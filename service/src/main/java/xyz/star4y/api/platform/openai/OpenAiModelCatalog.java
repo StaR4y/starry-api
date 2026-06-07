@@ -1,13 +1,25 @@
 package xyz.star4y.api.platform.openai;
 
-import java.util.ArrayList;
 import java.util.List;
 import xyz.star4y.api.model.ModelCatalogProvider;
 import xyz.star4y.api.model.ModelDtos.ModelSpec;
 import xyz.star4y.api.platform.catalog.OpenRouterModelIds;
+import xyz.star4y.api.platform.catalog.PlatformModelCatalogSupport.AliasProfile;
+
+import static xyz.star4y.api.platform.catalog.PlatformModelCatalogSupport.appendAliases;
+import static xyz.star4y.api.platform.catalog.PlatformModelCatalogSupport.compatibleAlias;
+import static xyz.star4y.api.platform.catalog.PlatformModelCatalogSupport.localModelId;
 
 public final class OpenAiModelCatalog {
 
+    private static final AliasProfile ALIAS_PROFILE = new AliasProfile(
+        "OpenAI",
+        ModelCatalogProvider.STARRY_OWNER,
+        "OpenAI-compatible alias for the unified Starry API routing layer",
+        ModelCatalogProvider.TEXT_AND_IMAGE,
+        ModelCatalogProvider.DEFAULT_INPUT_TOKENS,
+        ModelCatalogProvider.DEFAULT_OUTPUT_TOKENS
+    );
     private static final List<ModelSpec> LEGACY_ALIASES = List.of(
         alias("gpt-5.2", "GPT-5.2", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
         alias("gpt-5.2-pro", "GPT-5.2 pro", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
@@ -43,68 +55,37 @@ public final class OpenAiModelCatalog {
     }
 
     private static List<ModelSpec> buildModels() {
-        List<ModelSpec> models = new ArrayList<>(LEGACY_ALIASES);
-        models.addAll(OpenRouterModelIds.OPENAI.stream()
-            .map(id -> alias(id, displayName(id), family(id), targetModelId(id)))
-            .toList());
-        return List.copyOf(models);
-    }
-
-    private static String displayName(String id) {
-        return "OpenRouter " + localModelId(id);
+        return appendAliases(
+            LEGACY_ALIASES,
+            OpenRouterModelIds.OPENAI,
+            ALIAS_PROFILE,
+            OpenAiModelCatalog::family,
+            OpenAiModelCatalog::targetModelId
+        );
     }
 
     private static String family(String id) {
-        String model = localModelId(id);
-        if (model.startsWith("gpt-5")) {
-            return "GPT-5";
-        }
-        if (model.startsWith("gpt-4") || model.startsWith("chatgpt-4")) {
-            return "GPT-4";
-        }
-        if (model.startsWith("gpt-3.5")) {
-            return "GPT-3.5";
-        }
-        if (model.matches("o\\d.*")) {
-            return "OpenAI Reasoning";
-        }
-        if (model.startsWith("gpt-oss")) {
-            return "OpenAI OSS";
-        }
-        if (model.contains("audio")) {
-            return "OpenAI Audio";
-        }
-        if (model.contains("image")) {
-            return "OpenAI Image";
-        }
-        return "OpenAI";
+        return switch (localModelId(id)) {
+            case String model when model.startsWith("gpt-5") -> "GPT-5";
+            case String model when model.startsWith("gpt-4") || model.startsWith("chatgpt-4") -> "GPT-4";
+            case String model when model.startsWith("gpt-3.5") -> "GPT-3.5";
+            case String model when model.matches("o\\d.*") -> "OpenAI Reasoning";
+            case String model when model.startsWith("gpt-oss") -> "OpenAI OSS";
+            case String model when model.contains("audio") -> "OpenAI Audio";
+            case String model when model.contains("image") -> "OpenAI Image";
+            default -> "OpenAI";
+        };
     }
 
     private static String targetModelId(String id) {
-        String model = localModelId(id);
-        if (model.contains("-mini") || model.contains("-nano") || model.contains("oss-20b")) {
-            return ModelCatalogProvider.FAST_TARGET_MODEL_ID;
-        }
-        return ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID;
-    }
-
-    private static String localModelId(String id) {
-        int slash = id.indexOf('/');
-        return slash >= 0 ? id.substring(slash + 1) : id;
+        return switch (localModelId(id)) {
+            case String model when model.contains("-mini") || model.contains("-nano") || model.contains("oss-20b") ->
+                ModelCatalogProvider.FAST_TARGET_MODEL_ID;
+            default -> ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID;
+        };
     }
 
     private static ModelSpec alias(String id, String name, String family, String targetModelId) {
-        return new ModelSpec(
-            id,
-            name + " compatible alias",
-            "OpenAI",
-            family,
-            ModelCatalogProvider.STARRY_OWNER,
-            "OpenAI-compatible alias for the unified Starry API routing layer",
-            ModelCatalogProvider.TEXT_AND_IMAGE,
-            ModelCatalogProvider.DEFAULT_INPUT_TOKENS,
-            ModelCatalogProvider.DEFAULT_OUTPUT_TOKENS,
-            targetModelId
-        );
+        return compatibleAlias(id, name, family, targetModelId, ALIAS_PROFILE);
     }
 }

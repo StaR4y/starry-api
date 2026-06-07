@@ -5,7 +5,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Comparator;
 import java.util.List;
-import java.util.Optional;
+import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -48,7 +48,7 @@ public class ModelMappingService {
 
     public Mono<List<ModelDtos.MappingResponse>> list() {
         return repository.findAll()
-            .sort(Comparator.comparing(rule -> Optional.ofNullable(rule.getPriority()).orElse(100)))
+            .sort(Comparator.comparing(rule -> Objects.requireNonNullElse(rule.getPriority(), 100)))
             .map(this::toResponse)
             .collectList();
     }
@@ -63,7 +63,7 @@ public class ModelMappingService {
         entity.setSourceModel(request.sourceModel());
         entity.setTargetModels(toJson(request.targetModels()));
         entity.setWeights(toJson(request.weights()));
-        entity.setPriority(Optional.ofNullable(request.priority()).orElse(100));
+        entity.setPriority(Objects.requireNonNullElse(request.priority(), 100));
         entity.setApiKeyIds(toJson(request.apiKeyIds()));
         return repository.save(entity)
             .flatMap(saved -> refresh().thenReturn(toResponse(saved)));
@@ -102,7 +102,7 @@ public class ModelMappingService {
             if (targets.isEmpty()) {
                 continue;
             }
-            String type = Optional.ofNullable(rule.getMappingType()).orElse("replace").toLowerCase();
+            String type = Objects.requireNonNullElse(rule.getMappingType(), "replace").toLowerCase();
             if ("loadbalance".equals(type)) {
                 return weightedPick(targets, parseIntegerList(rule.getWeights()));
             }
@@ -196,7 +196,7 @@ public class ModelMappingService {
                 return targets.get(i);
             }
         }
-        return targets.get(targets.size() - 1);
+        return targets.getLast();
     }
 
     private ModelDtos.MappingResponse toResponse(ModelMappingEntity entity) {

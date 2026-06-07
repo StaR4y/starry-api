@@ -21,7 +21,7 @@ The current runtime supports OpenAI-compatible, Anthropic-compatible, and Gemini
 
 ## Requirements
 
-- Java 17
+- Java 25
 - MySQL reachable by JDBC and R2DBC
 - Node.js/npm for WebUI builds
 - Gradle wrapper included in this repository

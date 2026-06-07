@@ -230,16 +230,16 @@ public class ProxyFacade {
 
     private Throwable mapError(Throwable error) {
         Throwable failure = rootFailure(error);
-        if (failure instanceof ApiException) {
-            return failure;
-        }
-        if (failure instanceof UpstreamException upstream) {
-            HttpStatus status = upstream.getStatusCode() == 429 || upstream.getStatusCode() == 402
-                ? HttpStatus.TOO_MANY_REQUESTS
-                : HttpStatus.BAD_GATEWAY;
-            return new ApiException(status, "UPSTREAM_ERROR", upstream.getMessage());
-        }
-        return new ApiException(HttpStatus.BAD_GATEWAY, "UPSTREAM_ERROR", failure.getMessage());
+        return switch (failure) {
+            case ApiException api -> api;
+            case UpstreamException upstream -> {
+                HttpStatus status = upstream.getStatusCode() == 429 || upstream.getStatusCode() == 402
+                    ? HttpStatus.TOO_MANY_REQUESTS
+                    : HttpStatus.BAD_GATEWAY;
+                yield new ApiException(status, "UPSTREAM_ERROR", upstream.getMessage());
+            }
+            default -> new ApiException(HttpStatus.BAD_GATEWAY, "UPSTREAM_ERROR", failure.getMessage());
+        };
     }
 
     private Throwable rootFailure(Throwable error) {

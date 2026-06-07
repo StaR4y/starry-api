@@ -1,10 +1,14 @@
 package xyz.star4y.api.platform.anthropic;
 
-import java.util.ArrayList;
 import java.util.List;
 import xyz.star4y.api.model.ModelCatalogProvider;
 import xyz.star4y.api.model.ModelDtos.ModelSpec;
 import xyz.star4y.api.platform.catalog.OpenRouterModelIds;
+import xyz.star4y.api.platform.catalog.PlatformModelCatalogSupport.AliasProfile;
+
+import static xyz.star4y.api.platform.catalog.PlatformModelCatalogSupport.appendAliases;
+import static xyz.star4y.api.platform.catalog.PlatformModelCatalogSupport.compatibleAlias;
+import static xyz.star4y.api.platform.catalog.PlatformModelCatalogSupport.localModelId;
 
 public final class AnthropicModelCatalog {
 
@@ -16,6 +20,14 @@ public final class AnthropicModelCatalog {
     public static final List<String> TEXT_AND_IMAGE = ModelCatalogProvider.TEXT_AND_IMAGE;
     public static final List<String> TEXT_ONLY = ModelCatalogProvider.TEXT_ONLY;
 
+    private static final AliasProfile ALIAS_PROFILE = new AliasProfile(
+        "Anthropic",
+        ModelCatalogProvider.STARRY_OWNER,
+        "Anthropic-compatible alias for the unified Starry API routing layer",
+        TEXT_AND_IMAGE,
+        DEFAULT_INPUT_TOKENS,
+        DEFAULT_OUTPUT_TOKENS
+    );
     private static final List<ModelSpec> UPSTREAM_MODELS = List.of(
         model("auto", "Auto", "Routing Preset", "Auto select best model", "auto"),
         model(DEFAULT_MODEL_ID, "Claude Sonnet 4.5", "Claude 4", "The latest Claude Sonnet model", DEFAULT_MODEL_ID),
@@ -67,54 +79,32 @@ public final class AnthropicModelCatalog {
     }
 
     private static List<ModelSpec> buildModels() {
-        List<ModelSpec> models = new ArrayList<>(UPSTREAM_MODELS);
-        models.addAll(OpenRouterModelIds.ANTHROPIC.stream()
-            .map(id -> alias(id, displayName(id), family(id), targetModelId(id)))
-            .toList());
-        return List.copyOf(models);
-    }
-
-    private static String displayName(String id) {
-        return "OpenRouter " + localModelId(id);
+        return appendAliases(
+            UPSTREAM_MODELS,
+            OpenRouterModelIds.ANTHROPIC,
+            ALIAS_PROFILE,
+            AnthropicModelCatalog::family,
+            AnthropicModelCatalog::targetModelId
+        );
     }
 
     private static String family(String id) {
-        String model = localModelId(id);
-        if (model.contains("3.")) {
-            return "Claude 3";
-        }
-        return "Claude 4";
+        return switch (localModelId(id)) {
+            case String model when model.contains("3.") -> "Claude 3";
+            default -> "Claude 4";
+        };
     }
 
     private static String targetModelId(String id) {
-        String model = localModelId(id);
-        if (HAIKU_MODEL_ID.equals(model) || model.contains("haiku")) {
-            return HAIKU_MODEL_ID;
-        }
-        if ("claude-sonnet-4".equals(model) || "claude-opus-4.5".equals(model)) {
-            return model;
-        }
-        return DEFAULT_MODEL_ID;
-    }
-
-    private static String localModelId(String id) {
-        int slash = id.indexOf('/');
-        return slash >= 0 ? id.substring(slash + 1) : id;
+        return switch (localModelId(id)) {
+            case String model when HAIKU_MODEL_ID.equals(model) || model.contains("haiku") -> HAIKU_MODEL_ID;
+            case "claude-sonnet-4", "claude-opus-4.5" -> localModelId(id);
+            default -> DEFAULT_MODEL_ID;
+        };
     }
 
     private static ModelSpec alias(String id, String name, String family, String targetModelId) {
-        return new ModelSpec(
-            id,
-            name + " compatible alias",
-            "Anthropic",
-            family,
-            ModelCatalogProvider.STARRY_OWNER,
-            "Anthropic-compatible alias for the unified Starry API routing layer",
-            TEXT_AND_IMAGE,
-            DEFAULT_INPUT_TOKENS,
-            DEFAULT_OUTPUT_TOKENS,
-            targetModelId
-        );
+        return compatibleAlias(id, name, family, targetModelId, ALIAS_PROFILE);
     }
 
     private static ModelSpec model(

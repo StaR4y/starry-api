@@ -8,7 +8,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Comparator;
+import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -51,13 +51,11 @@ public class PerformanceMetricService {
         return Mono.fromSupplier(this::collect).flatMap(repository::save).then();
     }
 
-    public Mono<java.util.List<StatsDtos.PerformanceMetricResponse>> history() {
+    public Mono<List<StatsDtos.PerformanceMetricResponse>> history() {
         return repository.findTop120ByOrderBySampledAtDesc()
             .map(PerformanceMetricMapper::toResponse)
             .collectList()
-            .map(items -> items.stream()
-                .sorted(Comparator.comparing(StatsDtos.PerformanceMetricResponse::sampledAt))
-                .toList());
+            .map(List::reversed);
     }
 
     private PerformanceMetricEntity collect() {

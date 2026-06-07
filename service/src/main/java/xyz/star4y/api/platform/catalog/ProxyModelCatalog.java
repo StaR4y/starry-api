@@ -1,7 +1,7 @@
 package xyz.star4y.api.platform.catalog;
 
-import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Stream;
 import xyz.star4y.api.model.ModelDtos.ModelSpec;
 import xyz.star4y.api.platform.anthropic.AnthropicModelCatalog;
 import xyz.star4y.api.platform.gemini.GeminiModelCatalog;
@@ -19,10 +19,10 @@ public final class ProxyModelCatalog {
     }
 
     private static List<ModelSpec> buildModels() {
-        List<ModelSpec> models = new ArrayList<>();
-        models.addAll(AnthropicModelCatalog.models());
-        models.addAll(OpenAiModelCatalog.models());
-        models.addAll(GeminiModelCatalog.models());
-        return List.copyOf(models);
+        return Stream.of(
+            AnthropicModelCatalog.models(),
+            OpenAiModelCatalog.models(),
+            GeminiModelCatalog.models()
+        ).flatMap(List::stream).toList();
     }
 }
