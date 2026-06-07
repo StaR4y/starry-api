@@ -14,13 +14,13 @@ The service is bound to `127.0.0.1` by default. Expose it through 1Panel or Ngin
 ## One-Line Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/StaR4y/starryapi-service/main/scripts/install-server.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh | sudo bash
 ```
 
 With a public domain:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/StaR4y/starryapi-service/main/scripts/install-server.sh \
+curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
   | sudo env PUBLIC_BASE_URL=https://api.example.com bash
 ```
 
@@ -52,7 +52,7 @@ Supported variables:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `REPO_URL` | `https://github.com/StaR4y/starryapi-service.git` | Git repository to deploy |
+| `REPO_URL` | `https://github.com/StaR4y/starry-api.git` | Git repository to deploy |
 | `BRANCH` | `main` | Git branch to deploy |
 | `INSTALL_DIR` | `/opt/starryapi-service` | Server install directory |
 | `HOST_HTTP_PORT` | `18080` | Local host port exposed by compose |

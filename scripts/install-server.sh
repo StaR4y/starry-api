@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_NAME="starryapi-service"
-REPO_URL="${REPO_URL:-https://github.com/StaR4y/starryapi-service.git}"
+REPO_URL="${REPO_URL:-https://github.com/StaR4y/starry-api.git}"
 BRANCH="${BRANCH:-main}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/starryapi-service}"
 HOST_HTTP_PORT="${HOST_HTTP_PORT:-18080}"
@@ -129,6 +129,11 @@ prepare_install_dir() {
   log "Preparing ${INSTALL_DIR}..."
   root_cmd mkdir -p "$(dirname "$INSTALL_DIR")"
   if [[ -d "$INSTALL_DIR/.git" ]]; then
+    if git -C "$INSTALL_DIR" remote get-url origin >/dev/null 2>&1; then
+      git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL"
+    else
+      git -C "$INSTALL_DIR" remote add origin "$REPO_URL"
+    fi
     git -C "$INSTALL_DIR" fetch origin "$BRANCH"
     git -C "$INSTALL_DIR" checkout "$BRANCH"
     git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH"

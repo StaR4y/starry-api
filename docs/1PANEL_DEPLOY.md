@@ -16,7 +16,7 @@ Only the 1Panel reverse proxy should be exposed publicly. The service container 
 On a fresh Linux server, you can let the installer prepare Docker, clone the repo, generate `.env`, build the image, and start the stack:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/StaR4y/starryapi-service/main/scripts/install-server.sh \
+curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
   | sudo env PUBLIC_BASE_URL=https://your-domain.example bash
 ```
 
@@ -35,7 +35,7 @@ Open the 1Panel terminal or SSH into the server:
 ```bash
 mkdir -p /opt/starryapi-service
 cd /opt/starryapi-service
-git clone https://github.com/StaR4y/starryapi-service.git .
+git clone https://github.com/StaR4y/starry-api.git .
 ```
 
 For future updates:
