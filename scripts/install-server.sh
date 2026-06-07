@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_NAME="starryapi-service"
+APP_NAME="starry-api"
 REPO_URL="${REPO_URL:-https://github.com/StaR4y/starry-api.git}"
 BRANCH="${BRANCH:-main}"
-INSTALL_DIR="${INSTALL_DIR:-/opt/starryapi-service}"
+INSTALL_DIR="${INSTALL_DIR:-/opt/starry-api}"
 HOST_HTTP_PORT="${HOST_HTTP_PORT:-18080}"
 SERVER_PORT="${SERVER_PORT:-8080}"
 PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}"
@@ -127,6 +127,9 @@ set_compose_cmd() {
 
 prepare_install_dir() {
   log "Preparing ${INSTALL_DIR}..."
+  log "Using repository ${REPO_URL} branch ${BRANCH}."
+  git ls-remote --heads "$REPO_URL" "$BRANCH" >/dev/null \
+    || fail "Repository or branch is not accessible: ${REPO_URL} ${BRANCH}"
   root_cmd mkdir -p "$(dirname "$INSTALL_DIR")"
   if [[ -d "$INSTALL_DIR/.git" ]]; then
     if git -C "$INSTALL_DIR" remote get-url origin >/dev/null 2>&1; then

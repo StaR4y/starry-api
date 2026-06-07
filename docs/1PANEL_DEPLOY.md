@@ -5,7 +5,7 @@ This deployment uses Docker Compose in 1Panel:
 ```text
 1Panel reverse proxy / HTTPS
   -> 127.0.0.1:18080
-  -> starryapi-service container
+  -> starry-api service container
   -> mysql container
 ```
 
@@ -33,15 +33,15 @@ Manual deployment steps are kept below for existing servers or custom MySQL setu
 Open the 1Panel terminal or SSH into the server:
 
 ```bash
-mkdir -p /opt/starryapi-service
-cd /opt/starryapi-service
+mkdir -p /opt/starry-api
+cd /opt/starry-api
 git clone https://github.com/StaR4y/starry-api.git .
 ```
 
 For future updates:
 
 ```bash
-cd /opt/starryapi-service
+cd /opt/starry-api
 git pull
 docker compose up -d --build service
 ```
@@ -49,7 +49,7 @@ docker compose up -d --build service
 The service image includes the current WebUI build. If 1Panel still shows the old page after an update, rebuild the service image without cache and then refresh the browser cache:
 
 ```bash
-cd /opt/starryapi-service
+cd /opt/starry-api
 docker compose build --no-cache service
 docker compose up -d service
 docker compose logs --tail=160 service

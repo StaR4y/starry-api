@@ -82,7 +82,7 @@ Some newer MySQL Docker tags are based on Oracle Linux 9, whose glibc requires t
 Fix the compose deployment by rolling MySQL back to the Oracle Linux 8 image:
 
 ```bash
-cd /opt/starryapi-service
+cd /opt/starry-api
 grep -q '^MYSQL_IMAGE=' .env \
   && sed -i 's|^MYSQL_IMAGE=.*|MYSQL_IMAGE=mysql:8.0.37-oraclelinux8|' .env \
   || echo 'MYSQL_IMAGE=mysql:8.0.37-oraclelinux8' >> .env
@@ -103,7 +103,7 @@ The installer pulls the latest repo and runs `docker compose up -d --build`. If 
 Check the build and service logs:
 
 ```bash
-cd /opt/starryapi-service
+cd /opt/starry-api
 docker compose build --no-cache service
 docker compose up -d service
 docker compose logs --tail=160 service

@@ -5,7 +5,7 @@ This installer is for Linux servers. It deploys the project with Docker Compose:
 ```text
 Nginx / 1Panel reverse proxy
   -> 127.0.0.1:18080
-  -> starryapi-service container with embedded WebUI
+  -> starry-api service container with embedded WebUI
   -> mysql container
 ```
 
@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
 The installer will:
 
 - install `git`, `curl`, `openssl`, Docker, and Docker Compose when missing
-- clone or update the repo under `/opt/starryapi-service`
+- clone or update the repo under `/opt/starry-api`
 - create `.env` with generated MySQL passwords
 - build the service image, including WebUI static files
 - start MySQL and the service with Docker Compose
@@ -42,7 +42,7 @@ Set variables before running the installer:
 
 ```bash
 sudo env \
-  INSTALL_DIR=/opt/starryapi-service \
+  INSTALL_DIR=/opt/starry-api \
   HOST_HTTP_PORT=18080 \
   PUBLIC_BASE_URL=https://api.example.com \
   bash scripts/install-server.sh
@@ -54,7 +54,7 @@ Supported variables:
 | --- | --- | --- |
 | `REPO_URL` | `https://github.com/StaR4y/starry-api.git` | Git repository to deploy |
 | `BRANCH` | `main` | Git branch to deploy |
-| `INSTALL_DIR` | `/opt/starryapi-service` | Server install directory |
+| `INSTALL_DIR` | `/opt/starry-api` | Server install directory |
 | `HOST_HTTP_PORT` | `18080` | Local host port exposed by compose |
 | `SERVER_PORT` | `8080` | Internal Spring Boot port |
 | `PUBLIC_BASE_URL` | empty | Public HTTPS URL used in startup logs |
@@ -72,7 +72,7 @@ Fatal glibc error: CPU does not support x86-64-v2
 Roll MySQL back to the Oracle Linux 8 image:
 
 ```bash
-cd /opt/starryapi-service
+cd /opt/starry-api
 grep -q '^MYSQL_IMAGE=' .env \
   && sed -i 's|^MYSQL_IMAGE=.*|MYSQL_IMAGE=mysql:8.0.37-oraclelinux8|' .env \
   || echo 'MYSQL_IMAGE=mysql:8.0.37-oraclelinux8' >> .env
@@ -111,7 +111,7 @@ The password is only printed when the admin table is created. Save it immediatel
 ## Operations
 
 ```bash
-cd /opt/starryapi-service
+cd /opt/starry-api
 docker compose logs -f service
 docker compose restart service
 docker compose down
@@ -120,7 +120,7 @@ docker compose down
 Update:
 
 ```bash
-cd /opt/starryapi-service
+cd /opt/starry-api
 git pull
 ./scripts/install-server.sh
 ```
@@ -128,7 +128,7 @@ git pull
 The update path rebuilds the WebUI with Docker and embeds the generated static files into the Spring Boot jar. If the browser still shows an old UI, check the service build logs first:
 
 ```bash
-cd /opt/starryapi-service
+cd /opt/starry-api
 docker compose build --no-cache service
 docker compose up -d service
 docker compose logs --tail=160 service
