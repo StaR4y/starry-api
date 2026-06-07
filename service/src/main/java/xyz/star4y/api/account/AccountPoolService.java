@@ -5,7 +5,9 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
@@ -37,7 +39,6 @@ public class AccountPoolService {
     private final AtomicInteger nextIndex = new AtomicInteger();
     private final Map<String, AffinityEntry> affinity = new ConcurrentHashMap<>();
     private volatile List<ProxyAccountEntity> cachedAccounts = List.of();
-    private static final int IMPORT_CONCURRENCY = 8;
 
     public AccountPoolService(
         ProxyAccountRepository repository,
@@ -64,11 +65,8 @@ public class AccountPoolService {
     }
 
     public Mono<ProxyAccountEntity> create(AccountDtos.CreateAccountRequest request) {
-        return repository.save(newAccount(request))
-            .onErrorMap(
-                DuplicateKeyException.class,
-                error -> new ApiException(HttpStatus.CONFLICT, "ACCOUNT_EXISTS", "Account ID already exists")
-            )
+        return ensureEmailAvailable(request.email(), null)
+            .then(Mono.defer(() -> saveNewAccountAllowingAccountIdCollision(request)))
             .flatMap(saved -> refreshCache().thenReturn(saved));
     }
 
@@ -79,7 +77,7 @@ public class AccountPoolService {
         }
         boolean upsert = Boolean.TRUE.equals(request.upsert());
         return Flux.range(0, accounts.size())
-            .flatMap(index -> importOne(index, accounts.get(index), upsert), IMPORT_CONCURRENCY)
+            .concatMap(index -> importOne(index, accounts.get(index), upsert))
             .collectList()
             .map(this::summarizeImport)
             .flatMap(response -> refreshCache().thenReturn(response));
@@ -88,8 +86,8 @@ public class AccountPoolService {
     public Mono<ProxyAccountEntity> update(String accountId, AccountDtos.UpdateAccountRequest request) {
         return repository.findByAccountId(accountId)
             .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND", "Account not found")))
-            .flatMap(entity -> {
-                if (request.email() != null) entity.setEmail(request.email());
+            .flatMap(entity -> ensureEmailAvailable(request.email(), entity).then(Mono.defer(() -> {
+                if (request.email() != null) entity.setEmail(normalizeEmail(request.email()));
                 if (request.accessToken() != null) entity.setAccessToken(request.accessToken());
                 if (request.refreshToken() != null) entity.setRefreshToken(request.refreshToken());
                 if (request.clientId() != null) entity.setClientId(request.clientId());
@@ -117,7 +115,7 @@ public class AccountPoolService {
                 if (request.quotaLimit() != null) entity.setQuotaLimit(request.quotaLimit());
                 if (request.quotaResetAt() != null) entity.setQuotaResetAt(request.quotaResetAt());
                 return repository.save(entity);
-            })
+            })))
             .flatMap(saved -> refreshCache().thenReturn(saved));
     }
 
@@ -381,24 +379,47 @@ public class AccountPoolService {
             return Mono.just(importFailure(index, request.accountId(), request.email(), "accessToken / apiKey / credentials.accessToken is required"));
         }
 
-        String requestedAccountId = Optional.ofNullable(request.accountId()).filter(s -> !s.isBlank()).orElse(null);
-        if (requestedAccountId == null) {
-            return repository.save(newAccount(request))
-                .map(saved -> importSuccess(index, "CREATED", "Account created", saved))
-                .onErrorResume(error -> Mono.just(importFailure(index, null, request.email(), error.getMessage())));
-        }
+        String normalizedEmail = normalizeEmail(request.email());
+        Mono<ProxyAccountEntity> existingByEmail = normalizedEmail == null
+            ? Mono.empty()
+            : repository.findFirstByEmailOrderByCreatedAtAsc(normalizedEmail);
 
-        return repository.findByAccountId(requestedAccountId)
+        return existingByEmail
             .flatMap(existing -> {
                 if (!upsert) {
-                    return Mono.just(importSuccess(index, "SKIPPED", "Account already exists", existing));
+                    return Mono.just(importSuccess(index, "SKIPPED", "Account email already exists", existing));
                 }
                 applyImportedFields(existing, request);
                 return repository.save(existing).map(saved -> importSuccess(index, "UPDATED", "Account updated", saved));
             })
-            .switchIfEmpty(Mono.defer(() -> repository.save(newAccount(request))
-                .map(saved -> importSuccess(index, "CREATED", "Account created", saved))))
-            .onErrorResume(error -> Mono.just(importFailure(index, requestedAccountId, request.email(), error.getMessage())));
+            .switchIfEmpty(Mono.defer(() -> saveNewAccountAllowingAccountIdCollision(request)
+                .map(saved -> importSuccess(index, "CREATED", importCreatedMessage(request, saved), saved))))
+            .onErrorResume(error -> Mono.just(importFailure(index, request.accountId(), request.email(), error.getMessage())));
+    }
+
+    private Mono<ProxyAccountEntity> saveNewAccountAllowingAccountIdCollision(AccountDtos.CreateAccountRequest request) {
+        return saveNewAccountAllowingAccountIdCollision(request, 0);
+    }
+
+    private Mono<ProxyAccountEntity> saveNewAccountAllowingAccountIdCollision(
+        AccountDtos.CreateAccountRequest request,
+        int attempt
+    ) {
+        ProxyAccountEntity entity = newAccount(request);
+        if (attempt > 0) {
+            entity.setAccountId(Hashing.shortUuid());
+        }
+        return repository.save(entity)
+            .onErrorResume(DuplicateKeyException.class, error -> {
+                if (attempt >= 5) {
+                    return Mono.error(new ApiException(
+                        HttpStatus.CONFLICT,
+                        "ACCOUNT_ID_COLLISION",
+                        "Unable to allocate a unique account ID"
+                    ));
+                }
+                return saveNewAccountAllowingAccountIdCollision(request, attempt + 1);
+            });
     }
 
     private ProxyAccountEntity newAccount(AccountDtos.CreateAccountRequest request) {
@@ -415,7 +436,7 @@ public class AccountPoolService {
     private void applyImportedFields(ProxyAccountEntity entity, AccountDtos.CreateAccountRequest request) {
         String normalizedAuthMethod = AccountPlatforms.normalizeAuthMethod(request.authMethod(), request.provider());
         String normalizedProvider = AccountPlatforms.normalizeProvider(request.provider(), normalizedAuthMethod);
-        entity.setEmail(request.email());
+        entity.setEmail(normalizeEmail(request.email()));
         entity.setAccessToken(request.accessToken());
         entity.setRefreshToken(request.refreshToken());
         entity.setClientId(request.clientId());
@@ -430,6 +451,46 @@ public class AccountPoolService {
         entity.setMachineId(request.machineId());
         entity.setProxyUrl(request.proxyUrl());
         entity.setQuotaLimit(request.quotaLimit());
+    }
+
+    private Mono<Void> ensureEmailAvailable(String email, ProxyAccountEntity currentAccount) {
+        String normalizedEmail = normalizeEmail(email);
+        if (normalizedEmail == null) {
+            return Mono.empty();
+        }
+        return repository.findFirstByEmailOrderByCreatedAtAsc(normalizedEmail)
+            .filter(existing -> currentAccount == null || !samePersistedAccount(existing, currentAccount))
+            .flatMap(existing -> Mono.<Void>error(new ApiException(
+                HttpStatus.CONFLICT,
+                "ACCOUNT_EMAIL_EXISTS",
+                "Account email already exists"
+            )))
+            .then();
+    }
+
+    private boolean samePersistedAccount(ProxyAccountEntity left, ProxyAccountEntity right) {
+        if (left == null || right == null) {
+            return false;
+        }
+        if (left.getId() != null && right.getId() != null) {
+            return Objects.equals(left.getId(), right.getId());
+        }
+        return left.getAccountId() != null && Objects.equals(left.getAccountId(), right.getAccountId());
+    }
+
+    private String normalizeEmail(String email) {
+        if (email == null || email.isBlank()) {
+            return null;
+        }
+        return email.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private String importCreatedMessage(AccountDtos.CreateAccountRequest request, ProxyAccountEntity saved) {
+        String requestedAccountId = Optional.ofNullable(request.accountId()).filter(s -> !s.isBlank()).orElse(null);
+        if (requestedAccountId != null && !Objects.equals(requestedAccountId, saved.getAccountId())) {
+            return "Account created with generated accountId";
+        }
+        return "Account created";
     }
 
     private AccountDtos.ImportAccountsResponse summarizeImport(List<AccountDtos.ImportAccountItemResponse> items) {

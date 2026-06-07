@@ -1095,7 +1095,7 @@
       @input="clearImportFiles"
     />
     <el-checkbox v-model="importUpsert" class="mt-16">
-      已存在 accountId 时覆盖更新旧账号（谨慎开启）
+      已存在邮箱时覆盖更新旧账号（谨慎开启）
     </el-checkbox>
 
     <div v-if="importResult" class="import-summary glass-panel mt-16">

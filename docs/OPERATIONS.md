@@ -122,10 +122,10 @@ Request format. You can paste Kiro Account Manager JSON export directly:
 
 Import behavior:
 
-- `upsert=false` or omitted: duplicate `accountId` entries are skipped.
-- `upsert=true`: duplicate `accountId` entries update existing accounts.
-- Kiro Account Manager `id` is treated as `accountId`.
-- Missing `id/accountId`: the service generates one, so the item is always created as a new account.
+- `upsert=false` or omitted: imported entries with an existing email are skipped.
+- `upsert=true`: imported entries with an existing email update that account.
+- Kiro Account Manager `id` is accepted as an imported `accountId`, but duplicate detection is based on normalized email.
+- Missing or colliding `id/accountId`: the service generates a new internal `accountId`, so a different email is created as a separate account.
 - `credentials.accessToken` or top-level `accessToken` is required for import. Accounts with refresh credentials are refreshed in the background every hour by default; if Kiro still reports an invalid bearer token, the service refreshes once immediately and retries. IdC/BuilderId accounts also need `clientId` and `clientSecret`.
 - Each item returns `CREATED`, `UPDATED`, `SKIPPED`, or `FAILED`.
 

@@ -8,6 +8,8 @@ public interface ProxyAccountRepository extends ReactiveCrudRepository<ProxyAcco
 
     Mono<ProxyAccountEntity> findByAccountId(String accountId);
 
+    Mono<ProxyAccountEntity> findFirstByEmailOrderByCreatedAtAsc(String email);
+
     Flux<ProxyAccountEntity> findAllByEnabledTrue();
 
     Mono<Void> deleteByAccountId(String accountId);

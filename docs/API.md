@@ -404,6 +404,8 @@ The import endpoint accepts:
 - Codex token JSON with `type: "codex"`, `access_token`, `refresh_token`, and `id_token`.
 - OpenAI-compatible config blocks shaped as `openai-compatibility[].api-key-entries[]` with `api-key`, optional `base-url`, and optional `proxy-url`.
 
+Account identity is matched by normalized email during create/import. `upsert=false` skips an imported item when the email already exists; `upsert=true` updates that existing email record. Imported `accountId` values are treated as external/source identifiers only: if the requested `accountId` collides with an existing row but the email is different, the service creates a new account with a generated internal `accountId`.
+
 The management console can upload multiple `.json` files, parse them in the browser, and submit one import request per file. Results are aggregated in the console after all files finish.
 
 `POST /admin/accounts/test` tests Kiro accounts through the Kiro upstream client, OpenAI API key accounts through `/chat/completions`, and Codex accounts through `/responses`.

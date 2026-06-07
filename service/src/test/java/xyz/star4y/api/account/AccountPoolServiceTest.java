@@ -1,6 +1,7 @@
 package xyz.star4y.api.account;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -12,8 +13,10 @@ import static org.mockito.Mockito.when;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.dao.DuplicateKeyException;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import xyz.star4y.api.common.ApiException;
 import xyz.star4y.api.config.ProxyProperties;
 
 class AccountPoolServiceTest {
@@ -21,7 +24,7 @@ class AccountPoolServiceTest {
     @Test
     void importAccountsSavesEveryAccountIntoPool() {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
-        when(repository.findByAccountId(anyString())).thenReturn(Mono.empty());
+        when(repository.findFirstByEmailOrderByCreatedAtAsc(anyString())).thenReturn(Mono.empty());
         when(repository.save(any(ProxyAccountEntity.class))).thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
         when(repository.findAllByEnabledTrue()).thenReturn(Flux.empty());
 
@@ -47,8 +50,9 @@ class AccountPoolServiceTest {
     void importAccountsSkipsExistingAccountWithoutUpsert() {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         ProxyAccountEntity existing = account("same-account");
+        existing.setEmail("same-account@example.com");
         existing.setAccessToken("old-token");
-        when(repository.findByAccountId("same-account")).thenReturn(Mono.just(existing));
+        when(repository.findFirstByEmailOrderByCreatedAtAsc("same-account@example.com")).thenReturn(Mono.just(existing));
         when(repository.findAllByEnabledTrue()).thenReturn(Flux.empty());
 
         AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
@@ -65,6 +69,100 @@ class AccountPoolServiceTest {
         assertThat(response.items().get(0).status()).isEqualTo("SKIPPED");
         assertThat(existing.getAccessToken()).isEqualTo("old-token");
         verify(repository, never()).save(any(ProxyAccountEntity.class));
+    }
+
+    @Test
+    void importAccountsUpdatesExistingAccountByEmailWithUpsert() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity existing = account("internal-account");
+        existing.setEmail("owner@example.com");
+        existing.setAccessToken("old-token");
+        when(repository.findFirstByEmailOrderByCreatedAtAsc("owner@example.com")).thenReturn(Mono.just(existing));
+        when(repository.save(any(ProxyAccountEntity.class))).thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.empty());
+
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+
+        AccountDtos.ImportAccountsResponse response = service.importAccounts(new AccountDtos.ImportAccountsRequest(
+            List.of(create("source-account-id", "Owner@Example.com", "new-token")),
+            true
+        )).block();
+
+        assertThat(response).isNotNull();
+        assertThat(response.updated()).isEqualTo(1);
+        ProxyAccountEntity saved = savedAccount(repository);
+        assertThat(saved.getAccountId()).isEqualTo("internal-account");
+        assertThat(saved.getEmail()).isEqualTo("owner@example.com");
+        assertThat(saved.getAccessToken()).isEqualTo("new-token");
+    }
+
+    @Test
+    void importAccountsCreatesNewAccountWhenAccountIdCollidesButEmailDiffers() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        when(repository.findFirstByEmailOrderByCreatedAtAsc("new@example.com")).thenReturn(Mono.empty());
+        when(repository.save(any(ProxyAccountEntity.class))).thenAnswer(invocation -> {
+            ProxyAccountEntity entity = invocation.getArgument(0);
+            if ("duplicate-account-id".equals(entity.getAccountId())) {
+                return Mono.error(new DuplicateKeyException("duplicate account_id"));
+            }
+            return Mono.just(entity);
+        });
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.empty());
+
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+
+        AccountDtos.ImportAccountsResponse response = service.importAccounts(new AccountDtos.ImportAccountsRequest(
+            List.of(create("duplicate-account-id", "new@example.com", "token")),
+            false
+        )).block();
+
+        assertThat(response).isNotNull();
+        assertThat(response.created()).isEqualTo(1);
+        assertThat(response.items().get(0).accountId()).isNotEqualTo("duplicate-account-id");
+        assertThat(response.items().get(0).email()).isEqualTo("new@example.com");
+
+        ArgumentCaptor<ProxyAccountEntity> captor = ArgumentCaptor.forClass(ProxyAccountEntity.class);
+        verify(repository, times(2)).save(captor.capture());
+        assertThat(captor.getAllValues().get(0).getAccountId()).isEqualTo("duplicate-account-id");
+        assertThat(captor.getAllValues().get(1).getAccountId()).isNotEqualTo("duplicate-account-id");
+    }
+
+    @Test
+    void createRejectsExistingEmail() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity existing = account("existing-account");
+        existing.setEmail("owner@example.com");
+        when(repository.findFirstByEmailOrderByCreatedAtAsc("owner@example.com")).thenReturn(Mono.just(existing));
+
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+
+        assertThatThrownBy(() -> service.create(create("new-account", "owner@example.com", "token")).block())
+            .isInstanceOf(ApiException.class)
+            .hasMessage("Account email already exists");
+        verify(repository, never()).save(any(ProxyAccountEntity.class));
+    }
+
+    @Test
+    void createRegeneratesAccountIdWhenRequestedAccountIdCollides() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        when(repository.findFirstByEmailOrderByCreatedAtAsc("new@example.com")).thenReturn(Mono.empty());
+        when(repository.save(any(ProxyAccountEntity.class))).thenAnswer(invocation -> {
+            ProxyAccountEntity entity = invocation.getArgument(0);
+            if ("duplicate-account-id".equals(entity.getAccountId())) {
+                return Mono.error(new DuplicateKeyException("duplicate account_id"));
+            }
+            return Mono.just(entity);
+        });
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.empty());
+
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+
+        ProxyAccountEntity saved = service.create(create("duplicate-account-id", "new@example.com", "token")).block();
+
+        assertThat(saved).isNotNull();
+        assertThat(saved.getAccountId()).isNotEqualTo("duplicate-account-id");
+        assertThat(saved.getEmail()).isEqualTo("new@example.com");
+        verify(repository, times(2)).save(any(ProxyAccountEntity.class));
     }
 
     @Test
@@ -116,9 +214,13 @@ class AccountPoolServiceTest {
     }
 
     private AccountDtos.CreateAccountRequest create(String accountId, String accessToken) {
+        return create(accountId, accountId + "@example.com", accessToken);
+    }
+
+    private AccountDtos.CreateAccountRequest create(String accountId, String email, String accessToken) {
         return new AccountDtos.CreateAccountRequest(
             accountId,
-            accountId + "@example.com",
+            email,
             accessToken,
             null,
             null,
