@@ -23,6 +23,9 @@ public final class AccountPlatforms {
     public static boolean isOpenAi(String provider, String authMethod) {
         String providerKey = key(provider);
         String authKey = key(authMethod);
+        if (isGoogleProvider(providerKey) || isAnthropicProvider(providerKey)) {
+            return false;
+        }
         return "openai".equals(providerKey)
             || "codex".equals(providerKey)
             || "openai-compatible".equals(providerKey)
@@ -42,7 +45,15 @@ public final class AccountPlatforms {
     }
 
     public static boolean isKiroCompatible(ProxyAccountEntity account) {
-        return account != null && !isOpenAi(account);
+        return account != null && !isOpenAi(account) && !isGoogleApiKey(account) && !isAnthropicApiKey(account);
+    }
+
+    public static boolean isGoogleApiKey(ProxyAccountEntity account) {
+        return account != null && isGoogleProvider(key(account.getProvider())) && isApiKey(account.getAuthMethod());
+    }
+
+    public static boolean isAnthropicApiKey(ProxyAccountEntity account) {
+        return account != null && isAnthropicProvider(key(account.getProvider())) && isApiKey(account.getAuthMethod());
     }
 
     public static String normalizeProvider(String provider, String authMethod) {
@@ -106,6 +117,19 @@ public final class AccountPlatforms {
     public static String key(String value) {
         String cleaned = clean(value);
         return cleaned == null ? "" : cleaned.toLowerCase(Locale.ROOT);
+    }
+
+    private static boolean isGoogleProvider(String providerKey) {
+        return "google".equals(providerKey) || "gemini".equals(providerKey);
+    }
+
+    private static boolean isAnthropicProvider(String providerKey) {
+        return "anthropic".equals(providerKey) || "claude".equals(providerKey);
+    }
+
+    private static boolean isApiKey(String authMethod) {
+        String authKey = key(authMethod);
+        return OPENAI_API_KEY_AUTH.equals(authKey) || "apikey".equals(authKey);
     }
 
     public static String clean(String value) {

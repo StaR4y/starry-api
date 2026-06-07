@@ -31,6 +31,7 @@ import xyz.star4y.api.platform.kiro.KiroPayloadFactory;
 import xyz.star4y.api.platform.kiro.KiroUpstreamClient;
 import xyz.star4y.api.platform.openai.OpenAiRequestAdapter;
 import xyz.star4y.api.platform.openai.OpenAiResponseFactory;
+import xyz.star4y.api.platform.openai.OpenAiUpstreamClient;
 import xyz.star4y.api.platform.upstream.UpstreamException;
 import xyz.star4y.api.stats.StatsService;
 
@@ -46,6 +47,11 @@ public class ProxyFacade {
         GEMINI_GENERATE_CONTENT
     }
 
+    private enum UpstreamRoute {
+        KIRO,
+        OPENAI
+    }
+
     private final ApiKeyService apiKeyService;
     private final AccountPoolService accountPoolService;
     private final ModelCatalogProvider modelCatalog;
@@ -53,6 +59,7 @@ public class ProxyFacade {
     private final RateLimiterService rateLimiterService;
     private final KiroPayloadFactory payloadFactory;
     private final KiroUpstreamClient upstreamClient;
+    private final OpenAiUpstreamClient openAiUpstreamClient;
     private final OpenAiRequestAdapter openAiRequestAdapter;
     private final OpenAiResponseFactory openAiResponseFactory;
     private final AnthropicRequestAdapter anthropicRequestAdapter;
@@ -69,6 +76,7 @@ public class ProxyFacade {
         RateLimiterService rateLimiterService,
         KiroPayloadFactory payloadFactory,
         KiroUpstreamClient upstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
         OpenAiRequestAdapter openAiRequestAdapter,
         OpenAiResponseFactory openAiResponseFactory,
         AnthropicRequestAdapter anthropicRequestAdapter,
@@ -84,6 +92,7 @@ public class ProxyFacade {
         this.rateLimiterService = rateLimiterService;
         this.payloadFactory = payloadFactory;
         this.upstreamClient = upstreamClient;
+        this.openAiUpstreamClient = openAiUpstreamClient;
         this.openAiRequestAdapter = openAiRequestAdapter;
         this.openAiResponseFactory = openAiResponseFactory;
         this.anthropicRequestAdapter = anthropicRequestAdapter;
@@ -131,9 +140,10 @@ public class ProxyFacade {
         String mappedModel = modelMappingService.apply(requestedModel, principal.keyId());
         String sessionHint = sessionHint(exchange, request, principal.keyId());
         boolean stream = responseMode != ResponseMode.GEMINI_GENERATE_CONTENT && request.path("stream").asBoolean(false);
+        UpstreamRoute route = routeFor(mappedModel);
 
-        return accountPoolService.selectKiroAccount(sessionHint)
-            .flatMap(account -> callWithAccount(account, request, mappedModel, sessionHint)
+        return selectAccount(route, sessionHint)
+            .flatMap(account -> callWithAccount(route, account, request, mappedModel, sessionHint)
                 .flatMap(result -> {
                     Mono<Void> accounting = recordSuccess(requestId, principal, account, path, requestedModel, result, start);
                     ResponseEntity<?> response = stream
@@ -145,14 +155,36 @@ public class ProxyFacade {
                     .then(Mono.error(mapError(error)))));
     }
 
+    private Mono<ProxyAccountEntity> selectAccount(UpstreamRoute route, String sessionHint) {
+        return switch (route) {
+            case OPENAI -> accountPoolService.selectOpenAiAccount(sessionHint);
+            case KIRO -> accountPoolService.selectKiroAccount(sessionHint);
+        };
+    }
+
     private Mono<PlatformCompletionResult> callWithAccount(
+        UpstreamRoute route,
         ProxyAccountEntity account,
         JsonNode request,
         String mappedModel,
         String sessionHint
     ) {
+        if (route == UpstreamRoute.OPENAI) {
+            return openAiUpstreamClient.complete(account, request, mappedModel);
+        }
         ObjectNode payload = payloadFactory.fromOpenAiChat(request, account, mappedModel, "AI_EDITOR", sessionHint);
         return upstreamClient.complete(account, payload, mappedModel);
+    }
+
+    private UpstreamRoute routeFor(String model) {
+        String normalized = model == null ? "" : model.trim().toLowerCase();
+        if (normalized.startsWith("openai/")
+            || normalized.startsWith("gpt")
+            || normalized.startsWith("chatgpt")
+            || normalized.matches("o\\d.*")) {
+            return UpstreamRoute.OPENAI;
+        }
+        return UpstreamRoute.KIRO;
     }
 
     private Mono<ApiKeyPrincipal> authenticateAndLimit(ServerWebExchange exchange) {

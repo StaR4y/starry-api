@@ -145,9 +145,7 @@ public class AccountTestService {
         }
 
         Instant startedAt = Instant.now();
-        Mono<PlatformCompletionResult> call = AccountPlatforms.isOpenAi(account)
-            ? openAiAccountTestClient.test(account, model, firstNonBlank(request.prompt(), DEFAULT_PROMPT))
-            : testKiro(account, model, firstNonBlank(request.prompt(), DEFAULT_PROMPT));
+        Mono<PlatformCompletionResult> call = testAccount(account, model, firstNonBlank(request.prompt(), DEFAULT_PROMPT));
 
         return call
             .flatMap(result -> accountPoolService.recordTestSuccess(account.getAccountId(), result.usage().totalTokens(), updateStatus)
@@ -199,6 +197,24 @@ public class AccountTestService {
         );
 
         return upstreamClient.complete(account, payload, model);
+    }
+
+    private Mono<PlatformCompletionResult> testAccount(
+        ProxyAccountEntity account,
+        String model,
+        String prompt
+    ) {
+        if (AccountPlatforms.isOpenAi(account)) {
+            return openAiAccountTestClient.test(account, model, prompt);
+        }
+        if (AccountPlatforms.isGoogleApiKey(account) || AccountPlatforms.isAnthropicApiKey(account)) {
+            return Mono.error(new UpstreamException(
+                501,
+                "Direct " + account.getProvider() + " account testing is not implemented yet",
+                false
+            ));
+        }
+        return testKiro(account, model, prompt);
     }
 
     private ObjectNode testChatRequest(String model, String prompt) {

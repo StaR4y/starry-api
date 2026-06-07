@@ -2,7 +2,7 @@
 
 Starry API is a Spring Boot + Vue management service for routing multiple LLM client protocols through a unified model and account layer.
 
-The current runtime supports OpenAI-compatible, Anthropic-compatible, and Gemini-compatible inbound APIs. The active upstream adapter is the Kiro/AWS CodeWhisperer path, isolated under the backend `platform/kiro` package. Provider-neutral response data now lives in `platform/core`, so inbound protocol modules format a common completion result instead of depending on Kiro-specific records.
+The current runtime supports OpenAI-compatible, Anthropic-compatible, and Gemini-compatible inbound APIs. GPT/OpenAI model requests can use OpenAI API key or Codex token accounts directly, while Claude/Kiro-compatible requests use the Kiro/AWS CodeWhisperer upstream path isolated under `platform/kiro`. Provider-neutral response data lives in `platform/core`, so inbound protocol modules format a common completion result instead of depending on Kiro-specific records.
 
 ## Features
 
@@ -14,7 +14,7 @@ The current runtime supports OpenAI-compatible, Anthropic-compatible, and Gemini
 - Platform-scoped backend modules for OpenAI, Anthropic, Gemini, Kiro upstream, shared core records, and shared model catalog
 - Platform-scoped frontend modules for provider registry, model grouping, and client setup scripts
 - Admin APIs for upstream accounts, API keys, model mappings, request logs, and local administrators
-- Account management supports Kiro accounts plus OpenAI API key and Codex token import/testing; proxy inference currently still selects Kiro-compatible upstream accounts.
+- Account management supports Kiro accounts plus OpenAI API key and Codex token import/testing/routing.
 - WebFlux, R2DBC MySQL, Flyway migrations, API key accounting, rate limits, account failover, and session affinity
 - Vue/Vite management console embedded into the Spring Boot jar
 - OpenAPI UI at `/docs`
@@ -238,8 +238,9 @@ For a full packaged jar:
 
 ## Current Boundaries
 
-- OpenAI, Anthropic, and Gemini are inbound compatibility modules.
-- Kiro/AWS is the current upstream adapter.
+- OpenAI/GPT requests route to OpenAI API key or Codex token accounts.
+- Claude/Kiro-compatible requests route to the Kiro/AWS upstream adapter.
+- Anthropic and Gemini are currently inbound compatibility modules unless mapped to a supported upstream route.
 - Inbound protocol response factories consume `PlatformCompletionResult`; they should not import Kiro result records.
 - `stream=true` still emits SSE after upstream completion; true chunk passthrough is a later streaming milestone.
 - Image/document/file conversion is partial.

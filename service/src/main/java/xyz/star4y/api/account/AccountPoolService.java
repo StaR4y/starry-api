@@ -159,6 +159,10 @@ public class AccountPoolService {
         return selectAccount(sessionHint, AccountPlatforms::isKiroCompatible, "No available Kiro upstream account");
     }
 
+    public Mono<ProxyAccountEntity> selectOpenAiAccount(String sessionHint) {
+        return selectAccount(sessionHint, AccountPlatforms::isOpenAi, "No available OpenAI upstream account");
+    }
+
     private Mono<ProxyAccountEntity> selectAccount(
         String sessionHint,
         Predicate<ProxyAccountEntity> filter,
