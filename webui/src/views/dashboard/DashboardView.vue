@@ -177,20 +177,32 @@
   }
 
   function buildPoints(values: number[], maxValue: number) {
-    return values
-      .map(
-        (value, index) =>
-          `${xFor(index, values.length).toFixed(2)},${yFor(value, maxValue).toFixed(2)}`,
-      )
-      .join(' ');
+    if (values.length === 0) return '';
+    const coords = values.map((val, idx) => ({
+      x: xFor(idx, values.length),
+      y: yFor(val, maxValue),
+    }));
+
+    let d = `M ${coords[0].x.toFixed(2)} ${coords[0].y.toFixed(2)}`;
+    for (let i = 0; i < coords.length - 1; i++) {
+      const p0 = coords[i];
+      const p1 = coords[i + 1];
+      const cpX1 = p0.x + (p1.x - p0.x) / 3;
+      const cpY1 = p0.y;
+      const cpX2 = p0.x + 2 * (p1.x - p0.x) / 3;
+      const cpY2 = p1.y;
+      d += ` C ${cpX1.toFixed(2)} ${cpY1.toFixed(2)}, ${cpX2.toFixed(2)} ${cpY2.toFixed(2)}, ${p1.x.toFixed(2)} ${p1.y.toFixed(2)}`;
+    }
+    return d;
   }
 
   function buildAreaPoints(values: number[], maxValue: number) {
+    const pathD = buildPoints(values, maxValue);
+    if (!pathD) return '';
+    const startX = xFor(0, values.length).toFixed(2);
+    const endX = xFor(values.length - 1, values.length).toFixed(2);
     const baseline = yFor(0, maxValue).toFixed(2);
-    return `${xFor(0, values.length).toFixed(2)},${baseline} ${buildPoints(values, maxValue)} ${xFor(
-      values.length - 1,
-      values.length,
-    ).toFixed(2)},${baseline}`;
+    return `${pathD} L ${endX} ${baseline} L ${startX} ${baseline} Z`;
   }
 
   function average(values: number[]) {
@@ -393,12 +405,9 @@
       },
     ]),
   );
-  const networkChart = computed(() =>
-    buildPerformanceChart([
-      { name: '下行', color: '#06b6d4', value: (metric) => metric.networkRxBytesPerSecond },
-      { name: '上行', color: '#ef5b6b', value: (metric) => metric.networkTxBytesPerSecond },
-    ]),
-  );
+  const hoveredResourceIndex = ref<number | null>(null);
+  const hoveredMemoryIndex = ref<number | null>(null);
+  const hoveredUsageIndex = ref<number | null>(null);
   const totalRequests = computed(() => logs.value.length);
   const totalTokens = computed(() => logs.value.reduce((sum, log) => sum + tokensOf(log), 0));
   const successRate = computed(() => {
@@ -516,6 +525,7 @@
       </div>
 
       <div class="performance-charts">
+        <!-- Resource Chart -->
         <div class="chart-shell">
           <div class="chart-shell__header">
             <div>
@@ -566,8 +576,8 @@
               </g>
               <g class="chart-series">
                 <g v-for="(series, index) in resourceChart.series" :key="series.name">
-                  <polygon :points="series.areaPoints" :fill="`url(#resource-fill-${index})`" />
-                  <polyline :points="series.points" :stroke="series.color" />
+                  <path :d="series.areaPoints" :fill="`url(#resource-fill-${index})`" />
+                  <path :d="series.points" :stroke="series.color" fill="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
                   <circle
                     v-for="(value, valueIndex) in series.values"
                     :key="`${series.name}-${valueIndex}`"
@@ -577,6 +587,50 @@
                   />
                 </g>
               </g>
+              
+              <!-- Hover Guide Line -->
+              <line
+                v-if="hoveredResourceIndex !== null"
+                :x1="xFor(hoveredResourceIndex, resourceChart.buckets.length)"
+                :x2="xFor(hoveredResourceIndex, resourceChart.buckets.length)"
+                :y1="chartPadding.top"
+                :y2="chartHeight - chartPadding.bottom"
+                stroke="rgba(31, 42, 68, 0.15)"
+                stroke-width="1.5"
+                stroke-dasharray="3 3"
+              />
+
+              <!-- Glowing Active Point Circles -->
+              <g v-if="hoveredResourceIndex !== null" class="chart-active-points">
+                <circle
+                  v-for="series in resourceChart.series"
+                  :key="`active-res-${series.name}`"
+                  :cx="xFor(hoveredResourceIndex, series.values.length)"
+                  :cy="yFor(series.values[hoveredResourceIndex], resourceChart.maxValue)"
+                  :fill="series.color"
+                  r="6"
+                  stroke="#fff"
+                  stroke-width="2.5"
+                  style="filter: drop-shadow(0 2px 4px rgba(0,0,0,0.15))"
+                />
+              </g>
+
+              <!-- Transparent Hotspot Columns -->
+              <g class="chart-hotspots">
+                <rect
+                  v-for="(bucket, idx) in resourceChart.buckets"
+                  :key="bucket.timestamp"
+                  :x="xFor(idx, resourceChart.buckets.length) - (xFor(1, resourceChart.buckets.length) - xFor(0, resourceChart.buckets.length)) / 2"
+                  y="0"
+                  :width="xFor(1, resourceChart.buckets.length) - xFor(0, resourceChart.buckets.length)"
+                  :height="chartHeight"
+                  fill="transparent"
+                  style="cursor: crosshair"
+                  @mouseenter="hoveredResourceIndex = idx"
+                  @mouseleave="hoveredResourceIndex = null"
+                />
+              </g>
+
               <g class="chart-x-axis">
                 <template v-for="(bucket, index) in resourceChart.buckets" :key="bucket.timestamp">
                   <text
@@ -593,9 +647,32 @@
             <div v-if="resourceChart.empty" class="chart-empty">
               <strong>暂无性能采样</strong>
             </div>
+
+            <!-- Tooltip Panel -->
+            <transition name="fade">
+              <div
+                v-if="hoveredResourceIndex !== null && resourceChart.buckets[hoveredResourceIndex]"
+                class="chart-tooltip glass-panel"
+                :style="{
+                  left: xFor(hoveredResourceIndex, resourceChart.buckets.length) > chartWidth / 2 ? '58px' : 'auto',
+                  right: xFor(hoveredResourceIndex, resourceChart.buckets.length) > chartWidth / 2 ? 'auto' : '58px',
+                }"
+              >
+                <div class="tooltip-time">{{ resourceChart.buckets[hoveredResourceIndex].label }}</div>
+                <div class="tooltip-divider"></div>
+                <div v-for="series in resourceChart.series" :key="series.name" class="tooltip-row">
+                  <i :style="{ backgroundColor: series.color }" class="tooltip-dot" />
+                  <span class="tooltip-name">{{ series.name }}</span>
+                  <strong class="tooltip-value">
+                    {{ percentText(series.values[hoveredResourceIndex]) }}
+                  </strong>
+                </div>
+              </div>
+            </transition>
           </div>
         </div>
 
+        <!-- Memory Chart -->
         <div class="chart-shell">
           <div class="chart-shell__header">
             <div>
@@ -646,8 +723,8 @@
               </g>
               <g class="chart-series">
                 <g v-for="(series, index) in memoryChart.series" :key="series.name">
-                  <polygon :points="series.areaPoints" :fill="`url(#memory-fill-${index})`" />
-                  <polyline :points="series.points" :stroke="series.color" />
+                  <path :d="series.areaPoints" :fill="`url(#memory-fill-${index})`" />
+                  <path :d="series.points" :stroke="series.color" fill="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
                   <circle
                     v-for="(value, valueIndex) in series.values"
                     :key="`${series.name}-${valueIndex}`"
@@ -657,6 +734,50 @@
                   />
                 </g>
               </g>
+              
+              <!-- Hover Guide Line -->
+              <line
+                v-if="hoveredMemoryIndex !== null"
+                :x1="xFor(hoveredMemoryIndex, memoryChart.buckets.length)"
+                :x2="xFor(hoveredMemoryIndex, memoryChart.buckets.length)"
+                :y1="chartPadding.top"
+                :y2="chartHeight - chartPadding.bottom"
+                stroke="rgba(31, 42, 68, 0.15)"
+                stroke-width="1.5"
+                stroke-dasharray="3 3"
+              />
+
+              <!-- Glowing Active Point Circles -->
+              <g v-if="hoveredMemoryIndex !== null" class="chart-active-points">
+                <circle
+                  v-for="series in memoryChart.series"
+                  :key="`active-mem-${series.name}`"
+                  :cx="xFor(hoveredMemoryIndex, series.values.length)"
+                  :cy="yFor(series.values[hoveredMemoryIndex], memoryChart.maxValue)"
+                  :fill="series.color"
+                  r="6"
+                  stroke="#fff"
+                  stroke-width="2.5"
+                  style="filter: drop-shadow(0 2px 4px rgba(0,0,0,0.15))"
+                />
+              </g>
+
+              <!-- Transparent Hotspot Columns -->
+              <g class="chart-hotspots">
+                <rect
+                  v-for="(bucket, idx) in memoryChart.buckets"
+                  :key="bucket.timestamp"
+                  :x="xFor(idx, memoryChart.buckets.length) - (xFor(1, memoryChart.buckets.length) - xFor(0, memoryChart.buckets.length)) / 2"
+                  y="0"
+                  :width="xFor(1, memoryChart.buckets.length) - xFor(0, memoryChart.buckets.length)"
+                  :height="chartHeight"
+                  fill="transparent"
+                  style="cursor: crosshair"
+                  @mouseenter="hoveredMemoryIndex = idx"
+                  @mouseleave="hoveredMemoryIndex = null"
+                />
+              </g>
+
               <g class="chart-x-axis">
                 <template v-for="(bucket, index) in memoryChart.buckets" :key="bucket.timestamp">
                   <text
@@ -673,86 +794,28 @@
             <div v-if="memoryChart.empty" class="chart-empty">
               <strong>暂无内存采样</strong>
             </div>
-          </div>
-        </div>
 
-        <div class="chart-shell">
-          <div class="chart-shell__header">
-            <div>
-              <h3>网络带宽趋势</h3>
-              <p class="text-muted">网卡上下行速率</p>
-            </div>
-            <div v-if="networkChart.series.length" class="chart-legend">
-              <span v-for="series in networkChart.series" :key="series.name">
-                <i :style="{ backgroundColor: series.color }" />
-                {{ series.name }}
-              </span>
-            </div>
-          </div>
-
-          <div class="chart-stage" :class="{ 'is-empty': networkChart.empty }">
-            <svg
-              class="usage-chart"
-              :viewBox="`0 0 ${chartWidth} ${chartHeight}`"
-              role="img"
-              aria-label="网络带宽趋势折线图"
-            >
-              <defs>
-                <linearGradient
-                  v-for="(series, index) in networkChart.series"
-                  :id="`network-fill-${index}`"
-                  :key="series.name"
-                  x1="0"
-                  x2="0"
-                  y1="0"
-                  y2="1"
-                >
-                  <stop offset="0%" :stop-color="series.color" stop-opacity="0.22" />
-                  <stop offset="100%" :stop-color="series.color" stop-opacity="0.02" />
-                </linearGradient>
-              </defs>
-              <g class="chart-grid">
-                <g v-for="grid in networkChart.yLabels" :key="grid.value">
-                  <line
-                    :x1="chartPadding.left"
-                    :x2="chartWidth - chartPadding.right"
-                    :y1="grid.y"
-                    :y2="grid.y"
-                  />
-                  <text :x="chartPadding.left - 12" :y="grid.y + 4" text-anchor="end">
-                    {{ rateText(grid.value) }}
-                  </text>
-                </g>
-              </g>
-              <g class="chart-series">
-                <g v-for="(series, index) in networkChart.series" :key="series.name">
-                  <polygon :points="series.areaPoints" :fill="`url(#network-fill-${index})`" />
-                  <polyline :points="series.points" :stroke="series.color" />
-                  <circle
-                    v-for="(value, valueIndex) in series.values"
-                    :key="`${series.name}-${valueIndex}`"
-                    :cx="xFor(valueIndex, series.values.length)"
-                    :cy="yFor(value, networkChart.maxValue)"
-                    :fill="series.color"
-                  />
-                </g>
-              </g>
-              <g class="chart-x-axis">
-                <template v-for="(bucket, index) in networkChart.buckets" :key="bucket.timestamp">
-                  <text
-                    v-if="shouldShowPerformanceBucketLabel(networkChart, index)"
-                    :x="xFor(index, networkChart.buckets.length)"
-                    :y="chartHeight - 14"
-                    text-anchor="middle"
-                  >
-                    {{ bucket.label }}
-                  </text>
-                </template>
-              </g>
-            </svg>
-            <div v-if="networkChart.empty" class="chart-empty">
-              <strong>暂无网络采样</strong>
-            </div>
+            <!-- Tooltip Panel -->
+            <transition name="fade">
+              <div
+                v-if="hoveredMemoryIndex !== null && memoryChart.buckets[hoveredMemoryIndex]"
+                class="chart-tooltip glass-panel"
+                :style="{
+                  left: xFor(hoveredMemoryIndex, memoryChart.buckets.length) > chartWidth / 2 ? '58px' : 'auto',
+                  right: xFor(hoveredMemoryIndex, memoryChart.buckets.length) > chartWidth / 2 ? 'auto' : '58px',
+                }"
+              >
+                <div class="tooltip-time">{{ memoryChart.buckets[hoveredMemoryIndex].label }}</div>
+                <div class="tooltip-divider"></div>
+                <div v-for="series in memoryChart.series" :key="series.name" class="tooltip-row">
+                  <i :style="{ backgroundColor: series.color }" class="tooltip-dot" />
+                  <span class="tooltip-name">{{ series.name }}</span>
+                  <strong class="tooltip-value">
+                    {{ bytesText(series.values[hoveredMemoryIndex]) }}
+                  </strong>
+                </div>
+              </div>
+            </transition>
           </div>
         </div>
       </div>
@@ -840,8 +903,8 @@
 
               <g class="chart-series">
                 <g v-for="(series, index) in chartData.series" :key="series.name">
-                  <polygon :points="series.areaPoints" :fill="`url(#series-fill-${index})`" />
-                  <polyline :points="series.points" :stroke="series.color" />
+                  <path :d="series.areaPoints" :fill="`url(#series-fill-${index})`" />
+                  <path :d="series.points" :stroke="series.color" fill="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
                   <circle
                     v-for="(value, valueIndex) in series.values"
                     :key="`${series.name}-${valueIndex}`"
@@ -850,6 +913,49 @@
                     :fill="series.color"
                   />
                 </g>
+              </g>
+              
+              <!-- Hover Guide Line -->
+              <line
+                v-if="hoveredUsageIndex !== null"
+                :x1="xFor(hoveredUsageIndex, chartData.buckets.length)"
+                :x2="xFor(hoveredUsageIndex, chartData.buckets.length)"
+                :y1="chartPadding.top"
+                :y2="chartHeight - chartPadding.bottom"
+                stroke="rgba(31, 42, 68, 0.15)"
+                stroke-width="1.5"
+                stroke-dasharray="3 3"
+              />
+
+              <!-- Glowing Active Point Circles -->
+              <g v-if="hoveredUsageIndex !== null" class="chart-active-points">
+                <circle
+                  v-for="series in chartData.series"
+                  :key="`active-usage-${series.name}`"
+                  :cx="xFor(hoveredUsageIndex, series.values.length)"
+                  :cy="yFor(series.values[hoveredUsageIndex], chartData.maxValue)"
+                  :fill="series.color"
+                  r="6"
+                  stroke="#fff"
+                  stroke-width="2.5"
+                  style="filter: drop-shadow(0 2px 4px rgba(0,0,0,0.15))"
+                />
+              </g>
+
+              <!-- Transparent Hotspot Columns -->
+              <g class="chart-hotspots">
+                <rect
+                  v-for="(bucket, idx) in chartData.buckets"
+                  :key="bucket.timestamp"
+                  :x="xFor(idx, chartData.buckets.length) - (xFor(1, chartData.buckets.length) - xFor(0, chartData.buckets.length)) / 2"
+                  y="0"
+                  :width="xFor(1, chartData.buckets.length) - xFor(0, chartData.buckets.length)"
+                  :height="chartHeight"
+                  fill="transparent"
+                  style="cursor: crosshair"
+                  @mouseenter="hoveredUsageIndex = idx"
+                  @mouseleave="hoveredUsageIndex = null"
+                />
               </g>
 
               <g class="chart-x-axis">
@@ -869,6 +975,28 @@
             <div v-if="chartData.empty" class="chart-empty">
               <strong>暂无调用数据</strong>
             </div>
+
+            <!-- Tooltip Panel -->
+            <transition name="fade">
+              <div
+                v-if="hoveredUsageIndex !== null && chartData.buckets[hoveredUsageIndex]"
+                class="chart-tooltip glass-panel"
+                :style="{
+                  left: xFor(hoveredUsageIndex, chartData.buckets.length) > chartWidth / 2 ? '58px' : 'auto',
+                  right: xFor(hoveredUsageIndex, chartData.buckets.length) > chartWidth / 2 ? 'auto' : '58px',
+                }"
+              >
+                <div class="tooltip-time">{{ chartData.buckets[hoveredUsageIndex].label }}</div>
+                <div class="tooltip-divider"></div>
+                <div v-for="series in chartData.series" :key="series.name" class="tooltip-row">
+                  <i :style="{ backgroundColor: series.color }" class="tooltip-dot" />
+                  <span class="tooltip-name">{{ series.name }}</span>
+                  <strong class="tooltip-value">
+                    {{ formatNumber(series.values[hoveredUsageIndex]) }} 次
+                  </strong>
+                </div>
+              </div>
+            </transition>
           </div>
         </div>
       </div>
@@ -1013,10 +1141,6 @@
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 16px;
-
-    > .chart-shell:first-child {
-      grid-column: 1 / -1;
-    }
   }
 
   .usage-stats {
@@ -1132,25 +1256,87 @@
 
   .chart-grid {
     line {
-      stroke: rgba(31, 42, 68, 0.1);
+      stroke: rgba(15, 23, 42, 0.06);
       stroke-width: 1;
+      stroke-dasharray: 3 3;
     }
   }
 
   .chart-series {
-    polyline {
+    path {
       fill: none;
       stroke-width: 3;
       stroke-linecap: round;
       stroke-linejoin: round;
-      filter: drop-shadow(0 6px 12px rgba(31, 42, 68, 0.12));
+      filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.05));
+    }
+
+    path[fill] {
+      stroke: none;
+      stroke-width: 0;
+      filter: none;
     }
 
     circle {
-      r: 4;
-      stroke: rgba(255, 255, 255, 0.9);
-      stroke-width: 2;
+      r: 3.5;
+      stroke: rgba(255, 255, 255, 0.95);
+      stroke-width: 1.5;
+      transition: r 0.2s ease, stroke-width 0.2s ease;
     }
+  }
+
+  .chart-tooltip {
+    position: absolute;
+    top: 48px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.92) !important;
+    backdrop-filter: blur(10px) !important;
+    border: 1px solid var(--kp-border) !important;
+    box-shadow: 0 4px 16px rgba(31, 45, 80, 0.08) !important;
+    pointer-events: none;
+    z-index: 100;
+    min-width: 150px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    transition: all 0.2s cubic-bezier(0.25, 0.8, 0.25, 1);
+  }
+
+  .tooltip-time {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--kp-text-secondary);
+  }
+
+  .tooltip-divider {
+    height: 1px;
+    background: var(--kp-divider);
+    margin: 2px 0;
+  }
+
+  .tooltip-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11.5px;
+  }
+
+  .tooltip-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .tooltip-name {
+    color: var(--kp-text-secondary);
+    flex: 1;
+  }
+
+  .tooltip-value {
+    color: var(--kp-text);
+    font-weight: 700;
   }
 
   .chart-empty {
