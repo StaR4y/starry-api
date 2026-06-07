@@ -379,6 +379,20 @@
       100,
     ),
   );
+  const memoryChart = computed(() =>
+    buildPerformanceChart([
+      { name: 'JVM 堆内存', color: '#06b6d4', value: (metric) => metric.heapUsedBytes },
+      { name: 'JVM 非堆内存', color: '#b387ff', value: (metric) => metric.nonHeapUsedBytes },
+      {
+        name: '系统已用内存',
+        color: '#ef5b6b',
+        value: (metric) =>
+          metric.systemMemoryTotalBytes && metric.systemMemoryFreeBytes
+            ? metric.systemMemoryTotalBytes - metric.systemMemoryFreeBytes
+            : 0,
+      },
+    ]),
+  );
   const networkChart = computed(() =>
     buildPerformanceChart([
       { name: '下行', color: '#06b6d4', value: (metric) => metric.networkRxBytesPerSecond },
@@ -578,6 +592,86 @@
             </svg>
             <div v-if="resourceChart.empty" class="chart-empty">
               <strong>暂无性能采样</strong>
+            </div>
+          </div>
+        </div>
+
+        <div class="chart-shell">
+          <div class="chart-shell__header">
+            <div>
+              <h3>内存使用趋势</h3>
+              <p class="text-muted">JVM 堆、非堆与系统内存占用</p>
+            </div>
+            <div v-if="memoryChart.series.length" class="chart-legend">
+              <span v-for="series in memoryChart.series" :key="series.name">
+                <i :style="{ backgroundColor: series.color }" />
+                {{ series.name }}
+              </span>
+            </div>
+          </div>
+
+          <div class="chart-stage" :class="{ 'is-empty': memoryChart.empty }">
+            <svg
+              class="usage-chart"
+              :viewBox="`0 0 ${chartWidth} ${chartHeight}`"
+              role="img"
+              aria-label="内存使用趋势折线图"
+            >
+              <defs>
+                <linearGradient
+                  v-for="(series, index) in memoryChart.series"
+                  :id="`memory-fill-${index}`"
+                  :key="series.name"
+                  x1="0"
+                  x2="0"
+                  y1="0"
+                  y2="1"
+                >
+                  <stop offset="0%" :stop-color="series.color" stop-opacity="0.22" />
+                  <stop offset="100%" :stop-color="series.color" stop-opacity="0.02" />
+                </linearGradient>
+              </defs>
+              <g class="chart-grid">
+                <g v-for="grid in memoryChart.yLabels" :key="grid.value">
+                  <line
+                    :x1="chartPadding.left"
+                    :x2="chartWidth - chartPadding.right"
+                    :y1="grid.y"
+                    :y2="grid.y"
+                  />
+                  <text :x="chartPadding.left - 12" :y="grid.y + 4" text-anchor="end">
+                    {{ bytesText(grid.value) }}
+                  </text>
+                </g>
+              </g>
+              <g class="chart-series">
+                <g v-for="(series, index) in memoryChart.series" :key="series.name">
+                  <polygon :points="series.areaPoints" :fill="`url(#memory-fill-${index})`" />
+                  <polyline :points="series.points" :stroke="series.color" />
+                  <circle
+                    v-for="(value, valueIndex) in series.values"
+                    :key="`${series.name}-${valueIndex}`"
+                    :cx="xFor(valueIndex, series.values.length)"
+                    :cy="yFor(value, memoryChart.maxValue)"
+                    :fill="series.color"
+                  />
+                </g>
+              </g>
+              <g class="chart-x-axis">
+                <template v-for="(bucket, index) in memoryChart.buckets" :key="bucket.timestamp">
+                  <text
+                    v-if="shouldShowPerformanceBucketLabel(memoryChart, index)"
+                    :x="xFor(index, memoryChart.buckets.length)"
+                    :y="chartHeight - 14"
+                    text-anchor="middle"
+                  >
+                    {{ bucket.label }}
+                  </text>
+                </template>
+              </g>
+            </svg>
+            <div v-if="memoryChart.empty" class="chart-empty">
+              <strong>暂无内存采样</strong>
             </div>
           </div>
         </div>
@@ -919,6 +1013,10 @@
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 16px;
+
+    > .chart-shell:first-child {
+      grid-column: 1 / -1;
+    }
   }
 
   .usage-stats {
@@ -1171,6 +1269,10 @@
 
     .performance-charts {
       grid-template-columns: 1fr;
+
+      > .chart-shell:first-child {
+        grid-column: auto;
+      }
     }
 
     .model-rank {
