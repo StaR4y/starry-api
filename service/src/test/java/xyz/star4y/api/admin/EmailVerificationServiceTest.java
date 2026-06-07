@@ -2,6 +2,7 @@ package xyz.star4y.api.admin;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.net.InetAddress;
 import java.util.Properties;
 import org.junit.jupiter.api.Test;
 
@@ -14,8 +15,8 @@ class EmailVerificationServiceTest {
         assertThat(properties.getProperty("mail.smtp.ssl.enable")).isEqualTo("true");
         assertThat(properties.getProperty("mail.smtp.starttls.enable")).isEqualTo("false");
         assertThat(properties.getProperty("mail.smtp.starttls.required")).isEqualTo("false");
-        assertThat(properties.getProperty("mail.smtp.socketFactory.class")).isEqualTo("javax.net.ssl.SSLSocketFactory");
-        assertThat(properties.getProperty("mail.smtp.socketFactory.port")).isEqualTo("465");
+        assertThat(properties.getProperty("mail.smtp.socketFactory.class")).isNull();
+        assertThat(properties.getProperty("mail.smtp.socketFactory.port")).isNull();
     }
 
     @Test
@@ -43,6 +44,14 @@ class EmailVerificationServiceTest {
         assertThat(RegistrationSettingsService.legacySmtpSecurity("", true, 587)).isEqualTo("starttls");
         assertThat(RegistrationSettingsService.legacySmtpSecurity("", false, 25)).isEqualTo("auto");
         assertThat(RegistrationSettingsService.legacySmtpSecurity("none", true, 465)).isEqualTo("none");
+    }
+
+    @Test
+    void detectsProxyFakeIpAddresses() throws Exception {
+        assertThat(EmailVerificationService.isFakeIpAddress(InetAddress.getByName("198.18.0.234"))).isTrue();
+        assertThat(EmailVerificationService.isFakeIpAddress(InetAddress.getByName("198.19.255.255"))).isTrue();
+        assertThat(EmailVerificationService.isFakeIpAddress(InetAddress.getByName("198.20.0.1"))).isFalse();
+        assertThat(EmailVerificationService.isFakeIpAddress(InetAddress.getByName("127.0.0.1"))).isFalse();
     }
 
     private Properties propertiesFor(RegistrationSettingsService.SmtpConfig config) {

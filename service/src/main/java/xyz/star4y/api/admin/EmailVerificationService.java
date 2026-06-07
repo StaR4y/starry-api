@@ -1,6 +1,8 @@
 package xyz.star4y.api.admin;
 
 import jakarta.mail.internet.MimeMessage;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.time.Instant;
@@ -137,7 +139,7 @@ public class EmailVerificationService {
                     throw new ApiException(
                         HttpStatus.SERVICE_UNAVAILABLE,
                         "EMAIL_SEND_FAILED",
-                        "Failed to send verification email: " + error.getMessage()
+                        "Failed to send verification email: " + error.getMessage() + smtpFailureHint(config)
                     );
                 }
             })
@@ -170,11 +172,6 @@ public class EmailVerificationService {
         if (security == SmtpTransportSecurity.SSL || security == SmtpTransportSecurity.STARTTLS) {
             properties.put("mail.smtp.ssl.protocols", "TLSv1.2 TLSv1.3");
         }
-        if (security == SmtpTransportSecurity.SSL) {
-            properties.put("mail.smtp.socketFactory.class", "javax.net.ssl.SSLSocketFactory");
-            properties.put("mail.smtp.socketFactory.port", Integer.toString(config.port()));
-            properties.put("mail.smtp.socketFactory.fallback", "false");
-        }
         properties.put("mail.smtp.connectiontimeout", "10000");
         properties.put("mail.smtp.timeout", "10000");
         properties.put("mail.smtp.writetimeout", "10000");
@@ -196,6 +193,33 @@ public class EmailVerificationService {
                 yield SmtpTransportSecurity.NONE;
             }
         };
+    }
+
+    static String smtpFailureHint(RegistrationSettingsService.SmtpConfig config) {
+        try {
+            InetAddress[] addresses = InetAddress.getAllByName(config.host());
+            for (InetAddress address : addresses) {
+                if (isFakeIpAddress(address)) {
+                    return " SMTP host resolves to " + address.getHostAddress()
+                        + ", which is in the 198.18.0.0/15 fake-IP range often used by local proxy/DNS tools. "
+                        + "Disable fake-IP/proxy handling for this SMTP domain or add a DIRECT/fake-ip-filter rule for "
+                        + config.host() + ".";
+                }
+            }
+        } catch (UnknownHostException ignored) {
+            return "";
+        }
+        return "";
+    }
+
+    static boolean isFakeIpAddress(InetAddress address) {
+        byte[] bytes = address.getAddress();
+        if (bytes.length != 4) {
+            return false;
+        }
+        int first = Byte.toUnsignedInt(bytes[0]);
+        int second = Byte.toUnsignedInt(bytes[1]);
+        return first == 198 && (second == 18 || second == 19);
     }
 
     private String code() {

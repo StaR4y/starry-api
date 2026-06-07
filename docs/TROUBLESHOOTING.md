@@ -94,6 +94,37 @@ docker compose logs -f mysql
 
 The default project compose file already uses this compatible MySQL 8.0 image.
 
+## Tencent Exmail SMTP SSL Handshake Fails
+
+Symptom:
+
+```text
+Could not connect to SMTP host: smtp.exmail.qq.com, port: 465
+javax.net.ssl.SSLHandshakeException: Remote host terminated the handshake
+```
+
+For Tencent Exmail, `smtp.exmail.qq.com:465` must use implicit SSL. If the
+server still terminates the handshake, check whether the SMTP host resolves to a
+local proxy fake IP:
+
+```bash
+dig +short smtp.exmail.qq.com
+openssl s_client -connect smtp.exmail.qq.com:465 -servername smtp.exmail.qq.com -tls1_2 </dev/null
+```
+
+If the address is in `198.18.0.0/15`, the host is being handled by a local
+proxy/DNS fake-IP mode rather than Tencent's SMTP server. Add a DIRECT or
+fake-ip-filter rule for `smtp.exmail.qq.com` and `hwsmtp.exmail.qq.com`, or
+disable fake-IP mode for SMTP domains.
+
+Recommended settings:
+
+```text
+SMTP host: smtp.exmail.qq.com
+SMTP port: 465
+SMTP security: SSL / TLS
+```
+
 ## WebUI Does Not Change After Installer Update
 
 Cause:
