@@ -428,7 +428,7 @@
 
   const importVisible = ref(false);
   const importContent = ref('');
-  const importUpsert = ref(true);
+  const importUpsert = ref(false);
   const importResult = ref<ImportAccountsResult | null>(null);
   const importSubmitting = ref(false);
   const importFileInput = ref<HTMLInputElement | null>(null);
@@ -441,7 +441,7 @@
   function openImport() {
     importContent.value = '';
     importResult.value = null;
-    importUpsert.value = true;
+    importUpsert.value = false;
     importFileNames.value = [];
     importFilePayloads.value = [];
     isDragover.value = false;
@@ -1094,7 +1094,9 @@
       placeholder='{"type":"codex","access_token":"...","refresh_token":"...","id_token":"..."}'
       @input="clearImportFiles"
     />
-    <el-checkbox v-model="importUpsert" class="mt-16">已存在 accountId 时执行更新（upsert）</el-checkbox>
+    <el-checkbox v-model="importUpsert" class="mt-16">
+      已存在 accountId 时覆盖更新旧账号（谨慎开启）
+    </el-checkbox>
 
     <div v-if="importResult" class="import-summary glass-panel mt-16">
       <div class="flex gap-16">

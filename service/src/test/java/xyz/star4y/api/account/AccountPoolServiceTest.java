@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -40,6 +41,30 @@ class AccountPoolServiceTest {
         verify(repository, times(2)).save(captor.capture());
         assertThat(captor.getAllValues()).extracting(ProxyAccountEntity::getAccountId)
             .containsExactlyInAnyOrder("json-1", "json-2");
+    }
+
+    @Test
+    void importAccountsSkipsExistingAccountWithoutUpsert() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity existing = account("same-account");
+        existing.setAccessToken("old-token");
+        when(repository.findByAccountId("same-account")).thenReturn(Mono.just(existing));
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.empty());
+
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+
+        AccountDtos.ImportAccountsResponse response = service.importAccounts(new AccountDtos.ImportAccountsRequest(
+            List.of(create("same-account", "new-token")),
+            false
+        )).block();
+
+        assertThat(response).isNotNull();
+        assertThat(response.created()).isZero();
+        assertThat(response.updated()).isZero();
+        assertThat(response.skipped()).isEqualTo(1);
+        assertThat(response.items().get(0).status()).isEqualTo("SKIPPED");
+        assertThat(existing.getAccessToken()).isEqualTo("old-token");
+        verify(repository, never()).save(any(ProxyAccountEntity.class));
     }
 
     @Test
