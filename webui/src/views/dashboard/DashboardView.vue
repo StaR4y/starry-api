@@ -576,8 +576,8 @@
               </g>
               <g class="chart-series">
                 <g v-for="(series, index) in resourceChart.series" :key="series.name">
-                  <path :d="series.areaPoints" :fill="`url(#resource-fill-${index})`" />
-                  <path :d="series.points" :stroke="series.color" fill="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+                  <path class="chart-area" :d="series.areaPoints" :fill="`url(#resource-fill-${index})`" />
+                  <path class="chart-line" :d="series.points" :stroke="series.color" />
                   <circle
                     v-for="(value, valueIndex) in series.values"
                     :key="`${series.name}-${valueIndex}`"
@@ -723,8 +723,8 @@
               </g>
               <g class="chart-series">
                 <g v-for="(series, index) in memoryChart.series" :key="series.name">
-                  <path :d="series.areaPoints" :fill="`url(#memory-fill-${index})`" />
-                  <path :d="series.points" :stroke="series.color" fill="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+                  <path class="chart-area" :d="series.areaPoints" :fill="`url(#memory-fill-${index})`" />
+                  <path class="chart-line" :d="series.points" :stroke="series.color" />
                   <circle
                     v-for="(value, valueIndex) in series.values"
                     :key="`${series.name}-${valueIndex}`"
@@ -903,8 +903,8 @@
 
               <g class="chart-series">
                 <g v-for="(series, index) in chartData.series" :key="series.name">
-                  <path :d="series.areaPoints" :fill="`url(#series-fill-${index})`" />
-                  <path :d="series.points" :stroke="series.color" fill="none" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+                  <path class="chart-area" :d="series.areaPoints" :fill="`url(#series-fill-${index})`" />
+                  <path class="chart-line" :d="series.points" :stroke="series.color" />
                   <circle
                     v-for="(value, valueIndex) in series.values"
                     :key="`${series.name}-${valueIndex}`"
@@ -1263,7 +1263,7 @@
   }
 
   .chart-series {
-    path {
+    .chart-line {
       fill: none;
       stroke-width: 3;
       stroke-linecap: round;
@@ -1271,7 +1271,7 @@
       filter: drop-shadow(0 4px 8px rgba(0, 0, 0, 0.05));
     }
 
-    path[fill] {
+    .chart-area {
       stroke: none;
       stroke-width: 0;
       filter: none;
