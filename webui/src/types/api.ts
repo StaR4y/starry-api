@@ -49,6 +49,7 @@ export interface RegisterRequest {
   displayName?: string;
   password: string;
   verifyCode?: string;
+  inviteCode?: string;
 }
 
 export interface SendVerifyCodeRequest {
@@ -96,6 +97,7 @@ export interface ResetPasswordResult {
 export interface RegistrationSettings {
   registrationEnabled: boolean;
   emailVerifyEnabled: boolean;
+  inviteCodeEnabled: boolean;
   registrationEmailSuffixWhitelist: string[];
   smtpHost?: string | null;
   smtpPort?: number | null;
@@ -109,6 +111,7 @@ export interface RegistrationSettings {
 export interface UpdateRegistrationSettingsRequest {
   registrationEnabled: boolean;
   emailVerifyEnabled: boolean;
+  inviteCodeEnabled: boolean;
   registrationEmailSuffixWhitelist: string[];
   smtpHost?: string;
   smtpPort?: number;
@@ -117,6 +120,22 @@ export interface UpdateRegistrationSettingsRequest {
   smtpFromEmail?: string;
   smtpFromName?: string;
   smtpUseTls?: boolean;
+}
+
+export interface CreateInviteCodeRequest {
+  expiresAt?: string | null;
+}
+
+export interface InviteCode {
+  codeId: string;
+  code: string;
+  enabled: boolean;
+  used: boolean;
+  usedByUserId: string | null;
+  usedAt: string | null;
+  expiresAt: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /* ================== 账号 ================== */

@@ -45,4 +45,19 @@ public interface AdminUserApi {
         ServerWebExchange exchange,
         @RequestBody AdminDtos.UpdateRegistrationSettingsRequest request
     );
+
+    @GetMapping("/invite-codes")
+    Mono<ApiResponse<List<AdminDtos.InviteCodeResponse>>> inviteCodes(ServerWebExchange exchange);
+
+    @PostMapping("/invite-codes")
+    Mono<ApiResponse<AdminDtos.InviteCodeResponse>> createInviteCode(
+        ServerWebExchange exchange,
+        @RequestBody AdminDtos.CreateInviteCodeRequest request
+    );
+
+    @PostMapping("/invite-codes/{codeId}/revoke")
+    Mono<ApiResponse<AdminDtos.InviteCodeResponse>> revokeInviteCode(
+        ServerWebExchange exchange,
+        @PathVariable String codeId
+    );
 }

@@ -5,7 +5,9 @@ import type {
   AdminUserCreated,
   ApiResponse,
   CreateAdminUserRequest,
+  CreateInviteCodeRequest,
   RegistrationSettings,
+  InviteCode,
   ResetPasswordResult,
   UpdateRegistrationSettingsRequest,
   UpdateAdminUserRequest,
@@ -38,6 +40,19 @@ export const usersApi = {
   updateRegistrationSettings(payload: UpdateRegistrationSettingsRequest) {
     return unwrap<RegistrationSettings>(
       http.patch<ApiResponse<RegistrationSettings>>('/admin/users/registration-settings', payload),
+    );
+  },
+  inviteCodes() {
+    return unwrap<InviteCode[]>(http.get<ApiResponse<InviteCode[]>>('/admin/users/invite-codes'));
+  },
+  createInviteCode(payload: CreateInviteCodeRequest = {}) {
+    return unwrap<InviteCode>(
+      http.post<ApiResponse<InviteCode>>('/admin/users/invite-codes', payload),
+    );
+  },
+  revokeInviteCode(codeId: string) {
+    return unwrap<InviteCode>(
+      http.post<ApiResponse<InviteCode>>(`/admin/users/invite-codes/${codeId}/revoke`),
     );
   },
 };

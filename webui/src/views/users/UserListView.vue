@@ -10,16 +10,20 @@
   import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus';
   import PageSection from '@/components/PageSection.vue';
   import { usersApi } from '@/api';
-  import type { AdminUser, AdminUserRole, CreateAdminUserRequest } from '@/types/api';
+  import type { AdminUser, AdminUserRole, CreateAdminUserRequest, InviteCode } from '@/types/api';
   import { formatDateTime, formatNumber } from '@/utils/format';
 
   const loading = ref(false);
   const users = ref<AdminUser[]>([]);
   const registrationSettingsVisible = ref(false);
   const registrationSettingsSubmitting = ref(false);
+  const inviteCodeLoading = ref(false);
+  const inviteCodeCreating = ref(false);
+  const inviteCodes = ref<InviteCode[]>([]);
   const registrationSettings = reactive({
     registrationEnabled: false,
     emailVerifyEnabled: false,
+    inviteCodeEnabled: false,
     smtpHost: '',
     smtpPort: 587,
     smtpUsername: '',
@@ -29,6 +33,7 @@
     smtpFromName: '',
     smtpUseTls: false,
   });
+  type InviteCodeTagType = 'success' | 'warning' | 'info' | 'primary' | 'danger';
 
   async function loadUsers() {
     loading.value = true;
@@ -193,6 +198,7 @@
     const settings = await usersApi.registrationSettings();
     registrationSettings.registrationEnabled = settings.registrationEnabled;
     registrationSettings.emailVerifyEnabled = settings.emailVerifyEnabled;
+    registrationSettings.inviteCodeEnabled = settings.inviteCodeEnabled;
     registrationSettings.smtpHost = settings.smtpHost ?? '';
     registrationSettings.smtpPort = settings.smtpPort ?? 587;
     registrationSettings.smtpUsername = settings.smtpUsername ?? '';
@@ -204,7 +210,7 @@
   }
 
   async function openRegistrationSettings() {
-    await loadRegistrationSettings();
+    await Promise.all([loadRegistrationSettings(), loadInviteCodes()]);
     registrationSettingsVisible.value = true;
   }
 
@@ -214,6 +220,7 @@
       const settings = await usersApi.updateRegistrationSettings({
         registrationEnabled: registrationSettings.registrationEnabled,
         emailVerifyEnabled: registrationSettings.emailVerifyEnabled,
+        inviteCodeEnabled: registrationSettings.inviteCodeEnabled,
         registrationEmailSuffixWhitelist: [],
         smtpHost: registrationSettings.smtpHost,
         smtpPort: registrationSettings.smtpPort,
@@ -225,6 +232,7 @@
       });
       registrationSettings.registrationEnabled = settings.registrationEnabled;
       registrationSettings.emailVerifyEnabled = settings.emailVerifyEnabled;
+      registrationSettings.inviteCodeEnabled = settings.inviteCodeEnabled;
       registrationSettings.smtpHost = settings.smtpHost ?? '';
       registrationSettings.smtpPort = settings.smtpPort ?? 587;
       registrationSettings.smtpUsername = settings.smtpUsername ?? '';
@@ -238,6 +246,49 @@
     } finally {
       registrationSettingsSubmitting.value = false;
     }
+  }
+
+  async function loadInviteCodes() {
+    inviteCodeLoading.value = true;
+    try {
+      inviteCodes.value = await usersApi.inviteCodes();
+    } finally {
+      inviteCodeLoading.value = false;
+    }
+  }
+
+  async function createInviteCode() {
+    inviteCodeCreating.value = true;
+    try {
+      const code = await usersApi.createInviteCode();
+      inviteCodes.value = [code, ...inviteCodes.value];
+      await copy(code.code);
+      ElMessage.success('邀请码已生成并复制');
+    } finally {
+      inviteCodeCreating.value = false;
+    }
+  }
+
+  async function revokeInviteCode(row: InviteCode) {
+    await ElMessageBox.confirm(`确认停用邀请码 ${row.code}？`, '停用邀请码', {
+      confirmButtonText: '停用',
+      cancelButtonText: '取消',
+      type: 'warning',
+    }).catch(() => Promise.reject(new Error('cancel')));
+    const updated = await usersApi.revokeInviteCode(row.codeId);
+    inviteCodes.value = inviteCodes.value.map((item) =>
+      item.codeId === updated.codeId ? updated : item,
+    );
+    ElMessage.success('邀请码已停用');
+  }
+
+  function inviteCodeStatus(row: InviteCode): { label: string; type: InviteCodeTagType } {
+    if (row.used) return { label: '已使用', type: 'info' };
+    if (!row.enabled) return { label: '已停用', type: 'info' };
+    if (row.expiresAt && new Date(row.expiresAt).getTime() <= Date.now()) {
+      return { label: '已过期', type: 'warning' };
+    }
+    return { label: '可用', type: 'success' };
   }
 
   onMounted(() => {
@@ -349,7 +400,7 @@
     </template>
   </el-dialog>
 
-  <el-dialog v-model="registrationSettingsVisible" title="注册设置" width="520px">
+  <el-dialog v-model="registrationSettingsVisible" title="注册设置" width="760px">
     <div class="settings-minimal">
       <!-- 公开注册 Row -->
       <div class="setting-row">
@@ -383,6 +434,75 @@
           <el-switch v-model="registrationSettings.emailVerifyEnabled" />
         </div>
       </div>
+
+      <div class="setting-divider"></div>
+
+      <!-- 邀请码注册 Row -->
+      <div class="setting-row">
+        <div class="setting-info">
+          <div class="setting-title">邀请码注册</div>
+          <div class="setting-desc">开启后，用户可凭管理员生成的邀请码直接注册账号</div>
+        </div>
+        <div class="setting-control">
+          <el-switch v-model="registrationSettings.inviteCodeEnabled" />
+        </div>
+      </div>
+
+      <transition name="fade-slide">
+        <div v-if="registrationSettings.inviteCodeEnabled" class="invite-section">
+          <div class="invite-section__header">
+            <div>
+              <div class="smtp-section-header">邀请码管理</div>
+              <div class="setting-desc">邀请码为一次性使用，用户注册成功后自动失效。</div>
+            </div>
+            <el-button
+              type="primary"
+              size="small"
+              :loading="inviteCodeCreating"
+              @click="createInviteCode"
+            >
+              生成邀请码
+            </el-button>
+          </div>
+
+          <el-table v-loading="inviteCodeLoading" :data="inviteCodes" size="small" max-height="260" stripe>
+            <el-table-column label="邀请码" min-width="190">
+              <template #default="{ row }">
+                <code class="mono">{{ row.code }}</code>
+                <el-button link type="primary" @click="copy(row.code)">复制</el-button>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="90">
+              <template #default="{ row }">
+                <el-tag :type="inviteCodeStatus(row).type" effect="light" round>
+                  {{ inviteCodeStatus(row).label }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="使用用户" min-width="130">
+              <template #default="{ row }">{{ row.usedByUserId || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="创建时间" width="170">
+              <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
+            </el-table-column>
+            <el-table-column label="使用时间" width="170">
+              <template #default="{ row }">{{ formatDateTime(row.usedAt) }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="90" fixed="right">
+              <template #default="{ row }">
+                <el-button
+                  link
+                  type="warning"
+                  :disabled="row.used || !row.enabled"
+                  @click="revokeInviteCode(row)"
+                >
+                  停用
+                </el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
+      </transition>
 
       <!-- SMTP 配置区域 (Minimal) -->
       <transition name="fade-slide">
@@ -559,6 +679,22 @@
     margin-top: 16px;
     padding-top: 16px;
     border-top: 1px solid var(--kp-divider);
+  }
+
+  .invite-section {
+    margin: 10px 0 16px;
+    padding: 14px;
+    border: 1px solid var(--kp-divider);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.54);
+
+    &__header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 12px;
+    }
   }
 
   .smtp-section-header {

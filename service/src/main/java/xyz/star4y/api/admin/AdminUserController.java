@@ -16,15 +16,18 @@ public class AdminUserController implements AdminUserApi {
     private final AdminUserService adminUserService;
     private final AdminAuth adminAuth;
     private final RegistrationSettingsService registrationSettingsService;
+    private final InviteCodeService inviteCodeService;
 
     public AdminUserController(
         AdminUserService adminUserService,
         AdminAuth adminAuth,
-        RegistrationSettingsService registrationSettingsService
+        RegistrationSettingsService registrationSettingsService,
+        InviteCodeService inviteCodeService
     ) {
         this.adminUserService = adminUserService;
         this.adminAuth = adminAuth;
         this.registrationSettingsService = registrationSettingsService;
+        this.inviteCodeService = inviteCodeService;
     }
 
     @Override
@@ -79,5 +82,31 @@ public class AdminUserController implements AdminUserApi {
     ) {
         adminAuth.verifyAdmin(exchange);
         return registrationSettingsService.update(request).map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<List<AdminDtos.InviteCodeResponse>>> inviteCodes(ServerWebExchange exchange) {
+        adminAuth.verifyAdmin(exchange);
+        return inviteCodeService.list()
+            .collectList()
+            .map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<AdminDtos.InviteCodeResponse>> createInviteCode(
+        ServerWebExchange exchange,
+        AdminDtos.CreateInviteCodeRequest request
+    ) {
+        adminAuth.verifyAdmin(exchange);
+        return inviteCodeService.create(request).map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<AdminDtos.InviteCodeResponse>> revokeInviteCode(
+        ServerWebExchange exchange,
+        String codeId
+    ) {
+        adminAuth.verifyAdmin(exchange);
+        return inviteCodeService.revoke(codeId).map(ApiResponse::ok);
     }
 }

@@ -101,7 +101,8 @@ Content-Type: application/json
   "email": "user@example.com",
   "displayName": "User",
   "password": "strong-password",
-  "verifyCode": "123456"
+  "verifyCode": "123456",
+  "inviteCode": "INV-XXXX-XXXX-XXXX"
 }
 ```
 
@@ -119,6 +120,8 @@ Content-Type: application/json
 ```
 
 Administrators configure registration and SMTP settings through `GET/PATCH /admin/users/registration-settings`. SMTP fields follow the sub2api-style setting keys: `email_verify_enabled`, `smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`, `smtp_from_email`, `smtp_from_name`, and `smtp_use_tls`. API JSON uses camelCase field names, and responses only expose `smtpPasswordConfigured`, never the stored password.
+
+When `inviteCodeEnabled=true`, administrators can generate one-time invite codes from `/admin/users/invite-codes`. A valid `inviteCode` lets the user register directly even when public `registrationEnabled=false`; invite-code registration skips email verification and consumes the code atomically.
 
 ## Response Envelope
 
@@ -460,6 +463,9 @@ PATCH /admin/users/{userId}
 POST /admin/users/{userId}/reset-password
 GET  /admin/users/registration-settings
 PATCH /admin/users/registration-settings
+GET  /admin/users/invite-codes
+POST /admin/users/invite-codes
+POST /admin/users/invite-codes/{codeId}/revoke
 ```
 
 `/admin/logs` backs the global dashboard, and `/admin/users/*` is the account administration panel. Both require an `ADMIN` account session. `USER` accounts receive `403 ADMIN_ROLE_REQUIRED`.
@@ -477,7 +483,7 @@ Create or update login accounts with `role=ADMIN` or `role=USER`. `balance` is a
 }
 ```
 
-Public self-registration creates `USER` accounts with zero balance.
+Public self-registration and invite-code registration create `USER` accounts with zero balance.
 
 ## Status Codes
 

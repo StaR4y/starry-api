@@ -72,6 +72,19 @@ The WebUI API Key page now generates Starry API client variables:
 
 These client variables do not replace server runtime variables yet.
 
+## Registration Settings
+
+Registration is configured from the admin console under `账号 -> 注册设置`.
+
+| Setting key | Purpose |
+| --- | --- |
+| `registration_enabled` | Enable public self-registration. |
+| `email_verify_enabled` | Require email verification for public self-registration. |
+| `invite_code_enabled` | Enable one-time invite-code registration. |
+| `registration_email_suffix_whitelist` | Optional JSON email suffix whitelist. |
+
+When invite-code registration is enabled, administrators can generate one-time codes in the same settings dialog. Users pass `inviteCode` to `POST /auth/register`; a valid code allows direct registration even if public registration is disabled.
+
 ## Payment Settings
 
 Online balance recharge is configured from the admin console, not environment variables:

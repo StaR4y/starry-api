@@ -26,7 +26,7 @@ class AdminUserServiceTest {
         RegistrationSettingsService settingsService = mock(RegistrationSettingsService.class);
         AdminUserService service = service(repository, settingsService);
 
-        when(settingsService.ensureRegistrationAllowed("user@example.com")).thenReturn(Mono.empty());
+        when(settingsService.registrationPolicy()).thenReturn(Mono.just(publicRegistrationPolicy()));
         when(repository.save(any(AdminUserEntity.class))).thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
 
         AdminDtos.LoginResponse response = service.register(new AdminDtos.RegisterRequest(
@@ -34,7 +34,8 @@ class AdminUserServiceTest {
             "User@Example.COM",
             "New User",
             "secret123",
-            "123456"
+            "123456",
+            null
         )).block();
 
         assertThat(response).isNotNull();
@@ -83,21 +84,24 @@ class AdminUserServiceTest {
         AdminUserRepository repository = mock(AdminUserRepository.class);
         RegistrationSettingsService settingsService = mock(RegistrationSettingsService.class);
         AdminUserService service = service(repository, settingsService);
-        ApiException disabled = new ApiException(
-            org.springframework.http.HttpStatus.FORBIDDEN,
-            "REGISTRATION_DISABLED",
-            "User registration is disabled"
-        );
 
-        when(settingsService.ensureRegistrationAllowed("user@example.com")).thenReturn(Mono.error(disabled));
+        when(settingsService.registrationPolicy()).thenReturn(Mono.just(new RegistrationSettingsService.RegistrationPolicy(
+            false,
+            false,
+            false,
+            java.util.List.of()
+        )));
 
         assertThatThrownBy(() -> service.register(new AdminDtos.RegisterRequest(
             "new-user",
             "user@example.com",
             null,
             "secret123",
+            null,
             null
-        )).block()).isSameAs(disabled);
+        )).block())
+            .isInstanceOf(ApiException.class)
+            .hasMessageContaining("User registration is disabled");
 
         verify(repository, never()).save(any(AdminUserEntity.class));
     }
@@ -114,7 +118,7 @@ class AdminUserServiceTest {
             "Email verification code is invalid or expired"
         );
 
-        when(settingsService.ensureRegistrationAllowed("user@example.com")).thenReturn(Mono.empty());
+        when(settingsService.registrationPolicy()).thenReturn(Mono.just(publicRegistrationPolicy()));
         when(emailVerificationService.verifyRegistrationCode("user@example.com", "000000"))
             .thenReturn(Mono.error(invalidCode));
 
@@ -123,10 +127,44 @@ class AdminUserServiceTest {
             "user@example.com",
             null,
             "secret123",
-            "000000"
+            "000000",
+            null
         )).block()).isSameAs(invalidCode);
 
         verify(repository, never()).save(any(AdminUserEntity.class));
+    }
+
+    @Test
+    void registersUserWithInviteCodeWhenPublicRegistrationIsDisabled() {
+        AdminUserRepository repository = mock(AdminUserRepository.class);
+        RegistrationSettingsService settingsService = mock(RegistrationSettingsService.class);
+        EmailVerificationService emailVerificationService = mock(EmailVerificationService.class);
+        InviteCodeService inviteCodeService = mock(InviteCodeService.class);
+        AdminUserService service = service(repository, settingsService, emailVerificationService, inviteCodeService);
+
+        when(settingsService.registrationPolicy()).thenReturn(Mono.just(new RegistrationSettingsService.RegistrationPolicy(
+            false,
+            true,
+            true,
+            java.util.List.of("@locked.example")
+        )));
+        when(repository.save(any(AdminUserEntity.class))).thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
+        when(inviteCodeService.consume(eq("INV-ABCD-EFGH-IJKL"), any())).thenReturn(Mono.empty());
+
+        AdminDtos.LoginResponse response = service.register(new AdminDtos.RegisterRequest(
+            "invite-user",
+            "outside@example.com",
+            null,
+            "secret123",
+            null,
+            "INV-ABCD-EFGH-IJKL"
+        )).block();
+
+        assertThat(response).isNotNull();
+        assertThat(response.user().username()).isEqualTo("invite-user");
+        assertThat(response.user().email()).isEqualTo("outside@example.com");
+        verify(emailVerificationService, never()).verifyRegistrationCode(any(), any());
+        verify(inviteCodeService).consume(eq("INV-ABCD-EFGH-IJKL"), any());
     }
 
     @Test
@@ -202,7 +240,9 @@ class AdminUserServiceTest {
     ) {
         EmailVerificationService emailVerificationService = mock(EmailVerificationService.class);
         when(emailVerificationService.verifyRegistrationCode(any(), any())).thenReturn(Mono.empty());
-        return service(repository, settingsService, emailVerificationService);
+        InviteCodeService inviteCodeService = mock(InviteCodeService.class);
+        when(inviteCodeService.consume(any(), any())).thenReturn(Mono.empty());
+        return service(repository, settingsService, emailVerificationService, inviteCodeService);
     }
 
     private AdminUserService service(
@@ -210,13 +250,29 @@ class AdminUserServiceTest {
         RegistrationSettingsService settingsService,
         EmailVerificationService emailVerificationService
     ) {
+        InviteCodeService inviteCodeService = mock(InviteCodeService.class);
+        when(inviteCodeService.consume(any(), any())).thenReturn(Mono.empty());
+        return service(repository, settingsService, emailVerificationService, inviteCodeService);
+    }
+
+    private AdminUserService service(
+        AdminUserRepository repository,
+        RegistrationSettingsService settingsService,
+        EmailVerificationService emailVerificationService,
+        InviteCodeService inviteCodeService
+    ) {
         return new AdminUserService(
             repository,
             passwordHasher,
             new AdminSessionService(new ProxyProperties()),
             settingsService,
-            emailVerificationService
+            emailVerificationService,
+            inviteCodeService
         );
+    }
+
+    private RegistrationSettingsService.RegistrationPolicy publicRegistrationPolicy() {
+        return new RegistrationSettingsService.RegistrationPolicy(true, true, false, java.util.List.of());
     }
 
     private AdminUserEntity user(String userId, String username, String email, String password) {

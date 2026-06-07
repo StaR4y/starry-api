@@ -37,7 +37,8 @@ public final class AdminDtos {
         @Email @NotBlank String email,
         String displayName,
         @NotBlank @Size(min = 6) String password,
-        String verifyCode
+        String verifyCode,
+        String inviteCode
     ) {
     }
 
@@ -87,6 +88,7 @@ public final class AdminDtos {
     public record RegistrationSettingsResponse(
         Boolean registrationEnabled,
         Boolean emailVerifyEnabled,
+        Boolean inviteCodeEnabled,
         List<String> registrationEmailSuffixWhitelist,
         String smtpHost,
         Integer smtpPort,
@@ -106,6 +108,7 @@ public final class AdminDtos {
     public record UpdateRegistrationSettingsRequest(
         Boolean registrationEnabled,
         Boolean emailVerifyEnabled,
+        Boolean inviteCodeEnabled,
         List<String> registrationEmailSuffixWhitelist,
         String smtpHost,
         Integer smtpPort,
@@ -127,6 +130,24 @@ public final class AdminDtos {
         Boolean enabled,
         Boolean firstLogin,
         Instant lastLoginAt,
+        Instant createdAt,
+        Instant updatedAt
+    ) {
+    }
+
+    public record CreateInviteCodeRequest(
+        Instant expiresAt
+    ) {
+    }
+
+    public record InviteCodeResponse(
+        String codeId,
+        String code,
+        Boolean enabled,
+        Boolean used,
+        String usedByUserId,
+        Instant usedAt,
+        Instant expiresAt,
         Instant createdAt,
         Instant updatedAt
     ) {

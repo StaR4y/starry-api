@@ -5,6 +5,7 @@ import java.time.Instant;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import xyz.star4y.api.common.ApiException;
@@ -22,19 +23,22 @@ public class AdminUserService {
     private final AdminSessionService sessionService;
     private final RegistrationSettingsService registrationSettingsService;
     private final EmailVerificationService emailVerificationService;
+    private final InviteCodeService inviteCodeService;
 
     public AdminUserService(
         AdminUserRepository repository,
         PasswordHasher passwordHasher,
         AdminSessionService sessionService,
         RegistrationSettingsService registrationSettingsService,
-        EmailVerificationService emailVerificationService
+        EmailVerificationService emailVerificationService,
+        InviteCodeService inviteCodeService
     ) {
         this.repository = repository;
         this.passwordHasher = passwordHasher;
         this.sessionService = sessionService;
         this.registrationSettingsService = registrationSettingsService;
         this.emailVerificationService = emailVerificationService;
+        this.inviteCodeService = inviteCodeService;
     }
 
     public Mono<BootstrapAdmin> ensureDefaultAdmin() {
@@ -96,9 +100,11 @@ public class AdminUserService {
             );
     }
 
+    @Transactional
     public Mono<AdminDtos.LoginResponse> register(AdminDtos.RegisterRequest request) {
         String username = normalizeUsername(request.username());
         String email = RegistrationEmailPolicy.normalizeEmail(request.email());
+        String inviteCode = normalizeInviteCode(request.inviteCode());
         AdminUserEntity entity = new AdminUserEntity();
         entity.setUserId(Hashing.shortUuid());
         entity.setUsername(username);
@@ -110,9 +116,11 @@ public class AdminUserService {
         entity.setFirstLogin(false);
         applyPassword(entity, request.password());
 
-        return registrationSettingsService.ensureRegistrationAllowed(email)
-            .then(emailVerificationService.verifyRegistrationCode(email, request.verifyCode()))
-            .then(Mono.defer(() -> repository.save(entity)))
+        return registrationSettingsService.registrationPolicy()
+            .flatMap(policy -> registrationGuard(email, request.verifyCode(), inviteCode, policy)
+                .then(Mono.defer(() -> repository.save(entity)))
+                .flatMap(saved -> consumeInviteCodeIfNeeded(saved, inviteCode, policy))
+            )
             .map(this::loginResponse)
             .onErrorMap(
                 DuplicateKeyException.class,
@@ -211,6 +219,49 @@ public class AdminUserService {
 
     private String normalizeUsername(String username) {
         return username == null ? "" : username.trim();
+    }
+
+    private Mono<Void> registrationGuard(
+        String email,
+        String verifyCode,
+        String inviteCode,
+        RegistrationSettingsService.RegistrationPolicy policy
+    ) {
+        boolean hasInviteCode = !inviteCode.isBlank();
+        if (hasInviteCode) {
+            if (!policy.inviteCodeEnabled()) {
+                return Mono.error(new ApiException(
+                    HttpStatus.FORBIDDEN,
+                    "INVITE_REGISTRATION_DISABLED",
+                    "Invite code registration is disabled"
+                ));
+            }
+            return Mono.empty();
+        }
+        if (!policy.registrationEnabled()) {
+            return Mono.error(new ApiException(
+                HttpStatus.FORBIDDEN,
+                "REGISTRATION_DISABLED",
+                "User registration is disabled"
+            ));
+        }
+        RegistrationEmailPolicy.validateEmailAllowed(email, policy.registrationEmailSuffixWhitelist());
+        return emailVerificationService.verifyRegistrationCode(email, verifyCode);
+    }
+
+    private Mono<AdminUserEntity> consumeInviteCodeIfNeeded(
+        AdminUserEntity user,
+        String inviteCode,
+        RegistrationSettingsService.RegistrationPolicy policy
+    ) {
+        if (inviteCode.isBlank() || !policy.inviteCodeEnabled()) {
+            return Mono.just(user);
+        }
+        return inviteCodeService.consume(inviteCode, user.getUserId()).thenReturn(user);
+    }
+
+    private String normalizeInviteCode(String inviteCode) {
+        return inviteCode == null ? "" : inviteCode.trim();
     }
 
     private String firstNonBlank(String value, String fallback) {

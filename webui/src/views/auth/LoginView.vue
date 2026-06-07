@@ -26,6 +26,7 @@
   const verifyCodeCountdown = ref(0);
   const registrationEnabled = ref(false);
   const emailVerifyEnabled = ref(false);
+  const inviteCodeEnabled = ref(false);
   const allowedEmailSuffixes = ref<string[]>([]);
 
   const form = reactive({
@@ -40,6 +41,7 @@
     password: '',
     confirm: '',
     verifyCode: '',
+    inviteCode: '',
   });
 
   const rules: FormRules = {
@@ -61,6 +63,9 @@
   };
 
   const registrationHint = computed(() => {
+    if (inviteCodeEnabled.value && !registrationEnabled.value) {
+      return '当前仅允许凭邀请码注册';
+    }
     if (allowedEmailSuffixes.value.length === 0) return '当前允许任意邮箱注册';
     return `允许邮箱后缀：${allowedEmailSuffixes.value.join('、')}`;
   });
@@ -70,10 +75,12 @@
       const settings = await authApi.registrationSettings();
       registrationEnabled.value = settings.registrationEnabled;
       emailVerifyEnabled.value = settings.emailVerifyEnabled;
+      inviteCodeEnabled.value = settings.inviteCodeEnabled;
       allowedEmailSuffixes.value = settings.registrationEmailSuffixWhitelist ?? [];
     } catch {
       registrationEnabled.value = false;
       emailVerifyEnabled.value = false;
+      inviteCodeEnabled.value = false;
       allowedEmailSuffixes.value = [];
     }
   }
@@ -141,6 +148,10 @@
       ElMessage.error('两次输入的密码不一致');
       return;
     }
+    if (inviteCodeEnabled.value && !registrationEnabled.value && !registerForm.inviteCode) {
+      ElMessage.warning('请输入邀请码');
+      return;
+    }
 
     registerLoading.value = true;
     try {
@@ -150,6 +161,7 @@
         displayName: registerForm.displayName || undefined,
         password: registerForm.password,
         verifyCode: registerForm.verifyCode || undefined,
+        inviteCode: registerForm.inviteCode || undefined,
       });
       ElMessage.success('注册成功');
       registerVisible.value = false;
@@ -214,7 +226,7 @@
         </el-button>
       </el-form>
 
-      <div v-if="registrationEnabled" class="login__register">
+      <div v-if="registrationEnabled || inviteCodeEnabled" class="login__register">
         <span class="text-secondary">没有账号？</span>
         <el-button link type="primary" @click="openRegister">注册</el-button>
       </div>
@@ -235,7 +247,11 @@
           <el-input v-model="registerForm.email" autocomplete="email" />
           <div class="login__register-hint">{{ registrationHint }}</div>
         </el-form-item>
-        <el-form-item v-if="emailVerifyEnabled" label="邮箱验证码">
+        <el-form-item v-if="inviteCodeEnabled" label="邀请码">
+          <el-input v-model="registerForm.inviteCode" placeholder="INV-XXXX-XXXX-XXXX" />
+          <div class="login__register-hint">填写有效邀请码可直接注册。</div>
+        </el-form-item>
+        <el-form-item v-if="emailVerifyEnabled && !registerForm.inviteCode" label="邮箱验证码">
           <div class="login__verify-row">
             <el-input v-model="registerForm.verifyCode" maxlength="6" />
             <el-button

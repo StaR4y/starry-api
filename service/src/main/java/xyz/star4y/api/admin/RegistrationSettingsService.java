@@ -16,6 +16,7 @@ public class RegistrationSettingsService {
     static final String REGISTRATION_ENABLED = "registration_enabled";
     static final String REGISTRATION_EMAIL_SUFFIX_WHITELIST = "registration_email_suffix_whitelist";
     static final String EMAIL_VERIFY_ENABLED = "email_verify_enabled";
+    static final String INVITE_CODE_ENABLED = "invite_code_enabled";
     static final String SMTP_HOST = "smtp_host";
     static final String SMTP_PORT = "smtp_port";
     static final String SMTP_USERNAME = "smtp_username";
@@ -27,6 +28,7 @@ public class RegistrationSettingsService {
     private static final List<String> SETTING_KEYS = List.of(
         REGISTRATION_ENABLED,
         EMAIL_VERIFY_ENABLED,
+        INVITE_CODE_ENABLED,
         REGISTRATION_EMAIL_SUFFIX_WHITELIST,
         SMTP_HOST,
         SMTP_PORT,
@@ -52,6 +54,7 @@ public class RegistrationSettingsService {
         return settingValues().map(values -> new AdminDtos.RegistrationSettingsResponse(
             bool(values, REGISTRATION_ENABLED, false),
             bool(values, EMAIL_VERIFY_ENABLED, false),
+            bool(values, INVITE_CODE_ENABLED, false),
             parseWhitelist(values.get(REGISTRATION_EMAIL_SUFFIX_WHITELIST)),
             null,
             null,
@@ -76,6 +79,9 @@ public class RegistrationSettingsService {
                 boolean emailVerifyEnabled = request.emailVerifyEnabled() == null
                     ? bool(previous, EMAIL_VERIFY_ENABLED, false)
                     : Boolean.TRUE.equals(request.emailVerifyEnabled());
+                boolean inviteCodeEnabled = request.inviteCodeEnabled() == null
+                    ? bool(previous, INVITE_CODE_ENABLED, false)
+                    : Boolean.TRUE.equals(request.inviteCodeEnabled());
                 List<String> whitelist = request.registrationEmailSuffixWhitelist() == null
                     ? parseWhitelist(previous.get(REGISTRATION_EMAIL_SUFFIX_WHITELIST))
                     : RegistrationEmailPolicy.normalizeWhitelist(request.registrationEmailSuffixWhitelist(), true);
@@ -101,6 +107,7 @@ public class RegistrationSettingsService {
                 return Mono.when(
                     set(REGISTRATION_ENABLED, Boolean.toString(enabled)),
                     set(EMAIL_VERIFY_ENABLED, Boolean.toString(emailVerifyEnabled)),
+                    set(INVITE_CODE_ENABLED, Boolean.toString(inviteCodeEnabled)),
                     set(REGISTRATION_EMAIL_SUFFIX_WHITELIST, writeWhitelist(whitelist)),
                     set(SMTP_HOST, smtpHost),
                     set(SMTP_PORT, Integer.toString(smtpPort)),
@@ -116,8 +123,8 @@ public class RegistrationSettingsService {
     }
 
     public Mono<Void> ensureRegistrationAllowed(String email) {
-        return settings().flatMap(settings -> {
-            if (!Boolean.TRUE.equals(settings.registrationEnabled())) {
+        return registrationPolicy().flatMap(settings -> {
+            if (!settings.registrationEnabled()) {
                 return Mono.error(new ApiException(
                     HttpStatus.FORBIDDEN,
                     "REGISTRATION_DISABLED",
@@ -127,6 +134,15 @@ public class RegistrationSettingsService {
             RegistrationEmailPolicy.validateEmailAllowed(email, settings.registrationEmailSuffixWhitelist());
             return Mono.empty();
         });
+    }
+
+    public Mono<RegistrationPolicy> registrationPolicy() {
+        return settingValues().map(values -> new RegistrationPolicy(
+            bool(values, REGISTRATION_ENABLED, false),
+            bool(values, EMAIL_VERIFY_ENABLED, false),
+            bool(values, INVITE_CODE_ENABLED, false),
+            parseWhitelist(values.get(REGISTRATION_EMAIL_SUFFIX_WHITELIST))
+        ));
     }
 
     public Mono<Boolean> emailVerifyEnabled() {
@@ -155,6 +171,7 @@ public class RegistrationSettingsService {
         return new AdminDtos.RegistrationSettingsResponse(
             bool(values, REGISTRATION_ENABLED, false),
             bool(values, EMAIL_VERIFY_ENABLED, false),
+            bool(values, INVITE_CODE_ENABLED, false),
             parseWhitelist(values.get(REGISTRATION_EMAIL_SUFFIX_WHITELIST)),
             values.getOrDefault(SMTP_HOST, ""),
             number(values, SMTP_PORT, 587),
@@ -207,7 +224,7 @@ public class RegistrationSettingsService {
 
     private String defaultValue(String key) {
         return switch (key) {
-            case REGISTRATION_ENABLED, EMAIL_VERIFY_ENABLED, SMTP_USE_TLS -> "false";
+            case REGISTRATION_ENABLED, EMAIL_VERIFY_ENABLED, INVITE_CODE_ENABLED, SMTP_USE_TLS -> "false";
             case REGISTRATION_EMAIL_SUFFIX_WHITELIST -> "[]";
             case SMTP_PORT -> "587";
             default -> "";
@@ -254,6 +271,19 @@ public class RegistrationSettingsService {
     ) {
         boolean configured() {
             return !host.isBlank() && !fromEmail.isBlank();
+        }
+    }
+
+    public record RegistrationPolicy(
+        boolean registrationEnabled,
+        boolean emailVerifyEnabled,
+        boolean inviteCodeEnabled,
+        List<String> registrationEmailSuffixWhitelist
+    ) {
+        public RegistrationPolicy {
+            registrationEmailSuffixWhitelist = registrationEmailSuffixWhitelist == null
+                ? List.of()
+                : List.copyOf(registrationEmailSuffixWhitelist);
         }
     }
 }
