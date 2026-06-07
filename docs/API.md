@@ -457,6 +457,7 @@ DELETE /admin/model-mappings/{mappingId}
 
 ```http
 GET  /admin/logs
+GET  /admin/performance
 GET  /admin/users
 POST /admin/users
 PATCH /admin/users/{userId}
@@ -468,7 +469,30 @@ POST /admin/users/invite-codes
 POST /admin/users/invite-codes/{codeId}/revoke
 ```
 
-`/admin/logs` backs the global dashboard, and `/admin/users/*` is the account administration panel. Both require an `ADMIN` account session. `USER` accounts receive `403 ADMIN_ROLE_REQUIRED`.
+`/admin/logs` and `/admin/performance` back the global dashboard, and `/admin/users/*` is the account administration panel. These endpoints require an `ADMIN` account session. `USER` accounts receive `403 ADMIN_ROLE_REQUIRED`.
+
+`/admin/performance` returns the latest 120 performance samples. The backend records one sample every 30 seconds:
+
+```json
+{
+  "systemCpuLoadPercent": 12.5,
+  "processCpuLoadPercent": 3.2,
+  "heapUsedBytes": 134217728,
+  "heapCommittedBytes": 268435456,
+  "heapMaxBytes": 1073741824,
+  "nonHeapUsedBytes": 98304000,
+  "systemMemoryTotalBytes": 8589934592,
+  "systemMemoryFreeBytes": 4294967296,
+  "systemMemoryUsedPercent": 50.0,
+  "networkRxBytes": 123456789,
+  "networkTxBytes": 987654321,
+  "networkRxBytesPerSecond": 2048.0,
+  "networkTxBytesPerSecond": 1024.0,
+  "sampledAt": "2026-06-07T12:00:00Z"
+}
+```
+
+Network counters are read from Linux `/proc/net/dev`. On non-Linux hosts those network fields can be `null`.
 
 Create or update login accounts with `role=ADMIN` or `role=USER`. `balance` is a non-negative account balance for ordinary users:
 

@@ -379,6 +379,23 @@ export interface RequestLog {
   createdAt: string;
 }
 
+export interface PerformanceMetric {
+  systemCpuLoadPercent: number | null;
+  processCpuLoadPercent: number | null;
+  heapUsedBytes: number | null;
+  heapCommittedBytes: number | null;
+  heapMaxBytes: number | null;
+  nonHeapUsedBytes: number | null;
+  systemMemoryTotalBytes: number | null;
+  systemMemoryFreeBytes: number | null;
+  systemMemoryUsedPercent: number | null;
+  networkRxBytes: number | null;
+  networkTxBytes: number | null;
+  networkRxBytesPerSecond: number | null;
+  networkTxBytesPerSecond: number | null;
+  sampledAt: string;
+}
+
 export interface ModelInfo {
   id: string;
   object: string;

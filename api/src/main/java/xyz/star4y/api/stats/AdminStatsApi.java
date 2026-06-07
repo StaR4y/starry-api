@@ -12,4 +12,7 @@ public interface AdminStatsApi {
 
     @GetMapping("/logs")
     Mono<ApiResponse<List<StatsDtos.RequestLogResponse>>> logs(ServerWebExchange exchange);
+
+    @GetMapping("/performance")
+    Mono<ApiResponse<List<StatsDtos.PerformanceMetricResponse>>> performance(ServerWebExchange exchange);
 }

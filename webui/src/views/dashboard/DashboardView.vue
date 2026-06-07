@@ -13,7 +13,7 @@
   import { ElMessage } from 'element-plus';
   import PageSection from '@/components/PageSection.vue';
   import { accountsApi, apiKeysApi, logsApi, systemApi } from '@/api';
-  import type { Account, ApiKey, HealthInfo, ModelInfo, RequestLog } from '@/types/api';
+  import type { Account, ApiKey, HealthInfo, ModelInfo, PerformanceMetric, RequestLog } from '@/types/api';
   import { formatDateTime, formatNumber } from '@/utils/format';
 
   const loading = ref(false);
@@ -22,6 +22,7 @@
   const accounts = ref<Account[]>([]);
   const apiKeys = ref<ApiKey[]>([]);
   const logs = ref<RequestLog[]>([]);
+  const performanceMetrics = ref<PerformanceMetric[]>([]);
 
   const chartWidth = 760;
   const chartHeight = 320;
@@ -72,6 +73,29 @@
     empty: boolean;
   }
 
+  interface PerformanceSeriesDef {
+    name: string;
+    color: string;
+    value: (metric: PerformanceMetric) => number | null | undefined;
+  }
+
+  interface PerformanceSeries {
+    name: string;
+    color: string;
+    values: number[];
+    points: string;
+    areaPoints: string;
+    latestValue: number | null;
+  }
+
+  interface PerformanceChartData {
+    buckets: ChartBucket[];
+    series: PerformanceSeries[];
+    maxValue: number;
+    yLabels: Array<{ value: number; y: number }>;
+    empty: boolean;
+  }
+
   function uptimeText(ms: number) {
     const s = Math.floor(ms / 1000);
     const days = Math.floor(s / 86400);
@@ -110,6 +134,23 @@
   function latencyText(value: number | null | undefined) {
     if (value === null || value === undefined || Number.isNaN(value)) return '—';
     return `${Math.round(value)} ms`;
+  }
+
+  function bytesText(value: number | null | undefined) {
+    if (value === null || value === undefined || Number.isNaN(value)) return '—';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let size = Math.max(0, value);
+    let index = 0;
+    while (size >= 1024 && index < units.length - 1) {
+      size /= 1024;
+      index += 1;
+    }
+    return `${index === 0 ? Math.round(size) : size.toFixed(size >= 10 ? 1 : 2)} ${units[index]}`;
+  }
+
+  function rateText(value: number | null | undefined) {
+    const text = bytesText(value);
+    return text === '—' ? text : `${text}/s`;
   }
 
   function getChartColor(index: number) {
@@ -271,6 +312,42 @@
     };
   }
 
+  function buildPerformanceChart(defs: PerformanceSeriesDef[], fixedMax?: number): PerformanceChartData {
+    const samples = performanceSamples.value;
+    const buckets = samples.map((metric) => ({
+      timestamp: validTime(metric.sampledAt) ?? Date.now(),
+      label: formatBucketLabel(validTime(metric.sampledAt) ?? Date.now(), 60 * 60 * 1000),
+    }));
+    const seriesValues = defs.map((def) =>
+      samples.map((metric) => {
+        const value = def.value(metric);
+        return value === null || value === undefined || Number.isNaN(value) ? 0 : Math.max(0, value);
+      }),
+    );
+    const maxValue = fixedMax ?? Math.max(1, ...seriesValues.flat());
+    const yValues = fixedMax
+      ? [fixedMax, fixedMax / 2, 0]
+      : Array.from(new Set([maxValue, Math.ceil(maxValue / 2), 0]));
+    return {
+      buckets,
+      series: defs.map((def, index) => {
+        const values = seriesValues[index] ?? [];
+        const latest = samples.length ? def.value(samples[samples.length - 1]) : null;
+        return {
+          name: def.name,
+          color: def.color,
+          values,
+          points: values.length ? buildPoints(values, maxValue) : '',
+          areaPoints: values.length ? buildAreaPoints(values, maxValue) : '',
+          latestValue: latest === undefined || Number.isNaN(latest) ? null : latest,
+        };
+      }),
+      maxValue,
+      yLabels: yValues.map((value) => ({ value, y: yFor(value, maxValue) })),
+      empty: samples.length === 0,
+    };
+  }
+
   const recentLogs = computed(() => logs.value.slice(0, 6));
   const enabledAccounts = computed(
     () => accounts.value.filter((account) => account.enabled).length,
@@ -279,6 +356,35 @@
   const parsedLogs = computed(() => parseLogs(logs.value));
   const modelSummaries = computed(() => summarizeModels(parsedLogs.value));
   const chartData = computed(() => buildChart(logs.value));
+  const performanceSamples = computed(() =>
+    performanceMetrics.value
+      .filter((metric) => validTime(metric.sampledAt) !== null)
+      .sort((a, b) => (validTime(a.sampledAt) ?? 0) - (validTime(b.sampledAt) ?? 0)),
+  );
+  const latestPerformance = computed(() => performanceSamples.value.at(-1) ?? null);
+  const heapUsedPercent = computed(() => {
+    const latest = latestPerformance.value;
+    if (!latest?.heapUsedBytes) return null;
+    const max = latest.heapMaxBytes && latest.heapMaxBytes > 0 ? latest.heapMaxBytes : latest.heapCommittedBytes;
+    if (!max || max <= 0) return null;
+    return (latest.heapUsedBytes / max) * 100;
+  });
+  const resourceChart = computed(() =>
+    buildPerformanceChart(
+      [
+        { name: '系统 CPU', color: '#2563eb', value: (metric) => metric.systemCpuLoadPercent },
+        { name: '进程 CPU', color: '#10b981', value: (metric) => metric.processCpuLoadPercent },
+        { name: '系统内存', color: '#f59e0b', value: (metric) => metric.systemMemoryUsedPercent },
+      ],
+      100,
+    ),
+  );
+  const networkChart = computed(() =>
+    buildPerformanceChart([
+      { name: '下行', color: '#06b6d4', value: (metric) => metric.networkRxBytesPerSecond },
+      { name: '上行', color: '#ef5b6b', value: (metric) => metric.networkTxBytesPerSecond },
+    ]),
+  );
   const totalRequests = computed(() => logs.value.length);
   const totalTokens = computed(() => logs.value.reduce((sum, log) => sum + tokensOf(log), 0));
   const successRate = computed(() => {
@@ -301,23 +407,29 @@
   async function loadAll() {
     loading.value = true;
     try {
-      const [h, m, a, k, l] = await Promise.allSettled([
+      const [h, m, a, k, l, p] = await Promise.allSettled([
         systemApi.health(),
         systemApi.models(),
         accountsApi.list(),
         apiKeysApi.list(),
         logsApi.list(),
+        logsApi.performance(),
       ]);
       if (h.status === 'fulfilled') health.value = h.value;
       if (m.status === 'fulfilled') models.value = m.value;
       if (a.status === 'fulfilled') accounts.value = a.value;
       if (k.status === 'fulfilled') apiKeys.value = k.value;
       if (l.status === 'fulfilled') logs.value = l.value;
+      if (p.status === 'fulfilled') performanceMetrics.value = p.value;
     } catch (e) {
       ElMessage.error((e as Error).message);
     } finally {
       loading.value = false;
     }
+  }
+
+  function shouldShowPerformanceBucketLabel(chart: PerformanceChartData, index: number) {
+    return index === 0 || index === chart.buckets.length - 1 || index % 20 === 0;
   }
 
   onMounted(loadAll);
@@ -358,6 +470,197 @@
         <div class="metric__label">API Key</div>
         <div class="metric__value">{{ formatNumber(apiKeys.length) }}</div>
         <div class="metric__sub text-muted">启用 {{ enabledApiKeys }} 个</div>
+      </div>
+    </div>
+  </PageSection>
+
+  <PageSection title="性能日志" subtitle="每 30 秒记录一次 CPU、内存与网络吞吐，展示最近 120 个采样点">
+    <div class="performance-dashboard">
+      <div class="performance-stats">
+        <div class="performance-stat">
+          <span>系统 CPU</span>
+          <strong>{{ percentText(latestPerformance?.systemCpuLoadPercent) }}</strong>
+          <small class="text-muted">进程 {{ percentText(latestPerformance?.processCpuLoadPercent) }}</small>
+        </div>
+        <div class="performance-stat">
+          <span>系统内存</span>
+          <strong>{{ percentText(latestPerformance?.systemMemoryUsedPercent) }}</strong>
+          <small class="text-muted">
+            可用 {{ bytesText(latestPerformance?.systemMemoryFreeBytes) }}
+          </small>
+        </div>
+        <div class="performance-stat">
+          <span>JVM 堆内存</span>
+          <strong>{{ bytesText(latestPerformance?.heapUsedBytes) }}</strong>
+          <small class="text-muted">占用 {{ percentText(heapUsedPercent) }}</small>
+        </div>
+        <div class="performance-stat">
+          <span>网络吞吐</span>
+          <strong>{{ rateText(latestPerformance?.networkRxBytesPerSecond) }}</strong>
+          <small class="text-muted">上行 {{ rateText(latestPerformance?.networkTxBytesPerSecond) }}</small>
+        </div>
+      </div>
+
+      <div class="performance-charts">
+        <div class="chart-shell">
+          <div class="chart-shell__header">
+            <div>
+              <h3>资源占用趋势</h3>
+              <p class="text-muted">CPU 与内存使用率</p>
+            </div>
+            <div v-if="resourceChart.series.length" class="chart-legend">
+              <span v-for="series in resourceChart.series" :key="series.name">
+                <i :style="{ backgroundColor: series.color }" />
+                {{ series.name }}
+              </span>
+            </div>
+          </div>
+
+          <div class="chart-stage" :class="{ 'is-empty': resourceChart.empty }">
+            <svg
+              class="usage-chart"
+              :viewBox="`0 0 ${chartWidth} ${chartHeight}`"
+              role="img"
+              aria-label="资源占用趋势折线图"
+            >
+              <defs>
+                <linearGradient
+                  v-for="(series, index) in resourceChart.series"
+                  :id="`resource-fill-${index}`"
+                  :key="series.name"
+                  x1="0"
+                  x2="0"
+                  y1="0"
+                  y2="1"
+                >
+                  <stop offset="0%" :stop-color="series.color" stop-opacity="0.22" />
+                  <stop offset="100%" :stop-color="series.color" stop-opacity="0.02" />
+                </linearGradient>
+              </defs>
+              <g class="chart-grid">
+                <g v-for="grid in resourceChart.yLabels" :key="grid.value">
+                  <line
+                    :x1="chartPadding.left"
+                    :x2="chartWidth - chartPadding.right"
+                    :y1="grid.y"
+                    :y2="grid.y"
+                  />
+                  <text :x="chartPadding.left - 12" :y="grid.y + 4" text-anchor="end">
+                    {{ percentText(grid.value) }}
+                  </text>
+                </g>
+              </g>
+              <g class="chart-series">
+                <g v-for="(series, index) in resourceChart.series" :key="series.name">
+                  <polygon :points="series.areaPoints" :fill="`url(#resource-fill-${index})`" />
+                  <polyline :points="series.points" :stroke="series.color" />
+                  <circle
+                    v-for="(value, valueIndex) in series.values"
+                    :key="`${series.name}-${valueIndex}`"
+                    :cx="xFor(valueIndex, series.values.length)"
+                    :cy="yFor(value, resourceChart.maxValue)"
+                    :fill="series.color"
+                  />
+                </g>
+              </g>
+              <g class="chart-x-axis">
+                <template v-for="(bucket, index) in resourceChart.buckets" :key="bucket.timestamp">
+                  <text
+                    v-if="shouldShowPerformanceBucketLabel(resourceChart, index)"
+                    :x="xFor(index, resourceChart.buckets.length)"
+                    :y="chartHeight - 14"
+                    text-anchor="middle"
+                  >
+                    {{ bucket.label }}
+                  </text>
+                </template>
+              </g>
+            </svg>
+            <div v-if="resourceChart.empty" class="chart-empty">
+              <strong>暂无性能采样</strong>
+            </div>
+          </div>
+        </div>
+
+        <div class="chart-shell">
+          <div class="chart-shell__header">
+            <div>
+              <h3>网络带宽趋势</h3>
+              <p class="text-muted">网卡上下行速率</p>
+            </div>
+            <div v-if="networkChart.series.length" class="chart-legend">
+              <span v-for="series in networkChart.series" :key="series.name">
+                <i :style="{ backgroundColor: series.color }" />
+                {{ series.name }}
+              </span>
+            </div>
+          </div>
+
+          <div class="chart-stage" :class="{ 'is-empty': networkChart.empty }">
+            <svg
+              class="usage-chart"
+              :viewBox="`0 0 ${chartWidth} ${chartHeight}`"
+              role="img"
+              aria-label="网络带宽趋势折线图"
+            >
+              <defs>
+                <linearGradient
+                  v-for="(series, index) in networkChart.series"
+                  :id="`network-fill-${index}`"
+                  :key="series.name"
+                  x1="0"
+                  x2="0"
+                  y1="0"
+                  y2="1"
+                >
+                  <stop offset="0%" :stop-color="series.color" stop-opacity="0.22" />
+                  <stop offset="100%" :stop-color="series.color" stop-opacity="0.02" />
+                </linearGradient>
+              </defs>
+              <g class="chart-grid">
+                <g v-for="grid in networkChart.yLabels" :key="grid.value">
+                  <line
+                    :x1="chartPadding.left"
+                    :x2="chartWidth - chartPadding.right"
+                    :y1="grid.y"
+                    :y2="grid.y"
+                  />
+                  <text :x="chartPadding.left - 12" :y="grid.y + 4" text-anchor="end">
+                    {{ rateText(grid.value) }}
+                  </text>
+                </g>
+              </g>
+              <g class="chart-series">
+                <g v-for="(series, index) in networkChart.series" :key="series.name">
+                  <polygon :points="series.areaPoints" :fill="`url(#network-fill-${index})`" />
+                  <polyline :points="series.points" :stroke="series.color" />
+                  <circle
+                    v-for="(value, valueIndex) in series.values"
+                    :key="`${series.name}-${valueIndex}`"
+                    :cx="xFor(valueIndex, series.values.length)"
+                    :cy="yFor(value, networkChart.maxValue)"
+                    :fill="series.color"
+                  />
+                </g>
+              </g>
+              <g class="chart-x-axis">
+                <template v-for="(bucket, index) in networkChart.buckets" :key="bucket.timestamp">
+                  <text
+                    v-if="shouldShowPerformanceBucketLabel(networkChart, index)"
+                    :x="xFor(index, networkChart.buckets.length)"
+                    :y="chartHeight - 14"
+                    text-anchor="middle"
+                  >
+                    {{ bucket.label }}
+                  </text>
+                </template>
+              </g>
+            </svg>
+            <div v-if="networkChart.empty" class="chart-empty">
+              <strong>暂无网络采样</strong>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </PageSection>
@@ -570,6 +873,52 @@
       flex-direction: column;
       gap: 16px;
     }
+  }
+
+  .performance-dashboard {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .performance-stats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .performance-stat {
+    min-height: 86px;
+    padding: 14px 16px;
+    border: 1px solid rgba(15, 23, 42, 0.07);
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.56);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 5px;
+
+    span {
+      color: var(--kp-text-secondary);
+      font-size: 12px;
+    }
+
+    strong {
+      font-size: 22px;
+      line-height: 1.2;
+      letter-spacing: 0;
+      white-space: nowrap;
+    }
+
+    small {
+      font-size: 12px;
+    }
+  }
+
+  .performance-charts {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
   }
 
   .usage-stats {
@@ -820,13 +1169,18 @@
       grid-template-columns: 1fr;
     }
 
+    .performance-charts {
+      grid-template-columns: 1fr;
+    }
+
     .model-rank {
       align-self: auto;
     }
   }
 
   @media (max-width: 820px) {
-    .usage-stats {
+    .usage-stats,
+    .performance-stats {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
@@ -849,11 +1203,13 @@
   }
 
   @media (max-width: 560px) {
-    .usage-stats {
+    .usage-stats,
+    .performance-stats {
       grid-template-columns: 1fr;
     }
 
-    .usage-stat {
+    .usage-stat,
+    .performance-stat {
       min-height: 64px;
     }
   }

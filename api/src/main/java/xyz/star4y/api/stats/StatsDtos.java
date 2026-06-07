@@ -24,4 +24,22 @@ public final class StatsDtos {
         Instant createdAt
     ) {
     }
+
+    public record PerformanceMetricResponse(
+        Double systemCpuLoadPercent,
+        Double processCpuLoadPercent,
+        Long heapUsedBytes,
+        Long heapCommittedBytes,
+        Long heapMaxBytes,
+        Long nonHeapUsedBytes,
+        Long systemMemoryTotalBytes,
+        Long systemMemoryFreeBytes,
+        Double systemMemoryUsedPercent,
+        Long networkRxBytes,
+        Long networkTxBytes,
+        Double networkRxBytesPerSecond,
+        Double networkTxBytesPerSecond,
+        Instant sampledAt
+    ) {
+    }
 }

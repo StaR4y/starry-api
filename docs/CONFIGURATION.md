@@ -111,6 +111,18 @@ The settings follow the sub2api-style keys stored in `system_settings`:
 
 `EASYPAY_PKEY` is only accepted from the admin update API and is never returned to the WebUI; the admin page only shows whether it has already been configured.
 
+## Performance Metrics
+
+The service records performance samples into `performance_metrics` every 30 seconds after startup:
+
+- system CPU load
+- process CPU load
+- JVM heap and non-heap memory
+- system memory
+- Linux network receive/transmit counters and per-second rates
+
+The admin dashboard reads `GET /admin/performance` and displays the latest 120 samples. Samples older than 7 days are purged by the scheduled sampler.
+
 ## Recommended Local Environment
 
 ```bash

@@ -11,10 +11,16 @@ import xyz.star4y.api.common.ApiResponse;
 public class AdminStatsController implements AdminStatsApi {
 
     private final RequestLogRepository requestLogRepository;
+    private final PerformanceMetricService performanceMetricService;
     private final AdminAuth adminAuth;
 
-    public AdminStatsController(RequestLogRepository requestLogRepository, AdminAuth adminAuth) {
+    public AdminStatsController(
+        RequestLogRepository requestLogRepository,
+        PerformanceMetricService performanceMetricService,
+        AdminAuth adminAuth
+    ) {
         this.requestLogRepository = requestLogRepository;
+        this.performanceMetricService = performanceMetricService;
         this.adminAuth = adminAuth;
     }
 
@@ -24,6 +30,13 @@ public class AdminStatsController implements AdminStatsApi {
         return requestLogRepository.findTop100ByOrderByCreatedAtDesc()
             .map(RequestLogMapper::toResponse)
             .collectList()
+            .map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<List<StatsDtos.PerformanceMetricResponse>>> performance(ServerWebExchange exchange) {
+        adminAuth.verifyAdmin(exchange);
+        return performanceMetricService.history()
             .map(ApiResponse::ok);
     }
 }
