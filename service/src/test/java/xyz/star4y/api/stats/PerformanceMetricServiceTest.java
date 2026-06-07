@@ -22,4 +22,36 @@ class PerformanceMetricServiceTest {
         assertThat(snapshot.txBytes()).isEqualTo(4000);
         assertThat(snapshot.sampledAt()).isEqualTo(Instant.EPOCH);
     }
+
+    @Test
+    void parsesLinuxMemAvailableInsteadOfMemFree() {
+        PerformanceMetricService.SystemMemorySnapshot snapshot = PerformanceMetricService.parseProcMemInfo("""
+            MemTotal:       1000000 kB
+            MemFree:          60000 kB
+            MemAvailable:    760000 kB
+            Buffers:          20000 kB
+            Cached:          650000 kB
+            SReclaimable:     30000 kB
+            Shmem:            10000 kB
+            """);
+
+        assertThat(snapshot).isNotNull();
+        assertThat(snapshot.totalBytes()).isEqualTo(1_000_000L * 1024);
+        assertThat(snapshot.availableBytes()).isEqualTo(760_000L * 1024);
+    }
+
+    @Test
+    void fallsBackToCacheAwareAvailableMemoryWhenMemAvailableIsMissing() {
+        PerformanceMetricService.SystemMemorySnapshot snapshot = PerformanceMetricService.parseProcMemInfo("""
+            MemTotal:       1000000 kB
+            MemFree:          60000 kB
+            Buffers:          20000 kB
+            Cached:          650000 kB
+            SReclaimable:     30000 kB
+            Shmem:            10000 kB
+            """);
+
+        assertThat(snapshot).isNotNull();
+        assertThat(snapshot.availableBytes()).isEqualTo(750_000L * 1024);
+    }
 }

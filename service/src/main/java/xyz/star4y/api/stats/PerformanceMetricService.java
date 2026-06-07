@@ -23,6 +23,7 @@ public class PerformanceMetricService {
     private static final Logger log = LoggerFactory.getLogger(PerformanceMetricService.class);
     private static final Duration RETENTION = Duration.ofDays(7);
     private static final Path PROC_NET_DEV = Path.of("/proc/net/dev");
+    private static final Path PROC_MEMINFO = Path.of("/proc/meminfo");
 
     private final PerformanceMetricRepository repository;
     private final OperatingSystemMXBean osBean;
@@ -64,6 +65,9 @@ public class PerformanceMetricService {
         MemoryUsage nonHeap = memoryBean.getNonHeapMemoryUsage();
         NetworkSnapshot network = readNetworkSnapshot(now);
         NetworkRate rate = networkRate(network);
+        SystemMemorySnapshot systemMemory = readSystemMemorySnapshot();
+        long systemMemoryTotalBytes = systemMemory == null ? osBean.getTotalMemorySize() : systemMemory.totalBytes();
+        long systemMemoryAvailableBytes = systemMemory == null ? osBean.getFreeMemorySize() : systemMemory.availableBytes();
 
         PerformanceMetricEntity entity = new PerformanceMetricEntity();
         entity.setSystemCpuLoadPercent(percent(osBean.getCpuLoad()));
@@ -72,8 +76,8 @@ public class PerformanceMetricService {
         entity.setHeapCommittedBytes(heap.getCommitted());
         entity.setHeapMaxBytes(heap.getMax());
         entity.setNonHeapUsedBytes(nonHeap.getUsed());
-        entity.setSystemMemoryTotalBytes(osBean.getTotalMemorySize());
-        entity.setSystemMemoryFreeBytes(osBean.getFreeMemorySize());
+        entity.setSystemMemoryTotalBytes(systemMemoryTotalBytes);
+        entity.setSystemMemoryFreeBytes(systemMemoryAvailableBytes);
         entity.setSystemMemoryUsedPercent(memoryUsedPercent(entity.getSystemMemoryTotalBytes(), entity.getSystemMemoryFreeBytes()));
         if (network != null) {
             entity.setNetworkRxBytes(network.rxBytes());
@@ -129,6 +133,47 @@ public class PerformanceMetricService {
         return rxBytes == 0 && txBytes == 0 ? null : new NetworkSnapshot(rxBytes, txBytes, sampledAt);
     }
 
+    static SystemMemorySnapshot parseProcMemInfo(String content) {
+        if (content == null || content.isBlank()) {
+            return null;
+        }
+        Long totalKb = null;
+        Long availableKb = null;
+        Long freeKb = null;
+        Long buffersKb = null;
+        Long cachedKb = null;
+        Long reclaimableKb = null;
+        Long sharedKb = null;
+        for (String line : content.split("\\R")) {
+            String[] nameAndValue = line.split(":", 2);
+            if (nameAndValue.length != 2) {
+                continue;
+            }
+            Long valueKb = memInfoKilobytes(nameAndValue[1]);
+            if (valueKb == null) {
+                continue;
+            }
+            switch (nameAndValue[0].trim()) {
+                case "MemTotal" -> totalKb = valueKb;
+                case "MemAvailable" -> availableKb = valueKb;
+                case "MemFree" -> freeKb = valueKb;
+                case "Buffers" -> buffersKb = valueKb;
+                case "Cached" -> cachedKb = valueKb;
+                case "SReclaimable" -> reclaimableKb = valueKb;
+                case "Shmem" -> sharedKb = valueKb;
+                default -> {
+                }
+            }
+        }
+        if (totalKb == null || totalKb <= 0) {
+            return null;
+        }
+        long available = availableKb == null
+            ? legacyAvailableKilobytes(freeKb, buffersKb, cachedKb, reclaimableKb, sharedKb)
+            : availableKb;
+        return new SystemMemorySnapshot(kibibytesToBytes(totalKb), kibibytesToBytes(Math.min(totalKb, Math.max(0, available))));
+    }
+
     private NetworkSnapshot readNetworkSnapshot(Instant sampledAt) {
         try {
             if (!Files.isRegularFile(PROC_NET_DEV)) {
@@ -137,6 +182,18 @@ public class PerformanceMetricService {
             return parseProcNetDev(Files.readString(PROC_NET_DEV), sampledAt);
         } catch (Exception error) {
             log.debug("Unable to read network counters from {}", PROC_NET_DEV, error);
+            return null;
+        }
+    }
+
+    private SystemMemorySnapshot readSystemMemorySnapshot() {
+        try {
+            if (!Files.isRegularFile(PROC_MEMINFO)) {
+                return null;
+            }
+            return parseProcMemInfo(Files.readString(PROC_MEMINFO));
+        } catch (Exception error) {
+            log.debug("Unable to read memory counters from {}", PROC_MEMINFO, error);
             return null;
         }
     }
@@ -152,7 +209,40 @@ public class PerformanceMetricService {
         return Math.max(0.0, Math.min(100.0, ((double) (total - free) / total) * 100.0));
     }
 
+    private static Long memInfoKilobytes(String rawValue) {
+        String[] parts = rawValue.trim().split("\\s+");
+        if (parts.length == 0 || parts[0].isBlank()) {
+            return null;
+        }
+        try {
+            return Long.parseLong(parts[0]);
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private static long legacyAvailableKilobytes(
+        Long freeKb,
+        Long buffersKb,
+        Long cachedKb,
+        Long reclaimableKb,
+        Long sharedKb
+    ) {
+        return Math.max(0, value(freeKb) + value(buffersKb) + value(cachedKb) + value(reclaimableKb) - value(sharedKb));
+    }
+
+    private static long kibibytesToBytes(long value) {
+        return value * 1024;
+    }
+
+    private static long value(Long value) {
+        return value == null ? 0 : value;
+    }
+
     record NetworkSnapshot(long rxBytes, long txBytes, Instant sampledAt) {
+    }
+
+    record SystemMemorySnapshot(long totalBytes, long availableBytes) {
     }
 
     private record NetworkRate(double rxBytesPerSecond, double txBytesPerSecond) {
