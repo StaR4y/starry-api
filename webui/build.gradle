@@ -1,0 +1,85 @@
+def resolveNpmExecutable() {
+    def configured = System.getenv('NPM_BIN')
+    if (configured != null && !configured.isBlank()) {
+        return configured
+    }
+
+    def executableName = System.getProperty('os.name').toLowerCase(Locale.ROOT).contains('windows') ? 'npm.cmd' : 'npm'
+    def pathHit = (System.getenv('PATH') ?: '')
+        .split(File.pathSeparator)
+        .collect { new File(it, executableName) }
+        .find { it.canExecute() }
+    if (pathHit != null) {
+        return pathHit.absolutePath
+    }
+
+    def commonPaths = [
+        '/opt/homebrew/bin/npm',
+        '/usr/local/bin/npm',
+        '/usr/bin/npm'
+    ]
+    return commonPaths.find { new File(it).canExecute() } ?: executableName
+}
+
+def npmExecutable = resolveNpmExecutable()
+def webuiSources = files(
+    'index.html',
+    'package.json',
+    'package-lock.json',
+    'tsconfig.json',
+    'tsconfig.node.json',
+    'vite.config.ts'
+).plus(fileTree('src'))
+
+tasks.register('npmInstall', Exec) {
+    group = 'webui'
+    description = 'Install WebUI npm dependencies.'
+    workingDir = projectDir
+    commandLine npmExecutable, 'ci'
+    inputs.files('package.json', 'package-lock.json')
+    outputs.dir('node_modules')
+}
+
+tasks.register('npmBuild', Exec) {
+    group = 'build'
+    description = 'Build the Vue/Vite WebUI.'
+    dependsOn 'npmInstall'
+    workingDir = projectDir
+    commandLine npmExecutable, 'run', 'build'
+    inputs.files(webuiSources)
+    outputs.dir('dist')
+}
+
+tasks.register('npmLint', Exec) {
+    group = 'verification'
+    description = 'Lint the Vue/Vite WebUI.'
+    dependsOn 'npmInstall'
+    workingDir = projectDir
+    commandLine npmExecutable, 'run', 'lint'
+}
+
+tasks.register('npmDev', Exec) {
+    group = 'application'
+    description = 'Start the local Vite development server.'
+    dependsOn 'npmInstall'
+    workingDir = projectDir
+    commandLine npmExecutable, 'run', 'dev'
+}
+
+tasks.register('build') {
+    group = 'build'
+    description = 'Build the WebUI.'
+    dependsOn 'npmBuild'
+}
+
+tasks.register('check') {
+    group = 'verification'
+    description = 'Run WebUI verification tasks.'
+    dependsOn 'npmLint'
+}
+
+tasks.register('clean', Delete) {
+    group = 'build'
+    description = 'Delete WebUI build output.'
+    delete 'dist'
+}

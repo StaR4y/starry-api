@@ -1,0 +1,48 @@
+plugins {
+    id 'org.springframework.boot'
+}
+
+def skipWebuiBuild = providers.gradleProperty('skipWebuiBuild')
+    .map { it.toBoolean() }
+    .orElse(false)
+def webuiDistDir = project(':webui').layout.projectDirectory.dir('dist')
+
+dependencies {
+    implementation project(':api')
+
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    implementation 'org.springframework.boot:spring-boot-starter-cache'
+    implementation 'org.springframework.boot:spring-boot-starter-data-r2dbc'
+    implementation 'org.springframework.boot:spring-boot-starter-mail'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-webflux'
+    implementation 'org.springdoc:springdoc-openapi-starter-webflux-ui:2.8.17'
+    implementation 'com.github.ben-manes.caffeine:caffeine'
+    implementation 'io.asyncer:r2dbc-mysql:1.4.2'
+    implementation 'io.micrometer:micrometer-registry-prometheus'
+    implementation 'io.r2dbc:r2dbc-pool'
+    implementation 'org.flywaydb:flyway-core'
+    implementation 'org.flywaydb:flyway-mysql'
+    runtimeOnly 'io.netty:netty-resolver-dns-native-macos:4.1.132.Final:osx-aarch_64'
+    runtimeOnly 'com.mysql:mysql-connector-j'
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'io.projectreactor:reactor-test'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('bootJar') {
+    if (!skipWebuiBuild.get()) {
+        dependsOn ':webui:npmBuild'
+    }
+
+    from(webuiDistDir) {
+        into 'BOOT-INF/classes/static'
+    }
+
+    doFirst {
+        if (!webuiDistDir.asFile.exists()) {
+            throw new GradleException("WebUI dist is missing. Run :webui:npmBuild or remove -PskipWebuiBuild=true.")
+        }
+    }
+}

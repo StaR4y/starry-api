@@ -1,0 +1,29 @@
+{
+  "version": "kiro-account-manager",
+  "exportedAt": 1760000000000,
+  "upsert": true,
+  "accounts": [
+    {
+      "id": "kiro-main",
+      "email": "user@example.com",
+      "idp": "BuilderId",
+      "profileArn": "arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX",
+      "machineId": "optional-machine-id",
+      "proxyUrl": "http://user:pass@host:port",
+      "credentials": {
+        "accessToken": "kiro-access-token",
+        "refreshToken": "optional-refresh-token",
+        "clientId": "optional-client-id",
+        "clientSecret": "optional-client-secret",
+        "region": "us-east-1",
+        "authMethod": "IdC",
+        "provider": "BuilderId"
+      },
+      "usage": {
+        "limit": 1000000
+      }
+    }
+  ],
+  "groups": [],
+  "tags": []
+}

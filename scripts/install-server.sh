@@ -1,0 +1,247 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_NAME="starryapi-service"
+REPO_URL="${REPO_URL:-https://github.com/StaR4y/starryapi-service.git}"
+BRANCH="${BRANCH:-main}"
+INSTALL_DIR="${INSTALL_DIR:-/opt/starryapi-service}"
+HOST_HTTP_PORT="${HOST_HTTP_PORT:-18080}"
+SERVER_PORT="${SERVER_PORT:-8080}"
+PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}"
+FORCE_ENV="${FORCE_ENV:-false}"
+INSTALL_DOCKER="${INSTALL_DOCKER:-true}"
+
+log() {
+  printf '[%s] %s\n' "$APP_NAME" "$*"
+}
+
+fail() {
+  printf '[%s] ERROR: %s\n' "$APP_NAME" "$*" >&2
+  exit 1
+}
+
+root_cmd() {
+  "$@"
+}
+
+require_linux() {
+  [[ "$(uname -s)" == "Linux" ]] || fail "This installer is for Linux servers."
+}
+
+require_root() {
+  [[ "${EUID}" -eq 0 ]] || fail "Run with sudo: curl ... | sudo bash"
+}
+
+detect_package_manager() {
+  if command -v apt-get >/dev/null 2>&1; then
+    echo apt
+  elif command -v dnf >/dev/null 2>&1; then
+    echo dnf
+  elif command -v yum >/dev/null 2>&1; then
+    echo yum
+  else
+    echo unknown
+  fi
+}
+
+install_base_packages() {
+  local pm
+  pm="$(detect_package_manager)"
+  log "Installing base packages with ${pm}..."
+  case "$pm" in
+    apt)
+      root_cmd apt-get update
+      root_cmd apt-get install -y ca-certificates curl git openssl
+      ;;
+    dnf)
+      root_cmd dnf install -y ca-certificates curl git openssl
+      ;;
+    yum)
+      root_cmd yum install -y ca-certificates curl git openssl
+      ;;
+    *)
+      fail "Unsupported package manager. Install git, curl, openssl, docker and docker compose manually, then rerun with INSTALL_DOCKER=false."
+      ;;
+  esac
+}
+
+ensure_docker() {
+  if command -v docker >/dev/null 2>&1; then
+    log "Docker is already installed."
+  elif [[ "$INSTALL_DOCKER" == "true" ]]; then
+    log "Installing Docker from the official convenience script..."
+    curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
+    root_cmd sh /tmp/get-docker.sh
+  else
+    fail "Docker is not installed. Install Docker first or run with INSTALL_DOCKER=true."
+  fi
+
+  if command -v systemctl >/dev/null 2>&1; then
+    root_cmd systemctl enable --now docker
+  else
+    root_cmd service docker start >/dev/null 2>&1 || true
+  fi
+}
+
+ensure_compose() {
+  if root_cmd docker compose version >/dev/null 2>&1; then
+    log "Docker Compose plugin is available."
+    return
+  fi
+  if command -v docker-compose >/dev/null 2>&1; then
+    log "docker-compose is available."
+    return
+  fi
+
+  local pm
+  pm="$(detect_package_manager)"
+  log "Installing Docker Compose plugin with ${pm}..."
+  case "$pm" in
+    apt)
+      root_cmd apt-get update
+      root_cmd apt-get install -y docker-compose-plugin
+      ;;
+    dnf)
+      root_cmd dnf install -y docker-compose-plugin
+      ;;
+    yum)
+      root_cmd yum install -y docker-compose-plugin
+      ;;
+    *)
+      fail "Docker Compose is not available. Install docker compose manually and rerun."
+      ;;
+  esac
+}
+
+set_compose_cmd() {
+  if root_cmd docker compose version >/dev/null 2>&1; then
+    COMPOSE_CMD=(docker compose)
+    return
+  fi
+  if command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE_CMD=(docker-compose)
+    return
+  fi
+  fail "Docker Compose is not available after installation."
+}
+
+prepare_install_dir() {
+  log "Preparing ${INSTALL_DIR}..."
+  root_cmd mkdir -p "$(dirname "$INSTALL_DIR")"
+  if [[ -d "$INSTALL_DIR/.git" ]]; then
+    git -C "$INSTALL_DIR" fetch origin "$BRANCH"
+    git -C "$INSTALL_DIR" checkout "$BRANCH"
+    git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH"
+  elif [[ -d "$INSTALL_DIR" ]] && [[ -n "$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+    fail "${INSTALL_DIR} exists and is not an empty git checkout."
+  else
+    root_cmd mkdir -p "$INSTALL_DIR"
+    git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
+  fi
+}
+
+random_secret() {
+  openssl rand -hex 24
+}
+
+webui_url() {
+  if [[ -n "$PUBLIC_BASE_URL" ]]; then
+    printf '%s/#/login' "${PUBLIC_BASE_URL%/}"
+  else
+    printf 'http://127.0.0.1:%s/#/login' "$HOST_HTTP_PORT"
+  fi
+}
+
+write_env_file() {
+  local env_file="${INSTALL_DIR}/.env"
+  if [[ -f "$env_file" && "$FORCE_ENV" != "true" ]]; then
+    log "Keeping existing .env. Set FORCE_ENV=true to regenerate it."
+    return
+  fi
+
+  log "Writing ${env_file} with generated database passwords..."
+  cat > "$env_file" <<EOF
+SERVER_PORT=${SERVER_PORT}
+HOST_HTTP_PORT=${HOST_HTTP_PORT}
+
+MYSQL_ROOT_PASSWORD=$(random_secret)
+MYSQL_IMAGE=mysql:8.0.37-oraclelinux8
+MYSQL_DATABASE=kiro_proxy
+MYSQL_USERNAME=kiro_proxy
+MYSQL_PASSWORD=$(random_secret)
+
+# Runtime variables still use KIRO_* for compatibility with the current Kiro/AWS upstream adapter.
+KIRO_ALLOW_ANONYMOUS_PROXY=false
+KIRO_ADMIN_SESSION_TTL=12h
+KIRO_RATE_LIMIT_PER_MINUTE=120
+KIRO_ACCOUNT_SELECTION_STRATEGY=round_robin
+KIRO_WEBUI_URL=$(webui_url)
+KIRO_TOKEN_REFRESH_INTERVAL_MS=3600000
+KIRO_TOKEN_REFRESH_INITIAL_DELAY_MS=60000
+
+JAVA_OPTS=-XX:MaxRAMPercentage=75.0
+EOF
+  chmod 600 "$env_file"
+}
+
+wait_for_health() {
+  local url="http://127.0.0.1:${HOST_HTTP_PORT}/actuator/health"
+  log "Waiting for service health: ${url}"
+  for _ in $(seq 1 60); do
+    if curl -fsS "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+deploy_stack() {
+  COMPOSE_CMD=()
+  set_compose_cmd
+  cd "$INSTALL_DIR"
+
+  log "Starting Docker Compose stack..."
+  root_cmd "${COMPOSE_CMD[@]}" pull mysql || true
+  root_cmd "${COMPOSE_CMD[@]}" up -d --build
+
+  if ! wait_for_health; then
+    root_cmd "${COMPOSE_CMD[@]}" logs --tail=160 service || true
+    fail "Service did not become healthy in time."
+  fi
+
+  log "Recent service logs. Save the first admin password if this is the first startup."
+  root_cmd "${COMPOSE_CMD[@]}" logs --tail=120 service || true
+
+  cat <<EOF
+
+Deployment complete.
+
+Install dir:        ${INSTALL_DIR}
+Local WebUI:        http://127.0.0.1:${HOST_HTTP_PORT}/#/login
+Local API docs:     http://127.0.0.1:${HOST_HTTP_PORT}/docs
+Reverse proxy to:   http://127.0.0.1:${HOST_HTTP_PORT}
+
+Common commands:
+  cd ${INSTALL_DIR}
+  docker compose logs -f service
+  docker compose restart service
+  docker compose down
+
+If using 1Panel/Nginx, create a reverse proxy site with target:
+  http://127.0.0.1:${HOST_HTTP_PORT}
+EOF
+}
+
+main() {
+  require_linux
+  require_root
+  install_base_packages
+  ensure_docker
+  ensure_compose
+  prepare_install_dir
+  write_env_file
+  deploy_stack
+}
+
+main "$@"

@@ -1,0 +1,5 @@
+rootProject.name = 'starry-api'
+
+include 'api'
+include 'service'
+include 'webui'

@@ -1,0 +1,202 @@
+/**
+ * 全局样式：磨砂玻璃（Glassmorphism）主题。
+ *
+ * 设计要点：
+ * 1. body 上铺满柔和渐变背景，作为透光底色。
+ * 2. .glass-panel 是主面板基类，使用 backdrop-filter 形成毛玻璃。
+ * 3. 表面元素（卡片、表格、对话框）继承 .glass-panel 的视觉语言。
+ * 4. 通过 CSS 变量集中管理品牌色、阴影、圆角，便于二次开发。
+ */
+
+:root {
+  /* 品牌主色与渐变 */
+  --kp-primary: #5b8def;
+  --kp-primary-soft: rgba(91, 141, 239, 0.16);
+  --kp-accent: #b387ff;
+  --kp-success: #36c08a;
+  --kp-warning: #f0a84d;
+  --kp-danger: #ef5b6b;
+
+  /* 玻璃面板 */
+  --kp-surface: rgba(255, 255, 255, 0.62);
+  --kp-surface-strong: rgba(255, 255, 255, 0.78);
+  --kp-border: rgba(255, 255, 255, 0.65);
+  --kp-divider: rgba(15, 23, 42, 0.08);
+  --kp-shadow: 0 12px 32px rgba(31, 45, 80, 0.12);
+  --kp-shadow-lg: 0 20px 48px rgba(31, 45, 80, 0.18);
+  --kp-blur: 18px;
+
+  /* 文字 */
+  --kp-text: #1f2a44;
+  --kp-text-secondary: #54607a;
+  --kp-text-muted: #8a93a8;
+
+  /* 圆角与间距 */
+  --kp-radius-sm: 8px;
+  --kp-radius: 16px;
+  --kp-radius-lg: 24px;
+
+  /* 让 Element Plus 跟随主题色 */
+  --el-color-primary: var(--kp-primary);
+  --el-color-primary-light-3: #89aef4;
+  --el-color-primary-light-5: #aac3f8;
+  --el-color-primary-light-7: #cbd9fb;
+  --el-color-primary-light-9: #ecf2fe;
+  --el-color-primary-dark-2: #4476d8;
+  --el-border-radius-base: 10px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  color: var(--kp-text);
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Helvetica Neue', 'Microsoft YaHei',
+    Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.55;
+  background:
+    radial-gradient(circle at 12% 18%, #d4e3ff 0%, transparent 45%),
+    radial-gradient(circle at 88% 12%, #f0d6ff 0%, transparent 50%),
+    radial-gradient(circle at 50% 92%, #cdf3ff 0%, transparent 55%),
+    linear-gradient(135deg, #eef3ff 0%, #f8f0ff 60%, #ecfbff 100%);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 主题：磨砂玻璃通用面板 */
+.glass-panel {
+  background: var(--kp-surface);
+  backdrop-filter: blur(var(--kp-blur)) saturate(160%);
+  -webkit-backdrop-filter: blur(var(--kp-blur)) saturate(160%);
+  border: 1px solid var(--kp-border);
+  border-radius: var(--kp-radius);
+  box-shadow: var(--kp-shadow);
+}
+
+.glass-panel--strong {
+  background: var(--kp-surface-strong);
+  box-shadow: var(--kp-shadow-lg);
+}
+
+/* Element Plus 视觉适配 */
+.el-card,
+.el-dialog,
+.el-drawer,
+.el-message-box,
+.el-popover.el-popper {
+  background: var(--kp-surface-strong) !important;
+  backdrop-filter: blur(var(--kp-blur)) saturate(160%);
+  -webkit-backdrop-filter: blur(var(--kp-blur)) saturate(160%);
+  border: 1px solid var(--kp-border) !important;
+  border-radius: var(--kp-radius) !important;
+  box-shadow: var(--kp-shadow-lg) !important;
+}
+
+.el-table,
+.el-table tr,
+.el-table th.el-table__cell,
+.el-table td.el-table__cell {
+  background-color: transparent !important;
+}
+
+.el-table th.el-table__cell {
+  background-color: rgba(255, 255, 255, 0.55) !important;
+  color: var(--kp-text-secondary);
+  font-weight: 600;
+}
+
+.el-table--enable-row-hover .el-table__body tr:hover > td.el-table__cell {
+  background-color: rgba(91, 141, 239, 0.08) !important;
+}
+
+.el-table .el-table__inner-wrapper::before {
+  background-color: var(--kp-divider);
+}
+
+.el-input__wrapper,
+.el-textarea__inner,
+.el-select__wrapper {
+  background: rgba(255, 255, 255, 0.7) !important;
+  box-shadow: 0 0 0 1px var(--kp-divider) inset !important;
+  border-radius: 10px !important;
+}
+
+.el-input__wrapper.is-focus,
+.el-select__wrapper.is-focus {
+  box-shadow: 0 0 0 1px var(--kp-primary) inset !important;
+}
+
+.el-button {
+  border-radius: 10px;
+}
+
+.el-button--primary {
+  background: linear-gradient(135deg, var(--kp-primary), var(--kp-accent));
+  border: none;
+}
+
+.el-button--primary:hover,
+.el-button--primary:focus {
+  background: linear-gradient(135deg, #4d7ee5, #a273f4);
+}
+
+.el-tag {
+  border: none;
+  border-radius: 999px;
+  background: rgba(91, 141, 239, 0.12);
+  color: var(--kp-primary);
+}
+
+/* 工具类 */
+.text-secondary {
+  color: var(--kp-text-secondary);
+}
+
+.text-muted {
+  color: var(--kp-text-muted);
+}
+
+.flex {
+  display: flex;
+}
+
+.flex-between {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.gap-8 {
+  gap: 8px;
+}
+.gap-12 {
+  gap: 12px;
+}
+.gap-16 {
+  gap: 16px;
+}
+
+.mt-8 {
+  margin-top: 8px;
+}
+.mt-16 {
+  margin-top: 16px;
+}
+.mt-24 {
+  margin-top: 24px;
+}
+
+.mono {
+  font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+}

@@ -1,0 +1,54 @@
+/** 上游账号管理 API。对应后端 /admin/accounts/*。 */
+import http, { unwrap } from '@/utils/http';
+import type {
+  Account,
+  ApiResponse,
+  CreateAccountRequest,
+  ImportAccountsRequest,
+  ImportAccountsResult,
+  SuspendAccountRequest,
+  TestModelOptionsResult,
+  TestAccountsRequest,
+  TestAccountsResult,
+  UpdateAccountRequest,
+} from '@/types/api';
+
+export const accountsApi = {
+  list() {
+    return unwrap<Account[]>(http.get<ApiResponse<Account[]>>('/admin/accounts'));
+  },
+  create(payload: CreateAccountRequest) {
+    return unwrap<Account>(http.post<ApiResponse<Account>>('/admin/accounts', payload));
+  },
+  importBatch(payload: ImportAccountsRequest | Record<string, unknown>) {
+    return unwrap<ImportAccountsResult>(
+      http.post<ApiResponse<ImportAccountsResult>>('/admin/accounts/import', payload),
+    );
+  },
+  update(accountId: string, payload: UpdateAccountRequest) {
+    return unwrap<Account>(
+      http.patch<ApiResponse<Account>>(`/admin/accounts/${accountId}`, payload),
+    );
+  },
+  suspend(accountId: string, payload: SuspendAccountRequest) {
+    return unwrap<Account>(
+      http.post<ApiResponse<Account>>(`/admin/accounts/${accountId}/suspend`, payload),
+    );
+  },
+  reset(accountId: string) {
+    return unwrap<Account>(http.post<ApiResponse<Account>>(`/admin/accounts/${accountId}/reset`));
+  },
+  test(payload: TestAccountsRequest) {
+    return unwrap<TestAccountsResult>(
+      http.post<ApiResponse<TestAccountsResult>>('/admin/accounts/test', payload),
+    );
+  },
+  testModels() {
+    return unwrap<TestModelOptionsResult>(
+      http.get<ApiResponse<TestModelOptionsResult>>('/admin/accounts/test-models'),
+    );
+  },
+  remove(accountId: string) {
+    return unwrap<void>(http.delete<ApiResponse<void>>(`/admin/accounts/${accountId}`));
+  },
+};

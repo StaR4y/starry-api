@@ -1,0 +1,123 @@
+package xyz.star4y.api.platform.catalog;
+
+import java.util.List;
+
+public final class OpenRouterModelIds {
+
+    public static final String SOURCE_URL = "https://openrouter.ai/api/v1/models";
+
+    public static final List<String> OPENAI = List.of(
+        "openai/gpt-3.5-turbo",
+        "openai/gpt-3.5-turbo-0613",
+        "openai/gpt-3.5-turbo-16k",
+        "openai/gpt-3.5-turbo-instruct",
+        "openai/gpt-4",
+        "openai/gpt-4-turbo",
+        "openai/gpt-4-turbo-preview",
+        "openai/gpt-4.1",
+        "openai/gpt-4.1-mini",
+        "openai/gpt-4.1-nano",
+        "openai/gpt-4o",
+        "openai/gpt-4o-2024-05-13",
+        "openai/gpt-4o-2024-08-06",
+        "openai/gpt-4o-2024-11-20",
+        "openai/gpt-4o-mini",
+        "openai/gpt-4o-mini-2024-07-18",
+        "openai/gpt-4o-mini-search-preview",
+        "openai/gpt-4o-search-preview",
+        "openai/gpt-5",
+        "openai/gpt-5-chat",
+        "openai/gpt-5-codex",
+        "openai/gpt-5-image",
+        "openai/gpt-5-image-mini",
+        "openai/gpt-5-mini",
+        "openai/gpt-5-nano",
+        "openai/gpt-5-pro",
+        "openai/gpt-5.1",
+        "openai/gpt-5.1-chat",
+        "openai/gpt-5.1-codex",
+        "openai/gpt-5.1-codex-max",
+        "openai/gpt-5.1-codex-mini",
+        "openai/gpt-5.2",
+        "openai/gpt-5.2-chat",
+        "openai/gpt-5.2-codex",
+        "openai/gpt-5.2-pro",
+        "openai/gpt-5.3-chat",
+        "openai/gpt-5.3-codex",
+        "openai/gpt-5.4",
+        "openai/gpt-5.4-image-2",
+        "openai/gpt-5.4-mini",
+        "openai/gpt-5.4-nano",
+        "openai/gpt-5.4-pro",
+        "openai/gpt-5.5",
+        "openai/gpt-5.5-pro",
+        "openai/gpt-audio",
+        "openai/gpt-audio-mini",
+        "openai/gpt-chat-latest",
+        "openai/gpt-oss-120b",
+        "openai/gpt-oss-120b:free",
+        "openai/gpt-oss-20b",
+        "openai/gpt-oss-20b:free",
+        "openai/gpt-oss-safeguard-20b",
+        "openai/o1",
+        "openai/o1-pro",
+        "openai/o3",
+        "openai/o3-deep-research",
+        "openai/o3-mini",
+        "openai/o3-mini-high",
+        "openai/o3-pro",
+        "openai/o4-mini",
+        "openai/o4-mini-deep-research",
+        "openai/o4-mini-high"
+    );
+
+    public static final List<String> GOOGLE = List.of(
+        "google/gemini-2.5-flash",
+        "google/gemini-2.5-flash-image",
+        "google/gemini-2.5-flash-lite",
+        "google/gemini-2.5-flash-lite-preview-09-2025",
+        "google/gemini-2.5-pro",
+        "google/gemini-2.5-pro-preview",
+        "google/gemini-2.5-pro-preview-05-06",
+        "google/gemini-3-flash-preview",
+        "google/gemini-3-pro-image-preview",
+        "google/gemini-3.1-flash-image-preview",
+        "google/gemini-3.1-flash-lite",
+        "google/gemini-3.1-flash-lite-preview",
+        "google/gemini-3.1-pro-preview",
+        "google/gemini-3.1-pro-preview-customtools",
+        "google/gemini-3.5-flash",
+        "google/gemma-2-27b-it",
+        "google/gemma-3-12b-it",
+        "google/gemma-3-27b-it",
+        "google/gemma-3-4b-it",
+        "google/gemma-3n-e4b-it",
+        "google/gemma-4-26b-a4b-it",
+        "google/gemma-4-26b-a4b-it:free",
+        "google/gemma-4-31b-it",
+        "google/gemma-4-31b-it:free",
+        "google/lyria-3-clip-preview",
+        "google/lyria-3-pro-preview"
+    );
+
+    public static final List<String> ANTHROPIC = List.of(
+        "anthropic/claude-3-haiku",
+        "anthropic/claude-3.5-haiku",
+        "anthropic/claude-haiku-4.5",
+        "anthropic/claude-opus-4",
+        "anthropic/claude-opus-4.1",
+        "anthropic/claude-opus-4.5",
+        "anthropic/claude-opus-4.6",
+        "anthropic/claude-opus-4.6-fast",
+        "anthropic/claude-opus-4.7",
+        "anthropic/claude-opus-4.7-fast",
+        "anthropic/claude-opus-4.8",
+        "anthropic/claude-opus-4.8-fast",
+        "anthropic/claude-sonnet-4",
+        "anthropic/claude-sonnet-4.5",
+        "anthropic/claude-sonnet-4.6"
+    );
+
+    private OpenRouterModelIds() {
+    }
+}
