@@ -157,20 +157,55 @@ public class EmailVerificationService {
         }
         sender.setDefaultEncoding("UTF-8");
         Properties properties = sender.getJavaMailProperties();
+        configureSmtpProperties(properties, config);
+        return sender;
+    }
+
+    static void configureSmtpProperties(Properties properties, RegistrationSettingsService.SmtpConfig config) {
+        SmtpTransportSecurity security = smtpTransportSecurity(config);
         properties.put("mail.smtp.auth", Boolean.toString(!config.username().isBlank() || !config.password().isBlank()));
-        properties.put("mail.smtp.starttls.enable", Boolean.toString(config.useTls()));
-        properties.put("mail.smtp.starttls.required", Boolean.toString(config.useTls()));
-        if (config.useTls() && config.port() == 465) {
-            properties.put("mail.smtp.ssl.enable", "true");
+        properties.put("mail.smtp.ssl.enable", Boolean.toString(security == SmtpTransportSecurity.SSL));
+        properties.put("mail.smtp.starttls.enable", Boolean.toString(security == SmtpTransportSecurity.STARTTLS));
+        properties.put("mail.smtp.starttls.required", Boolean.toString(security == SmtpTransportSecurity.STARTTLS));
+        if (security == SmtpTransportSecurity.SSL || security == SmtpTransportSecurity.STARTTLS) {
+            properties.put("mail.smtp.ssl.protocols", "TLSv1.2 TLSv1.3");
+        }
+        if (security == SmtpTransportSecurity.SSL) {
+            properties.put("mail.smtp.socketFactory.class", "javax.net.ssl.SSLSocketFactory");
+            properties.put("mail.smtp.socketFactory.port", Integer.toString(config.port()));
+            properties.put("mail.smtp.socketFactory.fallback", "false");
         }
         properties.put("mail.smtp.connectiontimeout", "10000");
         properties.put("mail.smtp.timeout", "10000");
         properties.put("mail.smtp.writetimeout", "10000");
-        return sender;
+    }
+
+    static SmtpTransportSecurity smtpTransportSecurity(RegistrationSettingsService.SmtpConfig config) {
+        String security = RegistrationSettingsService.normalizeSmtpSecurity(config.security(), RegistrationSettingsService.SMTP_SECURITY_AUTO);
+        return switch (security) {
+            case RegistrationSettingsService.SMTP_SECURITY_SSL -> SmtpTransportSecurity.SSL;
+            case RegistrationSettingsService.SMTP_SECURITY_STARTTLS -> SmtpTransportSecurity.STARTTLS;
+            case RegistrationSettingsService.SMTP_SECURITY_NONE -> SmtpTransportSecurity.NONE;
+            default -> {
+                if (config.port() == 465) {
+                    yield SmtpTransportSecurity.SSL;
+                }
+                if (config.useTls() || config.port() == 587) {
+                    yield SmtpTransportSecurity.STARTTLS;
+                }
+                yield SmtpTransportSecurity.NONE;
+            }
+        };
     }
 
     private String code() {
         return String.format("%06d", RANDOM.nextInt(1_000_000));
+    }
+
+    enum SmtpTransportSecurity {
+        NONE,
+        SSL,
+        STARTTLS
     }
 
     private record VerificationCode(

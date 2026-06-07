@@ -114,9 +114,13 @@ curl -X PATCH http://127.0.0.1:8080/admin/users/registration-settings \
     "smtpPassword": "<smtp-password>",
     "smtpFromEmail": "noreply@example.com",
     "smtpFromName": "Starry API",
-    "smtpUseTls": true
+    "smtpUseTls": true,
+    "smtpSecurity": "starttls"
   }'
 ```
+
+For Tencent Exmail, use `smtpHost=smtp.exmail.qq.com`, `smtpPort=465`, and
+`smtpSecurity=ssl`. Port `587` should use `smtpSecurity=starttls`.
 
 Create a client API key:
 

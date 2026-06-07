@@ -24,6 +24,12 @@ public class RegistrationSettingsService {
     static final String SMTP_FROM_EMAIL = "smtp_from_email";
     static final String SMTP_FROM_NAME = "smtp_from_name";
     static final String SMTP_USE_TLS = "smtp_use_tls";
+    static final String SMTP_SECURITY = "smtp_security";
+
+    static final String SMTP_SECURITY_AUTO = "auto";
+    static final String SMTP_SECURITY_NONE = "none";
+    static final String SMTP_SECURITY_SSL = "ssl";
+    static final String SMTP_SECURITY_STARTTLS = "starttls";
 
     private static final List<String> SETTING_KEYS = List.of(
         REGISTRATION_ENABLED,
@@ -36,7 +42,8 @@ public class RegistrationSettingsService {
         SMTP_PASSWORD,
         SMTP_FROM_EMAIL,
         SMTP_FROM_NAME,
-        SMTP_USE_TLS
+        SMTP_USE_TLS,
+        SMTP_SECURITY
     );
 
     private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {
@@ -56,6 +63,7 @@ public class RegistrationSettingsService {
             bool(values, EMAIL_VERIFY_ENABLED, false),
             bool(values, INVITE_CODE_ENABLED, false),
             parseWhitelist(values.get(REGISTRATION_EMAIL_SUFFIX_WHITELIST)),
+            null,
             null,
             null,
             null,
@@ -103,6 +111,11 @@ public class RegistrationSettingsService {
                 boolean smtpUseTls = request.smtpUseTls() == null
                     ? bool(previous, SMTP_USE_TLS, false)
                     : Boolean.TRUE.equals(request.smtpUseTls());
+                String smtpSecurity = normalizeSmtpSecurity(
+                    request.smtpSecurity(),
+                    legacySmtpSecurity(previous.get(SMTP_SECURITY), smtpUseTls, smtpPort)
+                );
+                boolean compatibleUseTls = !SMTP_SECURITY_NONE.equals(smtpSecurity);
 
                 return Mono.when(
                     set(REGISTRATION_ENABLED, Boolean.toString(enabled)),
@@ -115,7 +128,8 @@ public class RegistrationSettingsService {
                     set(SMTP_PASSWORD, passwordValue(request.smtpPassword(), previous.get(SMTP_PASSWORD))),
                     set(SMTP_FROM_EMAIL, smtpFromEmail),
                     set(SMTP_FROM_NAME, smtpFromName),
-                    set(SMTP_USE_TLS, Boolean.toString(smtpUseTls))
+                    set(SMTP_USE_TLS, Boolean.toString(compatibleUseTls)),
+                    set(SMTP_SECURITY, smtpSecurity)
                 )
                 .then(settingValues())
                 .map(this::settingsResponse);
@@ -157,7 +171,12 @@ public class RegistrationSettingsService {
             clean(values.get(SMTP_PASSWORD)),
             clean(values.get(SMTP_FROM_EMAIL)),
             clean(values.get(SMTP_FROM_NAME)),
-            bool(values, SMTP_USE_TLS, false)
+            bool(values, SMTP_USE_TLS, false),
+            legacySmtpSecurity(
+                values.get(SMTP_SECURITY),
+                bool(values, SMTP_USE_TLS, false),
+                normalizePort(number(values, SMTP_PORT, 587))
+            )
         ));
     }
 
@@ -179,7 +198,12 @@ public class RegistrationSettingsService {
             !clean(values.get(SMTP_PASSWORD)).isBlank(),
             values.getOrDefault(SMTP_FROM_EMAIL, ""),
             values.getOrDefault(SMTP_FROM_NAME, ""),
-            bool(values, SMTP_USE_TLS, false)
+            bool(values, SMTP_USE_TLS, false),
+            legacySmtpSecurity(
+                values.get(SMTP_SECURITY),
+                bool(values, SMTP_USE_TLS, false),
+                normalizePort(number(values, SMTP_PORT, 587))
+            )
         );
     }
 
@@ -227,6 +251,7 @@ public class RegistrationSettingsService {
             case REGISTRATION_ENABLED, EMAIL_VERIFY_ENABLED, INVITE_CODE_ENABLED, SMTP_USE_TLS -> "false";
             case REGISTRATION_EMAIL_SUFFIX_WHITELIST -> "[]";
             case SMTP_PORT -> "587";
+            case SMTP_SECURITY -> SMTP_SECURITY_AUTO;
             default -> "";
         };
     }
@@ -260,6 +285,35 @@ public class RegistrationSettingsService {
         return value == null ? "" : value.trim();
     }
 
+    static String normalizeSmtpSecurity(String security, String fallback) {
+        String normalized = cleanStatic(security).toLowerCase();
+        return switch (normalized) {
+            case SMTP_SECURITY_NONE, SMTP_SECURITY_SSL, SMTP_SECURITY_STARTTLS, SMTP_SECURITY_AUTO -> normalized;
+            default -> {
+                String fallbackValue = cleanStatic(fallback).toLowerCase();
+                yield switch (fallbackValue) {
+                    case SMTP_SECURITY_NONE, SMTP_SECURITY_SSL, SMTP_SECURITY_STARTTLS, SMTP_SECURITY_AUTO -> fallbackValue;
+                    default -> SMTP_SECURITY_AUTO;
+                };
+            }
+        };
+    }
+
+    static String legacySmtpSecurity(String storedSecurity, boolean smtpUseTls, int smtpPort) {
+        String normalized = normalizeSmtpSecurity(storedSecurity, "");
+        if (!normalized.equals(SMTP_SECURITY_AUTO) || !cleanStatic(storedSecurity).isBlank()) {
+            return normalized;
+        }
+        if (smtpPort == 465) {
+            return SMTP_SECURITY_SSL;
+        }
+        return smtpUseTls ? SMTP_SECURITY_STARTTLS : SMTP_SECURITY_AUTO;
+    }
+
+    private static String cleanStatic(String value) {
+        return value == null ? "" : value.trim();
+    }
+
     public record SmtpConfig(
         String host,
         int port,
@@ -267,7 +321,8 @@ public class RegistrationSettingsService {
         String password,
         String fromEmail,
         String fromName,
-        boolean useTls
+        boolean useTls,
+        String security
     ) {
         boolean configured() {
             return !host.isBlank() && !fromEmail.isBlank();

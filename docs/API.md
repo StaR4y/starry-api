@@ -119,7 +119,7 @@ Content-Type: application/json
 }
 ```
 
-Administrators configure registration and SMTP settings through `GET/PATCH /admin/users/registration-settings`. SMTP fields follow the sub2api-style setting keys: `email_verify_enabled`, `smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`, `smtp_from_email`, `smtp_from_name`, and `smtp_use_tls`. API JSON uses camelCase field names, and responses only expose `smtpPasswordConfigured`, never the stored password.
+Administrators configure registration and SMTP settings through `GET/PATCH /admin/users/registration-settings`. SMTP fields follow the sub2api-style setting keys: `email_verify_enabled`, `smtp_host`, `smtp_port`, `smtp_username`, `smtp_password`, `smtp_from_email`, `smtp_from_name`, `smtp_use_tls`, and `smtp_security`. API JSON uses camelCase field names, and responses only expose `smtpPasswordConfigured`, never the stored password. `smtpSecurity` accepts `auto`, `ssl`, `starttls`, or `none`; Tencent Exmail should use `smtp.exmail.qq.com:465` with `ssl`, or port `587` with `starttls`.
 
 When `inviteCodeEnabled=true`, administrators can generate one-time invite codes from `/admin/users/invite-codes`. A valid `inviteCode` lets the user register directly even when public `registrationEnabled=false`; invite-code registration skips email verification and consumes the code atomically.
 

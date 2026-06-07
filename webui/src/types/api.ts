@@ -106,7 +106,10 @@ export interface RegistrationSettings {
   smtpFromEmail?: string | null;
   smtpFromName?: string | null;
   smtpUseTls?: boolean | null;
+  smtpSecurity?: SmtpSecurityMode | string | null;
 }
+
+export type SmtpSecurityMode = 'auto' | 'ssl' | 'starttls' | 'none';
 
 export interface UpdateRegistrationSettingsRequest {
   registrationEnabled: boolean;
@@ -120,6 +123,7 @@ export interface UpdateRegistrationSettingsRequest {
   smtpFromEmail?: string;
   smtpFromName?: string;
   smtpUseTls?: boolean;
+  smtpSecurity?: SmtpSecurityMode;
 }
 
 export interface CreateInviteCodeRequest {

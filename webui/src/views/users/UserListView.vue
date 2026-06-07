@@ -10,7 +10,7 @@
   import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus';
   import PageSection from '@/components/PageSection.vue';
   import { usersApi } from '@/api';
-  import type { AdminUser, AdminUserRole, CreateAdminUserRequest, InviteCode } from '@/types/api';
+  import type { AdminUser, AdminUserRole, CreateAdminUserRequest, InviteCode, SmtpSecurityMode } from '@/types/api';
   import { formatDateTime, formatNumber } from '@/utils/format';
 
   const loading = ref(false);
@@ -32,7 +32,14 @@
     smtpFromEmail: '',
     smtpFromName: '',
     smtpUseTls: false,
+    smtpSecurity: 'auto' as SmtpSecurityMode,
   });
+  const smtpSecurityOptions: Array<{ label: string; value: SmtpSecurityMode }> = [
+    { label: '自动', value: 'auto' },
+    { label: 'SSL / TLS', value: 'ssl' },
+    { label: 'STARTTLS', value: 'starttls' },
+    { label: '不加密', value: 'none' },
+  ];
   type InviteCodeTagType = 'success' | 'warning' | 'info' | 'primary' | 'danger';
 
   async function loadUsers() {
@@ -207,6 +214,7 @@
     registrationSettings.smtpFromEmail = settings.smtpFromEmail ?? '';
     registrationSettings.smtpFromName = settings.smtpFromName ?? '';
     registrationSettings.smtpUseTls = Boolean(settings.smtpUseTls);
+    registrationSettings.smtpSecurity = normalizeSmtpSecurity(settings.smtpSecurity, settings.smtpUseTls);
   }
 
   async function openRegistrationSettings() {
@@ -229,6 +237,7 @@
         smtpFromEmail: registrationSettings.smtpFromEmail,
         smtpFromName: registrationSettings.smtpFromName,
         smtpUseTls: registrationSettings.smtpUseTls,
+        smtpSecurity: registrationSettings.smtpSecurity,
       });
       registrationSettings.registrationEnabled = settings.registrationEnabled;
       registrationSettings.emailVerifyEnabled = settings.emailVerifyEnabled;
@@ -241,10 +250,30 @@
       registrationSettings.smtpFromEmail = settings.smtpFromEmail ?? '';
       registrationSettings.smtpFromName = settings.smtpFromName ?? '';
       registrationSettings.smtpUseTls = Boolean(settings.smtpUseTls);
+      registrationSettings.smtpSecurity = normalizeSmtpSecurity(settings.smtpSecurity, settings.smtpUseTls);
       ElMessage.success('注册设置已更新');
       registrationSettingsVisible.value = false;
     } finally {
       registrationSettingsSubmitting.value = false;
+    }
+  }
+
+  function normalizeSmtpSecurity(
+    value: string | null | undefined,
+    legacyUseTls: boolean | null | undefined,
+  ): SmtpSecurityMode {
+    if (value === 'auto' || value === 'ssl' || value === 'starttls' || value === 'none') {
+      return value;
+    }
+    return legacyUseTls ? 'auto' : 'none';
+  }
+
+  function handleSmtpSecurityChange(value: SmtpSecurityMode) {
+    registrationSettings.smtpUseTls = value !== 'none';
+    if (value === 'ssl' && registrationSettings.smtpPort === 587) {
+      registrationSettings.smtpPort = 465;
+    } else if (value === 'starttls' && registrationSettings.smtpPort === 465) {
+      registrationSettings.smtpPort = 587;
     }
   }
 
@@ -558,10 +587,21 @@
             <div class="smtp-row mt-16 align-center">
               <div class="smtp-col col-12 flex-between" style="flex-direction: row; align-items: center;">
                 <div class="switch-label-group">
-                  <span class="switch-title">启用 TLS / STARTTLS 加密</span>
-                  <span class="switch-subtitle">强制作出安全传输（SSL/TLS 端口一般为 465，STARTTLS 为 587）</span>
+                  <span class="switch-title">SMTP 加密方式</span>
+                  <span class="switch-subtitle">腾讯企业邮箱建议使用 465 + SSL，或 587 + STARTTLS</span>
                 </div>
-                <el-switch v-model="registrationSettings.smtpUseTls" />
+                <el-select
+                  v-model="registrationSettings.smtpSecurity"
+                  style="width: 180px"
+                  @change="handleSmtpSecurityChange"
+                >
+                  <el-option
+                    v-for="option in smtpSecurityOptions"
+                    :key="option.value"
+                    :label="option.label"
+                    :value="option.value"
+                  />
+                </el-select>
               </div>
             </div>
           </div>

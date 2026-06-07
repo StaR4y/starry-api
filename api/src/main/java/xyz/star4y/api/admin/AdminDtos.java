@@ -96,7 +96,8 @@ public final class AdminDtos {
         Boolean smtpPasswordConfigured,
         String smtpFromEmail,
         String smtpFromName,
-        Boolean smtpUseTls
+        Boolean smtpUseTls,
+        String smtpSecurity
     ) {
         public RegistrationSettingsResponse {
             registrationEmailSuffixWhitelist = registrationEmailSuffixWhitelist == null
@@ -116,7 +117,8 @@ public final class AdminDtos {
         String smtpPassword,
         String smtpFromEmail,
         String smtpFromName,
-        Boolean smtpUseTls
+        Boolean smtpUseTls,
+        String smtpSecurity
     ) {
     }
 

@@ -82,8 +82,12 @@ Registration is configured from the admin console under `账号 -> 注册设置`
 | `email_verify_enabled` | Require email verification for public self-registration. |
 | `invite_code_enabled` | Enable one-time invite-code registration. |
 | `registration_email_suffix_whitelist` | Optional JSON email suffix whitelist. |
+| `smtp_security` | SMTP encryption mode: `auto`, `ssl`, `starttls`, or `none`. |
 
 When invite-code registration is enabled, administrators can generate one-time codes in the same settings dialog. Users pass `inviteCode` to `POST /auth/register`; a valid code allows direct registration even if public registration is disabled.
+
+For Tencent Exmail, configure `smtp.exmail.qq.com:465` with `smtp_security=ssl`, or
+`smtp.exmail.qq.com:587` with `smtp_security=starttls`.
 
 ## Payment Settings
 
