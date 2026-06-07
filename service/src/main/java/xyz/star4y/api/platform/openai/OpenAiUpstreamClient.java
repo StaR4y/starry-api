@@ -206,13 +206,53 @@ public class OpenAiUpstreamClient {
     }
 
     private void appendCodexMessage(ArrayNode input, JsonNode source) {
+        String role = source.path("role").asText();
+        if ("tool".equals(role)) {
+            appendCodexFunctionCallOutput(input, source);
+            return;
+        }
+        String textValue = contentText(source.path("content"));
+        JsonNode toolCalls = source.path("tool_calls");
+        if ("assistant".equals(role) && textValue.isBlank() && toolCalls.isArray() && !toolCalls.isEmpty()) {
+            appendCodexFunctionCalls(input, toolCalls);
+            return;
+        }
         ObjectNode message = input.addObject();
         message.put("type", "message");
-        message.put("role", "assistant".equals(source.path("role").asText()) ? "assistant" : "user");
+        String codexRole = "assistant".equals(role) ? "assistant" : "user";
+        message.put("role", codexRole);
         ArrayNode content = message.putArray("content");
         ObjectNode text = content.addObject();
-        text.put("type", "input_text");
-        text.put("text", contentText(source.path("content")));
+        text.put("type", "assistant".equals(codexRole) ? "output_text" : "input_text");
+        text.put("text", textValue);
+        if ("assistant".equals(role) && toolCalls.isArray() && !toolCalls.isEmpty()) {
+            appendCodexFunctionCalls(input, toolCalls);
+        }
+    }
+
+    private void appendCodexFunctionCalls(ArrayNode input, JsonNode toolCalls) {
+        if (!toolCalls.isArray()) {
+            return;
+        }
+        for (JsonNode toolCall : toolCalls) {
+            ObjectNode item = input.addObject();
+            item.put("type", "function_call");
+            item.put("call_id", toolCall.path("id").asText(toolCall.path("call_id").asText()));
+            JsonNode function = toolCall.path("function");
+            item.put("name", firstNonBlank(function.path("name").asText(null), toolCall.path("name").asText(null)));
+            JsonNode arguments = function.path("arguments");
+            item.put("arguments", arguments.isMissingNode() || arguments.isNull()
+                ? "{}"
+                : arguments.isTextual() ? arguments.asText() : arguments.toString());
+            item.put("status", "completed");
+        }
+    }
+
+    private void appendCodexFunctionCallOutput(ArrayNode input, JsonNode source) {
+        ObjectNode item = input.addObject();
+        item.put("type", "function_call_output");
+        item.put("call_id", firstNonBlank(source.path("tool_call_id").asText(null), source.path("call_id").asText(null)));
+        item.put("output", contentText(source.path("content")));
     }
 
     private String codexInstructions(JsonNode request) {
@@ -251,7 +291,7 @@ public class OpenAiUpstreamClient {
         }
         StringBuilder builder = new StringBuilder();
         for (JsonNode part : content) {
-            String text = part.path("text").asText("");
+            String text = firstNonBlank(part.path("text").asText(null), part.path("refusal").asText(null));
             if (!text.isBlank()) {
                 if (!builder.isEmpty()) {
                     builder.append('\n');

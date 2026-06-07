@@ -65,7 +65,7 @@ public class OpenAiRequestAdapter {
             ObjectNode message = messages.addObject();
             message.put("role", "tool");
             message.put("tool_call_id", item.path("call_id").asText());
-            message.put("content", item.path("output").asText(""));
+            message.put("content", responsesOutputText(item.path("output")));
             return;
         }
         ObjectNode message = messages.addObject();
@@ -109,8 +109,35 @@ public class OpenAiRequestAdapter {
                 ObjectNode item = normalized.addObject();
                 item.put("type", "text");
                 item.put("text", part.path("text").asText());
+            } else if ("refusal".equals(part.path("type").asText())) {
+                ObjectNode item = normalized.addObject();
+                item.put("type", "text");
+                item.put("text", part.path("refusal").asText(part.path("text").asText()));
             }
         }
         return normalized;
+    }
+
+    private String responsesOutputText(JsonNode output) {
+        if (output == null || output.isMissingNode() || output.isNull()) {
+            return "";
+        }
+        if (output.isTextual()) {
+            return output.asText();
+        }
+        if (!output.isArray()) {
+            return output.toString();
+        }
+        StringBuilder builder = new StringBuilder();
+        for (JsonNode part : output) {
+            String text = part.path("text").asText("");
+            if (!text.isBlank()) {
+                if (!builder.isEmpty()) {
+                    builder.append('\n');
+                }
+                builder.append(text);
+            }
+        }
+        return builder.toString();
     }
 }
