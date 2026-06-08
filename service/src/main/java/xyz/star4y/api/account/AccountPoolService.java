@@ -131,6 +131,14 @@ public class AccountPoolService {
         return repository.deleteByAccountId(accountId).then(refreshCache());
     }
 
+    public Mono<AccountDtos.ClearAccountsResponse> clearAll() {
+        return repository.count()
+            .flatMap(count -> repository.deleteAll()
+                .doOnSuccess(ignored -> clearSelectionState())
+                .then(refreshCache())
+                .thenReturn(new AccountDtos.ClearAccountsResponse(count)));
+    }
+
     public Mono<ProxyAccountEntity> suspend(String accountId, String reason, String message) {
         return repository.findByAccountId(accountId)
             .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND", "Account not found")))
@@ -504,6 +512,12 @@ public class AccountPoolService {
     private void cleanupAffinity() {
         Duration ttl = properties.getSessionAffinityTtl();
         affinity.entrySet().removeIf(entry -> entry.getValue().expired(ttl));
+    }
+
+    private void clearSelectionState() {
+        cachedAccounts = List.of();
+        affinity.clear();
+        nextIndex.set(0);
     }
 
     private static String defaultString(String value, String fallback) {

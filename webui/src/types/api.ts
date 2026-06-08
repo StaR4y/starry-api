@@ -312,6 +312,10 @@ export interface ImportAccountsResult {
   items: ImportAccountItem[];
 }
 
+export interface ClearAccountsResult {
+  deleted: number;
+}
+
 /* ================== API Key ================== */
 
 export interface ApiKey {

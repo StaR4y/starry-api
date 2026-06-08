@@ -67,6 +67,9 @@ public interface AccountAdminApi {
     @GetMapping("/test-models")
     Mono<ApiResponse<AccountDtos.TestModelOptionsResponse>> testModels(ServerWebExchange exchange);
 
+    @DeleteMapping
+    Mono<ApiResponse<AccountDtos.ClearAccountsResponse>> clearAll(ServerWebExchange exchange);
+
     @DeleteMapping("/{accountId}")
     Mono<ApiResponse<Void>> delete(ServerWebExchange exchange, @PathVariable String accountId);
 }

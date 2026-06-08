@@ -28,7 +28,6 @@ public class OpenAiUpstreamClient {
 
     private static final String CODEX_USER_AGENT = "codex-tui/0.135.0";
     private static final String CODEX_ORIGINATOR = "codex-tui";
-    private static final String DEFAULT_CODEX_INSTRUCTIONS = "You are Codex. Answer the user request concisely.";
 
     private final ObjectMapper objectMapper;
     private final WebClient webClient;
@@ -81,7 +80,10 @@ public class OpenAiUpstreamClient {
     ) {
         ObjectNode body = objectMapper.createObjectNode();
         body.put("model", codexCompatibleModel(model));
-        body.put("instructions", codexInstructions(request));
+        String instructions = codexInstructions(request);
+        if (instructions != null) {
+            body.put("instructions", instructions);
+        }
         body.put("store", false);
         body.put("stream", true);
         body.set("input", codexInput(request));
@@ -526,7 +528,7 @@ public class OpenAiUpstreamClient {
                 }
             }
         }
-        return builder.isEmpty() ? DEFAULT_CODEX_INSTRUCTIONS : builder.toString();
+        return builder.isEmpty() ? null : builder.toString();
     }
 
     private String contentText(JsonNode content) {

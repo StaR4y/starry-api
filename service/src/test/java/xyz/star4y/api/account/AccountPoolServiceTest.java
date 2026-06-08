@@ -182,6 +182,23 @@ class AccountPoolServiceTest {
     }
 
     @Test
+    void clearAllDeletesEveryAccountAndRefreshesCache() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        when(repository.count()).thenReturn(Mono.just(2L));
+        when(repository.deleteAll()).thenReturn(Mono.empty());
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.empty());
+
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+
+        AccountDtos.ClearAccountsResponse response = service.clearAll().block();
+
+        assertThat(response).isNotNull();
+        assertThat(response.deleted()).isEqualTo(2L);
+        verify(repository).deleteAll();
+        verify(repository).findAllByEnabledTrue();
+    }
+
+    @Test
     void recordTestFailureDisablesAccountWhenUpdatingStatus() {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         ProxyAccountEntity account = account("acc-1");

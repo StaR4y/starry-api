@@ -127,6 +127,11 @@ public final class AccountDtos {
     ) {
     }
 
+    public record ClearAccountsResponse(
+        Long deleted
+    ) {
+    }
+
     public record ImportAccountItemResponse(
         Integer index,
         String accountId,

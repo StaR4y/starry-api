@@ -27,6 +27,47 @@ class OpenAiUpstreamClientTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
+    void codexDoesNotInjectDefaultInstructions() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/responses", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] response = """
+                event: response.output_text.delta
+                data: {"type":"response.output_text.delta","delta":"OK"}
+
+                data: [DONE]
+
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "text/event-stream");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {"model":"gpt-5.4-mini","messages":[{"role":"user","content":"write a detailed explanation"}]}
+                """);
+
+            PlatformCompletionResult result = client.complete(account, request, "gpt-5.4-mini").block();
+
+            assertThat(result).isNotNull();
+            JsonNode body = objectMapper.readTree(requestBody.get());
+            assertThat(body.has("instructions")).isFalse();
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void codexUpstreamUsesOutputTextForAssistantHistoryAndPreservesToolItems() throws Exception {
         AtomicReference<String> requestBody = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);

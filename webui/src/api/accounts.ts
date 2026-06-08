@@ -4,6 +4,7 @@ import type {
   Account,
   AccountSettings,
   ApiResponse,
+  ClearAccountsResult,
   CreateAccountRequest,
   ImportAccountsRequest,
   ImportAccountsResult,
@@ -62,5 +63,10 @@ export const accountsApi = {
   },
   remove(accountId: string) {
     return unwrap<void>(http.delete<ApiResponse<void>>(`/admin/accounts/${accountId}`));
+  },
+  clearAll() {
+    return unwrap<ClearAccountsResult>(
+      http.delete<ApiResponse<ClearAccountsResult>>('/admin/accounts'),
+    );
   },
 };

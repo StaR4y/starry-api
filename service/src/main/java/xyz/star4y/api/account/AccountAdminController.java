@@ -125,6 +125,12 @@ public class AccountAdminController implements AccountAdminApi {
     }
 
     @Override
+    public Mono<ApiResponse<AccountDtos.ClearAccountsResponse>> clearAll(ServerWebExchange exchange) {
+        adminAuth.verifyAdmin(exchange);
+        return service.clearAll().map(ApiResponse::ok);
+    }
+
+    @Override
     public Mono<ApiResponse<Void>> delete(ServerWebExchange exchange, @PathVariable String accountId) {
         adminAuth.verifyAdmin(exchange);
         return service.delete(accountId).thenReturn(ApiResponse.ok(null));

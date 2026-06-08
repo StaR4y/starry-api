@@ -35,6 +35,7 @@
   const keyword = ref('');
   const accountSettings = ref<AccountSettings>({ gptFastModeEnabled: false });
   const settingsSaving = ref(false);
+  const clearingAccounts = ref(false);
 
   const visibleAccounts = computed(() => {
     const q = keyword.value.trim().toLowerCase();
@@ -285,6 +286,34 @@
     await accountsApi.remove(row.accountId);
     ElMessage.success('已删除');
     await loadAccounts();
+  }
+
+  async function clearAllAccounts() {
+    if (accounts.value.length === 0) {
+      ElMessage.info('当前没有账号可清空');
+      return;
+    }
+    const confirmed = await ElMessageBox.confirm(
+      `确认清空全部 ${accounts.value.length} 个账号？该操作不可恢复。`,
+      '清空全部账号',
+      { confirmButtonText: '清空全部', cancelButtonText: '取消', type: 'error' },
+    )
+      .then(() => true)
+      .catch(() => false);
+    if (!confirmed) return;
+
+    clearingAccounts.value = true;
+    try {
+      const result = await accountsApi.clearAll();
+      latestTestResults.value = {};
+      testDetail.value = null;
+      ElMessage.success(`已清空 ${result.deleted} 个账号`);
+      await loadAccounts();
+    } catch (err) {
+      if (err instanceof ApiError) ElMessage.error(err.message);
+    } finally {
+      clearingAccounts.value = false;
+    }
   }
 
   /* ============= 账号连通测试 ============= */
@@ -758,6 +787,15 @@
         </template>
       </el-input>
       <el-button @click="openImport">批量导入</el-button>
+      <el-button
+        type="danger"
+        plain
+        :loading="clearingAccounts"
+        :disabled="loading || accounts.length === 0"
+        @click="clearAllAccounts"
+      >
+        清空全部
+      </el-button>
       <el-button type="primary" @click="openCreate">新建账号</el-button>
     </template>
 
