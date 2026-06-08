@@ -22,6 +22,7 @@ import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
 import org.springframework.mock.web.server.MockServerWebExchange;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import xyz.star4y.api.account.AccountAutoSuspendService;
 import xyz.star4y.api.account.AccountPoolService;
 import xyz.star4y.api.account.AccountPlatforms;
 import xyz.star4y.api.account.AccountSettingsService;
@@ -209,6 +210,7 @@ class ProxyFacadeRoutingTest {
     void chatRetriesNextOpenAiAccountWhenSelectedAccountReturnsQuotaError() throws Exception {
         ApiKeyService apiKeyService = mock(ApiKeyService.class);
         AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        AccountAutoSuspendService accountAutoSuspendService = mock(AccountAutoSuspendService.class);
         ModelMappingService modelMappingService = mock(ModelMappingService.class);
         RateLimiterService rateLimiterService = mock(RateLimiterService.class);
         KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
@@ -240,7 +242,7 @@ class ProxyFacadeRoutingTest {
             AccountPoolService.UpstreamErrorType.RECOVERABLE,
             429,
             "quota exhausted"
-        )).thenReturn(Mono.empty());
+        )).thenReturn(Mono.just(new AccountPoolService.RequestFailureRecord("openai-main", 2, 429, true)));
         when(accountPoolService.selectOpenAiAccount(eq("key-1"), eq(List.of("openai-main"))))
             .thenReturn(Mono.just(backup));
         when(openAiUpstreamClient.complete(eq(backup), eq(request), eq("gpt-5")))
@@ -252,6 +254,7 @@ class ProxyFacadeRoutingTest {
         ResponseEntity<?> response = proxyFacade(
             apiKeyService,
             accountPoolService,
+            accountAutoSuspendService,
             modelCatalog,
             modelMappingService,
             rateLimiterService,
@@ -269,6 +272,7 @@ class ProxyFacadeRoutingTest {
             429,
             "quota exhausted"
         );
+        verify(accountAutoSuspendService).scheduleIfNeeded(new AccountPoolService.RequestFailureRecord("openai-main", 2, 429, true));
         verify(accountPoolService).recordSuccess("openai-backup", 2L);
         verify(openAiUpstreamClient).complete(eq(primary), eq(request), eq("gpt-5"));
         verify(openAiUpstreamClient).complete(eq(backup), eq(request), eq("gpt-5"));
@@ -356,11 +360,40 @@ class ProxyFacadeRoutingTest {
         OpenAiUpstreamClient openAiUpstreamClient,
         StatsService statsService
     ) {
+        AccountAutoSuspendService accountAutoSuspendService = mock(AccountAutoSuspendService.class);
         AccountSettingsService accountSettingsService = mock(AccountSettingsService.class);
         when(accountSettingsService.ensureGptFastModeAllowed()).thenReturn(Mono.empty());
         return proxyFacade(
             apiKeyService,
             accountPoolService,
+            accountAutoSuspendService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService,
+            accountSettingsService
+        );
+    }
+
+    private ProxyFacade proxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        AccountAutoSuspendService accountAutoSuspendService,
+        DefaultModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroUpstreamClient kiroUpstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        StatsService statsService
+    ) {
+        AccountSettingsService accountSettingsService = mock(AccountSettingsService.class);
+        when(accountSettingsService.ensureGptFastModeAllowed()).thenReturn(Mono.empty());
+        return proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
             modelCatalog,
             modelMappingService,
             rateLimiterService,
@@ -382,9 +415,36 @@ class ProxyFacadeRoutingTest {
         StatsService statsService,
         AccountSettingsService accountSettingsService
     ) {
+        return proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            mock(AccountAutoSuspendService.class),
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService,
+            accountSettingsService
+        );
+    }
+
+    private ProxyFacade proxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        AccountAutoSuspendService accountAutoSuspendService,
+        DefaultModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroUpstreamClient kiroUpstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        StatsService statsService,
+        AccountSettingsService accountSettingsService
+    ) {
         return new ProxyFacade(
             apiKeyService,
             accountPoolService,
+            accountAutoSuspendService,
             accountSettingsService,
             modelCatalog,
             modelMappingService,
