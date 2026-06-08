@@ -24,6 +24,7 @@ public final class AccountDtos {
         String baseUrl,
         String upstreamAccountId,
         String idToken,
+        Instant tokenExpiresAt,
         String profileArn,
         String machineId,
         String proxyUrl,
@@ -45,6 +46,7 @@ public final class AccountDtos {
         String baseUrl,
         String upstreamAccountId,
         String idToken,
+        Instant tokenExpiresAt,
         String profileArn,
         String machineId,
         String proxyUrl,
@@ -97,6 +99,16 @@ public final class AccountDtos {
             anthropic = anthropic == null ? List.of() : List.copyOf(anthropic);
             codex = codex == null ? List.of() : List.copyOf(codex);
         }
+    }
+
+    public record AccountSettingsResponse(
+        Boolean gptFastModeEnabled
+    ) {
+    }
+
+    public record UpdateAccountSettingsRequest(
+        Boolean gptFastModeEnabled
+    ) {
     }
 
     public record ImportAccountsRequest(
@@ -157,6 +169,7 @@ public final class AccountDtos {
         String provider,
         String baseUrl,
         String upstreamAccountId,
+        Instant tokenExpiresAt,
         String profileArn,
         String machineId,
         String proxyUrl,

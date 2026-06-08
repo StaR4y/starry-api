@@ -152,6 +152,7 @@ export interface Account {
   provider: string | null;
   baseUrl: string | null;
   upstreamAccountId: string | null;
+  tokenExpiresAt: string | null;
   profileArn: string | null;
   machineId: string | null;
   proxyUrl: string | null;
@@ -191,6 +192,7 @@ export interface CreateAccountRequest {
   baseUrl?: string;
   upstreamAccountId?: string;
   idToken?: string;
+  tokenExpiresAt?: string;
   profileArn?: string;
   machineId?: string;
   proxyUrl?: string;
@@ -209,6 +211,7 @@ export interface CreateAccountRequest {
     baseUrl?: string;
     upstreamAccountId?: string;
     idToken?: string;
+    tokenExpiresAt?: string;
   };
   usage?: {
     limit?: number;
@@ -228,6 +231,14 @@ export type UpdateAccountRequest = Partial<
     quota7dResetAt: string;
   }
 >;
+
+export interface AccountSettings {
+  gptFastModeEnabled: boolean;
+}
+
+export interface UpdateAccountSettingsRequest {
+  gptFastModeEnabled?: boolean;
+}
 
 export interface SuspendAccountRequest {
   reason: string;

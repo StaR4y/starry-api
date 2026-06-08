@@ -2,6 +2,7 @@
 import http, { unwrap } from '@/utils/http';
 import type {
   Account,
+  AccountSettings,
   ApiResponse,
   CreateAccountRequest,
   ImportAccountsRequest,
@@ -10,6 +11,7 @@ import type {
   TestModelOptionsResult,
   TestAccountsRequest,
   TestAccountsResult,
+  UpdateAccountSettingsRequest,
   UpdateAccountRequest,
 } from '@/types/api';
 
@@ -23,6 +25,16 @@ export const accountsApi = {
   importBatch(payload: ImportAccountsRequest | Record<string, unknown>) {
     return unwrap<ImportAccountsResult>(
       http.post<ApiResponse<ImportAccountsResult>>('/admin/accounts/import', payload),
+    );
+  },
+  settings() {
+    return unwrap<AccountSettings>(
+      http.get<ApiResponse<AccountSettings>>('/admin/accounts/settings'),
+    );
+  },
+  updateSettings(payload: UpdateAccountSettingsRequest) {
+    return unwrap<AccountSettings>(
+      http.patch<ApiResponse<AccountSettings>>('/admin/accounts/settings', payload),
     );
   },
   update(accountId: string, payload: UpdateAccountRequest) {

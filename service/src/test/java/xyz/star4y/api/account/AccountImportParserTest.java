@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.Base64;
 import org.junit.jupiter.api.Test;
 import xyz.star4y.api.common.ApiException;
@@ -95,7 +96,9 @@ class AccountImportParserTest {
               "type": "codex",
               "id_token": "%s",
               "access_token": "codex-access",
-              "refresh_token": "codex-refresh"
+              "refresh_token": "codex-refresh",
+              "client_id": "codex-client",
+              "expires_at": "2026-06-08T03:00:00Z"
             }
             """.formatted(idToken)));
 
@@ -105,6 +108,8 @@ class AccountImportParserTest {
         assertThat(account.email()).isEqualTo("codex@example.com");
         assertThat(account.accessToken()).isEqualTo("codex-access");
         assertThat(account.refreshToken()).isEqualTo("codex-refresh");
+        assertThat(account.clientId()).isEqualTo("codex-client");
+        assertThat(account.tokenExpiresAt()).isEqualTo(Instant.parse("2026-06-08T03:00:00Z"));
         assertThat(account.baseUrl()).isEqualTo(AccountPlatforms.DEFAULT_CODEX_BASE_URL);
         assertThat(account.upstreamAccountId()).isEqualTo("acct_codex_123");
         assertThat(account.accountId()).startsWith("openai-");

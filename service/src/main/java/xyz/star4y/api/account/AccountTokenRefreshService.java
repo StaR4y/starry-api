@@ -3,7 +3,10 @@ package xyz.star4y.api.account;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
@@ -12,6 +15,8 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -26,6 +31,8 @@ public class AccountTokenRefreshService {
     private static final String KIRO_AUTH_ENDPOINT = "https://prod.us-east-1.auth.desktop.kiro.dev";
     private static final String CODEX_TOKEN_REFRESH_URL = "https://auth.openai.com/oauth/token";
     private static final String CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+    private static final String CODEX_REFRESH_SCOPE = "openid profile email";
+    private static final Duration CODEX_REFRESH_WINDOW = Duration.ofHours(2);
     private static final String KIRO_VERSION = "0.12.155";
     private static final String AWS_SDK_VERSION = "1.0.34";
     private static final String AWS_STREAMING_API_VERSION = "1.0.34";
@@ -80,7 +87,7 @@ public class AccountTokenRefreshService {
             .collectList()
             .flatMap(accounts -> {
                 List<ProxyAccountEntity> eligible = accounts.stream()
-                    .filter(this::canRefresh)
+                    .filter(this::shouldRefreshScheduled)
                     .toList();
                 if (eligible.isEmpty()) {
                     return Mono.just(new TokenRefreshSummary(accounts.size(), 0, 0, 0));
@@ -94,7 +101,7 @@ public class AccountTokenRefreshService {
                                 account.getAccountId(),
                                 error.getMessage()
                             );
-                            return Mono.just(Boolean.FALSE);
+                            return recordScheduledRefreshFailure(account, error);
                         }), SCHEDULED_REFRESH_CONCURRENCY)
                     .collectList()
                     .map(results -> {
@@ -110,7 +117,7 @@ public class AccountTokenRefreshService {
             return Mono.error(refreshError("Missing refreshToken"));
         }
         if (AccountPlatforms.isCodex(account)) {
-            return refreshCodexToken(refreshToken).flatMap(result -> saveRefreshedToken(account, result));
+            return refreshCodexToken(account, refreshToken).flatMap(result -> saveRefreshedToken(account, result));
         }
         boolean social = "social".equalsIgnoreCase(account.getAuthMethod());
         if (!social && (clean(account.getClientId()) == null || clean(account.getClientSecret()) == null)) {
@@ -136,17 +143,30 @@ public class AccountTokenRefreshService {
         return clean(account.getClientId()) != null && clean(account.getClientSecret()) != null;
     }
 
-    private Mono<TokenRefreshResult> refreshCodexToken(String refreshToken) {
-        ObjectNode body = objectMapper.createObjectNode();
-        body.put("client_id", CODEX_CLIENT_ID);
-        body.put("grant_type", "refresh_token");
-        body.put("refresh_token", refreshToken);
+    private boolean shouldRefreshScheduled(ProxyAccountEntity account) {
+        if (!canRefresh(account)) {
+            return false;
+        }
+        if (!AccountPlatforms.isCodex(account)) {
+            return true;
+        }
+        Instant expiresAt = account.getTokenExpiresAt();
+        return expiresAt != null && !expiresAt.isAfter(Instant.now().plus(CODEX_REFRESH_WINDOW));
+    }
+
+    private Mono<TokenRefreshResult> refreshCodexToken(ProxyAccountEntity account, String refreshToken) {
+        String clientId = firstNonBlank(account.getClientId(), CODEX_CLIENT_ID);
+        MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
+        form.add("client_id", clientId);
+        form.add("grant_type", "refresh_token");
+        form.add("refresh_token", refreshToken);
+        form.add("scope", CODEX_REFRESH_SCOPE);
 
         return webClient.post()
             .uri(CODEX_TOKEN_REFRESH_URL)
-            .contentType(MediaType.APPLICATION_JSON)
+            .contentType(MediaType.APPLICATION_FORM_URLENCODED)
             .accept(MediaType.APPLICATION_JSON)
-            .bodyValue(body)
+            .bodyValue(form)
             .exchangeToMono(response -> {
                 if (response.statusCode().isError()) {
                     return response.bodyToMono(String.class)
@@ -155,7 +175,7 @@ public class AccountTokenRefreshService {
                             "Codex token refresh failed " + response.statusCode().value() + ": " + text
                         )));
                 }
-                return response.bodyToMono(JsonNode.class).map(json -> tokenResult(json, refreshToken));
+                return response.bodyToMono(JsonNode.class).map(json -> tokenResult(json, refreshToken, clientId));
             });
     }
 
@@ -176,7 +196,7 @@ public class AccountTokenRefreshService {
                         .defaultIfEmpty("")
                         .flatMap(text -> Mono.error(refreshError("OIDC refresh failed " + response.statusCode().value() + ": " + text)));
                 }
-                return response.bodyToMono(JsonNode.class).map(json -> tokenResult(json, refreshToken));
+                return response.bodyToMono(JsonNode.class).map(json -> tokenResult(json, refreshToken, account.getClientId()));
             });
     }
 
@@ -195,7 +215,7 @@ public class AccountTokenRefreshService {
                         .defaultIfEmpty("")
                         .flatMap(text -> Mono.error(refreshError("Social token refresh failed " + response.statusCode().value() + ": " + text)));
                 }
-                return response.bodyToMono(JsonNode.class).map(json -> tokenResult(json, refreshToken));
+                return response.bodyToMono(JsonNode.class).map(json -> tokenResult(json, refreshToken, account.getClientId()));
             });
     }
 
@@ -210,17 +230,140 @@ public class AccountTokenRefreshService {
                 entity.setAccessToken(result.accessToken());
                 entity.setRefreshToken(firstNonBlank(result.refreshToken(), entity.getRefreshToken()));
                 entity.setIdToken(firstNonBlank(result.idToken(), entity.getIdToken()));
+                entity.setClientId(firstNonBlank(result.clientId(), entity.getClientId()));
+                if (result.tokenExpiresAt() != null) {
+                    entity.setTokenExpiresAt(result.tokenExpiresAt());
+                }
                 return repository.save(entity);
             })
             .flatMap(saved -> accountPoolService.refreshCache().thenReturn(saved));
     }
 
-    private TokenRefreshResult tokenResult(JsonNode json, String fallbackRefreshToken) {
+    private Mono<Boolean> recordScheduledRefreshFailure(ProxyAccountEntity account, Throwable error) {
+        if (!isNonRetryableRefreshError(error) || account.getAccountId() == null || account.getAccountId().isBlank()) {
+            return Mono.just(Boolean.FALSE);
+        }
+        String message = rootFailure(error).getMessage();
+        return accountPoolService.recordRequestFailure(
+                account.getAccountId(),
+                AccountPoolService.UpstreamErrorType.FATAL,
+                403,
+                message
+            )
+            .onErrorResume(recordError -> {
+                log.warn("Failed to disable account {} after token refresh failure", account.getAccountId(), recordError);
+                return Mono.empty();
+            })
+            .thenReturn(Boolean.FALSE);
+    }
+
+    private boolean isNonRetryableRefreshError(Throwable error) {
+        String message = rootFailure(error).getMessage();
+        if (message == null) {
+            return false;
+        }
+        String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains("invalid_grant")
+            || normalized.contains("refresh_token_reused")
+            || normalized.contains("invalid_client")
+            || normalized.contains("unauthorized_client")
+            || normalized.contains("access_denied")
+            || normalized.contains("app_session_terminated")
+            || normalized.contains("token_revoked")
+            || normalized.contains("session has ended")
+            || normalized.contains("invalidated oauth token")
+            || normalized.contains("no refresh token");
+    }
+
+    private Throwable rootFailure(Throwable error) {
+        Throwable current = error;
+        while (current != null && current.getCause() != null && current.getCause() != current) {
+            current = current.getCause();
+        }
+        return current == null ? error : current;
+    }
+
+    private TokenRefreshResult tokenResult(JsonNode json, String fallbackRefreshToken, String fallbackClientId) {
         return new TokenRefreshResult(
             firstNonBlank(json.path("accessToken").asText(null), json.path("access_token").asText(null)),
             firstNonBlank(json.path("refreshToken").asText(null), json.path("refresh_token").asText(null), fallbackRefreshToken),
-            firstNonBlank(json.path("idToken").asText(null), json.path("id_token").asText(null))
+            firstNonBlank(json.path("idToken").asText(null), json.path("id_token").asText(null)),
+            firstNonBlank(json.path("clientId").asText(null), json.path("client_id").asText(null), fallbackClientId),
+            tokenExpiresAt(json)
         );
+    }
+
+    private Instant tokenExpiresAt(JsonNode json) {
+        Instant absolute = firstInstant(json, "tokenExpiresAt", "token_expires_at", "expiresAt", "expires_at");
+        if (absolute != null) {
+            return absolute;
+        }
+        Long expiresIn = firstLong(json, "expiresIn", "expires_in");
+        return expiresIn == null ? null : Instant.now().plusSeconds(expiresIn);
+    }
+
+    private Instant firstInstant(JsonNode source, String... names) {
+        if (source == null || !source.isObject()) {
+            return null;
+        }
+        for (String name : names) {
+            Instant value = instant(source.path(name));
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private Long firstLong(JsonNode source, String... names) {
+        if (source == null || !source.isObject()) {
+            return null;
+        }
+        for (String name : names) {
+            JsonNode value = source.path(name);
+            if (value.isMissingNode() || value.isNull()) {
+                continue;
+            }
+            if (value.canConvertToLong()) {
+                return value.asLong();
+            }
+            String text = value.isTextual() ? clean(value.asText()) : clean(value.asText(null));
+            if (text == null) {
+                continue;
+            }
+            try {
+                return Long.parseLong(text);
+            } catch (NumberFormatException ignored) {
+                // Ignore malformed optional expiry fields.
+            }
+        }
+        return null;
+    }
+
+    private Instant instant(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        try {
+            if (node.canConvertToLong()) {
+                return epochInstant(node.asLong());
+            }
+            String value = node.isTextual() ? clean(node.asText()) : clean(node.asText(null));
+            if (value == null) {
+                return null;
+            }
+            try {
+                return epochInstant(Long.parseLong(value));
+            } catch (NumberFormatException ignored) {
+                return Instant.parse(value);
+            }
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    private Instant epochInstant(long value) {
+        return value > 9_999_999_999L ? Instant.ofEpochMilli(value) : Instant.ofEpochSecond(value);
     }
 
     private UpstreamException refreshError(String message) {
@@ -264,7 +407,13 @@ public class AccountTokenRefreshService {
         return trimmed.isEmpty() ? null : trimmed;
     }
 
-    private record TokenRefreshResult(String accessToken, String refreshToken, String idToken) {
+    private record TokenRefreshResult(
+        String accessToken,
+        String refreshToken,
+        String idToken,
+        String clientId,
+        Instant tokenExpiresAt
+    ) {
     }
 
     public record TokenRefreshSummary(int total, int eligible, int refreshed, int failed) {

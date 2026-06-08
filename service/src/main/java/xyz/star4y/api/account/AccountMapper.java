@@ -13,6 +13,7 @@ final class AccountMapper {
             entity.getProvider(),
             entity.getBaseUrl(),
             entity.getUpstreamAccountId(),
+            entity.getTokenExpiresAt(),
             entity.getProfileArn(),
             entity.getMachineId(),
             entity.getProxyUrl(),

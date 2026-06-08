@@ -166,42 +166,6 @@ class AccountPoolServiceTest {
     }
 
     @Test
-    void createPersistsWindowQuotaLimits() {
-        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
-        when(repository.findFirstByEmailOrderByCreatedAtAsc("quota@example.com")).thenReturn(Mono.empty());
-        when(repository.save(any(ProxyAccountEntity.class))).thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
-        when(repository.findAllByEnabledTrue()).thenReturn(Flux.empty());
-
-        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
-
-        ProxyAccountEntity saved = service.create(new AccountDtos.CreateAccountRequest(
-            "quota-account",
-            "quota@example.com",
-            "token",
-            null,
-            null,
-            null,
-            null,
-            "api-key",
-            AccountPlatforms.OPENAI_PROVIDER,
-            null,
-            null,
-            null,
-            null,
-            null,
-            null,
-            10_000L,
-            2_000L,
-            7_000L
-        )).block();
-
-        assertThat(saved).isNotNull();
-        assertThat(saved.getQuotaLimit()).isEqualTo(10_000L);
-        assertThat(saved.getQuota5hLimit()).isEqualTo(2_000L);
-        assertThat(saved.getQuota7dLimit()).isEqualTo(7_000L);
-    }
-
-    @Test
     void selectOpenAiAccountSkipsExcludedAccounts() {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         ProxyAccountEntity primary = openAiPoolAccount("openai-main");
@@ -304,33 +268,6 @@ class AccountPoolServiceTest {
         assertThat(saved.getSuspendMessage()).isEqualTo("token revoked");
     }
 
-    @Test
-    void recordRequestFailureCountsGenericFailureWithoutImmediateSuspend() {
-        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
-        ProxyAccountEntity account = account("acc-1");
-        when(repository.findByAccountId("acc-1")).thenReturn(Mono.just(account));
-        when(repository.save(any(ProxyAccountEntity.class))).thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
-        when(repository.findAllByEnabledTrue()).thenReturn(Flux.empty());
-
-        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
-
-        AccountPoolService.RequestFailureRecord record = service.recordRequestFailure(
-            "acc-1",
-            AccountPoolService.UpstreamErrorType.RECOVERABLE,
-            500,
-            "upstream unavailable"
-        ).block();
-
-        ProxyAccountEntity saved = savedAccount(repository);
-        assertThat(record).isNotNull();
-        assertThat(record.consecutiveFailures()).isEqualTo(2);
-        assertThat(record.suspended()).isFalse();
-        assertThat(saved.getEnabled()).isTrue();
-        assertThat(saved.getErrorCount()).isEqualTo(2);
-        assertThat(saved.getSuspendedAt()).isNull();
-        assertThat(saved.getSuspendReason()).isNull();
-    }
-
     private ProxyAccountEntity savedAccount(ProxyAccountRepository repository) {
         ArgumentCaptor<ProxyAccountEntity> captor = ArgumentCaptor.forClass(ProxyAccountEntity.class);
         verify(repository).save(captor.capture());
@@ -352,7 +289,6 @@ class AccountPoolServiceTest {
             null,
             "api-key",
             AccountPlatforms.OPENAI_PROVIDER,
-            null,
             null,
             null,
             null,

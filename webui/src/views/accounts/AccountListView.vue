@@ -17,6 +17,7 @@
   import { ApiError } from '@/utils/http';
   import type {
     Account,
+    AccountSettings,
     CreateAccountRequest,
     ImportAccountItem,
     ImportAccountsResult,
@@ -32,6 +33,8 @@
   const loading = ref(false);
   const accounts = ref<Account[]>([]);
   const keyword = ref('');
+  const accountSettings = ref<AccountSettings>({ gptFastModeEnabled: false });
+  const settingsSaving = ref(false);
 
   const visibleAccounts = computed(() => {
     const q = keyword.value.trim().toLowerCase();
@@ -50,19 +53,16 @@
     const total = accounts.value.length;
     const active = accounts.value.filter((a) => a.enabled && !a.suspendedAt && !a.quotaExhaustedAt).length;
     const abnormal = accounts.value.filter((a) => a.suspendedAt || a.quotaExhaustedAt || !a.enabled).length;
+    
     const totalRequests = accounts.value.reduce((sum, a) => sum + (a.requestCount || 0), 0);
     const totalErrors = accounts.value.reduce((sum, a) => sum + (a.errorCount || 0), 0);
-    const quotaUsed = accounts.value.reduce((sum, a) => sum + safeQuota(a.quotaUsed), 0);
-    const quotaLimit = accounts.value.reduce((sum, a) => sum + positiveQuota(a.quotaLimit), 0);
-
+    
     return {
       total,
       active,
       abnormal,
       totalRequests,
       totalErrors,
-      quotaUsed,
-      quotaLimit,
     };
   });
 
@@ -73,49 +73,35 @@
     return { label: '可用', tone: 'success' as const };
   }
 
-  function safeQuota(value: number | null | undefined) {
-    return value && value > 0 ? value : 0;
-  }
-
-  function positiveQuota(value: number | null | undefined) {
-    return value && value > 0 ? value : 0;
-  }
-
-  function quotaPercent(used: number | null | undefined, limit: number | null | undefined) {
-    const safeLimit = positiveQuota(limit);
-    if (safeLimit <= 0) return 0;
-    return Math.min(100, Math.round((safeQuota(used) / safeLimit) * 100));
-  }
-
-  function quotaStatus(
-    used: number | null | undefined,
-    limit: number | null | undefined,
-  ): 'success' | 'warning' | 'exception' {
-    const percent = quotaPercent(used, limit);
-    if (percent >= 100) return 'exception';
-    if (percent >= 80) return 'warning';
-    return 'success';
-  }
-
-  function quotaText(used: number | null | undefined, limit: number | null | undefined) {
-    const safeUsed = safeQuota(used);
-    const safeLimit = positiveQuota(limit);
-    if (safeLimit <= 0) {
-      return `${formatNumber(safeUsed)} / 未设上限`;
-    }
-    return `剩余 ${formatNumber(Math.max(safeLimit - safeUsed, 0))} / ${formatNumber(safeLimit)}`;
-  }
-
-  function quotaResetText(resetAt: string | null | undefined) {
-    return resetAt ? `重置 ${formatDateTime(resetAt)}` : '窗口未开始';
-  }
-
   async function loadAccounts() {
     loading.value = true;
     try {
       accounts.value = await accountsApi.list();
     } finally {
       loading.value = false;
+    }
+  }
+
+  async function loadAccountSettings() {
+    try {
+      accountSettings.value = await accountsApi.settings();
+    } catch (err) {
+      if (err instanceof ApiError) ElMessage.warning(`Fast 模式配置加载失败：${err.message}`);
+    }
+  }
+
+  async function toggleGptFastMode(value: string | number | boolean) {
+    settingsSaving.value = true;
+    try {
+      accountSettings.value = await accountsApi.updateSettings({
+        gptFastModeEnabled: Boolean(value),
+      });
+      ElMessage.success(accountSettings.value.gptFastModeEnabled ? '已允许 GPT Fast 模式' : '已关闭 GPT Fast 模式');
+    } catch (err) {
+      accountSettings.value.gptFastModeEnabled = !Boolean(value);
+      if (err instanceof ApiError) ElMessage.error(err.message);
+    } finally {
+      settingsSaving.value = false;
     }
   }
 
@@ -147,8 +133,6 @@
     machineId: '',
     proxyUrl: '',
     quotaLimit: undefined as number | undefined,
-    quota5hLimit: undefined as number | undefined,
-    quota7dLimit: undefined as number | undefined,
     enabled: true,
   });
 
@@ -174,8 +158,6 @@
       machineId: '',
       proxyUrl: '',
       quotaLimit: undefined,
-      quota5hLimit: undefined,
-      quota7dLimit: undefined,
       enabled: true,
     });
   }
@@ -204,8 +186,6 @@
       machineId: row.machineId ?? '',
       proxyUrl: row.proxyUrl ?? '',
       quotaLimit: row.quotaLimit ?? undefined,
-      quota5hLimit: row.quota5hLimit ?? undefined,
-      quota7dLimit: row.quota7dLimit ?? undefined,
       enabled: row.enabled,
     });
     formVisible.value = true;
@@ -744,6 +724,7 @@
   }
 
   onMounted(() => {
+    loadAccountSettings();
     loadTestModelOptions();
     loadAccounts();
   });
@@ -752,6 +733,17 @@
 <template>
   <PageSection title="账号管理" subtitle="维护上游账号池、配额与状态">
     <template #actions>
+      <div class="fast-mode-toggle">
+        <span>GPT Fast</span>
+        <el-switch
+          v-model="accountSettings.gptFastModeEnabled"
+          :disabled="settingsSaving"
+          inline-prompt
+          active-text="允许"
+          inactive-text="关闭"
+          @change="toggleGptFastMode"
+        />
+      </div>
       <el-input
         v-model="keyword"
         placeholder="搜索账号 ID / 邮箱 / 平台 / Base URL"
@@ -811,25 +803,6 @@
           <span class="metric-value__sub">/ {{ formatNumber(summary.totalErrors) }}</span>
         </div>
       </div>
-
-      <div class="metric-divider"></div>
-
-      <div class="metric-item metric-item--quota">
-        <div class="metric-item__header">
-          <span class="metric-dot dot-quota"></span>
-          <span class="metric-label">总配额</span>
-        </div>
-        <div class="metric-value metric-value--compact">
-          {{ quotaPercent(summary.quotaUsed, summary.quotaLimit) }}%
-        </div>
-        <el-progress
-          :percentage="quotaPercent(summary.quotaUsed, summary.quotaLimit)"
-          :status="quotaStatus(summary.quotaUsed, summary.quotaLimit)"
-          :stroke-width="6"
-          :show-text="false"
-        />
-        <div class="metric-subtext">{{ quotaText(summary.quotaUsed, summary.quotaLimit) }}</div>
-      </div>
     </div>
 
     <el-table v-loading="loading" :data="visibleAccounts" stripe>
@@ -880,48 +853,9 @@
           {{ formatNumber(row.requestCount) }} / {{ formatNumber(row.errorCount) }}
         </template>
       </el-table-column>
-      <el-table-column label="配额" min-width="260">
+      <el-table-column label="配额 (used/limit)" width="150">
         <template #default="{ row }">
-          <div class="quota-stack">
-            <div class="quota-row">
-              <div class="quota-row__head">
-                <span>总配额</span>
-                <span>{{ quotaText(row.quotaUsed, row.quotaLimit) }}</span>
-              </div>
-              <el-progress
-                :percentage="quotaPercent(row.quotaUsed, row.quotaLimit)"
-                :status="quotaStatus(row.quotaUsed, row.quotaLimit)"
-                :stroke-width="6"
-                :show-text="false"
-              />
-            </div>
-            <div class="quota-row">
-              <div class="quota-row__head">
-                <span>5h</span>
-                <span>{{ quotaText(row.quota5hUsed, row.quota5hLimit) }}</span>
-              </div>
-              <el-progress
-                :percentage="quotaPercent(row.quota5hUsed, row.quota5hLimit)"
-                :status="quotaStatus(row.quota5hUsed, row.quota5hLimit)"
-                :stroke-width="6"
-                :show-text="false"
-              />
-              <div class="quota-row__reset">{{ quotaResetText(row.quota5hResetAt) }}</div>
-            </div>
-            <div class="quota-row">
-              <div class="quota-row__head">
-                <span>7day</span>
-                <span>{{ quotaText(row.quota7dUsed, row.quota7dLimit) }}</span>
-              </div>
-              <el-progress
-                :percentage="quotaPercent(row.quota7dUsed, row.quota7dLimit)"
-                :status="quotaStatus(row.quota7dUsed, row.quota7dLimit)"
-                :stroke-width="6"
-                :show-text="false"
-              />
-              <div class="quota-row__reset">{{ quotaResetText(row.quota7dResetAt) }}</div>
-            </div>
-          </div>
+          {{ formatNumber(row.quotaUsed) }} / {{ formatNumber(row.quotaLimit) }}
         </template>
       </el-table-column>
       <el-table-column label="最近使用" width="160">
@@ -1108,25 +1042,19 @@
             <el-input v-model="form.proxyUrl" placeholder="http://user:pass@host:port" />
           </el-form-item>
         </el-col>
-        <el-col :span="8">
-          <el-form-item label="总配额上限">
-            <el-input-number v-model="form.quotaLimit" :min="0" :step="1000" style="width: 100%" />
-          </el-form-item>
-        </el-col>
-        <el-col :span="8">
-          <el-form-item label="5h 配额上限">
-            <el-input-number v-model="form.quota5hLimit" :min="0" :step="1000" style="width: 100%" />
-          </el-form-item>
-        </el-col>
-        <el-col :span="8">
-          <el-form-item label="7day 配额上限">
-            <el-input-number v-model="form.quota7dLimit" :min="0" :step="1000" style="width: 100%" />
-          </el-form-item>
-        </el-col>
-        <el-col v-if="formMode === 'edit'" :span="12">
-          <el-form-item label="启用">
-            <el-switch v-model="form.enabled" style="margin-top: 6px" />
-          </el-form-item>
+        <el-col :span="12">
+          <el-row :gutter="12">
+            <el-col :span="formMode === 'edit' ? 16 : 24">
+              <el-form-item label="配额上限">
+                <el-input-number v-model="form.quotaLimit" :min="0" :step="1000" style="width: 100%" />
+              </el-form-item>
+            </el-col>
+            <el-col v-if="formMode === 'edit'" :span="8">
+              <el-form-item label="启用">
+                <el-switch v-model="form.enabled" style="margin-top: 6px" />
+              </el-form-item>
+            </el-col>
+          </el-row>
         </el-col>
       </el-row>
     </el-form>
@@ -1580,10 +1508,6 @@
           background-color: #b387ff;
           box-shadow: 0 0 6px rgba(179, 135, 255, 0.6);
         }
-        &.dot-quota {
-          background-color: #f59e0b;
-          box-shadow: 0 0 6px rgba(245, 158, 11, 0.55);
-        }
       }
 
       .metric-label {
@@ -1605,9 +1529,6 @@
         &.text-danger {
           color: #ef5b6b;
         }
-        &--compact {
-          font-size: 22px;
-        }
 
         &__sub {
           font-size: 13px;
@@ -1620,14 +1541,6 @@
         font-size: 11px;
         color: var(--kp-text-muted);
         font-weight: 500;
-      }
-    }
-
-    .metric-item--quota {
-      min-width: 180px;
-
-      :deep(.el-progress) {
-        width: 100%;
       }
     }
 
@@ -1661,41 +1574,19 @@
     }
   }
 
-  .quota-stack {
-    display: grid;
-    gap: 7px;
-    min-width: 220px;
-    padding: 4px 0;
-  }
-
-  .quota-row {
-    display: grid;
-    gap: 3px;
-
-    &__head {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 8px;
-      color: var(--kp-text-secondary);
-      font-size: 11px;
-      font-weight: 700;
-
-      span:last-child {
-        min-width: 0;
-        overflow: hidden;
-        text-align: right;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-    }
-
-    &__reset {
-      color: var(--kp-text-muted);
-      font-size: 10px;
-      line-height: 1.1;
-      text-align: right;
-    }
+  .fast-mode-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 32px;
+    padding: 0 10px;
+    border: 1px solid var(--kp-divider);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.55);
+    color: var(--kp-text-secondary);
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
   }
 
   @media (max-width: 1024px) {

@@ -108,6 +108,7 @@ public class AccountPoolService {
                 }
                 if (request.upstreamAccountId() != null) entity.setUpstreamAccountId(request.upstreamAccountId());
                 if (request.idToken() != null) entity.setIdToken(request.idToken());
+                if (request.tokenExpiresAt() != null) entity.setTokenExpiresAt(request.tokenExpiresAt());
                 if (request.profileArn() != null) entity.setProfileArn(request.profileArn());
                 if (request.machineId() != null) entity.setMachineId(request.machineId());
                 if (request.proxyUrl() != null) entity.setProxyUrl(request.proxyUrl());
@@ -591,6 +592,7 @@ public class AccountPoolService {
         entity.setBaseUrl(AccountPlatforms.defaultBaseUrl(normalizedProvider, normalizedAuthMethod, request.baseUrl()));
         entity.setUpstreamAccountId(request.upstreamAccountId());
         entity.setIdToken(request.idToken());
+        entity.setTokenExpiresAt(request.tokenExpiresAt());
         entity.setProfileArn(request.profileArn());
         entity.setMachineId(request.machineId());
         entity.setProxyUrl(request.proxyUrl());

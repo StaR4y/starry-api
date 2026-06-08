@@ -16,8 +16,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-import xyz.star4y.api.account.AccountAutoSuspendService;
 import xyz.star4y.api.account.AccountPoolService;
+import xyz.star4y.api.account.AccountSettingsService;
 import xyz.star4y.api.account.ProxyAccountEntity;
 import xyz.star4y.api.apikey.ApiKeyPrincipal;
 import xyz.star4y.api.apikey.ApiKeyService;
@@ -57,7 +57,7 @@ public class ProxyFacade {
 
     private final ApiKeyService apiKeyService;
     private final AccountPoolService accountPoolService;
-    private final AccountAutoSuspendService accountAutoSuspendService;
+    private final AccountSettingsService accountSettingsService;
     private final ModelCatalogProvider modelCatalog;
     private final ModelMappingService modelMappingService;
     private final RateLimiterService rateLimiterService;
@@ -75,7 +75,7 @@ public class ProxyFacade {
     public ProxyFacade(
         ApiKeyService apiKeyService,
         AccountPoolService accountPoolService,
-        AccountAutoSuspendService accountAutoSuspendService,
+        AccountSettingsService accountSettingsService,
         ModelCatalogProvider modelCatalog,
         ModelMappingService modelMappingService,
         RateLimiterService rateLimiterService,
@@ -92,7 +92,7 @@ public class ProxyFacade {
     ) {
         this.apiKeyService = apiKeyService;
         this.accountPoolService = accountPoolService;
-        this.accountAutoSuspendService = accountAutoSuspendService;
+        this.accountSettingsService = accountSettingsService;
         this.modelCatalog = modelCatalog;
         this.modelMappingService = modelMappingService;
         this.rateLimiterService = rateLimiterService;
@@ -143,28 +143,35 @@ public class ProxyFacade {
         String requestId = UUID.randomUUID().toString();
         String requestedModel = request.path("model").asText(modelCatalog.defaultTargetModelId());
         String mappedModel = modelMappingService.apply(requestedModel, principal.keyId());
+        boolean requestedFastMode = isFastRequested(request, requestedModel, mappedModel);
+        String upstreamModel = upstreamModelFor(mappedModel, requestedFastMode);
         String sessionHint = sessionHint(exchange, request, principal.keyId());
         boolean stream = responseMode != ResponseMode.GEMINI_GENERATE_CONTENT && request.path("stream").asBoolean(false);
-        UpstreamRoute route = routeFor(mappedModel);
+        UpstreamRoute route = routeFor(upstreamModel);
+        boolean fastMode = requestedFastMode && route == UpstreamRoute.OPENAI;
+        JsonNode upstreamRequest = fastMode ? openAiFastRequest(request) : request;
 
-        return attemptChat(
+        return requireFastModeAllowed(fastMode).then(Mono.defer(() -> attemptChat(
+            upstreamRequest,
             request,
             principal,
             path,
             responseMode,
             requestedModel,
-            mappedModel,
+            upstreamModel,
             sessionHint,
             stream,
             route,
+            fastMode,
             requestId,
             start,
             List.of()
-        );
+        )));
     }
 
     private Mono<ResponseEntity<?>> attemptChat(
-        JsonNode request,
+        JsonNode upstreamRequest,
+        JsonNode responseRequest,
         ApiKeyPrincipal principal,
         String path,
         ResponseMode responseMode,
@@ -173,17 +180,18 @@ public class ProxyFacade {
         String sessionHint,
         boolean stream,
         UpstreamRoute route,
+        boolean fastMode,
         String requestId,
         Instant start,
         List<String> attemptedAccountIds
     ) {
         return selectAccount(route, sessionHint, attemptedAccountIds)
-            .flatMap(account -> callWithAccount(route, account, request, mappedModel, sessionHint)
+            .flatMap(account -> callWithAccount(route, account, upstreamRequest, mappedModel, sessionHint)
                 .flatMap(result -> {
-                    Mono<Void> accounting = recordSuccess(requestId, principal, account, path, requestedModel, result, start);
+                    Mono<Void> accounting = recordSuccess(requestId, principal, account, path, requestedModel, result, route, fastMode, start);
                     ResponseEntity<?> response = stream
-                        ? streamResponse(responseMode, request, mappedModel, result)
-                        : jsonResponse(responseMode, request, mappedModel, result);
+                        ? streamResponse(responseMode, responseRequest, mappedModel, result)
+                        : jsonResponse(responseMode, responseRequest, mappedModel, result);
                     return accounting.then(Mono.<ResponseEntity<?>>just(response));
                 })
                 .onErrorResume(error -> {
@@ -193,7 +201,8 @@ public class ProxyFacade {
                         return failureRecord.then(Mono.<ResponseEntity<?>>error(mapError(error)));
                     }
                     return failureRecord.then(attemptChat(
-                        request,
+                        upstreamRequest,
+                        responseRequest,
                         principal,
                         path,
                         responseMode,
@@ -202,6 +211,7 @@ public class ProxyFacade {
                         sessionHint,
                         stream,
                         route,
+                        fastMode,
                         requestId,
                         start,
                         nextAttempted
@@ -222,27 +232,38 @@ public class ProxyFacade {
         String path = "/v1/responses";
         String requestedModel = request.path("model").asText(modelCatalog.defaultTargetModelId());
         String mappedModel = modelMappingService.apply(requestedModel, principal.keyId());
+        boolean requestedFastMode = isFastRequested(request, requestedModel, mappedModel);
+        String upstreamModel = upstreamModelFor(mappedModel, requestedFastMode);
         String sessionHint = sessionHint(exchange, request, principal.keyId());
         boolean stream = request.path("stream").asBoolean(false);
-        UpstreamRoute route = routeFor(mappedModel);
+        UpstreamRoute route = routeFor(upstreamModel);
+        boolean fastMode = requestedFastMode && route == UpstreamRoute.OPENAI;
+        JsonNode upstreamRequest = fastMode ? openAiFastRequest(request) : request;
 
-        return attemptResponses(
+        return requireFastModeAllowed(fastMode).then(Mono.defer(() -> attemptResponses(
+            upstreamRequest,
             request,
             principal,
             path,
             requestedModel,
-            mappedModel,
+            upstreamModel,
             sessionHint,
             stream,
             route,
+            fastMode,
             requestId,
             start,
             List.of()
-        );
+        )));
+    }
+
+    private Mono<Void> requireFastModeAllowed(boolean fastMode) {
+        return fastMode ? accountSettingsService.ensureGptFastModeAllowed() : Mono.empty();
     }
 
     private Mono<ResponseEntity<?>> attemptResponses(
-        JsonNode request,
+        JsonNode upstreamRequest,
+        JsonNode responseRequest,
         ApiKeyPrincipal principal,
         String path,
         String requestedModel,
@@ -250,17 +271,18 @@ public class ProxyFacade {
         String sessionHint,
         boolean stream,
         UpstreamRoute route,
+        boolean fastMode,
         String requestId,
         Instant start,
         List<String> attemptedAccountIds
     ) {
         return selectAccount(route, sessionHint, attemptedAccountIds)
-            .flatMap(account -> callResponsesWithAccount(route, account, request, mappedModel, sessionHint)
+            .flatMap(account -> callResponsesWithAccount(route, account, upstreamRequest, mappedModel, sessionHint)
                 .flatMap(result -> {
-                    Mono<Void> accounting = recordSuccess(requestId, principal, account, path, requestedModel, result, start);
+                    Mono<Void> accounting = recordSuccess(requestId, principal, account, path, requestedModel, result, route, fastMode, start);
                     ResponseEntity<?> response = stream
-                        ? streamResponse(ResponseMode.OPENAI_RESPONSES, request, mappedModel, result)
-                        : jsonResponse(ResponseMode.OPENAI_RESPONSES, request, mappedModel, result);
+                        ? streamResponse(ResponseMode.OPENAI_RESPONSES, responseRequest, mappedModel, result)
+                        : jsonResponse(ResponseMode.OPENAI_RESPONSES, responseRequest, mappedModel, result);
                     return accounting.then(Mono.<ResponseEntity<?>>just(response));
                 })
                 .onErrorResume(error -> {
@@ -270,7 +292,8 @@ public class ProxyFacade {
                         return failureRecord.then(Mono.<ResponseEntity<?>>error(mapError(error)));
                     }
                     return failureRecord.then(attemptResponses(
-                        request,
+                        upstreamRequest,
+                        responseRequest,
                         principal,
                         path,
                         requestedModel,
@@ -278,6 +301,7 @@ public class ProxyFacade {
                         sessionHint,
                         stream,
                         route,
+                        fastMode,
                         requestId,
                         start,
                         nextAttempted
@@ -334,7 +358,7 @@ public class ProxyFacade {
     }
 
     private UpstreamRoute routeFor(String model) {
-        String normalized = model == null ? "" : model.trim().toLowerCase();
+        String normalized = routeModel(model);
         if (normalized.startsWith("openai/")
             || normalized.startsWith("gpt")
             || normalized.startsWith("chatgpt")
@@ -342,6 +366,69 @@ public class ProxyFacade {
             return UpstreamRoute.OPENAI;
         }
         return UpstreamRoute.KIRO;
+    }
+
+    private String routeModel(String model) {
+        String normalized = model == null ? "" : model.trim().toLowerCase();
+        return normalized.startsWith("starry/") ? normalized.substring("starry/".length()) : normalized;
+    }
+
+    private boolean isFastRequested(JsonNode request, String requestedModel, String mappedModel) {
+        return isPriorityTier(request.path("service_tier").asText(null))
+            || isPriorityTier(request.path("serviceTier").asText(null))
+            || request.path("fast").asBoolean(false)
+            || request.path("fast_mode").asBoolean(false)
+            || isFastOpenAiModel(requestedModel)
+            || isFastOpenAiModel(mappedModel);
+    }
+
+    private boolean isPriorityTier(String tier) {
+        if (tier == null || tier.isBlank()) {
+            return false;
+        }
+        String normalized = tier.trim().toLowerCase();
+        return "priority".equals(normalized) || "fast".equals(normalized);
+    }
+
+    private boolean isFastOpenAiModel(String model) {
+        String normalized = routeModel(model);
+        if (normalized.startsWith("openai/")) {
+            normalized = normalized.substring("openai/".length());
+        }
+        return normalized.endsWith("-fast")
+            && (normalized.startsWith("gpt") || normalized.startsWith("chatgpt") || normalized.matches("o\\d.*"));
+    }
+
+    private String upstreamModelFor(String model, boolean requestedFastMode) {
+        String normalized = stripStarryPrefix(model);
+        return requestedFastMode && isFastOpenAiModel(normalized) ? stripFastSuffix(normalized) : normalized;
+    }
+
+    private String stripStarryPrefix(String model) {
+        if (model == null) {
+            return null;
+        }
+        String trimmed = model.trim();
+        return trimmed.toLowerCase().startsWith("starry/") ? trimmed.substring("starry/".length()) : trimmed;
+    }
+
+    private String stripFastSuffix(String model) {
+        if (model == null) {
+            return null;
+        }
+        return model.toLowerCase().endsWith("-fast") ? model.substring(0, model.length() - "-fast".length()) : model;
+    }
+
+    private JsonNode openAiFastRequest(JsonNode request) {
+        if (request instanceof ObjectNode object) {
+            ObjectNode copy = object.deepCopy();
+            copy.put("service_tier", "priority");
+            copy.remove("serviceTier");
+            copy.remove("fast");
+            copy.remove("fast_mode");
+            return copy;
+        }
+        return request;
     }
 
     private Mono<ApiKeyPrincipal> authenticateAndLimit(ServerWebExchange exchange) {
@@ -363,11 +450,14 @@ public class ProxyFacade {
         String path,
         String model,
         PlatformCompletionResult result,
+        UpstreamRoute route,
+        boolean fastMode,
         Instant start
     ) {
         PlatformUsage usage = result.usage();
+        BigDecimal credits = billableCredits(usage, route, fastMode);
         Mono<Void> accountStats = accountPoolService.recordSuccess(account.getAccountId(), usage.totalTokens());
-        Mono<Void> keyStats = apiKeyService.recordUsage(principal.keyId(), usage.credits(), usage.inputTokens(), usage.outputTokens());
+        Mono<Void> keyStats = apiKeyService.recordUsage(principal.keyId(), credits, usage.inputTokens(), usage.outputTokens());
         Mono<Void> log = statsService.log(new StatsService.RequestLog(
             requestId,
             principal.keyId(),
@@ -378,11 +468,19 @@ public class ProxyFacade {
             true,
             usage.inputTokens(),
             usage.outputTokens(),
-            usage.credits(),
+            credits,
             Duration.between(start, Instant.now()).toMillis(),
             null
         ));
         return Mono.whenDelayError(accountStats, keyStats, log).then();
+    }
+
+    private BigDecimal billableCredits(PlatformUsage usage, UpstreamRoute route, boolean fastMode) {
+        BigDecimal credits = usage.credits() == null ? BigDecimal.ZERO : usage.credits();
+        if (route == UpstreamRoute.OPENAI && credits.compareTo(BigDecimal.ZERO) <= 0) {
+            credits = BigDecimal.valueOf(usage.totalTokens());
+        }
+        return fastMode ? credits.multiply(BigDecimal.valueOf(2)) : credits;
     }
 
     private Mono<Void> recordFailure(
@@ -396,13 +494,10 @@ public class ProxyFacade {
     ) {
         Throwable failure = rootFailure(error);
         Integer statusCode = failure instanceof UpstreamException upstream ? upstream.getStatusCode() : null;
-        AccountPoolService.UpstreamErrorType type = statusCode != null
-            && (statusCode == 401 || statusCode == 402 || statusCode == 403 || statusCode == 429 || statusCode >= 500)
+        AccountPoolService.UpstreamErrorType type = statusCode != null && (statusCode == 402 || statusCode == 403 || statusCode == 429)
             ? AccountPoolService.UpstreamErrorType.RECOVERABLE
             : AccountPoolService.UpstreamErrorType.FATAL;
-        Mono<Void> accountStats = accountPoolService.recordRequestFailure(account.getAccountId(), type, statusCode, failure.getMessage())
-            .doOnNext(accountAutoSuspendService::scheduleIfNeeded)
-            .then();
+        Mono<Void> accountStats = accountPoolService.recordRequestFailure(account.getAccountId(), type, statusCode, failure.getMessage());
         Mono<Void> log = statsService.log(new StatsService.RequestLog(
             requestId,
             principal.keyId(),
