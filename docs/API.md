@@ -377,7 +377,9 @@ Create account:
   "profileArn": "arn:aws:codewhisperer:us-east-1:...",
   "machineId": "optional-machine-id",
   "proxyUrl": "http://user:pass@host:port",
-  "quotaLimit": 1000000
+  "quotaLimit": 1000000,
+  "quota5hLimit": 200000,
+  "quota7dLimit": 800000
 }
 ```
 
@@ -408,8 +410,12 @@ Account identity is matched by normalized email during create/import. `upsert=fa
 
 The management console can upload multiple `.json` files, parse them in the browser, and submit one import request per file. Results are aggregated in the console after all files finish.
 
+Account quota tracking supports a total quota plus 5-hour and 7-day rolling windows. `quotaUsed`, `quota5hUsed`, and `quota7dUsed` are incremented from successful upstream token usage; `quota5hResetAt` and `quota7dResetAt` advance when each rolling window starts over. The management console renders all three as remaining-quota progress bars.
+
 `POST /admin/accounts/test` tests Kiro accounts through the Kiro upstream client, OpenAI API key accounts through `/chat/completions`, and Codex accounts through `/responses`.
 `updateStatus` defaults to `true`; set it to `false` only when a test should not change account state. Successful tests re-enable the account and clear suspended/quota state. Failed tests disable and suspend the account so it becomes unavailable. `402` and `429` also mark the account quota exhausted, while `401` and `403` use the auth failure suspend reason.
+
+During normal proxy traffic, upstream request failures increment the account's consecutive `errorCount`. When an account reaches two consecutive request failures, the service schedules one background account test with status updates enabled. If that test fails, the existing test-failure path marks the account unavailable; if it succeeds, the account is re-enabled and `errorCount` is reset.
 
 `GET /admin/accounts/test-models` returns provider-specific test model groups for Kiro, OpenAI API key, Google/Gemini, Anthropic, and Codex accounts. OpenAI, Google, and Anthropic test model IDs are synchronized from `https://openrouter.ai/api/v1/models` and keep the OpenRouter provider prefix, for example `openai/gpt-5`, `google/gemini-2.5-pro`, and `anthropic/claude-sonnet-4.5`. Codex OAuth account tests use ChatGPT-account-compatible GPT-5 series model IDs by default; legacy Codex-only slugs such as `gpt-5-codex` are normalized before testing to avoid unsupported-model failures. The management console uses this endpoint to show the correct model list for each account row.
 

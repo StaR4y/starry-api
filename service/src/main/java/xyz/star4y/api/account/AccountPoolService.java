@@ -115,6 +115,12 @@ public class AccountPoolService {
                 if (request.quotaUsed() != null) entity.setQuotaUsed(request.quotaUsed());
                 if (request.quotaLimit() != null) entity.setQuotaLimit(request.quotaLimit());
                 if (request.quotaResetAt() != null) entity.setQuotaResetAt(request.quotaResetAt());
+                if (request.quota5hUsed() != null) entity.setQuota5hUsed(request.quota5hUsed());
+                if (request.quota5hLimit() != null) entity.setQuota5hLimit(request.quota5hLimit());
+                if (request.quota5hResetAt() != null) entity.setQuota5hResetAt(request.quota5hResetAt());
+                if (request.quota7dUsed() != null) entity.setQuota7dUsed(request.quota7dUsed());
+                if (request.quota7dLimit() != null) entity.setQuota7dLimit(request.quota7dLimit());
+                if (request.quota7dResetAt() != null) entity.setQuota7dResetAt(request.quota7dResetAt());
                 return repository.save(entity);
             })))
             .flatMap(saved -> refreshCache().thenReturn(saved));
@@ -203,14 +209,48 @@ public class AccountPoolService {
     }
 
     public Mono<Void> recordSuccess(String accountId, long tokens) {
+        long safeTokens = Math.max(tokens, 0);
+        Instant totalQuotaResetAt = nextTotalQuotaResetAt();
         String sql = """
             UPDATE proxy_accounts
             SET request_count = request_count + 1,
                 error_count = 0,
+                quota_used = CASE
+                    WHEN quota_reset_at IS NOT NULL AND quota_reset_at <= CURRENT_TIMESTAMP(3)
+                        THEN :tokens
+                    ELSE COALESCE(quota_used, 0) + :tokens
+                END,
+                quota_reset_at = CASE
+                    WHEN quota_reset_at IS NOT NULL AND quota_reset_at <= CURRENT_TIMESTAMP(3)
+                        THEN :totalQuotaResetAt
+                    ELSE quota_reset_at
+                END,
+                quota_5h_used = CASE
+                    WHEN quota_5h_reset_at IS NULL OR quota_5h_reset_at <= CURRENT_TIMESTAMP(3)
+                        THEN :tokens
+                    ELSE COALESCE(quota_5h_used, 0) + :tokens
+                END,
+                quota_5h_reset_at = CASE
+                    WHEN quota_5h_reset_at IS NULL OR quota_5h_reset_at <= CURRENT_TIMESTAMP(3)
+                        THEN DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 5 HOUR)
+                    ELSE quota_5h_reset_at
+                END,
+                quota_7d_used = CASE
+                    WHEN quota_7d_reset_at IS NULL OR quota_7d_reset_at <= CURRENT_TIMESTAMP(3)
+                        THEN :tokens
+                    ELSE COALESCE(quota_7d_used, 0) + :tokens
+                END,
+                quota_7d_reset_at = CASE
+                    WHEN quota_7d_reset_at IS NULL OR quota_7d_reset_at <= CURRENT_TIMESTAMP(3)
+                        THEN DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 7 DAY)
+                    ELSE quota_7d_reset_at
+                END,
                 last_used_at = CURRENT_TIMESTAMP(3)
             WHERE account_id = :accountId
             """;
         return template.getDatabaseClient().sql(sql)
+            .bind("tokens", safeTokens)
+            .bind("totalQuotaResetAt", totalQuotaResetAt)
             .bind("accountId", accountId)
             .fetch()
             .rowsUpdated()
@@ -221,10 +261,42 @@ public class AccountPoolService {
         if (!updateStatus) {
             return recordSuccess(accountId, tokens);
         }
+        long safeTokens = Math.max(tokens, 0);
+        Instant totalQuotaResetAt = nextTotalQuotaResetAt();
         String sql = """
             UPDATE proxy_accounts
             SET request_count = request_count + 1,
                 error_count = 0,
+                quota_used = CASE
+                    WHEN quota_reset_at IS NOT NULL AND quota_reset_at <= CURRENT_TIMESTAMP(3)
+                        THEN :tokens
+                    ELSE COALESCE(quota_used, 0) + :tokens
+                END,
+                quota_reset_at = CASE
+                    WHEN quota_reset_at IS NOT NULL AND quota_reset_at <= CURRENT_TIMESTAMP(3)
+                        THEN :totalQuotaResetAt
+                    ELSE quota_reset_at
+                END,
+                quota_5h_used = CASE
+                    WHEN quota_5h_reset_at IS NULL OR quota_5h_reset_at <= CURRENT_TIMESTAMP(3)
+                        THEN :tokens
+                    ELSE COALESCE(quota_5h_used, 0) + :tokens
+                END,
+                quota_5h_reset_at = CASE
+                    WHEN quota_5h_reset_at IS NULL OR quota_5h_reset_at <= CURRENT_TIMESTAMP(3)
+                        THEN DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 5 HOUR)
+                    ELSE quota_5h_reset_at
+                END,
+                quota_7d_used = CASE
+                    WHEN quota_7d_reset_at IS NULL OR quota_7d_reset_at <= CURRENT_TIMESTAMP(3)
+                        THEN :tokens
+                    ELSE COALESCE(quota_7d_used, 0) + :tokens
+                END,
+                quota_7d_reset_at = CASE
+                    WHEN quota_7d_reset_at IS NULL OR quota_7d_reset_at <= CURRENT_TIMESTAMP(3)
+                        THEN DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 7 DAY)
+                    ELSE quota_7d_reset_at
+                END,
                 enabled = TRUE,
                 quota_exhausted_at = NULL,
                 suspended_at = NULL,
@@ -234,6 +306,8 @@ public class AccountPoolService {
             WHERE account_id = :accountId
             """;
         return template.getDatabaseClient().sql(sql)
+            .bind("tokens", safeTokens)
+            .bind("totalQuotaResetAt", totalQuotaResetAt)
             .bind("accountId", accountId)
             .fetch()
             .rowsUpdated()
@@ -260,30 +334,30 @@ public class AccountPoolService {
             .then(refreshCache());
     }
 
-    public Mono<Void> recordRequestFailure(
+    public Mono<RequestFailureRecord> recordRequestFailure(
         String accountId,
         UpstreamErrorType type,
         Integer statusCode,
         String message
     ) {
-        if (!isQuotaStatus(statusCode) && !isAuthStatus(statusCode)) {
-            return recordError(accountId, type, statusCode);
-        }
         Instant now = Instant.now();
         return repository.findByAccountId(accountId)
             .flatMap(entity -> {
-                entity.setErrorCount(Optional.ofNullable(entity.getErrorCount()).orElse(0) + 1);
+                int errors = Optional.ofNullable(entity.getErrorCount()).orElse(0) + 1;
+                boolean suspended = isQuotaStatus(statusCode) || isAuthStatus(statusCode);
+                entity.setErrorCount(errors);
                 entity.setLastUsedAt(now);
                 if (isQuotaStatus(statusCode)) {
                     entity.setQuotaExhaustedAt(now);
                     suspendForFailure(entity, "QUOTA_EXHAUSTED", message, now);
-                } else {
+                } else if (isAuthStatus(statusCode)) {
                     entity.setQuotaExhaustedAt(null);
                     suspendForFailure(entity, "AUTH_FAILED", message, now);
                 }
-                return repository.save(entity);
+                return repository.save(entity)
+                    .map(saved -> new RequestFailureRecord(saved.getAccountId(), errors, statusCode, suspended));
             })
-            .then(refreshCache());
+            .flatMap(record -> refreshCache().thenReturn(record));
     }
 
     public Mono<Void> recordTestFailure(
@@ -401,15 +475,29 @@ public class AccountPoolService {
 
     private boolean isQuotaExhausted(ProxyAccountEntity account) {
         Instant now = Instant.now();
-        if (account.getQuotaResetAt() != null && !account.getQuotaResetAt().isAfter(now)) {
-            return false;
-        }
-        if (account.getQuotaExhaustedAt() != null) {
+        boolean totalQuotaWindowActive = account.getQuotaResetAt() == null || account.getQuotaResetAt().isAfter(now);
+        if (totalQuotaWindowActive && account.getQuotaExhaustedAt() != null) {
             return true;
         }
         Long used = account.getQuotaUsed();
         Long limit = account.getQuotaLimit();
-        return limit != null && limit > 0 && used != null && used >= limit;
+        if (totalQuotaWindowActive && limit != null && limit > 0 && used != null && used >= limit) {
+            return true;
+        }
+        return isWindowQuotaExhausted(account.getQuota5hUsed(), account.getQuota5hLimit(), account.getQuota5hResetAt(), now)
+            || isWindowQuotaExhausted(account.getQuota7dUsed(), account.getQuota7dLimit(), account.getQuota7dResetAt(), now);
+    }
+
+    private boolean isWindowQuotaExhausted(Long used, Long limit, Instant resetAt, Instant now) {
+        if (limit == null || limit <= 0 || used == null || used < limit) {
+            return false;
+        }
+        return resetAt == null || resetAt.isAfter(now);
+    }
+
+    private Instant nextTotalQuotaResetAt() {
+        Duration reset = Optional.ofNullable(properties.getQuotaReset()).orElse(Duration.ofHours(1));
+        return Instant.now().plus(reset);
     }
 
     private void cleanupAffinity() {
@@ -483,6 +571,8 @@ public class AccountPoolService {
         entity.setRequestCount(0L);
         entity.setErrorCount(0);
         entity.setQuotaUsed(0L);
+        entity.setQuota5hUsed(0L);
+        entity.setQuota7dUsed(0L);
         applyImportedFields(entity, request);
         return entity;
     }
@@ -505,6 +595,8 @@ public class AccountPoolService {
         entity.setMachineId(request.machineId());
         entity.setProxyUrl(request.proxyUrl());
         entity.setQuotaLimit(request.quotaLimit());
+        entity.setQuota5hLimit(request.quota5hLimit());
+        entity.setQuota7dLimit(request.quota7dLimit());
     }
 
     private Mono<Void> ensureEmailAvailable(String email, ProxyAccountEntity currentAccount) {
@@ -585,6 +677,14 @@ public class AccountPoolService {
     public enum UpstreamErrorType {
         FATAL,
         RECOVERABLE
+    }
+
+    public record RequestFailureRecord(
+        String accountId,
+        int consecutiveFailures,
+        Integer statusCode,
+        boolean suspended
+    ) {
     }
 
     private record AffinityEntry(String accountId, Instant lastSeenAt) {

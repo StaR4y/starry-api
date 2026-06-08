@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import xyz.star4y.api.account.AccountAutoSuspendService;
 import xyz.star4y.api.account.AccountPoolService;
 import xyz.star4y.api.account.ProxyAccountEntity;
 import xyz.star4y.api.apikey.ApiKeyPrincipal;
@@ -56,6 +57,7 @@ public class ProxyFacade {
 
     private final ApiKeyService apiKeyService;
     private final AccountPoolService accountPoolService;
+    private final AccountAutoSuspendService accountAutoSuspendService;
     private final ModelCatalogProvider modelCatalog;
     private final ModelMappingService modelMappingService;
     private final RateLimiterService rateLimiterService;
@@ -73,6 +75,7 @@ public class ProxyFacade {
     public ProxyFacade(
         ApiKeyService apiKeyService,
         AccountPoolService accountPoolService,
+        AccountAutoSuspendService accountAutoSuspendService,
         ModelCatalogProvider modelCatalog,
         ModelMappingService modelMappingService,
         RateLimiterService rateLimiterService,
@@ -89,6 +92,7 @@ public class ProxyFacade {
     ) {
         this.apiKeyService = apiKeyService;
         this.accountPoolService = accountPoolService;
+        this.accountAutoSuspendService = accountAutoSuspendService;
         this.modelCatalog = modelCatalog;
         this.modelMappingService = modelMappingService;
         this.rateLimiterService = rateLimiterService;
@@ -392,10 +396,13 @@ public class ProxyFacade {
     ) {
         Throwable failure = rootFailure(error);
         Integer statusCode = failure instanceof UpstreamException upstream ? upstream.getStatusCode() : null;
-        AccountPoolService.UpstreamErrorType type = statusCode != null && (statusCode == 402 || statusCode == 403 || statusCode == 429)
+        AccountPoolService.UpstreamErrorType type = statusCode != null
+            && (statusCode == 401 || statusCode == 402 || statusCode == 403 || statusCode == 429 || statusCode >= 500)
             ? AccountPoolService.UpstreamErrorType.RECOVERABLE
             : AccountPoolService.UpstreamErrorType.FATAL;
-        Mono<Void> accountStats = accountPoolService.recordRequestFailure(account.getAccountId(), type, statusCode, failure.getMessage());
+        Mono<Void> accountStats = accountPoolService.recordRequestFailure(account.getAccountId(), type, statusCode, failure.getMessage())
+            .doOnNext(accountAutoSuspendService::scheduleIfNeeded)
+            .then();
         Mono<Void> log = statsService.log(new StatsService.RequestLog(
             requestId,
             principal.keyId(),

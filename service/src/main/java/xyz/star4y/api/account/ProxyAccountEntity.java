@@ -2,6 +2,7 @@ package xyz.star4y.api.account;
 
 import java.time.Instant;
 import org.springframework.data.annotation.Id;
+import org.springframework.data.relational.core.mapping.Column;
 import org.springframework.data.relational.core.mapping.Table;
 
 @Table("proxy_accounts")
@@ -31,6 +32,18 @@ public class ProxyAccountEntity {
     private Long quotaLimit;
     private Instant quotaExhaustedAt;
     private Instant quotaResetAt;
+    @Column("quota_5h_used")
+    private Long quota5hUsed;
+    @Column("quota_5h_limit")
+    private Long quota5hLimit;
+    @Column("quota_5h_reset_at")
+    private Instant quota5hResetAt;
+    @Column("quota_7d_used")
+    private Long quota7dUsed;
+    @Column("quota_7d_limit")
+    private Long quota7dLimit;
+    @Column("quota_7d_reset_at")
+    private Instant quota7dResetAt;
     private Instant suspendedAt;
     private String suspendReason;
     private String suspendMessage;
@@ -220,6 +233,54 @@ public class ProxyAccountEntity {
 
     public void setQuotaResetAt(Instant quotaResetAt) {
         this.quotaResetAt = quotaResetAt;
+    }
+
+    public Long getQuota5hUsed() {
+        return quota5hUsed;
+    }
+
+    public void setQuota5hUsed(Long quota5hUsed) {
+        this.quota5hUsed = quota5hUsed;
+    }
+
+    public Long getQuota5hLimit() {
+        return quota5hLimit;
+    }
+
+    public void setQuota5hLimit(Long quota5hLimit) {
+        this.quota5hLimit = quota5hLimit;
+    }
+
+    public Instant getQuota5hResetAt() {
+        return quota5hResetAt;
+    }
+
+    public void setQuota5hResetAt(Instant quota5hResetAt) {
+        this.quota5hResetAt = quota5hResetAt;
+    }
+
+    public Long getQuota7dUsed() {
+        return quota7dUsed;
+    }
+
+    public void setQuota7dUsed(Long quota7dUsed) {
+        this.quota7dUsed = quota7dUsed;
+    }
+
+    public Long getQuota7dLimit() {
+        return quota7dLimit;
+    }
+
+    public void setQuota7dLimit(Long quota7dLimit) {
+        this.quota7dLimit = quota7dLimit;
+    }
+
+    public Instant getQuota7dResetAt() {
+        return quota7dResetAt;
+    }
+
+    public void setQuota7dResetAt(Instant quota7dResetAt) {
+        this.quota7dResetAt = quota7dResetAt;
     }
 
     public Instant getSuspendedAt() {

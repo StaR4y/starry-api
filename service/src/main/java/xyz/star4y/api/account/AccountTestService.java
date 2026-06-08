@@ -241,15 +241,30 @@ public class AccountTestService {
         if (account.getSuspendedAt() != null) {
             return "Account is suspended";
         }
-        if (account.getQuotaExhaustedAt() != null) {
+        Instant now = Instant.now();
+        boolean totalQuotaWindowActive = account.getQuotaResetAt() == null || account.getQuotaResetAt().isAfter(now);
+        if (totalQuotaWindowActive && account.getQuotaExhaustedAt() != null) {
             return "Quota is exhausted";
         }
         Long limit = account.getQuotaLimit();
         Long used = account.getQuotaUsed();
-        if (limit != null && limit > 0 && used != null && used >= limit) {
+        if (totalQuotaWindowActive && limit != null && limit > 0 && used != null && used >= limit) {
             return "Quota limit reached";
         }
+        if (windowQuotaReached(account.getQuota5hUsed(), account.getQuota5hLimit(), account.getQuota5hResetAt(), now)) {
+            return "5h quota limit reached";
+        }
+        if (windowQuotaReached(account.getQuota7dUsed(), account.getQuota7dLimit(), account.getQuota7dResetAt(), now)) {
+            return "7day quota limit reached";
+        }
         return null;
+    }
+
+    private boolean windowQuotaReached(Long used, Long limit, Instant resetAt, Instant now) {
+        if (limit == null || limit <= 0 || used == null || used < limit) {
+            return false;
+        }
+        return resetAt == null || resetAt.isAfter(now);
     }
 
     private AccountDtos.TestAccountsResponse summarize(

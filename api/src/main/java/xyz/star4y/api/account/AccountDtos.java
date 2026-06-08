@@ -27,7 +27,9 @@ public final class AccountDtos {
         String profileArn,
         String machineId,
         String proxyUrl,
-        Long quotaLimit
+        Long quotaLimit,
+        Long quota5hLimit,
+        Long quota7dLimit
     ) {
     }
 
@@ -49,7 +51,13 @@ public final class AccountDtos {
         Boolean enabled,
         Long quotaUsed,
         Long quotaLimit,
-        Instant quotaResetAt
+        Instant quotaResetAt,
+        Long quota5hUsed,
+        Long quota5hLimit,
+        Instant quota5hResetAt,
+        Long quota7dUsed,
+        Long quota7dLimit,
+        Instant quota7dResetAt
     ) {
     }
 
@@ -159,6 +167,12 @@ public final class AccountDtos {
         Long quotaLimit,
         Instant quotaExhaustedAt,
         Instant quotaResetAt,
+        Long quota5hUsed,
+        Long quota5hLimit,
+        Instant quota5hResetAt,
+        Long quota7dUsed,
+        Long quota7dLimit,
+        Instant quota7dResetAt,
         Instant suspendedAt,
         String suspendReason,
         String suspendMessage,

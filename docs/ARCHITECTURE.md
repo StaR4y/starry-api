@@ -141,7 +141,7 @@ Flyway creates these tables:
 
 | Table | Purpose |
 | --- | --- |
-| `proxy_accounts` | Upstream account credentials, quota, suspension, and metadata. |
+| `proxy_accounts` | Upstream account credentials, total/5h/7day quota windows, suspension, and metadata. |
 | `api_keys` | Per-user API key owner, full key copy value for new keys, hashes, status, limits, and aggregate usage. |
 | `api_key_usage_daily` | Daily API key usage summary. |
 | `model_mappings` | Model alias/replacement/load-balancing rules. |
@@ -155,14 +155,18 @@ An account is skipped when:
 
 - `enabled=false`
 - `suspendedAt` is set
-- quota is exhausted and `quotaResetAt` is still in the future
+- total quota, 5-hour quota, or 7-day quota is exhausted and its reset window is still active
 - recoverable failures are still cooling down and probabilistic retry does not trigger
+
+After two consecutive upstream request failures, the service schedules a background account test. A failed automatic test updates status through the same path as manual account testing and disables the account.
 
 Recoverable upstream status codes:
 
+- `401`
 - `402`
 - `403`
 - `429`
+- `5xx`
 
 ## Session Affinity
 

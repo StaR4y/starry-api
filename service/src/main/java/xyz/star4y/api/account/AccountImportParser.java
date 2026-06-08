@@ -121,7 +121,9 @@ public class AccountImportParser {
             firstText(item, null, "profileArn", "profile_arn"),
             firstText(item, null, "machineId", "machine_id"),
             firstText(sources, "proxyUrl", "proxy_url", "proxy-url"),
-            firstLong(item.path("quotaLimit"), item.path("quota_limit"), usage.path("limit"))
+            firstLong(item.path("quotaLimit"), item.path("quota_limit"), usage.path("limit")),
+            firstLong(item.path("quota5hLimit"), item.path("quota_5h_limit"), usage.path("limit5h"), usage.path("limit_5h")),
+            firstLong(item.path("quota7dLimit"), item.path("quota_7d_limit"), usage.path("limit7d"), usage.path("limit_7d"))
         );
     }
 
@@ -187,7 +189,9 @@ public class AccountImportParser {
             null,
             null,
             proxyUrl,
-            firstLong(entry.path("quotaLimit"), entry.path("quota_limit"))
+            firstLong(entry.path("quotaLimit"), entry.path("quota_limit")),
+            firstLong(entry.path("quota5hLimit"), entry.path("quota_5h_limit")),
+            firstLong(entry.path("quota7dLimit"), entry.path("quota_7d_limit"))
         );
     }
 

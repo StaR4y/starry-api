@@ -162,6 +162,12 @@ export interface Account {
   quotaLimit: number | null;
   quotaExhaustedAt: string | null;
   quotaResetAt: string | null;
+  quota5hUsed: number | null;
+  quota5hLimit: number | null;
+  quota5hResetAt: string | null;
+  quota7dUsed: number | null;
+  quota7dLimit: number | null;
+  quota7dResetAt: string | null;
   suspendedAt: string | null;
   suspendReason: string | null;
   suspendMessage: string | null;
@@ -189,6 +195,8 @@ export interface CreateAccountRequest {
   machineId?: string;
   proxyUrl?: string;
   quotaLimit?: number;
+  quota5hLimit?: number;
+  quota7dLimit?: number;
   credentials?: {
     accessToken?: string;
     csrfToken?: string;
@@ -212,6 +220,12 @@ export type UpdateAccountRequest = Partial<
     enabled: boolean;
     quotaUsed: number;
     quotaResetAt: string;
+    quota5hUsed: number;
+    quota5hLimit: number;
+    quota5hResetAt: string;
+    quota7dUsed: number;
+    quota7dLimit: number;
+    quota7dResetAt: string;
   }
 >;
 

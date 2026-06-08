@@ -14,7 +14,7 @@ The current runtime supports OpenAI-compatible, Anthropic-compatible, and Gemini
 - Platform-scoped backend modules for OpenAI, Anthropic, Gemini, Kiro upstream, shared core records, and shared model catalog
 - Platform-scoped frontend modules for provider registry, model grouping, and client setup scripts
 - Admin APIs for upstream accounts, API keys, model mappings, request logs, and local administrators
-- Account management supports Kiro accounts plus OpenAI API key and Codex token import/testing/routing.
+- Account management supports Kiro accounts plus OpenAI API key and Codex token import/testing/routing, automatic health-test suspension after consecutive failures, and total/5h/7day quota progress.
 - WebFlux, R2DBC MySQL, Flyway migrations, API key accounting, rate limits, account failover, and session affinity
 - Vue/Vite management console embedded into the Spring Boot jar
 - OpenAPI UI at `/docs`
