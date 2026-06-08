@@ -1,0 +1,12 @@
+{
+  "artifact": "starry-api.jar",
+  "version": "0.1.0-SNAPSHOT",
+  "branch": "main",
+  "commit": "89b39b42636fffd3223917263046a73173dd94b9",
+  "dirty": true,
+  "builtAt": "2026-06-08T14:29:13Z",
+  "sourceJar": "service/build/libs/service-0.1.0-SNAPSHOT.jar",
+  "sizeBytes": 44536947,
+  "sha256": "ac7df640d0bd3814cad8d1ad5a65b9f8e2372de094d9e13d867aba6c7320772b",
+  "java": "openjdk version \"25.0.3\" 2026-04-21 LTS"
+}

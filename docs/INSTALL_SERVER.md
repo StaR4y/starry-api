@@ -11,6 +11,14 @@ Nginx / 1Panel reverse proxy
 
 The installer binds the service port to `0.0.0.0:${HOST_HTTP_PORT}` by default so Docker-based 1Panel/OpenResty can reach it through the host port. Restrict that port with your firewall/security group and expose the service publicly through HTTPS reverse proxy. If Nginx runs directly on the host instead of in Docker, you may set `HOST_BIND_ADDR=127.0.0.1`.
 
+If the server should not compile Java/WebUI sources, use the prebuilt artifact installer instead:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/deploy-prebuilt-artifact.sh | sudo bash
+```
+
+See [Prebuilt Artifact Deployment](PREBUILT_ARTIFACTS.md) for the artifact publishing and download-only deployment flow.
+
 ## One-Line Install
 
 ```bash

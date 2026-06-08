@@ -226,6 +226,7 @@ webui
 - [Platform Module Plan](docs/PLAN.md)
 - [Server One-Click Install](docs/INSTALL_SERVER.md)
 - [1Panel Deployment](docs/1PANEL_DEPLOY.md)
+- [Prebuilt Artifact Deployment](docs/PREBUILT_ARTIFACTS.md)
 - [Operations](docs/OPERATIONS.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 
@@ -240,6 +241,15 @@ For a full packaged jar:
 
 ```bash
 ./gradlew :service:bootJar
+```
+
+To update the checked-in deployable artifact after a source commit:
+
+```bash
+./scripts/publish-artifact.sh
+git add artifacts
+git commit -m "chore: publish prebuilt artifact"
+git push
 ```
 
 ## Current Boundaries
