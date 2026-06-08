@@ -2,12 +2,13 @@
   /**
    * API Key 管理。
    *
-   * 关键点：创建后返回的完整密钥仅显示一次，使用独立对话框保留并提供复制操作。
+   * 关键点：API Key 按登录用户隔离，完整密钥由后端保存在所属用户记录中，便于直接复制。
    */
   import { computed, onMounted, reactive, ref } from 'vue';
   import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus';
   import PageSection from '@/components/PageSection.vue';
   import { apiKeysApi } from '@/api';
+  import { useAuthStore } from '@/stores/auth';
   import type { ApiKey, CreateApiKeyRequest, CreatedApiKey } from '@/types/api';
   import { formatDateTime, formatNumber } from '@/utils/format';
   import {
@@ -26,6 +27,7 @@
 
   const loading = ref(false);
   const apiKeys = ref<ApiKey[]>([]);
+  const auth = useAuthStore();
   const apiOrigin = computed(() => {
     const configured = import.meta.env.VITE_API_BASE;
     if (configured) {
@@ -98,7 +100,7 @@
     formVisible.value = true;
   }
 
-  /* 创建后一次性密钥展示 */
+  /* 创建后密钥展示 */
   const newKeyVisible = ref(false);
   const newKey = ref<CreatedApiKey | null>(null);
   const newSetupClient = ref<SetupClient>('codex');
@@ -142,28 +144,66 @@
     return `已复制 ${file.path}`;
   }
 
-  function rowApiKeyPlaceholder(row: ApiKey) {
-    return row.keyPrefix ? `${row.keyPrefix}REPLACE_REST_OF_KEY` : 'sk-REPLACE_ME';
+  function fullApiKeyOf(row?: ApiKey | null) {
+    const value = row?.key?.trim() ?? '';
+    return value.startsWith('sk-') ? value : '';
   }
 
-  /* 已有密钥只保存前缀，配置面板中使用占位符提醒替换为完整密钥。 */
+  function rowApiKeyPlaceholder(row?: ApiKey | null) {
+    if (fullApiKeyOf(row)) {
+      return fullApiKeyOf(row);
+    }
+    return row?.keyPrefix ? `${row.keyPrefix}REPLACE_REST_OF_KEY` : 'sk-REPLACE_ME';
+  }
+
+  /* 新版密钥会保留完整值；历史密钥只剩哈希时仍允许手动粘贴。 */
   const configVisible = ref(false);
   const configKey = ref<ApiKey | null>(null);
   const configFullApiKey = ref('');
   const configDialogTitle = computed(() =>
     configKey.value ? `${configKey.value.name} 客户端配置` : '客户端配置',
   );
+  const pastedConfigApiKey = computed(() => configFullApiKey.value.trim());
+  const storedConfigApiKey = computed(() => fullApiKeyOf(configKey.value));
+  const effectiveConfigApiKey = computed(() => pastedConfigApiKey.value || storedConfigApiKey.value);
   const hasConfigFullApiKey = computed(() => {
-    const value = configFullApiKey.value.trim();
+    const value = effectiveConfigApiKey.value;
     return value.startsWith('sk-') && !value.includes('REPLACE') && value.length > 24;
   });
-  const configApiKey = computed(() =>
-    hasConfigFullApiKey.value
-      ? configFullApiKey.value.trim()
-      : configKey.value
-        ? rowApiKeyPlaceholder(configKey.value)
-        : 'sk-REPLACE_ME',
+  const configApiKey = computed(() => {
+    if (hasConfigFullApiKey.value) {
+      return effectiveConfigApiKey.value;
+    }
+    return rowApiKeyPlaceholder(configKey.value);
+  });
+  const hasStoredConfigApiKey = computed(() => Boolean(storedConfigApiKey.value));
+  const configKeyNotice = computed(() =>
+    hasStoredConfigApiKey.value
+      ? '当前 API Key 已按用户隔离保存，可直接复制密钥或客户端配置。'
+      : '此为旧版 API Key，数据库只保留哈希和前缀，无法反推完整密钥；请重新创建或手动粘贴完整密钥。',
   );
+  const configKeyNoticeType = computed(() => (hasStoredConfigApiKey.value ? 'success' : 'warning'));
+  const configKeyHint = computed(() =>
+    hasStoredConfigApiKey.value
+      ? '完整密钥已自动填入；复制配置会使用当前用户自己的 API Key。'
+      : '粘贴创建时保存的完整密钥；只含前缀的占位密钥不能用于客户端鉴权。',
+  );
+
+  function fullConfigMissingMessage(action: string) {
+    return hasStoredConfigApiKey.value
+      ? `当前 API Key 异常，无法${action}`
+      : `请先粘贴完整 API Key，否则无法${action}`;
+  }
+
+  async function copyRowApiKey(row: ApiKey) {
+    const key = fullApiKeyOf(row);
+    if (!key) {
+      ElMessage.warning('旧版 API Key 只保存哈希，无法直接复制完整密钥，请重新创建');
+      return;
+    }
+    await copy(key, '已复制 API Key');
+  }
+
   const configConnectionText = computed(() => createConnectionText(setupContext(configApiKey.value)));
   const configScriptBlock = computed(() =>
     createSetupScriptBlock(configSetupClient.value, configSetupPlatform.value, setupContext(configApiKey.value)),
@@ -172,13 +212,13 @@
 
   function openShellConfig(row: ApiKey) {
     configKey.value = row;
-    configFullApiKey.value = '';
+    configFullApiKey.value = fullApiKeyOf(row);
     configVisible.value = true;
   }
 
   async function copyConfigConnectionText() {
     if (!hasConfigFullApiKey.value) {
-      ElMessage.warning('请先粘贴创建时保存的完整 API Key');
+      ElMessage.warning(fullConfigMissingMessage('复制连接信息'));
       return;
     }
     await copy(configConnectionText.value, '已复制连接信息');
@@ -186,7 +226,7 @@
 
   async function copyConfigScript(block: SetupScriptBlock) {
     if (!hasConfigFullApiKey.value) {
-      ElMessage.warning('请先粘贴完整 API Key，否则配置中的占位密钥不可用');
+      ElMessage.warning(fullConfigMissingMessage('复制客户端配置'));
       return;
     }
     await copy(block.script, scriptCopyMessage(block));
@@ -194,7 +234,7 @@
 
   async function copyConfigSetupFile(file: SetupFileBlock) {
     if (!hasConfigFullApiKey.value) {
-      ElMessage.warning('请先粘贴完整 API Key，否则配置中的占位密钥不可用');
+      ElMessage.warning(fullConfigMissingMessage('复制客户端配置文件'));
       return;
     }
     await copy(file.content, setupFileCopyMessage(file));
@@ -202,7 +242,7 @@
 
   async function copyConfigCcSwitch(link: CcSwitchLink) {
     if (!hasConfigFullApiKey.value) {
-      ElMessage.warning('请先粘贴完整 API Key，否则 CC Switch 链接不可用');
+      ElMessage.warning(fullConfigMissingMessage('复制 CC Switch 链接'));
       return;
     }
     await copy(link.url, `已复制 ${link.label} CC Switch 链接`);
@@ -210,7 +250,7 @@
 
   function openConfigCcSwitch(link: CcSwitchLink) {
     if (!hasConfigFullApiKey.value) {
-      ElMessage.warning('请先粘贴完整 API Key，否则 CC Switch 链接不可用');
+      ElMessage.warning(fullConfigMissingMessage('打开 CC Switch 链接'));
       return;
     }
     window.location.href = link.url;
@@ -285,6 +325,11 @@
           <span class="mono">{{ row.keyPrefix }}</span>
         </template>
       </el-table-column>
+      <el-table-column v-if="auth.isAdmin" label="归属用户" min-width="150">
+        <template #default="{ row }">
+          <span class="mono">{{ row.userId || '—' }}</span>
+        </template>
+      </el-table-column>
       <el-table-column label="启用" width="80">
         <template #default="{ row }">
           <el-tag :type="row.enabled ? 'success' : 'info'" effect="light" round>
@@ -304,12 +349,13 @@
       <el-table-column label="最近使用" width="180">
         <template #default="{ row }">{{ formatDateTime(row.lastUsedAt) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="280" fixed="right">
+      <el-table-column label="操作" width="340" fixed="right">
         <template #default="{ row }">
           <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
           <el-button link type="primary" @click="toggleEnabled(row)">
             {{ row.enabled ? '停用' : '启用' }}
           </el-button>
+          <el-button link type="primary" @click="copyRowApiKey(row)">复制 Key</el-button>
           <el-button link type="primary" @click="openShellConfig(row)">客户端配置</el-button>
           <el-button link type="danger" @click="removeKey(row)">删除</el-button>
         </template>
@@ -343,8 +389,8 @@
     <div class="config-dialog-body">
       <el-alert
         class="secret-alert"
-        title="已有 API Key 只保留前缀。请先粘贴创建时保存的完整密钥，否则客户端配置中的占位密钥不可用。"
-        type="error"
+        :title="configKeyNotice"
+        :type="configKeyNoticeType"
         :closable="false"
         show-icon
       />
@@ -353,7 +399,7 @@
         <div class="secret-panel__head">
           <div>
             <h3>连接信息</h3>
-            <p>复制配置前先输入完整密钥；只含前缀的占位密钥不能用于客户端鉴权。</p>
+            <p>{{ configKeyHint }}</p>
           </div>
           <el-button size="small" :disabled="!hasConfigFullApiKey" @click="copyConfigConnectionText">
             复制连接信息
@@ -366,7 +412,7 @@
             v-model="configFullApiKey"
             clearable
             show-password
-            placeholder="粘贴创建时保存的完整 sk-... 密钥"
+            placeholder="完整 sk-... 密钥"
           />
         </div>
 
@@ -490,7 +536,7 @@
     </template>
   </el-dialog>
 
-  <!-- 创建后一次性密钥展示 -->
+  <!-- 创建后密钥展示 -->
   <el-dialog
     v-model="newKeyVisible"
     title="保存你的新密钥"
@@ -500,8 +546,8 @@
     <div class="secret-dialog-body">
       <el-alert
         class="secret-alert"
-        title="此密钥只显示一次，关闭后无法找回。请先复制 API Key 或客户端配置。"
-        type="warning"
+        title="此密钥已按当前用户独立保存，后续可在列表中直接复制。"
+        type="success"
         :closable="false"
         show-icon
       />

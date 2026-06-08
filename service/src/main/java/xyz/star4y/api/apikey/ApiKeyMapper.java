@@ -8,7 +8,9 @@ final class ApiKeyMapper {
     static ApiKeyDtos.ApiKeyResponse toResponse(ApiKeyEntity entity) {
         return new ApiKeyDtos.ApiKeyResponse(
             entity.getKeyId(),
+            entity.getUserId(),
             entity.getName(),
+            entity.getKeyValue(),
             entity.getKeyPrefix(),
             entity.getEnabled(),
             entity.getCreditsLimit(),

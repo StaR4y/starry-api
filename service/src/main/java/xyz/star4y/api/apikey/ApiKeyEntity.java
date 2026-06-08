@@ -11,8 +11,10 @@ public class ApiKeyEntity {
     @Id
     private Long id;
     private String keyId;
+    private String userId;
     private String name;
     private String keyHash;
+    private String keyValue;
     private String keyPrefix;
     private Boolean enabled;
     private BigDecimal creditsLimit;
@@ -40,6 +42,14 @@ public class ApiKeyEntity {
         this.keyId = keyId;
     }
 
+    public String getUserId() {
+        return userId;
+    }
+
+    public void setUserId(String userId) {
+        this.userId = userId;
+    }
+
     public String getName() {
         return name;
     }
@@ -54,6 +64,14 @@ public class ApiKeyEntity {
 
     public void setKeyHash(String keyHash) {
         this.keyHash = keyHash;
+    }
+
+    public String getKeyValue() {
+        return keyValue;
+    }
+
+    public void setKeyValue(String keyValue) {
+        this.keyValue = keyValue;
     }
 
     public String getKeyPrefix() {

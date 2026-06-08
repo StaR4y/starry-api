@@ -291,7 +291,9 @@ export interface ImportAccountsResult {
 
 export interface ApiKey {
   keyId: string;
+  userId: string | null;
   name: string;
+  key: string | null;
   keyPrefix: string;
   enabled: boolean;
   creditsLimit: number | null;
@@ -317,8 +319,9 @@ export interface UpdateApiKeyRequest {
 
 export interface CreatedApiKey {
   keyId: string;
+  userId: string | null;
   name: string;
-  /** 完整 sk-... 密钥，仅在创建响应中出现一次 */
+  /** 完整 sk-... 密钥 */
   key: string;
   keyPrefix: string;
   enabled: boolean;

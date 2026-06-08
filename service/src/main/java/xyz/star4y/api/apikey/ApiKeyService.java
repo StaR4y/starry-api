@@ -9,6 +9,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
+import xyz.star4y.api.admin.AdminPrincipal;
 import xyz.star4y.api.common.ApiException;
 import xyz.star4y.api.common.Hashing;
 import xyz.star4y.api.config.ProxyProperties;
@@ -17,6 +18,7 @@ import xyz.star4y.api.config.ProxyProperties;
 public class ApiKeyService {
 
     private static final String KEY_PREFIX = "sk-";
+    private static final String ADMIN_ROLE = "ADMIN";
 
     private final ApiKeyRepository repository;
     private final R2dbcEntityTemplate template;
@@ -28,12 +30,14 @@ public class ApiKeyService {
         this.properties = properties;
     }
 
-    public Mono<ApiKeyDtos.CreatedApiKeyResponse> create(ApiKeyDtos.CreateApiKeyRequest request) {
+    public Mono<ApiKeyDtos.CreatedApiKeyResponse> create(AdminPrincipal principal, ApiKeyDtos.CreateApiKeyRequest request) {
         String key = KEY_PREFIX + Hashing.randomToken(32);
         ApiKeyEntity entity = new ApiKeyEntity();
         entity.setKeyId(Hashing.shortUuid());
+        entity.setUserId(principal.userId());
         entity.setName(request.name());
         entity.setKeyHash(Hashing.sha256(key));
+        entity.setKeyValue(key);
         entity.setKeyPrefix(key.substring(0, Math.min(18, key.length())));
         entity.setEnabled(true);
         entity.setCreditsLimit(request.creditsLimit());
@@ -44,6 +48,7 @@ public class ApiKeyService {
         return repository.save(entity)
             .map(saved -> new ApiKeyDtos.CreatedApiKeyResponse(
                 saved.getKeyId(),
+                saved.getUserId(),
                 saved.getName(),
                 key,
                 saved.getKeyPrefix(),
@@ -53,8 +58,8 @@ public class ApiKeyService {
             ));
     }
 
-    public Mono<ApiKeyEntity> update(String keyId, ApiKeyDtos.UpdateApiKeyRequest request) {
-        return repository.findByKeyId(keyId)
+    public Mono<ApiKeyEntity> update(AdminPrincipal principal, String keyId, ApiKeyDtos.UpdateApiKeyRequest request) {
+        return findVisibleKey(principal, keyId)
             .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "API_KEY_NOT_FOUND", "API key not found")))
             .flatMap(entity -> {
                 if (request.name() != null) entity.setName(request.name());
@@ -64,8 +69,11 @@ public class ApiKeyService {
             });
     }
 
-    public Mono<Void> delete(String keyId) {
-        return repository.deleteByKeyId(keyId);
+    public Mono<Void> delete(AdminPrincipal principal, String keyId) {
+        if (isAdmin(principal)) {
+            return repository.deleteByKeyId(keyId);
+        }
+        return repository.deleteByKeyIdAndUserId(keyId, principal.userId());
     }
 
     public Mono<ApiKeyPrincipal> authenticate(ServerWebExchange exchange) {
@@ -94,6 +102,16 @@ public class ApiKeyService {
                     entity.getTotalCredits()
                 ));
             });
+    }
+
+    private Mono<ApiKeyEntity> findVisibleKey(AdminPrincipal principal, String keyId) {
+        return isAdmin(principal)
+            ? repository.findByKeyId(keyId)
+            : repository.findByKeyIdAndUserId(keyId, principal.userId());
+    }
+
+    private boolean isAdmin(AdminPrincipal principal) {
+        return principal != null && ADMIN_ROLE.equalsIgnoreCase(principal.role());
     }
 
     public Mono<Void> recordUsage(String keyId, BigDecimal credits, long inputTokens, long outputTokens) {

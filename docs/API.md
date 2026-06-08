@@ -431,7 +431,9 @@ Create key:
 }
 ```
 
-The full `sk-...` secret is returned only once.
+API keys are scoped to the logged-in local user. Administrators can list and manage all keys and see each key's `userId`; normal users only list, update, delete, and copy their own keys.
+
+New keys persist the full `sk-...` value in the owning user's key record, so the console can copy the API key and generated client configuration directly. Keys created before this behavior only have `keyHash` and `keyPrefix`; their full secret cannot be recovered and should be recreated when direct copy is needed.
 
 ### Model Mappings
 

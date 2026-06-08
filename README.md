@@ -131,6 +131,8 @@ curl -X POST http://127.0.0.1:8080/admin/api-keys \
   -d '{"name":"default","creditsLimit":1000}'
 ```
 
+API keys are bound to the logged-in local user. Normal users only see and manage their own keys; administrators can see all keys with their owner. New keys can be copied later from the console because the owning key record stores the full `sk-...` value.
+
 Add an upstream Kiro account:
 
 ```bash

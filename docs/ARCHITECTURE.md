@@ -142,7 +142,7 @@ Flyway creates these tables:
 | Table | Purpose |
 | --- | --- |
 | `proxy_accounts` | Upstream account credentials, quota, suspension, and metadata. |
-| `api_keys` | API key hashes, status, limits, and aggregate usage. |
+| `api_keys` | Per-user API key owner, full key copy value for new keys, hashes, status, limits, and aggregate usage. |
 | `api_key_usage_daily` | Daily API key usage summary. |
 | `model_mappings` | Model alias/replacement/load-balancing rules. |
 | `request_logs` | Request history, status, token use, latency, errors. |

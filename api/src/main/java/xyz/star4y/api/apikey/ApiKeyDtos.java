@@ -24,6 +24,7 @@ public final class ApiKeyDtos {
 
     public record CreatedApiKeyResponse(
         String keyId,
+        String userId,
         String name,
         String key,
         String keyPrefix,
@@ -35,7 +36,9 @@ public final class ApiKeyDtos {
 
     public record ApiKeyResponse(
         String keyId,
+        String userId,
         String name,
+        String key,
         String keyPrefix,
         Boolean enabled,
         BigDecimal creditsLimit,
