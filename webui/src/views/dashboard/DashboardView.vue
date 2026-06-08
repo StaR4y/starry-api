@@ -578,13 +578,6 @@
                 <g v-for="(series, index) in resourceChart.series" :key="series.name">
                   <path class="chart-area" :d="series.areaPoints" :fill="`url(#resource-fill-${index})`" />
                   <path class="chart-line" :d="series.points" :stroke="series.color" />
-                  <circle
-                    v-for="(value, valueIndex) in series.values"
-                    :key="`${series.name}-${valueIndex}`"
-                    :cx="xFor(valueIndex, series.values.length)"
-                    :cy="yFor(value, resourceChart.maxValue)"
-                    :fill="series.color"
-                  />
                 </g>
               </g>
               
@@ -725,13 +718,6 @@
                 <g v-for="(series, index) in memoryChart.series" :key="series.name">
                   <path class="chart-area" :d="series.areaPoints" :fill="`url(#memory-fill-${index})`" />
                   <path class="chart-line" :d="series.points" :stroke="series.color" />
-                  <circle
-                    v-for="(value, valueIndex) in series.values"
-                    :key="`${series.name}-${valueIndex}`"
-                    :cx="xFor(valueIndex, series.values.length)"
-                    :cy="yFor(value, memoryChart.maxValue)"
-                    :fill="series.color"
-                  />
                 </g>
               </g>
               
@@ -905,13 +891,6 @@
                 <g v-for="(series, index) in chartData.series" :key="series.name">
                   <path class="chart-area" :d="series.areaPoints" :fill="`url(#series-fill-${index})`" />
                   <path class="chart-line" :d="series.points" :stroke="series.color" />
-                  <circle
-                    v-for="(value, valueIndex) in series.values"
-                    :key="`${series.name}-${valueIndex}`"
-                    :cx="xFor(valueIndex, series.values.length)"
-                    :cy="yFor(value, chartData.maxValue)"
-                    :fill="series.color"
-                  />
                 </g>
               </g>
               
