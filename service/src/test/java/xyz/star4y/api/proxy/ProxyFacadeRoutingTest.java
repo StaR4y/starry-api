@@ -1,6 +1,7 @@
 package xyz.star4y.api.proxy;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -13,6 +14,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
@@ -21,9 +24,11 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import xyz.star4y.api.account.AccountPoolService;
 import xyz.star4y.api.account.AccountPlatforms;
+import xyz.star4y.api.account.AccountSettingsService;
 import xyz.star4y.api.account.ProxyAccountEntity;
 import xyz.star4y.api.apikey.ApiKeyPrincipal;
 import xyz.star4y.api.apikey.ApiKeyService;
+import xyz.star4y.api.common.ApiException;
 import xyz.star4y.api.model.DefaultModelCatalogProvider;
 import xyz.star4y.api.model.ModelMappingService;
 import xyz.star4y.api.platform.anthropic.AnthropicRequestAdapter;
@@ -74,7 +79,7 @@ class ProxyFacadeRoutingTest {
         when(openAiUpstreamClient.complete(eq(account), eq(request), eq("GPT-5.5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
         when(accountPoolService.recordSuccess("openai-main", 2L)).thenReturn(Mono.empty());
-        when(apiKeyService.recordUsage(eq("key-1"), eq(BigDecimal.ZERO), eq(1L), eq(1L))).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(BigDecimal.valueOf(2)), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
         proxyFacade(
@@ -91,6 +96,112 @@ class ProxyFacadeRoutingTest {
         verify(accountPoolService).selectOpenAiAccount("key-1");
         verify(accountPoolService, never()).selectKiroAccount(any());
         verify(openAiUpstreamClient).complete(eq(account), eq(request), eq("GPT-5.5"));
+        verify(kiroUpstreamClient, never()).complete(any(), any(), any());
+    }
+
+    @Test
+    void openAiFastModelUsesPriorityTierAndDoubleTokenCredits() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity account = openAiAccount();
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "starry/gpt-5-fast",
+              "messages": [{"role": "user", "content": "hi"}]
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/chat/completions")
+        );
+
+        when(apiKeyService.authenticate(exchange))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("starry/gpt-5-fast", "key-1")).thenReturn("starry/gpt-5-fast");
+        when(accountPoolService.selectOpenAiAccount("key-1")).thenReturn(Mono.just(account));
+        when(openAiUpstreamClient.complete(eq(account), any(JsonNode.class), eq("gpt-5")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(3, 2, BigDecimal.ZERO, 0, 0, 0))));
+        when(accountPoolService.recordSuccess("openai-main", 5L)).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(BigDecimal.valueOf(10)), eq(3L), eq(2L))).thenReturn(Mono.empty());
+        when(statsService.log(any())).thenReturn(Mono.empty());
+
+        proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService
+        ).chat(request, exchange).block();
+
+        ArgumentCaptor<JsonNode> forwardedRequest = ArgumentCaptor.forClass(JsonNode.class);
+        verify(openAiUpstreamClient).complete(eq(account), forwardedRequest.capture(), eq("gpt-5"));
+        assertThat(forwardedRequest.getValue().path("service_tier").asText()).isEqualTo("priority");
+        verify(apiKeyService).recordUsage("key-1", BigDecimal.valueOf(10), 3L, 2L);
+        verify(kiroUpstreamClient, never()).complete(any(), any(), any());
+    }
+
+    @Test
+    void openAiFastModelIsRejectedWhenAdminSettingDisabled() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        AccountSettingsService accountSettingsService = mock(AccountSettingsService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "starry/gpt-5-fast",
+              "messages": [{"role": "user", "content": "hi"}]
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/chat/completions")
+        );
+
+        when(apiKeyService.authenticate(exchange))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("starry/gpt-5-fast", "key-1")).thenReturn("starry/gpt-5-fast");
+        when(accountSettingsService.ensureGptFastModeAllowed()).thenReturn(Mono.error(new ApiException(
+            HttpStatus.FORBIDDEN,
+            "GPT_FAST_MODE_DISABLED",
+            "GPT fast mode is not allowed by administrator"
+        )));
+
+        assertThatThrownBy(() -> proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService,
+            accountSettingsService
+        ).chat(request, exchange).block())
+            .isInstanceOfSatisfying(ApiException.class, error -> {
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.FORBIDDEN);
+                assertThat(error.getCode()).isEqualTo("GPT_FAST_MODE_DISABLED");
+                assertThat(error.getMessage()).isEqualTo("GPT fast mode is not allowed by administrator");
+            });
+
+        verify(accountSettingsService).ensureGptFastModeAllowed();
+        verify(accountPoolService, never()).selectOpenAiAccount(any(String.class));
+        verify(openAiUpstreamClient, never()).complete(any(), any(), any());
         verify(kiroUpstreamClient, never()).complete(any(), any(), any());
     }
 
@@ -135,7 +246,7 @@ class ProxyFacadeRoutingTest {
         when(openAiUpstreamClient.complete(eq(backup), eq(request), eq("gpt-5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
         when(accountPoolService.recordSuccess("openai-backup", 2L)).thenReturn(Mono.empty());
-        when(apiKeyService.recordUsage(eq("key-1"), eq(BigDecimal.ZERO), eq(1L), eq(1L))).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(BigDecimal.valueOf(2)), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
         ResponseEntity<?> response = proxyFacade(
@@ -195,7 +306,7 @@ class ProxyFacadeRoutingTest {
         when(openAiUpstreamClient.completeResponses(eq(account), eq(request), eq("gpt-5.4-mini")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
         when(accountPoolService.recordSuccess("openai-main", 2L)).thenReturn(Mono.empty());
-        when(apiKeyService.recordUsage(eq("key-1"), eq(BigDecimal.ZERO), eq(1L), eq(1L))).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(BigDecimal.valueOf(2)), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
         ResponseEntity<?> response = proxyFacade(
@@ -245,9 +356,36 @@ class ProxyFacadeRoutingTest {
         OpenAiUpstreamClient openAiUpstreamClient,
         StatsService statsService
     ) {
+        AccountSettingsService accountSettingsService = mock(AccountSettingsService.class);
+        when(accountSettingsService.ensureGptFastModeAllowed()).thenReturn(Mono.empty());
+        return proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService,
+            accountSettingsService
+        );
+    }
+
+    private ProxyFacade proxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        DefaultModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroUpstreamClient kiroUpstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        StatsService statsService,
+        AccountSettingsService accountSettingsService
+    ) {
         return new ProxyFacade(
             apiKeyService,
             accountPoolService,
+            accountSettingsService,
             modelCatalog,
             modelMappingService,
             rateLimiterService,

@@ -85,6 +85,9 @@ public class OpenAiUpstreamClient {
         body.put("store", false);
         body.put("stream", true);
         body.set("input", codexInput(request));
+        if (request.hasNonNull("service_tier")) {
+            body.set("service_tier", request.get("service_tier"));
+        }
         appendCodexTools(body, request);
 
         return completeCodexOnce(account, body)

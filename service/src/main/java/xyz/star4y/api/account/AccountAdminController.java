@@ -17,17 +17,20 @@ public class AccountAdminController implements AccountAdminApi {
     private final AccountPoolService service;
     private final AccountImportParser importParser;
     private final AccountTestService testService;
+    private final AccountSettingsService settingsService;
     private final AdminAuth adminAuth;
 
     public AccountAdminController(
         AccountPoolService service,
         AccountImportParser importParser,
         AccountTestService testService,
+        AccountSettingsService settingsService,
         AdminAuth adminAuth
     ) {
         this.service = service;
         this.importParser = importParser;
         this.testService = testService;
+        this.settingsService = settingsService;
         this.adminAuth = adminAuth;
     }
 
@@ -57,6 +60,21 @@ public class AccountAdminController implements AccountAdminApi {
     ) {
         adminAuth.verifyAdmin(exchange);
         return service.importAccounts(importParser.parse(request)).map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<AccountDtos.AccountSettingsResponse>> settings(ServerWebExchange exchange) {
+        adminAuth.verifyAdmin(exchange);
+        return settingsService.settings().map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<AccountDtos.AccountSettingsResponse>> updateSettings(
+        ServerWebExchange exchange,
+        @RequestBody AccountDtos.UpdateAccountSettingsRequest request
+    ) {
+        adminAuth.verifyAdmin(exchange);
+        return settingsService.update(request).map(ApiResponse::ok);
     }
 
     @Override

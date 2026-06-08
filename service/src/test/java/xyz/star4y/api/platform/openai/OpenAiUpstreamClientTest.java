@@ -59,6 +59,7 @@ class OpenAiUpstreamClientTest {
             JsonNode request = objectMapper.readTree("""
                 {
                   "model": "gpt-5.4-mini",
+                  "service_tier": "priority",
                   "messages": [
                     {"role": "system", "content": "Use short replies."},
                     {"role": "user", "content": [{"type": "text", "text": "first"}]},
@@ -86,6 +87,7 @@ class OpenAiUpstreamClientTest {
             assertThat(result.content()).isEqualTo("OK");
             JsonNode body = objectMapper.readTree(requestBody.get());
             assertThat(body.path("instructions").asText()).isEqualTo("Use short replies.");
+            assertThat(body.path("service_tier").asText()).isEqualTo("priority");
             JsonNode input = body.path("input");
             assertThat(input.size()).isEqualTo(5);
             assertThat(input.path(0).path("role").asText()).isEqualTo("user");

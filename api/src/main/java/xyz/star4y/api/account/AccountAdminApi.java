@@ -32,6 +32,15 @@ public interface AccountAdminApi {
         @RequestBody JsonNode request
     );
 
+    @GetMapping("/settings")
+    Mono<ApiResponse<AccountDtos.AccountSettingsResponse>> settings(ServerWebExchange exchange);
+
+    @PatchMapping("/settings")
+    Mono<ApiResponse<AccountDtos.AccountSettingsResponse>> updateSettings(
+        ServerWebExchange exchange,
+        @RequestBody AccountDtos.UpdateAccountSettingsRequest request
+    );
+
     @PatchMapping("/{accountId}")
     Mono<ApiResponse<AccountDtos.AccountResponse>> update(
         ServerWebExchange exchange,

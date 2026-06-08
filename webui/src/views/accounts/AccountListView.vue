@@ -17,6 +17,7 @@
   import { ApiError } from '@/utils/http';
   import type {
     Account,
+    AccountSettings,
     CreateAccountRequest,
     ImportAccountItem,
     ImportAccountsResult,
@@ -32,6 +33,8 @@
   const loading = ref(false);
   const accounts = ref<Account[]>([]);
   const keyword = ref('');
+  const accountSettings = ref<AccountSettings>({ gptFastModeEnabled: false });
+  const settingsSaving = ref(false);
 
   const visibleAccounts = computed(() => {
     const q = keyword.value.trim().toLowerCase();
@@ -76,6 +79,29 @@
       accounts.value = await accountsApi.list();
     } finally {
       loading.value = false;
+    }
+  }
+
+  async function loadAccountSettings() {
+    try {
+      accountSettings.value = await accountsApi.settings();
+    } catch (err) {
+      if (err instanceof ApiError) ElMessage.warning(`Fast 模式配置加载失败：${err.message}`);
+    }
+  }
+
+  async function toggleGptFastMode(value: string | number | boolean) {
+    settingsSaving.value = true;
+    try {
+      accountSettings.value = await accountsApi.updateSettings({
+        gptFastModeEnabled: Boolean(value),
+      });
+      ElMessage.success(accountSettings.value.gptFastModeEnabled ? '已允许 GPT Fast 模式' : '已关闭 GPT Fast 模式');
+    } catch (err) {
+      accountSettings.value.gptFastModeEnabled = !Boolean(value);
+      if (err instanceof ApiError) ElMessage.error(err.message);
+    } finally {
+      settingsSaving.value = false;
     }
   }
 
@@ -698,6 +724,7 @@
   }
 
   onMounted(() => {
+    loadAccountSettings();
     loadTestModelOptions();
     loadAccounts();
   });
@@ -706,6 +733,17 @@
 <template>
   <PageSection title="账号管理" subtitle="维护上游账号池、配额与状态">
     <template #actions>
+      <div class="fast-mode-toggle">
+        <span>GPT Fast</span>
+        <el-switch
+          v-model="accountSettings.gptFastModeEnabled"
+          :disabled="settingsSaving"
+          inline-prompt
+          active-text="允许"
+          inactive-text="关闭"
+          @change="toggleGptFastMode"
+        />
+      </div>
       <el-input
         v-model="keyword"
         placeholder="搜索账号 ID / 邮箱 / 平台 / Base URL"
@@ -1534,6 +1572,21 @@
     .more-btn {
       padding: 0 4px;
     }
+  }
+
+  .fast-mode-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 32px;
+    padding: 0 10px;
+    border: 1px solid var(--kp-divider);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.55);
+    color: var(--kp-text-secondary);
+    font-size: 12px;
+    font-weight: 700;
+    white-space: nowrap;
   }
 
   @media (max-width: 1024px) {

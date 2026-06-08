@@ -3,6 +3,7 @@ package xyz.star4y.api.account;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -83,6 +84,7 @@ public class AccountImportParser {
         );
         String normalizedProvider = AccountPlatforms.normalizeProvider(provider, authMethod);
         String idToken = firstText(sources, "idToken", "id_token");
+        Instant tokenExpiresAt = firstInstant(sources, "tokenExpiresAt", "token_expires_at", "expiresAt", "expires_at");
         JwtIdentity jwtIdentity = jwtIdentity(idToken);
         String email = firstNonBlank(firstText(sources, "email"), jwtIdentity.email());
         String accessToken = firstText(
@@ -118,6 +120,7 @@ public class AccountImportParser {
             AccountPlatforms.defaultBaseUrl(normalizedProvider, authMethod, baseUrl),
             upstreamAccountId,
             idToken,
+            tokenExpiresAt,
             firstText(item, null, "profileArn", "profile_arn"),
             firstText(item, null, "machineId", "machine_id"),
             firstText(sources, "proxyUrl", "proxy_url", "proxy-url"),
@@ -183,6 +186,7 @@ public class AccountImportParser {
             AccountPlatforms.OPENAI_PROVIDER,
             AccountPlatforms.defaultBaseUrl(AccountPlatforms.OPENAI_PROVIDER, AccountPlatforms.OPENAI_API_KEY_AUTH, baseUrl),
             upstreamAccountId,
+            null,
             null,
             null,
             null,
@@ -331,6 +335,47 @@ public class AccountImportParser {
             }
         }
         return null;
+    }
+
+    private Instant firstInstant(List<JsonNode> sources, String... names) {
+        if (sources == null || sources.isEmpty()) {
+            return null;
+        }
+        for (JsonNode source : sources) {
+            for (String name : names) {
+                Instant value = instant(source.path(name));
+                if (value != null) {
+                    return value;
+                }
+            }
+        }
+        return null;
+    }
+
+    private Instant instant(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        try {
+            if (node.canConvertToLong()) {
+                return epochInstant(node.asLong());
+            }
+            String value = node.isTextual() ? clean(node.asText()) : clean(node.asText(null));
+            if (value == null) {
+                return null;
+            }
+            try {
+                return epochInstant(Long.parseLong(value));
+            } catch (NumberFormatException ignored) {
+                return Instant.parse(value);
+            }
+        } catch (RuntimeException ignored) {
+            return null;
+        }
+    }
+
+    private Instant epochInstant(long value) {
+        return value > 9_999_999_999L ? Instant.ofEpochMilli(value) : Instant.ofEpochSecond(value);
     }
 
     private Boolean booleanValue(JsonNode node) {

@@ -21,6 +21,7 @@ public class ProxyAccountEntity {
     private String baseUrl;
     private String upstreamAccountId;
     private String idToken;
+    private Instant tokenExpiresAt;
     private String profileArn;
     private String machineId;
     private String proxyUrl;
@@ -140,6 +141,14 @@ public class ProxyAccountEntity {
 
     public void setIdToken(String idToken) {
         this.idToken = idToken;
+    }
+
+    public Instant getTokenExpiresAt() {
+        return tokenExpiresAt;
+    }
+
+    public void setTokenExpiresAt(Instant tokenExpiresAt) {
+        this.tokenExpiresAt = tokenExpiresAt;
     }
 
     public String getProfileArn() {

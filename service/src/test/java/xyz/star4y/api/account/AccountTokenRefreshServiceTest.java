@@ -1,15 +1,20 @@
 package xyz.star4y.api.account;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
+import java.time.Instant;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.ExchangeFunction;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -98,18 +103,26 @@ class AccountTokenRefreshServiceTest {
     @Test
     void refreshesCodexTokenAndSavesAccount() {
         AtomicReference<URI> requestUri = new AtomicReference<>();
+        AtomicReference<MediaType> requestContentType = new AtomicReference<>();
         ExchangeFunction exchange = request -> {
             requestUri.set(request.url());
+            requestContentType.set(request.headers().getContentType());
             return Mono.just(ClientResponse.create(HttpStatus.OK)
                 .header("Content-Type", "application/json")
                 .body("""
-                    {"access_token":"codex-new-access","refresh_token":"codex-new-refresh","id_token":"codex-id-token"}
+                    {
+                      "access_token":"codex-new-access",
+                      "refresh_token":"codex-new-refresh",
+                      "id_token":"codex-id-token",
+                      "expires_in":3600
+                    }
                     """)
                 .build());
         };
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         AccountPoolService accountPoolService = mock(AccountPoolService.class);
         ProxyAccountEntity account = codexAccount();
+        account.setClientId("codex-client-id");
 
         when(repository.findByAccountId("codex-main")).thenReturn(Mono.just(account));
         when(repository.save(account)).thenReturn(Mono.just(account));
@@ -126,10 +139,91 @@ class AccountTokenRefreshServiceTest {
 
         assertThat(refreshed).isNotNull();
         assertThat(requestUri.get()).isEqualTo(URI.create("https://auth.openai.com/oauth/token"));
+        assertThat(requestContentType.get()).isEqualTo(MediaType.APPLICATION_FORM_URLENCODED);
         assertThat(refreshed.getAccessToken()).isEqualTo("codex-new-access");
         assertThat(refreshed.getRefreshToken()).isEqualTo("codex-new-refresh");
         assertThat(refreshed.getIdToken()).isEqualTo("codex-id-token");
+        assertThat(refreshed.getClientId()).isEqualTo("codex-client-id");
+        assertThat(refreshed.getTokenExpiresAt()).isAfterOrEqualTo(Instant.now().plusSeconds(3500));
         assertThat(service.canRefresh(account)).isTrue();
+    }
+
+    @Test
+    void scheduledRefreshSkipsCodexAccountWithoutTokenExpiry() {
+        AtomicBoolean called = new AtomicBoolean(false);
+        ExchangeFunction exchange = request -> {
+            called.set(true);
+            return Mono.just(ClientResponse.create(HttpStatus.OK).build());
+        };
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ProxyAccountEntity codex = codexAccount();
+
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(codex));
+
+        AccountTokenRefreshService service = new AccountTokenRefreshService(
+            new ObjectMapper(),
+            WebClient.builder().exchangeFunction(exchange).build(),
+            repository,
+            accountPoolService
+        );
+
+        AccountTokenRefreshService.TokenRefreshSummary summary = service.refreshEligibleAccounts().block();
+
+        assertThat(summary).isNotNull();
+        assertThat(summary.total()).isEqualTo(1);
+        assertThat(summary.eligible()).isZero();
+        assertThat(summary.refreshed()).isZero();
+        assertThat(summary.failed()).isZero();
+        assertThat(called).isFalse();
+    }
+
+    @Test
+    void scheduledRefreshDisablesCodexAccountOnTerminatedSession() {
+        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.BAD_REQUEST)
+            .header("Content-Type", "application/json")
+            .body("""
+                {
+                  "error": {
+                    "message": "Your session has ended. Please log in again.",
+                    "code": "app_session_terminated"
+                  }
+                }
+                """)
+            .build());
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ProxyAccountEntity codex = codexAccount();
+        codex.setTokenExpiresAt(Instant.now().minusSeconds(60));
+
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(codex));
+        when(accountPoolService.recordRequestFailure(
+            eq("codex-main"),
+            eq(AccountPoolService.UpstreamErrorType.FATAL),
+            eq(403),
+            contains("app_session_terminated")
+        )).thenReturn(Mono.empty());
+
+        AccountTokenRefreshService service = new AccountTokenRefreshService(
+            new ObjectMapper(),
+            WebClient.builder().exchangeFunction(exchange).build(),
+            repository,
+            accountPoolService
+        );
+
+        AccountTokenRefreshService.TokenRefreshSummary summary = service.refreshEligibleAccounts().block();
+
+        assertThat(summary).isNotNull();
+        assertThat(summary.total()).isEqualTo(1);
+        assertThat(summary.eligible()).isEqualTo(1);
+        assertThat(summary.refreshed()).isZero();
+        assertThat(summary.failed()).isEqualTo(1);
+        verify(accountPoolService).recordRequestFailure(
+            eq("codex-main"),
+            eq(AccountPoolService.UpstreamErrorType.FATAL),
+            eq(403),
+            contains("app_session_terminated")
+        );
     }
 
     @Test
