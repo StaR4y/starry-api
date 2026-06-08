@@ -7,6 +7,7 @@ BRANCH="${BRANCH:-main}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/starry-api}"
 HOST_HTTP_PORT="${HOST_HTTP_PORT:-18080}"
 SERVER_PORT="${SERVER_PORT:-8080}"
+HEALTH_WAIT_SECONDS="${HEALTH_WAIT_SECONDS:-300}"
 PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}"
 FORCE_ENV="${FORCE_ENV:-false}"
 INSTALL_DOCKER="${INSTALL_DOCKER:-true}"
@@ -192,15 +193,42 @@ EOF
   chmod 600 "$env_file"
 }
 
+load_runtime_env() {
+  local env_file="${INSTALL_DIR}/.env"
+  [[ -f "$env_file" ]] || return
+
+  local value
+  value="$(grep -E '^HOST_HTTP_PORT=' "$env_file" | tail -n 1 | cut -d= -f2- || true)"
+  if [[ -n "$value" ]]; then
+    HOST_HTTP_PORT="$value"
+  fi
+  value="$(grep -E '^SERVER_PORT=' "$env_file" | tail -n 1 | cut -d= -f2- || true)"
+  if [[ -n "$value" ]]; then
+    SERVER_PORT="$value"
+  fi
+
+  log "Using runtime ports from .env: HOST_HTTP_PORT=${HOST_HTTP_PORT}, SERVER_PORT=${SERVER_PORT}"
+}
+
 wait_for_health() {
   local url="http://127.0.0.1:${HOST_HTTP_PORT}/actuator/health"
+  local attempts=$(( (HEALTH_WAIT_SECONDS + 1) / 2 ))
+  local last_response=""
+  local status=""
   log "Waiting for service health: ${url}"
-  for _ in $(seq 1 60); do
-    if curl -fsS "$url" >/dev/null 2>&1; then
+  for attempt in $(seq 1 "$attempts"); do
+    last_response="$(curl -sS -m 3 -w '\nHTTP_STATUS:%{http_code}' "$url" 2>&1 || true)"
+    status="$(printf '%s\n' "$last_response" | sed -n 's/^HTTP_STATUS://p' | tail -n 1)"
+    if [[ "$status" == "200" ]]; then
       return 0
+    fi
+    if (( attempt % 15 == 0 )); then
+      log "Health still not ready after $(( attempt * 2 ))s. Last status: ${status:-curl-failed}"
     fi
     sleep 2
   done
+  log "Last health response:"
+  printf '%s\n' "$last_response" >&2
   return 1
 }
 
@@ -214,6 +242,8 @@ deploy_stack() {
   root_cmd "${COMPOSE_CMD[@]}" up -d --build
 
   if ! wait_for_health; then
+    root_cmd "${COMPOSE_CMD[@]}" ps || true
+    root_cmd "${COMPOSE_CMD[@]}" logs --tail=120 mysql || true
     root_cmd "${COMPOSE_CMD[@]}" logs --tail=160 service || true
     fail "Service did not become healthy in time."
   fi
@@ -249,6 +279,7 @@ main() {
   ensure_compose
   prepare_install_dir
   write_env_file
+  load_runtime_env
   deploy_stack
 }
 
