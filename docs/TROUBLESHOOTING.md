@@ -86,13 +86,13 @@ cd /opt/starry-api
 grep -q '^MYSQL_IMAGE=' .env \
   && sed -i 's|^MYSQL_IMAGE=.*|MYSQL_IMAGE=mysql:8.0.37-oraclelinux8|' .env \
   || echo 'MYSQL_IMAGE=mysql:8.0.37-oraclelinux8' >> .env
-docker compose pull mysql
-docker compose up -d --force-recreate mysql
-docker compose up -d --build service
-docker compose logs -f mysql
+docker compose -f docker-compose.artifact.yml pull mysql
+docker compose -f docker-compose.artifact.yml up -d --force-recreate mysql
+docker compose -f docker-compose.artifact.yml up -d service
+docker compose -f docker-compose.artifact.yml logs -f mysql
 ```
 
-The default project compose file already uses this compatible MySQL 8.0 image.
+The server installer writes `docker-compose.artifact.yml` and already uses this compatible MySQL 8.0 image by default.
 
 ## Tencent Exmail SMTP SSL Handshake Fails
 
@@ -129,18 +129,18 @@ SMTP security: SSL / TLS
 
 Cause:
 
-The installer pulls the latest repo and runs `docker compose up -d --build`. If the service image build fails, Docker Compose keeps the previous running container, so the old embedded WebUI is still served.
+The installer downloads the checked-in `artifacts/starry-api.jar`. If the artifact was not refreshed and pushed after frontend changes, the server will correctly deploy the old embedded WebUI.
 
-Check the build and service logs:
+Check the installed artifact metadata and service logs:
 
 ```bash
 cd /opt/starry-api
-docker compose build --no-cache service
-docker compose up -d service
-docker compose logs --tail=160 service
+cat app/build-info.json
+sha256sum -c app/starry-api.jar.sha256
+docker compose -f docker-compose.artifact.yml logs --tail=160 service
 ```
 
-The successful image build must run the WebUI build and then `:service:bootJar`. The final jar should contain `BOOT-INF/classes/static/index.html`.
+Refresh the artifact on a developer machine or CI, commit `artifacts/starry-api.jar`, push it, then rerun `scripts/install-server.sh` on the server.
 
 ## `Port 8080 was already in use`
 

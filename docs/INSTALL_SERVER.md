@@ -1,6 +1,6 @@
 # Server One-Click Install
 
-This installer is for Linux servers. It deploys the project with Docker Compose:
+This installer is for Linux servers. It deploys the checked-in prebuilt jar with Docker Compose:
 
 ```text
 Nginx / 1Panel reverse proxy
@@ -11,13 +11,7 @@ Nginx / 1Panel reverse proxy
 
 The installer binds the service port to `0.0.0.0:${HOST_HTTP_PORT}` by default so Docker-based 1Panel/OpenResty can reach it through the host port. Restrict that port with your firewall/security group and expose the service publicly through HTTPS reverse proxy. If Nginx runs directly on the host instead of in Docker, you may set `HOST_BIND_ADDR=127.0.0.1`.
 
-If the server should not compile Java/WebUI sources, use the prebuilt artifact installer instead:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/deploy-prebuilt-artifact.sh | sudo bash
-```
-
-See [Prebuilt Artifact Deployment](PREBUILT_ARTIFACTS.md) for the artifact publishing and download-only deployment flow.
+It downloads `artifacts/starry-api.jar` from the repository and does not run Gradle or npm on the server. See [Prebuilt Artifact Deployment](PREBUILT_ARTIFACTS.md) for the artifact publishing flow.
 
 ## One-Line Install
 
@@ -34,11 +28,11 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
 
 The installer will:
 
-- install `git`, `curl`, `openssl`, Docker, and Docker Compose when missing
-- clone or update the repo under `/opt/starry-api`
+- install `curl`, `openssl`, Docker, and Docker Compose when missing
+- download `artifacts/starry-api.jar` and verify `artifacts/starry-api.jar.sha256`
 - create `.env` with generated MySQL passwords
-- build the service image, including WebUI static files
-- start MySQL and the service with Docker Compose
+- write `docker-compose.artifact.yml`
+- start MySQL and the service container with Docker Compose
 - wait for `/actuator/health`
 - print recent logs so the first admin password can be saved
 
@@ -61,8 +55,12 @@ Supported variables:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `REPO_URL` | `https://github.com/StaR4y/starry-api.git` | Git repository to deploy |
-| `BRANCH` | `main` | Git branch to deploy |
+| `REPO_URL` | `https://github.com/StaR4y/starry-api.git` | GitHub repository used to derive raw artifact URLs |
+| `BRANCH` | `main` | Branch used to derive raw artifact URLs |
+| `REPO_RAW_BASE` | derived from `REPO_URL` and `BRANCH` | Raw repository base used to download artifacts |
+| `ARTIFACT_URL` | `${REPO_RAW_BASE}/artifacts/starry-api.jar` | Direct jar URL |
+| `CHECKSUM_URL` | `${REPO_RAW_BASE}/artifacts/starry-api.jar.sha256` | Direct checksum URL |
+| `BUILD_INFO_URL` | `${REPO_RAW_BASE}/artifacts/build-info.json` | Optional build metadata URL |
 | `INSTALL_DIR` | `/opt/starry-api` | Server install directory |
 | `HOST_BIND_ADDR` | `0.0.0.0` | Host address for compose port binding; use `127.0.0.1` only when reverse proxy runs on the host |
 | `HOST_HTTP_PORT` | `18080` | Local host port exposed by compose |
@@ -70,6 +68,7 @@ Supported variables:
 | `PUBLIC_BASE_URL` | empty | Public HTTPS URL used in startup logs |
 | `FORCE_ENV` | `false` | Regenerate `.env` even if it already exists |
 | `INSTALL_DOCKER` | `true` | Install Docker when missing |
+| `GITHUB_TOKEN` | empty | Optional token for private raw artifact downloads |
 
 ## MySQL Image Compatibility
 
@@ -86,9 +85,9 @@ cd /opt/starry-api
 grep -q '^MYSQL_IMAGE=' .env \
   && sed -i 's|^MYSQL_IMAGE=.*|MYSQL_IMAGE=mysql:8.0.37-oraclelinux8|' .env \
   || echo 'MYSQL_IMAGE=mysql:8.0.37-oraclelinux8' >> .env
-docker compose pull mysql
-docker compose up -d --force-recreate mysql
-docker compose up -d --build service
+docker compose -f docker-compose.artifact.yml pull mysql
+docker compose -f docker-compose.artifact.yml up -d --force-recreate mysql
+docker compose -f docker-compose.artifact.yml up -d service
 ```
 
 ## 1Panel Reverse Proxy
@@ -124,28 +123,26 @@ The password is only printed when the admin table is created. Save it immediatel
 
 ```bash
 cd /opt/starry-api
-docker compose logs -f service
-docker compose restart service
-docker compose down
+docker compose -f docker-compose.artifact.yml logs -f service
+docker compose -f docker-compose.artifact.yml restart service
+docker compose -f docker-compose.artifact.yml down
 ```
 
 Update:
 
 ```bash
 cd /opt/starry-api
-git pull
-./scripts/install-server.sh
+curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh | sudo bash
 ```
 
-The update path rebuilds the WebUI with Docker and embeds the generated static files into the Spring Boot jar. If the browser still shows an old UI, check the service build logs first:
+The update path downloads the latest checked-in jar and restarts the service. If the browser still shows an old UI, check that the artifact was refreshed and pushed before running the installer:
 
 ```bash
 cd /opt/starry-api
-docker compose build --no-cache service
-docker compose up -d service
-docker compose logs --tail=160 service
+cat app/build-info.json
+docker compose -f docker-compose.artifact.yml logs --tail=160 service
 ```
 
-When a build fails, Compose keeps the previous running container, so the old WebUI can remain visible even though `git pull` succeeded.
+When artifact download or checksum verification fails, the script keeps the previous jar as `app/starry-api.jar.previous`.
 
 Do not delete `./data/mysql` unless you want to reset the database.

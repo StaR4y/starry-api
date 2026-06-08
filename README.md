@@ -252,6 +252,12 @@ git commit -m "chore: publish prebuilt artifact"
 git push
 ```
 
+Servers should not run this publishing script. To deploy the already checked-in jar on a server:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh | sudo bash
+```
+
 ## Current Boundaries
 
 - OpenAI/GPT requests route to OpenAI API key or Codex token accounts.

@@ -4,6 +4,13 @@ This project supports a source-build deployment and a prebuilt-artifact deployme
 
 Use the prebuilt path when the server should only download and run the latest packaged jar from the repository instead of compiling Java and WebUI assets on the server.
 
+There are two separate scripts:
+
+| Script | Where to run | What it does |
+| --- | --- | --- |
+| `scripts/publish-artifact.sh` | Developer machine or CI | Builds `service/build/libs/*.jar` and writes `artifacts/starry-api.jar`. |
+| `scripts/install-server.sh` | Linux server | Downloads `artifacts/starry-api.jar`, verifies SHA256, and starts Docker Compose. It does not build. |
+
 ## Artifact Directory
 
 The repository-level `artifacts/` directory stores the deployable output:
@@ -16,7 +23,7 @@ The repository-level `artifacts/` directory stores the deployable output:
 
 ## Publish After Each Commit
 
-After every source commit that should be deployable, build and publish the artifact files:
+After every source commit that should be deployable, run this on a developer machine or CI, not on the server:
 
 ```bash
 ./scripts/publish-artifact.sh
@@ -57,16 +64,16 @@ RUN_TESTS=false ./scripts/publish-artifact.sh
 
 ## One-Line Server Deploy
 
-Run this on a Linux server:
+Run this on a Linux server. This command downloads the checked-in jar from the repository and does not run Gradle/npm:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/deploy-prebuilt-artifact.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh | sudo bash
 ```
 
 With a public domain:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/deploy-prebuilt-artifact.sh \
+curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
   | sudo env PUBLIC_BASE_URL=https://api.example.com bash
 ```
 
@@ -87,14 +94,16 @@ It does not clone the repo and does not run Gradle or npm on the server.
 Rerun the same command. The script downloads the current artifact, keeps the previous jar as `app/starry-api.jar.previous`, and restarts the service container.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/deploy-prebuilt-artifact.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh | sudo bash
 ```
 
 ## Variables
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `REPO_RAW_BASE` | `https://raw.githubusercontent.com/StaR4y/starry-api/main` | Raw repository base used to download scripts and artifacts. |
+| `REPO_URL` | `https://github.com/StaR4y/starry-api.git` | GitHub repository used to derive raw artifact URLs. |
+| `BRANCH` | `main` | Branch used to derive raw artifact URLs. |
+| `REPO_RAW_BASE` | derived from `REPO_URL` and `BRANCH` | Raw repository base used to download scripts and artifacts. |
 | `ARTIFACT_URL` | `${REPO_RAW_BASE}/artifacts/starry-api.jar` | Direct jar URL. |
 | `CHECKSUM_URL` | `${REPO_RAW_BASE}/artifacts/starry-api.jar.sha256` | Direct checksum URL. |
 | `BUILD_INFO_URL` | `${REPO_RAW_BASE}/artifacts/build-info.json` | Optional build metadata URL. |
@@ -107,11 +116,11 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/depl
 | `INSTALL_DOCKER` | `true` | Install Docker when missing. |
 | `GITHUB_TOKEN` | empty | Optional token for private raw artifact downloads. |
 
-Deploy a non-main branch artifact by changing `REPO_RAW_BASE`:
+Deploy a non-main branch artifact by setting `BRANCH`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/deploy-prebuilt-artifact.sh \
-  | sudo env REPO_RAW_BASE=https://raw.githubusercontent.com/StaR4y/starry-api/my-branch bash
+curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
+  | sudo env BRANCH=my-branch bash
 ```
 
 ## Operations

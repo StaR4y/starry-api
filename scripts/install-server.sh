@@ -4,6 +4,27 @@ set -euo pipefail
 APP_NAME="starry-api"
 REPO_URL="${REPO_URL:-https://github.com/StaR4y/starry-api.git}"
 BRANCH="${BRANCH:-main}"
+
+default_repo_raw_base() {
+  local repo="${REPO_URL%.git}"
+  case "$repo" in
+    https://github.com/*)
+      printf 'https://raw.githubusercontent.com/%s/%s' "${repo#https://github.com/}" "$BRANCH"
+      ;;
+    git@github.com:*)
+      repo="${repo#git@github.com:}"
+      printf 'https://raw.githubusercontent.com/%s/%s' "$repo" "$BRANCH"
+      ;;
+    *)
+      printf 'https://raw.githubusercontent.com/StaR4y/starry-api/%s' "$BRANCH"
+      ;;
+  esac
+}
+
+REPO_RAW_BASE="${REPO_RAW_BASE:-$(default_repo_raw_base)}"
+ARTIFACT_URL="${ARTIFACT_URL:-${REPO_RAW_BASE%/}/artifacts/starry-api.jar}"
+CHECKSUM_URL="${CHECKSUM_URL:-${REPO_RAW_BASE%/}/artifacts/starry-api.jar.sha256}"
+BUILD_INFO_URL="${BUILD_INFO_URL:-${REPO_RAW_BASE%/}/artifacts/build-info.json}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/starry-api}"
 HOST_BIND_ADDR="${HOST_BIND_ADDR:-0.0.0.0}"
 HOST_HTTP_PORT="${HOST_HTTP_PORT:-18080}"
@@ -12,6 +33,7 @@ HEALTH_WAIT_SECONDS="${HEALTH_WAIT_SECONDS:-300}"
 PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}"
 FORCE_ENV="${FORCE_ENV:-false}"
 INSTALL_DOCKER="${INSTALL_DOCKER:-true}"
+MYSQL_IMAGE="${MYSQL_IMAGE:-mysql:8.0.37-oraclelinux8}"
 
 log() {
   printf '[%s] %s\n' "$APP_NAME" "$*"
@@ -53,16 +75,16 @@ install_base_packages() {
   case "$pm" in
     apt)
       root_cmd apt-get update
-      root_cmd apt-get install -y ca-certificates curl git openssl
+      root_cmd apt-get install -y ca-certificates curl openssl
       ;;
     dnf)
-      root_cmd dnf install -y ca-certificates curl git openssl
+      root_cmd dnf install -y ca-certificates curl openssl
       ;;
     yum)
-      root_cmd yum install -y ca-certificates curl git openssl
+      root_cmd yum install -y ca-certificates curl openssl
       ;;
     *)
-      fail "Unsupported package manager. Install git, curl, openssl, docker and docker compose manually, then rerun with INSTALL_DOCKER=false."
+      fail "Unsupported package manager. Install curl, openssl, docker and docker compose manually, then rerun with INSTALL_DOCKER=false."
       ;;
   esac
 }
@@ -87,11 +109,11 @@ ensure_docker() {
 
 ensure_compose() {
   if root_cmd docker compose version >/dev/null 2>&1; then
-    log "Docker Compose plugin is available."
+    COMPOSE_CMD=(docker compose)
     return
   fi
   if command -v docker-compose >/dev/null 2>&1; then
-    log "docker-compose is available."
+    COMPOSE_CMD=(docker-compose)
     return
   fi
 
@@ -113,53 +135,36 @@ ensure_compose() {
       fail "Docker Compose is not available. Install docker compose manually and rerun."
       ;;
   esac
-}
 
-set_compose_cmd() {
   if root_cmd docker compose version >/dev/null 2>&1; then
     COMPOSE_CMD=(docker compose)
-    return
-  fi
-  if command -v docker-compose >/dev/null 2>&1; then
+  elif command -v docker-compose >/dev/null 2>&1; then
     COMPOSE_CMD=(docker-compose)
-    return
+  else
+    fail "Docker Compose is not available after installation."
   fi
-  fail "Docker Compose is not available after installation."
 }
 
-prepare_install_dir() {
-  log "Preparing ${INSTALL_DIR}..."
-  log "Using repository ${REPO_URL} branch ${BRANCH}."
-  git ls-remote --heads "$REPO_URL" "$BRANCH" >/dev/null \
-    || fail "Repository or branch is not accessible: ${REPO_URL} ${BRANCH}"
-  root_cmd mkdir -p "$(dirname "$INSTALL_DIR")"
-  if [[ -d "$INSTALL_DIR/.git" ]]; then
-    if git -C "$INSTALL_DIR" remote get-url origin >/dev/null 2>&1; then
-      git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL"
-    else
-      git -C "$INSTALL_DIR" remote add origin "$REPO_URL"
-    fi
-    git -C "$INSTALL_DIR" fetch origin "$BRANCH"
-    git -C "$INSTALL_DIR" checkout "$BRANCH"
-    git -C "$INSTALL_DIR" pull --ff-only origin "$BRANCH"
-  elif [[ -d "$INSTALL_DIR" ]] && [[ -n "$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
-    fail "${INSTALL_DIR} exists and is not an empty git checkout."
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
   else
-    root_cmd mkdir -p "$INSTALL_DIR"
-    git clone --branch "$BRANCH" "$REPO_URL" "$INSTALL_DIR"
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+download_file() {
+  local url="$1"
+  local output="$2"
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" "$url" -o "$output"
+  else
+    curl -fsSL "$url" -o "$output"
   fi
 }
 
 random_secret() {
   openssl rand -hex 24
-}
-
-webui_url() {
-  if [[ -n "$PUBLIC_BASE_URL" ]]; then
-    printf '%s/#/login' "${PUBLIC_BASE_URL%/}"
-  else
-    printf 'http://%s:%s/#/login' "$(local_access_host)" "$HOST_HTTP_PORT"
-  fi
 }
 
 local_access_host() {
@@ -189,10 +194,25 @@ reverse_proxy_target() {
   fi
 }
 
+webui_url() {
+  if [[ -n "$PUBLIC_BASE_URL" ]]; then
+    printf '%s/#/login' "${PUBLIC_BASE_URL%/}"
+  else
+    printf 'http://%s:%s/#/login' "$(local_access_host)" "$HOST_HTTP_PORT"
+  fi
+}
+
+prepare_install_dir() {
+  log "Preparing ${INSTALL_DIR}..."
+  log "Using prebuilt artifact base ${REPO_RAW_BASE}."
+  root_cmd mkdir -p "$INSTALL_DIR/app" "$INSTALL_DIR/data/mysql"
+}
+
 write_env_file() {
   local env_file="${INSTALL_DIR}/.env"
   if [[ -f "$env_file" && "$FORCE_ENV" != "true" ]]; then
     log "Keeping existing .env. Set FORCE_ENV=true to regenerate it."
+    load_runtime_env
     return
   fi
 
@@ -203,7 +223,7 @@ SERVER_PORT=${SERVER_PORT}
 HOST_HTTP_PORT=${HOST_HTTP_PORT}
 
 MYSQL_ROOT_PASSWORD=$(random_secret)
-MYSQL_IMAGE=mysql:8.0.37-oraclelinux8
+MYSQL_IMAGE=${MYSQL_IMAGE}
 MYSQL_DATABASE=kiro_proxy
 MYSQL_USERNAME=kiro_proxy
 MYSQL_PASSWORD=$(random_secret)
@@ -228,27 +248,113 @@ load_runtime_env() {
 
   local value
   value="$(grep -E '^HOST_BIND_ADDR=' "$env_file" | tail -n 1 | cut -d= -f2- || true)"
-  if [[ -n "$value" ]]; then
-    HOST_BIND_ADDR="$value"
-  fi
+  [[ -n "$value" ]] && HOST_BIND_ADDR="$value"
   value="$(grep -E '^HOST_HTTP_PORT=' "$env_file" | tail -n 1 | cut -d= -f2- || true)"
-  if [[ -n "$value" ]]; then
-    HOST_HTTP_PORT="$value"
-  fi
+  [[ -n "$value" ]] && HOST_HTTP_PORT="$value"
   value="$(grep -E '^SERVER_PORT=' "$env_file" | tail -n 1 | cut -d= -f2- || true)"
-  if [[ -n "$value" ]]; then
-    SERVER_PORT="$value"
-  fi
+  [[ -n "$value" ]] && SERVER_PORT="$value"
 
-  log "Using runtime ports from .env: HOST_BIND_ADDR=${HOST_BIND_ADDR}, HOST_HTTP_PORT=${HOST_HTTP_PORT}, SERVER_PORT=${SERVER_PORT}"
   export HOST_BIND_ADDR HOST_HTTP_PORT SERVER_PORT
+  log "Using runtime ports from .env: HOST_BIND_ADDR=${HOST_BIND_ADDR}, HOST_HTTP_PORT=${HOST_HTTP_PORT}, SERVER_PORT=${SERVER_PORT}"
+}
+
+write_compose_file() {
+  cat > "${INSTALL_DIR}/docker-compose.artifact.yml" <<'EOF'
+services:
+  mysql:
+    image: ${MYSQL_IMAGE:-mysql:8.0.37-oraclelinux8}
+    container_name: starryapi-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-kiro_proxy}
+      MYSQL_USER: ${MYSQL_USERNAME:-kiro_proxy}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u\"$${MYSQL_USER}\" -p\"$${MYSQL_PASSWORD}\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    networks:
+      - starryapi
+
+  service:
+    image: eclipse-temurin:25-jre
+    container_name: starryapi-service
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    working_dir: /app
+    volumes:
+      - ./app/starry-api.jar:/app/app.jar:ro
+    environment:
+      SERVER_PORT: ${SERVER_PORT:-8080}
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-kiro_proxy}
+      MYSQL_USERNAME: ${MYSQL_USERNAME:-kiro_proxy}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      KIRO_ALLOW_ANONYMOUS_PROXY: ${KIRO_ALLOW_ANONYMOUS_PROXY:-false}
+      KIRO_ADMIN_SESSION_TTL: ${KIRO_ADMIN_SESSION_TTL:-12h}
+      KIRO_RATE_LIMIT_PER_MINUTE: ${KIRO_RATE_LIMIT_PER_MINUTE:-120}
+      KIRO_ACCOUNT_SELECTION_STRATEGY: ${KIRO_ACCOUNT_SELECTION_STRATEGY:-round_robin}
+      KIRO_WEBUI_URL: ${KIRO_WEBUI_URL:-}
+      KIRO_ADMIN_TOKEN: ${KIRO_ADMIN_TOKEN:-}
+      JAVA_OPTS: ${JAVA_OPTS:-}
+    ports:
+      - "${HOST_BIND_ADDR:-127.0.0.1}:${HOST_HTTP_PORT:-18080}:${SERVER_PORT:-8080}"
+    command: ["sh", "-c", "exec java $${JAVA_OPTS:-} -jar /app/app.jar"]
+    networks:
+      - starryapi
+
+networks:
+  starryapi:
+    name: starryapi
+EOF
+}
+
+download_artifact() {
+  local tmp_dir tmp_jar tmp_sha tmp_info expected actual
+  tmp_dir="$(mktemp -d)"
+  tmp_jar="${tmp_dir}/starry-api.jar"
+  tmp_sha="${tmp_dir}/starry-api.jar.sha256"
+  tmp_info="${tmp_dir}/build-info.json"
+
+  log "Downloading artifact: ${ARTIFACT_URL}"
+  download_file "$ARTIFACT_URL" "$tmp_jar"
+  log "Downloading checksum: ${CHECKSUM_URL}"
+  download_file "$CHECKSUM_URL" "$tmp_sha"
+  download_file "$BUILD_INFO_URL" "$tmp_info" || true
+
+  expected="$(awk '{print $1}' "$tmp_sha" | head -n 1)"
+  actual="$(sha256_file "$tmp_jar")"
+  [[ -n "$expected" ]] || fail "Checksum file is empty."
+  [[ "$expected" == "$actual" ]] || fail "Artifact checksum mismatch. expected=${expected} actual=${actual}"
+
+  if [[ -f "${INSTALL_DIR}/app/starry-api.jar" ]]; then
+    cp "${INSTALL_DIR}/app/starry-api.jar" "${INSTALL_DIR}/app/starry-api.jar.previous"
+  fi
+  mv "$tmp_jar" "${INSTALL_DIR}/app/starry-api.jar"
+  cp "$tmp_sha" "${INSTALL_DIR}/app/starry-api.jar.sha256"
+  if [[ -s "$tmp_info" ]]; then
+    cp "$tmp_info" "${INSTALL_DIR}/app/build-info.json"
+  fi
+  rm -rf "$tmp_dir"
+  log "Installed artifact with SHA256 ${actual}"
 }
 
 wait_for_health() {
   local url="http://$(local_access_host):${HOST_HTTP_PORT}/actuator/health"
   local attempts=$(( (HEALTH_WAIT_SECONDS + 1) / 2 ))
-  local last_response=""
-  local status=""
+  local last_response="" status=""
   log "Waiting for service health: ${url}"
   for attempt in $(seq 1 "$attempts"); do
     last_response="$(curl -sS -m 3 -w '\nHTTP_STATUS:%{http_code}' "$url" 2>&1 || true)"
@@ -267,45 +373,35 @@ wait_for_health() {
 }
 
 deploy_stack() {
-  COMPOSE_CMD=()
-  set_compose_cmd
   cd "$INSTALL_DIR"
-
-  log "Starting Docker Compose stack..."
-  root_cmd "${COMPOSE_CMD[@]}" pull mysql || true
-  root_cmd "${COMPOSE_CMD[@]}" up -d --build
+  log "Starting Docker Compose stack from prebuilt artifact..."
+  root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml pull mysql service || true
+  root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml up -d
 
   if ! wait_for_health; then
-    root_cmd "${COMPOSE_CMD[@]}" ps || true
-    root_cmd "${COMPOSE_CMD[@]}" logs --tail=120 mysql || true
-    root_cmd "${COMPOSE_CMD[@]}" logs --tail=160 service || true
+    root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml ps || true
+    root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml logs --tail=120 mysql || true
+    root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml logs --tail=160 service || true
     fail "Service did not become healthy in time."
   fi
 
-  log "Recent service logs. Save the first admin password if this is the first startup."
-  root_cmd "${COMPOSE_CMD[@]}" logs --tail=120 service || true
+  root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml logs --tail=120 service || true
 
   cat <<EOF
 
 Deployment complete.
 
 Install dir:        ${INSTALL_DIR}
+Artifact file:      ${INSTALL_DIR}/app/starry-api.jar
 Local WebUI:        http://$(local_access_host):${HOST_HTTP_PORT}/#/login
 Local API docs:     http://$(local_access_host):${HOST_HTTP_PORT}/docs
 Reverse proxy to:   $(reverse_proxy_target)
 
 Common commands:
   cd ${INSTALL_DIR}
-  docker compose logs -f service
-  docker compose restart service
-  docker compose down
-
-If using 1Panel/Nginx, create a reverse proxy site with target:
-  $(reverse_proxy_target)
-
-If your 1Panel OpenResty runs in Docker, keep HOST_BIND_ADDR=0.0.0.0 and
-use the server intranet/public IP target shown above. If Nginx runs directly
-on the host, you can set HOST_BIND_ADDR=127.0.0.1 and proxy to localhost.
+  docker compose -f docker-compose.artifact.yml logs -f service
+  docker compose -f docker-compose.artifact.yml restart service
+  docker compose -f docker-compose.artifact.yml down
 EOF
 }
 
@@ -318,6 +414,8 @@ main() {
   prepare_install_dir
   write_env_file
   load_runtime_env
+  write_compose_file
+  download_artifact
   deploy_stack
 }
 

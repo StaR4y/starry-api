@@ -108,6 +108,9 @@ main() {
   [[ -x ./gradlew ]] || fail "gradlew is missing or not executable."
   assert_clean_staging_area_for_auto_commit
 
+  log "This script is for developers/CI to refresh repository artifacts."
+  log "Do not run it on the server. Servers should use scripts/install-server.sh."
+
   local version branch commit built_at java_version dirty jar_path artifact_path checksum size_bytes checksum_path info_path
   version="${VERSION:-$(project_version)}"
   version="${version:-0.1.0-SNAPSHOT}"
