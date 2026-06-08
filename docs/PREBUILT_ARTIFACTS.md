@@ -27,6 +27,20 @@ git push
 
 The script runs `./gradlew test :service:bootJar`, copies the executable jar to `artifacts/starry-api.jar`, and refreshes checksum/build metadata.
 
+The publish script needs either local Java 25 or Docker. If `java` is not available in `PATH`, it automatically falls back to Docker and builds through the project `Dockerfile`.
+
+Force Docker-based publishing:
+
+```bash
+BUILD_WITH_DOCKER=true ./scripts/publish-artifact.sh
+```
+
+Force local Java/Gradle publishing:
+
+```bash
+BUILD_WITH_DOCKER=false ./scripts/publish-artifact.sh
+```
+
 To let the script create and push the artifact-only commit:
 
 ```bash

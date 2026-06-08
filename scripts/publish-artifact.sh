@@ -8,6 +8,8 @@ ARTIFACT_NAME="${ARTIFACT_NAME:-starry-api.jar}"
 RUN_TESTS="${RUN_TESTS:-true}"
 COMMIT_ARTIFACTS="${COMMIT_ARTIFACTS:-false}"
 PUSH_ARTIFACTS="${PUSH_ARTIFACTS:-false}"
+BUILD_WITH_DOCKER="${BUILD_WITH_DOCKER:-auto}"
+DOCKER_BUILD_IMAGE="${DOCKER_BUILD_IMAGE:-starry-api-artifact-builder}"
 
 log() {
   printf '[%s] %s\n' "$APP_NAME" "$*"
@@ -42,6 +44,63 @@ assert_clean_staging_area_for_auto_commit() {
     || fail "Staged changes already exist. Commit or unstage them before COMMIT_ARTIFACTS=true."
 }
 
+has_java() {
+  command -v java >/dev/null 2>&1
+}
+
+use_docker_build() {
+  case "$BUILD_WITH_DOCKER" in
+    true)
+      return 0
+      ;;
+    false)
+      return 1
+      ;;
+    auto)
+      ! has_java
+      ;;
+    *)
+      fail "BUILD_WITH_DOCKER must be auto, true, or false."
+      ;;
+  esac
+}
+
+build_with_gradle() {
+  if [[ "$RUN_TESTS" == "true" ]]; then
+    log "Running tests and building boot jar..."
+    ./gradlew test :service:bootJar
+  else
+    log "Building boot jar..."
+    ./gradlew :service:bootJar
+  fi
+}
+
+build_with_docker() {
+  command -v docker >/dev/null 2>&1 \
+    || fail "Java is not available and Docker was not found. Install JDK 25 or Docker, or set JAVA_HOME."
+
+  local image_tag container_id
+  image_tag="${DOCKER_BUILD_IMAGE}:$(git rev-parse --short=12 HEAD 2>/dev/null || printf latest)"
+  log "Java is not available locally; building artifact with Docker image ${image_tag}..."
+  docker build --target build -t "$image_tag" .
+
+  container_id="$(docker create "$image_tag" sh -c 'chmod +x gradlew && ./gradlew --no-daemon test :service:bootJar -PskipWebuiBuild=true')"
+  trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' RETURN
+
+  if [[ "$RUN_TESTS" == "true" ]]; then
+    log "Running tests and bootJar inside Docker..."
+    docker start -a "$container_id"
+  else
+    log "Skipping tests; copying Docker-built boot jar..."
+  fi
+
+  rm -rf service/build/libs
+  mkdir -p service/build/libs
+  docker cp "${container_id}:/workspace/service/build/libs/." service/build/libs/
+  docker rm "$container_id" >/dev/null
+  trap - RETURN
+}
+
 main() {
   cd "$ROOT_DIR"
 
@@ -55,7 +114,11 @@ main() {
   branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'unknown')"
   commit="$(git rev-parse HEAD 2>/dev/null || printf 'unknown')"
   built_at="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-  java_version="$(java -version 2>&1 | head -n 1 || true)"
+  if has_java; then
+    java_version="$(java -version 2>&1 | head -n 1 || true)"
+  else
+    java_version="docker:${DOCKER_BUILD_IMAGE}"
+  fi
   if git status --porcelain --untracked-files=all | grep -q .; then
     dirty=true
     log "Working tree has uncommitted changes; build-info.json will record dirty=true."
@@ -63,12 +126,11 @@ main() {
     dirty=false
   fi
 
-  if [[ "$RUN_TESTS" == "true" ]]; then
-    log "Running tests and building boot jar..."
-    ./gradlew test :service:bootJar
+  if use_docker_build; then
+    build_with_docker
   else
-    log "Building boot jar..."
-    ./gradlew :service:bootJar
+    has_java || fail "Java is not available. Install JDK 25, set JAVA_HOME, or run with BUILD_WITH_DOCKER=true."
+    build_with_gradle
   fi
 
   jar_path="$(find service/build/libs -maxdepth 1 -type f -name 'service-*.jar' ! -name '*-plain.jar' | sort | tail -n 1)"

@@ -22,3 +22,9 @@ Or let the script commit and push only the artifact files:
 ```bash
 COMMIT_ARTIFACTS=true PUSH_ARTIFACTS=true ./scripts/publish-artifact.sh
 ```
+
+The publish script needs either local Java 25 or Docker. When local Java is missing it automatically falls back to Docker; you can force that path with:
+
+```bash
+BUILD_WITH_DOCKER=true ./scripts/publish-artifact.sh
+```

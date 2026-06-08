@@ -6,6 +6,7 @@ api/build
 service/build
 webui/dist
 webui/node_modules
+artifacts/*.jar
 .env
 .env.*
 *.log
