@@ -57,20 +57,18 @@ CREATE DATABASE IF NOT EXISTS kiro_proxy
 | `KIRO_TOKEN_REFRESH_INITIAL_DELAY_MS` | `60000` | Delay before first background token refresh. |
 | `KIRO_PREFERRED_ENDPOINT` | `codewhisperer` | Preferred Kiro/AWS endpoint: `codewhisperer`, `amazonq`, or `amazonq-cli`. |
 
-## Client-Side Environment Variables
+## Client-Side API Key Setup
 
-The WebUI API Key page now generates Starry API client variables:
+The WebUI API Key page generates API-key based client configuration:
 
-| Variable | Purpose |
+| Client | Generated configuration |
 | --- | --- |
-| `STARRY_API_BASE_URL` | Generic base URL, usually `http://host:8080/v1`. |
-| `STARRY_API_KEY` | Generated `sk-...` API key. |
-| `OPENAI_BASE_URL`, `OPENAI_API_KEY` | OpenAI-compatible clients. |
-| `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` | Anthropic/Claude-compatible clients. |
-| `GEMINI_BASE_URL`, `GEMINI_API_KEY`, `GOOGLE_API_KEY` | Gemini-compatible clients. |
-| `OPENCODE_STARRY_API_BASE_URL`, `OPENCODE_STARRY_API_KEY`, `OPENCODE_MODEL`, `OPENCODE_SMALL_MODEL` | OpenCode custom `starry` provider variables. |
+| Codex CLI | `~/.codex/config.toml` plus `~/.codex/auth.json`, using the HTTP Responses API. |
+| Claude Code | Shell environment variables: `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, and Claude Code traffic flags. |
+| OpenCode | Project-level `opencode.json` with a `starry` OpenAI-compatible provider. |
+| CC Switch | `ccswitch://v1/import?resource=provider...` deep links for Claude Code and Codex CLI. |
 
-These client variables do not replace server runtime variables yet.
+These client settings are generated per API key and do not replace server runtime variables.
 
 ## Registration Settings
 

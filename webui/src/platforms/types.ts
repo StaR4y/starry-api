@@ -9,8 +9,8 @@ export interface PlatformDefinition {
   familyOf?: (model: ModelInfo) => string | null;
 }
 
-export type SetupClient = 'all' | 'openai' | 'anthropic' | 'gemini' | 'opencode';
-export type SetupPlatform = 'macos' | 'linux' | 'windows';
+export type SetupClient = 'codex' | 'claude' | 'opencode';
+export type SetupPlatform = 'unix' | 'cmd' | 'powershell';
 
 export type SetupOption<T extends string> = {
   value: T;
@@ -32,5 +32,19 @@ export type SetupScriptBlock = {
   platformLabel: string;
   clientDescription: string;
   platformDescription: string;
+  files: SetupFileBlock[];
   script: string;
+};
+
+export type SetupFileBlock = {
+  path: string;
+  content: string;
+  hint?: string;
+};
+
+export type CcSwitchLink = {
+  client: 'claude' | 'codex';
+  label: string;
+  description: string;
+  url: string;
 };

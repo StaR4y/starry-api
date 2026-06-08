@@ -41,7 +41,11 @@ public class AnthropicRequestAdapter {
             chat.set("tools", anthropicToolsToOpenAi(request.path("tools")));
         }
         if (request.has("tool_choice")) {
-            chat.set("tool_choice", request.get("tool_choice"));
+            JsonNode toolChoice = request.path("tool_choice");
+            chat.set("tool_choice", anthropicToolChoiceToOpenAi(toolChoice));
+            if (toolChoice.path("disable_parallel_tool_use").asBoolean(false)) {
+                chat.put("parallel_tool_calls", false);
+            }
         }
         return chat;
     }
@@ -58,7 +62,7 @@ public class AnthropicRequestAdapter {
         if ("assistant".equals(role) && hasAnthropicContentType(content, "tool_use")) {
             ObjectNode message = messages.addObject();
             message.put("role", "assistant");
-            message.put("content", anthropicContentText(content));
+            message.put("content", anthropicTextOnly(content));
             ArrayNode toolCalls = message.putArray("tool_calls");
             for (JsonNode part : content) {
                 if (!"tool_use".equals(part.path("type").asText())) {
@@ -161,6 +165,23 @@ public class AnthropicRequestAdapter {
             return "Tool use: " + name;
         }
         return "Tool use: " + name + "\nInput: " + input;
+    }
+
+    private JsonNode anthropicToolChoiceToOpenAi(JsonNode toolChoice) {
+        String type = toolChoice.path("type").asText("");
+        return switch (type) {
+            case "auto" -> objectMapper.getNodeFactory().textNode("auto");
+            case "any" -> objectMapper.getNodeFactory().textNode("required");
+            case "none" -> objectMapper.getNodeFactory().textNode("none");
+            case "tool" -> {
+                ObjectNode converted = objectMapper.createObjectNode();
+                converted.put("type", "function");
+                ObjectNode function = converted.putObject("function");
+                function.put("name", toolChoice.path("name").asText());
+                yield converted;
+            }
+            default -> toolChoice;
+        };
     }
 
     private ArrayNode anthropicToolsToOpenAi(JsonNode tools) {

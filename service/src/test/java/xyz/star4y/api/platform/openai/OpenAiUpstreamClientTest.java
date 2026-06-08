@@ -1,19 +1,26 @@
 package xyz.star4y.api.platform.openai;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
 import org.springframework.web.reactive.function.client.WebClient;
 import xyz.star4y.api.account.AccountPlatforms;
+import xyz.star4y.api.account.AccountTokenRefreshService;
 import xyz.star4y.api.account.ProxyAccountEntity;
 import xyz.star4y.api.platform.core.PlatformCompletionResult;
+import reactor.core.publisher.Mono;
 
 class OpenAiUpstreamClientTest {
 
@@ -43,7 +50,11 @@ class OpenAiUpstreamClientTest {
         server.start();
 
         try {
-            OpenAiUpstreamClient client = new OpenAiUpstreamClient(objectMapper, WebClient.builder().build());
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
             JsonNode request = objectMapper.readTree("""
                 {
@@ -96,12 +107,282 @@ class OpenAiUpstreamClientTest {
         }
     }
 
+    @Test
+    void codexUpstreamRefreshesTokenAndRetriesOnceOnUnauthorized() throws Exception {
+        AtomicInteger requestCount = new AtomicInteger();
+        AtomicReference<List<String>> secondAuthorization = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/responses", exchange -> {
+            int count = requestCount.incrementAndGet();
+            if (count == 1) {
+                byte[] response = """
+                    {"error":{"message":"Encountered invalidated oauth token for user, failing request","code":"token_revoked"},"status":401}
+                    """.getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "application/json");
+                exchange.sendResponseHeaders(401, response.length);
+                exchange.getResponseBody().write(response);
+                exchange.close();
+                return;
+            }
+            secondAuthorization.set(exchange.getRequestHeaders().get(HttpHeaders.AUTHORIZATION));
+            byte[] response = """
+                event: response.output_text.delta
+                data: {"type":"response.output_text.delta","delta":"OK"}
+
+                data: [DONE]
+
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "text/event-stream");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            AccountTokenRefreshService tokenRefreshService = mock(AccountTokenRefreshService.class);
+            ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            account.setRefreshToken("old-refresh");
+            ProxyAccountEntity refreshed = codexAccount(account.getBaseUrl());
+            refreshed.setAccessToken("new-access-token");
+            when(tokenRefreshService.canRefresh(any(ProxyAccountEntity.class))).thenReturn(true);
+            when(tokenRefreshService.refresh(account)).thenReturn(Mono.just(refreshed));
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                tokenRefreshService
+            );
+            JsonNode request = objectMapper.readTree("""
+                {"model":"gpt-5.4-mini","messages":[{"role":"user","content":"ping"}]}
+                """);
+
+            PlatformCompletionResult result = client.complete(account, request, "gpt-5.4-mini").block();
+
+            assertThat(result).isNotNull();
+            assertThat(result.content()).isEqualTo("OK");
+            assertThat(requestCount.get()).isEqualTo(2);
+            assertThat(secondAuthorization.get()).containsExactly("Bearer new-access-token");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void codexUpstreamSendsToolsAndParsesFunctionCalls() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/responses", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] response = """
+                event: response.output_item.done
+                data: {"type":"response.output_item.done","item":{"type":"function_call","call_id":"call_lookup","name":"lookup","arguments":"{\\"query\\":\\"stars\\"}"}}
+
+                event: response.completed
+                data: {"type":"response.completed","response":{"usage":{"input_tokens":6,"output_tokens":2},"output":[]}}
+
+                data: [DONE]
+
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "text/event-stream");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {
+                  "model": "gpt-5.4-mini",
+                  "messages": [{"role": "user", "content": "lookup stars"}],
+                  "tools": [
+                    {
+                      "type": "function",
+                      "function": {
+                        "name": "lookup",
+                        "description": "Lookup data",
+                        "parameters": {
+                          "type": "object",
+                          "properties": {"query": {"type": "string"}},
+                          "required": ["query"]
+                        },
+                        "strict": true
+                      }
+                    }
+                  ],
+                  "tool_choice": {"type": "function", "function": {"name": "lookup"}},
+                  "parallel_tool_calls": false
+                }
+                """);
+
+            PlatformCompletionResult result = client.complete(account, request, "gpt-5.4-mini").block();
+
+            assertThat(result).isNotNull();
+            assertThat(result.content()).isBlank();
+            assertThat(result.toolUses()).hasSize(1);
+            assertThat(result.toolUses().get(0).id()).isEqualTo("call_lookup");
+            assertThat(result.toolUses().get(0).name()).isEqualTo("lookup");
+            assertThat(result.toolUses().get(0).input().path("query").asText()).isEqualTo("stars");
+
+            JsonNode body = objectMapper.readTree(requestBody.get());
+            JsonNode tool = body.path("tools").get(0);
+            assertThat(tool.path("type").asText()).isEqualTo("function");
+            assertThat(tool.path("name").asText()).isEqualTo("lookup");
+            assertThat(tool.path("function").isMissingNode()).isTrue();
+            assertThat(tool.path("parameters").path("properties").path("query").path("type").asText()).isEqualTo("string");
+            assertThat(tool.path("strict").asBoolean()).isTrue();
+            assertThat(body.path("tool_choice").path("type").asText()).isEqualTo("function");
+            assertThat(body.path("tool_choice").path("name").asText()).isEqualTo("lookup");
+            assertThat(body.path("parallel_tool_calls").asBoolean(true)).isFalse();
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void openAiResponsesApiPreservesMultimodalInput() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/responses", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] response = """
+                {"output_text":"OK","usage":{"input_tokens":8,"output_tokens":1}}
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "application/json");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = openAiAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {
+                  "model": "gpt-5.4-mini",
+                  "input": [
+                    {
+                      "type": "message",
+                      "role": "user",
+                      "content": [
+                        {"type": "input_text", "text": "describe"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,abc", "detail": "high"},
+                        {"type": "input_file", "file_id": "file_123", "filename": "notes.txt"}
+                      ]
+                    }
+                  ]
+                }
+                """);
+
+            PlatformCompletionResult result = client.completeResponses(account, request, "openai/gpt-5.4-mini").block();
+
+            assertThat(result).isNotNull();
+            assertThat(result.content()).isEqualTo("OK");
+            JsonNode body = objectMapper.readTree(requestBody.get());
+            JsonNode content = body.path("input").path(0).path("content");
+            assertThat(content.path(0).path("type").asText()).isEqualTo("input_text");
+            assertThat(content.path(1).path("type").asText()).isEqualTo("input_image");
+            assertThat(content.path(1).path("image_url").asText()).isEqualTo("data:image/png;base64,abc");
+            assertThat(content.path(1).path("detail").asText()).isEqualTo("high");
+            assertThat(content.path(2).path("type").asText()).isEqualTo("input_file");
+            assertThat(content.path(2).path("file_id").asText()).isEqualTo("file_123");
+            assertThat(content.path(2).path("filename").asText()).isEqualTo("notes.txt");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void codexResponsesInputPreservesMultimodalContent() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/responses", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] response = """
+                event: response.output_text.delta
+                data: {"type":"response.output_text.delta","delta":"OK"}
+
+                data: [DONE]
+
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "text/event-stream");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {
+                  "model": "gpt-5.4-mini",
+                  "instructions": "Use vision.",
+                  "input": [
+                    {
+                      "type": "message",
+                      "role": "user",
+                      "content": [
+                        {"type": "input_text", "text": "describe"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,abc", "detail": "high"},
+                        {"type": "input_file", "file_id": "file_123", "filename": "notes.txt"}
+                      ]
+                    }
+                  ]
+                }
+                """);
+
+            PlatformCompletionResult result = client.completeResponses(account, request, "gpt-5.4-mini").block();
+
+            assertThat(result).isNotNull();
+            assertThat(result.content()).isEqualTo("OK");
+            JsonNode body = objectMapper.readTree(requestBody.get());
+            assertThat(body.path("instructions").asText()).isEqualTo("Use vision.");
+            JsonNode content = body.path("input").path(0).path("content");
+            assertThat(content.path(0).path("type").asText()).isEqualTo("input_text");
+            assertThat(content.path(0).path("text").asText()).isEqualTo("describe");
+            assertThat(content.path(1).path("type").asText()).isEqualTo("input_image");
+            assertThat(content.path(1).path("image_url").asText()).isEqualTo("data:image/png;base64,abc");
+            assertThat(content.path(1).path("detail").asText()).isEqualTo("high");
+            assertThat(content.path(2).path("type").asText()).isEqualTo("input_file");
+            assertThat(content.path(2).path("file_id").asText()).isEqualTo("file_123");
+            assertThat(content.path(2).path("filename").asText()).isEqualTo("notes.txt");
+        } finally {
+            server.stop(0);
+        }
+    }
+
     private ProxyAccountEntity codexAccount(String baseUrl) {
         ProxyAccountEntity account = new ProxyAccountEntity();
         account.setProvider(AccountPlatforms.OPENAI_PROVIDER);
         account.setAuthMethod(AccountPlatforms.OPENAI_CODEX_AUTH);
         account.setBaseUrl(baseUrl);
         account.setAccessToken("test-access-token");
+        return account;
+    }
+
+    private ProxyAccountEntity openAiAccount(String baseUrl) {
+        ProxyAccountEntity account = new ProxyAccountEntity();
+        account.setProvider(AccountPlatforms.OPENAI_PROVIDER);
+        account.setAuthMethod(AccountPlatforms.OPENAI_API_KEY_AUTH);
+        account.setBaseUrl(baseUrl);
+        account.setAccessToken("sk-test");
         return account;
     }
 }

@@ -6,10 +6,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.codec.ServerSentEvent;
 import xyz.star4y.api.platform.core.PlatformCompletionResult;
 import xyz.star4y.api.platform.core.PlatformToolUse;
 import xyz.star4y.api.platform.core.PlatformUsage;
-import xyz.star4y.api.platform.openai.OpenAiResponseFactory;
 
 class OpenAiResponseFactoryTest {
 
@@ -65,5 +65,84 @@ class OpenAiResponseFactoryTest {
         JsonNode stopChunk = objectMapper.readTree(events.get(1));
         assertThat(stopChunk.path("choices").get(0).path("finish_reason").asText()).isEqualTo("tool_calls");
         assertThat(events.get(2)).isEqualTo("[DONE]");
+    }
+
+    @Test
+    void responsesApiStreamReturnsResponsesEvents() {
+        PlatformCompletionResult result = new PlatformCompletionResult(
+            "OK",
+            new PlatformUsage(10, 2, java.math.BigDecimal.ZERO, 0, 0, 0)
+        );
+
+        List<ServerSentEvent<String>> events = factory.responsesStreamEvents("gpt-5.4-mini", result, "resp_prev")
+            .collectList()
+            .block();
+
+        assertThat(events).isNotNull();
+        assertThat(events)
+            .extracting(ServerSentEvent::event)
+            .contains("response.created", "response.output_text.delta", "response.completed");
+        assertThat(events.get(events.size() - 1).data()).isEqualTo("[DONE]");
+
+        List<JsonNode> jsonEvents = jsonEvents(events);
+        assertThat(jsonEvents)
+            .extracting(event -> event.path("type").asText())
+            .contains("response.output_text.delta", "response.output_text.done", "response.completed");
+
+        JsonNode completed = jsonEvents.stream()
+            .filter(event -> "response.completed".equals(event.path("type").asText()))
+            .findFirst()
+            .orElseThrow();
+        assertThat(completed.path("response").path("object").asText()).isEqualTo("response");
+        assertThat(completed.path("response").path("status").asText()).isEqualTo("completed");
+        assertThat(completed.path("response").path("previous_response_id").asText()).isEqualTo("resp_prev");
+    }
+
+    @Test
+    void responsesApiStreamReturnsFunctionCallEvents() throws Exception {
+        PlatformCompletionResult result = new PlatformCompletionResult(
+            "",
+            List.of(new PlatformToolUse(
+                "call_1",
+                "Bash",
+                objectMapper.readTree("{\"command\":\"pwd\"}")
+            )),
+            new PlatformUsage(10, 2, java.math.BigDecimal.ZERO, 0, 0, 0)
+        );
+
+        List<ServerSentEvent<String>> events = factory.responsesStreamEvents("gpt-5.4-mini", result, null)
+            .collectList()
+            .block();
+
+        assertThat(events).isNotNull();
+        List<JsonNode> jsonEvents = jsonEvents(events);
+        assertThat(jsonEvents)
+            .extracting(event -> event.path("type").asText())
+            .contains("response.output_item.added", "response.function_call_arguments.done", "response.output_item.done", "response.completed");
+
+        JsonNode toolDone = jsonEvents.stream()
+            .filter(event -> "response.output_item.done".equals(event.path("type").asText()))
+            .findFirst()
+            .orElseThrow();
+        assertThat(toolDone.path("item").path("type").asText()).isEqualTo("function_call");
+        assertThat(toolDone.path("item").path("call_id").asText()).isEqualTo("call_1");
+        assertThat(toolDone.path("item").path("name").asText()).isEqualTo("Bash");
+        assertThat(toolDone.path("item").path("arguments").asText()).isEqualTo("{\"command\":\"pwd\"}");
+    }
+
+    private List<JsonNode> jsonEvents(List<ServerSentEvent<String>> events) {
+        return events.stream()
+            .map(ServerSentEvent::data)
+            .filter(data -> data != null && !"[DONE]".equals(data))
+            .map(this::readJson)
+            .toList();
+    }
+
+    private JsonNode readJson(String data) {
+        try {
+            return objectMapper.readTree(data);
+        } catch (Exception error) {
+            throw new AssertionError(error);
+        }
     }
 }

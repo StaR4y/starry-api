@@ -25,6 +25,7 @@ public class OpenAiRequestAdapter {
         if (request.has("top_p")) chat.set("top_p", request.get("top_p"));
         if (request.has("max_output_tokens")) chat.set("max_tokens", request.get("max_output_tokens"));
         if (request.has("stream")) chat.set("stream", request.get("stream"));
+        if (request.has("previous_response_id")) chat.set("previous_response_id", request.get("previous_response_id"));
         if (request.has("tools")) chat.set("tools", responsesToolsToOpenAi(request.path("tools")));
         if (request.has("tool_choice")) chat.set("tool_choice", request.get("tool_choice"));
         ArrayNode messages = chat.putArray("messages");
@@ -109,6 +110,22 @@ public class OpenAiRequestAdapter {
                 ObjectNode item = normalized.addObject();
                 item.put("type", "text");
                 item.put("text", part.path("text").asText());
+            } else if ("input_image".equals(part.path("type").asText())) {
+                ObjectNode item = normalized.addObject();
+                item.put("type", "image_url");
+                ObjectNode imageUrl = item.putObject("image_url");
+                if (part.has("image_url")) {
+                    imageUrl.set("url", part.get("image_url"));
+                } else if (part.has("file_id")) {
+                    imageUrl.set("url", part.get("file_id"));
+                }
+                if (part.has("detail")) {
+                    imageUrl.set("detail", part.get("detail"));
+                }
+            } else if ("input_file".equals(part.path("type").asText())) {
+                ObjectNode item = normalized.addObject();
+                item.put("type", "text");
+                item.put("text", responsesFileText(part));
             } else if ("refusal".equals(part.path("type").asText())) {
                 ObjectNode item = normalized.addObject();
                 item.put("type", "text");
@@ -116,6 +133,21 @@ public class OpenAiRequestAdapter {
             }
         }
         return normalized;
+    }
+
+    private String responsesFileText(JsonNode part) {
+        String filename = part.path("filename").asText("");
+        String fileId = part.path("file_id").asText("");
+        if (!filename.isBlank() && !fileId.isBlank()) {
+            return "[Input file: " + filename + " (" + fileId + ")]";
+        }
+        if (!filename.isBlank()) {
+            return "[Input file: " + filename + "]";
+        }
+        if (!fileId.isBlank()) {
+            return "[Input file: " + fileId + "]";
+        }
+        return "[Input file]";
     }
 
     private String responsesOutputText(JsonNode output) {

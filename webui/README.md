@@ -39,15 +39,15 @@ webui/
 │   ├── composables/       # 组合式逻辑（按需添加）
 │   ├── layouts/
 │   │   └── DefaultLayout.vue
-│   ├── platforms/         # 前端平台注册、模型推断、客户端脚本
+│   ├── platforms/         # 前端平台注册、模型推断、客户端配置
 │   │   ├── openai/        # OpenAI 展示元数据与客户端环境变量片段
-│   │   ├── anthropic/     # Anthropic / Claude Code 展示元数据与脚本片段
-│   │   ├── gemini/        # Gemini 展示元数据与脚本片段
-│   │   ├── opencode/      # OpenCode 项目配置与脚本片段
+│   │   ├── anthropic/     # Anthropic / Claude Code 展示元数据与配置片段
+│   │   ├── gemini/        # Gemini 展示元数据
+│   │   ├── opencode/      # OpenCode 项目配置片段
 │   │   ├── registry.ts    # 统一 provider / family 顺序与模型推断
-│   │   ├── clientSetup.ts # 聚合各平台片段，生成 macOS/Linux/Windows 脚本
-│   │   ├── setupShared.ts # 脚本生成公共工具
-│   │   └── types.ts       # 平台与脚本类型
+│   │   ├── clientSetup.ts # 聚合 Codex/Claude/OpenCode 配置与 CC Switch 链接
+│   │   ├── setupShared.ts # 配置生成公共工具
+│   │   └── types.ts       # 平台与配置类型
 │   ├── router/index.ts    # 路由 + 全局守卫
 │   ├── stores/auth.ts     # 鉴权状态
 │   ├── types/api.ts       # 与后端 DTO 对齐的类型

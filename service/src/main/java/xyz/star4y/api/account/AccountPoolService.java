@@ -3,6 +3,7 @@ package xyz.star4y.api.account;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
@@ -159,8 +160,24 @@ public class AccountPoolService {
         return selectAccount(sessionHint, AccountPlatforms::isKiroCompatible, "No available Kiro upstream account");
     }
 
+    public Mono<ProxyAccountEntity> selectKiroAccount(String sessionHint, Collection<String> excludedAccountIds) {
+        return selectAccount(
+            sessionHint,
+            account -> AccountPlatforms.isKiroCompatible(account) && !isExcluded(account, excludedAccountIds),
+            "No available Kiro upstream account"
+        );
+    }
+
     public Mono<ProxyAccountEntity> selectOpenAiAccount(String sessionHint) {
         return selectAccount(sessionHint, AccountPlatforms::isOpenAi, "No available OpenAI upstream account");
+    }
+
+    public Mono<ProxyAccountEntity> selectOpenAiAccount(String sessionHint, Collection<String> excludedAccountIds) {
+        return selectAccount(
+            sessionHint,
+            account -> AccountPlatforms.isOpenAi(account) && !isExcluded(account, excludedAccountIds),
+            "No available OpenAI upstream account"
+        );
     }
 
     private Mono<ProxyAccountEntity> selectAccount(
@@ -176,6 +193,13 @@ public class AccountPoolService {
         }
         return Mono.justOrEmpty(selectFrom(accounts, sessionHint))
             .switchIfEmpty(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", unavailableMessage)));
+    }
+
+    private boolean isExcluded(ProxyAccountEntity account, Collection<String> excludedAccountIds) {
+        return account != null
+            && account.getAccountId() != null
+            && excludedAccountIds != null
+            && excludedAccountIds.contains(account.getAccountId());
     }
 
     public Mono<Void> recordSuccess(String accountId, long tokens) {
@@ -236,6 +260,32 @@ public class AccountPoolService {
             .then(refreshCache());
     }
 
+    public Mono<Void> recordRequestFailure(
+        String accountId,
+        UpstreamErrorType type,
+        Integer statusCode,
+        String message
+    ) {
+        if (!isQuotaStatus(statusCode) && !isAuthStatus(statusCode)) {
+            return recordError(accountId, type, statusCode);
+        }
+        Instant now = Instant.now();
+        return repository.findByAccountId(accountId)
+            .flatMap(entity -> {
+                entity.setErrorCount(Optional.ofNullable(entity.getErrorCount()).orElse(0) + 1);
+                entity.setLastUsedAt(now);
+                if (isQuotaStatus(statusCode)) {
+                    entity.setQuotaExhaustedAt(now);
+                    suspendForFailure(entity, "QUOTA_EXHAUSTED", message, now);
+                } else {
+                    entity.setQuotaExhaustedAt(null);
+                    suspendForFailure(entity, "AUTH_FAILED", message, now);
+                }
+                return repository.save(entity);
+            })
+            .then(refreshCache());
+    }
+
     public Mono<Void> recordTestFailure(
         String accountId,
         UpstreamErrorType type,
@@ -253,12 +303,12 @@ public class AccountPoolService {
                 entity.setLastUsedAt(now);
                 if (isQuotaStatus(statusCode)) {
                     entity.setQuotaExhaustedAt(now);
-                    suspendForTestFailure(entity, "QUOTA_EXHAUSTED", message, now);
+                    suspendForFailure(entity, "QUOTA_EXHAUSTED", message, now);
                 } else if (isAuthStatus(statusCode)) {
-                    suspendForTestFailure(entity, "AUTH_FAILED", message, now);
+                    suspendForFailure(entity, "AUTH_FAILED", message, now);
                     entity.setQuotaExhaustedAt(null);
                 } else {
-                    suspendForTestFailure(entity, "ACCOUNT_TEST_FAILED", message, now);
+                    suspendForFailure(entity, "ACCOUNT_TEST_FAILED", message, now);
                     entity.setQuotaExhaustedAt(null);
                 }
                 return repository.save(entity);
@@ -266,7 +316,7 @@ public class AccountPoolService {
             .then(refreshCache());
     }
 
-    private void suspendForTestFailure(ProxyAccountEntity entity, String reason, String message, Instant now) {
+    private void suspendForFailure(ProxyAccountEntity entity, String reason, String message, Instant now) {
         entity.setEnabled(false);
         entity.setSuspendedAt(now);
         entity.setSuspendReason(reason);

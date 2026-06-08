@@ -11,12 +11,15 @@
   import type { ApiKey, CreateApiKeyRequest, CreatedApiKey } from '@/types/api';
   import { formatDateTime, formatNumber } from '@/utils/format';
   import {
+    createCcSwitchLinks,
     createConnectionText,
     createSetupScriptBlock,
     setupClients,
     setupPlatforms,
+    type CcSwitchLink,
     type SetupClient,
     type SetupContext,
+    type SetupFileBlock,
     type SetupPlatform,
     type SetupScriptBlock,
   } from '@/platforms/clientSetup';
@@ -98,10 +101,10 @@
   /* 创建后一次性密钥展示 */
   const newKeyVisible = ref(false);
   const newKey = ref<CreatedApiKey | null>(null);
-  const newSetupClient = ref<SetupClient>('all');
-  const newSetupPlatform = ref<SetupPlatform>('macos');
-  const configSetupClient = ref<SetupClient>('all');
-  const configSetupPlatform = ref<SetupPlatform>('macos');
+  const newSetupClient = ref<SetupClient>('codex');
+  const newSetupPlatform = ref<SetupPlatform>('unix');
+  const configSetupClient = ref<SetupClient>('codex');
+  const configSetupPlatform = ref<SetupPlatform>('unix');
 
   function normalizedApiKey(apiKey?: string | null) {
     return apiKey?.trim() || 'sk-REPLACE_ME';
@@ -120,6 +123,7 @@
     createSetupScriptBlock(newSetupClient.value, newSetupPlatform.value, setupContext(newKey.value?.key)),
   );
   const connectionText = computed(() => createConnectionText(setupContext(newKey.value?.key)));
+  const ccSwitchLinks = computed(() => createCcSwitchLinks(setupContext(newKey.value?.key)));
 
   async function copy(text: string, successMessage = '已复制') {
     try {
@@ -131,7 +135,11 @@
   }
 
   function scriptCopyMessage(block: SetupScriptBlock) {
-    return `已复制 ${block.clientLabel} / ${block.platformLabel} 脚本`;
+    return `已复制 ${block.clientLabel} / ${block.platformLabel} 配置`;
+  }
+
+  function setupFileCopyMessage(file: SetupFileBlock) {
+    return `已复制 ${file.path}`;
   }
 
   function rowApiKeyPlaceholder(row: ApiKey) {
@@ -143,7 +151,7 @@
   const configKey = ref<ApiKey | null>(null);
   const configFullApiKey = ref('');
   const configDialogTitle = computed(() =>
-    configKey.value ? `${configKey.value.name} 配置脚本` : '配置脚本',
+    configKey.value ? `${configKey.value.name} 客户端配置` : '客户端配置',
   );
   const hasConfigFullApiKey = computed(() => {
     const value = configFullApiKey.value.trim();
@@ -160,6 +168,7 @@
   const configScriptBlock = computed(() =>
     createSetupScriptBlock(configSetupClient.value, configSetupPlatform.value, setupContext(configApiKey.value)),
   );
+  const configCcSwitchLinks = computed(() => createCcSwitchLinks(setupContext(configApiKey.value)));
 
   function openShellConfig(row: ApiKey) {
     configKey.value = row;
@@ -177,10 +186,38 @@
 
   async function copyConfigScript(block: SetupScriptBlock) {
     if (!hasConfigFullApiKey.value) {
-      ElMessage.warning('请先粘贴完整 API Key，否则脚本中的占位密钥不可用');
+      ElMessage.warning('请先粘贴完整 API Key，否则配置中的占位密钥不可用');
       return;
     }
     await copy(block.script, scriptCopyMessage(block));
+  }
+
+  async function copyConfigSetupFile(file: SetupFileBlock) {
+    if (!hasConfigFullApiKey.value) {
+      ElMessage.warning('请先粘贴完整 API Key，否则配置中的占位密钥不可用');
+      return;
+    }
+    await copy(file.content, setupFileCopyMessage(file));
+  }
+
+  async function copyConfigCcSwitch(link: CcSwitchLink) {
+    if (!hasConfigFullApiKey.value) {
+      ElMessage.warning('请先粘贴完整 API Key，否则 CC Switch 链接不可用');
+      return;
+    }
+    await copy(link.url, `已复制 ${link.label} CC Switch 链接`);
+  }
+
+  function openConfigCcSwitch(link: CcSwitchLink) {
+    if (!hasConfigFullApiKey.value) {
+      ElMessage.warning('请先粘贴完整 API Key，否则 CC Switch 链接不可用');
+      return;
+    }
+    window.location.href = link.url;
+  }
+
+  function openCcSwitch(link: CcSwitchLink) {
+    window.location.href = link.url;
   }
 
   async function submitForm() {
@@ -273,7 +310,7 @@
           <el-button link type="primary" @click="toggleEnabled(row)">
             {{ row.enabled ? '停用' : '启用' }}
           </el-button>
-          <el-button link type="primary" @click="openShellConfig(row)">配置脚本</el-button>
+          <el-button link type="primary" @click="openShellConfig(row)">客户端配置</el-button>
           <el-button link type="danger" @click="removeKey(row)">删除</el-button>
         </template>
       </el-table-column>
@@ -306,7 +343,7 @@
     <div class="config-dialog-body">
       <el-alert
         class="secret-alert"
-        title="已有 API Key 只保留前缀。请先粘贴创建时保存的完整密钥，否则 OpenCode 会因占位密钥报 Invalid API key。"
+        title="已有 API Key 只保留前缀。请先粘贴创建时保存的完整密钥，否则客户端配置中的占位密钥不可用。"
         type="error"
         :closable="false"
         show-icon
@@ -316,7 +353,7 @@
         <div class="secret-panel__head">
           <div>
             <h3>连接信息</h3>
-            <p>复制脚本前先输入完整密钥；只含前缀的占位密钥不能用于客户端鉴权。</p>
+            <p>复制配置前先输入完整密钥；只含前缀的占位密钥不能用于客户端鉴权。</p>
           </div>
           <el-button size="small" :disabled="!hasConfigFullApiKey" @click="copyConfigConnectionText">
             复制连接信息
@@ -339,7 +376,7 @@
             <code class="secret-field__value mono" :title="configKey.name">{{ configKey.name }}</code>
           </div>
           <div class="secret-field">
-            <span class="secret-field__label">Base URL</span>
+            <span class="secret-field__label">Codex</span>
             <code class="secret-field__value mono" :title="apiBaseUrl">{{ apiBaseUrl }}</code>
             <el-button size="small" @click="copy(apiBaseUrl)">复制</el-button>
           </div>
@@ -349,13 +386,6 @@
             <el-button size="small" @click="copy(apiOrigin)">复制</el-button>
           </div>
           <div class="secret-field">
-            <span class="secret-field__label">Gemini</span>
-            <code class="secret-field__value mono" :title="`${apiOrigin}/v1beta`">
-              {{ apiOrigin }}/v1beta
-            </code>
-            <el-button size="small" @click="copy(`${apiOrigin}/v1beta`)">复制</el-button>
-          </div>
-          <div class="secret-field">
             <span class="secret-field__label">OpenCode</span>
             <code class="secret-field__value mono" :title="apiBaseUrl">
               {{ apiBaseUrl }}
@@ -363,7 +393,7 @@
             <el-button size="small" @click="copy(apiBaseUrl)">复制</el-button>
           </div>
           <div class="secret-field">
-            <span class="secret-field__label">脚本密钥</span>
+            <span class="secret-field__label">API Key</span>
             <code class="secret-field__value mono" :title="configApiKey">{{ configApiKey }}</code>
             <el-button size="small" :disabled="!hasConfigFullApiKey" @click="copy(configApiKey)">复制</el-button>
           </div>
@@ -378,8 +408,8 @@
       <section class="secret-panel setup-scripts">
         <div class="secret-panel__head">
           <div>
-            <h3>配置脚本</h3>
-            <p>先选客户端，再选系统平台；OpenCode 会额外生成当前目录的 opencode.json。</p>
+            <h3>客户端配置</h3>
+            <p>将以下配置添加到对应客户端；Claude Code 可直接在终端运行。</p>
           </div>
           <el-button
             size="small"
@@ -387,7 +417,7 @@
             :disabled="!hasConfigFullApiKey"
             @click="copyConfigScript(configScriptBlock)"
           >
-            复制当前脚本
+            复制当前配置
           </el-button>
         </div>
 
@@ -415,7 +445,42 @@
             <h4>{{ configScriptBlock.clientLabel }} / {{ configScriptBlock.platformLabel }}</h4>
             <p>{{ configScriptBlock.clientDescription }}；{{ configScriptBlock.platformDescription }}。</p>
           </div>
-          <pre class="setup-scripts__code"><code>{{ configScriptBlock.script }}</code></pre>
+          <div v-for="file in configScriptBlock.files" :key="file.path" class="setup-file">
+            <div class="setup-file__head">
+              <span class="mono">{{ file.path }}</span>
+              <el-button size="small" :disabled="!hasConfigFullApiKey" @click="copyConfigSetupFile(file)">
+                复制
+              </el-button>
+            </div>
+            <p v-if="file.hint" class="setup-file__hint">{{ file.hint }}</p>
+            <pre class="setup-scripts__code"><code>{{ file.content }}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="secret-panel cc-switch-panel">
+        <div class="secret-panel__head">
+          <div>
+            <h3>CC Switch 一键连接</h3>
+            <p>打开 CC Switch 后会导入 Starry API 供应商配置。</p>
+          </div>
+        </div>
+
+        <div class="cc-switch-list">
+          <div v-for="link in configCcSwitchLinks" :key="link.client" class="cc-switch-item">
+            <div class="cc-switch-item__meta">
+              <strong>{{ link.label }}</strong>
+              <span>{{ link.description }}</span>
+            </div>
+            <div class="cc-switch-item__actions">
+              <el-button size="small" type="primary" :disabled="!hasConfigFullApiKey" @click="openConfigCcSwitch(link)">
+                打开
+              </el-button>
+              <el-button size="small" :disabled="!hasConfigFullApiKey" @click="copyConfigCcSwitch(link)">
+                复制链接
+              </el-button>
+            </div>
+          </div>
         </div>
       </section>
     </div>
@@ -435,7 +500,7 @@
     <div class="secret-dialog-body">
       <el-alert
         class="secret-alert"
-        title="此密钥只显示一次，关闭后无法找回。请先复制 API Key 或一键配置脚本。"
+        title="此密钥只显示一次，关闭后无法找回。请先复制 API Key 或客户端配置。"
         type="warning"
         :closable="false"
         show-icon
@@ -452,7 +517,7 @@
 
         <div class="secret-fields">
           <div class="secret-field">
-            <span class="secret-field__label">Base URL</span>
+            <span class="secret-field__label">Codex</span>
             <code class="secret-field__value mono" :title="apiBaseUrl">{{ apiBaseUrl }}</code>
             <el-button size="small" @click="copy(apiBaseUrl)">复制</el-button>
           </div>
@@ -460,13 +525,6 @@
             <span class="secret-field__label">Claude</span>
             <code class="secret-field__value mono" :title="apiOrigin">{{ apiOrigin }}</code>
             <el-button size="small" @click="copy(apiOrigin)">复制</el-button>
-          </div>
-          <div class="secret-field">
-            <span class="secret-field__label">Gemini</span>
-            <code class="secret-field__value mono" :title="`${apiOrigin}/v1beta`">
-              {{ apiOrigin }}/v1beta
-            </code>
-            <el-button size="small" @click="copy(`${apiOrigin}/v1beta`)">复制</el-button>
           </div>
           <div class="secret-field">
             <span class="secret-field__label">OpenCode</span>
@@ -491,15 +549,15 @@
       <section v-if="newKey" class="secret-panel setup-scripts">
         <div class="secret-panel__head">
           <div>
-            <h3>控制台一键配置</h3>
-            <p>先选客户端，再选系统平台；新密钥会直接写入脚本。</p>
+            <h3>客户端配置</h3>
+            <p>将以下配置添加到对应客户端；新密钥会直接写入配置内容。</p>
           </div>
           <el-button
             size="small"
             type="primary"
             @click="copy(setupScriptBlock.script, scriptCopyMessage(setupScriptBlock))"
           >
-            复制当前脚本
+            复制当前配置
           </el-button>
         </div>
 
@@ -527,7 +585,38 @@
             <h4>{{ setupScriptBlock.clientLabel }} / {{ setupScriptBlock.platformLabel }}</h4>
             <p>{{ setupScriptBlock.clientDescription }}；{{ setupScriptBlock.platformDescription }}。</p>
           </div>
-          <pre class="setup-scripts__code"><code>{{ setupScriptBlock.script }}</code></pre>
+          <div v-for="file in setupScriptBlock.files" :key="file.path" class="setup-file">
+            <div class="setup-file__head">
+              <span class="mono">{{ file.path }}</span>
+              <el-button size="small" @click="copy(file.content, setupFileCopyMessage(file))">复制</el-button>
+            </div>
+            <p v-if="file.hint" class="setup-file__hint">{{ file.hint }}</p>
+            <pre class="setup-scripts__code"><code>{{ file.content }}</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section v-if="newKey" class="secret-panel cc-switch-panel">
+        <div class="secret-panel__head">
+          <div>
+            <h3>CC Switch 一键连接</h3>
+            <p>打开 CC Switch 后会导入 Starry API 供应商配置。</p>
+          </div>
+        </div>
+
+        <div class="cc-switch-list">
+          <div v-for="link in ccSwitchLinks" :key="link.client" class="cc-switch-item">
+            <div class="cc-switch-item__meta">
+              <strong>{{ link.label }}</strong>
+              <span>{{ link.description }}</span>
+            </div>
+            <div class="cc-switch-item__actions">
+              <el-button size="small" type="primary" @click="openCcSwitch(link)">打开</el-button>
+              <el-button size="small" @click="copy(link.url, `已复制 ${link.label} CC Switch 链接`)">
+                复制链接
+              </el-button>
+            </div>
+          </div>
         </div>
       </section>
     </div>
@@ -685,6 +774,75 @@
     }
   }
 
+  .setup-file {
+    display: grid;
+    gap: 6px;
+
+    &__head {
+      min-height: 36px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 10px;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      border-radius: 8px;
+      background: rgba(248, 250, 252, 0.78);
+
+      span {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+    }
+
+    &__hint {
+      margin: 0;
+      color: var(--kp-text-secondary);
+      font-size: 12px;
+    }
+  }
+
+  .cc-switch-list {
+    display: grid;
+    gap: 8px;
+  }
+
+  .cc-switch-item {
+    min-height: 56px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    padding: 10px;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.7);
+
+    &__meta {
+      min-width: 0;
+      display: grid;
+      gap: 2px;
+
+      strong {
+        color: var(--kp-text);
+        font-size: 13px;
+      }
+
+      span {
+        color: var(--kp-text-secondary);
+        font-size: 12px;
+      }
+    }
+
+    &__actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+  }
+
   @media (max-width: 720px) {
     .secret-panel__head {
       flex-direction: column;
@@ -701,6 +859,20 @@
 
     .secret-field .el-button {
       justify-self: start;
+    }
+
+    .setup-file__head,
+    .cc-switch-item {
+      grid-template-columns: 1fr;
+    }
+
+    .setup-file__head {
+      display: grid;
+    }
+
+    .cc-switch-item__actions {
+      justify-content: flex-start;
+      flex-wrap: wrap;
     }
   }
 </style>

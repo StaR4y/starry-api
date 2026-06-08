@@ -269,11 +269,48 @@ public class KiroPayloadFactory {
     }
 
     private List<ObjectNode> sanitizeConversation(List<ObjectNode> messages) {
-        List<ObjectNode> sanitized = removeInvalidToolResultMessages(messages);
+        List<ObjectNode> sanitized = mergeConsecutiveToolResultMessages(messages);
+        sanitized = removeInvalidToolResultMessages(sanitized);
         sanitized = ensureValidToolUsesAndResults(sanitized);
         sanitized = ensureAlternatingMessages(sanitized);
         sanitized = ensureEndsWithUserMessage(sanitized);
         return sanitized;
+    }
+
+    private List<ObjectNode> mergeConsecutiveToolResultMessages(List<ObjectNode> messages) {
+        List<ObjectNode> result = new ArrayList<>();
+        for (ObjectNode message : messages) {
+            ObjectNode copy = message.deepCopy();
+            ObjectNode previous = result.isEmpty() ? null : result.get(result.size() - 1);
+            if (previous != null && isUser(previous) && hasToolResults(previous) && isUser(copy) && hasToolResults(copy)) {
+                mergeUserMessages(previous, copy);
+                continue;
+            }
+            result.add(copy);
+        }
+        return result;
+    }
+
+    private void mergeUserMessages(ObjectNode target, ObjectNode source) {
+        ObjectNode targetInput = (ObjectNode) target.path("userInputMessage");
+        ObjectNode sourceInput = (ObjectNode) source.path("userInputMessage");
+        targetInput.put("content", flattenContent(
+            targetInput.path("content").asText(""),
+            sourceInput.path("content").asText("")
+        ));
+
+        JsonNode sourceResults = sourceInput.path("userInputMessageContext").path("toolResults");
+        if (sourceResults.isArray() && !sourceResults.isEmpty()) {
+            ObjectNode targetContext = targetInput.path("userInputMessageContext").isObject()
+                ? (ObjectNode) targetInput.path("userInputMessageContext")
+                : targetInput.putObject("userInputMessageContext");
+            ArrayNode targetResults = targetContext.path("toolResults").isArray()
+                ? (ArrayNode) targetContext.path("toolResults")
+                : targetContext.putArray("toolResults");
+            for (JsonNode result : sourceResults) {
+                targetResults.add(result.deepCopy());
+            }
+        }
     }
 
     private List<ObjectNode> normalizeToolHistory(List<ObjectNode> messages, JsonNode tools) {

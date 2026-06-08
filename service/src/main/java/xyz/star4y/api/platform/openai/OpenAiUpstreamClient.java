@@ -16,8 +16,10 @@ import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 import xyz.star4y.api.account.AccountPlatforms;
+import xyz.star4y.api.account.AccountTokenRefreshService;
 import xyz.star4y.api.account.ProxyAccountEntity;
 import xyz.star4y.api.platform.core.PlatformCompletionResult;
+import xyz.star4y.api.platform.core.PlatformToolUse;
 import xyz.star4y.api.platform.core.PlatformUsage;
 import xyz.star4y.api.platform.upstream.UpstreamException;
 
@@ -30,10 +32,16 @@ public class OpenAiUpstreamClient {
 
     private final ObjectMapper objectMapper;
     private final WebClient webClient;
+    private final AccountTokenRefreshService tokenRefreshService;
 
-    public OpenAiUpstreamClient(ObjectMapper objectMapper, WebClient kiroWebClient) {
+    public OpenAiUpstreamClient(
+        ObjectMapper objectMapper,
+        WebClient kiroWebClient,
+        AccountTokenRefreshService tokenRefreshService
+    ) {
         this.objectMapper = objectMapper;
         this.webClient = kiroWebClient;
+        this.tokenRefreshService = tokenRefreshService;
     }
 
     public Mono<PlatformCompletionResult> complete(ProxyAccountEntity account, JsonNode request, String model) {
@@ -41,6 +49,13 @@ public class OpenAiUpstreamClient {
             return completeCodex(account, request, openAiModel(model, account));
         }
         return completeChatCompletions(account, request, openAiModel(model, account));
+    }
+
+    public Mono<PlatformCompletionResult> completeResponses(ProxyAccountEntity account, JsonNode request, String model) {
+        if (AccountPlatforms.isCodex(account)) {
+            return completeCodex(account, request, openAiModel(model, account));
+        }
+        return completeResponsesApi(account, request, openAiModel(model, account));
     }
 
     private Mono<PlatformCompletionResult> completeChatCompletions(
@@ -70,10 +85,37 @@ public class OpenAiUpstreamClient {
         body.put("store", false);
         body.put("stream", true);
         body.set("input", codexInput(request));
+        appendCodexTools(body, request);
 
+        return completeCodexOnce(account, body)
+            .onErrorResume(error -> {
+                if (isUnauthorized(error) && tokenRefreshService.canRefresh(account)) {
+                    return tokenRefreshService.refresh(account)
+                        .flatMap(refreshedAccount -> completeCodexOnce(refreshedAccount, body));
+                }
+                return Mono.error(error);
+            });
+    }
+
+    private Mono<PlatformCompletionResult> completeCodexOnce(ProxyAccountEntity account, ObjectNode body) {
         return webClient.post()
             .uri(endpoint(account.getBaseUrl(), AccountPlatforms.DEFAULT_CODEX_BASE_URL, "/responses"))
             .headers(headers -> applyCodexHeaders(headers, account))
+            .bodyValue(body)
+            .exchangeToMono(response -> handleResponse(response, this::parseResponses));
+    }
+
+    private Mono<PlatformCompletionResult> completeResponsesApi(
+        ProxyAccountEntity account,
+        JsonNode request,
+        String model
+    ) {
+        ObjectNode body = request.deepCopy();
+        body.put("model", model);
+
+        return webClient.post()
+            .uri(endpoint(account.getBaseUrl(), AccountPlatforms.DEFAULT_OPENAI_BASE_URL, "/responses"))
+            .headers(headers -> applyOpenAiResponsesHeaders(headers, account))
             .bodyValue(body)
             .exchangeToMono(response -> handleResponse(response, this::parseResponses));
     }
@@ -143,12 +185,17 @@ public class OpenAiUpstreamClient {
         if (content.isBlank()) {
             content = responseOutputText(body.path("output"));
         }
-        return new PlatformCompletionResult(content, usage(body.path("usage"), "input_tokens", "output_tokens"));
+        return new PlatformCompletionResult(
+            content,
+            responseToolUses(body.path("output")),
+            usage(body.path("usage"), "input_tokens", "output_tokens")
+        );
     }
 
     private PlatformCompletionResult parseResponsesStream(String rawBody) throws Exception {
         StringBuilder content = new StringBuilder();
         String fallbackContent = "";
+        List<PlatformToolUse> toolUses = new ArrayList<>();
         JsonNode usage = null;
         for (String payload : sseDataPayloads(rawBody)) {
             String data = payload.trim();
@@ -164,7 +211,9 @@ public class OpenAiUpstreamClient {
             } else if ("response.content_part.done".equals(type)) {
                 fallbackContent = firstNonBlank(fallbackContent, contentPartText(event.path("part")));
             } else if ("response.output_item.done".equals(type)) {
-                fallbackContent = firstNonBlank(fallbackContent, responseOutputItemText(event.path("item")));
+                JsonNode item = event.path("item");
+                fallbackContent = firstNonBlank(fallbackContent, responseOutputItemText(item));
+                appendResponseToolUse(toolUses, item);
             } else if ("response.completed".equals(type)) {
                 JsonNode response = event.path("response");
                 fallbackContent = firstNonBlank(
@@ -172,17 +221,86 @@ public class OpenAiUpstreamClient {
                     response.path("output_text").asText(""),
                     responseOutputText(response.path("output"))
                 );
+                appendResponseToolUses(toolUses, response.path("output"));
                 usage = presentNode(response.path("usage"), usage);
             }
             usage = presentNode(event.path("usage"), usage);
         }
         return new PlatformCompletionResult(
             content.length() > 0 ? content.toString() : fallbackContent,
+            toolUses,
             usage(usage, "input_tokens", "output_tokens")
         );
     }
 
+    private void appendCodexTools(ObjectNode body, JsonNode request) {
+        JsonNode tools = request.path("tools");
+        if (tools.isArray() && !tools.isEmpty()) {
+            body.set("tools", codexTools(tools));
+        }
+        if (request.has("tool_choice")) {
+            body.set("tool_choice", codexToolChoice(request.path("tool_choice")));
+        }
+        if (request.has("parallel_tool_calls")) {
+            body.set("parallel_tool_calls", request.path("parallel_tool_calls"));
+        }
+    }
+
+    private void applyOpenAiResponsesHeaders(HttpHeaders headers, ProxyAccountEntity account) {
+        applyOpenAiHeaders(headers, account);
+        headers.setAccept(List.of(MediaType.TEXT_EVENT_STREAM, MediaType.APPLICATION_JSON));
+    }
+
+    private ArrayNode codexTools(JsonNode tools) {
+        ArrayNode converted = objectMapper.createArrayNode();
+        for (JsonNode tool : tools) {
+            if (!"function".equals(tool.path("type").asText())) {
+                converted.add(tool);
+                continue;
+            }
+            JsonNode function = tool.path("function");
+            if (function.isMissingNode() || function.isNull()) {
+                converted.add(tool);
+                continue;
+            }
+            ObjectNode codexTool = converted.addObject();
+            codexTool.put("type", "function");
+            codexTool.put("name", function.path("name").asText());
+            if (function.has("description")) {
+                codexTool.set("description", function.get("description"));
+            }
+            if (function.has("parameters")) {
+                codexTool.set("parameters", function.get("parameters"));
+            }
+            if (function.has("strict")) {
+                codexTool.set("strict", function.get("strict"));
+            }
+        }
+        return converted;
+    }
+
+    private JsonNode codexToolChoice(JsonNode toolChoice) {
+        if (!toolChoice.isObject() || !"function".equals(toolChoice.path("type").asText())) {
+            return toolChoice;
+        }
+        JsonNode function = toolChoice.path("function");
+        if (function.isMissingNode() || function.isNull()) {
+            return toolChoice;
+        }
+        ObjectNode converted = objectMapper.createObjectNode();
+        converted.put("type", "function");
+        converted.put("name", function.path("name").asText());
+        return converted;
+    }
+
     private ArrayNode codexInput(JsonNode request) {
+        if (request.has("input")) {
+            return codexResponsesInput(request.path("input"));
+        }
+        return codexChatInput(request);
+    }
+
+    private ArrayNode codexChatInput(JsonNode request) {
         ArrayNode input = objectMapper.createArrayNode();
         JsonNode messages = request.path("messages");
         if (messages.isArray()) {
@@ -205,6 +323,29 @@ public class OpenAiUpstreamClient {
         return input;
     }
 
+    private ArrayNode codexResponsesInput(JsonNode sourceInput) {
+        ArrayNode input = objectMapper.createArrayNode();
+        if (sourceInput.isTextual()) {
+            ObjectNode message = input.addObject();
+            message.put("type", "message");
+            message.put("role", "user");
+            ArrayNode content = message.putArray("content");
+            addTextPart(content, "input_text", sourceInput.asText());
+        } else if (sourceInput.isArray()) {
+            for (JsonNode item : sourceInput) {
+                appendCodexResponsesInputItem(input, item);
+            }
+        }
+        if (input.isEmpty()) {
+            ObjectNode message = input.addObject();
+            message.put("type", "message");
+            message.put("role", "user");
+            ArrayNode content = message.putArray("content");
+            addTextPart(content, "input_text", "Continue");
+        }
+        return input;
+    }
+
     private void appendCodexMessage(ArrayNode input, JsonNode source) {
         String role = source.path("role").asText();
         if ("tool".equals(role)) {
@@ -222,12 +363,46 @@ public class OpenAiUpstreamClient {
         String codexRole = "assistant".equals(role) ? "assistant" : "user";
         message.put("role", codexRole);
         ArrayNode content = message.putArray("content");
-        ObjectNode text = content.addObject();
-        text.put("type", "assistant".equals(codexRole) ? "output_text" : "input_text");
-        text.put("text", textValue);
+        appendCodexContentParts(content, source.path("content"), codexRole);
+        if (content.isEmpty()) {
+            addTextPart(content, "assistant".equals(codexRole) ? "output_text" : "input_text", textValue);
+        }
         if ("assistant".equals(role) && toolCalls.isArray() && !toolCalls.isEmpty()) {
             appendCodexFunctionCalls(input, toolCalls);
         }
+    }
+
+    private void appendCodexResponsesInputItem(ArrayNode input, JsonNode source) {
+        String type = source.path("type").asText("");
+        if ("function_call".equals(type)) {
+            ObjectNode item = input.addObject();
+            item.put("type", "function_call");
+            item.put("call_id", firstNonBlank(source.path("call_id").asText(null), source.path("id").asText(null)));
+            item.put("name", source.path("name").asText());
+            item.put("arguments", source.path("arguments").asText("{}"));
+            item.put("status", source.path("status").asText("completed"));
+            return;
+        }
+        if ("function_call_output".equals(type)) {
+            ObjectNode item = input.addObject();
+            item.put("type", "function_call_output");
+            item.put("call_id", source.path("call_id").asText());
+            item.set("output", source.has("output") ? source.get("output").deepCopy() : objectMapper.getNodeFactory().textNode(""));
+            return;
+        }
+        if ("message".equals(type) || source.has("role") || source.has("content")) {
+            String role = source.path("role").asText("user");
+            ObjectNode message = input.addObject();
+            message.put("type", "message");
+            message.put("role", "assistant".equals(role) ? "assistant" : "user");
+            ArrayNode content = message.putArray("content");
+            appendCodexContentParts(content, source.path("content"), message.path("role").asText());
+            if (content.isEmpty()) {
+                addTextPart(content, "assistant".equals(message.path("role").asText()) ? "output_text" : "input_text", "");
+            }
+            return;
+        }
+        input.add(source.deepCopy());
     }
 
     private void appendCodexFunctionCalls(ArrayNode input, JsonNode toolCalls) {
@@ -253,6 +428,78 @@ public class OpenAiUpstreamClient {
         item.put("type", "function_call_output");
         item.put("call_id", firstNonBlank(source.path("tool_call_id").asText(null), source.path("call_id").asText(null)));
         item.put("output", contentText(source.path("content")));
+    }
+
+    private void appendCodexContentParts(ArrayNode target, JsonNode content, String role) {
+        if (content == null || content.isMissingNode() || content.isNull()) {
+            return;
+        }
+        String textType = "assistant".equals(role) ? "output_text" : "input_text";
+        if (content.isTextual()) {
+            addTextPart(target, textType, content.asText());
+            return;
+        }
+        if (!content.isArray()) {
+            addTextPart(target, textType, content.toString());
+            return;
+        }
+        for (JsonNode part : content) {
+            appendCodexContentPart(target, part, textType);
+        }
+    }
+
+    private void appendCodexContentPart(ArrayNode target, JsonNode part, String textType) {
+        String type = part.path("type").asText("");
+        switch (type) {
+            case "text" -> addTextPart(target, textType, part.path("text").asText(""));
+            case "input_text", "output_text" -> {
+                ObjectNode copy = target.addObject();
+                copy.put("type", type);
+                copy.put("text", part.path("text").asText(""));
+            }
+            case "refusal" -> addTextPart(target, "output_text", part.path("refusal").asText(part.path("text").asText("")));
+            case "image_url" -> addInputImageFromChat(target, part);
+            case "input_image" -> target.add(normalizedInputImage(part));
+            case "input_file" -> target.add(part.deepCopy());
+            default -> target.add(part.deepCopy());
+        }
+    }
+
+    private void addInputImageFromChat(ArrayNode target, JsonNode part) {
+        JsonNode imageUrl = part.path("image_url");
+        ObjectNode inputImage = target.addObject();
+        inputImage.put("type", "input_image");
+        if (imageUrl.isObject()) {
+            if (imageUrl.has("url")) {
+                inputImage.set("image_url", imageUrl.get("url"));
+            }
+            if (imageUrl.has("detail")) {
+                inputImage.set("detail", imageUrl.get("detail"));
+            }
+        } else if (imageUrl.isTextual()) {
+            inputImage.set("image_url", imageUrl);
+        }
+    }
+
+    private ObjectNode normalizedInputImage(JsonNode part) {
+        ObjectNode inputImage = objectMapper.createObjectNode();
+        inputImage.put("type", "input_image");
+        copyIfPresent(part, inputImage, "image_url");
+        copyIfPresent(part, inputImage, "file_id");
+        copyIfPresent(part, inputImage, "detail");
+        return inputImage;
+    }
+
+    private void addTextPart(ArrayNode target, String type, String text) {
+        ObjectNode part = target.addObject();
+        part.put("type", type);
+        part.put("text", text == null ? "" : text);
+    }
+
+    private void copyIfPresent(JsonNode source, ObjectNode target, String field) {
+        if (source.has(field)) {
+            target.set(field, source.get(field).deepCopy());
+        }
     }
 
     private String codexInstructions(JsonNode request) {
@@ -389,6 +636,47 @@ public class OpenAiUpstreamClient {
         return builder.toString();
     }
 
+    private List<PlatformToolUse> responseToolUses(JsonNode output) {
+        List<PlatformToolUse> toolUses = new ArrayList<>();
+        appendResponseToolUses(toolUses, output);
+        return toolUses;
+    }
+
+    private void appendResponseToolUses(List<PlatformToolUse> toolUses, JsonNode output) {
+        if (!output.isArray()) {
+            return;
+        }
+        for (JsonNode item : output) {
+            appendResponseToolUse(toolUses, item);
+        }
+    }
+
+    private void appendResponseToolUse(List<PlatformToolUse> toolUses, JsonNode item) {
+        if (!"function_call".equals(item.path("type").asText())) {
+            return;
+        }
+        String callId = firstNonBlank(item.path("call_id").asText(null), item.path("id").asText(null));
+        String name = item.path("name").asText(null);
+        if (callId == null || name == null || name.isBlank()) {
+            return;
+        }
+        if (toolUses.stream().anyMatch(toolUse -> callId.equals(toolUse.id()))) {
+            return;
+        }
+        toolUses.add(new PlatformToolUse(callId, name, parseToolArguments(item.path("arguments").asText("{}"))));
+    }
+
+    private JsonNode parseToolArguments(String arguments) {
+        if (arguments == null || arguments.isBlank()) {
+            return objectMapper.createObjectNode();
+        }
+        try {
+            return objectMapper.readTree(arguments);
+        } catch (Exception ignored) {
+            return objectMapper.createObjectNode().put("_rawArguments", arguments);
+        }
+    }
+
     private String responseOutputItemText(JsonNode item) {
         JsonNode content = item.path("content");
         if (!content.isArray()) {
@@ -447,6 +735,10 @@ public class OpenAiUpstreamClient {
 
     private boolean isRecoverableStatus(int statusCode) {
         return statusCode == 402 || statusCode == 429 || statusCode >= 500;
+    }
+
+    private boolean isUnauthorized(Throwable error) {
+        return error instanceof UpstreamException upstream && upstream.getStatusCode() == 401;
     }
 
     private boolean usesMaxCompletionTokens(String model) {

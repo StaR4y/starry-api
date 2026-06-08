@@ -228,72 +228,95 @@ https://<your-domain>/payment/webhook/easypay
 
 When the webhook signature is valid and the upstream trade status is successful, the service marks the order as completed and increments the user's balance. Duplicate successful callbacks are ignored after the first completion.
 
-Persist client API configuration in a console profile:
+Use the WebUI API Key page to generate per-key client configuration. The current setup is API-key based and no longer writes shell profiles automatically.
 
-macOS:
+Codex CLI (`~/.codex/config.toml`):
 
-```bash
-PROFILE="${ZDOTDIR:-$HOME}/.zshrc"
-cat >> "$PROFILE" <<'EOF'
-export OPENAI_BASE_URL='http://127.0.0.1:8080/v1'
-export OPENAI_API_KEY='sk-REPLACE_ME'
-export GEMINI_BASE_URL='http://127.0.0.1:8080/v1beta'
-export GEMINI_API_KEY='sk-REPLACE_ME'
-export STARRY_API_BASE_URL='http://127.0.0.1:8080/v1'
-export STARRY_API_KEY='sk-REPLACE_ME'
-export STARRY_API_PORT='8080'
-EOF
-export OPENAI_BASE_URL='http://127.0.0.1:8080/v1'
-export OPENAI_API_KEY='sk-REPLACE_ME'
-export GEMINI_BASE_URL='http://127.0.0.1:8080/v1beta'
-export GEMINI_API_KEY='sk-REPLACE_ME'
-export STARRY_API_BASE_URL='http://127.0.0.1:8080/v1'
-export STARRY_API_KEY='sk-REPLACE_ME'
-export STARRY_API_PORT='8080'
+```toml
+model = "gpt-5.5"
+review_model = "gpt-5.5"
+model_provider = "starry"
+model_reasoning_effort = "xhigh"
+model_verbosity = "medium"
+disable_response_storage = true
+windows_wsl_setup_acknowledged = true
+
+[model_providers.starry]
+name = "Starry API"
+base_url = "http://127.0.0.1:8080/v1"
+wire_api = "responses"
+requires_openai_auth = true
+supports_websockets = false
 ```
 
-Linux:
+Codex CLI (`~/.codex/auth.json`):
 
-```bash
-PROFILE="$HOME/.bashrc"; [ -n "$ZSH_VERSION" ] && PROFILE="${ZDOTDIR:-$HOME}/.zshrc"
-cat >> "$PROFILE" <<'EOF'
-export OPENAI_BASE_URL='http://127.0.0.1:8080/v1'
-export OPENAI_API_KEY='sk-REPLACE_ME'
-export GEMINI_BASE_URL='http://127.0.0.1:8080/v1beta'
-export GEMINI_API_KEY='sk-REPLACE_ME'
-export STARRY_API_BASE_URL='http://127.0.0.1:8080/v1'
-export STARRY_API_KEY='sk-REPLACE_ME'
-export STARRY_API_PORT='8080'
-EOF
-export OPENAI_BASE_URL='http://127.0.0.1:8080/v1'
-export OPENAI_API_KEY='sk-REPLACE_ME'
-export GEMINI_BASE_URL='http://127.0.0.1:8080/v1beta'
-export GEMINI_API_KEY='sk-REPLACE_ME'
-export STARRY_API_BASE_URL='http://127.0.0.1:8080/v1'
-export STARRY_API_KEY='sk-REPLACE_ME'
-export STARRY_API_PORT='8080'
+```json
+{
+  "OPENAI_API_KEY": "sk-REPLACE_ME"
+}
 ```
 
-Windows PowerShell:
+Claude Code:
+
+```bash
+export ANTHROPIC_BASE_URL='http://127.0.0.1:8080'
+export ANTHROPIC_API_KEY='sk-REPLACE_ME'
+export ANTHROPIC_AUTH_TOKEN='sk-REPLACE_ME'
+export ANTHROPIC_MODEL='claude-sonnet-4.5'
+export ANTHROPIC_SMALL_FAST_MODEL='claude-haiku-4.5'
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1'
+export CLAUDE_CODE_ATTRIBUTION_HEADER='0'
+```
+
+Windows CMD:
+
+```cmd
+set "ANTHROPIC_BASE_URL=http://127.0.0.1:8080"
+set "ANTHROPIC_API_KEY=sk-REPLACE_ME"
+set "ANTHROPIC_AUTH_TOKEN=sk-REPLACE_ME"
+set "ANTHROPIC_MODEL=claude-sonnet-4.5"
+set "ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4.5"
+set "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"
+set "CLAUDE_CODE_ATTRIBUTION_HEADER=0"
+```
+
+PowerShell:
 
 ```powershell
-New-Item -ItemType Directory -Force (Split-Path $PROFILE) | Out-Null
-@'
-$env:OPENAI_BASE_URL = 'http://127.0.0.1:8080/v1'
-$env:OPENAI_API_KEY = 'sk-REPLACE_ME'
-$env:GEMINI_BASE_URL = 'http://127.0.0.1:8080/v1beta'
-$env:GEMINI_API_KEY = 'sk-REPLACE_ME'
-$env:STARRY_API_BASE_URL = 'http://127.0.0.1:8080/v1'
-$env:STARRY_API_KEY = 'sk-REPLACE_ME'
-$env:STARRY_API_PORT = '8080'
-'@ | Add-Content -Path $PROFILE -Encoding UTF8
-$env:OPENAI_BASE_URL = 'http://127.0.0.1:8080/v1'
-$env:OPENAI_API_KEY = 'sk-REPLACE_ME'
-$env:GEMINI_BASE_URL = 'http://127.0.0.1:8080/v1beta'
-$env:GEMINI_API_KEY = 'sk-REPLACE_ME'
-$env:STARRY_API_BASE_URL = 'http://127.0.0.1:8080/v1'
-$env:STARRY_API_KEY = 'sk-REPLACE_ME'
-$env:STARRY_API_PORT = '8080'
+$env:ANTHROPIC_BASE_URL = 'http://127.0.0.1:8080'
+$env:ANTHROPIC_API_KEY = 'sk-REPLACE_ME'
+$env:ANTHROPIC_AUTH_TOKEN = 'sk-REPLACE_ME'
+$env:ANTHROPIC_MODEL = 'claude-sonnet-4.5'
+$env:ANTHROPIC_SMALL_FAST_MODEL = 'claude-haiku-4.5'
+$env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
+$env:CLAUDE_CODE_ATTRIBUTION_HEADER = '0'
+```
+
+OpenCode (`opencode.json`):
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "starry/gpt-5.5",
+  "small_model": "starry/gpt-5.4-mini",
+  "provider": {
+    "starry": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Starry API",
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1",
+        "apiKey": "sk-REPLACE_ME"
+      }
+    }
+  }
+}
+```
+
+CC Switch one-click imports use deep links like:
+
+```text
+ccswitch://v1/import?resource=provider&app=claude&name=Starry+API+Claude&homepage=http%3A%2F%2F127.0.0.1%3A8080&endpoint=http%3A%2F%2F127.0.0.1%3A8080&apiKey=sk-REPLACE_ME&model=claude-sonnet-4.5&configFormat=json&enabled=true
 ```
 
 Chat completion test:

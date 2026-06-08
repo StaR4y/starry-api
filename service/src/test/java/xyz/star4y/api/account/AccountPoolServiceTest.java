@@ -166,6 +166,22 @@ class AccountPoolServiceTest {
     }
 
     @Test
+    void selectOpenAiAccountSkipsExcludedAccounts() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity primary = openAiPoolAccount("openai-main");
+        ProxyAccountEntity backup = openAiPoolAccount("openai-backup");
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(primary, backup));
+
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+        service.refreshCache().block();
+
+        ProxyAccountEntity selected = service.selectOpenAiAccount("session-1", List.of("openai-main")).block();
+
+        assertThat(selected).isNotNull();
+        assertThat(selected.getAccountId()).isEqualTo("openai-backup");
+    }
+
+    @Test
     void recordTestFailureDisablesAccountWhenUpdatingStatus() {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         ProxyAccountEntity account = account("acc-1");
@@ -207,6 +223,51 @@ class AccountPoolServiceTest {
         assertThat(saved.getSuspendReason()).isEqualTo("QUOTA_EXHAUSTED");
     }
 
+    @Test
+    void recordRequestFailureMarksQuotaAndDisablesAccount() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity account = account("acc-1");
+        when(repository.findByAccountId("acc-1")).thenReturn(Mono.just(account));
+        when(repository.save(any(ProxyAccountEntity.class))).thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.empty());
+
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+
+        service.recordRequestFailure("acc-1", AccountPoolService.UpstreamErrorType.RECOVERABLE, 429, "quota exhausted")
+            .block();
+
+        ProxyAccountEntity saved = savedAccount(repository);
+        assertThat(saved.getEnabled()).isFalse();
+        assertThat(saved.getErrorCount()).isEqualTo(2);
+        assertThat(saved.getQuotaExhaustedAt()).isNotNull();
+        assertThat(saved.getSuspendedAt()).isNotNull();
+        assertThat(saved.getSuspendReason()).isEqualTo("QUOTA_EXHAUSTED");
+        assertThat(saved.getSuspendMessage()).isEqualTo("quota exhausted");
+    }
+
+    @Test
+    void recordRequestFailureDisablesAccountOnAuthFailure() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity account = account("acc-1");
+        account.setQuotaExhaustedAt(java.time.Instant.parse("2026-06-08T00:00:00Z"));
+        when(repository.findByAccountId("acc-1")).thenReturn(Mono.just(account));
+        when(repository.save(any(ProxyAccountEntity.class))).thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.empty());
+
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+
+        service.recordRequestFailure("acc-1", AccountPoolService.UpstreamErrorType.FATAL, 401, "token revoked")
+            .block();
+
+        ProxyAccountEntity saved = savedAccount(repository);
+        assertThat(saved.getEnabled()).isFalse();
+        assertThat(saved.getErrorCount()).isEqualTo(2);
+        assertThat(saved.getQuotaExhaustedAt()).isNull();
+        assertThat(saved.getSuspendedAt()).isNotNull();
+        assertThat(saved.getSuspendReason()).isEqualTo("AUTH_FAILED");
+        assertThat(saved.getSuspendMessage()).isEqualTo("token revoked");
+    }
+
     private ProxyAccountEntity savedAccount(ProxyAccountRepository repository) {
         ArgumentCaptor<ProxyAccountEntity> captor = ArgumentCaptor.forClass(ProxyAccountEntity.class);
         verify(repository).save(captor.capture());
@@ -243,6 +304,13 @@ class AccountPoolServiceTest {
         account.setAccountId(accountId);
         account.setEnabled(true);
         account.setErrorCount(1);
+        return account;
+    }
+
+    private ProxyAccountEntity openAiPoolAccount(String accountId) {
+        ProxyAccountEntity account = account(accountId);
+        account.setProvider(AccountPlatforms.OPENAI_PROVIDER);
+        account.setAuthMethod(AccountPlatforms.OPENAI_API_KEY_AUTH);
         return account;
     }
 }

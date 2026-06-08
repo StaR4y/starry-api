@@ -130,6 +130,78 @@ class KiroPayloadFactoryTest {
     }
 
     @Test
+    void preservesParallelToolResultsInOneKiroMessage() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "claude-sonnet-4.5",
+              "messages": [
+                {"role": "user", "content": "inspect"},
+                {
+                  "role": "assistant",
+                  "content": "",
+                  "tool_calls": [
+                    {
+                      "id": "toolu_1",
+                      "type": "function",
+                      "function": {
+                        "name": "Read",
+                        "arguments": "{\\"file_path\\":\\"README.md\\"}"
+                      }
+                    },
+                    {
+                      "id": "toolu_2",
+                      "type": "function",
+                      "function": {
+                        "name": "Bash",
+                        "arguments": "{\\"command\\":\\"pwd\\"}"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "role": "tool",
+                  "tool_call_id": "toolu_1",
+                  "content": "readme"
+                },
+                {
+                  "role": "tool",
+                  "tool_call_id": "toolu_2",
+                  "content": "/tmp/project"
+                },
+                {"role": "user", "content": "continue"}
+              ],
+              "tools": [
+                {
+                  "type": "function",
+                  "function": {
+                    "name": "Read",
+                    "parameters": {"type": "object"}
+                  }
+                },
+                {
+                  "type": "function",
+                  "function": {
+                    "name": "Bash",
+                    "parameters": {"type": "object"}
+                  }
+                }
+              ]
+            }
+            """);
+        ProxyAccountEntity account = new ProxyAccountEntity();
+        account.setProfileArn("arn:test");
+
+        ObjectNode payload = factory.fromOpenAiChat(request, account, "claude-sonnet-4.5", "AI_EDITOR", "session-1");
+
+        JsonNode toolResults = findFirstToolResults(payload.path("conversationState").path("history"));
+        assertThat(toolResults).hasSize(2);
+        assertThat(toolResults.get(0).path("toolUseId").asText()).isEqualTo("toolu_1");
+        assertThat(toolResults.get(0).path("status").asText()).isEqualTo("success");
+        assertThat(toolResults.get(1).path("toolUseId").asText()).isEqualTo("toolu_2");
+        assertThat(toolResults.get(1).path("status").asText()).isEqualTo("success");
+    }
+
+    @Test
     void appendsFailedToolResultWhenAssistantToolCallIsUnanswered() throws Exception {
         JsonNode request = objectMapper.readTree("""
             {
@@ -198,5 +270,15 @@ class KiroPayloadFactoryTest {
             }
         }
         throw new AssertionError("tool result not found");
+    }
+
+    private JsonNode findFirstToolResults(JsonNode history) {
+        for (JsonNode message : history) {
+            JsonNode toolResults = message.path("userInputMessage").path("userInputMessageContext").path("toolResults");
+            if (toolResults.isArray() && !toolResults.isEmpty()) {
+                return toolResults;
+            }
+        }
+        throw new AssertionError("tool results not found");
     }
 }

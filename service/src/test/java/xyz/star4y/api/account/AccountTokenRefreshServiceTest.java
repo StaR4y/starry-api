@@ -96,6 +96,43 @@ class AccountTokenRefreshServiceTest {
     }
 
     @Test
+    void refreshesCodexTokenAndSavesAccount() {
+        AtomicReference<URI> requestUri = new AtomicReference<>();
+        ExchangeFunction exchange = request -> {
+            requestUri.set(request.url());
+            return Mono.just(ClientResponse.create(HttpStatus.OK)
+                .header("Content-Type", "application/json")
+                .body("""
+                    {"access_token":"codex-new-access","refresh_token":"codex-new-refresh","id_token":"codex-id-token"}
+                    """)
+                .build());
+        };
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ProxyAccountEntity account = codexAccount();
+
+        when(repository.findByAccountId("codex-main")).thenReturn(Mono.just(account));
+        when(repository.save(account)).thenReturn(Mono.just(account));
+        when(accountPoolService.refreshCache()).thenReturn(Mono.empty());
+
+        AccountTokenRefreshService service = new AccountTokenRefreshService(
+            new ObjectMapper(),
+            WebClient.builder().exchangeFunction(exchange).build(),
+            repository,
+            accountPoolService
+        );
+
+        ProxyAccountEntity refreshed = service.refresh(account).block();
+
+        assertThat(refreshed).isNotNull();
+        assertThat(requestUri.get()).isEqualTo(URI.create("https://auth.openai.com/oauth/token"));
+        assertThat(refreshed.getAccessToken()).isEqualTo("codex-new-access");
+        assertThat(refreshed.getRefreshToken()).isEqualTo("codex-new-refresh");
+        assertThat(refreshed.getIdToken()).isEqualTo("codex-id-token");
+        assertThat(service.canRefresh(account)).isTrue();
+    }
+
+    @Test
     void reportsWhetherAccountCanRefresh() {
         AccountTokenRefreshService service = new AccountTokenRefreshService(
             new ObjectMapper(),
@@ -111,10 +148,14 @@ class AccountTokenRefreshServiceTest {
         social.setAuthMethod("social");
         social.setClientId(null);
         social.setClientSecret(null);
+        ProxyAccountEntity codex = codexAccount();
+        codex.setClientId(null);
+        codex.setClientSecret(null);
 
         assertThat(service.canRefresh(oidc)).isTrue();
         assertThat(service.canRefresh(missingCredentials)).isFalse();
         assertThat(service.canRefresh(social)).isTrue();
+        assertThat(service.canRefresh(codex)).isTrue();
     }
 
     private ProxyAccountEntity account() {
@@ -126,6 +167,16 @@ class AccountTokenRefreshServiceTest {
         account.setClientSecret("client-secret");
         account.setRegion("us-east-1");
         account.setAuthMethod("idc");
+        return account;
+    }
+
+    private ProxyAccountEntity codexAccount() {
+        ProxyAccountEntity account = new ProxyAccountEntity();
+        account.setAccountId("codex-main");
+        account.setAccessToken("codex-old-access");
+        account.setRefreshToken("codex-old-refresh");
+        account.setProvider(AccountPlatforms.OPENAI_PROVIDER);
+        account.setAuthMethod(AccountPlatforms.OPENAI_CODEX_AUTH);
         return account;
     }
 }

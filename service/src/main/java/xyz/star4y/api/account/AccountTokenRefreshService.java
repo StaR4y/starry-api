@@ -24,6 +24,8 @@ public class AccountTokenRefreshService {
     private static final Logger log = LoggerFactory.getLogger(AccountTokenRefreshService.class);
     private static final int SCHEDULED_REFRESH_CONCURRENCY = 4;
     private static final String KIRO_AUTH_ENDPOINT = "https://prod.us-east-1.auth.desktop.kiro.dev";
+    private static final String CODEX_TOKEN_REFRESH_URL = "https://auth.openai.com/oauth/token";
+    private static final String CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
     private static final String KIRO_VERSION = "0.12.155";
     private static final String AWS_SDK_VERSION = "1.0.34";
     private static final String AWS_STREAMING_API_VERSION = "1.0.34";
@@ -63,13 +65,13 @@ public class AccountTokenRefreshService {
         refreshEligibleAccounts()
             .subscribe(
                 summary -> log.info(
-                    "Scheduled Kiro token refresh completed: total={}, eligible={}, refreshed={}, failed={}",
+                    "Scheduled upstream token refresh completed: total={}, eligible={}, refreshed={}, failed={}",
                     summary.total(),
                     summary.eligible(),
                     summary.refreshed(),
                     summary.failed()
                 ),
-                error -> log.warn("Scheduled Kiro token refresh failed", error)
+                error -> log.warn("Scheduled upstream token refresh failed", error)
             );
     }
 
@@ -88,7 +90,7 @@ public class AccountTokenRefreshService {
                         .thenReturn(Boolean.TRUE)
                         .onErrorResume(error -> {
                             log.warn(
-                                "Scheduled Kiro token refresh failed for account {}: {}",
+                                "Scheduled upstream token refresh failed for account {}: {}",
                                 account.getAccountId(),
                                 error.getMessage()
                             );
@@ -107,6 +109,9 @@ public class AccountTokenRefreshService {
         if (refreshToken == null) {
             return Mono.error(refreshError("Missing refreshToken"));
         }
+        if (AccountPlatforms.isCodex(account)) {
+            return refreshCodexToken(refreshToken).flatMap(result -> saveRefreshedToken(account, result));
+        }
         boolean social = "social".equalsIgnoreCase(account.getAuthMethod());
         if (!social && (clean(account.getClientId()) == null || clean(account.getClientSecret()) == null)) {
             return Mono.error(refreshError("Missing OIDC refresh credentials: clientId/clientSecret"));
@@ -122,10 +127,36 @@ public class AccountTokenRefreshService {
         if (clean(account.getRefreshToken()) == null) {
             return false;
         }
+        if (AccountPlatforms.isCodex(account)) {
+            return true;
+        }
         if ("social".equalsIgnoreCase(account.getAuthMethod())) {
             return true;
         }
         return clean(account.getClientId()) != null && clean(account.getClientSecret()) != null;
+    }
+
+    private Mono<TokenRefreshResult> refreshCodexToken(String refreshToken) {
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("client_id", CODEX_CLIENT_ID);
+        body.put("grant_type", "refresh_token");
+        body.put("refresh_token", refreshToken);
+
+        return webClient.post()
+            .uri(CODEX_TOKEN_REFRESH_URL)
+            .contentType(MediaType.APPLICATION_JSON)
+            .accept(MediaType.APPLICATION_JSON)
+            .bodyValue(body)
+            .exchangeToMono(response -> {
+                if (response.statusCode().isError()) {
+                    return response.bodyToMono(String.class)
+                        .defaultIfEmpty("")
+                        .flatMap(text -> Mono.error(refreshError(
+                            "Codex token refresh failed " + response.statusCode().value() + ": " + text
+                        )));
+                }
+                return response.bodyToMono(JsonNode.class).map(json -> tokenResult(json, refreshToken));
+            });
     }
 
     private Mono<TokenRefreshResult> refreshOidcToken(ProxyAccountEntity account, String refreshToken) {
@@ -178,6 +209,7 @@ public class AccountTokenRefreshService {
             .flatMap(entity -> {
                 entity.setAccessToken(result.accessToken());
                 entity.setRefreshToken(firstNonBlank(result.refreshToken(), entity.getRefreshToken()));
+                entity.setIdToken(firstNonBlank(result.idToken(), entity.getIdToken()));
                 return repository.save(entity);
             })
             .flatMap(saved -> accountPoolService.refreshCache().thenReturn(saved));
@@ -185,8 +217,9 @@ public class AccountTokenRefreshService {
 
     private TokenRefreshResult tokenResult(JsonNode json, String fallbackRefreshToken) {
         return new TokenRefreshResult(
-            json.path("accessToken").asText(null),
-            firstNonBlank(json.path("refreshToken").asText(null), fallbackRefreshToken)
+            firstNonBlank(json.path("accessToken").asText(null), json.path("access_token").asText(null)),
+            firstNonBlank(json.path("refreshToken").asText(null), json.path("refresh_token").asText(null), fallbackRefreshToken),
+            firstNonBlank(json.path("idToken").asText(null), json.path("id_token").asText(null))
         );
     }
 
@@ -210,9 +243,17 @@ public class AccountTokenRefreshService {
             .formatted(AWS_SDK_VERSION, os, release, javaVersion, AWS_STREAMING_API_VERSION, KIRO_VERSION, machineId);
     }
 
-    private String firstNonBlank(String value, String fallback) {
-        String cleaned = clean(value);
-        return cleaned == null ? fallback : cleaned;
+    private String firstNonBlank(String... values) {
+        if (values == null) {
+            return null;
+        }
+        for (String value : values) {
+            String cleaned = clean(value);
+            if (cleaned != null) {
+                return cleaned;
+            }
+        }
+        return null;
     }
 
     private String clean(String value) {
@@ -223,7 +264,7 @@ public class AccountTokenRefreshService {
         return trimmed.isEmpty() ? null : trimmed;
     }
 
-    private record TokenRefreshResult(String accessToken, String refreshToken) {
+    private record TokenRefreshResult(String accessToken, String refreshToken, String idToken) {
     }
 
     public record TokenRefreshSummary(int total, int eligible, int refreshed, int failed) {

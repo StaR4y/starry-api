@@ -1,6 +1,7 @@
 package xyz.star4y.api.platform.openai;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -13,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
 import org.springframework.web.reactive.function.client.WebClient;
 import xyz.star4y.api.account.AccountPlatforms;
+import xyz.star4y.api.account.AccountTokenRefreshService;
 import xyz.star4y.api.account.ProxyAccountEntity;
 import xyz.star4y.api.platform.core.PlatformCompletionResult;
 
@@ -50,7 +52,11 @@ class OpenAiAccountTestClientTest {
         server.start();
 
         try {
-            OpenAiAccountTestClient client = new OpenAiAccountTestClient(objectMapper, WebClient.builder().build());
+            OpenAiAccountTestClient client = new OpenAiAccountTestClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
 
             PlatformCompletionResult result = client.test(account, "gpt-5.5", "ping").block();

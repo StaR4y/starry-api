@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -108,9 +110,8 @@ public class ProxyFacade {
     }
 
     public Mono<ResponseEntity<?>> responses(JsonNode request, ServerWebExchange exchange) {
-        ObjectNode chat = openAiRequestAdapter.responsesToChat(request);
         return authenticateAndLimit(exchange)
-            .flatMap(principal -> invokeChat(chat, exchange, principal, "/v1/responses", ResponseMode.OPENAI_RESPONSES));
+            .flatMap(principal -> invokeResponses(request, exchange, principal));
     }
 
     public Mono<ResponseEntity<?>> messages(JsonNode request, ServerWebExchange exchange) {
@@ -142,23 +143,160 @@ public class ProxyFacade {
         boolean stream = responseMode != ResponseMode.GEMINI_GENERATE_CONTENT && request.path("stream").asBoolean(false);
         UpstreamRoute route = routeFor(mappedModel);
 
-        return selectAccount(route, sessionHint)
+        return attemptChat(
+            request,
+            principal,
+            path,
+            responseMode,
+            requestedModel,
+            mappedModel,
+            sessionHint,
+            stream,
+            route,
+            requestId,
+            start,
+            List.of()
+        );
+    }
+
+    private Mono<ResponseEntity<?>> attemptChat(
+        JsonNode request,
+        ApiKeyPrincipal principal,
+        String path,
+        ResponseMode responseMode,
+        String requestedModel,
+        String mappedModel,
+        String sessionHint,
+        boolean stream,
+        UpstreamRoute route,
+        String requestId,
+        Instant start,
+        List<String> attemptedAccountIds
+    ) {
+        return selectAccount(route, sessionHint, attemptedAccountIds)
             .flatMap(account -> callWithAccount(route, account, request, mappedModel, sessionHint)
                 .flatMap(result -> {
                     Mono<Void> accounting = recordSuccess(requestId, principal, account, path, requestedModel, result, start);
                     ResponseEntity<?> response = stream
-                        ? streamResponse(responseMode, mappedModel, result)
+                        ? streamResponse(responseMode, request, mappedModel, result)
                         : jsonResponse(responseMode, request, mappedModel, result);
-                    return accounting.thenReturn(response);
+                    return accounting.then(Mono.<ResponseEntity<?>>just(response));
                 })
-                .onErrorResume(error -> recordFailure(requestId, principal, account, path, requestedModel, error, start)
-                    .then(Mono.error(mapError(error)))));
+                .onErrorResume(error -> {
+                    List<String> nextAttempted = attemptedWith(account, attemptedAccountIds);
+                    Mono<Void> failureRecord = recordFailure(requestId, principal, account, path, requestedModel, error, start);
+                    if (!shouldRetryWithAnotherAccount(error, attemptedAccountIds, nextAttempted)) {
+                        return failureRecord.then(Mono.<ResponseEntity<?>>error(mapError(error)));
+                    }
+                    return failureRecord.then(attemptChat(
+                        request,
+                        principal,
+                        path,
+                        responseMode,
+                        requestedModel,
+                        mappedModel,
+                        sessionHint,
+                        stream,
+                        route,
+                        requestId,
+                        start,
+                        nextAttempted
+                    ).onErrorResume(retryError -> isNoAvailableAccount(retryError)
+                        ? Mono.<ResponseEntity<?>>error(mapError(error))
+                        : Mono.<ResponseEntity<?>>error(retryError)));
+                }));
+    }
+
+    private Mono<ResponseEntity<?>> invokeResponses(
+        JsonNode request,
+        ServerWebExchange exchange,
+        ApiKeyPrincipal principal
+    ) {
+        validateResponsesRequest(request);
+        Instant start = Instant.now();
+        String requestId = UUID.randomUUID().toString();
+        String path = "/v1/responses";
+        String requestedModel = request.path("model").asText(modelCatalog.defaultTargetModelId());
+        String mappedModel = modelMappingService.apply(requestedModel, principal.keyId());
+        String sessionHint = sessionHint(exchange, request, principal.keyId());
+        boolean stream = request.path("stream").asBoolean(false);
+        UpstreamRoute route = routeFor(mappedModel);
+
+        return attemptResponses(
+            request,
+            principal,
+            path,
+            requestedModel,
+            mappedModel,
+            sessionHint,
+            stream,
+            route,
+            requestId,
+            start,
+            List.of()
+        );
+    }
+
+    private Mono<ResponseEntity<?>> attemptResponses(
+        JsonNode request,
+        ApiKeyPrincipal principal,
+        String path,
+        String requestedModel,
+        String mappedModel,
+        String sessionHint,
+        boolean stream,
+        UpstreamRoute route,
+        String requestId,
+        Instant start,
+        List<String> attemptedAccountIds
+    ) {
+        return selectAccount(route, sessionHint, attemptedAccountIds)
+            .flatMap(account -> callResponsesWithAccount(route, account, request, mappedModel, sessionHint)
+                .flatMap(result -> {
+                    Mono<Void> accounting = recordSuccess(requestId, principal, account, path, requestedModel, result, start);
+                    ResponseEntity<?> response = stream
+                        ? streamResponse(ResponseMode.OPENAI_RESPONSES, request, mappedModel, result)
+                        : jsonResponse(ResponseMode.OPENAI_RESPONSES, request, mappedModel, result);
+                    return accounting.then(Mono.<ResponseEntity<?>>just(response));
+                })
+                .onErrorResume(error -> {
+                    List<String> nextAttempted = attemptedWith(account, attemptedAccountIds);
+                    Mono<Void> failureRecord = recordFailure(requestId, principal, account, path, requestedModel, error, start);
+                    if (!shouldRetryWithAnotherAccount(error, attemptedAccountIds, nextAttempted)) {
+                        return failureRecord.then(Mono.<ResponseEntity<?>>error(mapError(error)));
+                    }
+                    return failureRecord.then(attemptResponses(
+                        request,
+                        principal,
+                        path,
+                        requestedModel,
+                        mappedModel,
+                        sessionHint,
+                        stream,
+                        route,
+                        requestId,
+                        start,
+                        nextAttempted
+                    ).onErrorResume(retryError -> isNoAvailableAccount(retryError)
+                        ? Mono.<ResponseEntity<?>>error(mapError(error))
+                        : Mono.<ResponseEntity<?>>error(retryError)));
+                }));
     }
 
     private Mono<ProxyAccountEntity> selectAccount(UpstreamRoute route, String sessionHint) {
         return switch (route) {
             case OPENAI -> accountPoolService.selectOpenAiAccount(sessionHint);
             case KIRO -> accountPoolService.selectKiroAccount(sessionHint);
+        };
+    }
+
+    private Mono<ProxyAccountEntity> selectAccount(UpstreamRoute route, String sessionHint, List<String> attemptedAccountIds) {
+        if (attemptedAccountIds == null || attemptedAccountIds.isEmpty()) {
+            return selectAccount(route, sessionHint);
+        }
+        return switch (route) {
+            case OPENAI -> accountPoolService.selectOpenAiAccount(sessionHint, attemptedAccountIds);
+            case KIRO -> accountPoolService.selectKiroAccount(sessionHint, attemptedAccountIds);
         };
     }
 
@@ -173,6 +311,21 @@ public class ProxyFacade {
             return openAiUpstreamClient.complete(account, request, mappedModel);
         }
         ObjectNode payload = payloadFactory.fromOpenAiChat(request, account, mappedModel, "AI_EDITOR", sessionHint);
+        return upstreamClient.complete(account, payload, mappedModel);
+    }
+
+    private Mono<PlatformCompletionResult> callResponsesWithAccount(
+        UpstreamRoute route,
+        ProxyAccountEntity account,
+        JsonNode request,
+        String mappedModel,
+        String sessionHint
+    ) {
+        if (route == UpstreamRoute.OPENAI) {
+            return openAiUpstreamClient.completeResponses(account, request, mappedModel);
+        }
+        ObjectNode chat = openAiRequestAdapter.responsesToChat(request);
+        ObjectNode payload = payloadFactory.fromOpenAiChat(chat, account, mappedModel, "AI_EDITOR", sessionHint);
         return upstreamClient.complete(account, payload, mappedModel);
     }
 
@@ -242,7 +395,7 @@ public class ProxyFacade {
         AccountPoolService.UpstreamErrorType type = statusCode != null && (statusCode == 402 || statusCode == 403 || statusCode == 429)
             ? AccountPoolService.UpstreamErrorType.RECOVERABLE
             : AccountPoolService.UpstreamErrorType.FATAL;
-        Mono<Void> accountStats = accountPoolService.recordError(account.getAccountId(), type, statusCode);
+        Mono<Void> accountStats = accountPoolService.recordRequestFailure(account.getAccountId(), type, statusCode, failure.getMessage());
         Mono<Void> log = statsService.log(new StatsService.RequestLog(
             requestId,
             principal.keyId(),
@@ -258,6 +411,44 @@ public class ProxyFacade {
             failure.getMessage()
         ));
         return Mono.whenDelayError(accountStats, log).then();
+    }
+
+    private List<String> attemptedWith(ProxyAccountEntity account, List<String> attemptedAccountIds) {
+        String accountId = account.getAccountId();
+        if (accountId == null || accountId.isBlank() || attemptedAccountIds.contains(accountId)) {
+            return attemptedAccountIds;
+        }
+        List<String> next = new ArrayList<>(attemptedAccountIds);
+        next.add(accountId);
+        return List.copyOf(next);
+    }
+
+    private boolean shouldRetryWithAnotherAccount(
+        Throwable error,
+        List<String> attemptedAccountIds,
+        List<String> nextAttemptedAccountIds
+    ) {
+        return nextAttemptedAccountIds.size() > attemptedAccountIds.size()
+            && isRetryableUpstreamError(error);
+    }
+
+    private boolean isRetryableUpstreamError(Throwable error) {
+        Throwable failure = rootFailure(error);
+        if (!(failure instanceof UpstreamException upstream)) {
+            return false;
+        }
+        int statusCode = upstream.getStatusCode();
+        return upstream.isRecoverable()
+            || statusCode == 401
+            || statusCode == 402
+            || statusCode == 403
+            || statusCode == 429
+            || statusCode >= 500;
+    }
+
+    private boolean isNoAvailableAccount(Throwable error) {
+        Throwable failure = rootFailure(error);
+        return failure instanceof ApiException api && "NO_AVAILABLE_ACCOUNT".equals(api.getCode());
     }
 
     private Throwable mapError(Throwable error) {
@@ -292,11 +483,25 @@ public class ProxyFacade {
         return ResponseEntity.ok(body);
     }
 
-    private ResponseEntity<Flux<ServerSentEvent<String>>> streamResponse(ResponseMode mode, String mappedModel, PlatformCompletionResult result) {
+    private ResponseEntity<Flux<ServerSentEvent<String>>> streamResponse(
+        ResponseMode mode,
+        JsonNode request,
+        String mappedModel,
+        PlatformCompletionResult result
+    ) {
         if (mode == ResponseMode.ANTHROPIC_MESSAGES) {
             return ResponseEntity.ok()
                 .contentType(MediaType.TEXT_EVENT_STREAM)
                 .body(anthropicResponseFactory.messageStream(mappedModel, result));
+        }
+        if (mode == ResponseMode.OPENAI_RESPONSES) {
+            return ResponseEntity.ok()
+                .contentType(MediaType.TEXT_EVENT_STREAM)
+                .body(openAiResponseFactory.responsesStreamEvents(
+                    mappedModel,
+                    result,
+                    request.path("previous_response_id").asText(null)
+                ));
         }
         return ResponseEntity.ok()
             .contentType(MediaType.TEXT_EVENT_STREAM)
@@ -304,6 +509,20 @@ public class ProxyFacade {
     }
 
     private void validateChatRequest(JsonNode request) {
+        validateModelField(request);
+        if (!request.path("messages").isArray() || request.path("messages").isEmpty()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "MESSAGES_REQUIRED", "messages must be a non-empty array");
+        }
+    }
+
+    private void validateResponsesRequest(JsonNode request) {
+        validateModelField(request);
+        if (!request.has("input")) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INPUT_REQUIRED", "input is required");
+        }
+    }
+
+    private void validateModelField(JsonNode request) {
         if (!request.hasNonNull("model")) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "MODEL_REQUIRED", "model is required");
         }
@@ -316,9 +535,6 @@ public class ProxyFacade {
                 "MODEL_TOO_LONG",
                 "model must be at most " + MAX_MODEL_ID_LENGTH + " characters"
             );
-        }
-        if (!request.path("messages").isArray() || request.path("messages").isEmpty()) {
-            throw new ApiException(HttpStatus.BAD_REQUEST, "MESSAGES_REQUIRED", "messages must be a non-empty array");
         }
     }
 

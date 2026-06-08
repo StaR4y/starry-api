@@ -15,6 +15,7 @@ import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 import xyz.star4y.api.account.AccountPlatforms;
+import xyz.star4y.api.account.AccountTokenRefreshService;
 import xyz.star4y.api.account.ProxyAccountEntity;
 import xyz.star4y.api.platform.core.PlatformCompletionResult;
 import xyz.star4y.api.platform.core.PlatformUsage;
@@ -32,10 +33,16 @@ public class OpenAiAccountTestClient {
 
     private final ObjectMapper objectMapper;
     private final WebClient webClient;
+    private final AccountTokenRefreshService tokenRefreshService;
 
-    public OpenAiAccountTestClient(ObjectMapper objectMapper, WebClient kiroWebClient) {
+    public OpenAiAccountTestClient(
+        ObjectMapper objectMapper,
+        WebClient kiroWebClient,
+        AccountTokenRefreshService tokenRefreshService
+    ) {
         this.objectMapper = objectMapper;
         this.webClient = kiroWebClient;
+        this.tokenRefreshService = tokenRefreshService;
     }
 
     public Mono<PlatformCompletionResult> test(ProxyAccountEntity account, String model, String prompt) {
@@ -81,6 +88,17 @@ public class OpenAiAccountTestClient {
         text.put("type", "input_text");
         text.put("text", prompt);
 
+        return testCodexOnce(account, body)
+            .onErrorResume(error -> {
+                if (isUnauthorized(error) && tokenRefreshService.canRefresh(account)) {
+                    return tokenRefreshService.refresh(account)
+                        .flatMap(refreshedAccount -> testCodexOnce(refreshedAccount, body));
+                }
+                return Mono.error(error);
+            });
+    }
+
+    private Mono<PlatformCompletionResult> testCodexOnce(ProxyAccountEntity account, ObjectNode body) {
         return webClient.post()
             .uri(endpoint(account.getBaseUrl(), AccountPlatforms.DEFAULT_CODEX_BASE_URL, "/responses"))
             .headers(headers -> applyCodexHeaders(headers, account))
@@ -289,6 +307,10 @@ public class OpenAiAccountTestClient {
 
     private boolean isRecoverableStatus(int statusCode) {
         return statusCode == 402 || statusCode == 429 || statusCode >= 500;
+    }
+
+    private boolean isUnauthorized(Throwable error) {
+        return error instanceof UpstreamException upstream && upstream.getStatusCode() == 401;
     }
 
     private boolean usesMaxCompletionTokens(String model) {
