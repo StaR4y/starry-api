@@ -1,1 +1,2 @@
 artifacts/*.jar binary
+artifacts/*.tar.gz binary

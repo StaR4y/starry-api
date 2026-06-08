@@ -22,6 +22,8 @@ default_repo_raw_base() {
 }
 
 REPO_RAW_BASE="${REPO_RAW_BASE:-$(default_repo_raw_base)}"
+BUNDLE_URL="${BUNDLE_URL:-${REPO_RAW_BASE%/}/artifacts/starry-api-bundle.tar.gz}"
+BUNDLE_CHECKSUM_URL="${BUNDLE_CHECKSUM_URL:-${BUNDLE_URL}.sha256}"
 ARTIFACT_URL="${ARTIFACT_URL:-${REPO_RAW_BASE%/}/artifacts/starry-api.jar}"
 CHECKSUM_URL="${CHECKSUM_URL:-${REPO_RAW_BASE%/}/artifacts/starry-api.jar.sha256}"
 BUILD_INFO_URL="${BUILD_INFO_URL:-${REPO_RAW_BASE%/}/artifacts/build-info.json}"
@@ -163,6 +165,26 @@ download_file() {
   fi
 }
 
+download_failure_hint() {
+  if [[ -z "${GITHUB_TOKEN:-}" ]]; then
+    log "Download failed without GITHUB_TOKEN. If the repository is private, GitHub returns 404 for raw files."
+    log "Use a fine-grained GitHub token with read-only Contents permission and pass GITHUB_TOKEN to this script."
+  else
+    log "Download failed even though GITHUB_TOKEN was provided. Check that the token can read ${REPO_URL}."
+  fi
+}
+
+download_required_file() {
+  local label="$1"
+  local url="$2"
+  local output="$3"
+  log "Downloading ${label}: ${url}"
+  if ! download_file "$url" "$output"; then
+    download_failure_hint
+    fail "Could not download ${label}: ${url}"
+  fi
+}
+
 random_secret() {
   openssl rand -hex 24
 }
@@ -212,7 +234,6 @@ write_env_file() {
   local env_file="${INSTALL_DIR}/.env"
   if [[ -f "$env_file" && "$FORCE_ENV" != "true" ]]; then
     log "Keeping existing .env. Set FORCE_ENV=true to regenerate it."
-    load_runtime_env
     return
   fi
 
@@ -328,10 +349,8 @@ download_artifact() {
   tmp_sha="${tmp_dir}/starry-api.jar.sha256"
   tmp_info="${tmp_dir}/build-info.json"
 
-  log "Downloading artifact: ${ARTIFACT_URL}"
-  download_file "$ARTIFACT_URL" "$tmp_jar"
-  log "Downloading checksum: ${CHECKSUM_URL}"
-  download_file "$CHECKSUM_URL" "$tmp_sha"
+  download_required_file "artifact jar" "$ARTIFACT_URL" "$tmp_jar"
+  download_required_file "artifact checksum" "$CHECKSUM_URL" "$tmp_sha"
   download_file "$BUILD_INFO_URL" "$tmp_info" || true
 
   expected="$(awk '{print $1}' "$tmp_sha" | head -n 1)"
@@ -349,6 +368,53 @@ download_artifact() {
   fi
   rm -rf "$tmp_dir"
   log "Installed artifact with SHA256 ${actual}"
+}
+
+download_bundle() {
+  local tmp_dir tmp_bundle tmp_sha extract_dir expected actual
+  tmp_dir="$(mktemp -d)"
+  tmp_bundle="${tmp_dir}/starry-api-bundle.tar.gz"
+  tmp_sha="${tmp_dir}/starry-api-bundle.tar.gz.sha256"
+  extract_dir="${tmp_dir}/extract"
+  mkdir -p "$extract_dir"
+
+  log "Downloading deployment bundle: ${BUNDLE_URL}"
+  if ! download_file "$BUNDLE_URL" "$tmp_bundle"; then
+    log "Deployment bundle is not available; trying single-jar artifact fallback."
+    download_failure_hint
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+
+  log "Downloading deployment bundle checksum: ${BUNDLE_CHECKSUM_URL}"
+  if ! download_file "$BUNDLE_CHECKSUM_URL" "$tmp_sha"; then
+    log "Deployment bundle checksum is not available; trying single-jar artifact fallback."
+    rm -rf "$tmp_dir"
+    return 1
+  fi
+
+  expected="$(awk '{print $1}' "$tmp_sha" | head -n 1)"
+  actual="$(sha256_file "$tmp_bundle")"
+  [[ -n "$expected" ]] || fail "Bundle checksum file is empty."
+  [[ "$expected" == "$actual" ]] || fail "Bundle checksum mismatch. expected=${expected} actual=${actual}"
+
+  tar -xzf "$tmp_bundle" -C "$extract_dir"
+  [[ -f "${extract_dir}/app/starry-api.jar" ]] || fail "Bundle does not contain app/starry-api.jar."
+  [[ -f "${extract_dir}/docker-compose.artifact.yml" ]] || fail "Bundle does not contain docker-compose.artifact.yml."
+
+  if [[ -f "${INSTALL_DIR}/app/starry-api.jar" ]]; then
+    cp "${INSTALL_DIR}/app/starry-api.jar" "${INSTALL_DIR}/app/starry-api.jar.previous"
+  fi
+  cp "${extract_dir}/app/starry-api.jar" "${INSTALL_DIR}/app/starry-api.jar"
+  cp "${extract_dir}/app/starry-api.jar.sha256" "${INSTALL_DIR}/app/starry-api.jar.sha256"
+  cp "${extract_dir}/docker-compose.artifact.yml" "${INSTALL_DIR}/docker-compose.artifact.yml"
+  [[ -f "${extract_dir}/build-info.json" ]] && cp "${extract_dir}/build-info.json" "${INSTALL_DIR}/app/build-info.json"
+  [[ -f "${extract_dir}/sha256sums.txt" ]] && cp "${extract_dir}/sha256sums.txt" "${INSTALL_DIR}/app/sha256sums.txt"
+  [[ -f "${extract_dir}/starry-api-webui.tar.gz" ]] && cp "${extract_dir}/starry-api-webui.tar.gz" "${INSTALL_DIR}/app/starry-api-webui.tar.gz"
+  [[ -f "${extract_dir}/starry-api-webui.tar.gz.sha256" ]] && cp "${extract_dir}/starry-api-webui.tar.gz.sha256" "${INSTALL_DIR}/app/starry-api-webui.tar.gz.sha256"
+
+  rm -rf "$tmp_dir"
+  log "Installed deployment bundle with SHA256 ${actual}"
 }
 
 wait_for_health() {
@@ -415,7 +481,7 @@ main() {
   write_env_file
   load_runtime_env
   write_compose_file
-  download_artifact
+  download_bundle || download_artifact
   deploy_stack
 }
 

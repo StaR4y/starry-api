@@ -13,11 +13,20 @@ Docker-based 1Panel/OpenResty cannot use the host's `127.0.0.1` as an upstream. 
 
 ## One-Click Server Install
 
-On a fresh Linux server, you can let the installer prepare Docker, download the checked-in `artifacts/starry-api.jar`, generate `.env`, and start the stack:
+On a fresh Linux server, you can let the installer prepare Docker, download the checked-in `artifacts/starry-api-bundle.tar.gz`, generate `.env`, and start the stack:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
   | sudo env PUBLIC_BASE_URL=https://your-domain.example bash
+```
+
+For a private repository, pass a GitHub token with read-only Contents permission:
+
+```bash
+GITHUB_TOKEN=replace-with-token
+curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+  https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
+  | sudo env GITHUB_TOKEN="${GITHUB_TOKEN}" PUBLIC_BASE_URL=https://your-domain.example bash
 ```
 
 After it finishes, create the 1Panel reverse proxy site with target:

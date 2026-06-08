@@ -129,7 +129,7 @@ SMTP security: SSL / TLS
 
 Cause:
 
-The installer downloads the checked-in `artifacts/starry-api.jar`. If the artifact was not refreshed and pushed after frontend changes, the server will correctly deploy the old embedded WebUI.
+The installer downloads the checked-in `artifacts/starry-api-bundle.tar.gz`. If the artifact bundle was not refreshed and pushed after frontend changes, the server will correctly deploy the old embedded WebUI.
 
 Check the installed artifact metadata and service logs:
 
@@ -140,7 +140,7 @@ sha256sum -c app/starry-api.jar.sha256
 docker compose -f docker-compose.artifact.yml logs --tail=160 service
 ```
 
-Refresh the artifact on a developer machine or CI, commit `artifacts/starry-api.jar`, push it, then rerun `scripts/install-server.sh` on the server.
+Refresh the artifact bundle on a developer machine or CI, commit `artifacts/`, push it, then rerun `scripts/install-server.sh` on the server.
 
 ## `Port 8080 was already in use`
 

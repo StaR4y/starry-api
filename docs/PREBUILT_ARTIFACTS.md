@@ -2,14 +2,14 @@
 
 This project supports a source-build deployment and a prebuilt-artifact deployment.
 
-Use the prebuilt path when the server should only download and run the latest packaged jar from the repository instead of compiling Java and WebUI assets on the server.
+Use the prebuilt path when the server should only download and run the latest packaged bundle from the repository instead of compiling Java and WebUI assets on the server.
 
 There are two separate scripts:
 
 | Script | Where to run | What it does |
 | --- | --- | --- |
-| `scripts/publish-artifact.sh` | Developer machine or CI | Builds `service/build/libs/*.jar` and writes `artifacts/starry-api.jar`. |
-| `scripts/install-server.sh` | Linux server | Downloads `artifacts/starry-api.jar`, verifies SHA256, and starts Docker Compose. It does not build. |
+| `scripts/publish-artifact.sh` | Developer machine or CI | Builds the WebUI and boot jar, then writes the full deployment bundle under `artifacts/`. |
+| `scripts/install-server.sh` | Linux server | Downloads `artifacts/starry-api-bundle.tar.gz`, verifies SHA256, extracts it, and starts Docker Compose. It does not build. |
 
 ## Artifact Directory
 
@@ -17,8 +17,13 @@ The repository-level `artifacts/` directory stores the deployable output:
 
 | File | Purpose |
 | --- | --- |
+| `artifacts/starry-api-bundle.tar.gz` | Full server deployment bundle. |
+| `artifacts/starry-api-bundle.tar.gz.sha256` | Checksum used by the server deploy script. |
 | `artifacts/starry-api.jar` | Spring Boot executable jar with the WebUI embedded. |
-| `artifacts/starry-api.jar.sha256` | Checksum used by the server deploy script. |
+| `artifacts/starry-api.jar.sha256` | Jar checksum, also kept inside the bundle. |
+| `artifacts/starry-api-webui.tar.gz` | Standalone built WebUI dist archive for inspection or CDN use. |
+| `artifacts/docker-compose.artifact.yml` | Compose file that runs the jar with a JRE image. |
+| `artifacts/sha256sums.txt` | Checksum manifest for deployable files. |
 | `artifacts/build-info.json` | Source commit, branch, version, build time, size, and checksum metadata. |
 
 ## Publish After Each Commit
@@ -32,7 +37,7 @@ git commit -m "chore: publish prebuilt artifact"
 git push
 ```
 
-The script runs `./gradlew test :service:bootJar`, copies the executable jar to `artifacts/starry-api.jar`, and refreshes checksum/build metadata.
+The script runs `./gradlew test :service:bootJar`, verifies that the jar contains the built WebUI, then refreshes the jar, WebUI archive, Compose file, full bundle, checksums, and build metadata.
 
 The publish script needs either local Java 25 or Docker. If `java` is not available in `PATH`, it automatically falls back to Docker and builds through the project `Dockerfile`.
 
@@ -64,7 +69,7 @@ RUN_TESTS=false ./scripts/publish-artifact.sh
 
 ## One-Line Server Deploy
 
-Run this on a Linux server. This command downloads the checked-in jar from the repository and does not run Gradle/npm:
+Run this on a Linux server. This command downloads the checked-in bundle from the repository and does not run Gradle/npm:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh | sudo bash
@@ -77,13 +82,22 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
   | sudo env PUBLIC_BASE_URL=https://api.example.com bash
 ```
 
+For a private repository, GitHub raw URLs return `404` unless authenticated. Use a fine-grained token with read-only Contents permission:
+
+```bash
+GITHUB_TOKEN=replace-with-token
+curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+  https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
+  | sudo env GITHUB_TOKEN="${GITHUB_TOKEN}" bash
+```
+
 The deploy script will:
 
 - install `curl`, `openssl`, Docker, and Docker Compose when missing
 - create `/opt/starry-api/.env` with generated MySQL credentials when missing
-- download `artifacts/starry-api.jar` and `artifacts/starry-api.jar.sha256`
-- verify the jar checksum
-- write `docker-compose.artifact.yml`
+- download `artifacts/starry-api-bundle.tar.gz` and its checksum
+- verify and extract the bundle under `/opt/starry-api`
+- fall back to `artifacts/starry-api.jar` only when the bundle is not available
 - start MySQL and an `eclipse-temurin:25-jre` service container
 - wait for `/actuator/health`
 
@@ -91,7 +105,7 @@ It does not clone the repo and does not run Gradle or npm on the server.
 
 ## Update Existing Server
 
-Rerun the same command. The script downloads the current artifact, keeps the previous jar as `app/starry-api.jar.previous`, and restarts the service container.
+Rerun the same command. The script downloads the current bundle, keeps the previous jar as `app/starry-api.jar.previous`, and restarts the service container.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh | sudo bash
@@ -104,6 +118,8 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
 | `REPO_URL` | `https://github.com/StaR4y/starry-api.git` | GitHub repository used to derive raw artifact URLs. |
 | `BRANCH` | `main` | Branch used to derive raw artifact URLs. |
 | `REPO_RAW_BASE` | derived from `REPO_URL` and `BRANCH` | Raw repository base used to download scripts and artifacts. |
+| `BUNDLE_URL` | `${REPO_RAW_BASE}/artifacts/starry-api-bundle.tar.gz` | Direct full bundle URL. |
+| `BUNDLE_CHECKSUM_URL` | `${BUNDLE_URL}.sha256` | Direct full bundle checksum URL. |
 | `ARTIFACT_URL` | `${REPO_RAW_BASE}/artifacts/starry-api.jar` | Direct jar URL. |
 | `CHECKSUM_URL` | `${REPO_RAW_BASE}/artifacts/starry-api.jar.sha256` | Direct checksum URL. |
 | `BUILD_INFO_URL` | `${REPO_RAW_BASE}/artifacts/build-info.json` | Optional build metadata URL. |

@@ -243,7 +243,7 @@ For a full packaged jar:
 ./gradlew :service:bootJar
 ```
 
-To update the checked-in deployable artifact after a source commit:
+To update the checked-in deployable bundle after a source commit:
 
 ```bash
 ./scripts/publish-artifact.sh
@@ -252,10 +252,19 @@ git commit -m "chore: publish prebuilt artifact"
 git push
 ```
 
-Servers should not run this publishing script. To deploy the already checked-in jar on a server:
+Servers should not run this publishing script. To deploy the already checked-in bundle on a server:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh | sudo bash
+```
+
+For a private repository, pass a GitHub token with read-only Contents permission to both the script download and the installer:
+
+```bash
+GITHUB_TOKEN=replace-with-token
+curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+  https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
+  | sudo env GITHUB_TOKEN="${GITHUB_TOKEN}" bash
 ```
 
 ## Current Boundaries

@@ -1,0 +1,58 @@
+services:
+  mysql:
+    image: ${MYSQL_IMAGE:-mysql:8.0.37-oraclelinux8}
+    container_name: starryapi-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-kiro_proxy}
+      MYSQL_USER: ${MYSQL_USERNAME:-kiro_proxy}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u\"$${MYSQL_USER}\" -p\"$${MYSQL_PASSWORD}\" --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    networks:
+      - starryapi
+
+  service:
+    image: eclipse-temurin:25-jre
+    container_name: starryapi-service
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    working_dir: /app
+    volumes:
+      - ./app/starry-api.jar:/app/app.jar:ro
+    environment:
+      SERVER_PORT: ${SERVER_PORT:-8080}
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-kiro_proxy}
+      MYSQL_USERNAME: ${MYSQL_USERNAME:-kiro_proxy}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      KIRO_ALLOW_ANONYMOUS_PROXY: ${KIRO_ALLOW_ANONYMOUS_PROXY:-false}
+      KIRO_ADMIN_SESSION_TTL: ${KIRO_ADMIN_SESSION_TTL:-12h}
+      KIRO_RATE_LIMIT_PER_MINUTE: ${KIRO_RATE_LIMIT_PER_MINUTE:-120}
+      KIRO_ACCOUNT_SELECTION_STRATEGY: ${KIRO_ACCOUNT_SELECTION_STRATEGY:-round_robin}
+      KIRO_WEBUI_URL: ${KIRO_WEBUI_URL:-}
+      KIRO_ADMIN_TOKEN: ${KIRO_ADMIN_TOKEN:-}
+      JAVA_OPTS: ${JAVA_OPTS:-}
+    ports:
+      - "${HOST_BIND_ADDR:-127.0.0.1}:${HOST_HTTP_PORT:-18080}:${SERVER_PORT:-8080}"
+    command: ["sh", "-c", "exec java $${JAVA_OPTS:-} -jar /app/app.jar"]
+    networks:
+      - starryapi
+
+networks:
+  starryapi:
+    name: starryapi

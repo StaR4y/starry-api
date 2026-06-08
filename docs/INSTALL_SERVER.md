@@ -1,6 +1,6 @@
 # Server One-Click Install
 
-This installer is for Linux servers. It deploys the checked-in prebuilt jar with Docker Compose:
+This installer is for Linux servers. It deploys the checked-in prebuilt bundle with Docker Compose:
 
 ```text
 Nginx / 1Panel reverse proxy
@@ -11,7 +11,7 @@ Nginx / 1Panel reverse proxy
 
 The installer binds the service port to `0.0.0.0:${HOST_HTTP_PORT}` by default so Docker-based 1Panel/OpenResty can reach it through the host port. Restrict that port with your firewall/security group and expose the service publicly through HTTPS reverse proxy. If Nginx runs directly on the host instead of in Docker, you may set `HOST_BIND_ADDR=127.0.0.1`.
 
-It downloads `artifacts/starry-api.jar` from the repository and does not run Gradle or npm on the server. See [Prebuilt Artifact Deployment](PREBUILT_ARTIFACTS.md) for the artifact publishing flow.
+It downloads `artifacts/starry-api-bundle.tar.gz` from the repository and does not run Gradle, npm, or Docker build on the server. See [Prebuilt Artifact Deployment](PREBUILT_ARTIFACTS.md) for the artifact publishing flow.
 
 ## One-Line Install
 
@@ -26,10 +26,20 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
   | sudo env PUBLIC_BASE_URL=https://api.example.com bash
 ```
 
+For a private repository, GitHub raw URLs return `404` unless authenticated:
+
+```bash
+GITHUB_TOKEN=replace-with-token
+curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+  https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
+  | sudo env GITHUB_TOKEN="${GITHUB_TOKEN}" bash
+```
+
 The installer will:
 
 - install `curl`, `openssl`, Docker, and Docker Compose when missing
-- download `artifacts/starry-api.jar` and verify `artifacts/starry-api.jar.sha256`
+- download `artifacts/starry-api-bundle.tar.gz` and verify `artifacts/starry-api-bundle.tar.gz.sha256`
+- extract the prebuilt jar, WebUI archive, Compose file, and metadata
 - create `.env` with generated MySQL passwords
 - write `docker-compose.artifact.yml`
 - start MySQL and the service container with Docker Compose
@@ -58,6 +68,8 @@ Supported variables:
 | `REPO_URL` | `https://github.com/StaR4y/starry-api.git` | GitHub repository used to derive raw artifact URLs |
 | `BRANCH` | `main` | Branch used to derive raw artifact URLs |
 | `REPO_RAW_BASE` | derived from `REPO_URL` and `BRANCH` | Raw repository base used to download artifacts |
+| `BUNDLE_URL` | `${REPO_RAW_BASE}/artifacts/starry-api-bundle.tar.gz` | Direct full bundle URL |
+| `BUNDLE_CHECKSUM_URL` | `${BUNDLE_URL}.sha256` | Direct full bundle checksum URL |
 | `ARTIFACT_URL` | `${REPO_RAW_BASE}/artifacts/starry-api.jar` | Direct jar URL |
 | `CHECKSUM_URL` | `${REPO_RAW_BASE}/artifacts/starry-api.jar.sha256` | Direct checksum URL |
 | `BUILD_INFO_URL` | `${REPO_RAW_BASE}/artifacts/build-info.json` | Optional build metadata URL |
@@ -135,7 +147,7 @@ cd /opt/starry-api
 curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh | sudo bash
 ```
 
-The update path downloads the latest checked-in jar and restarts the service. If the browser still shows an old UI, check that the artifact was refreshed and pushed before running the installer:
+The update path downloads the latest checked-in bundle and restarts the service. If the browser still shows an old UI, check that the artifact was refreshed and pushed before running the installer:
 
 ```bash
 cd /opt/starry-api
