@@ -15,12 +15,22 @@ import type { ApiResponse } from '@/types/api';
 const TOKEN_STORAGE_KEY = 'kp.adminToken';
 
 export function getStoredToken(): string | null {
-  return localStorage.getItem(TOKEN_STORAGE_KEY);
+  return localStorage.getItem(TOKEN_STORAGE_KEY) || sessionStorage.getItem(TOKEN_STORAGE_KEY);
 }
 
-export function setStoredToken(token: string | null) {
-  if (token) localStorage.setItem(TOKEN_STORAGE_KEY, token);
-  else localStorage.removeItem(TOKEN_STORAGE_KEY);
+export function setStoredToken(token: string | null, remember = true) {
+  if (token) {
+    if (remember) {
+      localStorage.setItem(TOKEN_STORAGE_KEY, token);
+      sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+    } else {
+      sessionStorage.setItem(TOKEN_STORAGE_KEY, token);
+      localStorage.removeItem(TOKEN_STORAGE_KEY);
+    }
+  } else {
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
+    sessionStorage.removeItem(TOKEN_STORAGE_KEY);
+  }
 }
 
 const http: AxiosInstance = axios.create({

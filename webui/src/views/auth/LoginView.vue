@@ -32,6 +32,7 @@
   const form = reactive({
     username: 'admin',
     password: '',
+    remember: true,
   });
 
   const registerForm = reactive({
@@ -214,6 +215,9 @@
             @keyup.enter="submit"
           />
         </el-form-item>
+        <div class="login__options">
+          <el-checkbox v-model="form.remember">记住登录状态</el-checkbox>
+        </div>
 
         <el-button
           type="primary"
@@ -331,6 +335,12 @@
     &__hint {
       margin: 0;
       font-size: 13px;
+    }
+
+    &__options {
+      margin-bottom: 18px;
+      display: flex;
+      align-items: center;
     }
 
     &__submit {

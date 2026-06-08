@@ -18,16 +18,26 @@ const USER_STORAGE_KEY = 'kp.adminUser';
 
 function readStoredUser(): AdminUser | null {
   try {
-    const raw = localStorage.getItem(USER_STORAGE_KEY);
+    const raw = localStorage.getItem(USER_STORAGE_KEY) || sessionStorage.getItem(USER_STORAGE_KEY);
     return raw ? (JSON.parse(raw) as AdminUser) : null;
   } catch {
     return null;
   }
 }
 
-function writeStoredUser(user: AdminUser | null) {
-  if (user) localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
-  else localStorage.removeItem(USER_STORAGE_KEY);
+function writeStoredUser(user: AdminUser | null, remember = true) {
+  if (user) {
+    if (remember) {
+      localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
+      sessionStorage.removeItem(USER_STORAGE_KEY);
+    } else {
+      sessionStorage.setItem(USER_STORAGE_KEY, JSON.stringify(user));
+      localStorage.removeItem(USER_STORAGE_KEY);
+    }
+  } else {
+    localStorage.removeItem(USER_STORAGE_KEY);
+    sessionStorage.removeItem(USER_STORAGE_KEY);
+  }
 }
 
 export const useAuthStore = defineStore('auth', {
@@ -45,21 +55,23 @@ export const useAuthStore = defineStore('auth', {
   },
 
   actions: {
-    async login(payload: LoginRequest) {
-      const result = await authApi.login(payload);
+    async login(payload: LoginRequest & { remember?: boolean }) {
+      const { remember = true, ...loginPayload } = payload;
+      const result = await authApi.login(loginPayload);
       this.token = result.accessToken;
       this.user = result.user;
-      setStoredToken(result.accessToken);
-      writeStoredUser(result.user);
+      setStoredToken(result.accessToken, remember);
+      writeStoredUser(result.user, remember);
       return result;
     },
 
-    async register(payload: RegisterRequest) {
-      const result = await authApi.register(payload);
+    async register(payload: RegisterRequest & { remember?: boolean }) {
+      const { remember = true, ...registerPayload } = payload;
+      const result = await authApi.register(registerPayload);
       this.token = result.accessToken;
       this.user = result.user;
-      setStoredToken(result.accessToken);
-      writeStoredUser(result.user);
+      setStoredToken(result.accessToken, remember);
+      writeStoredUser(result.user, remember);
       return result;
     },
 
@@ -67,7 +79,8 @@ export const useAuthStore = defineStore('auth', {
       if (!this.token) return null;
       const user = await authApi.me();
       this.user = user;
-      writeStoredUser(user);
+      const remember = localStorage.getItem('kp.adminToken') !== null;
+      writeStoredUser(user, remember);
       return user;
     },
 
@@ -83,7 +96,8 @@ export const useAuthStore = defineStore('auth', {
     markPasswordChanged() {
       if (this.user) {
         this.user = { ...this.user, firstLogin: false };
-        writeStoredUser(this.user);
+        const remember = localStorage.getItem('kp.adminToken') !== null;
+        writeStoredUser(this.user, remember);
       }
     },
   },
