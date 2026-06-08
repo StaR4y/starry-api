@@ -23,7 +23,7 @@ public class ModelMappingAdminController implements ModelMappingAdminApi {
 
     @Override
     public Mono<ApiResponse<List<ModelDtos.MappingResponse>>> list(ServerWebExchange exchange) {
-        adminAuth.verify(exchange);
+        adminAuth.verifyAdmin(exchange);
         return service.list().map(ApiResponse::ok);
     }
 
@@ -32,7 +32,7 @@ public class ModelMappingAdminController implements ModelMappingAdminApi {
         ServerWebExchange exchange,
         @Valid @RequestBody ModelDtos.CreateMappingRequest request
     ) {
-        adminAuth.verify(exchange);
+        adminAuth.verifyAdmin(exchange);
         return service.create(request).map(ApiResponse::ok);
     }
 
@@ -42,13 +42,13 @@ public class ModelMappingAdminController implements ModelMappingAdminApi {
         @PathVariable String mappingId,
         @RequestBody ModelDtos.UpdateMappingRequest request
     ) {
-        adminAuth.verify(exchange);
+        adminAuth.verifyAdmin(exchange);
         return service.update(mappingId, request).map(ApiResponse::ok);
     }
 
     @Override
     public Mono<ApiResponse<Void>> delete(ServerWebExchange exchange, @PathVariable String mappingId) {
-        adminAuth.verify(exchange);
+        adminAuth.verifyAdmin(exchange);
         return service.delete(mappingId).thenReturn(ApiResponse.ok(null));
     }
 }

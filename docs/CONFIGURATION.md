@@ -101,7 +101,7 @@ The settings follow the sub2api-style keys stored in `system_settings`:
 | Key | Purpose |
 | --- | --- |
 | `payment_enabled` | Enable user recharge order creation. |
-| `MIN_RECHARGE_AMOUNT`, `MAX_RECHARGE_AMOUNT` | Per-order recharge amount range. |
+| `MIN_RECHARGE_AMOUNT`, `MAX_RECHARGE_AMOUNT` | Per-order recharge amount range. `MAX_RECHARGE_AMOUNT = 0` means no maximum limit. |
 | `DAILY_RECHARGE_LIMIT` | Per-user daily paid amount limit. `0` means no limit. |
 | `ORDER_TIMEOUT_MINUTES` | Pending order expiry window. |
 | `MAX_PENDING_ORDERS` | Maximum pending orders per user. |

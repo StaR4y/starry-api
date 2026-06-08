@@ -63,7 +63,7 @@ const routes: RouteRecordRaw[] = [
         path: 'model-mappings',
         name: 'model-mappings',
         component: () => import('@/views/model-mappings/ModelMappingListView.vue'),
-        meta: { title: '模型映射' },
+        meta: { title: '模型映射', adminOnly: true },
       },
       {
         path: 'models',

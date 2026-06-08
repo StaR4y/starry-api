@@ -23,7 +23,7 @@
     { name: 'accounts', label: '账号管理', icon: '', adminOnly: true },
     { name: 'api-keys', label: 'API Key', icon: '' },
     { name: 'payment', label: '余额充值', icon: '', userOnly: true },
-    { name: 'model-mappings', label: '模型映射', icon: '' },
+    { name: 'model-mappings', label: '模型映射', icon: '', adminOnly: true },
     { name: 'models', label: '模型 ID', icon: '' },
     { name: 'logs', label: '请求日志', icon: '', adminOnly: true },
     { name: 'users', label: '账号', icon: '', adminOnly: true },

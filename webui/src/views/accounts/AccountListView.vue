@@ -768,8 +768,6 @@
           v-model="accountSettings.gptFastModeEnabled"
           :disabled="settingsSaving"
           inline-prompt
-          active-text="允许"
-          inactive-text="关闭"
           @change="toggleGptFastMode"
         />
       </div>

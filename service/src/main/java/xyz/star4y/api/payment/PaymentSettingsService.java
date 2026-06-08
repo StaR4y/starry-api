@@ -116,7 +116,9 @@ public class PaymentSettingsService {
                     set(EASYPAY_PID, next.easypayPid()),
                     set(EASYPAY_PKEY, next.easypayPkey()),
                     set(EASYPAY_PAYMENT_MODE, next.easypayPaymentMode())
-                ).thenReturn(toResponse(next, true));
+                )
+                .then(settingValues())
+                .map(saved -> toResponse(parseConfig(saved), true));
             });
     }
 
@@ -178,20 +180,8 @@ public class PaymentSettingsService {
             .defaultIfEmpty(fallback);
     }
 
-    private Mono<SystemSettingEntity> set(String key, String value) {
-        return repository.findById(key)
-            .defaultIfEmpty(newSetting(key))
-            .flatMap(entity -> {
-                entity.setSettingValue(value == null ? "" : value);
-                return repository.save(entity);
-            });
-    }
-
-    private SystemSettingEntity newSetting(String key) {
-        SystemSettingEntity entity = new SystemSettingEntity();
-        entity.setSettingKey(key);
-        entity.setSettingValue("");
-        return entity;
+    private Mono<Void> set(String key, String value) {
+        return repository.upsertSetting(key, value == null ? "" : value).then();
     }
 
     private String defaultValue(String key) {

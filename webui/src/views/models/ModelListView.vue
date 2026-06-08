@@ -217,7 +217,7 @@
 </script>
 
 <template>
-  <PageSection title="模型 ID" subtitle="查看与映射系统支持的 LLM 模型 ID 列表">
+  <PageSection title="模型 ID" subtitle="查看系统支持的 LLM 模型 ID 列表">
     <template #actions>
       <div class="model-page__buttons">
         <el-button class="action-btn" @click="copy(allModelIds, '已复制全部模型 ID')">

@@ -443,6 +443,8 @@ New keys persist the full `sk-...` value in the owning user's key record, so the
 
 ### Model Mappings
 
+These endpoints require an administrator session. Ordinary user sessions cannot list, create, update, or delete mapping rules.
+
 ```http
 GET    /admin/model-mappings
 POST   /admin/model-mappings
