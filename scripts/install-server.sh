@@ -5,6 +5,7 @@ APP_NAME="starry-api"
 REPO_URL="${REPO_URL:-https://github.com/StaR4y/starry-api.git}"
 BRANCH="${BRANCH:-main}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/starry-api}"
+HOST_BIND_ADDR="${HOST_BIND_ADDR:-0.0.0.0}"
 HOST_HTTP_PORT="${HOST_HTTP_PORT:-18080}"
 SERVER_PORT="${SERVER_PORT:-8080}"
 HEALTH_WAIT_SECONDS="${HEALTH_WAIT_SECONDS:-300}"
@@ -157,7 +158,34 @@ webui_url() {
   if [[ -n "$PUBLIC_BASE_URL" ]]; then
     printf '%s/#/login' "${PUBLIC_BASE_URL%/}"
   else
-    printf 'http://127.0.0.1:%s/#/login' "$HOST_HTTP_PORT"
+    printf 'http://%s:%s/#/login' "$(local_access_host)" "$HOST_HTTP_PORT"
+  fi
+}
+
+local_access_host() {
+  if [[ "$HOST_BIND_ADDR" == "0.0.0.0" || "$HOST_BIND_ADDR" == "::" ]]; then
+    printf '127.0.0.1'
+  else
+    printf '%s' "$HOST_BIND_ADDR"
+  fi
+}
+
+detect_host_ip() {
+  local ip_addr=""
+  if command -v ip >/dev/null 2>&1; then
+    ip_addr="$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i=1;i<=NF;i++) if ($i=="src") {print $(i+1); exit}}')"
+  fi
+  if [[ -z "$ip_addr" ]] && command -v hostname >/dev/null 2>&1; then
+    ip_addr="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  fi
+  printf '%s' "${ip_addr:-SERVER_IP}"
+}
+
+reverse_proxy_target() {
+  if [[ "$HOST_BIND_ADDR" == "127.0.0.1" || "$HOST_BIND_ADDR" == "localhost" ]]; then
+    printf 'http://127.0.0.1:%s' "$HOST_HTTP_PORT"
+  else
+    printf 'http://%s:%s' "$(detect_host_ip)" "$HOST_HTTP_PORT"
   fi
 }
 
@@ -170,6 +198,7 @@ write_env_file() {
 
   log "Writing ${env_file} with generated database passwords..."
   cat > "$env_file" <<EOF
+HOST_BIND_ADDR=${HOST_BIND_ADDR}
 SERVER_PORT=${SERVER_PORT}
 HOST_HTTP_PORT=${HOST_HTTP_PORT}
 
@@ -198,6 +227,10 @@ load_runtime_env() {
   [[ -f "$env_file" ]] || return
 
   local value
+  value="$(grep -E '^HOST_BIND_ADDR=' "$env_file" | tail -n 1 | cut -d= -f2- || true)"
+  if [[ -n "$value" ]]; then
+    HOST_BIND_ADDR="$value"
+  fi
   value="$(grep -E '^HOST_HTTP_PORT=' "$env_file" | tail -n 1 | cut -d= -f2- || true)"
   if [[ -n "$value" ]]; then
     HOST_HTTP_PORT="$value"
@@ -207,11 +240,12 @@ load_runtime_env() {
     SERVER_PORT="$value"
   fi
 
-  log "Using runtime ports from .env: HOST_HTTP_PORT=${HOST_HTTP_PORT}, SERVER_PORT=${SERVER_PORT}"
+  log "Using runtime ports from .env: HOST_BIND_ADDR=${HOST_BIND_ADDR}, HOST_HTTP_PORT=${HOST_HTTP_PORT}, SERVER_PORT=${SERVER_PORT}"
+  export HOST_BIND_ADDR HOST_HTTP_PORT SERVER_PORT
 }
 
 wait_for_health() {
-  local url="http://127.0.0.1:${HOST_HTTP_PORT}/actuator/health"
+  local url="http://$(local_access_host):${HOST_HTTP_PORT}/actuator/health"
   local attempts=$(( (HEALTH_WAIT_SECONDS + 1) / 2 ))
   local last_response=""
   local status=""
@@ -256,9 +290,9 @@ deploy_stack() {
 Deployment complete.
 
 Install dir:        ${INSTALL_DIR}
-Local WebUI:        http://127.0.0.1:${HOST_HTTP_PORT}/#/login
-Local API docs:     http://127.0.0.1:${HOST_HTTP_PORT}/docs
-Reverse proxy to:   http://127.0.0.1:${HOST_HTTP_PORT}
+Local WebUI:        http://$(local_access_host):${HOST_HTTP_PORT}/#/login
+Local API docs:     http://$(local_access_host):${HOST_HTTP_PORT}/docs
+Reverse proxy to:   $(reverse_proxy_target)
 
 Common commands:
   cd ${INSTALL_DIR}
@@ -267,7 +301,11 @@ Common commands:
   docker compose down
 
 If using 1Panel/Nginx, create a reverse proxy site with target:
-  http://127.0.0.1:${HOST_HTTP_PORT}
+  $(reverse_proxy_target)
+
+If your 1Panel OpenResty runs in Docker, keep HOST_BIND_ADDR=0.0.0.0 and
+use the server intranet/public IP target shown above. If Nginx runs directly
+on the host, you can set HOST_BIND_ADDR=127.0.0.1 and proxy to localhost.
 EOF
 }
 

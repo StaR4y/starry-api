@@ -48,7 +48,7 @@ services:
       KIRO_ADMIN_TOKEN: ${KIRO_ADMIN_TOKEN:-}
       JAVA_OPTS: ${JAVA_OPTS:-}
     ports:
-      - "127.0.0.1:${HOST_HTTP_PORT:-18080}:${SERVER_PORT:-8080}"
+      - "${HOST_BIND_ADDR:-127.0.0.1}:${HOST_HTTP_PORT:-18080}:${SERVER_PORT:-8080}"
     networks:
       - starryapi
 

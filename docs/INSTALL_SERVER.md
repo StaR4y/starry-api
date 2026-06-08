@@ -4,12 +4,12 @@ This installer is for Linux servers. It deploys the project with Docker Compose:
 
 ```text
 Nginx / 1Panel reverse proxy
-  -> 127.0.0.1:18080
+  -> server-ip:18080
   -> starry-api service container with embedded WebUI
   -> mysql container
 ```
 
-The service is bound to `127.0.0.1` by default. Expose it through 1Panel or Nginx instead of opening the compose port directly.
+The installer binds the service port to `0.0.0.0:${HOST_HTTP_PORT}` by default so Docker-based 1Panel/OpenResty can reach it through the host port. Restrict that port with your firewall/security group and expose the service publicly through HTTPS reverse proxy. If Nginx runs directly on the host instead of in Docker, you may set `HOST_BIND_ADDR=127.0.0.1`.
 
 ## One-Line Install
 
@@ -43,6 +43,7 @@ Set variables before running the installer:
 ```bash
 sudo env \
   INSTALL_DIR=/opt/starry-api \
+  HOST_BIND_ADDR=0.0.0.0 \
   HOST_HTTP_PORT=18080 \
   PUBLIC_BASE_URL=https://api.example.com \
   bash scripts/install-server.sh
@@ -55,6 +56,7 @@ Supported variables:
 | `REPO_URL` | `https://github.com/StaR4y/starry-api.git` | Git repository to deploy |
 | `BRANCH` | `main` | Git branch to deploy |
 | `INSTALL_DIR` | `/opt/starry-api` | Server install directory |
+| `HOST_BIND_ADDR` | `0.0.0.0` | Host address for compose port binding; use `127.0.0.1` only when reverse proxy runs on the host |
 | `HOST_HTTP_PORT` | `18080` | Local host port exposed by compose |
 | `SERVER_PORT` | `8080` | Internal Spring Boot port |
 | `PUBLIC_BASE_URL` | empty | Public HTTPS URL used in startup logs |
@@ -86,10 +88,12 @@ docker compose up -d --build service
 After the installer finishes, create a 1Panel reverse proxy site:
 
 ```text
-Proxy address: http://127.0.0.1:18080
+Proxy address: http://<server-ip>:18080
 Domain:        your domain
 HTTPS:         enable in 1Panel
 ```
+
+If your 1Panel OpenResty runs in Docker, `127.0.0.1` means the OpenResty container itself and usually causes `502 Bad Gateway`. Use the server intranet/public IP printed by the installer. Only use `http://127.0.0.1:18080` when Nginx runs directly on the host.
 
 Then open:
 

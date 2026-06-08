@@ -4,12 +4,12 @@ This deployment uses Docker Compose in 1Panel:
 
 ```text
 1Panel reverse proxy / HTTPS
-  -> 127.0.0.1:18080
+  -> server-ip:18080
   -> starry-api service container
   -> mysql container
 ```
 
-Only the 1Panel reverse proxy should be exposed publicly. The service container is bound to `127.0.0.1:${HOST_HTTP_PORT}` by default.
+Docker-based 1Panel/OpenResty cannot use the host's `127.0.0.1` as an upstream. The installer binds the service to `0.0.0.0:${HOST_HTTP_PORT}` by default and prints a reverse proxy target using the server IP. Restrict `${HOST_HTTP_PORT}` with your firewall/security group and expose the service publicly through the 1Panel HTTPS site.
 
 ## One-Click Server Install
 
@@ -23,7 +23,7 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
 After it finishes, create the 1Panel reverse proxy site with target:
 
 ```text
-http://127.0.0.1:18080
+http://<server-ip>:18080
 ```
 
 Manual deployment steps are kept below for existing servers or custom MySQL setups.
@@ -75,6 +75,7 @@ Recommended defaults:
 
 ```dotenv
 MYSQL_IMAGE=mysql:8.0.37-oraclelinux8
+HOST_BIND_ADDR=0.0.0.0
 HOST_HTTP_PORT=18080
 KIRO_ALLOW_ANONYMOUS_PROXY=false
 KIRO_ADMIN_SESSION_TTL=12h
@@ -139,10 +140,12 @@ Website -> Create Website -> Reverse Proxy
 Use:
 
 ```text
-Proxy target: http://127.0.0.1:18080
+Proxy target: http://<server-ip>:18080
 ```
 
 Then bind your domain and enable HTTPS in 1Panel.
+
+If OpenResty/Nginx runs directly on the host, you may instead set `HOST_BIND_ADDR=127.0.0.1` in `.env` and proxy to `http://127.0.0.1:18080`. For the default 1Panel containerized OpenResty, using `127.0.0.1` as the proxy target usually points to the OpenResty container itself and results in `502 Bad Gateway`.
 
 Recommended public base URL:
 
