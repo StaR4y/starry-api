@@ -176,22 +176,22 @@ build_with_gradle() {
 
 build_with_docker() {
   command -v docker >/dev/null 2>&1 \
-    || fail "Java is not available and Docker was not found. Install JDK 25 or Docker, or set JAVA_HOME."
+    || fail "Docker was not found. Install Docker, or set BUILD_WITH_DOCKER=false and ensure JDK 25 is available."
 
   local image_tag container_id
   image_tag="${DOCKER_BUILD_IMAGE}:$(git rev-parse --short=12 HEAD 2>/dev/null || printf latest)"
   log "Java is not available locally; building artifact with Docker image ${image_tag}..."
   docker build --target build -t "$image_tag" .
 
-  container_id="$(docker create "$image_tag" sh -c 'chmod +x gradlew && ./gradlew --no-daemon test :service:bootJar -PskipWebuiBuild=true')"
-  trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' RETURN
-
   if [[ "$RUN_TESTS" == "true" ]]; then
-    log "Running tests and bootJar inside Docker..."
-    docker start -a "$container_id"
+    log "Running tests inside Docker..."
+    docker run --rm "$image_tag" sh -c 'chmod +x gradlew && ./gradlew --no-daemon test -PskipWebuiBuild=true'
   else
     log "Skipping tests; copying Docker-built boot jar..."
   fi
+
+  container_id="$(docker create "$image_tag" true)"
+  trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' RETURN
 
   rm -rf service/build/libs
   mkdir -p service/build/libs
