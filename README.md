@@ -258,13 +258,22 @@ Servers should not run this publishing script. To deploy the already checked-in 
 curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh | sudo bash
 ```
 
-For a private repository, pass a GitHub token with read-only Contents permission to both the script download and the installer:
+For a private repository, save a read-only Contents GitHub token once on the server. The installer will reuse it automatically:
 
 ```bash
-GITHUB_TOKEN=replace-with-token
+sudo mkdir -p /opt/starry-api
+sudo install -m 600 /dev/null /opt/starry-api/.github-token
+sudo sh -c 'printf "%s" "replace-with-token" > /opt/starry-api/.github-token'
+```
+
+Then update with:
+
+```bash
+GITHUB_TOKEN="$(sudo cat /opt/starry-api/.github-token)"
 curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
   https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
-  | sudo env GITHUB_TOKEN="${GITHUB_TOKEN}" bash
+  -o /tmp/install-server.sh
+sudo bash /tmp/install-server.sh
 ```
 
 ## Current Boundaries

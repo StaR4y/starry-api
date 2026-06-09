@@ -28,6 +28,7 @@ ARTIFACT_URL="${ARTIFACT_URL:-${REPO_RAW_BASE%/}/artifacts/starry-api.jar}"
 CHECKSUM_URL="${CHECKSUM_URL:-${REPO_RAW_BASE%/}/artifacts/starry-api.jar.sha256}"
 BUILD_INFO_URL="${BUILD_INFO_URL:-${REPO_RAW_BASE%/}/artifacts/build-info.json}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/starry-api}"
+GITHUB_TOKEN_FILE="${GITHUB_TOKEN_FILE:-${INSTALL_DIR}/.github-token}"
 HOST_BIND_ADDR="${HOST_BIND_ADDR:-0.0.0.0}"
 HOST_HTTP_PORT="${HOST_HTTP_PORT:-18080}"
 SERVER_PORT="${SERVER_PORT:-8080}"
@@ -228,6 +229,25 @@ prepare_install_dir() {
   log "Preparing ${INSTALL_DIR}..."
   log "Using prebuilt artifact base ${REPO_RAW_BASE}."
   root_cmd mkdir -p "$INSTALL_DIR/app" "$INSTALL_DIR/data/mysql"
+}
+
+load_github_token() {
+  if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+    log "Using GitHub token from environment."
+    return
+  fi
+
+  if [[ ! -f "$GITHUB_TOKEN_FILE" ]]; then
+    return
+  fi
+
+  GITHUB_TOKEN="$(tr -d '[:space:]' < "$GITHUB_TOKEN_FILE")"
+  export GITHUB_TOKEN
+  if [[ -n "$GITHUB_TOKEN" ]]; then
+    log "Using GitHub token from ${GITHUB_TOKEN_FILE}."
+  else
+    log "GitHub token file is empty: ${GITHUB_TOKEN_FILE}"
+  fi
 }
 
 write_env_file() {
@@ -478,6 +498,7 @@ main() {
   ensure_docker
   ensure_compose
   prepare_install_dir
+  load_github_token
   write_env_file
   load_runtime_env
   write_compose_file

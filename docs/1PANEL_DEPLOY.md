@@ -20,13 +20,22 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
   | sudo env PUBLIC_BASE_URL=https://your-domain.example bash
 ```
 
-For a private repository, pass a GitHub token with read-only Contents permission:
+For a private repository, save a GitHub token with read-only Contents permission once on the server:
 
 ```bash
-GITHUB_TOKEN=replace-with-token
+sudo mkdir -p /opt/starry-api
+sudo install -m 600 /dev/null /opt/starry-api/.github-token
+sudo sh -c 'printf "%s" "replace-with-token" > /opt/starry-api/.github-token'
+```
+
+Then run updates without retyping the token:
+
+```bash
+GITHUB_TOKEN="$(sudo cat /opt/starry-api/.github-token)"
 curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
   https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
-  | sudo env GITHUB_TOKEN="${GITHUB_TOKEN}" PUBLIC_BASE_URL=https://your-domain.example bash
+  -o /tmp/install-server.sh
+sudo env PUBLIC_BASE_URL=https://your-domain.example bash /tmp/install-server.sh
 ```
 
 After it finishes, create the 1Panel reverse proxy site with target:

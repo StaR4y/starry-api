@@ -82,14 +82,25 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
   | sudo env PUBLIC_BASE_URL=https://api.example.com bash
 ```
 
-For a private repository, GitHub raw URLs return `404` unless authenticated. Use a fine-grained token with read-only Contents permission:
+For a private repository, GitHub raw URLs return `404` unless authenticated. Save a fine-grained token with read-only Contents permission once on the server:
 
 ```bash
-GITHUB_TOKEN=replace-with-token
+sudo mkdir -p /opt/starry-api
+sudo install -m 600 /dev/null /opt/starry-api/.github-token
+sudo sh -c 'printf "%s" "replace-with-token" > /opt/starry-api/.github-token'
+```
+
+Then run updates without retyping the token:
+
+```bash
+GITHUB_TOKEN="$(sudo cat /opt/starry-api/.github-token)"
 curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
   https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
-  | sudo env GITHUB_TOKEN="${GITHUB_TOKEN}" bash
+  -o /tmp/install-server.sh
+sudo bash /tmp/install-server.sh
 ```
+
+If you already have a local checkout on the server, you can run `sudo bash scripts/install-server.sh`; it will read `/opt/starry-api/.github-token` automatically.
 
 The deploy script will:
 
@@ -131,6 +142,7 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
 | `FORCE_ENV` | `false` | Regenerate `.env` even if it already exists. |
 | `INSTALL_DOCKER` | `true` | Install Docker when missing. |
 | `GITHUB_TOKEN` | empty | Optional token for private raw artifact downloads. |
+| `GITHUB_TOKEN_FILE` | `${INSTALL_DIR}/.github-token` | Optional local token file used when `GITHUB_TOKEN` is empty. |
 
 Deploy a non-main branch artifact by setting `BRANCH`:
 
