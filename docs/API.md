@@ -409,6 +409,8 @@ For third-party OpenAI-compatible API key accounts, use `provider=OpenAI-compati
 }
 ```
 
+`baseUrl` may be either the site origin, such as `https://joystar.cc`, or a versioned API base, such as `https://api.deepseek.com/v1` or `https://openrouter.ai/api/v1`. When the path does not already end in an API version segment, Starry API calls `/v1/chat/completions` and `/v1/responses` by default.
+
 Route third-party model IDs through model mappings by targeting `openai-compatible/<actual-model-id>`. For example, map public model `deepseek-chat` to `openai-compatible/deepseek-chat`; Starry API uses the prefix to select OpenAI-compatible accounts and sends `deepseek-chat` to the upstream site.
 
 For Codex OAuth token accounts, use `authMethod=codex`, `provider=OpenAI`, `accessToken`, optional `refreshToken`, optional `idToken`, and optional `upstreamAccountId`. If `baseUrl` is omitted, Codex defaults to `https://chatgpt.com/backend-api/codex`.

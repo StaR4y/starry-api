@@ -67,11 +67,12 @@ public class OpenAiUpstreamClient {
         body.put("model", model);
         normalizeChatTokenLimit(body, model);
 
+        String endpoint = OpenAiEndpoints.openAiApi(account.getBaseUrl(), "/chat/completions");
         return webClient.post()
-            .uri(endpoint(account.getBaseUrl(), AccountPlatforms.DEFAULT_OPENAI_BASE_URL, "/chat/completions"))
+            .uri(endpoint)
             .headers(headers -> applyOpenAiHeaders(headers, account))
             .bodyValue(body)
-            .exchangeToMono(response -> handleResponse(response, this::parseChatCompletions));
+            .exchangeToMono(response -> handleResponse(response, this::parseChatCompletions, endpoint));
     }
 
     private Mono<PlatformCompletionResult> completeCodex(
@@ -104,11 +105,12 @@ public class OpenAiUpstreamClient {
     }
 
     private Mono<PlatformCompletionResult> completeCodexOnce(ProxyAccountEntity account, ObjectNode body) {
+        String endpoint = OpenAiEndpoints.codexApi(account.getBaseUrl(), "/responses");
         return webClient.post()
-            .uri(endpoint(account.getBaseUrl(), AccountPlatforms.DEFAULT_CODEX_BASE_URL, "/responses"))
+            .uri(endpoint)
             .headers(headers -> applyCodexHeaders(headers, account))
             .bodyValue(body)
-            .exchangeToMono(response -> handleResponse(response, this::parseResponses));
+            .exchangeToMono(response -> handleResponse(response, this::parseResponses, endpoint));
     }
 
     private Mono<PlatformCompletionResult> completeResponsesApi(
@@ -119,11 +121,12 @@ public class OpenAiUpstreamClient {
         ObjectNode body = request.deepCopy();
         body.put("model", model);
 
+        String endpoint = OpenAiEndpoints.openAiApi(account.getBaseUrl(), "/responses");
         return webClient.post()
-            .uri(endpoint(account.getBaseUrl(), AccountPlatforms.DEFAULT_OPENAI_BASE_URL, "/responses"))
+            .uri(endpoint)
             .headers(headers -> applyOpenAiResponsesHeaders(headers, account))
             .bodyValue(body)
-            .exchangeToMono(response -> handleResponse(response, this::parseResponses));
+            .exchangeToMono(response -> handleResponse(response, this::parseResponses, endpoint));
     }
 
     private void applyOpenAiHeaders(HttpHeaders headers, ProxyAccountEntity account) {
@@ -145,7 +148,8 @@ public class OpenAiUpstreamClient {
 
     private Mono<PlatformCompletionResult> handleResponse(
         ClientResponse response,
-        ResponseParser parser
+        ResponseParser parser,
+        String endpoint
     ) {
         HttpStatusCode status = response.statusCode();
         return response.bodyToMono(String.class)
@@ -161,7 +165,7 @@ public class OpenAiUpstreamClient {
                 try {
                     return Mono.just(parser.parse(rawBody));
                 } catch (Exception error) {
-                    return Mono.error(new UpstreamException(502, "OpenAI upstream returned invalid response: " + rawBody, false));
+                    return Mono.error(new UpstreamException(502, invalidResponseMessage(endpoint, rawBody), false));
                 }
             });
     }
@@ -724,17 +728,6 @@ public class OpenAiUpstreamClient {
         return new PlatformUsage(inputTokens, outputTokens, BigDecimal.ZERO, cacheReadTokens, 0, reasoningTokens);
     }
 
-    private String endpoint(String baseUrl, String fallback, String suffix) {
-        String base = clean(baseUrl);
-        if (base == null) {
-            base = fallback;
-        }
-        if (base.endsWith(suffix)) {
-            return base;
-        }
-        return base.replaceAll("/+$", "") + suffix;
-    }
-
     private boolean isOfficialOpenAiBaseUrl(ProxyAccountEntity account) {
         String baseUrl = account == null ? null : account.getBaseUrl();
         return baseUrl == null
@@ -744,6 +737,24 @@ public class OpenAiUpstreamClient {
 
     private boolean isRecoverableStatus(int statusCode) {
         return statusCode == 402 || statusCode == 429 || statusCode >= 500;
+    }
+
+    private String invalidResponseMessage(String endpoint, String rawBody) {
+        String body = clean(rawBody);
+        if (body != null && body.toLowerCase().startsWith("<!doctype html")) {
+            return "OpenAI upstream returned HTML instead of JSON from " + endpoint
+                + ". Check the Base URL; OpenAI-compatible API key accounts use the /v1 API path by default.";
+        }
+        return "OpenAI upstream returned invalid response from " + endpoint + ": " + truncate(rawBody);
+    }
+
+    private String truncate(String value) {
+        String cleaned = clean(value);
+        if (cleaned == null) {
+            return "";
+        }
+        String singleLine = cleaned.replaceAll("\\s+", " ");
+        return singleLine.length() <= 500 ? singleLine : singleLine.substring(0, 500) + "...";
     }
 
     private boolean isUnauthorized(Throwable error) {

@@ -150,7 +150,7 @@
   const baseUrlLabel = computed(() => isOpenAiCompatibleForm.value ? '第三方 Base URL' : 'Base URL');
   const baseUrlPlaceholder = computed(() =>
     isOpenAiCompatibleForm.value
-      ? '例如 https://api.deepseek.com/v1 或 https://openrouter.ai/api/v1'
+      ? '例如 https://joystar.cc、https://api.deepseek.com 或 https://openrouter.ai/api/v1'
       : '默认 https://api.openai.com/v1',
   );
 
@@ -1066,7 +1066,7 @@
         type="info"
         show-icon
         :closable="false"
-        title="第三方 API Key 账号会按 OpenAI 兼容协议调用 Base URL。模型映射目标可写成 openai-compatible/真实模型ID，例如 openai-compatible/deepseek-chat。"
+        title="第三方 API Key 账号会按 OpenAI 兼容协议调用 Base URL；填写站点根地址时会自动使用 /v1。模型映射目标可写成 openai-compatible/真实模型ID，例如 openai-compatible/deepseek-chat。"
       />
       <el-row :gutter="20">
         <el-col v-if="formMode === 'create'" :span="12">

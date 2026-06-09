@@ -83,6 +83,8 @@ curl -X POST http://127.0.0.1:8080/admin/accounts \
 
 Then map public model IDs to `openai-compatible/<actual-model-id>`, for example `deepseek-chat -> openai-compatible/deepseek-chat`. Starry API strips the `openai-compatible/` routing prefix before sending the request upstream.
 
+For OpenAI-compatible API key accounts, `baseUrl` can be the site origin (`https://joystar.cc`) or a versioned API base (`https://api.deepseek.com/v1`, `https://openrouter.ai/api/v1`). If the path does not already end in a version segment, the runtime and account tester automatically use `/v1/chat/completions` for chat-completion checks.
+
 ## Batch Import Accounts
 
 Edit the sample file:

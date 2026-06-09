@@ -305,7 +305,7 @@ class OpenAiUpstreamClientTest {
     void openAiResponsesApiPreservesMultimodalInput() throws Exception {
         AtomicReference<String> requestBody = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/responses", exchange -> {
+        server.createContext("/v1/responses", exchange -> {
             requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             byte[] response = """
                 {"output_text":"OK","usage":{"input_tokens":8,"output_tokens":1}}
@@ -363,7 +363,7 @@ class OpenAiUpstreamClientTest {
     void openAiCompatibleModelPrefixRoutesWithoutSendingPrefixToUpstream() throws Exception {
         AtomicReference<String> requestBody = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.createContext("/chat/completions", exchange -> {
+        server.createContext("/v1/chat/completions", exchange -> {
             requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             byte[] response = """
                 {"choices":[{"message":{"content":"OK"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}

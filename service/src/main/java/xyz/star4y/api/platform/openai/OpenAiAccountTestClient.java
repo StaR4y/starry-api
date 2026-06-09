@@ -66,11 +66,12 @@ public class OpenAiAccountTestClient {
         message.put("role", "user");
         message.put("content", prompt);
 
+        String endpoint = OpenAiEndpoints.openAiApi(account.getBaseUrl(), "/chat/completions");
         return webClient.post()
-            .uri(endpoint(account.getBaseUrl(), AccountPlatforms.DEFAULT_OPENAI_BASE_URL, "/chat/completions"))
+            .uri(endpoint)
             .headers(headers -> applyOpenAiHeaders(headers, account))
             .bodyValue(body)
-            .exchangeToMono(response -> handleResponse(response, this::parseChatCompletions));
+            .exchangeToMono(response -> handleResponse(response, this::parseChatCompletions, endpoint));
     }
 
     private Mono<PlatformCompletionResult> testCodex(ProxyAccountEntity account, String model, String prompt) {
@@ -99,11 +100,12 @@ public class OpenAiAccountTestClient {
     }
 
     private Mono<PlatformCompletionResult> testCodexOnce(ProxyAccountEntity account, ObjectNode body) {
+        String endpoint = OpenAiEndpoints.codexApi(account.getBaseUrl(), "/responses");
         return webClient.post()
-            .uri(endpoint(account.getBaseUrl(), AccountPlatforms.DEFAULT_CODEX_BASE_URL, "/responses"))
+            .uri(endpoint)
             .headers(headers -> applyCodexHeaders(headers, account))
             .bodyValue(body)
-            .exchangeToMono(response -> handleResponse(response, this::parseResponses));
+            .exchangeToMono(response -> handleResponse(response, this::parseResponses, endpoint));
     }
 
     private void applyOpenAiHeaders(HttpHeaders headers, ProxyAccountEntity account) {
@@ -125,7 +127,8 @@ public class OpenAiAccountTestClient {
 
     private Mono<PlatformCompletionResult> handleResponse(
         ClientResponse response,
-        ResponseParser parser
+        ResponseParser parser,
+        String endpoint
     ) {
         HttpStatusCode status = response.statusCode();
         return response.bodyToMono(String.class)
@@ -141,7 +144,7 @@ public class OpenAiAccountTestClient {
                 try {
                     return Mono.just(parser.parse(rawBody));
                 } catch (Exception error) {
-                    return Mono.error(new UpstreamException(502, "OpenAI account test returned invalid response: " + rawBody, false));
+                    return Mono.error(new UpstreamException(502, invalidResponseMessage(endpoint, rawBody), false));
                 }
             });
     }
@@ -294,19 +297,26 @@ public class OpenAiAccountTestClient {
         return new PlatformUsage(inputTokens, outputTokens, BigDecimal.ZERO, cacheReadTokens, 0, reasoningTokens);
     }
 
-    private String endpoint(String baseUrl, String fallback, String suffix) {
-        String base = clean(baseUrl);
-        if (base == null) {
-            base = fallback;
-        }
-        if (base.endsWith(suffix)) {
-            return base;
-        }
-        return base.replaceAll("/+$", "") + suffix;
-    }
-
     private boolean isRecoverableStatus(int statusCode) {
         return statusCode == 402 || statusCode == 429 || statusCode >= 500;
+    }
+
+    private String invalidResponseMessage(String endpoint, String rawBody) {
+        String body = clean(rawBody);
+        if (body != null && body.toLowerCase().startsWith("<!doctype html")) {
+            return "OpenAI account test returned HTML instead of JSON from " + endpoint
+                + ". Check the Base URL; OpenAI-compatible API key accounts use the /v1 API path by default.";
+        }
+        return "OpenAI account test returned invalid response from " + endpoint + ": " + truncate(rawBody);
+    }
+
+    private String truncate(String value) {
+        String cleaned = clean(value);
+        if (cleaned == null) {
+            return "";
+        }
+        String singleLine = cleaned.replaceAll("\\s+", " ");
+        return singleLine.length() <= 500 ? singleLine : singleLine.substring(0, 500) + "...";
     }
 
     private boolean isUnauthorized(Throwable error) {
