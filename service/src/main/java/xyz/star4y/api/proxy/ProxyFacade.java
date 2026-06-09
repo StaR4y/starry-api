@@ -443,7 +443,9 @@ public class ProxyFacade {
                     exchange.getResponse().getHeaders().set("Retry-After", String.valueOf(limit.retryAfterMillis() / 1000));
                     return Mono.error(new ApiException(HttpStatus.TOO_MANY_REQUESTS, "RATE_LIMITED", "Rate limit exceeded"));
                 }
-                return Mono.just(principal);
+                return principal.requiresBalance()
+                    ? apiKeyService.ensureBalanceAvailable(principal).thenReturn(principal)
+                    : Mono.just(principal);
             });
     }
 
@@ -462,6 +464,9 @@ public class ProxyFacade {
         BigDecimal credits = billableCredits(usage, route, fastMode);
         Mono<Void> accountStats = accountPoolService.recordSuccess(account.getAccountId(), usage.totalTokens());
         Mono<Void> keyStats = apiKeyService.recordUsage(principal.keyId(), credits, usage.inputTokens(), usage.outputTokens());
+        Mono<Void> balanceUsage = principal.requiresBalance()
+            ? apiKeyService.consumeBalance(principal, credits)
+            : Mono.empty();
         Mono<Void> log = statsService.log(new StatsService.RequestLog(
             requestId,
             principal.keyId(),
@@ -476,12 +481,12 @@ public class ProxyFacade {
             Duration.between(start, Instant.now()).toMillis(),
             null
         ));
-        return Mono.whenDelayError(accountStats, keyStats, log).then();
+        return Mono.whenDelayError(accountStats, keyStats, balanceUsage, log).then();
     }
 
     private BigDecimal billableCredits(PlatformUsage usage, UpstreamRoute route, boolean fastMode) {
         BigDecimal credits = usage.credits() == null ? BigDecimal.ZERO : usage.credits();
-        if (route == UpstreamRoute.OPENAI && credits.compareTo(BigDecimal.ZERO) <= 0) {
+        if (credits.compareTo(BigDecimal.ZERO) <= 0) {
             credits = BigDecimal.valueOf(usage.totalTokens());
         }
         return fastMode ? credits.multiply(BigDecimal.valueOf(2)) : credits;

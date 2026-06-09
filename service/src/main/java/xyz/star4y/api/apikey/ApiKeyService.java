@@ -80,7 +80,7 @@ public class ApiKeyService {
         Optional<String> key = extractKey(exchange);
         if (key.isEmpty()) {
             if (properties.isAllowAnonymousProxy()) {
-                return Mono.just(new ApiKeyPrincipal("anonymous", "anonymous", null, BigDecimal.ZERO));
+                return Mono.just(new ApiKeyPrincipal("anonymous", null, "ANONYMOUS", "anonymous", null, BigDecimal.ZERO, BigDecimal.ZERO));
             }
             return Mono.error(new ApiException(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED", "Missing API key"));
         }
@@ -95,13 +95,51 @@ public class ApiKeyService {
                     && entity.getTotalCredits().compareTo(entity.getCreditsLimit()) >= 0) {
                     return Mono.error(new ApiException(HttpStatus.TOO_MANY_REQUESTS, "CREDITS_LIMIT_EXCEEDED", "API key credits limit exceeded"));
                 }
-                return Mono.just(new ApiKeyPrincipal(
-                    entity.getKeyId(),
-                    entity.getName(),
-                    entity.getCreditsLimit(),
-                    entity.getTotalCredits()
-                ));
+                return userBillingState(entity.getUserId())
+                    .map(user -> new ApiKeyPrincipal(
+                        entity.getKeyId(),
+                        entity.getUserId(),
+                        user.role(),
+                        entity.getName(),
+                        entity.getCreditsLimit(),
+                        entity.getTotalCredits(),
+                        user.balance()
+                    ));
             });
+    }
+
+    public Mono<Void> ensureBalanceAvailable(ApiKeyPrincipal principal) {
+        if (principal == null || !principal.requiresBalance()) {
+            return Mono.empty();
+        }
+        BigDecimal balance = principal.balance() == null ? BigDecimal.ZERO : principal.balance();
+        if (balance.compareTo(BigDecimal.ZERO) <= 0) {
+            return Mono.error(new ApiException(HttpStatus.PAYMENT_REQUIRED, "INSUFFICIENT_BALANCE", "Account balance is insufficient"));
+        }
+        return Mono.empty();
+    }
+
+    public Mono<Void> consumeBalance(ApiKeyPrincipal principal, BigDecimal credits) {
+        if (principal == null || !principal.requiresBalance()) {
+            return Mono.empty();
+        }
+        BigDecimal safeCredits = credits == null ? BigDecimal.ZERO : credits;
+        if (safeCredits.compareTo(BigDecimal.ZERO) <= 0) {
+            return Mono.empty();
+        }
+        String sql = """
+            UPDATE admin_users
+            SET balance = GREATEST(balance - :credits, 0),
+                updated_at = CURRENT_TIMESTAMP(3)
+            WHERE user_id = :userId
+              AND role = 'USER'
+            """;
+        return template.getDatabaseClient().sql(sql)
+            .bind("credits", safeCredits)
+            .bind("userId", principal.userId())
+            .fetch()
+            .rowsUpdated()
+            .then();
     }
 
     private Mono<ApiKeyEntity> findVisibleKey(AdminPrincipal principal, String keyId) {
@@ -112,6 +150,26 @@ public class ApiKeyService {
 
     private boolean isAdmin(AdminPrincipal principal) {
         return principal != null && ADMIN_ROLE.equalsIgnoreCase(principal.role());
+    }
+
+    private Mono<UserBillingState> userBillingState(String userId) {
+        String sql = """
+            SELECT role, balance, enabled
+            FROM admin_users
+            WHERE user_id = :userId
+            """;
+        return template.getDatabaseClient().sql(sql)
+            .bind("userId", userId)
+            .map((row, metadata) -> new UserBillingState(
+                row.get("role", String.class),
+                row.get("balance", BigDecimal.class),
+                Boolean.TRUE.equals(row.get("enabled", Boolean.class))
+            ))
+            .one()
+            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.UNAUTHORIZED, "API_KEY_OWNER_NOT_FOUND", "API key owner does not exist")))
+            .flatMap(user -> user.enabled()
+                ? Mono.just(user)
+                : Mono.error(new ApiException(HttpStatus.UNAUTHORIZED, "API_KEY_OWNER_DISABLED", "API key owner is disabled")));
     }
 
     public Mono<Void> recordUsage(String keyId, BigDecimal credits, long inputTokens, long outputTokens) {
@@ -167,5 +225,8 @@ public class ApiKeyService {
             return Optional.of(authorization.substring("Bearer ".length()).trim());
         }
         return Optional.empty();
+    }
+
+    private record UserBillingState(String role, BigDecimal balance, boolean enabled) {
     }
 }

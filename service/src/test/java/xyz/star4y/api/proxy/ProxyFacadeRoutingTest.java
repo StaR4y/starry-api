@@ -11,6 +11,7 @@ import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -98,6 +99,122 @@ class ProxyFacadeRoutingTest {
         verify(accountPoolService, never()).selectKiroAccount(any());
         verify(openAiUpstreamClient).complete(eq(account), eq(request), eq("GPT-5.5"));
         verify(kiroUpstreamClient, never()).complete(any(), any(), any());
+    }
+
+    @Test
+    void userApiRequestsConsumeAccountBalanceAfterSuccessfulUsage() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity account = openAiAccount();
+        ApiKeyPrincipal principal = new ApiKeyPrincipal(
+            "key-1",
+            "user-1",
+            "USER",
+            "test",
+            null,
+            BigDecimal.ZERO,
+            BigDecimal.valueOf(100)
+        );
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "gpt-5",
+              "messages": [{"role": "user", "content": "hi"}]
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/chat/completions")
+        );
+
+        when(apiKeyService.authenticate(exchange)).thenReturn(Mono.just(principal));
+        when(apiKeyService.ensureBalanceAvailable(principal)).thenReturn(Mono.empty());
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("gpt-5", "key-1")).thenReturn("gpt-5");
+        when(accountPoolService.selectOpenAiAccount("key-1")).thenReturn(Mono.just(account));
+        when(openAiUpstreamClient.complete(eq(account), eq(request), eq("gpt-5")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(2, 3, BigDecimal.ZERO, 0, 0, 0))));
+        when(accountPoolService.recordSuccess("openai-main", 5L)).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(BigDecimal.valueOf(5)), eq(2L), eq(3L))).thenReturn(Mono.empty());
+        when(apiKeyService.consumeBalance(eq(principal), eq(BigDecimal.valueOf(5)))).thenReturn(Mono.empty());
+        when(statsService.log(any())).thenReturn(Mono.empty());
+
+        proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService
+        ).chat(request, exchange).block();
+
+        verify(apiKeyService).ensureBalanceAvailable(principal);
+        verify(apiKeyService).consumeBalance(principal, BigDecimal.valueOf(5));
+    }
+
+    @Test
+    void kiroUsageFallsBackToTokenCreditsWhenUpstreamCreditsAreMissing() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity account = kiroAccount();
+        ApiKeyPrincipal principal = new ApiKeyPrincipal(
+            "key-1",
+            "user-1",
+            "USER",
+            "test",
+            null,
+            BigDecimal.ZERO,
+            BigDecimal.valueOf(100)
+        );
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "claude-sonnet-4.5",
+              "messages": [{"role": "user", "content": "hi"}]
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/chat/completions")
+        );
+
+        when(apiKeyService.authenticate(exchange)).thenReturn(Mono.just(principal));
+        when(apiKeyService.ensureBalanceAvailable(principal)).thenReturn(Mono.empty());
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("claude-sonnet-4.5", "key-1")).thenReturn("claude-sonnet-4.5");
+        when(accountPoolService.selectKiroAccount("key-1")).thenReturn(Mono.just(account));
+        when(kiroUpstreamClient.complete(eq(account), any(ObjectNode.class), eq("claude-sonnet-4.5")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(4, 6, BigDecimal.ZERO, 0, 0, 0))));
+        when(accountPoolService.recordSuccess("kiro-main", 10L)).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(BigDecimal.TEN), eq(4L), eq(6L))).thenReturn(Mono.empty());
+        when(apiKeyService.consumeBalance(eq(principal), eq(BigDecimal.TEN))).thenReturn(Mono.empty());
+        when(statsService.log(any())).thenReturn(Mono.empty());
+
+        proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService
+        ).chat(request, exchange).block();
+
+        verify(apiKeyService).recordUsage("key-1", BigDecimal.TEN, 4L, 6L);
+        verify(apiKeyService).consumeBalance(principal, BigDecimal.TEN);
     }
 
     @Test
@@ -472,6 +589,16 @@ class ProxyFacadeRoutingTest {
         account.setProvider(AccountPlatforms.OPENAI_PROVIDER);
         account.setAuthMethod(AccountPlatforms.OPENAI_API_KEY_AUTH);
         account.setAccessToken("sk-test");
+        account.setEnabled(true);
+        return account;
+    }
+
+    private ProxyAccountEntity kiroAccount() {
+        ProxyAccountEntity account = new ProxyAccountEntity();
+        account.setAccountId("kiro-main");
+        account.setProvider("BuilderId");
+        account.setAccessToken("kiro-token");
+        account.setRegion("us-east-1");
         account.setEnabled(true);
         return account;
     }
