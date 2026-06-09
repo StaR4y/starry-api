@@ -400,9 +400,11 @@
       { label: 'claude-haiku-4.5', value: 'claude-haiku-4.5' },
     ],
     openAi: [
-      { label: 'auto (gpt-5.4-mini)', value: 'auto' },
-      { label: 'openai/gpt-5.5', value: 'openai/gpt-5.5' },
-      { label: 'openai/gpt-5.4-mini', value: 'openai/gpt-5.4-mini' },
+      { label: 'auto (gpt-4o-mini)', value: 'auto' },
+      { label: 'gpt-4o-mini', value: 'gpt-4o-mini' },
+      { label: 'gpt-4.1-mini', value: 'gpt-4.1-mini' },
+      { label: 'gpt-5.1', value: 'gpt-5.1' },
+      { label: 'gpt-5-mini', value: 'gpt-5-mini' },
     ],
     google: [
       { label: 'auto (google/gemini-2.5-flash)', value: 'auto' },
@@ -415,14 +417,12 @@
       { label: 'anthropic/claude-opus-4.5', value: 'anthropic/claude-opus-4.5' },
     ],
     codex: [
-      { label: 'auto (gpt-5.4-mini)', value: 'auto' },
-      { label: 'gpt-5.5', value: 'gpt-5.5' },
-      { label: 'gpt-5.4', value: 'gpt-5.4' },
-      { label: 'gpt-5.4-mini', value: 'gpt-5.4-mini' },
-      { label: 'gpt-5.4-nano', value: 'gpt-5.4-nano' },
-      { label: 'gpt-5.2', value: 'gpt-5.2' },
-      { label: 'gpt-5.1', value: 'gpt-5.1' },
-      { label: 'gpt-5', value: 'gpt-5' },
+      { label: 'auto (gpt-5.1-codex)', value: 'auto' },
+      { label: 'gpt-5.2-codex', value: 'gpt-5.2-codex' },
+      { label: 'gpt-5.1-codex', value: 'gpt-5.1-codex' },
+      { label: 'gpt-5.1-codex-max', value: 'gpt-5.1-codex-max' },
+      { label: 'gpt-5.1-codex-mini', value: 'gpt-5.1-codex-mini' },
+      { label: 'gpt-5-codex', value: 'gpt-5-codex' },
     ],
   };
   const testModelOptions = ref<TestModelOptionsResult>(fallbackTestModelOptions);
@@ -991,6 +991,9 @@
                     <el-select
                       v-model="testModelByAccount[row.accountId]"
                       filterable
+                      allow-create
+                      default-first-option
+                      placeholder="选择或输入模型 ID"
                       style="width: 100%"
                       @focus="ensureTestModel(row)"
                     >

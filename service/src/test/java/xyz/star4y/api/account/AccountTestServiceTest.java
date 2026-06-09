@@ -116,7 +116,7 @@ class AccountTestServiceTest {
         ProxyAccountEntity account = openAiAccount("openai-main", "sk-test");
 
         when(repository.findAll()).thenReturn(Flux.just(account));
-        when(openAiAccountTestClient.test(eq(account), eq("gpt-5.4-mini"), eq("ping")))
+        when(openAiAccountTestClient.test(eq(account), eq("gpt-4o-mini"), eq("ping")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", PlatformUsage.zero())));
         when(accountPoolService.recordTestSuccess(eq("openai-main"), eq(0L), eq(false))).thenReturn(Mono.empty());
 
@@ -138,10 +138,10 @@ class AccountTestServiceTest {
         assertThat(response.items()).singleElement()
             .satisfies(item -> {
                 assertThat(item.accountId()).isEqualTo("openai-main");
-                assertThat(item.model()).isEqualTo("gpt-5.4-mini");
+                assertThat(item.model()).isEqualTo("gpt-4o-mini");
                 assertThat(item.status()).isEqualTo("SUCCESS");
             });
-        verify(openAiAccountTestClient).test(eq(account), eq("gpt-5.4-mini"), eq("ping"));
+        verify(openAiAccountTestClient).test(eq(account), eq("gpt-4o-mini"), eq("ping"));
         verifyNoInteractions(upstreamClient);
     }
 
@@ -291,8 +291,21 @@ class AccountTestServiceTest {
         assertThat(options.kiro()).extracting(AccountDtos.TestModelOption::value)
             .containsExactly("auto", "claude-sonnet-4.5", "simple-task", "claude-haiku-4.5", "claude-sonnet-4", "claude-opus-4.5");
         assertThat(options.openAi()).extracting(AccountDtos.TestModelOption::value)
-            .hasSize(63)
-            .contains("auto", "openai/gpt-5.4-mini", "openai/gpt-5.5-pro", "openai/o4-mini-high");
+            .containsExactly(
+                "auto",
+                "gpt-4o-mini",
+                "gpt-4o",
+                "gpt-4.1-mini",
+                "gpt-4.1",
+                "gpt-4.1-nano",
+                "gpt-5.2",
+                "gpt-5.1",
+                "gpt-5",
+                "gpt-5-mini",
+                "gpt-5-nano",
+                "o4-mini",
+                "o3"
+            );
         assertThat(options.google()).extracting(AccountDtos.TestModelOption::value)
             .hasSize(27)
             .contains("auto", "google/gemini-2.5-pro", "google/gemini-3.5-flash", "google/gemma-4-31b-it:free");
@@ -309,25 +322,12 @@ class AccountTestServiceTest {
         assertThat(options.codex()).extracting(AccountDtos.TestModelOption::value)
             .containsExactly(
                 "auto",
-                "gpt-5.5",
-                "gpt-5.4",
-                "gpt-5.4-mini",
-                "gpt-5.4-nano",
-                "gpt-5.4-pro",
-                "gpt-5.3-chat",
-                "gpt-5.2",
-                "gpt-5.2-chat",
-                "gpt-5.2-pro",
-                "gpt-5.1",
-                "gpt-5.1-chat",
-                "gpt-5",
-                "gpt-5-mini",
-                "gpt-5-nano",
-                "gpt-5-pro",
-                "gpt-4.1",
-                "gpt-4.1-mini",
-                "gpt-4o",
-                "gpt-4o-mini"
+                "gpt-5.2-codex",
+                "gpt-5.1-codex",
+                "gpt-5.1-codex-max",
+                "gpt-5.1-codex-mini",
+                "gpt-5-codex",
+                "codex-mini-latest"
             );
     }
 
@@ -341,7 +341,7 @@ class AccountTestServiceTest {
         account.setAuthMethod(AccountPlatforms.OPENAI_CODEX_AUTH);
 
         when(repository.findAll()).thenReturn(Flux.just(account));
-        when(openAiAccountTestClient.test(eq(account), eq("gpt-5.4-mini"), eq("ping")))
+        when(openAiAccountTestClient.test(eq(account), eq("gpt-5.1-codex"), eq("ping")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", PlatformUsage.zero())));
         when(accountPoolService.recordTestSuccess(eq("codex-main"), eq(0L), eq(false))).thenReturn(Mono.empty());
 
@@ -361,8 +361,8 @@ class AccountTestServiceTest {
         assertThat(response).isNotNull();
         assertThat(response.success()).isEqualTo(1);
         assertThat(response.items()).singleElement()
-            .satisfies(item -> assertThat(item.model()).isEqualTo("gpt-5.4-mini"));
-        verify(openAiAccountTestClient).test(eq(account), eq("gpt-5.4-mini"), eq("ping"));
+            .satisfies(item -> assertThat(item.model()).isEqualTo("gpt-5.1-codex"));
+        verify(openAiAccountTestClient).test(eq(account), eq("gpt-5.1-codex"), eq("ping"));
         verifyNoInteractions(upstreamClient);
     }
 
@@ -376,7 +376,7 @@ class AccountTestServiceTest {
         account.setAuthMethod(AccountPlatforms.OPENAI_CODEX_AUTH);
 
         when(repository.findAll()).thenReturn(Flux.just(account));
-        when(openAiAccountTestClient.test(eq(account), eq("gpt-5.4-mini"), eq("ping")))
+        when(openAiAccountTestClient.test(eq(account), eq("gpt-5.1-codex"), eq("ping")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", PlatformUsage.zero())));
         when(accountPoolService.recordTestSuccess(eq("codex-main"), eq(0L), eq(false))).thenReturn(Mono.empty());
 
@@ -396,8 +396,8 @@ class AccountTestServiceTest {
         assertThat(response).isNotNull();
         assertThat(response.success()).isEqualTo(1);
         assertThat(response.items()).singleElement()
-            .satisfies(item -> assertThat(item.model()).isEqualTo("gpt-5.4-mini"));
-        verify(openAiAccountTestClient).test(eq(account), eq("gpt-5.4-mini"), eq("ping"));
+            .satisfies(item -> assertThat(item.model()).isEqualTo("gpt-5.1-codex"));
+        verify(openAiAccountTestClient).test(eq(account), eq("gpt-5.1-codex"), eq("ping"));
         verifyNoInteractions(upstreamClient);
     }
 
