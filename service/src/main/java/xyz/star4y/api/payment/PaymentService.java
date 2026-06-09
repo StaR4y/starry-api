@@ -11,6 +11,7 @@ import java.util.Map;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.r2dbc.core.DatabaseClient.GenericExecuteSpec;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Flux;
@@ -103,7 +104,7 @@ public class PaymentService {
                 Instant now = Instant.now();
                 order.setCancelledAt(now);
                 touch(order, now);
-                return repository.save(order);
+                return updateCancelledOrder(order, now);
             })
             .map(PaymentOrderMapper::toResponse);
     }
@@ -183,15 +184,77 @@ public class PaymentService {
         if (result.tradeNo() != null && !result.tradeNo().isBlank()) {
             order.setPaymentTradeNo(result.tradeNo());
         }
-        touch(order, Instant.now());
-        return repository.save(order);
+        Instant now = Instant.now();
+        touch(order, now);
+        return updateProviderResult(order, now);
     }
 
     private Mono<Void> markFailed(PaymentOrderEntity order, Throwable error) {
         order.setStatus(STATUS_FAILED);
         order.setErrorMessage(error.getMessage());
-        touch(order, Instant.now());
-        return repository.save(order).then();
+        Instant now = Instant.now();
+        touch(order, now);
+        return updateFailedOrder(order, now).then();
+    }
+
+    private Mono<PaymentOrderEntity> updateCancelledOrder(PaymentOrderEntity order, Instant now) {
+        String sql = """
+            UPDATE payment_orders
+            SET status = :status,
+                cancelled_at = :cancelledAt,
+                updated_at = :now
+            WHERE order_id = :orderId
+              AND status = :pendingStatus
+            """;
+        return template.getDatabaseClient().sql(sql)
+            .bind("status", STATUS_CANCELLED)
+            .bind("cancelledAt", now)
+            .bind("now", now)
+            .bind("orderId", order.getOrderId())
+            .bind("pendingStatus", STATUS_PENDING)
+            .fetch()
+            .rowsUpdated()
+            .flatMap(rows -> rows > 0
+                ? Mono.just(order)
+                : Mono.error(new ApiException(HttpStatus.BAD_REQUEST, "PAYMENT_ORDER_NOT_PENDING", "Only pending orders can be cancelled")));
+    }
+
+    private Mono<PaymentOrderEntity> updateProviderResult(PaymentOrderEntity order, Instant now) {
+        String sql = """
+            UPDATE payment_orders
+            SET pay_url = :payUrl,
+                qr_code = :qrCode,
+                payment_trade_no = COALESCE(:paymentTradeNo, payment_trade_no),
+                updated_at = :now
+            WHERE order_id = :orderId
+            """;
+        GenericExecuteSpec spec = template.getDatabaseClient().sql(sql)
+            .bind("now", now)
+            .bind("orderId", order.getOrderId());
+        spec = bindNullable(spec, "payUrl", order.getPayUrl());
+        spec = bindNullable(spec, "qrCode", order.getQrCode());
+        spec = bindNullable(spec, "paymentTradeNo", order.getPaymentTradeNo());
+        return spec.fetch()
+            .rowsUpdated()
+            .thenReturn(order);
+    }
+
+    private Mono<PaymentOrderEntity> updateFailedOrder(PaymentOrderEntity order, Instant now) {
+        String sql = """
+            UPDATE payment_orders
+            SET status = :status,
+                error_message = :errorMessage,
+                updated_at = :now
+            WHERE order_id = :orderId
+            """;
+        GenericExecuteSpec spec = template.getDatabaseClient().sql(sql)
+            .bind("status", STATUS_FAILED)
+            .bind("now", now)
+            .bind("orderId", order.getOrderId());
+        spec = bindNullable(spec, "errorMessage", order.getErrorMessage());
+        return spec.fetch()
+            .rowsUpdated()
+            .thenReturn(order);
     }
 
     private Mono<Void> completePaidOrder(Notification notification) {
@@ -383,6 +446,10 @@ public class PaymentService {
             order.setCreatedAt(now);
         }
         order.setUpdatedAt(now);
+    }
+
+    private static GenericExecuteSpec bindNullable(GenericExecuteSpec spec, String name, String value) {
+        return value == null ? spec.bindNull(name, String.class) : spec.bind(name, value);
     }
 
     private String firstNonBlank(String... values) {
