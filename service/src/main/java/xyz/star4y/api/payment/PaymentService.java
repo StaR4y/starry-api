@@ -264,47 +264,56 @@ public class PaymentService {
         return repository.findByOutTradeNo(notification.outTradeNo())
             .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "PAYMENT_ORDER_NOT_FOUND", "Payment order not found")))
             .flatMap(order -> {
-                if (STATUS_COMPLETED.equals(order.getStatus())) {
-                    return Mono.empty();
-                }
                 if (notification.amount().compareTo(order.getPayAmount().setScale(2, RoundingMode.HALF_UP)) < 0) {
                     return Mono.error(new ApiException(HttpStatus.BAD_REQUEST, "PAYMENT_AMOUNT_MISMATCH", "Paid amount is lower than order amount"));
                 }
                 Instant now = Instant.now();
-                String sql = """
-                    UPDATE payment_orders
-                    SET status = 'COMPLETED',
-                        payment_trade_no = :tradeNo,
-                        paid_at = :now,
-                        completed_at = :now,
-                        raw_notify = :rawNotify,
-                        updated_at = :now
-                    WHERE out_trade_no = :outTradeNo
-                      AND status IN ('PENDING', 'EXPIRED', 'PAID')
-                    """;
-                return template.getDatabaseClient().sql(sql)
-                    .bind("tradeNo", notification.tradeNo())
-                    .bind("now", now)
-                    .bind("rawNotify", notification.rawBody())
-                    .bind("outTradeNo", notification.outTradeNo())
-                    .fetch()
-                    .rowsUpdated()
-                    .flatMap(rows -> rows > 0 ? creditBalance(order) : Mono.empty());
+                return markOrderCompleted(notification, now)
+                    .then(creditBalanceOnce(notification.outTradeNo(), now))
+                    .then();
             });
     }
 
-    private Mono<Void> creditBalance(PaymentOrderEntity order) {
+    private Mono<Long> markOrderCompleted(Notification notification, Instant now) {
         String sql = """
-            UPDATE admin_users
-            SET balance = balance + :amount
-            WHERE user_id = :userId
+            UPDATE payment_orders
+            SET status = :completedStatus,
+                payment_trade_no = COALESCE(:tradeNo, payment_trade_no),
+                paid_at = COALESCE(paid_at, :now),
+                completed_at = COALESCE(completed_at, :now),
+                raw_notify = :rawNotify,
+                updated_at = :now
+            WHERE out_trade_no = :outTradeNo
+              AND status IN (:pendingStatus, :expiredStatus, 'PAID', :completedStatus)
+            """;
+        GenericExecuteSpec spec = template.getDatabaseClient().sql(sql)
+            .bind("completedStatus", STATUS_COMPLETED)
+            .bind("now", now)
+            .bind("rawNotify", notification.rawBody())
+            .bind("outTradeNo", notification.outTradeNo())
+            .bind("pendingStatus", STATUS_PENDING)
+            .bind("expiredStatus", STATUS_EXPIRED);
+        spec = bindNullable(spec, "tradeNo", blankToNull(notification.tradeNo()));
+        return spec.fetch().rowsUpdated();
+    }
+
+    private Mono<Long> creditBalanceOnce(String outTradeNo, Instant now) {
+        String sql = """
+            UPDATE admin_users AS u
+            JOIN payment_orders AS p ON p.user_id = u.user_id
+            SET u.balance = u.balance + p.amount,
+                p.credited_at = :now,
+                p.updated_at = :now
+            WHERE p.out_trade_no = :outTradeNo
+              AND p.status = :completedStatus
+              AND p.credited_at IS NULL
             """;
         return template.getDatabaseClient().sql(sql)
-            .bind("amount", order.getAmount())
-            .bind("userId", order.getUserId())
+            .bind("now", now)
+            .bind("outTradeNo", outTradeNo)
+            .bind("completedStatus", STATUS_COMPLETED)
             .fetch()
-            .rowsUpdated()
-            .then();
+            .rowsUpdated();
     }
 
     private Mono<AdminUserEntity> user(AdminPrincipal principal) {
@@ -450,6 +459,10 @@ public class PaymentService {
 
     private static GenericExecuteSpec bindNullable(GenericExecuteSpec spec, String name, String value) {
         return value == null ? spec.bindNull(name, String.class) : spec.bind(name, value);
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 
     private String firstNonBlank(String... values) {

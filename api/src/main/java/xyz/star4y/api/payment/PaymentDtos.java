@@ -89,6 +89,7 @@ public final class PaymentDtos {
         Instant expiresAt,
         Instant paidAt,
         Instant completedAt,
+        Instant creditedAt,
         Instant cancelledAt,
         Instant createdAt,
         Instant updatedAt

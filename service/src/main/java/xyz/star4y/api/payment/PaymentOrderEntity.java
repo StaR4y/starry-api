@@ -28,6 +28,7 @@ public class PaymentOrderEntity {
     private Instant expiresAt;
     private Instant paidAt;
     private Instant completedAt;
+    private Instant creditedAt;
     private Instant cancelledAt;
     private Instant createdAt;
     private Instant updatedAt;
@@ -182,6 +183,14 @@ public class PaymentOrderEntity {
 
     public void setCompletedAt(Instant completedAt) {
         this.completedAt = completedAt;
+    }
+
+    public Instant getCreditedAt() {
+        return creditedAt;
+    }
+
+    public void setCreditedAt(Instant creditedAt) {
+        this.creditedAt = creditedAt;
     }
 
     public Instant getCancelledAt() {

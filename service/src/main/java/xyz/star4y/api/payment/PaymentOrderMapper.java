@@ -26,6 +26,7 @@ final class PaymentOrderMapper {
             entity.getExpiresAt(),
             entity.getPaidAt(),
             entity.getCompletedAt(),
+            entity.getCreditedAt(),
             entity.getCancelledAt(),
             entity.getCreatedAt(),
             entity.getUpdatedAt()
