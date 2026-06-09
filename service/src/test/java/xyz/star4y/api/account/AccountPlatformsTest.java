@@ -28,6 +28,16 @@ class AccountPlatformsTest {
         assertThat(AccountPlatforms.isKiroCompatible(account)).isTrue();
     }
 
+    @Test
+    void openAiCompatibleProviderKeepsDisplayNameAndUsesOpenAiRouting() {
+        ProxyAccountEntity account = account("openai-compatible", AccountPlatforms.OPENAI_API_KEY_AUTH);
+
+        assertThat(AccountPlatforms.normalizeProvider("openai-compatible", AccountPlatforms.OPENAI_API_KEY_AUTH))
+            .isEqualTo(AccountPlatforms.OPENAI_COMPATIBLE_PROVIDER);
+        assertThat(AccountPlatforms.isOpenAi(account)).isTrue();
+        assertThat(AccountPlatforms.isKiroCompatible(account)).isFalse();
+    }
+
     private ProxyAccountEntity account(String provider, String authMethod) {
         ProxyAccountEntity account = new ProxyAccountEntity();
         account.setProvider(provider);

@@ -577,6 +577,9 @@ public class OpenAiUpstreamClient {
                 : OpenAiAccountTestClient.DEFAULT_OPENAI_TEST_MODEL;
         }
         String lower = cleaned.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("openai-compatible/")) {
+            return cleaned.substring("openai-compatible/".length());
+        }
         String unprefixed = lower.startsWith("openai/") ? lower.substring("openai/".length()) : lower;
         if (AccountPlatforms.isCodex(account) || isOfficialOpenAiBaseUrl(account)) {
             return unprefixed;

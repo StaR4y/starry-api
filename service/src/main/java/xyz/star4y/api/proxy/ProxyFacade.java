@@ -369,6 +369,7 @@ public class ProxyFacade {
     private UpstreamRoute routeFor(String model) {
         String normalized = routeModel(model);
         if (normalized.startsWith("openai/")
+            || normalized.startsWith("openai-compatible/")
             || normalized.startsWith("gpt")
             || normalized.startsWith("chatgpt")
             || normalized.matches("o\\d.*")) {

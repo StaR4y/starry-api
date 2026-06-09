@@ -360,6 +360,47 @@ class OpenAiUpstreamClientTest {
     }
 
     @Test
+    void openAiCompatibleModelPrefixRoutesWithoutSendingPrefixToUpstream() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/chat/completions", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] response = """
+                {"choices":[{"message":{"content":"OK"}}],"usage":{"prompt_tokens":1,"completion_tokens":1}}
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "application/json");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = openAiCompatibleAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {
+                  "model": "starry/deepseek",
+                  "messages": [{"role": "user", "content": "hi"}]
+                }
+                """);
+
+            PlatformCompletionResult result = client.complete(account, request, "openai-compatible/deepseek-chat").block();
+
+            assertThat(result).isNotNull();
+            assertThat(result.content()).isEqualTo("OK");
+            JsonNode body = objectMapper.readTree(requestBody.get());
+            assertThat(body.path("model").asText()).isEqualTo("deepseek-chat");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void codexResponsesInputPreservesMultimodalContent() throws Exception {
         AtomicReference<String> requestBody = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -439,6 +480,12 @@ class OpenAiUpstreamClientTest {
         account.setAuthMethod(AccountPlatforms.OPENAI_API_KEY_AUTH);
         account.setBaseUrl(baseUrl);
         account.setAccessToken("sk-test");
+        return account;
+    }
+
+    private ProxyAccountEntity openAiCompatibleAccount(String baseUrl) {
+        ProxyAccountEntity account = openAiAccount(baseUrl);
+        account.setProvider(AccountPlatforms.OPENAI_COMPATIBLE_PROVIDER);
         return account;
     }
 }

@@ -185,7 +185,7 @@ class AccountImportParserTest {
 
         AccountDtos.CreateAccountRequest account = request.accounts().get(0);
         assertThat(request.upsert()).isTrue();
-        assertThat(account.provider()).isEqualTo(AccountPlatforms.OPENAI_PROVIDER);
+        assertThat(account.provider()).isEqualTo(AccountPlatforms.OPENAI_COMPATIBLE_PROVIDER);
         assertThat(account.authMethod()).isEqualTo(AccountPlatforms.OPENAI_API_KEY_AUTH);
         assertThat(account.accessToken()).isEqualTo("sk-or-test");
         assertThat(account.baseUrl()).isEqualTo("https://openrouter.ai/api/v1");
@@ -280,7 +280,7 @@ class AccountImportParserTest {
         assertThat(request.accounts()).extracting(AccountDtos.CreateAccountRequest::accessToken)
             .containsExactly("sk-or-test", "kiro-token");
         assertThat(request.accounts()).extracting(AccountDtos.CreateAccountRequest::provider)
-            .containsExactly(AccountPlatforms.OPENAI_PROVIDER, "BuilderId");
+            .containsExactly(AccountPlatforms.OPENAI_COMPATIBLE_PROVIDER, "BuilderId");
     }
 
     @Test

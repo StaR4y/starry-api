@@ -5,6 +5,7 @@ import java.util.Locale;
 public final class AccountPlatforms {
 
     public static final String OPENAI_PROVIDER = "OpenAI";
+    public static final String OPENAI_COMPATIBLE_PROVIDER = "OpenAI-compatible";
     public static final String GOOGLE_PROVIDER = "Google";
     public static final String ANTHROPIC_PROVIDER = "Anthropic";
     public static final String OPENAI_API_KEY_AUTH = "api-key";
@@ -64,6 +65,9 @@ public final class AccountPlatforms {
         }
         if ("anthropic".equals(providerKey) || "claude".equals(providerKey)) {
             return ANTHROPIC_PROVIDER;
+        }
+        if ("openai-compatible".equals(providerKey) || "openaicompatibility".equals(providerKey)) {
+            return OPENAI_COMPATIBLE_PROVIDER;
         }
         if (isOpenAi(cleaned, authMethod)) {
             return OPENAI_PROVIDER;

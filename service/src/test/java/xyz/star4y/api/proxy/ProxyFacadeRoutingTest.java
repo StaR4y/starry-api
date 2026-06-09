@@ -104,6 +104,57 @@ class ProxyFacadeRoutingTest {
     }
 
     @Test
+    void openAiCompatiblePrefixUsesOpenAiAccountPoolAndKeepsMappedModel() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity account = openAiAccount();
+        account.setProvider(AccountPlatforms.OPENAI_COMPATIBLE_PROVIDER);
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "deepseek",
+              "messages": [{"role": "user", "content": "hi"}]
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/chat/completions")
+        );
+
+        when(apiKeyService.authenticate(exchange))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("deepseek", "key-1")).thenReturn("openai-compatible/deepseek-chat");
+        when(accountPoolService.selectOpenAiAccount("key-1")).thenReturn(Mono.just(account));
+        when(openAiUpstreamClient.complete(eq(account), eq(request), eq("openai-compatible/deepseek-chat")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
+        when(accountPoolService.recordSuccess("openai-main", 2L)).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
+        when(statsService.log(any())).thenReturn(Mono.empty());
+
+        proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService
+        ).chat(request, exchange).block();
+
+        verify(accountPoolService).selectOpenAiAccount("key-1");
+        verify(accountPoolService, never()).selectKiroAccount(any());
+        verify(openAiUpstreamClient).complete(eq(account), eq(request), eq("openai-compatible/deepseek-chat"));
+        verify(kiroUpstreamClient, never()).complete(any(), any(), any());
+    }
+
+    @Test
     void userApiRequestsConsumeAccountBalanceAfterSuccessfulUsage() throws Exception {
         ApiKeyService apiKeyService = mock(ApiKeyService.class);
         AccountPoolService accountPoolService = mock(AccountPoolService.class);

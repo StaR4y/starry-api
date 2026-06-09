@@ -331,6 +331,9 @@ public class AccountTestService {
                 : OpenAiAccountTestClient.DEFAULT_OPENAI_TEST_MODEL;
         }
         String unprefixed = normalized.startsWith("openai/") ? model.substring("openai/".length()) : model;
+        if (normalized.startsWith("openai-compatible/")) {
+            return model.substring("openai-compatible/".length());
+        }
         if (AccountPlatforms.isCodex(account)) {
             return codexCompatibleTestModel(unprefixed);
         }

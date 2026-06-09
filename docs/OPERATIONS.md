@@ -66,6 +66,23 @@ curl -X POST http://127.0.0.1:8080/admin/accounts \
 
 Only `accessToken` is required. `region` defaults to `us-east-1`.
 
+To add an API key from another OpenAI-compatible website, create an account with `provider=OpenAI-compatible`, `authMethod=api-key`, the site API key as `accessToken`, and the site API root as `baseUrl`:
+
+```bash
+curl -X POST http://127.0.0.1:8080/admin/accounts \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -d '{
+    "email":"deepseek@example.com",
+    "provider":"OpenAI-compatible",
+    "authMethod":"api-key",
+    "baseUrl":"https://api.deepseek.com/v1",
+    "accessToken":"sk-..."
+  }'
+```
+
+Then map public model IDs to `openai-compatible/<actual-model-id>`, for example `deepseek-chat -> openai-compatible/deepseek-chat`. Starry API strips the `openai-compatible/` routing prefix before sending the request upstream.
+
 ## Batch Import Accounts
 
 Edit the sample file:

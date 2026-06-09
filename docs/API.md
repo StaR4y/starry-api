@@ -383,7 +383,7 @@ Create account:
 }
 ```
 
-Only `accessToken` is required for a basic Kiro upstream account. For OpenAI-compatible API key accounts, use:
+Only `accessToken` is required for a basic Kiro upstream account. For official OpenAI API key accounts, use:
 
 ```json
 {
@@ -395,6 +395,21 @@ Only `accessToken` is required for a basic Kiro upstream account. For OpenAI-com
   "baseUrl": "https://api.openai.com/v1"
 }
 ```
+
+For third-party OpenAI-compatible API key accounts, use `provider=OpenAI-compatible`, `authMethod=api-key`, the upstream site API key as `accessToken`, and the upstream API root as `baseUrl`:
+
+```json
+{
+  "accountId": "deepseek-main",
+  "email": "deepseek@example.com",
+  "accessToken": "sk-...",
+  "authMethod": "api-key",
+  "provider": "OpenAI-compatible",
+  "baseUrl": "https://api.deepseek.com/v1"
+}
+```
+
+Route third-party model IDs through model mappings by targeting `openai-compatible/<actual-model-id>`. For example, map public model `deepseek-chat` to `openai-compatible/deepseek-chat`; Starry API uses the prefix to select OpenAI-compatible accounts and sends `deepseek-chat` to the upstream site.
 
 For Codex OAuth token accounts, use `authMethod=codex`, `provider=OpenAI`, `accessToken`, optional `refreshToken`, optional `idToken`, and optional `upstreamAccountId`. If `baseUrl` is omitted, Codex defaults to `https://chatgpt.com/backend-api/codex`.
 

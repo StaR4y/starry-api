@@ -133,7 +133,7 @@ Each model record exposes:
 - `targetModelId`: upstream model ID after alias mapping
 - token and input capability metadata
 
-OpenAI, Google/Gemini, and Anthropic catalog entries include both legacy short aliases and OpenRouter-sourced complete IDs with provider prefixes. GPT/OpenAI IDs are routed to OpenAI API key or Codex token accounts; Claude/Kiro-compatible IDs continue to use `ModelCatalogProvider.resolveTargetModel` for Kiro upstream model aliases. Shared default capabilities and current default routing targets are defined by the `api/model` contract, not in a provider-specific catalog.
+OpenAI, Google/Gemini, and Anthropic catalog entries include both legacy short aliases and OpenRouter-sourced complete IDs with provider prefixes. GPT/OpenAI IDs are routed to OpenAI API key or Codex token accounts; `openai-compatible/<model>` is a routing prefix for third-party OpenAI-compatible API-key accounts and is stripped before the upstream request is sent. Claude/Kiro-compatible IDs continue to use `ModelCatalogProvider.resolveTargetModel` for Kiro upstream model aliases. Shared default capabilities and current default routing targets are defined by the `api/model` contract, not in a provider-specific catalog.
 
 ## Persistent State
 
