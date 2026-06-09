@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.stereotype.Component;
 import xyz.star4y.api.model.ModelCatalogProvider;
+import xyz.star4y.api.platform.core.ToolSchemaSanitizer;
 
 @Component
 public class OpenAiRequestAdapter {
@@ -84,7 +85,15 @@ public class OpenAiRequestAdapter {
         }
         for (JsonNode tool : tools) {
             if ("function".equals(tool.path("type").asText()) && tool.has("function")) {
-                converted.add(tool);
+                ObjectNode wrapper = tool.deepCopy();
+                JsonNode function = wrapper.path("function");
+                if (function.isObject()) {
+                    ((ObjectNode) function).set(
+                        "parameters",
+                        ToolSchemaSanitizer.sanitizeParameters(objectMapper, function.path("parameters"))
+                    );
+                }
+                converted.add(wrapper);
                 continue;
             }
             ObjectNode wrapper = converted.addObject();
@@ -95,7 +104,7 @@ public class OpenAiRequestAdapter {
             JsonNode parameters = tool.has("parameters")
                 ? tool.path("parameters")
                 : tool.path("function").path("parameters");
-            function.set("parameters", parameters);
+            function.set("parameters", ToolSchemaSanitizer.sanitizeParameters(objectMapper, parameters));
         }
         return converted;
     }

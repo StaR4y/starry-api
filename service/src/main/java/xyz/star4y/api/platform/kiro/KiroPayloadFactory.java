@@ -13,6 +13,7 @@ import java.util.UUID;
 import org.springframework.stereotype.Component;
 import xyz.star4y.api.account.ProxyAccountEntity;
 import xyz.star4y.api.model.ModelCatalogProvider;
+import xyz.star4y.api.platform.core.ToolSchemaSanitizer;
 
 @Component
 public class KiroPayloadFactory {
@@ -199,7 +200,7 @@ public class KiroPayloadFactory {
             spec.put("name", function.path("name").asText());
             spec.put("description", function.path("description").asText(""));
             ObjectNode inputSchema = spec.putObject("inputSchema");
-            inputSchema.set("json", function.path("parameters"));
+            inputSchema.set("json", ToolSchemaSanitizer.sanitizeParameters(objectMapper, function.path("parameters")));
         }
     }
 

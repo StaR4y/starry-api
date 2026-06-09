@@ -252,6 +252,61 @@ class KiroPayloadFactoryTest {
             .isEmpty();
     }
 
+    @Test
+    void sanitizesToolSchemaPageFieldForKiroPayload() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "gpt-4o",
+              "messages": [
+                {"role": "user", "content": "take screenshot"}
+              ],
+              "tools": [
+                {
+                  "type": "function",
+                  "function": {
+                    "name": "screenshot",
+                    "description": "Capture a browser page",
+                    "parameters": {
+                      "type": "object",
+                      "properties": {
+                        "page": {
+                          "type": "integer",
+                          "description": "Page number",
+                          "minimum": 0,
+                          "default": 0,
+                          "format": "int32"
+                        }
+                      },
+                      "required": ["page"]
+                    }
+                  }
+                }
+              ]
+            }
+            """);
+        ProxyAccountEntity account = new ProxyAccountEntity();
+        account.setProfileArn("arn:test");
+
+        ObjectNode payload = factory.fromOpenAiChat(request, account, "gpt-4o", "AI_EDITOR", "session-1");
+
+        JsonNode page = payload.path("conversationState")
+            .path("currentMessage")
+            .path("userInputMessage")
+            .path("userInputMessageContext")
+            .path("tools")
+            .path(0)
+            .path("toolSpecification")
+            .path("inputSchema")
+            .path("json")
+            .path("properties")
+            .path("page");
+        assertThat(page.path("type").asText()).isEqualTo("integer");
+        assertThat(page.path("description").asText()).isEqualTo("Page number");
+        assertThat(page.has("minimum")).isFalse();
+        assertThat(page.has("default")).isFalse();
+        assertThat(page.has("format")).isFalse();
+    }
+
     private JsonNode findFirstToolUse(JsonNode history) {
         for (JsonNode message : history) {
             JsonNode toolUses = message.path("assistantResponseMessage").path("toolUses");

@@ -252,8 +252,16 @@ class OpenAiUpstreamClientTest {
                         "description": "Lookup data",
                         "parameters": {
                           "type": "object",
-                          "properties": {"query": {"type": "string"}},
-                          "required": ["query"]
+                          "properties": {
+                            "query": {"type": "string"},
+                            "page": {
+                              "type": "integer",
+                              "minimum": 0,
+                              "default": 0,
+                              "format": "int32"
+                            }
+                          },
+                          "required": ["query", "page"]
                         },
                         "strict": true
                       }
@@ -279,6 +287,11 @@ class OpenAiUpstreamClientTest {
             assertThat(tool.path("name").asText()).isEqualTo("lookup");
             assertThat(tool.path("function").isMissingNode()).isTrue();
             assertThat(tool.path("parameters").path("properties").path("query").path("type").asText()).isEqualTo("string");
+            JsonNode page = tool.path("parameters").path("properties").path("page");
+            assertThat(page.path("type").asText()).isEqualTo("integer");
+            assertThat(page.has("minimum")).isFalse();
+            assertThat(page.has("default")).isFalse();
+            assertThat(page.has("format")).isFalse();
             assertThat(tool.path("strict").asBoolean()).isTrue();
             assertThat(body.path("tool_choice").path("type").asText()).isEqualTo("function");
             assertThat(body.path("tool_choice").path("name").asText()).isEqualTo("lookup");

@@ -21,6 +21,7 @@ import xyz.star4y.api.account.ProxyAccountEntity;
 import xyz.star4y.api.platform.core.PlatformCompletionResult;
 import xyz.star4y.api.platform.core.PlatformToolUse;
 import xyz.star4y.api.platform.core.PlatformUsage;
+import xyz.star4y.api.platform.core.ToolSchemaSanitizer;
 import xyz.star4y.api.platform.upstream.UpstreamException;
 
 @Component
@@ -275,7 +276,7 @@ public class OpenAiUpstreamClient {
                 codexTool.set("description", function.get("description"));
             }
             if (function.has("parameters")) {
-                codexTool.set("parameters", function.get("parameters"));
+                codexTool.set("parameters", ToolSchemaSanitizer.sanitizeParameters(objectMapper, function.get("parameters")));
             }
             if (function.has("strict")) {
                 codexTool.set("strict", function.get("strict"));
