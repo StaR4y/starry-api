@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.stereotype.Component;
 import xyz.star4y.api.model.ModelCatalogProvider;
+import xyz.star4y.api.platform.core.ToolSchemaSanitizer;
 
 @Component
 public class AnthropicRequestAdapter {
@@ -192,7 +193,7 @@ public class AnthropicRequestAdapter {
             ObjectNode function = wrapper.putObject("function");
             function.put("name", tool.path("name").asText());
             function.put("description", tool.path("description").asText(""));
-            function.set("parameters", tool.path("input_schema"));
+            function.set("parameters", ToolSchemaSanitizer.sanitizeParameters(objectMapper, tool.path("input_schema")));
         }
         return converted;
     }

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.stereotype.Component;
+import xyz.star4y.api.platform.core.ToolSchemaSanitizer;
 
 @Component
 public class GeminiRequestAdapter {
@@ -112,7 +113,7 @@ public class GeminiRequestAdapter {
                 JsonNode parameters = declaration.has("parameters")
                     ? declaration.path("parameters")
                     : objectMapper.createObjectNode();
-                function.set("parameters", parameters);
+                function.set("parameters", ToolSchemaSanitizer.sanitizeParameters(objectMapper, parameters));
             }
         }
         return converted;

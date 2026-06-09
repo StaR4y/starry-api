@@ -100,7 +100,9 @@ public class PaymentService {
                     return Mono.error(new ApiException(HttpStatus.BAD_REQUEST, "PAYMENT_ORDER_NOT_PENDING", "Only pending orders can be cancelled"));
                 }
                 order.setStatus(STATUS_CANCELLED);
-                order.setCancelledAt(Instant.now());
+                Instant now = Instant.now();
+                order.setCancelledAt(now);
+                touch(order, now);
                 return repository.save(order);
             })
             .map(PaymentOrderMapper::toResponse);
@@ -151,6 +153,7 @@ public class PaymentService {
         order.setStatus(STATUS_PENDING);
         order.setOutTradeNo(outTradeNo());
         order.setExpiresAt(now.plus(Duration.ofMinutes(config.orderTimeoutMinutes())));
+        initializeTimestamps(order, now);
         return repository.save(order)
             .flatMap(saved -> easyPayClient.createPayment(
                     config,
@@ -180,12 +183,14 @@ public class PaymentService {
         if (result.tradeNo() != null && !result.tradeNo().isBlank()) {
             order.setPaymentTradeNo(result.tradeNo());
         }
+        touch(order, Instant.now());
         return repository.save(order);
     }
 
     private Mono<Void> markFailed(PaymentOrderEntity order, Throwable error) {
         order.setStatus(STATUS_FAILED);
         order.setErrorMessage(error.getMessage());
+        touch(order, Instant.now());
         return repository.save(order).then();
     }
 
@@ -209,7 +214,8 @@ public class PaymentService {
                         payment_trade_no = :tradeNo,
                         paid_at = :now,
                         completed_at = :now,
-                        raw_notify = :rawNotify
+                        raw_notify = :rawNotify,
+                        updated_at = :now
                     WHERE out_trade_no = :outTradeNo
                       AND status IN ('PENDING', 'EXPIRED', 'PAID')
                     """;
@@ -310,8 +316,8 @@ public class PaymentService {
 
     private Mono<Void> expirePendingOrders(String userId) {
         String sql = userId == null
-            ? "UPDATE payment_orders SET status = 'EXPIRED' WHERE status = 'PENDING' AND expires_at <= CURRENT_TIMESTAMP(3)"
-            : "UPDATE payment_orders SET status = 'EXPIRED' WHERE user_id = :userId AND status = 'PENDING' AND expires_at <= CURRENT_TIMESTAMP(3)";
+            ? "UPDATE payment_orders SET status = 'EXPIRED', updated_at = CURRENT_TIMESTAMP(3) WHERE status = 'PENDING' AND expires_at <= CURRENT_TIMESTAMP(3)"
+            : "UPDATE payment_orders SET status = 'EXPIRED', updated_at = CURRENT_TIMESTAMP(3) WHERE user_id = :userId AND status = 'PENDING' AND expires_at <= CURRENT_TIMESTAMP(3)";
         var spec = template.getDatabaseClient().sql(sql);
         if (userId != null) {
             spec = spec.bind("userId", userId);
@@ -365,6 +371,18 @@ public class PaymentService {
 
     private BigDecimal money(BigDecimal value) {
         return (value == null ? BigDecimal.ZERO : value).setScale(2, RoundingMode.HALF_UP);
+    }
+
+    static void initializeTimestamps(PaymentOrderEntity order, Instant now) {
+        order.setCreatedAt(now);
+        order.setUpdatedAt(now);
+    }
+
+    static void touch(PaymentOrderEntity order, Instant now) {
+        if (order.getCreatedAt() == null) {
+            order.setCreatedAt(now);
+        }
+        order.setUpdatedAt(now);
     }
 
     private String firstNonBlank(String... values) {
