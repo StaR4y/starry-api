@@ -462,7 +462,9 @@ deploy_stack() {
   cd "$INSTALL_DIR"
   log "Starting Docker Compose stack from prebuilt artifact..."
   root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml pull mysql service || true
-  root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml up -d
+  root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml up -d mysql
+  log "Recreating service container so the new jar is loaded..."
+  root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml up -d --force-recreate service
 
   if ! wait_for_health; then
     root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml ps || true
