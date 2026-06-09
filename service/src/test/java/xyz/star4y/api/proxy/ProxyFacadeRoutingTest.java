@@ -3,6 +3,7 @@ package xyz.star4y.api.proxy;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -13,6 +14,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -33,6 +35,7 @@ import xyz.star4y.api.apikey.ApiKeyService;
 import xyz.star4y.api.common.ApiException;
 import xyz.star4y.api.model.DefaultModelCatalogProvider;
 import xyz.star4y.api.model.ModelMappingService;
+import xyz.star4y.api.model.ModelPricingService;
 import xyz.star4y.api.platform.anthropic.AnthropicRequestAdapter;
 import xyz.star4y.api.platform.anthropic.AnthropicResponseFactory;
 import xyz.star4y.api.platform.core.PlatformCompletionResult;
@@ -748,6 +751,7 @@ class ProxyFacadeRoutingTest {
             new GeminiRequestAdapter(objectMapper),
             new GeminiResponseFactory(objectMapper),
             paymentSettingsService,
+            modelPricingService(),
             statsService
         );
     }
@@ -774,6 +778,26 @@ class ProxyFacadeRoutingTest {
             "",
             "popup"
         )));
+        return service;
+    }
+
+    private ModelPricingService modelPricingService() {
+        ModelPricingService service = mock(ModelPricingService.class);
+        when(service.cost(any(), any(), anyBoolean(), any())).thenAnswer(invocation -> {
+            PlatformUsage usage = invocation.getArgument(1);
+            boolean fastMode = invocation.getArgument(2);
+            BigDecimal multiplier = invocation.getArgument(3);
+            BigDecimal units = usage.totalTokens() > 0
+                ? BigDecimal.valueOf(usage.totalTokens())
+                : usage.credits() == null ? BigDecimal.ZERO : usage.credits();
+            if (fastMode) {
+                units = units.multiply(BigDecimal.valueOf(2));
+            }
+            BigDecimal safeMultiplier = multiplier == null || multiplier.compareTo(BigDecimal.ZERO) <= 0
+                ? PaymentSettingsService.DEFAULT_API_BILLING_MULTIPLIER
+                : multiplier;
+            return Mono.just(units.multiply(safeMultiplier).setScale(6, RoundingMode.HALF_UP));
+        });
         return service;
     }
 

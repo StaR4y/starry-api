@@ -102,8 +102,16 @@ public final class OpenRouterModelIds {
 
     public static final List<String> ANTHROPIC = List.of(
         "anthropic/claude-3-haiku",
+        "anthropic/claude-3-opus",
+        "anthropic/claude-3-sonnet",
         "anthropic/claude-3.5-haiku",
+        "anthropic/claude-3.5-sonnet",
+        "anthropic/claude-3.5-sonnet-latest",
+        "anthropic/claude-3.7-sonnet",
+        "anthropic/claude-3.7-sonnet-latest",
         "anthropic/claude-haiku-4.5",
+        "anthropic/claude-haiku-4-5-20251001",
+        "anthropic/claude-haiku-latest",
         "anthropic/claude-opus-4",
         "anthropic/claude-opus-4.1",
         "anthropic/claude-opus-4.5",
@@ -113,9 +121,12 @@ public final class OpenRouterModelIds {
         "anthropic/claude-opus-4.7-fast",
         "anthropic/claude-opus-4.8",
         "anthropic/claude-opus-4.8-fast",
+        "anthropic/claude-opus-latest",
         "anthropic/claude-sonnet-4",
         "anthropic/claude-sonnet-4.5",
-        "anthropic/claude-sonnet-4.6"
+        "anthropic/claude-sonnet-4.6",
+        "anthropic/claude-sonnet-4-6",
+        "anthropic/claude-sonnet-latest"
     );
 
     private OpenRouterModelIds() {

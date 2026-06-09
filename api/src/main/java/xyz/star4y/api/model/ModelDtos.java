@@ -3,6 +3,7 @@ package xyz.star4y.api.model;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 
@@ -95,5 +96,45 @@ public final class ModelDtos {
         Instant createdAt,
         Instant updatedAt
     ) {
+    }
+
+    public record ModelPricingRuleResponse(
+        String ruleId,
+        Boolean enabled,
+        String modelPattern,
+        BigDecimal inputMultiplier,
+        BigDecimal outputMultiplier,
+        BigDecimal totalMultiplier,
+        Integer priority,
+        Instant createdAt,
+        Instant updatedAt
+    ) {
+    }
+
+    public record ModelPricingResponse(
+        List<ModelPricingRuleResponse> rules
+    ) {
+        public ModelPricingResponse {
+            rules = rules == null ? List.of() : List.copyOf(rules);
+        }
+    }
+
+    public record UpdateModelPricingRuleRequest(
+        String ruleId,
+        Boolean enabled,
+        @NotBlank String modelPattern,
+        BigDecimal inputMultiplier,
+        BigDecimal outputMultiplier,
+        BigDecimal totalMultiplier,
+        Integer priority
+    ) {
+    }
+
+    public record UpdateModelPricingRequest(
+        List<UpdateModelPricingRuleRequest> rules
+    ) {
+        public UpdateModelPricingRequest {
+            rules = rules == null ? List.of() : List.copyOf(rules);
+        }
     }
 }

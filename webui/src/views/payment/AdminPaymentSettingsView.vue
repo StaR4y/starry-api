@@ -64,8 +64,8 @@ function togglePaymentType(type: PaymentType) {
     return {
       completed: completed.length,
       pending: pending.length,
-      completedAmount: completed.reduce((sum, order) => sum + order.amount, 0),
-      paidAmount: completed.reduce((sum, order) => sum + order.payAmount, 0),
+      creditedAmount: completed.reduce((sum, order) => sum + order.amount, 0),
+      actualIncome: completed.reduce((sum, order) => sum + order.payAmount, 0),
     };
   });
 
@@ -229,9 +229,9 @@ function togglePaymentType(type: PaymentType) {
         <div class="metric-item">
           <div class="metric-item__header">
             <span class="metric-dot dot-primary"></span>
-            <span class="metric-label">入账余额</span>
+            <span class="metric-label">实际收入</span>
           </div>
-          <div class="metric-value">{{ formatNumber(orderStats.completedAmount) }}<span class="metric-value__unit"> 元</span></div>
+          <div class="metric-value">{{ formatNumber(orderStats.actualIncome) }}<span class="metric-value__unit"> 元</span></div>
         </div>
 
         <div class="metric-divider"></div>
@@ -239,9 +239,9 @@ function togglePaymentType(type: PaymentType) {
         <div class="metric-item">
           <div class="metric-item__header">
             <span class="metric-dot dot-accent"></span>
-            <span class="metric-label">实付金额</span>
+            <span class="metric-label">发放余额</span>
           </div>
-          <div class="metric-value">{{ formatNumber(orderStats.paidAmount) }}<span class="metric-value__unit"> 元</span></div>
+          <div class="metric-value">{{ formatNumber(orderStats.creditedAmount) }}<span class="metric-value__unit"> 元</span></div>
         </div>
       </div>
 

@@ -32,9 +32,27 @@ public final class AnthropicModelCatalog {
         model("auto", "Auto", "Routing Preset", "Auto select best model", "auto"),
         model(DEFAULT_MODEL_ID, "Claude Sonnet 4.5", "Claude 4", "The latest Claude Sonnet model", DEFAULT_MODEL_ID),
         model("claude-sonnet-4", "Claude Sonnet 4", "Claude 4", "Hybrid reasoning and coding", "claude-sonnet-4"),
+        model("claude-sonnet-4.6", "Claude Sonnet 4.6", "Claude 4", "Claude Sonnet 4.6 compatible alias", DEFAULT_MODEL_ID),
+        model("claude-sonnet-4-6", "Claude Sonnet 4.6", "Claude 4", "Claude Sonnet 4.6 compatible alias", DEFAULT_MODEL_ID),
+        model("claude-sonnet-latest", "Claude Sonnet Latest", "Claude 4", "Latest Claude Sonnet compatible alias", DEFAULT_MODEL_ID),
+        model("sonnet", "Claude Sonnet", "Claude 4", "Claude Code sonnet alias", DEFAULT_MODEL_ID),
         model(HAIKU_MODEL_ID, "Claude Haiku 4.5", "Claude 4", "The latest Claude Haiku model", HAIKU_MODEL_ID),
+        model("claude-haiku-4-5-20251001", "Claude Haiku 4.5", "Claude 4", "Claude Haiku dated compatible alias", HAIKU_MODEL_ID),
+        model("claude-haiku-latest", "Claude Haiku Latest", "Claude 4", "Latest Claude Haiku compatible alias", HAIKU_MODEL_ID),
+        model("haiku", "Claude Haiku", "Claude 4", "Claude Code haiku alias", HAIKU_MODEL_ID),
         model("claude-opus-4.5", "Claude Opus 4.5", "Claude 4", "The most powerful model", "claude-opus-4.5"),
+        model("claude-opus-4.7", "Claude Opus 4.7", "Claude 4", "Claude Opus 4.7 compatible alias", DEFAULT_MODEL_ID),
+        model("claude-opus-4-7", "Claude Opus 4.7", "Claude 4", "Claude Opus 4.7 compatible alias", DEFAULT_MODEL_ID),
+        model("claude-opus-latest", "Claude Opus Latest", "Claude 4", "Latest Claude Opus compatible alias", DEFAULT_MODEL_ID),
+        model("opus", "Claude Opus", "Claude 4", "Claude Code opus alias", DEFAULT_MODEL_ID),
+        model("claude-3-opus", "Claude 3 Opus", "Claude 3", "Claude 3 Opus compatible alias", DEFAULT_MODEL_ID),
+        model("claude-3-sonnet", "Claude 3 Sonnet", "Claude 3", "Claude 3 Sonnet compatible alias", DEFAULT_MODEL_ID),
+        model("claude-3-haiku", "Claude 3 Haiku", "Claude 3", "Claude 3 Haiku compatible alias", HAIKU_MODEL_ID),
+        model("claude-3.5-sonnet", "Claude 3.5 Sonnet", "Claude 3", "Claude 3.5 Sonnet compatible alias", DEFAULT_MODEL_ID),
+        model("claude-3.5-sonnet-latest", "Claude 3.5 Sonnet Latest", "Claude 3", "Claude 3.5 Sonnet compatible alias", DEFAULT_MODEL_ID),
+        model("claude-3.5-haiku", "Claude 3.5 Haiku", "Claude 3", "Claude 3.5 Haiku compatible alias", HAIKU_MODEL_ID),
         model("claude-3.7-sonnet", "Claude 3.7 Sonnet", "Claude 3", "Claude 3.7 Sonnet (hidden)", "claude-3.7-sonnet"),
+        model("claude-3.7-sonnet-latest", "Claude 3.7 Sonnet Latest", "Claude 3", "Claude 3.7 Sonnet compatible alias", DEFAULT_MODEL_ID),
         new ModelSpec(
             "simple-task",
             "Simple Task",
@@ -89,14 +107,14 @@ public final class AnthropicModelCatalog {
     }
 
     private static String family(String id) {
-        return switch (localModelId(id)) {
-            case String model when model.contains("3.") -> "Claude 3";
+        return switch (localModelId(id).toLowerCase()) {
+            case String model when model.contains("claude-3") || model.contains("3.") -> "Claude 3";
             default -> "Claude 4";
         };
     }
 
     private static String targetModelId(String id) {
-        return switch (localModelId(id)) {
+        return switch (localModelId(id).toLowerCase()) {
             case String model when HAIKU_MODEL_ID.equals(model) || model.contains("haiku") -> HAIKU_MODEL_ID;
             case "claude-sonnet-4", "claude-opus-4.5" -> localModelId(id);
             default -> DEFAULT_MODEL_ID;

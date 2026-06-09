@@ -66,6 +66,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '模型映射', adminOnly: true },
       },
       {
+        path: 'model-pricing',
+        name: 'model-pricing',
+        component: () => import('@/views/model-pricing/ModelPricingView.vue'),
+        meta: { title: '模型价格', adminOnly: true },
+      },
+      {
         path: 'models',
         name: 'models',
         component: () => import('@/views/models/ModelListView.vue'),

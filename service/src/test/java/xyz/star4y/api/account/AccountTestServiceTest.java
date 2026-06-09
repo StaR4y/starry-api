@@ -297,8 +297,15 @@ class AccountTestServiceTest {
             .hasSize(27)
             .contains("auto", "google/gemini-2.5-pro", "google/gemini-3.5-flash", "google/gemma-4-31b-it:free");
         assertThat(options.anthropic()).extracting(AccountDtos.TestModelOption::value)
-            .hasSize(16)
-            .contains("auto", "anthropic/claude-sonnet-4.5", "anthropic/claude-opus-4.8-fast");
+            .hasSizeGreaterThanOrEqualTo(27)
+            .contains(
+                "auto",
+                "anthropic/claude-sonnet-4.5",
+                "anthropic/claude-sonnet-4-6",
+                "anthropic/claude-haiku-4-5-20251001",
+                "anthropic/claude-opus-4.8-fast",
+                "anthropic/claude-opus-latest"
+            );
         assertThat(options.codex()).extracting(AccountDtos.TestModelOption::value)
             .containsExactly(
                 "auto",

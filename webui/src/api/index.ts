@@ -7,6 +7,7 @@ export { usersApi } from './users';
 export { accountsApi } from './accounts';
 export { apiKeysApi } from './apiKeys';
 export { modelMappingsApi } from './modelMappings';
+export { modelPricingApi } from './modelPricing';
 export { logsApi } from './logs';
 export { systemApi } from './system';
 export { paymentApi, adminPaymentApi } from './payment';

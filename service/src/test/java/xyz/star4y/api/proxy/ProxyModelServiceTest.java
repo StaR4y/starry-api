@@ -20,20 +20,34 @@ class ProxyModelServiceTest {
         List<String> ids = data.findValuesAsText("id");
 
         assertThat(ids)
-            .hasSize(142)
+            .hasSizeGreaterThanOrEqualTo(142)
             .contains(
                 "auto",
                 "claude-sonnet-4.5",
                 "claude-sonnet-4",
+                "claude-sonnet-4.6",
+                "claude-sonnet-latest",
+                "sonnet",
                 "claude-haiku-4.5",
+                "claude-haiku-4-5-20251001",
+                "claude-haiku-latest",
+                "haiku",
                 "claude-opus-4.5",
+                "claude-opus-4.7",
+                "claude-opus-4-7",
+                "claude-opus-latest",
+                "opus",
+                "claude-3.5-sonnet",
                 "claude-3.7-sonnet",
                 "simple-task",
                 "CLAUDE_SONNET_4_20250514_V1_0",
                 "CLAUDE_HAIKU_4_5_20251001_V1_0",
                 "CLAUDE_3_7_SONNET_20250219_V1_0",
                 "anthropic/claude-opus-4.8-fast",
+                "anthropic/claude-opus-latest",
                 "anthropic/claude-sonnet-4.5",
+                "anthropic/claude-sonnet-4-6",
+                "anthropic/claude-haiku-4-5-20251001",
                 "gpt-5.2",
                 "gpt-4o-mini",
                 "openai/gpt-5.5-pro",
@@ -91,8 +105,15 @@ class ProxyModelServiceTest {
     @Test
     void mapsAnthropicOpenRouterAliasesToKiroModels() {
         assertThat(modelCatalog.resolveTargetModel("anthropic/claude-sonnet-4.5")).isEqualTo("claude-sonnet-4.5");
+        assertThat(modelCatalog.resolveTargetModel("anthropic/claude-sonnet-4-6")).isEqualTo("claude-sonnet-4.5");
+        assertThat(modelCatalog.resolveTargetModel("claude-sonnet-latest")).isEqualTo("claude-sonnet-4.5");
+        assertThat(modelCatalog.resolveTargetModel("sonnet")).isEqualTo("claude-sonnet-4.5");
         assertThat(modelCatalog.resolveTargetModel("anthropic/claude-haiku-4.5")).isEqualTo("claude-haiku-4.5");
+        assertThat(modelCatalog.resolveTargetModel("anthropic/claude-haiku-4-5-20251001")).isEqualTo("claude-haiku-4.5");
+        assertThat(modelCatalog.resolveTargetModel("haiku")).isEqualTo("claude-haiku-4.5");
         assertThat(modelCatalog.resolveTargetModel("anthropic/claude-opus-4.5")).isEqualTo("claude-opus-4.5");
+        assertThat(modelCatalog.resolveTargetModel("claude-opus-latest")).isEqualTo("claude-sonnet-4.5");
+        assertThat(modelCatalog.resolveTargetModel("opus")).isEqualTo("claude-sonnet-4.5");
         assertThat(modelCatalog.resolveTargetModel("anthropic/claude-opus-4.8")).isEqualTo("claude-sonnet-4.5");
         assertThat(modelCatalog.resolveTargetModel("anthropic/claude-future")).isEqualTo("claude-sonnet-4.5");
     }

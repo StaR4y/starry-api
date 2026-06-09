@@ -397,6 +397,36 @@ export interface UpdateModelMappingRequest {
   apiKeyIds?: string[];
 }
 
+export interface ModelPricingRule {
+  ruleId: string;
+  enabled: boolean;
+  modelPattern: string;
+  inputMultiplier: number | null;
+  outputMultiplier: number | null;
+  totalMultiplier: number | null;
+  priority: number;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface ModelPricingSettings {
+  rules: ModelPricingRule[];
+}
+
+export interface UpdateModelPricingRuleRequest {
+  ruleId?: string;
+  enabled?: boolean;
+  modelPattern: string;
+  inputMultiplier?: number | null;
+  outputMultiplier?: number | null;
+  totalMultiplier?: number | null;
+  priority?: number;
+}
+
+export interface UpdateModelPricingRequest {
+  rules: UpdateModelPricingRuleRequest[];
+}
+
 /* ================== 日志 / 模型清单 ================== */
 
 export interface RequestLog {

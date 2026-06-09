@@ -3,7 +3,6 @@ package xyz.star4y.api.proxy;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -26,6 +25,7 @@ import xyz.star4y.api.apikey.ApiKeyService;
 import xyz.star4y.api.common.ApiException;
 import xyz.star4y.api.model.ModelCatalogProvider;
 import xyz.star4y.api.model.ModelMappingService;
+import xyz.star4y.api.model.ModelPricingService;
 import xyz.star4y.api.platform.anthropic.AnthropicRequestAdapter;
 import xyz.star4y.api.platform.anthropic.AnthropicResponseFactory;
 import xyz.star4y.api.platform.core.PlatformCompletionResult;
@@ -75,6 +75,7 @@ public class ProxyFacade {
     private final GeminiRequestAdapter geminiRequestAdapter;
     private final GeminiResponseFactory geminiResponseFactory;
     private final PaymentSettingsService paymentSettingsService;
+    private final ModelPricingService modelPricingService;
     private final StatsService statsService;
 
     public ProxyFacade(
@@ -95,6 +96,7 @@ public class ProxyFacade {
         GeminiRequestAdapter geminiRequestAdapter,
         GeminiResponseFactory geminiResponseFactory,
         PaymentSettingsService paymentSettingsService,
+        ModelPricingService modelPricingService,
         StatsService statsService
     ) {
         this.apiKeyService = apiKeyService;
@@ -114,6 +116,7 @@ public class ProxyFacade {
         this.geminiRequestAdapter = geminiRequestAdapter;
         this.geminiResponseFactory = geminiResponseFactory;
         this.paymentSettingsService = paymentSettingsService;
+        this.modelPricingService = modelPricingService;
         this.statsService = statsService;
     }
 
@@ -467,10 +470,9 @@ public class ProxyFacade {
         Instant start
     ) {
         PlatformUsage usage = result.usage();
-        BigDecimal billableUnits = billableTokenUnits(usage, fastMode);
         Mono<Void> accountStats = accountPoolService.recordSuccess(account.getAccountId(), usage.totalTokens());
         return paymentSettingsService.config()
-            .map(config -> billableBalanceCost(billableUnits, config.apiBillingMultiplier()))
+            .flatMap(config -> modelPricingService.cost(model, usage, fastMode, config.apiBillingMultiplier()))
             .flatMap(credits -> {
                 Mono<Void> keyStats = apiKeyService.recordUsage(principal.keyId(), credits, usage.inputTokens(), usage.outputTokens());
                 Mono<Void> balanceUsage = principal.requiresBalance()
@@ -492,21 +494,6 @@ public class ProxyFacade {
                 ));
                 return Mono.whenDelayError(accountStats, keyStats, balanceUsage, log).then();
             });
-    }
-
-    private BigDecimal billableTokenUnits(PlatformUsage usage, boolean fastMode) {
-        BigDecimal units = usage.totalTokens() > 0
-            ? BigDecimal.valueOf(usage.totalTokens())
-            : usage.credits() == null ? BigDecimal.ZERO : usage.credits();
-        return fastMode ? units.multiply(BigDecimal.valueOf(2)) : units;
-    }
-
-    private BigDecimal billableBalanceCost(BigDecimal billableUnits, BigDecimal multiplier) {
-        BigDecimal safeUnits = billableUnits == null ? BigDecimal.ZERO : billableUnits;
-        BigDecimal safeMultiplier = multiplier == null || multiplier.compareTo(BigDecimal.ZERO) <= 0
-            ? PaymentSettingsService.DEFAULT_API_BILLING_MULTIPLIER
-            : multiplier;
-        return safeUnits.multiply(safeMultiplier).setScale(6, RoundingMode.HALF_UP);
     }
 
     private Mono<Void> recordFailure(
