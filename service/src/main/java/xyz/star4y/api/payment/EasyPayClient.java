@@ -49,6 +49,20 @@ public class EasyPayClient {
         return Mono.just(new CreatePaymentResult(redirectUrl(config, params), null, null));
     }
 
+    public Mono<OrderQueryResult> queryOrder(PaymentConfig config, PaymentOrderEntity order) {
+        String queryUrl = apiBase(config.easypayApiBase())
+            + "/api.php?act=order"
+            + "&pid=" + encode(config.easypayPid())
+            + "&key=" + encode(config.easypayPkey())
+            + "&out_trade_no=" + encode(order.getOutTradeNo());
+        return webClient.get()
+            .uri(URI.create(queryUrl))
+            .retrieve()
+            .bodyToMono(String.class)
+            .timeout(REQUEST_TIMEOUT)
+            .map(body -> parseOrderQueryResponse(order.getOutTradeNo(), body));
+    }
+
     public Notification verifyNotification(PaymentConfig config, Map<String, String> params, String rawBody) {
         String sign = params.get("sign");
         if (sign == null || sign.isBlank()) {
@@ -98,6 +112,23 @@ public class EasyPayClient {
             );
         } catch (Exception error) {
             throw new IllegalStateException("EasyPay create payment response is invalid: " + error.getMessage(), error);
+        }
+    }
+
+    OrderQueryResult parseOrderQueryResponse(String expectedOutTradeNo, String body) {
+        try {
+            JsonNode root = objectMapper.readTree(body);
+            int code = root.path("code").asInt(0);
+            if (code != 1) {
+                return new OrderQueryResult(expectedOutTradeNo, null, BigDecimal.ZERO, false, body);
+            }
+            String outTradeNo = firstNonBlank(root.path("out_trade_no").asText(null), expectedOutTradeNo);
+            String status = firstNonBlank(root.path("trade_status").asText(null), root.path("status").asText(null));
+            boolean paid = "1".equals(status) || TRADE_SUCCESS.equalsIgnoreCase(status);
+            BigDecimal amount = parseAmount(firstNonBlank(root.path("money").asText(null), root.path("amount").asText(null)));
+            return new OrderQueryResult(outTradeNo, blankToNull(root.path("trade_no").asText(null)), amount, paid, body);
+        } catch (Exception error) {
+            throw new IllegalStateException("EasyPay order query response is invalid: " + error.getMessage(), error);
         }
     }
 
@@ -228,6 +259,15 @@ public class EasyPayClient {
     }
 
     public record Notification(
+        String outTradeNo,
+        String tradeNo,
+        BigDecimal amount,
+        boolean paid,
+        String rawBody
+    ) {
+    }
+
+    public record OrderQueryResult(
         String outTradeNo,
         String tradeNo,
         BigDecimal amount,

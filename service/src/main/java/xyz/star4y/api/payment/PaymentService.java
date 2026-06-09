@@ -12,6 +12,8 @@ import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.r2dbc.core.DatabaseClient.GenericExecuteSpec;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Flux;
@@ -23,6 +25,7 @@ import xyz.star4y.api.common.ApiException;
 import xyz.star4y.api.common.Hashing;
 import xyz.star4y.api.payment.EasyPayClient.CreatePaymentResult;
 import xyz.star4y.api.payment.EasyPayClient.Notification;
+import xyz.star4y.api.payment.EasyPayClient.OrderQueryResult;
 import xyz.star4y.api.payment.PaymentDtos.CreatePaymentOrderRequest;
 import xyz.star4y.api.payment.PaymentDtos.CreatePaymentOrderResponse;
 import xyz.star4y.api.payment.PaymentDtos.PaymentOrderResponse;
@@ -31,6 +34,7 @@ import xyz.star4y.api.payment.PaymentSettingsService.PaymentConfig;
 @Service
 public class PaymentService {
 
+    private static final Logger log = LoggerFactory.getLogger(PaymentService.class);
     private static final String USER_ROLE = "USER";
     private static final String STATUS_PENDING = "PENDING";
     private static final String STATUS_COMPLETED = "COMPLETED";
@@ -80,6 +84,7 @@ public class PaymentService {
         return user(principal)
             .flatMapMany(user -> expirePendingOrders(user.getUserId())
                 .thenMany(repository.findTop50ByUserIdOrderByCreatedAtDesc(user.getUserId())))
+            .flatMap(this::syncOrderWithProviderIfNeeded, 4)
             .map(PaymentOrderMapper::toResponse);
     }
 
@@ -88,6 +93,7 @@ public class PaymentService {
             .flatMap(user -> repository.findByOrderId(orderId)
                 .filter(order -> user.getUserId().equals(order.getUserId()))
                 .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "PAYMENT_ORDER_NOT_FOUND", "Payment order not found"))))
+            .flatMap(this::syncOrderWithProviderIfNeeded)
             .map(PaymentOrderMapper::toResponse);
     }
 
@@ -112,12 +118,14 @@ public class PaymentService {
     public Flux<PaymentOrderResponse> listAdminOrders() {
         return expirePendingOrders(null)
             .thenMany(repository.findTop100ByOrderByCreatedAtDesc())
+            .flatMap(this::syncOrderWithProviderIfNeeded, 4)
             .map(PaymentOrderMapper::toResponse);
     }
 
     public Mono<PaymentOrderResponse> getAdminOrder(String orderId) {
         return repository.findByOrderId(orderId)
             .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "PAYMENT_ORDER_NOT_FOUND", "Payment order not found")))
+            .flatMap(this::syncOrderWithProviderIfNeeded)
             .map(PaymentOrderMapper::toResponse);
     }
 
@@ -272,6 +280,62 @@ public class PaymentService {
                     .then(creditBalanceOnce(notification.outTradeNo(), now))
                     .then();
             });
+    }
+
+    private Mono<PaymentOrderEntity> syncOrderWithProviderIfNeeded(PaymentOrderEntity order) {
+        if (order.getOutTradeNo() == null || order.getOutTradeNo().isBlank()) {
+            return Mono.just(order);
+        }
+        if (STATUS_COMPLETED.equals(order.getStatus()) && order.getCreditedAt() == null) {
+            return creditBalanceOnce(order.getOutTradeNo(), Instant.now())
+                .then(reloadOrder(order));
+        }
+        if (!shouldQueryProvider(order)) {
+            return Mono.just(order);
+        }
+        return settingsService.config()
+            .filter(PaymentConfig::easypayConfigured)
+            .flatMap(config -> easyPayClient.queryOrder(config, order))
+            .flatMap(result -> applyOrderQueryResult(order, result))
+            .switchIfEmpty(Mono.just(order))
+            .onErrorResume(error -> {
+                log.warn("Could not sync payment order {} with EasyPay: {}", order.getOutTradeNo(), error.getMessage());
+                return Mono.just(order);
+            });
+    }
+
+    private boolean shouldQueryProvider(PaymentOrderEntity order) {
+        String status = order.getStatus();
+        return STATUS_PENDING.equals(status)
+            || STATUS_EXPIRED.equals(status)
+            || "PAID".equals(status)
+            || (STATUS_COMPLETED.equals(status) && order.getCreditedAt() == null);
+    }
+
+    private Mono<PaymentOrderEntity> applyOrderQueryResult(PaymentOrderEntity order, OrderQueryResult result) {
+        if (!result.paid()) {
+            return Mono.just(order);
+        }
+        if (!order.getOutTradeNo().equals(result.outTradeNo())) {
+            log.warn("EasyPay order query returned mismatched out_trade_no. expected={} actual={}", order.getOutTradeNo(), result.outTradeNo());
+            return Mono.just(order);
+        }
+        if (result.amount().compareTo(order.getPayAmount().setScale(2, RoundingMode.HALF_UP)) < 0) {
+            log.warn("EasyPay order query amount mismatch for {}. expected={} actual={}", order.getOutTradeNo(), order.getPayAmount(), result.amount());
+            return Mono.just(order);
+        }
+        Notification notification = new Notification(
+            result.outTradeNo(),
+            result.tradeNo(),
+            result.amount(),
+            true,
+            result.rawBody()
+        );
+        return completePaidOrder(notification).then(reloadOrder(order));
+    }
+
+    private Mono<PaymentOrderEntity> reloadOrder(PaymentOrderEntity order) {
+        return repository.findByOrderId(order.getOrderId()).defaultIfEmpty(order);
     }
 
     private Mono<Long> markOrderCompleted(Notification notification, Instant now) {

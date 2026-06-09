@@ -2,6 +2,7 @@ package xyz.star4y.api.payment;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -28,5 +29,31 @@ class EasyPayClientTest {
         assertThat(EasyPayClient.apiBase("https://pay.example.com/mapi.php")).isEqualTo("https://pay.example.com");
         assertThat(EasyPayClient.apiBase("https://pay.example.com/gateway/api.php"))
             .isEqualTo("https://pay.example.com/gateway");
+    }
+
+    @Test
+    void parsesPaidOrderQueryResponse() {
+        EasyPayClient client = new EasyPayClient(null, new ObjectMapper());
+
+        EasyPayClient.OrderQueryResult result = client.parseOrderQueryResponse("SA123", """
+            {"code":1,"status":1,"out_trade_no":"SA123","trade_no":"T123","money":"1.00"}
+            """);
+
+        assertThat(result.paid()).isTrue();
+        assertThat(result.outTradeNo()).isEqualTo("SA123");
+        assertThat(result.tradeNo()).isEqualTo("T123");
+        assertThat(result.amount()).isEqualByComparingTo("1.00");
+    }
+
+    @Test
+    void treatsMissingOrderQueryResponseAsUnpaid() {
+        EasyPayClient client = new EasyPayClient(null, new ObjectMapper());
+
+        EasyPayClient.OrderQueryResult result = client.parseOrderQueryResponse("SA404", """
+            {"code":-1,"msg":"order not found"}
+            """);
+
+        assertThat(result.paid()).isFalse();
+        assertThat(result.outTradeNo()).isEqualTo("SA404");
     }
 }
