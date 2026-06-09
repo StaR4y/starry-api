@@ -45,6 +45,8 @@ import xyz.star4y.api.platform.openai.OpenAiRequestAdapter;
 import xyz.star4y.api.platform.openai.OpenAiResponseFactory;
 import xyz.star4y.api.platform.openai.OpenAiUpstreamClient;
 import xyz.star4y.api.platform.upstream.UpstreamException;
+import xyz.star4y.api.payment.PaymentSettingsService;
+import xyz.star4y.api.payment.PaymentSettingsService.PaymentConfig;
 import xyz.star4y.api.stats.StatsService;
 
 class ProxyFacadeRoutingTest {
@@ -81,7 +83,7 @@ class ProxyFacadeRoutingTest {
         when(openAiUpstreamClient.complete(eq(account), eq(request), eq("GPT-5.5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
         when(accountPoolService.recordSuccess("openai-main", 2L)).thenReturn(Mono.empty());
-        when(apiKeyService.recordUsage(eq("key-1"), eq(BigDecimal.valueOf(2)), eq(1L), eq(1L))).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
         proxyFacade(
@@ -140,8 +142,8 @@ class ProxyFacadeRoutingTest {
         when(openAiUpstreamClient.complete(eq(account), eq(request), eq("gpt-5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(2, 3, BigDecimal.ZERO, 0, 0, 0))));
         when(accountPoolService.recordSuccess("openai-main", 5L)).thenReturn(Mono.empty());
-        when(apiKeyService.recordUsage(eq("key-1"), eq(BigDecimal.valueOf(5)), eq(2L), eq(3L))).thenReturn(Mono.empty());
-        when(apiKeyService.consumeBalance(eq(principal), eq(BigDecimal.valueOf(5)))).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(credits("5")), eq(2L), eq(3L))).thenReturn(Mono.empty());
+        when(apiKeyService.consumeBalance(eq(principal), eq(credits("5")))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
         proxyFacade(
@@ -156,7 +158,68 @@ class ProxyFacadeRoutingTest {
         ).chat(request, exchange).block();
 
         verify(apiKeyService).ensureBalanceAvailable(principal);
-        verify(apiKeyService).consumeBalance(principal, BigDecimal.valueOf(5));
+        verify(apiKeyService).consumeBalance(principal, credits("5"));
+    }
+
+    @Test
+    void defaultApiBillingMultiplierMakesOneHundredBalanceCoverSixMillionTokens() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        PaymentSettingsService paymentSettingsService = paymentSettingsService(PaymentSettingsService.DEFAULT_API_BILLING_MULTIPLIER);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity account = openAiAccount();
+        ApiKeyPrincipal principal = new ApiKeyPrincipal(
+            "key-1",
+            "user-1",
+            "USER",
+            "test",
+            null,
+            BigDecimal.ZERO,
+            BigDecimal.valueOf(200)
+        );
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "gpt-5",
+              "messages": [{"role": "user", "content": "hi"}]
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/chat/completions")
+        );
+        BigDecimal expectedCredits = new BigDecimal("100.000000");
+
+        when(apiKeyService.authenticate(exchange)).thenReturn(Mono.just(principal));
+        when(apiKeyService.ensureBalanceAvailable(principal)).thenReturn(Mono.empty());
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("gpt-5", "key-1")).thenReturn("gpt-5");
+        when(accountPoolService.selectOpenAiAccount("key-1")).thenReturn(Mono.just(account));
+        when(openAiUpstreamClient.complete(eq(account), eq(request), eq("gpt-5")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(3_000_000, 3_000_000, BigDecimal.ZERO, 0, 0, 0))));
+        when(accountPoolService.recordSuccess("openai-main", 6_000_000L)).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(expectedCredits), eq(3_000_000L), eq(3_000_000L))).thenReturn(Mono.empty());
+        when(apiKeyService.consumeBalance(eq(principal), eq(expectedCredits))).thenReturn(Mono.empty());
+        when(statsService.log(any())).thenReturn(Mono.empty());
+
+        proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService,
+            paymentSettingsService
+        ).chat(request, exchange).block();
+
+        verify(apiKeyService).recordUsage("key-1", expectedCredits, 3_000_000L, 3_000_000L);
+        verify(apiKeyService).consumeBalance(principal, expectedCredits);
     }
 
     @Test
@@ -198,8 +261,8 @@ class ProxyFacadeRoutingTest {
         when(kiroUpstreamClient.complete(eq(account), any(ObjectNode.class), eq("claude-sonnet-4.5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(4, 6, BigDecimal.ZERO, 0, 0, 0))));
         when(accountPoolService.recordSuccess("kiro-main", 10L)).thenReturn(Mono.empty());
-        when(apiKeyService.recordUsage(eq("key-1"), eq(BigDecimal.TEN), eq(4L), eq(6L))).thenReturn(Mono.empty());
-        when(apiKeyService.consumeBalance(eq(principal), eq(BigDecimal.TEN))).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(credits("10")), eq(4L), eq(6L))).thenReturn(Mono.empty());
+        when(apiKeyService.consumeBalance(eq(principal), eq(credits("10")))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
         proxyFacade(
@@ -213,8 +276,8 @@ class ProxyFacadeRoutingTest {
             statsService
         ).chat(request, exchange).block();
 
-        verify(apiKeyService).recordUsage("key-1", BigDecimal.TEN, 4L, 6L);
-        verify(apiKeyService).consumeBalance(principal, BigDecimal.TEN);
+        verify(apiKeyService).recordUsage("key-1", credits("10"), 4L, 6L);
+        verify(apiKeyService).consumeBalance(principal, credits("10"));
     }
 
     @Test
@@ -247,7 +310,7 @@ class ProxyFacadeRoutingTest {
         when(openAiUpstreamClient.complete(eq(account), any(JsonNode.class), eq("gpt-5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(3, 2, BigDecimal.ZERO, 0, 0, 0))));
         when(accountPoolService.recordSuccess("openai-main", 5L)).thenReturn(Mono.empty());
-        when(apiKeyService.recordUsage(eq("key-1"), eq(BigDecimal.valueOf(10)), eq(3L), eq(2L))).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(credits("10")), eq(3L), eq(2L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
         proxyFacade(
@@ -264,7 +327,7 @@ class ProxyFacadeRoutingTest {
         ArgumentCaptor<JsonNode> forwardedRequest = ArgumentCaptor.forClass(JsonNode.class);
         verify(openAiUpstreamClient).complete(eq(account), forwardedRequest.capture(), eq("gpt-5"));
         assertThat(forwardedRequest.getValue().path("service_tier").asText()).isEqualTo("priority");
-        verify(apiKeyService).recordUsage("key-1", BigDecimal.valueOf(10), 3L, 2L);
+        verify(apiKeyService).recordUsage("key-1", credits("10"), 3L, 2L);
         verify(kiroUpstreamClient, never()).complete(any(), any(), any());
     }
 
@@ -365,7 +428,7 @@ class ProxyFacadeRoutingTest {
         when(openAiUpstreamClient.complete(eq(backup), eq(request), eq("gpt-5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
         when(accountPoolService.recordSuccess("openai-backup", 2L)).thenReturn(Mono.empty());
-        when(apiKeyService.recordUsage(eq("key-1"), eq(BigDecimal.valueOf(2)), eq(1L), eq(1L))).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
         ResponseEntity<?> response = proxyFacade(
@@ -427,7 +490,7 @@ class ProxyFacadeRoutingTest {
         when(openAiUpstreamClient.completeResponses(eq(account), eq(request), eq("gpt-5.4-mini")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
         when(accountPoolService.recordSuccess("openai-main", 2L)).thenReturn(Mono.empty());
-        when(apiKeyService.recordUsage(eq("key-1"), eq(BigDecimal.valueOf(2)), eq(1L), eq(1L))).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
         ResponseEntity<?> response = proxyFacade(
@@ -490,7 +553,36 @@ class ProxyFacadeRoutingTest {
             kiroUpstreamClient,
             openAiUpstreamClient,
             statsService,
-            accountSettingsService
+            accountSettingsService,
+            paymentSettingsService(BigDecimal.ONE)
+        );
+    }
+
+    private ProxyFacade proxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        DefaultModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroUpstreamClient kiroUpstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        StatsService statsService,
+        PaymentSettingsService paymentSettingsService
+    ) {
+        AccountSettingsService accountSettingsService = mock(AccountSettingsService.class);
+        when(accountSettingsService.ensureGptFastModeAllowed()).thenReturn(Mono.empty());
+        return proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            mock(AccountAutoSuspendService.class),
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService,
+            accountSettingsService,
+            paymentSettingsService
         );
     }
 
@@ -517,7 +609,8 @@ class ProxyFacadeRoutingTest {
             kiroUpstreamClient,
             openAiUpstreamClient,
             statsService,
-            accountSettingsService
+            accountSettingsService,
+            paymentSettingsService(BigDecimal.ONE)
         );
     }
 
@@ -558,6 +651,34 @@ class ProxyFacadeRoutingTest {
         StatsService statsService,
         AccountSettingsService accountSettingsService
     ) {
+        return proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService,
+            accountSettingsService,
+            paymentSettingsService(BigDecimal.ONE)
+        );
+    }
+
+    private ProxyFacade proxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        AccountAutoSuspendService accountAutoSuspendService,
+        DefaultModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroUpstreamClient kiroUpstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        StatsService statsService,
+        AccountSettingsService accountSettingsService,
+        PaymentSettingsService paymentSettingsService
+    ) {
         return new ProxyFacade(
             apiKeyService,
             accountPoolService,
@@ -575,8 +696,38 @@ class ProxyFacadeRoutingTest {
             new AnthropicResponseFactory(objectMapper),
             new GeminiRequestAdapter(objectMapper),
             new GeminiResponseFactory(objectMapper),
+            paymentSettingsService,
             statsService
         );
+    }
+
+    private PaymentSettingsService paymentSettingsService(BigDecimal apiBillingMultiplier) {
+        PaymentSettingsService service = mock(PaymentSettingsService.class);
+        when(service.config()).thenReturn(Mono.just(new PaymentConfig(
+            false,
+            BigDecimal.ONE,
+            BigDecimal.ZERO,
+            BigDecimal.ZERO,
+            30,
+            3,
+            List.of("alipay", "wxpay"),
+            BigDecimal.ONE,
+            apiBillingMultiplier,
+            BigDecimal.ZERO,
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "popup"
+        )));
+        return service;
+    }
+
+    private BigDecimal credits(String value) {
+        return new BigDecimal(value).setScale(6);
     }
 
     private ProxyAccountEntity openAiAccount() {

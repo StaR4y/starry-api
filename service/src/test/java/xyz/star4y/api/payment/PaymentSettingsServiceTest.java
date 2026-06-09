@@ -34,6 +34,7 @@ class PaymentSettingsServiceTest {
                 5,
                 List.of("alipay"),
                 new BigDecimal("2"),
+                new BigDecimal("0.00002"),
                 new BigDecimal("0.01"),
                 "Prefix",
                 "Suffix",
@@ -51,6 +52,7 @@ class PaymentSettingsServiceTest {
         assertThat(response.maxAmount()).isEqualByComparingTo("0.00");
         assertThat(response.dailyLimit()).isEqualByComparingTo("0.00");
         assertThat(response.enabledTypes()).containsExactly("alipay");
+        assertThat(response.apiBillingMultiplier()).isEqualByComparingTo("0.0000200000000000");
         assertThat(response.easypayApiBase()).isEqualTo("https://pay.example.com/submit.php");
         assertThat(response.easypayPid()).isEqualTo("10001");
         assertThat(response.easypayPkeyConfigured()).isTrue();
@@ -58,7 +60,19 @@ class PaymentSettingsServiceTest {
 
         verify(repository).upsertSetting(PaymentSettingsService.PAYMENT_ENABLED, "true");
         verify(repository).upsertSetting(PaymentSettingsService.MAX_RECHARGE_AMOUNT, "0.00");
+        verify(repository).upsertSetting(PaymentSettingsService.API_BILLING_MULTIPLIER, "0.0000200000000000");
         verify(repository).upsertSetting(PaymentSettingsService.EASYPAY_PKEY, "secret");
+    }
+
+    @Test
+    void defaultApiBillingMultiplierTargetsSixMillionTokensPerOneHundredBalance() {
+        Map<String, String> store = new ConcurrentHashMap<>();
+        SystemSettingRepository repository = mockRepository(store);
+
+        PaymentSettingsResponse response = new PaymentSettingsService(repository).settings().block();
+
+        assertThat(response).isNotNull();
+        assertThat(response.apiBillingMultiplier()).isEqualByComparingTo("0.0000166666666667");
     }
 
     private SystemSettingRepository mockRepository(Map<String, String> store) {

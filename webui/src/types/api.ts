@@ -470,6 +470,7 @@ export interface PaymentSettings {
   maxPendingOrders: number;
   enabledTypes: PaymentType[];
   balanceRechargeMultiplier: number;
+  apiBillingMultiplier: number;
   rechargeFeeRate: number;
   productNamePrefix: string;
   productNameSuffix: string;
@@ -490,6 +491,7 @@ export interface UpdatePaymentSettingsRequest {
   maxPendingOrders?: number;
   enabledTypes?: PaymentType[];
   balanceRechargeMultiplier?: number;
+  apiBillingMultiplier?: number;
   rechargeFeeRate?: number;
   productNamePrefix?: string;
   productNameSuffix?: string;

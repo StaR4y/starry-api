@@ -107,6 +107,7 @@ The settings follow the sub2api-style keys stored in `system_settings`:
 | `MAX_PENDING_ORDERS` | Maximum pending orders per user. |
 | `ENABLED_PAYMENT_TYPES` | Comma-separated `alipay,wxpay`. |
 | `BALANCE_RECHARGE_MULTIPLIER` | Credited balance multiplier. |
+| `API_BILLING_MULTIPLIER` | Balance deducted per billable token. Default `0.0000166666666667`, so 100 balance covers about 6,000,000 tokens. |
 | `RECHARGE_FEE_RATE` | Extra fee rate added to the payable amount. |
 | `EASYPAY_API_BASE`, `EASYPAY_PID`, `EASYPAY_PKEY` | EasyPay gateway URL and merchant credentials. |
 | `EASYPAY_PAYMENT_MODE` | `popup` for submit-page redirect, `qrcode` for `mapi.php`. |

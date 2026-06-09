@@ -228,6 +228,8 @@ https://<your-domain>/payment/webhook/easypay
 
 When the webhook signature is valid and the upstream trade status is successful, the service marks the order as completed and increments the user's balance. Duplicate successful callbacks are ignored after the first completion.
 
+Proxy API calls deduct balance by billable token count. The default admin setting `API计费倍率` is `0.0000166666666667`, which means 100 balance covers about 6,000,000 tokens; administrators can adjust it from `支付设置`.
+
 Use the WebUI API Key page to generate per-key client configuration. The current setup is API-key based and no longer writes shell profiles automatically.
 
 Codex CLI (`~/.codex/config.toml`):

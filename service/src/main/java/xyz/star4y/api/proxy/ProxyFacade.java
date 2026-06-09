@@ -3,6 +3,7 @@ package xyz.star4y.api.proxy;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -37,6 +38,7 @@ import xyz.star4y.api.platform.openai.OpenAiRequestAdapter;
 import xyz.star4y.api.platform.openai.OpenAiResponseFactory;
 import xyz.star4y.api.platform.openai.OpenAiUpstreamClient;
 import xyz.star4y.api.platform.upstream.UpstreamException;
+import xyz.star4y.api.payment.PaymentSettingsService;
 import xyz.star4y.api.stats.StatsService;
 
 @Service
@@ -72,6 +74,7 @@ public class ProxyFacade {
     private final AnthropicResponseFactory anthropicResponseFactory;
     private final GeminiRequestAdapter geminiRequestAdapter;
     private final GeminiResponseFactory geminiResponseFactory;
+    private final PaymentSettingsService paymentSettingsService;
     private final StatsService statsService;
 
     public ProxyFacade(
@@ -91,6 +94,7 @@ public class ProxyFacade {
         AnthropicResponseFactory anthropicResponseFactory,
         GeminiRequestAdapter geminiRequestAdapter,
         GeminiResponseFactory geminiResponseFactory,
+        PaymentSettingsService paymentSettingsService,
         StatsService statsService
     ) {
         this.apiKeyService = apiKeyService;
@@ -109,6 +113,7 @@ public class ProxyFacade {
         this.anthropicResponseFactory = anthropicResponseFactory;
         this.geminiRequestAdapter = geminiRequestAdapter;
         this.geminiResponseFactory = geminiResponseFactory;
+        this.paymentSettingsService = paymentSettingsService;
         this.statsService = statsService;
     }
 
@@ -461,35 +466,46 @@ public class ProxyFacade {
         Instant start
     ) {
         PlatformUsage usage = result.usage();
-        BigDecimal credits = billableCredits(usage, route, fastMode);
+        BigDecimal billableUnits = billableTokenUnits(usage, fastMode);
         Mono<Void> accountStats = accountPoolService.recordSuccess(account.getAccountId(), usage.totalTokens());
-        Mono<Void> keyStats = apiKeyService.recordUsage(principal.keyId(), credits, usage.inputTokens(), usage.outputTokens());
-        Mono<Void> balanceUsage = principal.requiresBalance()
-            ? apiKeyService.consumeBalance(principal, credits)
-            : Mono.empty();
-        Mono<Void> log = statsService.log(new StatsService.RequestLog(
-            requestId,
-            principal.keyId(),
-            account.getAccountId(),
-            path,
-            model,
-            200,
-            true,
-            usage.inputTokens(),
-            usage.outputTokens(),
-            credits,
-            Duration.between(start, Instant.now()).toMillis(),
-            null
-        ));
-        return Mono.whenDelayError(accountStats, keyStats, balanceUsage, log).then();
+        return paymentSettingsService.config()
+            .map(config -> billableBalanceCost(billableUnits, config.apiBillingMultiplier()))
+            .flatMap(credits -> {
+                Mono<Void> keyStats = apiKeyService.recordUsage(principal.keyId(), credits, usage.inputTokens(), usage.outputTokens());
+                Mono<Void> balanceUsage = principal.requiresBalance()
+                    ? apiKeyService.consumeBalance(principal, credits)
+                    : Mono.empty();
+                Mono<Void> log = statsService.log(new StatsService.RequestLog(
+                    requestId,
+                    principal.keyId(),
+                    account.getAccountId(),
+                    path,
+                    model,
+                    200,
+                    true,
+                    usage.inputTokens(),
+                    usage.outputTokens(),
+                    credits,
+                    Duration.between(start, Instant.now()).toMillis(),
+                    null
+                ));
+                return Mono.whenDelayError(accountStats, keyStats, balanceUsage, log).then();
+            });
     }
 
-    private BigDecimal billableCredits(PlatformUsage usage, UpstreamRoute route, boolean fastMode) {
-        BigDecimal credits = usage.credits() == null ? BigDecimal.ZERO : usage.credits();
-        if (credits.compareTo(BigDecimal.ZERO) <= 0) {
-            credits = BigDecimal.valueOf(usage.totalTokens());
-        }
-        return fastMode ? credits.multiply(BigDecimal.valueOf(2)) : credits;
+    private BigDecimal billableTokenUnits(PlatformUsage usage, boolean fastMode) {
+        BigDecimal units = usage.totalTokens() > 0
+            ? BigDecimal.valueOf(usage.totalTokens())
+            : usage.credits() == null ? BigDecimal.ZERO : usage.credits();
+        return fastMode ? units.multiply(BigDecimal.valueOf(2)) : units;
+    }
+
+    private BigDecimal billableBalanceCost(BigDecimal billableUnits, BigDecimal multiplier) {
+        BigDecimal safeUnits = billableUnits == null ? BigDecimal.ZERO : billableUnits;
+        BigDecimal safeMultiplier = multiplier == null || multiplier.compareTo(BigDecimal.ZERO) <= 0
+            ? PaymentSettingsService.DEFAULT_API_BILLING_MULTIPLIER
+            : multiplier;
+        return safeUnits.multiply(safeMultiplier).setScale(6, RoundingMode.HALF_UP);
     }
 
     private Mono<Void> recordFailure(

@@ -31,6 +31,7 @@ const form = reactive<Required<UpdatePaymentSettingsRequest>>({
   maxPendingOrders: 3,
   enabledTypes: ['alipay', 'wxpay'],
   balanceRechargeMultiplier: 1,
+  apiBillingMultiplier: 0.0000166666666667,
   rechargeFeeRate: 0,
   productNamePrefix: 'Starry API',
   productNameSuffix: '余额充值',
@@ -77,6 +78,7 @@ function togglePaymentType(type: PaymentType) {
     form.maxPendingOrders = settings.maxPendingOrders;
     form.enabledTypes = settings.enabledTypes.length ? settings.enabledTypes : ['alipay', 'wxpay'];
     form.balanceRechargeMultiplier = settings.balanceRechargeMultiplier;
+    form.apiBillingMultiplier = settings.apiBillingMultiplier ?? 0.0000166666666667;
     form.rechargeFeeRate = settings.rechargeFeeRate;
     form.productNamePrefix = settings.productNamePrefix ?? '';
     form.productNameSuffix = settings.productNameSuffix ?? '';
@@ -112,6 +114,10 @@ function togglePaymentType(type: PaymentType) {
       ElMessage.warning('至少启用一种支付方式');
       return;
     }
+    if (form.apiBillingMultiplier <= 0) {
+      ElMessage.warning('API计费倍率必须大于 0');
+      return;
+    }
 
     submitting.value = true;
     try {
@@ -124,6 +130,7 @@ function togglePaymentType(type: PaymentType) {
         maxPendingOrders: form.maxPendingOrders,
         enabledTypes: form.enabledTypes,
         balanceRechargeMultiplier: form.balanceRechargeMultiplier,
+        apiBillingMultiplier: form.apiBillingMultiplier,
         rechargeFeeRate: form.rechargeFeeRate,
         productNamePrefix: form.productNamePrefix,
         productNameSuffix: form.productNameSuffix,
@@ -353,6 +360,17 @@ function togglePaymentType(type: PaymentType) {
                   controls-position="right"
                   style="width: 100%"
                 />
+              </el-form-item>
+              <el-form-item label="API计费倍率 (每 token 扣多少余额)">
+                <el-input-number
+                  v-model="form.apiBillingMultiplier"
+                  :min="0.0000000000000001"
+                  :precision="16"
+                  :step="0.000000000001"
+                  controls-position="right"
+                  style="width: 100%"
+                />
+                <p class="field-hint text-muted">默认 0.0000166666666667，即 100 余额约可用 600 万 token。</p>
               </el-form-item>
               <el-form-item label="充值手续费率 (例如 0.006)">
                 <el-input-number
@@ -585,6 +603,13 @@ function togglePaymentType(type: PaymentType) {
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 16px;
     }
+  }
+
+  .field-hint {
+    width: 100%;
+    margin: 6px 0 0;
+    font-size: 12px;
+    line-height: 1.4;
   }
 
   /* Unified Metrics Panel */

@@ -26,6 +26,7 @@ public class PaymentSettingsService {
     static final String MAX_PENDING_ORDERS = "MAX_PENDING_ORDERS";
     static final String ENABLED_PAYMENT_TYPES = "ENABLED_PAYMENT_TYPES";
     static final String BALANCE_RECHARGE_MULTIPLIER = "BALANCE_RECHARGE_MULTIPLIER";
+    static final String API_BILLING_MULTIPLIER = "API_BILLING_MULTIPLIER";
     static final String RECHARGE_FEE_RATE = "RECHARGE_FEE_RATE";
     static final String PRODUCT_NAME_PREFIX = "PRODUCT_NAME_PREFIX";
     static final String PRODUCT_NAME_SUFFIX = "PRODUCT_NAME_SUFFIX";
@@ -35,6 +36,7 @@ public class PaymentSettingsService {
     static final String EASYPAY_PID = "EASYPAY_PID";
     static final String EASYPAY_PKEY = "EASYPAY_PKEY";
     static final String EASYPAY_PAYMENT_MODE = "EASYPAY_PAYMENT_MODE";
+    public static final BigDecimal DEFAULT_API_BILLING_MULTIPLIER = new BigDecimal("0.0000166666666667");
 
     private static final List<String> SETTING_KEYS = List.of(
         PAYMENT_ENABLED,
@@ -45,6 +47,7 @@ public class PaymentSettingsService {
         MAX_PENDING_ORDERS,
         ENABLED_PAYMENT_TYPES,
         BALANCE_RECHARGE_MULTIPLIER,
+        API_BILLING_MULTIPLIER,
         RECHARGE_FEE_RATE,
         PRODUCT_NAME_PREFIX,
         PRODUCT_NAME_SUFFIX,
@@ -87,6 +90,7 @@ public class PaymentSettingsService {
                     normalizeMaxPending(request.maxPendingOrders() == null ? current.maxPendingOrders() : request.maxPendingOrders()),
                     request.enabledTypes() == null ? current.enabledTypes() : normalizeTypes(request.enabledTypes()),
                     normalizeMultiplier(request.balanceRechargeMultiplier() == null ? current.balanceRechargeMultiplier() : request.balanceRechargeMultiplier()),
+                    normalizeApiBillingMultiplier(request.apiBillingMultiplier() == null ? current.apiBillingMultiplier() : request.apiBillingMultiplier()),
                     normalizeFeeRate(request.rechargeFeeRate() == null ? current.rechargeFeeRate() : request.rechargeFeeRate()),
                     request.productNamePrefix() == null ? current.productNamePrefix() : clean(request.productNamePrefix()),
                     request.productNameSuffix() == null ? current.productNameSuffix() : clean(request.productNameSuffix()),
@@ -107,6 +111,7 @@ public class PaymentSettingsService {
                     set(MAX_PENDING_ORDERS, Integer.toString(next.maxPendingOrders())),
                     set(ENABLED_PAYMENT_TYPES, String.join(",", next.enabledTypes())),
                     set(BALANCE_RECHARGE_MULTIPLIER, next.balanceRechargeMultiplier().toPlainString()),
+                    set(API_BILLING_MULTIPLIER, next.apiBillingMultiplier().toPlainString()),
                     set(RECHARGE_FEE_RATE, next.rechargeFeeRate().toPlainString()),
                     set(PRODUCT_NAME_PREFIX, next.productNamePrefix()),
                     set(PRODUCT_NAME_SUFFIX, next.productNameSuffix()),
@@ -138,6 +143,7 @@ public class PaymentSettingsService {
             normalizeMaxPending(number(values, MAX_PENDING_ORDERS, 3)),
             normalizeTypes(splitTypes(values.get(ENABLED_PAYMENT_TYPES))),
             normalizeMultiplier(amount(values, BALANCE_RECHARGE_MULTIPLIER, BigDecimal.ONE)),
+            normalizeApiBillingMultiplier(amount(values, API_BILLING_MULTIPLIER, DEFAULT_API_BILLING_MULTIPLIER)),
             normalizeFeeRate(amount(values, RECHARGE_FEE_RATE, BigDecimal.ZERO)),
             clean(values.get(PRODUCT_NAME_PREFIX)),
             clean(values.get(PRODUCT_NAME_SUFFIX)),
@@ -162,6 +168,7 @@ public class PaymentSettingsService {
             config.maxPendingOrders(),
             config.enabledTypes(),
             config.balanceRechargeMultiplier(),
+            config.apiBillingMultiplier(),
             config.rechargeFeeRate(),
             config.productNamePrefix(),
             config.productNameSuffix(),
@@ -188,6 +195,7 @@ public class PaymentSettingsService {
         return switch (key) {
             case PAYMENT_ENABLED -> "false";
             case MIN_RECHARGE_AMOUNT, BALANCE_RECHARGE_MULTIPLIER -> "1";
+            case API_BILLING_MULTIPLIER -> DEFAULT_API_BILLING_MULTIPLIER.toPlainString();
             case ORDER_TIMEOUT_MINUTES -> "30";
             case MAX_PENDING_ORDERS -> "3";
             case ENABLED_PAYMENT_TYPES -> "alipay,wxpay";
@@ -237,6 +245,14 @@ public class PaymentSettingsService {
             return BigDecimal.ONE;
         }
         return multiplier.setScale(6, RoundingMode.HALF_UP);
+    }
+
+    private BigDecimal normalizeApiBillingMultiplier(BigDecimal value) {
+        BigDecimal multiplier = value == null ? DEFAULT_API_BILLING_MULTIPLIER : value;
+        if (multiplier.compareTo(BigDecimal.ZERO) <= 0) {
+            return DEFAULT_API_BILLING_MULTIPLIER;
+        }
+        return multiplier.setScale(16, RoundingMode.HALF_UP);
     }
 
     private BigDecimal normalizeFeeRate(BigDecimal value) {
@@ -306,6 +322,7 @@ public class PaymentSettingsService {
         int maxPendingOrders,
         List<String> enabledTypes,
         BigDecimal balanceRechargeMultiplier,
+        BigDecimal apiBillingMultiplier,
         BigDecimal rechargeFeeRate,
         String productNamePrefix,
         String productNameSuffix,
