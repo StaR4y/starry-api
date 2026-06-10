@@ -25,7 +25,7 @@ import xyz.star4y.api.platform.upstream.UpstreamException;
 public class OpenAiAccountTestClient {
 
     public static final String DEFAULT_OPENAI_TEST_MODEL = "gpt-4o-mini";
-    public static final String DEFAULT_CODEX_TEST_MODEL = "gpt-5.1-codex";
+    public static final String DEFAULT_CODEX_TEST_MODEL = "gpt-5.4-mini";
 
     private static final String CODEX_USER_AGENT = "codex-tui/0.135.0";
     private static final String CODEX_ORIGINATOR = "codex-tui";

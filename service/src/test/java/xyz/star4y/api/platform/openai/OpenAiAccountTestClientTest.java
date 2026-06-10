@@ -101,7 +101,7 @@ class OpenAiAccountTestClientTest {
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
 
-            PlatformCompletionResult result = client.test(account, "gpt-5.1-codex", "ping").block();
+            PlatformCompletionResult result = client.test(account, "gpt-5.4-mini", "ping").block();
 
             assertThat(result).isNotNull();
             assertThat(result.content()).isEqualTo("OK");
@@ -111,7 +111,7 @@ class OpenAiAccountTestClientTest {
             assertThat(accept.get()).singleElement().asString().contains("text/event-stream");
 
             JsonNode body = objectMapper.readTree(requestBody.get());
-            assertThat(body.path("model").asText()).isEqualTo("gpt-5.1-codex");
+            assertThat(body.path("model").asText()).isEqualTo("gpt-5.4-mini");
             assertThat(body.path("instructions").asText()).isNotBlank();
             assertThat(body.has("max_output_tokens")).isFalse();
             assertThat(body.path("store").asBoolean()).isFalse();

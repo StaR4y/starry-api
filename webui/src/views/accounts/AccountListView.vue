@@ -417,12 +417,14 @@
       { label: 'anthropic/claude-opus-4.5', value: 'anthropic/claude-opus-4.5' },
     ],
     codex: [
-      { label: 'auto (gpt-5.1-codex)', value: 'auto' },
-      { label: 'gpt-5.2-codex', value: 'gpt-5.2-codex' },
-      { label: 'gpt-5.1-codex', value: 'gpt-5.1-codex' },
-      { label: 'gpt-5.1-codex-max', value: 'gpt-5.1-codex-max' },
-      { label: 'gpt-5.1-codex-mini', value: 'gpt-5.1-codex-mini' },
-      { label: 'gpt-5-codex', value: 'gpt-5-codex' },
+      { label: 'auto (gpt-5.4-mini)', value: 'auto' },
+      { label: 'gpt-5.5', value: 'gpt-5.5' },
+      { label: 'gpt-5.4', value: 'gpt-5.4' },
+      { label: 'gpt-5.4-mini', value: 'gpt-5.4-mini' },
+      { label: 'gpt-5.4-nano', value: 'gpt-5.4-nano' },
+      { label: 'gpt-5.2', value: 'gpt-5.2' },
+      { label: 'gpt-5.1', value: 'gpt-5.1' },
+      { label: 'gpt-5', value: 'gpt-5' },
     ],
   };
   const testModelOptions = ref<TestModelOptionsResult>(fallbackTestModelOptions);
