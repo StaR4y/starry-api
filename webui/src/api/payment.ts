@@ -4,8 +4,13 @@ import type {
   ApiResponse,
   CreatePaymentOrderRequest,
   CreatePaymentOrderResponse,
+  CreateRedemptionCodeRequest,
+  CreateRedemptionCodesResponse,
   PaymentOrder,
   PaymentSettings,
+  RedeemCodeRequest,
+  RedeemCodeResponse,
+  RedemptionCode,
   UpdatePaymentSettingsRequest,
 } from '@/types/api';
 
@@ -26,6 +31,11 @@ export const paymentApi = {
       http.post<ApiResponse<PaymentOrder>>(`/payment/orders/${orderId}/cancel`),
     );
   },
+  redeemCode(payload: RedeemCodeRequest) {
+    return unwrap<RedeemCodeResponse>(
+      http.post<ApiResponse<RedeemCodeResponse>>('/payment/redeem-code', payload),
+    );
+  },
 };
 
 export const adminPaymentApi = {
@@ -39,5 +49,20 @@ export const adminPaymentApi = {
   },
   orders() {
     return unwrap<PaymentOrder[]>(http.get<ApiResponse<PaymentOrder[]>>('/admin/payment/orders'));
+  },
+  redemptionCodes() {
+    return unwrap<RedemptionCode[]>(
+      http.get<ApiResponse<RedemptionCode[]>>('/admin/payment/redemption-codes'),
+    );
+  },
+  createRedemptionCodes(payload: CreateRedemptionCodeRequest) {
+    return unwrap<CreateRedemptionCodesResponse>(
+      http.post<ApiResponse<CreateRedemptionCodesResponse>>('/admin/payment/redemption-codes', payload),
+    );
+  },
+  revokeRedemptionCode(codeId: string) {
+    return unwrap<RedemptionCode>(
+      http.post<ApiResponse<RedemptionCode>>(`/admin/payment/redemption-codes/${codeId}/revoke`),
+    );
   },
 };

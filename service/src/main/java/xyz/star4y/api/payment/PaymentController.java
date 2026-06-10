@@ -22,21 +22,26 @@ import xyz.star4y.api.payment.PaymentDtos.CreatePaymentOrderRequest;
 import xyz.star4y.api.payment.PaymentDtos.CreatePaymentOrderResponse;
 import xyz.star4y.api.payment.PaymentDtos.PaymentOrderResponse;
 import xyz.star4y.api.payment.PaymentDtos.PaymentSettingsResponse;
+import xyz.star4y.api.payment.PaymentDtos.RedeemCodeRequest;
+import xyz.star4y.api.payment.PaymentDtos.RedeemCodeResponse;
 
 @RestController
 public class PaymentController implements PaymentApi {
 
     private final PaymentSettingsService settingsService;
     private final PaymentService paymentService;
+    private final RedemptionCodeService redemptionCodeService;
     private final AdminAuth adminAuth;
 
     public PaymentController(
         PaymentSettingsService settingsService,
         PaymentService paymentService,
+        RedemptionCodeService redemptionCodeService,
         AdminAuth adminAuth
     ) {
         this.settingsService = settingsService;
         this.paymentService = paymentService;
+        this.redemptionCodeService = redemptionCodeService;
         this.adminAuth = adminAuth;
     }
 
@@ -69,6 +74,14 @@ public class PaymentController implements PaymentApi {
     @Override
     public Mono<ApiResponse<PaymentOrderResponse>> cancelOrder(ServerWebExchange exchange, @PathVariable String orderId) {
         return paymentService.cancelUserOrder(adminAuth.verify(exchange), orderId).map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<RedeemCodeResponse>> redeemCode(
+        ServerWebExchange exchange,
+        @Valid @RequestBody RedeemCodeRequest request
+    ) {
+        return redemptionCodeService.redeem(adminAuth.verify(exchange), request).map(ApiResponse::ok);
     }
 
     @GetMapping(value = "/payment/webhook/easypay", produces = MediaType.TEXT_PLAIN_VALUE)

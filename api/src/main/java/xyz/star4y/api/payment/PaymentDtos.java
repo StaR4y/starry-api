@@ -1,6 +1,8 @@
 package xyz.star4y.api.payment;
 
 import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -95,6 +97,51 @@ public final class PaymentDtos {
         Instant cancelledAt,
         Instant createdAt,
         Instant updatedAt
+    ) {
+    }
+
+    public record CreateRedemptionCodeRequest(
+        @DecimalMin(value = "0.000001") BigDecimal balance,
+        @Min(1) @Max(100) Integer count,
+        Instant expiresAt
+    ) {
+    }
+
+    public record RedemptionCodeResponse(
+        String codeId,
+        String code,
+        BigDecimal balance,
+        Boolean enabled,
+        Boolean used,
+        String usedByUserId,
+        String usedByUsername,
+        Instant usedAt,
+        Instant expiresAt,
+        String createdByUserId,
+        Instant createdAt,
+        Instant updatedAt
+    ) {
+    }
+
+    public record CreateRedemptionCodesResponse(
+        Integer total,
+        List<RedemptionCodeResponse> codes
+    ) {
+        public CreateRedemptionCodesResponse {
+            codes = codes == null ? List.of() : List.copyOf(codes);
+        }
+    }
+
+    public record RedeemCodeRequest(
+        @NotBlank String code
+    ) {
+    }
+
+    public record RedeemCodeResponse(
+        String codeId,
+        BigDecimal redeemedBalance,
+        BigDecimal balance,
+        Instant redeemedAt
     ) {
     }
 }

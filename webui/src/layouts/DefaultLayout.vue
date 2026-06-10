@@ -29,6 +29,7 @@
     { name: 'logs', label: '请求日志', icon: '', adminOnly: true },
     { name: 'users', label: '账号', icon: '', adminOnly: true },
     { name: 'payment-settings', label: '支付设置', icon: '', adminOnly: true },
+    { name: 'redemption-codes', label: '兑换码', icon: '', adminOnly: true },
   ];
 
   const menus = computed(() =>

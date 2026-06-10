@@ -95,6 +95,12 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/payment/AdminPaymentSettingsView.vue'),
         meta: { title: '支付设置', adminOnly: true },
       },
+      {
+        path: 'redemption-codes',
+        name: 'redemption-codes',
+        component: () => import('@/views/payment/AdminRedemptionCodesView.vue'),
+        meta: { title: '兑换码', adminOnly: true },
+      },
     ],
   },
   { path: '/:pathMatch(.*)*', redirect: { name: 'dashboard' } },

@@ -102,6 +102,15 @@ public class AdminUserController implements AdminUserApi {
     }
 
     @Override
+    public Mono<ApiResponse<AdminDtos.CreateInviteCodesResponse>> createInviteCodes(
+        ServerWebExchange exchange,
+        @Valid @RequestBody AdminDtos.CreateInviteCodeRequest request
+    ) {
+        adminAuth.verifyAdmin(exchange);
+        return inviteCodeService.createBatch(request).map(ApiResponse::ok);
+    }
+
+    @Override
     public Mono<ApiResponse<AdminDtos.InviteCodeResponse>> revokeInviteCode(
         ServerWebExchange exchange,
         String codeId

@@ -19,6 +19,8 @@ public class InviteCodeService {
     private static final char[] CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789".toCharArray();
     private static final int CODE_PART_LENGTH = 4;
     private static final int CODE_PARTS = 3;
+    private static final int DEFAULT_BATCH_COUNT = 1;
+    private static final int MAX_BATCH_COUNT = 100;
 
     private final InviteCodeRepository repository;
     private final R2dbcEntityTemplate template;
@@ -34,7 +36,20 @@ public class InviteCodeService {
     }
 
     public Mono<AdminDtos.InviteCodeResponse> create(AdminDtos.CreateInviteCodeRequest request) {
-        return Mono.defer(() -> repository.save(newInviteCode(request == null ? null : request.expiresAt())))
+        return saveNewInviteCode(request == null ? null : request.expiresAt());
+    }
+
+    public Mono<AdminDtos.CreateInviteCodesResponse> createBatch(AdminDtos.CreateInviteCodeRequest request) {
+        Instant expiresAt = request == null ? null : request.expiresAt();
+        int count = validateBatchCount(request == null ? null : request.count());
+        return Flux.range(0, count)
+            .concatMap(index -> saveNewInviteCode(expiresAt))
+            .collectList()
+            .map(codes -> new AdminDtos.CreateInviteCodesResponse(codes.size(), codes));
+    }
+
+    private Mono<AdminDtos.InviteCodeResponse> saveNewInviteCode(Instant expiresAt) {
+        return Mono.defer(() -> repository.save(newInviteCode(expiresAt)))
             .retryWhen(Retry.max(5).filter(DuplicateKeyException.class::isInstance))
             .map(InviteCodeMapper::toResponse);
     }
@@ -84,6 +99,14 @@ public class InviteCodeService {
         entity.setUsed(false);
         entity.setExpiresAt(expiresAt);
         return entity;
+    }
+
+    private int validateBatchCount(Integer value) {
+        int count = value == null ? DEFAULT_BATCH_COUNT : value;
+        if (count < 1 || count > MAX_BATCH_COUNT) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_INVITE_CODE_COUNT", "Invite code count must be between 1 and 100");
+        }
+        return count;
     }
 
     private String generateCode() {

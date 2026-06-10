@@ -128,6 +128,7 @@ export interface UpdateRegistrationSettingsRequest {
 
 export interface CreateInviteCodeRequest {
   expiresAt?: string | null;
+  count?: number;
 }
 
 export interface InviteCode {
@@ -140,6 +141,11 @@ export interface InviteCode {
   expiresAt: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface CreateInviteCodesResponse {
+  total: number;
+  codes: InviteCode[];
 }
 
 /* ================== 账号 ================== */
@@ -564,6 +570,7 @@ export interface PaymentOrder {
   expiresAt: string;
   paidAt: string | null;
   completedAt: string | null;
+  creditedAt: string | null;
   cancelledAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -573,6 +580,43 @@ export interface CreatePaymentOrderResponse {
   order: PaymentOrder;
   payUrl: string | null;
   qrCode: string | null;
+}
+
+export interface CreateRedemptionCodeRequest {
+  balance: number;
+  count?: number;
+  expiresAt?: string | null;
+}
+
+export interface RedemptionCode {
+  codeId: string;
+  code: string;
+  balance: number;
+  enabled: boolean;
+  used: boolean;
+  usedByUserId: string | null;
+  usedByUsername: string | null;
+  usedAt: string | null;
+  expiresAt: string | null;
+  createdByUserId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateRedemptionCodesResponse {
+  total: number;
+  codes: RedemptionCode[];
+}
+
+export interface RedeemCodeRequest {
+  code: string;
+}
+
+export interface RedeemCodeResponse {
+  codeId: string;
+  redeemedBalance: number;
+  balance: number;
+  redeemedAt: string;
 }
 
 export interface OpenAiQuotaWindowResponse {
@@ -596,4 +640,3 @@ export interface OpenAiQuotaResponse {
   fiveHour: OpenAiQuotaWindowResponse | null;
   sevenDay: OpenAiQuotaWindowResponse | null;
 }
-

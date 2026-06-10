@@ -37,4 +37,10 @@ public interface PaymentApi {
         ServerWebExchange exchange,
         @PathVariable String orderId
     );
+
+    @PostMapping("/redeem-code")
+    Mono<ApiResponse<PaymentDtos.RedeemCodeResponse>> redeemCode(
+        ServerWebExchange exchange,
+        @Valid @RequestBody PaymentDtos.RedeemCodeRequest request
+    );
 }

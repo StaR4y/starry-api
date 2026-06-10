@@ -55,6 +55,12 @@ public interface AdminUserApi {
         @RequestBody AdminDtos.CreateInviteCodeRequest request
     );
 
+    @PostMapping("/invite-codes/batch")
+    Mono<ApiResponse<AdminDtos.CreateInviteCodesResponse>> createInviteCodes(
+        ServerWebExchange exchange,
+        @Valid @RequestBody AdminDtos.CreateInviteCodeRequest request
+    );
+
     @PostMapping("/invite-codes/{codeId}/revoke")
     Mono<ApiResponse<AdminDtos.InviteCodeResponse>> revokeInviteCode(
         ServerWebExchange exchange,

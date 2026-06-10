@@ -6,6 +6,7 @@ import type {
   ApiResponse,
   CreateAdminUserRequest,
   CreateInviteCodeRequest,
+  CreateInviteCodesResponse,
   RegistrationSettings,
   InviteCode,
   ResetPasswordResult,
@@ -48,6 +49,11 @@ export const usersApi = {
   createInviteCode(payload: CreateInviteCodeRequest = {}) {
     return unwrap<InviteCode>(
       http.post<ApiResponse<InviteCode>>('/admin/users/invite-codes', payload),
+    );
+  },
+  createInviteCodes(payload: CreateInviteCodeRequest = {}) {
+    return unwrap<CreateInviteCodesResponse>(
+      http.post<ApiResponse<CreateInviteCodesResponse>>('/admin/users/invite-codes/batch', payload),
     );
   },
   revokeInviteCode(codeId: string) {

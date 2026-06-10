@@ -34,6 +34,9 @@
     smtpUseTls: false,
     smtpSecurity: 'auto' as SmtpSecurityMode,
   });
+  const inviteCodeForm = reactive({
+    count: 1,
+  });
   const smtpSecurityOptions: Array<{ label: string; value: SmtpSecurityMode }> = [
     { label: '自动', value: 'auto' },
     { label: 'SSL / TLS', value: 'ssl' },
@@ -287,12 +290,16 @@
   }
 
   async function createInviteCode() {
+    if (!Number.isInteger(inviteCodeForm.count) || inviteCodeForm.count < 1 || inviteCodeForm.count > 100) {
+      ElMessage.warning('邀请码生成数量需在 1 到 100 之间');
+      return;
+    }
     inviteCodeCreating.value = true;
     try {
-      const code = await usersApi.createInviteCode();
-      inviteCodes.value = [code, ...inviteCodes.value];
-      await copy(code.code);
-      ElMessage.success('邀请码已生成并复制');
+      const result = await usersApi.createInviteCodes({ count: inviteCodeForm.count });
+      inviteCodes.value = [...result.codes, ...inviteCodes.value];
+      await copy(result.codes.map((code) => code.code).join('\n'));
+      ElMessage.success(`已生成 ${formatNumber(result.total)} 个邀请码并复制`);
     } finally {
       inviteCodeCreating.value = false;
     }
@@ -484,14 +491,24 @@
               <div class="smtp-section-header">邀请码管理</div>
               <div class="setting-desc">邀请码为一次性使用，用户注册成功后自动失效。</div>
             </div>
-            <el-button
-              type="primary"
-              size="small"
-              :loading="inviteCodeCreating"
-              @click="createInviteCode"
-            >
-              生成邀请码
-            </el-button>
+            <div class="invite-section__actions">
+              <el-input-number
+                v-model="inviteCodeForm.count"
+                :min="1"
+                :max="100"
+                :precision="0"
+                size="small"
+                controls-position="right"
+              />
+              <el-button
+                type="primary"
+                size="small"
+                :loading="inviteCodeCreating"
+                @click="createInviteCode"
+              >
+                批量生成
+              </el-button>
+            </div>
           </div>
 
           <el-table v-loading="inviteCodeLoading" :data="inviteCodes" size="small" max-height="260" stripe>
@@ -734,6 +751,12 @@
       align-items: flex-start;
       gap: 16px;
       margin-bottom: 12px;
+    }
+
+    &__actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
   }
 

@@ -16,6 +16,7 @@ import { formatDateTime, formatNumber } from '@/utils/format';
   const auth = useAuthStore();
   const loading = ref(false);
   const creating = ref(false);
+  const redeeming = ref(false);
   const orders = ref<PaymentOrder[]>([]);
   const activeOrder = ref<PaymentOrder | null>(null);
   const settings = ref<PaymentSettings | null>(null);
@@ -26,6 +27,10 @@ import { formatDateTime, formatNumber } from '@/utils/format';
   }>({
     amount: 10,
     paymentType: 'alipay',
+  });
+
+  const redeemForm = reactive({
+    code: '',
   });
 
   const paymentTypeLabels: Record<PaymentType, string> = {
@@ -163,6 +168,23 @@ import { formatDateTime, formatNumber } from '@/utils/format';
     orders.value = orders.value.map((item) => (item.orderId === updated.orderId ? updated : item));
     if (activeOrder.value?.orderId === updated.orderId) activeOrder.value = null;
     ElMessage.success('订单已取消');
+  }
+
+  async function redeemCode() {
+    const code = redeemForm.code.trim();
+    if (!code) {
+      ElMessage.warning('请输入兑换码');
+      return;
+    }
+    redeeming.value = true;
+    try {
+      const result = await paymentApi.redeemCode({ code });
+      redeemForm.code = '';
+      await auth.refreshCurrentUser();
+      ElMessage.success(`兑换成功，已入账 ${formatNumber(result.redeemedBalance)} 余额`);
+    } finally {
+      redeeming.value = false;
+    }
   }
 
   onMounted(load);
@@ -316,6 +338,39 @@ import { formatDateTime, formatNumber } from '@/utils/format';
               @click="createOrder"
             >
               创建订单并支付
+            </el-button>
+          </el-form>
+        </div>
+
+        <!-- 兑换码充值面板 -->
+        <div class="payment__panel">
+          <div class="payment__panel-header">
+            <h3 class="panel-header-title">兑换码充值</h3>
+            <span class="custom-badge completed">即时入账</span>
+          </div>
+
+          <el-form label-position="top" class="payment__form">
+            <el-form-item label="兑换码">
+              <el-input
+                v-model="redeemForm.code"
+                placeholder="输入管理员发放的余额兑换码"
+                clearable
+                @keyup.enter="redeemCode"
+              />
+            </el-form-item>
+
+            <div class="payment__limits text-muted">
+              <el-icon><Warning /></el-icon>
+              <span>兑换码为一次性使用，兑换成功后余额会直接加入当前账号。</span>
+            </div>
+
+            <el-button
+              type="primary"
+              :loading="redeeming"
+              class="submit-btn"
+              @click="redeemCode"
+            >
+              兑换余额
             </el-button>
           </el-form>
         </div>

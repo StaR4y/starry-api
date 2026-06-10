@@ -2,6 +2,8 @@ package xyz.star4y.api.admin;
 
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.Size;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -138,8 +140,18 @@ public final class AdminDtos {
     }
 
     public record CreateInviteCodeRequest(
-        Instant expiresAt
+        Instant expiresAt,
+        @Min(1) @Max(100) Integer count
     ) {
+    }
+
+    public record CreateInviteCodesResponse(
+        Integer total,
+        List<InviteCodeResponse> codes
+    ) {
+        public CreateInviteCodesResponse {
+            codes = codes == null ? List.of() : List.copyOf(codes);
+        }
     }
 
     public record InviteCodeResponse(
