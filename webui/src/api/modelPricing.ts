@@ -14,7 +14,7 @@ export const modelPricingApi = {
   },
   update(payload: UpdateModelPricingRequest) {
     return unwrap<ModelPricingSettings>(
-      http.put<ApiResponse<ModelPricingSettings>>('/admin/model-pricing', payload),
+      http.post<ApiResponse<ModelPricingSettings>>('/admin/model-pricing', payload),
     );
   },
 };
