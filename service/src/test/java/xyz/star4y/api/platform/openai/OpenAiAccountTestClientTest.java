@@ -127,6 +127,65 @@ class OpenAiAccountTestClientTest {
         }
     }
 
+    @Test
+    void codexQuotaParsesOfficialResponseHeaders() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        AtomicReference<List<String>> authorization = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/responses", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            authorization.set(exchange.getRequestHeaders().get(HttpHeaders.AUTHORIZATION));
+            exchange.getResponseHeaders().set("x-codex-primary-used-percent", "25");
+            exchange.getResponseHeaders().set("x-codex-primary-reset-after-seconds", "604800");
+            exchange.getResponseHeaders().set("x-codex-primary-window-minutes", "10080");
+            exchange.getResponseHeaders().set("x-codex-secondary-used-percent", "40");
+            exchange.getResponseHeaders().set("x-codex-secondary-reset-after-seconds", "18000");
+            exchange.getResponseHeaders().set("x-codex-secondary-window-minutes", "300");
+            exchange.getResponseHeaders().set("x-codex-primary-over-secondary-limit-percent", "62.5");
+            byte[] response = """
+                {"error":{"type":"usage_limit_reached","message":"limit reached"}}
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "application/json");
+            exchange.sendResponseHeaders(429, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiAccountTestClient client = new OpenAiAccountTestClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
+
+            OpenAiAccountTestClient.OpenAiQuotaSnapshot quota = client.quota(account).block();
+
+            assertThat(quota).isNotNull();
+            assertThat(authorization.get()).containsExactly("Bearer test-access-token");
+            assertThat(quota.primary().usedPercent()).isEqualTo(25);
+            assertThat(quota.primary().remainingPercent()).isEqualTo(75);
+            assertThat(quota.secondary().usedPercent()).isEqualTo(40);
+            assertThat(quota.secondary().remainingPercent()).isEqualTo(60);
+            assertThat(quota.primaryOverSecondaryLimitPercent()).isEqualTo(62.5);
+            assertThat(quota.fiveHour().key()).isEqualTo("5h");
+            assertThat(quota.fiveHour().usedPercent()).isEqualTo(40);
+            assertThat(quota.fiveHour().resetAfterSeconds()).isEqualTo(18000);
+            assertThat(quota.sevenDay().key()).isEqualTo("7d");
+            assertThat(quota.sevenDay().usedPercent()).isEqualTo(25);
+            assertThat(quota.sevenDay().resetAfterSeconds()).isEqualTo(604800);
+            assertThat(quota.fiveHour().resetAt()).isAfter(quota.checkedAt());
+
+            JsonNode body = objectMapper.readTree(requestBody.get());
+            assertThat(body.path("model").asText()).isEqualTo("gpt-5.4-mini");
+            assertThat(body.path("stream").asBoolean()).isTrue();
+            assertThat(body.path("store").asBoolean()).isFalse();
+        } finally {
+            server.stop(0);
+        }
+    }
+
     private ProxyAccountEntity codexAccount(String baseUrl) {
         ProxyAccountEntity account = new ProxyAccountEntity();
         account.setProvider(AccountPlatforms.OPENAI_PROVIDER);

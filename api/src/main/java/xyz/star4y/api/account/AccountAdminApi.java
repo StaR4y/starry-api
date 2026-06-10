@@ -58,6 +58,12 @@ public interface AccountAdminApi {
     @PostMapping("/{accountId}/reset")
     Mono<ApiResponse<AccountDtos.AccountResponse>> reset(ServerWebExchange exchange, @PathVariable String accountId);
 
+    @GetMapping("/{accountId}/openai-quota")
+    Mono<ApiResponse<AccountDtos.OpenAiQuotaResponse>> openAiQuota(
+        ServerWebExchange exchange,
+        @PathVariable String accountId
+    );
+
     @PostMapping("/test")
     Mono<ApiResponse<AccountDtos.TestAccountsResponse>> test(
         ServerWebExchange exchange,

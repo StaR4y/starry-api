@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import org.springframework.http.HttpHeaders;
@@ -52,6 +53,18 @@ public class OpenAiAccountTestClient {
         return testChatCompletions(account, model, prompt);
     }
 
+    public Mono<OpenAiQuotaSnapshot> quota(ProxyAccountEntity account) {
+        ObjectNode body = codexBody(DEFAULT_CODEX_TEST_MODEL, "hi");
+        return quotaCodexOnce(account, body)
+            .onErrorResume(error -> {
+                if (isUnauthorized(error) && tokenRefreshService.canRefresh(account)) {
+                    return tokenRefreshService.refresh(account)
+                        .flatMap(refreshedAccount -> quotaCodexOnce(refreshedAccount, body));
+                }
+                return Mono.error(error);
+            });
+    }
+
     private Mono<PlatformCompletionResult> testChatCompletions(ProxyAccountEntity account, String model, String prompt) {
         ObjectNode body = objectMapper.createObjectNode();
         body.put("model", model);
@@ -75,6 +88,18 @@ public class OpenAiAccountTestClient {
     }
 
     private Mono<PlatformCompletionResult> testCodex(ProxyAccountEntity account, String model, String prompt) {
+        ObjectNode body = codexBody(model, prompt);
+        return testCodexOnce(account, body)
+            .onErrorResume(error -> {
+                if (isUnauthorized(error) && tokenRefreshService.canRefresh(account)) {
+                    return tokenRefreshService.refresh(account)
+                        .flatMap(refreshedAccount -> testCodexOnce(refreshedAccount, body));
+                }
+                return Mono.error(error);
+            });
+    }
+
+    private ObjectNode codexBody(String model, String prompt) {
         ObjectNode body = objectMapper.createObjectNode();
         body.put("model", model);
         body.put("instructions", CODEX_TEST_INSTRUCTIONS);
@@ -88,15 +113,7 @@ public class OpenAiAccountTestClient {
         ObjectNode text = content.addObject();
         text.put("type", "input_text");
         text.put("text", prompt);
-
-        return testCodexOnce(account, body)
-            .onErrorResume(error -> {
-                if (isUnauthorized(error) && tokenRefreshService.canRefresh(account)) {
-                    return tokenRefreshService.refresh(account)
-                        .flatMap(refreshedAccount -> testCodexOnce(refreshedAccount, body));
-                }
-                return Mono.error(error);
-            });
+        return body;
     }
 
     private Mono<PlatformCompletionResult> testCodexOnce(ProxyAccountEntity account, ObjectNode body) {
@@ -106,6 +123,15 @@ public class OpenAiAccountTestClient {
             .headers(headers -> applyCodexHeaders(headers, account))
             .bodyValue(body)
             .exchangeToMono(response -> handleResponse(response, this::parseResponses, endpoint));
+    }
+
+    private Mono<OpenAiQuotaSnapshot> quotaCodexOnce(ProxyAccountEntity account, ObjectNode body) {
+        String endpoint = OpenAiEndpoints.codexApi(account.getBaseUrl(), "/responses");
+        return webClient.post()
+            .uri(endpoint)
+            .headers(headers -> applyCodexHeaders(headers, account))
+            .bodyValue(body)
+            .exchangeToMono(response -> handleQuotaResponse(response, endpoint));
     }
 
     private void applyOpenAiHeaders(HttpHeaders headers, ProxyAccountEntity account) {
@@ -119,6 +145,7 @@ public class OpenAiAccountTestClient {
         headers.setAccept(List.of(MediaType.TEXT_EVENT_STREAM, MediaType.APPLICATION_JSON));
         headers.set(HttpHeaders.USER_AGENT, CODEX_USER_AGENT);
         headers.set(HttpHeaders.CONNECTION, "Keep-Alive");
+        headers.set("OpenAI-Beta", "responses=experimental");
         headers.set("Originator", CODEX_ORIGINATOR);
         if (account.getUpstreamAccountId() != null && !account.getUpstreamAccountId().isBlank()) {
             headers.set("Chatgpt-Account-Id", account.getUpstreamAccountId());
@@ -146,6 +173,31 @@ public class OpenAiAccountTestClient {
                 } catch (Exception error) {
                     return Mono.error(new UpstreamException(502, invalidResponseMessage(endpoint, rawBody), false));
                 }
+            });
+    }
+
+    private Mono<OpenAiQuotaSnapshot> handleQuotaResponse(ClientResponse response, String endpoint) {
+        HttpStatusCode status = response.statusCode();
+        Instant checkedAt = Instant.now();
+        OpenAiQuotaSnapshot snapshot = quotaSnapshot(response.headers().asHttpHeaders(), checkedAt);
+        return response.bodyToMono(String.class)
+            .defaultIfEmpty("")
+            .flatMap(rawBody -> {
+                if (snapshot != null) {
+                    return Mono.just(snapshot);
+                }
+                if (status.isError()) {
+                    return Mono.error(new UpstreamException(
+                        status.value(),
+                        "OpenAI quota probe error " + status.value() + ": " + rawBody,
+                        isRecoverableStatus(status.value())
+                    ));
+                }
+                return Mono.error(new UpstreamException(
+                    502,
+                    "OpenAI quota probe returned no x-codex quota headers from " + endpoint,
+                    false
+                ));
             });
     }
 
@@ -332,6 +384,105 @@ public class OpenAiAccountTestClient {
         return lower.startsWith("gpt-5") || lower.startsWith("o1") || lower.startsWith("o3") || lower.startsWith("o4");
     }
 
+    private OpenAiQuotaSnapshot quotaSnapshot(HttpHeaders headers, Instant checkedAt) {
+        OpenAiQuotaWindow primary = quotaWindow("primary", "primary", headers, "x-codex-primary", checkedAt);
+        OpenAiQuotaWindow secondary = quotaWindow("secondary", "secondary", headers, "x-codex-secondary", checkedAt);
+        Double primaryOverSecondary = parseDouble(headers.getFirst("x-codex-primary-over-secondary-limit-percent"));
+        if (primary == null && secondary == null && primaryOverSecondary == null) {
+            return null;
+        }
+        NormalizedQuotaWindows normalized = normalizeQuotaWindows(primary, secondary);
+        return new OpenAiQuotaSnapshot(
+            primary,
+            secondary,
+            normalized.fiveHour(),
+            normalized.sevenDay(),
+            primaryOverSecondary,
+            checkedAt
+        );
+    }
+
+    private OpenAiQuotaWindow quotaWindow(String key, String label, HttpHeaders headers, String prefix, Instant checkedAt) {
+        Double usedPercent = parseDouble(headers.getFirst(prefix + "-used-percent"));
+        Integer resetAfterSeconds = parseInt(headers.getFirst(prefix + "-reset-after-seconds"));
+        Integer windowMinutes = parseInt(headers.getFirst(prefix + "-window-minutes"));
+        if (usedPercent == null && resetAfterSeconds == null && windowMinutes == null) {
+            return null;
+        }
+        return window(key, label, usedPercent, resetAfterSeconds, windowMinutes, checkedAt);
+    }
+
+    private NormalizedQuotaWindows normalizeQuotaWindows(OpenAiQuotaWindow primary, OpenAiQuotaWindow secondary) {
+        if (primary == null && secondary == null) {
+            return new NormalizedQuotaWindows(null, null);
+        }
+        if (primary != null && secondary != null && primary.windowMinutes() != null && secondary.windowMinutes() != null) {
+            return primary.windowMinutes() <= secondary.windowMinutes()
+                ? new NormalizedQuotaWindows(normalizeWindow("5h", "5小时窗口", primary), normalizeWindow("7d", "7天窗口", secondary))
+                : new NormalizedQuotaWindows(normalizeWindow("5h", "5小时窗口", secondary), normalizeWindow("7d", "7天窗口", primary));
+        }
+        OpenAiQuotaWindow fiveHour = classifyWindow(primary, true);
+        OpenAiQuotaWindow sevenDay = classifyWindow(primary, false);
+        OpenAiQuotaWindow secondaryFiveHour = classifyWindow(secondary, true);
+        OpenAiQuotaWindow secondarySevenDay = classifyWindow(secondary, false);
+        return new NormalizedQuotaWindows(
+            fiveHour != null ? fiveHour : secondaryFiveHour,
+            sevenDay != null ? sevenDay : secondarySevenDay
+        );
+    }
+
+    private OpenAiQuotaWindow classifyWindow(OpenAiQuotaWindow window, boolean fiveHour) {
+        if (window == null || window.windowMinutes() == null) {
+            return null;
+        }
+        boolean isFiveHour = window.windowMinutes() <= 360;
+        if (fiveHour != isFiveHour) {
+            return null;
+        }
+        return normalizeWindow(fiveHour ? "5h" : "7d", fiveHour ? "5小时窗口" : "7天窗口", window);
+    }
+
+    private OpenAiQuotaWindow normalizeWindow(String key, String label, OpenAiQuotaWindow window) {
+        return window(key, label, window.usedPercent(), window.resetAfterSeconds(), window.windowMinutes(), window.checkedAt());
+    }
+
+    private OpenAiQuotaWindow window(
+        String key,
+        String label,
+        Double usedPercent,
+        Integer resetAfterSeconds,
+        Integer windowMinutes,
+        Instant checkedAt
+    ) {
+        Double remainingPercent = usedPercent == null ? null : Math.max(0.0, 100.0 - usedPercent);
+        Instant resetAt = resetAfterSeconds == null ? null : checkedAt.plusSeconds(Math.max(0, resetAfterSeconds));
+        return new OpenAiQuotaWindow(key, label, usedPercent, remainingPercent, resetAfterSeconds, resetAt, windowMinutes, checkedAt);
+    }
+
+    private Double parseDouble(String value) {
+        String cleaned = clean(value);
+        if (cleaned == null) {
+            return null;
+        }
+        try {
+            return Double.parseDouble(cleaned);
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private Integer parseInt(String value) {
+        String cleaned = clean(value);
+        if (cleaned == null) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(cleaned);
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
     private String clean(String value) {
         if (value == null) {
             return null;
@@ -352,5 +503,33 @@ public class OpenAiAccountTestClient {
     @FunctionalInterface
     private interface ResponseParser {
         PlatformCompletionResult parse(String rawBody) throws Exception;
+    }
+
+    public record OpenAiQuotaSnapshot(
+        OpenAiQuotaWindow primary,
+        OpenAiQuotaWindow secondary,
+        OpenAiQuotaWindow fiveHour,
+        OpenAiQuotaWindow sevenDay,
+        Double primaryOverSecondaryLimitPercent,
+        Instant checkedAt
+    ) {
+    }
+
+    public record OpenAiQuotaWindow(
+        String key,
+        String label,
+        Double usedPercent,
+        Double remainingPercent,
+        Integer resetAfterSeconds,
+        Instant resetAt,
+        Integer windowMinutes,
+        Instant checkedAt
+    ) {
+    }
+
+    private record NormalizedQuotaWindows(
+        OpenAiQuotaWindow fiveHour,
+        OpenAiQuotaWindow sevenDay
+    ) {
     }
 }

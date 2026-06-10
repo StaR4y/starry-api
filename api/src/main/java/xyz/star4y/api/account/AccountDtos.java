@@ -166,6 +166,30 @@ public final class AccountDtos {
     ) {
     }
 
+    public record OpenAiQuotaResponse(
+        String accountId,
+        String email,
+        String source,
+        Instant checkedAt,
+        Double primaryOverSecondaryLimitPercent,
+        OpenAiQuotaWindowResponse primary,
+        OpenAiQuotaWindowResponse secondary,
+        OpenAiQuotaWindowResponse fiveHour,
+        OpenAiQuotaWindowResponse sevenDay
+    ) {
+    }
+
+    public record OpenAiQuotaWindowResponse(
+        String key,
+        String label,
+        Double usedPercent,
+        Double remainingPercent,
+        Integer resetAfterSeconds,
+        Instant resetAt,
+        Integer windowMinutes
+    ) {
+    }
+
     public record AccountResponse(
         String accountId,
         String email,

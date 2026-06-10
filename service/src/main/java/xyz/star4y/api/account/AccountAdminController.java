@@ -17,6 +17,7 @@ public class AccountAdminController implements AccountAdminApi {
     private final AccountPoolService service;
     private final AccountImportParser importParser;
     private final AccountTestService testService;
+    private final AccountOpenAiQuotaService openAiQuotaService;
     private final AccountSettingsService settingsService;
     private final AdminAuth adminAuth;
 
@@ -24,12 +25,14 @@ public class AccountAdminController implements AccountAdminApi {
         AccountPoolService service,
         AccountImportParser importParser,
         AccountTestService testService,
+        AccountOpenAiQuotaService openAiQuotaService,
         AccountSettingsService settingsService,
         AdminAuth adminAuth
     ) {
         this.service = service;
         this.importParser = importParser;
         this.testService = testService;
+        this.openAiQuotaService = openAiQuotaService;
         this.settingsService = settingsService;
         this.adminAuth = adminAuth;
     }
@@ -107,6 +110,15 @@ public class AccountAdminController implements AccountAdminApi {
         return service.resetState(accountId)
             .map(AccountMapper::toResponse)
             .map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<AccountDtos.OpenAiQuotaResponse>> openAiQuota(
+        ServerWebExchange exchange,
+        @PathVariable String accountId
+    ) {
+        adminAuth.verifyAdmin(exchange);
+        return openAiQuotaService.quota(accountId).map(ApiResponse::ok);
     }
 
     @Override
