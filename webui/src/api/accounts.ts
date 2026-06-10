@@ -14,11 +14,17 @@ import type {
   TestAccountsResult,
   UpdateAccountSettingsRequest,
   UpdateAccountRequest,
+  OpenAiQuotaResponse,
 } from '@/types/api';
 
 export const accountsApi = {
   list() {
     return unwrap<Account[]>(http.get<ApiResponse<Account[]>>('/admin/accounts'));
+  },
+  openAiQuota(accountId: string) {
+    return unwrap<OpenAiQuotaResponse>(
+      http.get<ApiResponse<OpenAiQuotaResponse>>(`/admin/accounts/${accountId}/openai-quota`),
+    );
   },
   create(payload: CreateAccountRequest) {
     return unwrap<Account>(http.post<ApiResponse<Account>>('/admin/accounts', payload));

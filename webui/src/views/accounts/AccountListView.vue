@@ -25,6 +25,7 @@
     TestModelOption,
     TestModelOptionsResult,
     TestAccountsResult,
+    OpenAiQuotaResponse,
   } from '@/types/api';
   import { formatDateTime, formatNumber, shorten } from '@/utils/format';
 
@@ -74,10 +75,117 @@
     return { label: '可用', tone: 'success' as const };
   }
 
+  function getQuotaInfo(row: Account) {
+    const used = Math.max(0, row.quotaUsed || 0);
+    const limit = row.quotaLimit;
+    const hasLimit = limit !== null && limit !== undefined && limit > 0;
+
+    if (!hasLimit) {
+      return {
+        hasLimit: false,
+        used,
+        percentage: 100,
+        remaining: 0,
+        status: 'success' as const
+      };
+    }
+
+    const remaining = Math.max(0, limit - used);
+    const percentage = Math.round((remaining / limit) * 100);
+
+    let status: 'success' | 'warning' | 'exception' = 'success';
+    if (percentage <= 15) {
+      status = 'exception';
+    } else if (percentage <= 40) {
+      status = 'warning';
+    }
+
+    return {
+      hasLimit: true,
+      used,
+      limit,
+      remaining,
+      percentage,
+      status
+    };
+  }
+
+  const openAiQuotas = ref<Record<string, { loading: boolean; error?: string; data?: OpenAiQuotaResponse }>>({});
+
+  function isCodexAccount(row: Account) {
+    const provider = (row.provider || '').trim().toLowerCase();
+    const authMethod = (row.authMethod || '').trim().toLowerCase();
+    return provider === 'codex' || authMethod === 'codex';
+  }
+
+  async function fetchOpenAiQuota(accountId: string, force = false) {
+    if (!force && openAiQuotas.value[accountId]?.data) return;
+
+    openAiQuotas.value[accountId] = { loading: true };
+    try {
+      const res = await accountsApi.openAiQuota(accountId);
+      openAiQuotas.value[accountId] = { loading: false, data: res };
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : String(err);
+      openAiQuotas.value[accountId] = { loading: false, error: msg };
+    }
+  }
+
+  function getOpenAiQuotaInfo(data: OpenAiQuotaResponse | undefined) {
+    if (!data) {
+      return {
+        hasData: false,
+        percentage: 100,
+        status: 'success' as const,
+        label: '未知',
+        activeWindow: null
+      };
+    }
+
+    const fiveHour = data.fiveHour;
+    const sevenDay = data.sevenDay;
+
+    let activeWindow = fiveHour || sevenDay;
+    if (fiveHour && sevenDay) {
+      activeWindow = (fiveHour.remainingPercent ?? 100) < (sevenDay.remainingPercent ?? 100) ? fiveHour : sevenDay;
+    }
+
+    if (!activeWindow) {
+      return {
+        hasData: false,
+        percentage: 100,
+        status: 'success' as const,
+        label: '无限制',
+        activeWindow: null
+      };
+    }
+
+    const percentage = Math.round(activeWindow.remainingPercent ?? 100);
+    let status: 'success' | 'warning' | 'exception' = 'success';
+    if (percentage <= 15) {
+      status = 'exception';
+    } else if (percentage <= 40) {
+      status = 'warning';
+    }
+
+    return {
+      hasData: true,
+      percentage,
+      status,
+      label: activeWindow.label || (activeWindow.key === '5h' ? '5小时' : '7天'),
+      activeWindow
+    };
+  }
+
   async function loadAccounts() {
     loading.value = true;
     try {
       accounts.value = await accountsApi.list();
+      accounts.value.forEach((account) => {
+        if (isCodexAccount(account)) {
+          fetchOpenAiQuota(account.accountId);
+        }
+      });
     } finally {
       loading.value = false;
     }
@@ -960,9 +1068,138 @@
           {{ formatNumber(row.requestCount) }} / {{ formatNumber(row.errorCount) }}
         </template>
       </el-table-column>
-      <el-table-column label="配额 (used/limit)" width="150">
+      <el-table-column label="可用配额" width="180">
         <template #default="{ row }">
-          {{ formatNumber(row.quotaUsed) }} / {{ formatNumber(row.quotaLimit) }}
+          <div v-if="isCodexAccount(row)" class="quota-cell is-codex">
+            <template v-if="openAiQuotas[row.accountId]?.loading">
+              <div class="quota-meta">
+                <span class="quota-loading-text">
+                  <span class="quota-spinner"></span>
+                  正在获取官方配额...
+                </span>
+              </div>
+              <div class="quota-loading-bar" />
+            </template>
+            <template v-else-if="openAiQuotas[row.accountId]?.error">
+              <div class="quota-meta">
+                <el-tooltip :content="openAiQuotas[row.accountId].error" placement="top" effect="dark">
+                  <span class="quota-error-text">获取失败</span>
+                </el-tooltip>
+                <el-button link type="primary" size="small" class="quota-refresh-btn" @click.stop="fetchOpenAiQuota(row.accountId, true)">
+                  <svg class="icon-refresh" viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 2px;">
+                    <polyline points="23 4 23 10 17 10" />
+                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                  </svg>
+                  重试
+                </el-button>
+              </div>
+              <el-progress
+                v-if="getQuotaInfo(row).hasLimit"
+                :percentage="getQuotaInfo(row).percentage"
+                :status="getQuotaInfo(row).status"
+                :stroke-width="6"
+                :show-text="false"
+                class="quota-progress"
+              />
+              <div v-else class="quota-unlimited-bar" />
+            </template>
+            <template v-else-if="openAiQuotas[row.accountId]?.data">
+              <el-tooltip placement="top" effect="dark">
+                <template #content>
+                  <div class="quota-tooltip-content">
+                    <div v-if="openAiQuotas[row.accountId]?.data?.fiveHour">
+                      <strong>5小时窗口:</strong>
+                      已用 {{ openAiQuotas[row.accountId]?.data?.fiveHour?.usedPercent }}%,
+                      剩余 {{ openAiQuotas[row.accountId]?.data?.fiveHour?.remainingPercent }}%
+                      <span v-if="openAiQuotas[row.accountId]?.data?.fiveHour?.resetAt">
+                        (重置: {{ formatDateTime(openAiQuotas[row.accountId]?.data?.fiveHour?.resetAt) }})
+                      </span>
+                    </div>
+                    <div v-if="openAiQuotas[row.accountId]?.data?.sevenDay" style="margin-top: 4px;">
+                      <strong>7天窗口:</strong>
+                      已用 {{ openAiQuotas[row.accountId]?.data?.sevenDay?.usedPercent }}%,
+                      剩余 {{ openAiQuotas[row.accountId]?.data?.sevenDay?.remainingPercent }}%
+                      <span v-if="openAiQuotas[row.accountId]?.data?.sevenDay?.resetAt">
+                        (重置: {{ formatDateTime(openAiQuotas[row.accountId]?.data?.sevenDay?.resetAt) }})
+                      </span>
+                    </div>
+                    <div style="margin-top: 6px; font-size: 10px; opacity: 0.8; border-top: 1px solid rgba(255,255,255,0.15); padding-top: 4px;">
+                      数据源: {{ openAiQuotas[row.accountId]?.data?.source }}<br />
+                      更新时间: {{ formatDateTime(openAiQuotas[row.accountId]?.data?.checkedAt) }}
+                    </div>
+                  </div>
+                </template>
+                <div class="quota-wrapper-hoverable">
+                  <div class="quota-meta">
+                    <span class="quota-remaining" :class="'is-' + getOpenAiQuotaInfo(openAiQuotas[row.accountId]?.data).status">
+                      {{ getOpenAiQuotaInfo(openAiQuotas[row.accountId]?.data).percentage }}% 剩余 ({{ getOpenAiQuotaInfo(openAiQuotas[row.accountId]?.data).label }})
+                    </span>
+                    <el-button link type="primary" size="small" class="quota-refresh-btn-mini" @click.stop="fetchOpenAiQuota(row.accountId, true)">
+                      <svg class="icon-refresh" viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="23 4 23 10 17 10" />
+                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                      </svg>
+                    </el-button>
+                  </div>
+                  <el-progress
+                    :percentage="getOpenAiQuotaInfo(openAiQuotas[row.accountId].data).percentage"
+                    :status="getOpenAiQuotaInfo(openAiQuotas[row.accountId].data).status"
+                    :stroke-width="6"
+                    :show-text="false"
+                    class="quota-progress"
+                  />
+                </div>
+              </el-tooltip>
+            </template>
+            <template v-else>
+              <div class="quota-meta">
+                <span class="quota-fallback-label">未获取官方配额</span>
+                <el-button link type="primary" size="small" class="quota-refresh-btn" @click.stop="fetchOpenAiQuota(row.accountId, true)">
+                  <svg class="icon-refresh" viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 2px;">
+                    <polyline points="23 4 23 10 17 10" />
+                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+                  </svg>
+                  获取
+                </el-button>
+              </div>
+              <el-progress
+                v-if="getQuotaInfo(row).hasLimit"
+                :percentage="getQuotaInfo(row).percentage"
+                :status="getQuotaInfo(row).status"
+                :stroke-width="6"
+                :show-text="false"
+                class="quota-progress"
+              />
+              <div v-else class="quota-unlimited-bar" />
+            </template>
+          </div>
+
+          <div v-else class="quota-cell">
+            <template v-if="getQuotaInfo(row).hasLimit">
+              <div class="quota-meta">
+                <span class="quota-remaining" :class="'is-' + getQuotaInfo(row).status">
+                  {{ formatNumber(getQuotaInfo(row).remaining) }} 剩余
+                </span>
+                <span class="quota-divider">/</span>
+                <span class="quota-limit">{{ formatNumber(getQuotaInfo(row).limit) }}</span>
+              </div>
+              <el-progress
+                :percentage="getQuotaInfo(row).percentage"
+                :status="getQuotaInfo(row).status"
+                :stroke-width="6"
+                :show-text="false"
+                class="quota-progress"
+              />
+            </template>
+            <template v-else>
+              <div class="quota-meta">
+                <span class="quota-used">{{ formatNumber(getQuotaInfo(row).used) }} 已用</span>
+                <span class="quota-divider">/</span>
+                <span class="quota-limit-unlimited">无限制</span>
+              </div>
+              <div class="quota-unlimited-bar" />
+            </template>
+          </div>
         </template>
       </el-table-column>
       <el-table-column label="最近使用" width="160">
@@ -1720,6 +1957,183 @@
     font-size: 12px;
     font-weight: 700;
     white-space: nowrap;
+  }
+
+  .quota-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    width: 100%;
+    padding: 2px 0;
+
+    .quota-meta {
+      display: flex;
+      align-items: center;
+      font-size: 11.5px;
+      line-height: 1.2;
+      color: var(--kp-text-secondary);
+      font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+
+      .quota-remaining {
+        font-weight: 600;
+
+        &.is-success {
+          color: var(--el-color-success);
+        }
+        &.is-warning {
+          color: var(--el-color-warning);
+        }
+        &.is-exception {
+          color: var(--el-color-danger);
+        }
+      }
+
+      .quota-used {
+        font-weight: 600;
+        color: var(--kp-text-secondary);
+      }
+
+      .quota-divider {
+        margin: 0 4px;
+        color: var(--kp-text-muted);
+      }
+
+      .quota-limit {
+        color: var(--kp-text-muted);
+      }
+
+      .quota-limit-unlimited {
+        color: var(--kp-text-muted);
+        font-style: italic;
+      }
+    }
+
+    .quota-progress {
+      margin: 0;
+      width: 100%;
+      :deep(.el-progress-bar__outer) {
+        background-color: rgba(15, 23, 42, 0.06) !important;
+      }
+    }
+
+    .quota-unlimited-bar {
+      height: 6px;
+      border-radius: 100px;
+      background: linear-gradient(90deg, rgba(66, 133, 244, 0.2) 0%, rgba(66, 133, 244, 0.05) 100%);
+      width: 100%;
+    }
+
+    &.is-codex {
+      .quota-loading-text {
+        display: inline-flex;
+        align-items: center;
+        font-size: 11px;
+        color: var(--kp-text-muted);
+      }
+
+      .quota-spinner {
+        display: inline-block;
+        width: 10px;
+        height: 10px;
+        border: 1.5px solid rgba(66, 133, 244, 0.2);
+        border-top-color: #4285f4;
+        border-radius: 50%;
+        animation: quota-spin 0.8s linear infinite;
+        margin-right: 6px;
+        flex-shrink: 0;
+      }
+
+      .quota-loading-bar {
+        height: 6px;
+        border-radius: 100px;
+        background: linear-gradient(90deg, rgba(66, 133, 244, 0.1) 25%, rgba(66, 133, 244, 0.3) 50%, rgba(66, 133, 244, 0.1) 75%);
+        background-size: 200% 100%;
+        animation: quota-loading-sweep 1.5s infinite linear;
+        width: 100%;
+      }
+
+      .quota-error-text {
+        color: var(--el-color-danger);
+        font-weight: 600;
+        cursor: help;
+        text-decoration: underline dotted;
+      }
+
+      .quota-refresh-btn {
+        margin-left: auto;
+        padding: 0;
+        height: auto;
+        font-size: 11px;
+        display: inline-flex;
+        align-items: center;
+        gap: 2px;
+        
+        .icon-refresh {
+          transition: transform 0.25s ease;
+        }
+
+        &:hover .icon-refresh {
+          transform: rotate(180deg);
+        }
+      }
+
+      .quota-refresh-btn-mini {
+        margin-left: 6px;
+        padding: 0;
+        height: auto;
+        font-size: 10px;
+        opacity: 0;
+        transition: opacity 0.2s ease;
+        display: inline-flex;
+        align-items: center;
+        
+        .icon-refresh {
+          color: var(--kp-text-muted);
+          transition: transform 0.25s ease, color 0.2s ease;
+        }
+
+        &:hover .icon-refresh {
+          transform: rotate(180deg);
+          color: var(--kp-primary);
+        }
+      }
+
+      .quota-wrapper-hoverable {
+        cursor: pointer;
+        width: 100%;
+
+        &:hover {
+          .quota-refresh-btn-mini {
+            opacity: 1;
+          }
+        }
+      }
+
+      .quota-fallback-label {
+        font-size: 11px;
+        color: var(--kp-text-muted);
+      }
+    }
+  }
+
+  .quota-tooltip-content {
+    font-size: 12px;
+    line-height: 1.55;
+    padding: 2px 4px;
+    font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+    
+    strong {
+      color: #93c5fd;
+    }
+  }
+
+  @keyframes quota-spin {
+    to { transform: rotate(360deg); }
+  }
+
+  @keyframes quota-loading-sweep {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
   }
 
   @media (max-width: 1024px) {

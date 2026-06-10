@@ -574,3 +574,26 @@ export interface CreatePaymentOrderResponse {
   payUrl: string | null;
   qrCode: string | null;
 }
+
+export interface OpenAiQuotaWindowResponse {
+  key: string;
+  label: string;
+  usedPercent: number;
+  remainingPercent: number;
+  resetAfterSeconds: number;
+  resetAt: string;
+  windowMinutes: number;
+}
+
+export interface OpenAiQuotaResponse {
+  accountId: string;
+  email: string;
+  source: string;
+  checkedAt: string;
+  primaryOverSecondaryLimitPercent: number | null;
+  primary: OpenAiQuotaWindowResponse | null;
+  secondary: OpenAiQuotaWindowResponse | null;
+  fiveHour: OpenAiQuotaWindowResponse | null;
+  sevenDay: OpenAiQuotaWindowResponse | null;
+}
+
