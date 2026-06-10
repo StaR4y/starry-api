@@ -24,7 +24,7 @@ class ModelPricingServiceTest {
     private final ObjectMapper objectMapper = JsonMapper.builder().findAndAddModules().build();
 
     @Test
-    void chargesMatchedModelWithInputAndOutputMultipliers() {
+    void chargesMatchedModelWithInputAndOutputPricesPerMillionTokens() {
         Map<String, String> store = new ConcurrentHashMap<>();
         SystemSettingRepository repository = mockRepository(store);
         ModelPricingService service = new ModelPricingService(repository, objectMapper);
@@ -34,8 +34,11 @@ class ModelPricingServiceTest {
                 null,
                 true,
                 "gpt-5*",
-                new BigDecimal("0.00001"),
-                new BigDecimal("0.00003"),
+                null,
+                null,
+                null,
+                new BigDecimal("10"),
+                new BigDecimal("30"),
                 null,
                 10
             )
@@ -43,6 +46,8 @@ class ModelPricingServiceTest {
 
         assertThat(response).isNotNull();
         assertThat(response.rules()).hasSize(1);
+        assertThat(response.rules().getFirst().inputPricePerMillionTokens()).isEqualByComparingTo("10");
+        assertThat(response.rules().getFirst().outputPricePerMillionTokens()).isEqualByComparingTo("30");
         BigDecimal cost = service.cost(
             "gpt-5.2",
             new PlatformUsage(1_000, 2_000, BigDecimal.ZERO, 0, 0, 0),
@@ -68,8 +73,8 @@ class ModelPricingServiceTest {
         ModelPricingService service = new ModelPricingService(repository, objectMapper);
 
         service.update(new ModelDtos.UpdateModelPricingRequest(List.of(
-            new ModelDtos.UpdateModelPricingRuleRequest(null, true, "*", null, null, new BigDecimal("1"), 100),
-            new ModelDtos.UpdateModelPricingRuleRequest(null, true, "anthropic/*", null, null, new BigDecimal("0.5"), 10)
+            new ModelDtos.UpdateModelPricingRuleRequest(null, true, "*", null, null, new BigDecimal("1"), null, null, null, 100),
+            new ModelDtos.UpdateModelPricingRuleRequest(null, true, "anthropic/*", null, null, new BigDecimal("0.5"), null, null, null, 10)
         ))).block();
 
         BigDecimal cost = service.cost(
@@ -80,6 +85,40 @@ class ModelPricingServiceTest {
         ).block();
 
         assertThat(cost).isEqualByComparingTo("2.000000");
+    }
+
+    @Test
+    void chargesTotalPricePerMillionTokens() {
+        Map<String, String> store = new ConcurrentHashMap<>();
+        SystemSettingRepository repository = mockRepository(store);
+        ModelPricingService service = new ModelPricingService(repository, objectMapper);
+
+        ModelDtos.ModelPricingResponse response = service.update(new ModelDtos.UpdateModelPricingRequest(List.of(
+            new ModelDtos.UpdateModelPricingRuleRequest(
+                null,
+                true,
+                "*",
+                null,
+                null,
+                null,
+                null,
+                null,
+                new BigDecimal("16.6666666667"),
+                100
+            )
+        ))).block();
+
+        assertThat(response).isNotNull();
+        assertThat(response.rules().getFirst().totalPricePerMillionTokens()).isEqualByComparingTo("16.6666666667");
+
+        BigDecimal cost = service.cost(
+            "gpt-5.4-mini",
+            new PlatformUsage(3_000_000, 3_000_000, BigDecimal.ZERO, 0, 0, 0),
+            false,
+            BigDecimal.ONE
+        ).block();
+
+        assertThat(cost).isEqualByComparingTo("100.000000");
     }
 
     @Test

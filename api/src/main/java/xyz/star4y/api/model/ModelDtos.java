@@ -105,6 +105,9 @@ public final class ModelDtos {
         BigDecimal inputMultiplier,
         BigDecimal outputMultiplier,
         BigDecimal totalMultiplier,
+        BigDecimal inputPricePerMillionTokens,
+        BigDecimal outputPricePerMillionTokens,
+        BigDecimal totalPricePerMillionTokens,
         Integer priority,
         Instant createdAt,
         Instant updatedAt
@@ -126,6 +129,9 @@ public final class ModelDtos {
         BigDecimal inputMultiplier,
         BigDecimal outputMultiplier,
         BigDecimal totalMultiplier,
+        BigDecimal inputPricePerMillionTokens,
+        BigDecimal outputPricePerMillionTokens,
+        BigDecimal totalPricePerMillionTokens,
         Integer priority
     ) {
     }

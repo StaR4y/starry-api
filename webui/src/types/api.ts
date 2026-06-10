@@ -404,6 +404,9 @@ export interface ModelPricingRule {
   inputMultiplier: number | null;
   outputMultiplier: number | null;
   totalMultiplier: number | null;
+  inputPricePerMillionTokens: number | null;
+  outputPricePerMillionTokens: number | null;
+  totalPricePerMillionTokens: number | null;
   priority: number;
   createdAt: string | null;
   updatedAt: string | null;
@@ -420,6 +423,9 @@ export interface UpdateModelPricingRuleRequest {
   inputMultiplier?: number | null;
   outputMultiplier?: number | null;
   totalMultiplier?: number | null;
+  inputPricePerMillionTokens?: number | null;
+  outputPricePerMillionTokens?: number | null;
+  totalPricePerMillionTokens?: number | null;
   priority?: number;
 }
 

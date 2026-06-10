@@ -16,15 +16,16 @@
     ruleId?: string;
     enabled: boolean;
     modelPattern: string;
-    inputMultiplier: number | null;
-    outputMultiplier: number | null;
-    totalMultiplier: number | null;
+    inputPricePerMillionTokens: number | null;
+    outputPricePerMillionTokens: number | null;
+    totalPricePerMillionTokens: number | null;
     priority: number;
     createdAt?: string | null;
     updatedAt?: string | null;
   }
 
-  const DEFAULT_TOTAL_MULTIPLIER = 0.0000166666666667;
+  const TOKENS_PER_MILLION = 1_000_000;
+  const DEFAULT_TOTAL_PRICE_PER_MILLION = 16.6666666667;
   const loading = ref(false);
   const submitting = ref(false);
   const rules = ref<EditableRule[]>([]);
@@ -42,8 +43,8 @@
     return {
       total: rules.value.length,
       active: active.length,
-      totalPrice: active.filter((rule) => isPositive(rule.totalMultiplier)).length,
-      splitPrice: active.filter((rule) => !isPositive(rule.totalMultiplier)).length,
+      totalPrice: active.filter((rule) => isPositive(rule.totalPricePerMillionTokens)).length,
+      splitPrice: active.filter((rule) => !isPositive(rule.totalPricePerMillionTokens)).length,
     };
   });
 
@@ -53,9 +54,18 @@
       ruleId: rule.ruleId,
       enabled: rule.enabled !== false,
       modelPattern: rule.modelPattern,
-      inputMultiplier: numberOrNull(rule.inputMultiplier),
-      outputMultiplier: numberOrNull(rule.outputMultiplier),
-      totalMultiplier: numberOrNull(rule.totalMultiplier),
+      inputPricePerMillionTokens: pricePerMillionOrNull(
+        rule.inputPricePerMillionTokens,
+        rule.inputMultiplier,
+      ),
+      outputPricePerMillionTokens: pricePerMillionOrNull(
+        rule.outputPricePerMillionTokens,
+        rule.outputMultiplier,
+      ),
+      totalPricePerMillionTokens: pricePerMillionOrNull(
+        rule.totalPricePerMillionTokens,
+        rule.totalMultiplier,
+      ),
       priority: rule.priority ?? 100,
       createdAt: rule.createdAt,
       updatedAt: rule.updatedAt,
@@ -67,9 +77,9 @@
       tempId: crypto.randomUUID(),
       enabled: true,
       modelPattern: pattern,
-      inputMultiplier: null,
-      outputMultiplier: null,
-      totalMultiplier: DEFAULT_TOTAL_MULTIPLIER,
+      inputPricePerMillionTokens: null,
+      outputPricePerMillionTokens: null,
+      totalPricePerMillionTokens: DEFAULT_TOTAL_PRICE_PER_MILLION,
       priority: 100,
     });
   }
@@ -130,11 +140,11 @@
       }
       seen.add(lowerPattern);
 
-      const totalMultiplier = positiveOrNull(rule.totalMultiplier);
-      const inputMultiplier = positiveOrNull(rule.inputMultiplier);
-      const outputMultiplier = positiveOrNull(rule.outputMultiplier);
-      if (!totalMultiplier && (!inputMultiplier || !outputMultiplier)) {
-        ElMessage.warning(`第 ${index + 1} 条规则需要填写总 token 单价，或同时填写输入/输出单价`);
+      const totalPricePerMillionTokens = positiveOrNull(rule.totalPricePerMillionTokens);
+      const inputPricePerMillionTokens = positiveOrNull(rule.inputPricePerMillionTokens);
+      const outputPricePerMillionTokens = positiveOrNull(rule.outputPricePerMillionTokens);
+      if (!totalPricePerMillionTokens && (!inputPricePerMillionTokens || !outputPricePerMillionTokens)) {
+        ElMessage.warning(`第 ${index + 1} 条规则需要填写总价，或同时填写输入/输出价`);
         return null;
       }
 
@@ -142,9 +152,9 @@
         ruleId: rule.ruleId,
         enabled: rule.enabled,
         modelPattern: pattern,
-        totalMultiplier,
-        inputMultiplier: totalMultiplier ? null : inputMultiplier,
-        outputMultiplier: totalMultiplier ? null : outputMultiplier,
+        totalPricePerMillionTokens,
+        inputPricePerMillionTokens: totalPricePerMillionTokens ? null : inputPricePerMillionTokens,
+        outputPricePerMillionTokens: totalPricePerMillionTokens ? null : outputPricePerMillionTokens,
         priority: rule.priority ?? 100,
       });
     }
@@ -159,6 +169,13 @@
     return value === null || value === undefined ? null : Number(value);
   }
 
+  function pricePerMillionOrNull(price: number | null | undefined, multiplier: number | null | undefined) {
+    const normalizedPrice = numberOrNull(price);
+    if (normalizedPrice !== null) return normalizedPrice;
+    const normalizedMultiplier = numberOrNull(multiplier);
+    return normalizedMultiplier === null ? null : Number((normalizedMultiplier * TOKENS_PER_MILLION).toFixed(10));
+  }
+
   function positiveOrNull(value: number | null | undefined) {
     const normalized = numberOrNull(value);
     return normalized !== null && Number.isFinite(normalized) && normalized > 0 ? normalized : null;
@@ -169,14 +186,14 @@
   }
 
   function priceMode(rule: EditableRule) {
-    return isPositive(rule.totalMultiplier) ? '总 token' : '输入/输出';
+    return isPositive(rule.totalPricePerMillionTokens) ? '总价' : '输入/输出';
   }
 
   onMounted(load);
 </script>
 
 <template>
-  <PageSection title="模型价格" subtitle="按模型 ID 或通配符调整 API 余额扣费倍率，只有管理员可修改">
+  <PageSection title="模型价格" subtitle="按模型 ID 或通配符设置每 100 万 token 消耗多少余额，只有管理员可修改">
     <template #actions>
       <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
       <el-button @click="addRule()">新增规则</el-button>
@@ -207,7 +224,7 @@
         type="info"
         :closable="false"
         show-icon
-        title="未命中任何规则时，仍使用支付设置里的 API计费倍率。总 token 单价优先；留空总价时，必须同时配置输入和输出单价。"
+        title="单位统一为余额 / 1M token。总价优先；留空总价时，必须同时配置输入价和输出价。默认 16.6666666667 表示 100 余额约可用 600 万 token。"
       />
 
       <div class="table-actions">
@@ -251,13 +268,13 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="总 token 单价" width="190" align="right">
+        <el-table-column label="总价 (余额/1M token)" width="210" align="right">
           <template #default="{ row }">
             <el-input-number
-              v-model="row.totalMultiplier"
+              v-model="row.totalPricePerMillionTokens"
               :min="0"
-              :precision="16"
-              :step="0.000000000001"
+              :precision="10"
+              :step="0.1"
               controls-position="right"
               placeholder="留空使用拆分价"
               style="width: 100%"
@@ -265,29 +282,29 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="输入 token 单价" width="190" align="right">
+        <el-table-column label="输入价 (余额/1M token)" width="210" align="right">
           <template #default="{ row }">
             <el-input-number
-              v-model="row.inputMultiplier"
+              v-model="row.inputPricePerMillionTokens"
               :min="0"
-              :precision="16"
-              :step="0.000000000001"
+              :precision="10"
+              :step="0.1"
               controls-position="right"
-              :disabled="isPositive(row.totalMultiplier)"
+              :disabled="isPositive(row.totalPricePerMillionTokens)"
               style="width: 100%"
             />
           </template>
         </el-table-column>
 
-        <el-table-column label="输出 token 单价" width="190" align="right">
+        <el-table-column label="输出价 (余额/1M token)" width="210" align="right">
           <template #default="{ row }">
             <el-input-number
-              v-model="row.outputMultiplier"
+              v-model="row.outputPricePerMillionTokens"
               :min="0"
-              :precision="16"
-              :step="0.000000000001"
+              :precision="10"
+              :step="0.1"
               controls-position="right"
-              :disabled="isPositive(row.totalMultiplier)"
+              :disabled="isPositive(row.totalPricePerMillionTokens)"
               style="width: 100%"
             />
           </template>

@@ -38,6 +38,8 @@ public class ModelPricingService {
     private static final Logger log = LoggerFactory.getLogger(ModelPricingService.class);
     private static final TypeReference<List<ModelPricingRule>> RULE_LIST = new TypeReference<>() {};
     private static final int MULTIPLIER_SCALE = 16;
+    private static final int PRICE_PER_MILLION_SCALE = 10;
+    private static final BigDecimal TOKENS_PER_MILLION = BigDecimal.valueOf(1_000_000);
 
     private final SystemSettingRepository repository;
     private final ObjectMapper objectMapper;
@@ -227,14 +229,26 @@ public class ModelPricingService {
                 "Model pattern must be at most " + MAX_MODEL_PATTERN_LENGTH + " characters"
             );
         }
-        BigDecimal totalMultiplier = normalizeRequestMultiplier(request.totalMultiplier(), "totalMultiplier");
-        BigDecimal inputMultiplier = normalizeRequestMultiplier(request.inputMultiplier(), "inputMultiplier");
-        BigDecimal outputMultiplier = normalizeRequestMultiplier(request.outputMultiplier(), "outputMultiplier");
+        BigDecimal totalMultiplier = normalizeRequestMultiplier(
+            request.totalPricePerMillionTokens(),
+            request.totalMultiplier(),
+            "totalPricePerMillionTokens"
+        );
+        BigDecimal inputMultiplier = normalizeRequestMultiplier(
+            request.inputPricePerMillionTokens(),
+            request.inputMultiplier(),
+            "inputPricePerMillionTokens"
+        );
+        BigDecimal outputMultiplier = normalizeRequestMultiplier(
+            request.outputPricePerMillionTokens(),
+            request.outputMultiplier(),
+            "outputPricePerMillionTokens"
+        );
         if (!positive(totalMultiplier) && (!positive(inputMultiplier) || !positive(outputMultiplier))) {
             throw new ApiException(
                 HttpStatus.BAD_REQUEST,
                 "MODEL_PRICE_REQUIRED",
-                "Configure totalMultiplier, or both inputMultiplier and outputMultiplier"
+                "Configure totalPricePerMillionTokens, or both inputPricePerMillionTokens and outputPricePerMillionTokens"
             );
         }
         String requestedRuleId = clean(request.ruleId());
@@ -264,6 +278,9 @@ public class ModelPricingService {
                     rule.inputMultiplier(),
                     rule.outputMultiplier(),
                     rule.totalMultiplier(),
+                    pricePerMillion(rule.inputMultiplier()),
+                    pricePerMillion(rule.outputMultiplier()),
+                    pricePerMillion(rule.totalMultiplier()),
                     rule.priority(),
                     rule.createdAt(),
                     rule.updatedAt()
@@ -326,7 +343,8 @@ public class ModelPricingService {
         return patternIndex == pattern.length();
     }
 
-    private BigDecimal normalizeRequestMultiplier(BigDecimal value, String fieldName) {
+    private BigDecimal normalizeRequestMultiplier(BigDecimal pricePerMillion, BigDecimal multiplier, String fieldName) {
+        BigDecimal value = pricePerMillion == null ? multiplier : pricePerMillion.divide(TOKENS_PER_MILLION, MULTIPLIER_SCALE, RoundingMode.HALF_UP);
         if (value == null || value.compareTo(BigDecimal.ZERO) == 0) {
             return null;
         }
@@ -340,6 +358,12 @@ public class ModelPricingService {
         return value == null || value.compareTo(BigDecimal.ZERO) <= 0
             ? null
             : value.setScale(MULTIPLIER_SCALE, RoundingMode.HALF_UP);
+    }
+
+    private BigDecimal pricePerMillion(BigDecimal multiplier) {
+        return positive(multiplier)
+            ? multiplier.multiply(TOKENS_PER_MILLION).setScale(PRICE_PER_MILLION_SCALE, RoundingMode.HALF_UP)
+            : null;
     }
 
     private boolean positive(BigDecimal value) {
