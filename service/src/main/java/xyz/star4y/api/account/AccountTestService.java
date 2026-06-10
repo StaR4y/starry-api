@@ -26,6 +26,28 @@ public class AccountTestService {
     private static final int MAX_CONCURRENCY = 8;
     private static final String DEFAULT_MODEL = "auto";
     private static final String DEFAULT_PROMPT = "Reply OK in one short sentence.";
+    private static final String DEFAULT_OPENAI_API_KEY_TEST_MODEL = OpenAiAccountTestClient.DEFAULT_CODEX_TEST_MODEL;
+    private static final List<String> OPENAI_STYLE_TEST_MODEL_IDS = List.of(
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.4-nano",
+        "gpt-5.4-pro",
+        "gpt-5.3-chat",
+        "gpt-5.2",
+        "gpt-5.2-chat",
+        "gpt-5.2-pro",
+        "gpt-5.1",
+        "gpt-5.1-chat",
+        "gpt-5",
+        "gpt-5-mini",
+        "gpt-5-nano",
+        "gpt-5-pro",
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "gpt-4o",
+        "gpt-4o-mini"
+    );
     private static final List<AccountDtos.TestModelOption> KIRO_TEST_MODELS = List.of(
         option("auto", "auto"),
         option("claude-sonnet-4.5", "claude-sonnet-4.5"),
@@ -35,53 +57,22 @@ public class AccountTestService {
         option("claude-opus-4.5", "claude-opus-4.5")
     );
     private static final List<AccountDtos.TestModelOption> OPENAI_TEST_MODELS = testModelOptions(
-        option("auto (" + OpenAiAccountTestClient.DEFAULT_OPENAI_TEST_MODEL + ")", DEFAULT_MODEL),
-        List.of(
-            "gpt-4o-mini",
-            "gpt-4o",
-            "gpt-4.1-mini",
-            "gpt-4.1",
-            "gpt-4.1-nano",
-            "gpt-5.2",
-            "gpt-5.1",
-            "gpt-5",
-            "gpt-5-mini",
-            "gpt-5-nano",
-            "o4-mini",
-            "o3"
-        )
+        option("auto (" + DEFAULT_OPENAI_API_KEY_TEST_MODEL + ")", DEFAULT_MODEL),
+        OPENAI_STYLE_TEST_MODEL_IDS
     );
     private static final List<AccountDtos.TestModelOption> GOOGLE_TEST_MODELS = openRouterOptions(
         option("auto (google/gemini-2.5-flash)", DEFAULT_MODEL),
+        "google",
         OpenRouterModelIds.GOOGLE
     );
     private static final List<AccountDtos.TestModelOption> ANTHROPIC_TEST_MODELS = openRouterOptions(
         option("auto (anthropic/claude-sonnet-4.5)", DEFAULT_MODEL),
+        "anthropic",
         OpenRouterModelIds.ANTHROPIC
     );
     private static final List<AccountDtos.TestModelOption> CODEX_TEST_MODELS = testModelOptions(
         option("auto (" + OpenAiAccountTestClient.DEFAULT_CODEX_TEST_MODEL + ")", DEFAULT_MODEL),
-        List.of(
-            "gpt-5.5",
-            "gpt-5.4",
-            "gpt-5.4-mini",
-            "gpt-5.4-nano",
-            "gpt-5.4-pro",
-            "gpt-5.3-chat",
-            "gpt-5.2",
-            "gpt-5.2-chat",
-            "gpt-5.2-pro",
-            "gpt-5.1",
-            "gpt-5.1-chat",
-            "gpt-5",
-            "gpt-5-mini",
-            "gpt-5-nano",
-            "gpt-5-pro",
-            "gpt-4.1",
-            "gpt-4.1-mini",
-            "gpt-4o",
-            "gpt-4o-mini"
-        )
+        OPENAI_STYLE_TEST_MODEL_IDS
     );
 
     private final ObjectMapper objectMapper;
@@ -341,7 +332,7 @@ public class AccountTestService {
             || normalized.startsWith("claude_")) {
             return AccountPlatforms.isCodex(account)
                 ? OpenAiAccountTestClient.DEFAULT_CODEX_TEST_MODEL
-                : OpenAiAccountTestClient.DEFAULT_OPENAI_TEST_MODEL;
+                : DEFAULT_OPENAI_API_KEY_TEST_MODEL;
         }
         String unprefixed = normalized.startsWith("openai/") ? model.substring("openai/".length()) : model;
         if (normalized.startsWith("openai-compatible/")) {
@@ -374,9 +365,12 @@ public class AccountTestService {
 
     private static List<AccountDtos.TestModelOption> openRouterOptions(
         AccountDtos.TestModelOption autoOption,
+        String providerPrefix,
         List<String> modelIds
     ) {
-        return testModelOptions(autoOption, modelIds);
+        return testModelOptions(autoOption, modelIds.stream()
+            .map(id -> id.contains("/") ? id : providerPrefix + "/" + id)
+            .toList());
     }
 
     private static List<AccountDtos.TestModelOption> testModelOptions(

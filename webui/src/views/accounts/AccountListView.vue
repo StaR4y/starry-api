@@ -500,6 +500,28 @@
   const testDetail = ref<TestAccountItem | null>(null);
   const latestTestResults = ref<Record<string, TestAccountItem>>({});
   const testModelByAccount = reactive<Record<string, string>>({});
+  const fallbackOpenAiStyleTestModels: TestModelOption[] = [
+    { label: 'auto (gpt-5.4-mini)', value: 'auto' },
+    { label: 'gpt-5.5', value: 'gpt-5.5' },
+    { label: 'gpt-5.4', value: 'gpt-5.4' },
+    { label: 'gpt-5.4-mini', value: 'gpt-5.4-mini' },
+    { label: 'gpt-5.4-nano', value: 'gpt-5.4-nano' },
+    { label: 'gpt-5.4-pro', value: 'gpt-5.4-pro' },
+    { label: 'gpt-5.3-chat', value: 'gpt-5.3-chat' },
+    { label: 'gpt-5.2', value: 'gpt-5.2' },
+    { label: 'gpt-5.2-chat', value: 'gpt-5.2-chat' },
+    { label: 'gpt-5.2-pro', value: 'gpt-5.2-pro' },
+    { label: 'gpt-5.1', value: 'gpt-5.1' },
+    { label: 'gpt-5.1-chat', value: 'gpt-5.1-chat' },
+    { label: 'gpt-5', value: 'gpt-5' },
+    { label: 'gpt-5-mini', value: 'gpt-5-mini' },
+    { label: 'gpt-5-nano', value: 'gpt-5-nano' },
+    { label: 'gpt-5-pro', value: 'gpt-5-pro' },
+    { label: 'gpt-4.1', value: 'gpt-4.1' },
+    { label: 'gpt-4.1-mini', value: 'gpt-4.1-mini' },
+    { label: 'gpt-4o', value: 'gpt-4o' },
+    { label: 'gpt-4o-mini', value: 'gpt-4o-mini' },
+  ];
   const fallbackTestModelOptions: TestModelOptionsResult = {
     kiro: [
       { label: 'auto', value: 'auto' },
@@ -507,13 +529,7 @@
       { label: 'simple-task', value: 'simple-task' },
       { label: 'claude-haiku-4.5', value: 'claude-haiku-4.5' },
     ],
-    openAi: [
-      { label: 'auto (gpt-4o-mini)', value: 'auto' },
-      { label: 'gpt-4o-mini', value: 'gpt-4o-mini' },
-      { label: 'gpt-4.1-mini', value: 'gpt-4.1-mini' },
-      { label: 'gpt-5.1', value: 'gpt-5.1' },
-      { label: 'gpt-5-mini', value: 'gpt-5-mini' },
-    ],
+    openAi: fallbackOpenAiStyleTestModels,
     google: [
       { label: 'auto (google/gemini-2.5-flash)', value: 'auto' },
       { label: 'google/gemini-2.5-pro', value: 'google/gemini-2.5-pro' },
@@ -524,16 +540,7 @@
       { label: 'anthropic/claude-sonnet-4.5', value: 'anthropic/claude-sonnet-4.5' },
       { label: 'anthropic/claude-opus-4.5', value: 'anthropic/claude-opus-4.5' },
     ],
-    codex: [
-      { label: 'auto (gpt-5.4-mini)', value: 'auto' },
-      { label: 'gpt-5.5', value: 'gpt-5.5' },
-      { label: 'gpt-5.4', value: 'gpt-5.4' },
-      { label: 'gpt-5.4-mini', value: 'gpt-5.4-mini' },
-      { label: 'gpt-5.4-nano', value: 'gpt-5.4-nano' },
-      { label: 'gpt-5.2', value: 'gpt-5.2' },
-      { label: 'gpt-5.1', value: 'gpt-5.1' },
-      { label: 'gpt-5', value: 'gpt-5' },
-    ],
+    codex: fallbackOpenAiStyleTestModels,
   };
   const testModelOptions = ref<TestModelOptionsResult>(fallbackTestModelOptions);
   const testOptions = reactive({
@@ -765,7 +772,7 @@
           ? { ...(parsed as Record<string, unknown>), upsert: importUpsert.value }
           : null;
     if (!isImportPayload(payload)) {
-      ElMessage.error('数据应为 Kiro / OpenAI Codex / OpenAI-compatible 导入 JSON');
+      ElMessage.error('数据应为 Kiro / OpenAI Codex / OpenAI-API 导入 JSON');
       return;
     }
 
@@ -884,6 +891,15 @@
     );
   }
 
+  function getProviderDisplayName(provider: string | null | undefined): string {
+    if (!provider) return 'Unknown';
+    const p = provider.trim().toLowerCase();
+    if (p === 'openai-compatible' || p === 'openaicompatibility') {
+      return 'OpenAI-API';
+    }
+    return provider;
+  }
+
   function getProviderTagStyle(provider: string) {
     const p = (provider || '').toUpperCase();
     if (p === 'OPENAI' || p === 'OPENAI-COMPATIBLE') {
@@ -963,6 +979,7 @@
           </svg>
         </template>
       </el-input>
+      <el-button type="primary" @click="openCreate">新建账号</el-button>
       <el-button @click="openImport">批量导入</el-button>
       <el-button
         type="danger"
@@ -973,7 +990,6 @@
       >
         清空全部
       </el-button>
-      <el-button type="primary" @click="openCreate">新建账号</el-button>
     </template>
 
     <!-- 1. Stats Summary Panel -->
@@ -1021,7 +1037,7 @@
     </div>
 
     <el-table v-loading="loading" :data="visibleAccounts" stripe>
-      <el-table-column label="账号类型" width="130">
+      <el-table-column label="账号类型" width="160">
         <template #default="{ row }">
           <span class="provider-badge" :style="getProviderTagStyle(row.provider)">
             <!-- OpenAI Logo -->
@@ -1040,7 +1056,7 @@
             <svg v-else class="provider-logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
               <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
             </svg>
-            <span class="provider-name">{{ row.provider || 'Unknown' }}</span>
+            <span class="provider-name">{{ getProviderDisplayName(row.provider) }}</span>
           </span>
         </template>
       </el-table-column>
@@ -1801,6 +1817,8 @@
     font-weight: 600;
     white-space: nowrap;
     vertical-align: middle;
+    max-width: 100%;
+    box-sizing: border-box;
 
     .provider-logo {
       width: 13px;
@@ -1810,6 +1828,9 @@
 
     .provider-name {
       line-height: 1;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
   }
 

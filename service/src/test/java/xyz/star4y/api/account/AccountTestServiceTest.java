@@ -116,7 +116,7 @@ class AccountTestServiceTest {
         ProxyAccountEntity account = openAiAccount("openai-main", "sk-test");
 
         when(repository.findAll()).thenReturn(Flux.just(account));
-        when(openAiAccountTestClient.test(eq(account), eq("gpt-4o-mini"), eq("ping")))
+        when(openAiAccountTestClient.test(eq(account), eq("gpt-5.4-mini"), eq("ping")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", PlatformUsage.zero())));
         when(accountPoolService.recordTestSuccess(eq("openai-main"), eq(0L), eq(false))).thenReturn(Mono.empty());
 
@@ -138,10 +138,10 @@ class AccountTestServiceTest {
         assertThat(response.items()).singleElement()
             .satisfies(item -> {
                 assertThat(item.accountId()).isEqualTo("openai-main");
-                assertThat(item.model()).isEqualTo("gpt-4o-mini");
+                assertThat(item.model()).isEqualTo("gpt-5.4-mini");
                 assertThat(item.status()).isEqualTo("SUCCESS");
             });
-        verify(openAiAccountTestClient).test(eq(account), eq("gpt-4o-mini"), eq("ping"));
+        verify(openAiAccountTestClient).test(eq(account), eq("gpt-5.4-mini"), eq("ping"));
         verifyNoInteractions(upstreamClient);
     }
 
@@ -290,21 +290,31 @@ class AccountTestServiceTest {
 
         assertThat(options.kiro()).extracting(AccountDtos.TestModelOption::value)
             .containsExactly("auto", "claude-sonnet-4.5", "simple-task", "claude-haiku-4.5", "claude-sonnet-4", "claude-opus-4.5");
+        assertThat(options.openAi())
+            .extracting(AccountDtos.TestModelOption::value)
+            .containsExactlyElementsOf(options.codex().stream().map(AccountDtos.TestModelOption::value).toList());
         assertThat(options.openAi()).extracting(AccountDtos.TestModelOption::value)
             .containsExactly(
                 "auto",
-                "gpt-4o-mini",
-                "gpt-4o",
-                "gpt-4.1-mini",
-                "gpt-4.1",
-                "gpt-4.1-nano",
+                "gpt-5.5",
+                "gpt-5.4",
+                "gpt-5.4-mini",
+                "gpt-5.4-nano",
+                "gpt-5.4-pro",
+                "gpt-5.3-chat",
                 "gpt-5.2",
+                "gpt-5.2-chat",
+                "gpt-5.2-pro",
                 "gpt-5.1",
+                "gpt-5.1-chat",
                 "gpt-5",
                 "gpt-5-mini",
                 "gpt-5-nano",
-                "o4-mini",
-                "o3"
+                "gpt-5-pro",
+                "gpt-4.1",
+                "gpt-4.1-mini",
+                "gpt-4o",
+                "gpt-4o-mini"
             );
         assertThat(options.google()).extracting(AccountDtos.TestModelOption::value)
             .hasSize(27)
