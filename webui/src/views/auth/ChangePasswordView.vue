@@ -78,9 +78,6 @@
   <div class="change">
     <div class="change__panel glass-panel glass-panel--strong">
       <h1 class="change__title">修改密码</h1>
-      <p v-if="auth.requirePasswordChange" class="change__hint text-secondary">
-        首次登录请先设置新密码，再继续使用控制台
-      </p>
 
       <el-form
         ref="formRef"
