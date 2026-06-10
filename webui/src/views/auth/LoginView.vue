@@ -191,7 +191,6 @@
         <span class="login__brand">⌁ Starry API</span>
         <h1 class="login__title">控制台登录</h1>
         <p class="login__hint text-secondary">
-          首次部署后请使用 <span class="mono">admin</span> 和启动日志中的随机密码登录
         </p>
       </div>
 
