@@ -302,6 +302,151 @@ class OpenAiUpstreamClientTest {
     }
 
     @Test
+    void codexUpstreamParsesIncrementalFunctionCallArguments() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/responses", exchange -> {
+            byte[] response = """
+                event: response.output_item.added
+                data: {"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_write","name":"apply_patch","arguments":""}}
+
+                event: response.function_call_arguments.delta
+                data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\\"patch\\":\\"*** Begin"}
+
+                event: response.function_call_arguments.delta
+                data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":" Patch\\"}"}
+
+                event: response.function_call_arguments.done
+                data: {"type":"response.function_call_arguments.done","item_id":"fc_1","arguments":"{\\"patch\\":\\"*** Begin Patch\\"}"}
+
+                event: response.output_item.done
+                data: {"type":"response.output_item.done","item":{"type":"function_call","id":"fc_1","call_id":"call_write","name":"apply_patch","arguments":""}}
+
+                event: response.completed
+                data: {"type":"response.completed","response":{"usage":{"input_tokens":6,"output_tokens":2},"output":[]}}
+
+                data: [DONE]
+
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "text/event-stream");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {
+                  "model": "gpt-5.4-mini",
+                  "input": "edit the file",
+                  "tools": [{"type": "function", "name": "apply_patch", "parameters": {"type": "object", "properties": {}}}]
+                }
+                """);
+
+            PlatformCompletionResult result = client.completeResponses(account, request, "gpt-5.4-mini").block();
+
+            assertThat(result).isNotNull();
+            assertThat(result.toolUses()).hasSize(1);
+            assertThat(result.toolUses().get(0).id()).isEqualTo("call_write");
+            assertThat(result.toolUses().get(0).name()).isEqualTo("apply_patch");
+            assertThat(result.toolUses().get(0).input().path("patch").asText()).isEqualTo("*** Begin Patch");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void codexResponsesRequestSanitizesFlatToolsAndNormalizesFunctionOutput() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/responses", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] response = """
+                event: response.output_text.delta
+                data: {"type":"response.output_text.delta","delta":"OK"}
+
+                data: [DONE]
+
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "text/event-stream");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {
+                  "model": "gpt-5.4-mini",
+                  "input": [
+                    {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "edit file"}]},
+                    {"type": "function_call", "call_id": "call_write", "name": "apply_patch", "arguments": {"patch": "*** Begin Patch"}},
+                    {"type": "function_call_output", "call_id": "call_write", "output": [{"type": "output_text", "text": "Done"}]}
+                  ],
+                  "tools": [
+                    {
+                      "type": "function",
+                      "name": "apply_patch",
+                      "description": "Apply a patch to files",
+                      "parameters": {
+                        "type": "object",
+                        "properties": {
+                          "page": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": 0,
+                            "format": "int32"
+                          }
+                        },
+                        "required": ["page", "missing"]
+                      },
+                      "strict": true
+                    }
+                  ],
+                  "tool_choice": {"type": "function", "name": "apply_patch"},
+                  "parallel_tool_calls": false
+                }
+                """);
+
+            PlatformCompletionResult result = client.completeResponses(account, request, "gpt-5.4-mini").block();
+
+            assertThat(result).isNotNull();
+            JsonNode body = objectMapper.readTree(requestBody.get());
+            JsonNode tool = body.path("tools").get(0);
+            assertThat(tool.path("type").asText()).isEqualTo("function");
+            assertThat(tool.path("name").asText()).isEqualTo("apply_patch");
+            assertThat(tool.path("function").isMissingNode()).isTrue();
+            JsonNode page = tool.path("parameters").path("properties").path("page");
+            assertThat(page.path("type").asText()).isEqualTo("integer");
+            assertThat(page.has("minimum")).isFalse();
+            assertThat(page.has("default")).isFalse();
+            assertThat(page.has("format")).isFalse();
+            assertThat(tool.path("parameters").path("required")).hasSize(1);
+            assertThat(tool.path("parameters").path("required").get(0).asText()).isEqualTo("page");
+            assertThat(tool.path("strict").asBoolean()).isTrue();
+            assertThat(body.path("input").path(1).path("arguments").asText()).isEqualTo("{\"patch\":\"*** Begin Patch\"}");
+            assertThat(body.path("input").path(2).path("output").asText()).isEqualTo("Done");
+            assertThat(body.path("tool_choice").path("name").asText()).isEqualTo("apply_patch");
+            assertThat(body.path("parallel_tool_calls").asBoolean(true)).isFalse();
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void openAiResponsesApiPreservesMultimodalInput() throws Exception {
         AtomicReference<String> requestBody = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);

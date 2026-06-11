@@ -6,8 +6,10 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
@@ -206,6 +208,7 @@ public class OpenAiUpstreamClient {
         StringBuilder content = new StringBuilder();
         String fallbackContent = "";
         List<PlatformToolUse> toolUses = new ArrayList<>();
+        Map<String, PendingResponseToolUse> pendingToolUses = new LinkedHashMap<>();
         JsonNode usage = null;
         for (String payload : sseDataPayloads(rawBody)) {
             String data = payload.trim();
@@ -220,10 +223,16 @@ public class OpenAiUpstreamClient {
                 fallbackContent = firstNonBlank(fallbackContent, event.path("text").asText(""));
             } else if ("response.content_part.done".equals(type)) {
                 fallbackContent = firstNonBlank(fallbackContent, contentPartText(event.path("part")));
+            } else if ("response.output_item.added".equals(type)) {
+                rememberResponseToolUse(pendingToolUses, event.path("item"));
+            } else if ("response.function_call_arguments.delta".equals(type)) {
+                appendResponseToolUseArguments(pendingToolUses, event);
+            } else if ("response.function_call_arguments.done".equals(type)) {
+                completeResponseToolUseArguments(pendingToolUses, event);
             } else if ("response.output_item.done".equals(type)) {
                 JsonNode item = event.path("item");
                 fallbackContent = firstNonBlank(fallbackContent, responseOutputItemText(item));
-                appendResponseToolUse(toolUses, item);
+                rememberResponseToolUse(pendingToolUses, item);
             } else if ("response.completed".equals(type)) {
                 JsonNode response = event.path("response");
                 fallbackContent = firstNonBlank(
@@ -231,11 +240,12 @@ public class OpenAiUpstreamClient {
                     response.path("output_text").asText(""),
                     responseOutputText(response.path("output"))
                 );
-                appendResponseToolUses(toolUses, response.path("output"));
+                rememberResponseToolUses(pendingToolUses, response.path("output"));
                 usage = presentNode(response.path("usage"), usage);
             }
             usage = presentNode(event.path("usage"), usage);
         }
+        appendPendingResponseToolUses(toolUses, pendingToolUses);
         return new PlatformCompletionResult(
             content.length() > 0 ? content.toString() : fallbackContent,
             toolUses,
@@ -269,21 +279,18 @@ public class OpenAiUpstreamClient {
                 continue;
             }
             JsonNode function = tool.path("function");
-            if (function.isMissingNode() || function.isNull()) {
-                converted.add(tool);
-                continue;
-            }
+            JsonNode source = function.isObject() ? function : tool;
             ObjectNode codexTool = converted.addObject();
             codexTool.put("type", "function");
-            codexTool.put("name", function.path("name").asText());
-            if (function.has("description")) {
-                codexTool.set("description", function.get("description"));
+            codexTool.put("name", source.path("name").asText());
+            if (source.has("description")) {
+                codexTool.set("description", source.get("description"));
             }
-            if (function.has("parameters")) {
-                codexTool.set("parameters", ToolSchemaSanitizer.sanitizeParameters(objectMapper, function.get("parameters")));
+            if (source.has("parameters")) {
+                codexTool.set("parameters", ToolSchemaSanitizer.sanitizeParameters(objectMapper, source.get("parameters")));
             }
-            if (function.has("strict")) {
-                codexTool.set("strict", function.get("strict"));
+            if (source.has("strict")) {
+                codexTool.set("strict", source.get("strict"));
             }
         }
         return converted;
@@ -389,7 +396,7 @@ public class OpenAiUpstreamClient {
             item.put("type", "function_call");
             item.put("call_id", firstNonBlank(source.path("call_id").asText(null), source.path("id").asText(null)));
             item.put("name", source.path("name").asText());
-            item.put("arguments", source.path("arguments").asText("{}"));
+            item.put("arguments", jsonText(source.path("arguments"), "{}"));
             item.put("status", source.path("status").asText("completed"));
             return;
         }
@@ -397,7 +404,7 @@ public class OpenAiUpstreamClient {
             ObjectNode item = input.addObject();
             item.put("type", "function_call_output");
             item.put("call_id", source.path("call_id").asText());
-            item.set("output", source.has("output") ? source.get("output").deepCopy() : objectMapper.getNodeFactory().textNode(""));
+            item.put("output", functionCallOutputText(source.path("output")));
             return;
         }
         if ("message".equals(type) || source.has("role") || source.has("content")) {
@@ -664,6 +671,15 @@ public class OpenAiUpstreamClient {
         }
     }
 
+    private void rememberResponseToolUses(Map<String, PendingResponseToolUse> pendingToolUses, JsonNode output) {
+        if (!output.isArray()) {
+            return;
+        }
+        for (JsonNode item : output) {
+            rememberResponseToolUse(pendingToolUses, item);
+        }
+    }
+
     private void appendResponseToolUse(List<PlatformToolUse> toolUses, JsonNode item) {
         if (!"function_call".equals(item.path("type").asText())) {
             return;
@@ -677,6 +693,79 @@ public class OpenAiUpstreamClient {
             return;
         }
         toolUses.add(new PlatformToolUse(callId, name, parseToolArguments(item.path("arguments").asText("{}"))));
+    }
+
+    private void rememberResponseToolUse(Map<String, PendingResponseToolUse> pendingToolUses, JsonNode item) {
+        if (!"function_call".equals(item.path("type").asText())) {
+            return;
+        }
+        String itemId = item.path("id").asText(null);
+        String callId = firstNonBlank(item.path("call_id").asText(null), itemId);
+        String key = firstNonBlank(itemId, callId);
+        if (key.isBlank()) {
+            return;
+        }
+        PendingResponseToolUse pending = pendingToolUses.computeIfAbsent(key, ignored -> new PendingResponseToolUse());
+        pending.itemId = firstNonBlank(pending.itemId, itemId);
+        pending.callId = firstNonBlank(pending.callId, callId);
+        pending.name = firstNonBlank(pending.name, item.path("name").asText(null));
+        String arguments = item.path("arguments").asText(null);
+        if (arguments != null && !arguments.isBlank() && pending.arguments.length() == 0) {
+            pending.arguments.append(arguments);
+        }
+    }
+
+    private void appendResponseToolUseArguments(Map<String, PendingResponseToolUse> pendingToolUses, JsonNode event) {
+        PendingResponseToolUse pending = pendingResponseToolUse(pendingToolUses, event);
+        if (pending == null) {
+            return;
+        }
+        String delta = event.path("delta").asText("");
+        if (!delta.isEmpty()) {
+            pending.arguments.append(delta);
+        }
+    }
+
+    private void completeResponseToolUseArguments(Map<String, PendingResponseToolUse> pendingToolUses, JsonNode event) {
+        PendingResponseToolUse pending = pendingResponseToolUse(pendingToolUses, event);
+        if (pending == null) {
+            return;
+        }
+        String arguments = event.path("arguments").asText(null);
+        if (arguments != null && !arguments.isBlank()) {
+            pending.arguments.setLength(0);
+            pending.arguments.append(arguments);
+        }
+    }
+
+    private PendingResponseToolUse pendingResponseToolUse(Map<String, PendingResponseToolUse> pendingToolUses, JsonNode event) {
+        String itemId = event.path("item_id").asText(null);
+        String callId = event.path("call_id").asText(null);
+        String key = firstNonBlank(itemId, callId);
+        if (key.isBlank()) {
+            return null;
+        }
+        PendingResponseToolUse pending = pendingToolUses.computeIfAbsent(key, ignored -> new PendingResponseToolUse());
+        pending.itemId = firstNonBlank(pending.itemId, itemId);
+        pending.callId = firstNonBlank(pending.callId, callId);
+        pending.name = firstNonBlank(pending.name, event.path("name").asText(null));
+        return pending;
+    }
+
+    private void appendPendingResponseToolUses(
+        List<PlatformToolUse> toolUses,
+        Map<String, PendingResponseToolUse> pendingToolUses
+    ) {
+        for (PendingResponseToolUse pending : pendingToolUses.values()) {
+            String callId = firstNonBlank(pending.callId, pending.itemId);
+            if (callId.isBlank() || pending.name == null || pending.name.isBlank()) {
+                continue;
+            }
+            if (toolUses.stream().anyMatch(toolUse -> callId.equals(toolUse.id()))) {
+                continue;
+            }
+            toolUses.add(new PlatformToolUse(callId, pending.name, parseToolArguments(pending.arguments.toString())));
+        }
     }
 
     private JsonNode parseToolArguments(String arguments) {
@@ -711,6 +800,40 @@ public class OpenAiUpstreamClient {
     private String contentPartText(JsonNode part) {
         String type = part.path("type").asText("");
         return "output_text".equals(type) || "text".equals(type) ? part.path("text").asText("") : "";
+    }
+
+    private String jsonText(JsonNode value, String fallback) {
+        if (value == null || value.isMissingNode() || value.isNull()) {
+            return fallback;
+        }
+        if (value.isTextual()) {
+            return value.asText();
+        }
+        return value.toString();
+    }
+
+    private String functionCallOutputText(JsonNode output) {
+        if (output == null || output.isMissingNode() || output.isNull()) {
+            return "";
+        }
+        if (output.isTextual()) {
+            return output.asText();
+        }
+        if (!output.isArray()) {
+            return output.toString();
+        }
+        StringBuilder builder = new StringBuilder();
+        for (JsonNode part : output) {
+            String text = firstNonBlank(part.path("text").asText(null), part.path("output_text").asText(null));
+            if (text.isBlank()) {
+                text = part.toString();
+            }
+            if (!builder.isEmpty()) {
+                builder.append('\n');
+            }
+            builder.append(text);
+        }
+        return builder.toString();
     }
 
     private JsonNode presentNode(JsonNode candidate, JsonNode fallback) {
@@ -785,6 +908,13 @@ public class OpenAiUpstreamClient {
             }
         }
         return "";
+    }
+
+    private static final class PendingResponseToolUse {
+        private String itemId;
+        private String callId;
+        private String name;
+        private final StringBuilder arguments = new StringBuilder();
     }
 
     @FunctionalInterface
