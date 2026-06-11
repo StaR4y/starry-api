@@ -129,7 +129,10 @@ public class OpenAiResponseFactory {
         PlatformCompletionResult result,
         String previousResponseId
     ) {
-        ObjectNode response = responses(model, result, previousResponseId);
+        return responsesStreamEvents(responses(model, result, previousResponseId));
+    }
+
+    public Flux<ServerSentEvent<String>> responsesStreamEvents(ObjectNode response) {
         ArrayNode output = (ArrayNode) response.path("output");
         String responseId = response.path("id").asText();
         List<ServerSentEvent<String>> events = new ArrayList<>();

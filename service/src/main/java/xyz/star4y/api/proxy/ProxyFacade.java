@@ -36,6 +36,7 @@ import xyz.star4y.api.platform.kiro.KiroPayloadFactory;
 import xyz.star4y.api.platform.kiro.KiroUpstreamClient;
 import xyz.star4y.api.platform.openai.OpenAiRequestAdapter;
 import xyz.star4y.api.platform.openai.OpenAiResponseFactory;
+import xyz.star4y.api.platform.openai.OpenAiResponseStateStore;
 import xyz.star4y.api.platform.openai.OpenAiUpstreamClient;
 import xyz.star4y.api.platform.upstream.UpstreamException;
 import xyz.star4y.api.payment.PaymentSettingsService;
@@ -70,6 +71,7 @@ public class ProxyFacade {
     private final OpenAiUpstreamClient openAiUpstreamClient;
     private final OpenAiRequestAdapter openAiRequestAdapter;
     private final OpenAiResponseFactory openAiResponseFactory;
+    private final OpenAiResponseStateStore openAiResponseStateStore;
     private final AnthropicRequestAdapter anthropicRequestAdapter;
     private final AnthropicResponseFactory anthropicResponseFactory;
     private final GeminiRequestAdapter geminiRequestAdapter;
@@ -91,6 +93,7 @@ public class ProxyFacade {
         OpenAiUpstreamClient openAiUpstreamClient,
         OpenAiRequestAdapter openAiRequestAdapter,
         OpenAiResponseFactory openAiResponseFactory,
+        OpenAiResponseStateStore openAiResponseStateStore,
         AnthropicRequestAdapter anthropicRequestAdapter,
         AnthropicResponseFactory anthropicResponseFactory,
         GeminiRequestAdapter geminiRequestAdapter,
@@ -111,6 +114,7 @@ public class ProxyFacade {
         this.openAiUpstreamClient = openAiUpstreamClient;
         this.openAiRequestAdapter = openAiRequestAdapter;
         this.openAiResponseFactory = openAiResponseFactory;
+        this.openAiResponseStateStore = openAiResponseStateStore;
         this.anthropicRequestAdapter = anthropicRequestAdapter;
         this.anthropicResponseFactory = anthropicResponseFactory;
         this.geminiRequestAdapter = geminiRequestAdapter;
@@ -250,7 +254,8 @@ public class ProxyFacade {
         boolean stream = request.path("stream").asBoolean(false);
         UpstreamRoute route = routeFor(upstreamModel);
         boolean fastMode = requestedFastMode && route == UpstreamRoute.OPENAI;
-        JsonNode upstreamRequest = fastMode ? openAiFastRequest(request) : request;
+        JsonNode expandedRequest = openAiResponseStateStore.expand(request);
+        JsonNode upstreamRequest = fastMode ? openAiFastRequest(expandedRequest) : expandedRequest;
 
         return requireFastModeAllowed(fastMode).then(Mono.defer(() -> attemptResponses(
             upstreamRequest,
@@ -293,8 +298,8 @@ public class ProxyFacade {
                 .flatMap(result -> {
                     Mono<Void> accounting = recordSuccess(requestId, principal, account, path, requestedModel, result, route, fastMode, start);
                     ResponseEntity<?> response = stream
-                        ? streamResponse(ResponseMode.OPENAI_RESPONSES, responseRequest, mappedModel, result)
-                        : jsonResponse(ResponseMode.OPENAI_RESPONSES, responseRequest, mappedModel, result);
+                        ? responsesStreamResponse(responseRequest, upstreamRequest, mappedModel, result)
+                        : responsesJsonResponse(responseRequest, upstreamRequest, mappedModel, result);
                     return accounting.then(Mono.<ResponseEntity<?>>just(response));
                 })
                 .onErrorResume(error -> {
@@ -599,6 +604,38 @@ public class ProxyFacade {
             case OPENAI_CHAT -> openAiResponseFactory.chatCompletion(mappedModel, result);
         };
         return ResponseEntity.ok(body);
+    }
+
+    private ResponseEntity<?> responsesJsonResponse(
+        JsonNode request,
+        JsonNode stateRequest,
+        String mappedModel,
+        PlatformCompletionResult result
+    ) {
+        ObjectNode body = openAiResponseFactory.responses(
+            mappedModel,
+            result,
+            request.path("previous_response_id").asText(null)
+        );
+        openAiResponseStateStore.remember(body, stateRequest);
+        return ResponseEntity.ok(body);
+    }
+
+    private ResponseEntity<Flux<ServerSentEvent<String>>> responsesStreamResponse(
+        JsonNode request,
+        JsonNode stateRequest,
+        String mappedModel,
+        PlatformCompletionResult result
+    ) {
+        ObjectNode body = openAiResponseFactory.responses(
+            mappedModel,
+            result,
+            request.path("previous_response_id").asText(null)
+        );
+        openAiResponseStateStore.remember(body, stateRequest);
+        return ResponseEntity.ok()
+            .contentType(MediaType.TEXT_EVENT_STREAM)
+            .body(openAiResponseFactory.responsesStreamEvents(body));
     }
 
     private ResponseEntity<Flux<ServerSentEvent<String>>> streamResponse(

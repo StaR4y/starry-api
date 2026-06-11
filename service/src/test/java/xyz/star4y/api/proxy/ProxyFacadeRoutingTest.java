@@ -39,6 +39,7 @@ import xyz.star4y.api.model.ModelPricingService;
 import xyz.star4y.api.platform.anthropic.AnthropicRequestAdapter;
 import xyz.star4y.api.platform.anthropic.AnthropicResponseFactory;
 import xyz.star4y.api.platform.core.PlatformCompletionResult;
+import xyz.star4y.api.platform.core.PlatformToolUse;
 import xyz.star4y.api.platform.core.PlatformUsage;
 import xyz.star4y.api.platform.gemini.GeminiRequestAdapter;
 import xyz.star4y.api.platform.gemini.GeminiResponseFactory;
@@ -46,6 +47,7 @@ import xyz.star4y.api.platform.kiro.KiroPayloadFactory;
 import xyz.star4y.api.platform.kiro.KiroUpstreamClient;
 import xyz.star4y.api.platform.openai.OpenAiRequestAdapter;
 import xyz.star4y.api.platform.openai.OpenAiResponseFactory;
+import xyz.star4y.api.platform.openai.OpenAiResponseStateStore;
 import xyz.star4y.api.platform.openai.OpenAiUpstreamClient;
 import xyz.star4y.api.platform.upstream.UpstreamException;
 import xyz.star4y.api.payment.PaymentSettingsService;
@@ -584,6 +586,101 @@ class ProxyFacadeRoutingTest {
         verify(openAiUpstreamClient).completeResponses(eq(account), eq(request), eq("gpt-5.4-mini"));
     }
 
+    @Test
+    void responsesEndpointReplaysStoredPreviousResponseForToolContinuation() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity account = openAiAccount();
+        JsonNode firstRequest = objectMapper.readTree("""
+            {
+              "model": "gpt-5.4-mini",
+              "input": "write a file"
+            }
+            """);
+        ObjectNode secondRequest = (ObjectNode) objectMapper.readTree("""
+            {
+              "model": "gpt-5.4-mini",
+              "previous_response_id": "resp_placeholder",
+              "input": [
+                {
+                  "type": "function_call_output",
+                  "call_id": "call_write",
+                  "output": "created"
+                }
+              ]
+            }
+            """);
+
+        MockServerWebExchange firstExchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/responses")
+        );
+        MockServerWebExchange secondExchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/responses")
+        );
+
+        when(apiKeyService.authenticate(any()))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("gpt-5.4-mini", "key-1")).thenReturn("gpt-5.4-mini");
+        when(accountPoolService.selectOpenAiAccount("key-1")).thenReturn(Mono.just(account));
+        when(openAiUpstreamClient.completeResponses(eq(account), any(JsonNode.class), eq("gpt-5.4-mini")))
+            .thenReturn(
+                Mono.just(new PlatformCompletionResult(
+                    "",
+                    List.of(new PlatformToolUse(
+                        "call_write",
+                        "exec_command",
+                        objectMapper.readTree("{\"cmd\":\"printf hi > hello.txt\"}")
+                    )),
+                    new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0)
+                )),
+                Mono.just(new PlatformCompletionResult("done", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0)))
+            );
+        when(accountPoolService.recordSuccess("openai-main", 2L)).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), any(BigDecimal.class), eq(1L), eq(1L))).thenReturn(Mono.empty());
+        when(statsService.log(any())).thenReturn(Mono.empty());
+
+        ProxyFacade facade = proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService
+        );
+
+        ResponseEntity<?> firstResponse = facade.responses(firstRequest, firstExchange).block();
+        assertThat(firstResponse).isNotNull();
+        JsonNode firstBody = (JsonNode) firstResponse.getBody();
+        String responseId = firstBody.path("id").asText();
+        secondRequest.put("previous_response_id", responseId);
+
+        facade.responses(secondRequest, secondExchange).block();
+
+        ArgumentCaptor<JsonNode> requestCaptor = ArgumentCaptor.forClass(JsonNode.class);
+        verify(openAiUpstreamClient, org.mockito.Mockito.times(2))
+            .completeResponses(eq(account), requestCaptor.capture(), eq("gpt-5.4-mini"));
+        JsonNode replayed = requestCaptor.getAllValues().get(1);
+        assertThat(replayed.has("previous_response_id")).isFalse();
+        assertThat(replayed.path("store").asBoolean(true)).isFalse();
+        JsonNode input = replayed.path("input");
+        assertThat(input).hasSize(3);
+        assertThat(input.path(0).path("content").path(0).path("text").asText()).isEqualTo("write a file");
+        assertThat(input.path(1).path("type").asText()).isEqualTo("function_call");
+        assertThat(input.path(1).path("call_id").asText()).isEqualTo("call_write");
+        assertThat(input.path(2).path("type").asText()).isEqualTo("function_call_output");
+        assertThat(input.path(2).path("call_id").asText()).isEqualTo("call_write");
+    }
+
     private ProxyFacade proxyFacade(
         ApiKeyService apiKeyService,
         AccountPoolService accountPoolService,
@@ -746,6 +843,7 @@ class ProxyFacadeRoutingTest {
             openAiUpstreamClient,
             new OpenAiRequestAdapter(objectMapper, modelCatalog),
             new OpenAiResponseFactory(objectMapper),
+            new OpenAiResponseStateStore(objectMapper),
             new AnthropicRequestAdapter(objectMapper, modelCatalog),
             new AnthropicResponseFactory(objectMapper),
             new GeminiRequestAdapter(objectMapper),
