@@ -43,7 +43,7 @@ export type SetupFileBlock = {
 };
 
 export type CcSwitchLink = {
-  client: 'claude' | 'codex';
+  client: 'claude' | 'codex' | 'opencode';
   label: string;
   description: string;
   url: string;

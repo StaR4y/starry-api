@@ -149,6 +149,11 @@
     return value.startsWith('sk-') ? value : '';
   }
 
+  function isUsableApiKey(value?: string | null) {
+    const key = value?.trim() ?? '';
+    return key.length > 8 && !key.includes('REPLACE');
+  }
+
   function rowApiKeyPlaceholder(row?: ApiKey | null) {
     if (fullApiKeyOf(row)) {
       return fullApiKeyOf(row);
@@ -168,7 +173,7 @@
   const effectiveConfigApiKey = computed(() => pastedConfigApiKey.value || storedConfigApiKey.value);
   const hasConfigFullApiKey = computed(() => {
     const value = effectiveConfigApiKey.value;
-    return value.startsWith('sk-') && !value.includes('REPLACE') && value.length > 24;
+    return isUsableApiKey(value);
   });
   const configApiKey = computed(() => {
     if (hasConfigFullApiKey.value) {

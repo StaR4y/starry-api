@@ -66,7 +66,7 @@ The WebUI API Key page generates API-key based client configuration:
 | Codex CLI | `~/.codex/config.toml` plus `~/.codex/auth.json`, using the HTTP Responses API. |
 | Claude Code | Shell environment variables: `ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, and Claude Code traffic flags. |
 | OpenCode | Project-level `opencode.json` with a `starry` OpenAI-compatible provider. |
-| CC Switch | `ccswitch://v1/import?resource=provider...` deep links for Claude Code and Codex CLI. |
+| CC Switch | `ccswitch://v1/import?resource=provider...` deep links for Claude Code, Codex CLI, and OpenCode. |
 
 These client settings are generated per API key and do not replace server runtime variables.
 

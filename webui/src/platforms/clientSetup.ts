@@ -23,6 +23,7 @@ const CODEX_MODEL = 'gpt-5.5';
 const CODEX_REVIEW_MODEL = 'gpt-5.5';
 const CLAUDE_MODEL = 'claude-sonnet-4.5';
 const CLAUDE_FAST_MODEL = 'claude-haiku-4.5';
+const CLAUDE_OPUS_MODEL = 'claude-opus-4.5';
 const OPENCODE_MODEL = 'starry/gpt-5.5';
 const OPENCODE_SMALL_MODEL = 'starry/gpt-5.4-mini';
 
@@ -82,6 +83,11 @@ export function createCcSwitchLinks(context: SetupContext): CcSwitchLink[] {
         endpoint: context.apiOrigin,
         apiKey,
         model: CLAUDE_MODEL,
+        icon: 'claude',
+        haikuModel: CLAUDE_FAST_MODEL,
+        sonnetModel: CLAUDE_MODEL,
+        opusModel: CLAUDE_OPUS_MODEL,
+        notes: 'Starry API Anthropic-compatible provider for Claude Code.',
       }),
     },
     {
@@ -95,6 +101,23 @@ export function createCcSwitchLinks(context: SetupContext): CcSwitchLink[] {
         endpoint: context.apiBaseUrl,
         apiKey,
         model: CODEX_MODEL,
+        icon: 'openai',
+        notes: 'Starry API OpenAI Responses provider for Codex CLI.',
+      }),
+    },
+    {
+      client: 'opencode',
+      label: 'OpenCode',
+      description: '导入 OpenCode 的 OpenAI-compatible 供应商',
+      url: ccSwitchProviderUrl({
+        app: 'opencode',
+        name: 'Starry API OpenCode',
+        homepage: context.apiOrigin,
+        endpoint: context.apiBaseUrl,
+        apiKey,
+        model: OPENCODE_MODEL,
+        icon: 'openai',
+        notes: 'Starry API OpenAI-compatible provider for OpenCode.',
       }),
     },
   ];
@@ -272,14 +295,19 @@ function copyableFilesText(files: SetupFileBlock[]) {
 }
 
 function ccSwitchProviderUrl(input: {
-  app: 'claude' | 'codex';
+  app: 'claude' | 'codex' | 'opencode';
   name: string;
   homepage: string;
   endpoint: string;
   apiKey: string;
   model: string;
+  icon: string;
+  notes?: string;
+  haikuModel?: string;
+  sonnetModel?: string;
+  opusModel?: string;
 }) {
-  return `ccswitch://v1/import?${new URLSearchParams([
+  const params = new URLSearchParams([
     ['resource', 'provider'],
     ['app', input.app],
     ['name', input.name],
@@ -287,7 +315,12 @@ function ccSwitchProviderUrl(input: {
     ['endpoint', input.endpoint],
     ['apiKey', input.apiKey],
     ['model', input.model],
-    ['configFormat', 'json'],
+    ['icon', input.icon],
     ['enabled', 'true'],
-  ]).toString()}`;
+  ]);
+  if (input.notes) params.set('notes', input.notes);
+  if (input.haikuModel) params.set('haikuModel', input.haikuModel);
+  if (input.sonnetModel) params.set('sonnetModel', input.sonnetModel);
+  if (input.opusModel) params.set('opusModel', input.opusModel);
+  return `ccswitch://v1/import?${params.toString()}`;
 }
