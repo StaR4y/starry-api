@@ -66,11 +66,13 @@ public interface ModelCatalogProvider {
     }
 
     default ModelDtos.ModelListResponse modelList(long created) {
+        List<ModelDtos.ModelListItem> items = models().stream()
+            .map(spec -> modelListItem(spec, created))
+            .toList();
         return new ModelDtos.ModelListResponse(
             "list",
-            models().stream()
-                .map(spec -> modelListItem(spec, created))
-                .toList()
+            items,
+            items
         );
     }
 

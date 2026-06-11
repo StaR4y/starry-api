@@ -266,7 +266,7 @@ windows_wsl_setup_acknowledged = true
 name = "Starry API"
 base_url = "http://127.0.0.1:8080/v1"
 wire_api = "responses"
-requires_openai_auth = true
+experimental_bearer_token = "sk-REPLACE_ME"
 supports_websockets = false
 ```
 
@@ -277,6 +277,8 @@ Codex CLI (`~/.codex/auth.json`):
   "OPENAI_API_KEY": "sk-REPLACE_ME"
 }
 ```
+
+If Codex prints `Your access token could not be refreshed because your refresh token was already used`, the local `auth.json` still contains stale ChatGPT OAuth fields. Back up the file and replace it with the minimal API-key JSON above, or run `codex logout` before applying the Starry API-key configuration.
 
 Claude Code:
 

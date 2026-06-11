@@ -16,9 +16,12 @@ class ProxyModelServiceTest {
 
     @Test
     void exposesOfficialHiddenAndPresetModels() {
-        JsonNode data = objectMapper.valueToTree(modelCatalog.modelList(123L)).path("data");
+        JsonNode response = objectMapper.valueToTree(modelCatalog.modelList(123L));
+        JsonNode data = response.path("data");
         List<String> ids = data.findValuesAsText("id");
 
+        assertThat(response.path("models")).hasSize(data.size());
+        assertThat(response.path("models").get(0).path("id").asText()).isEqualTo(data.get(0).path("id").asText());
         assertThat(ids)
             .hasSizeGreaterThanOrEqualTo(142)
             .contains(

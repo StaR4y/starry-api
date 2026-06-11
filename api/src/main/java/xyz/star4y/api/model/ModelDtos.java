@@ -31,10 +31,13 @@ public final class ModelDtos {
 
     public record ModelListResponse(
         String object,
-        List<ModelListItem> data
+        List<ModelListItem> data,
+        List<ModelListItem> models
     ) {
         public ModelListResponse {
-            data = data == null ? List.of() : List.copyOf(data);
+            List<ModelListItem> items = data == null ? models : data;
+            data = items == null ? List.of() : List.copyOf(items);
+            models = models == null ? data : List.copyOf(models);
         }
     }
 

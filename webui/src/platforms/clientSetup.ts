@@ -147,12 +147,12 @@ function codexFiles(platform: SetupPlatform, context: SetupContext): SetupFileBl
   return [
     {
       path: joinConfigPath(dir, 'config.toml', platform),
-      hint: '保存到 Codex 用户级配置；不要放在项目 .codex/config.toml 中。',
+      hint: '保存到 Codex 用户级配置；不要放在项目 .codex/config.toml 中。配置会直接使用 Starry API Key，避免触发 ChatGPT token 刷新。',
       content: codexConfigToml(context),
     },
     {
       path: joinConfigPath(dir, 'auth.json', platform),
-      hint: 'API Key 会写入 Codex 本地鉴权文件，请妥善保管。',
+      hint: '覆盖旧的 ChatGPT OAuth token，避免 refresh token already used。原文件如需保留请先备份。',
       content: JSON.stringify({ OPENAI_API_KEY: normalizedApiKey(context.apiKey) }, null, 2),
     },
   ];
@@ -216,7 +216,7 @@ function codexConfigToml(context: SetupContext) {
     `name = "Starry API"`,
     `base_url = ${JSON.stringify(context.apiBaseUrl)}`,
     `wire_api = "responses"`,
-    `requires_openai_auth = true`,
+    `experimental_bearer_token = ${JSON.stringify(normalizedApiKey(context.apiKey))}`,
     `supports_websockets = false`,
   ].join('\n');
 }
