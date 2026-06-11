@@ -149,6 +149,79 @@ class AccountTokenRefreshServiceTest {
     }
 
     @Test
+    void returnsStoredRotatedCredentialsWhenCallerHasStaleCodexToken() {
+        AtomicBoolean called = new AtomicBoolean(false);
+        ExchangeFunction exchange = request -> {
+            called.set(true);
+            return Mono.just(ClientResponse.create(HttpStatus.OK).build());
+        };
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ProxyAccountEntity stale = codexAccount();
+        ProxyAccountEntity rotated = codexAccount();
+        rotated.setAccessToken("codex-new-access");
+        rotated.setRefreshToken("codex-new-refresh");
+        rotated.setTokenExpiresAt(Instant.now().plusSeconds(3600));
+
+        when(repository.findByAccountId("codex-main")).thenReturn(Mono.just(rotated));
+        when(accountPoolService.refreshCache()).thenReturn(Mono.empty());
+
+        AccountTokenRefreshService service = new AccountTokenRefreshService(
+            new ObjectMapper(),
+            WebClient.builder().exchangeFunction(exchange).build(),
+            repository,
+            accountPoolService
+        );
+
+        ProxyAccountEntity refreshed = service.refresh(stale).block();
+
+        assertThat(refreshed).isSameAs(rotated);
+        assertThat(refreshed.getAccessToken()).isEqualTo("codex-new-access");
+        assertThat(called).isFalse();
+    }
+
+    @Test
+    void recoversCodexRefreshWhenOldRefreshTokenWasAlreadyUsed() {
+        AtomicBoolean called = new AtomicBoolean(false);
+        ExchangeFunction exchange = request -> {
+            called.set(true);
+            return Mono.just(ClientResponse.create(HttpStatus.BAD_REQUEST)
+                .header("Content-Type", "application/json")
+                .body("""
+                    {
+                      "error": "invalid_grant",
+                      "error_description": "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again."
+                    }
+                    """)
+                .build());
+        };
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ProxyAccountEntity stale = codexAccount();
+        ProxyAccountEntity current = codexAccount();
+        ProxyAccountEntity rotated = codexAccount();
+        rotated.setAccessToken("codex-new-access");
+        rotated.setRefreshToken("codex-new-refresh");
+        rotated.setTokenExpiresAt(Instant.now().plusSeconds(3600));
+
+        when(repository.findByAccountId("codex-main")).thenReturn(Mono.just(current), Mono.just(rotated));
+        when(accountPoolService.refreshCache()).thenReturn(Mono.empty());
+
+        AccountTokenRefreshService service = new AccountTokenRefreshService(
+            new ObjectMapper(),
+            WebClient.builder().exchangeFunction(exchange).build(),
+            repository,
+            accountPoolService
+        );
+
+        ProxyAccountEntity refreshed = service.refresh(stale).block();
+
+        assertThat(refreshed).isSameAs(rotated);
+        assertThat(refreshed.getAccessToken()).isEqualTo("codex-new-access");
+        assertThat(called).isTrue();
+    }
+
+    @Test
     void scheduledRefreshSkipsCodexAccountWithoutTokenExpiry() {
         AtomicBoolean called = new AtomicBoolean(false);
         ExchangeFunction exchange = request -> {
@@ -197,6 +270,7 @@ class AccountTokenRefreshServiceTest {
         codex.setTokenExpiresAt(Instant.now().minusSeconds(60));
 
         when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(codex));
+        when(repository.findByAccountId("codex-main")).thenReturn(Mono.just(codex));
         when(accountPoolService.recordRequestFailure(
             eq("codex-main"),
             eq(AccountPoolService.UpstreamErrorType.FATAL),

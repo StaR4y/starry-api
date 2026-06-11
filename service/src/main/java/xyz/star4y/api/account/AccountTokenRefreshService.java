@@ -56,12 +56,13 @@ public class AccountTokenRefreshService {
     }
 
     public Mono<ProxyAccountEntity> refresh(ProxyAccountEntity account) {
-        if (account.getAccountId() == null || account.getAccountId().isBlank()) {
+        String accountId = clean(account.getAccountId());
+        if (accountId == null) {
             return Mono.error(refreshError("Account ID is empty"));
         }
-        return inFlightRefreshes.computeIfAbsent(account.getAccountId(), ignored -> refreshInternal(account)
+        return inFlightRefreshes.computeIfAbsent(accountId, ignored -> refreshInternal(account)
             .cache()
-            .doFinally(signal -> inFlightRefreshes.remove(account.getAccountId())));
+            .doFinally(signal -> inFlightRefreshes.remove(accountId)));
     }
 
     @Scheduled(
@@ -112,22 +113,23 @@ public class AccountTokenRefreshService {
     }
 
     private Mono<ProxyAccountEntity> refreshInternal(ProxyAccountEntity account) {
-        String refreshToken = clean(account.getRefreshToken());
-        if (refreshToken == null) {
-            return Mono.error(refreshError("Missing refreshToken"));
-        }
-        if (AccountPlatforms.isCodex(account)) {
-            return refreshCodexToken(account, refreshToken).flatMap(result -> saveRefreshedToken(account, result));
-        }
-        boolean social = "social".equalsIgnoreCase(account.getAuthMethod());
-        if (!social && (clean(account.getClientId()) == null || clean(account.getClientSecret()) == null)) {
-            return Mono.error(refreshError("Missing OIDC refresh credentials: clientId/clientSecret"));
-        }
+        String accountId = clean(account.getAccountId());
+        return repository.findByAccountId(accountId)
+            .switchIfEmpty(Mono.error(refreshError("Account not found while loading latest token")))
+            .flatMap(latest -> {
+                if (hasNewerStoredAccessToken(account, latest)) {
+                    return accountPoolService.refreshCache().thenReturn(latest);
+                }
 
-        Mono<TokenRefreshResult> refreshed = social
-            ? refreshSocialToken(account, refreshToken)
-            : refreshOidcToken(account, refreshToken);
-        return refreshed.flatMap(result -> saveRefreshedToken(account, result));
+                String refreshToken = clean(latest.getRefreshToken());
+                if (refreshToken == null) {
+                    return Mono.error(refreshError("Missing refreshToken"));
+                }
+                Mono<TokenRefreshResult> refreshed = refreshToken(latest, refreshToken);
+                return refreshed
+                    .flatMap(result -> saveRefreshedToken(latest, result))
+                    .onErrorResume(error -> recoverFromPossibleRotatedToken(account, refreshToken, error));
+            });
     }
 
     public boolean canRefresh(ProxyAccountEntity account) {
@@ -219,6 +221,17 @@ public class AccountTokenRefreshService {
             });
     }
 
+    private Mono<TokenRefreshResult> refreshToken(ProxyAccountEntity account, String refreshToken) {
+        if (AccountPlatforms.isCodex(account)) {
+            return refreshCodexToken(account, refreshToken);
+        }
+        boolean social = "social".equalsIgnoreCase(account.getAuthMethod());
+        if (!social && (clean(account.getClientId()) == null || clean(account.getClientSecret()) == null)) {
+            return Mono.error(refreshError("Missing OIDC refresh credentials: clientId/clientSecret"));
+        }
+        return social ? refreshSocialToken(account, refreshToken) : refreshOidcToken(account, refreshToken);
+    }
+
     private Mono<ProxyAccountEntity> saveRefreshedToken(ProxyAccountEntity account, TokenRefreshResult result) {
         if (result.accessToken() == null || result.accessToken().isBlank()) {
             return Mono.error(refreshError("Refresh response does not contain accessToken"));
@@ -257,6 +270,45 @@ public class AccountTokenRefreshService {
             .thenReturn(Boolean.FALSE);
     }
 
+    private Mono<ProxyAccountEntity> recoverFromPossibleRotatedToken(
+        ProxyAccountEntity requested,
+        String attemptedRefreshToken,
+        Throwable error
+    ) {
+        if (!isRefreshTokenReuseError(error)) {
+            return Mono.error(error);
+        }
+        return loadRotatedAccount(requested, attemptedRefreshToken)
+            .switchIfEmpty(Mono.delay(Duration.ofMillis(300)).then(loadRotatedAccount(requested, attemptedRefreshToken)))
+            .switchIfEmpty(Mono.error(error))
+            .flatMap(latest -> accountPoolService.refreshCache().thenReturn(latest));
+    }
+
+    private Mono<ProxyAccountEntity> loadRotatedAccount(ProxyAccountEntity requested, String attemptedRefreshToken) {
+        String accountId = clean(requested.getAccountId());
+        if (accountId == null) {
+            return Mono.empty();
+        }
+        return repository.findByAccountId(accountId)
+            .filter(latest -> !same(clean(latest.getRefreshToken()), attemptedRefreshToken))
+            .filter(latest -> hasNewerStoredAccessToken(requested, latest));
+    }
+
+    private boolean hasNewerStoredAccessToken(ProxyAccountEntity requested, ProxyAccountEntity latest) {
+        String latestAccessToken = clean(latest.getAccessToken());
+        if (latestAccessToken == null) {
+            return false;
+        }
+        if (!same(clean(requested.getAccessToken()), latestAccessToken)) {
+            return true;
+        }
+        Instant requestedExpiry = requested.getTokenExpiresAt();
+        Instant latestExpiry = latest.getTokenExpiresAt();
+        return latestExpiry != null
+            && (requestedExpiry == null || latestExpiry.isAfter(requestedExpiry))
+            && latestExpiry.isAfter(Instant.now().plusSeconds(30));
+    }
+
     private boolean isNonRetryableRefreshError(Throwable error) {
         String message = rootFailure(error).getMessage();
         if (message == null) {
@@ -265,6 +317,7 @@ public class AccountTokenRefreshService {
         String normalized = message.toLowerCase(Locale.ROOT);
         return normalized.contains("invalid_grant")
             || normalized.contains("refresh_token_reused")
+            || (normalized.contains("refresh token") && normalized.contains("already used"))
             || normalized.contains("invalid_client")
             || normalized.contains("unauthorized_client")
             || normalized.contains("access_denied")
@@ -273,6 +326,16 @@ public class AccountTokenRefreshService {
             || normalized.contains("session has ended")
             || normalized.contains("invalidated oauth token")
             || normalized.contains("no refresh token");
+    }
+
+    private boolean isRefreshTokenReuseError(Throwable error) {
+        String message = rootFailure(error).getMessage();
+        if (message == null) {
+            return false;
+        }
+        String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains("refresh_token_reused")
+            || (normalized.contains("refresh token") && normalized.contains("already used"));
     }
 
     private Throwable rootFailure(Throwable error) {
@@ -405,6 +468,10 @@ public class AccountTokenRefreshService {
         }
         String trimmed = value.trim();
         return trimmed.isEmpty() ? null : trimmed;
+    }
+
+    private boolean same(String first, String second) {
+        return first == null ? second == null : first.equals(second);
     }
 
     private record TokenRefreshResult(
