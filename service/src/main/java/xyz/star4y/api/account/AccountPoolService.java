@@ -195,6 +195,18 @@ public class AccountPoolService {
         );
     }
 
+    public Mono<ProxyAccountEntity> selectAnthropicAccount(String sessionHint) {
+        return selectAccount(sessionHint, AccountPlatforms::isAnthropicApiKey, "No available Anthropic upstream account");
+    }
+
+    public Mono<ProxyAccountEntity> selectAnthropicAccount(String sessionHint, Collection<String> excludedAccountIds) {
+        return selectAccount(
+            sessionHint,
+            account -> AccountPlatforms.isAnthropicApiKey(account) && !isExcluded(account, excludedAccountIds),
+            "No available Anthropic upstream account"
+        );
+    }
+
     public Mono<ProxyAccountEntity> selectCodexOpenAiAccount(String sessionHint) {
         return selectAccount(sessionHint, AccountPlatforms::isCodex, "No available Codex upstream account");
     }
@@ -612,7 +624,10 @@ public class AccountPoolService {
         entity.setRefreshToken(request.refreshToken());
         entity.setClientId(request.clientId());
         entity.setClientSecret(request.clientSecret());
-        entity.setRegion(defaultString(request.region(), AccountPlatforms.isOpenAi(normalizedProvider, normalizedAuthMethod) ? null : AccountPlatforms.DEFAULT_KIRO_REGION));
+        boolean regionlessApiKey = AccountPlatforms.isOpenAi(normalizedProvider, normalizedAuthMethod)
+            || AccountPlatforms.isGoogleApiKey(normalizedProvider, normalizedAuthMethod)
+            || AccountPlatforms.isAnthropicApiKey(normalizedProvider, normalizedAuthMethod);
+        entity.setRegion(defaultString(request.region(), regionlessApiKey ? null : AccountPlatforms.DEFAULT_KIRO_REGION));
         entity.setAuthMethod(normalizedAuthMethod);
         entity.setProvider(normalizedProvider);
         entity.setBaseUrl(AccountPlatforms.defaultBaseUrl(normalizedProvider, normalizedAuthMethod, request.baseUrl()));

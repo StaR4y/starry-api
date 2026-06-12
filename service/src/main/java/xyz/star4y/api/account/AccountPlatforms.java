@@ -12,6 +12,7 @@ public final class AccountPlatforms {
     public static final String OPENAI_CODEX_AUTH = "codex";
     public static final String DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
     public static final String DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex";
+    public static final String DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
     public static final String DEFAULT_KIRO_REGION = "us-east-1";
 
     private AccountPlatforms() {
@@ -53,8 +54,16 @@ public final class AccountPlatforms {
         return account != null && isGoogleProvider(key(account.getProvider())) && isApiKey(account.getAuthMethod());
     }
 
+    public static boolean isGoogleApiKey(String provider, String authMethod) {
+        return isGoogleProvider(key(provider)) && isApiKey(authMethod);
+    }
+
     public static boolean isAnthropicApiKey(ProxyAccountEntity account) {
         return account != null && isAnthropicProvider(key(account.getProvider())) && isApiKey(account.getAuthMethod());
+    }
+
+    public static boolean isAnthropicApiKey(String provider, String authMethod) {
+        return isAnthropicProvider(key(provider)) && isApiKey(authMethod);
     }
 
     public static String normalizeProvider(String provider, String authMethod) {
@@ -86,6 +95,10 @@ public final class AccountPlatforms {
         if (isCodex(provider, cleaned)) {
             return OPENAI_CODEX_AUTH;
         }
+        String providerKey = key(provider);
+        if (cleaned == null && (isGoogleProvider(providerKey) || isAnthropicProvider(providerKey))) {
+            return OPENAI_API_KEY_AUTH;
+        }
         if (isOpenAi(provider, cleaned)) {
             return OPENAI_API_KEY_AUTH;
         }
@@ -114,6 +127,9 @@ public final class AccountPlatforms {
         }
         if (isOpenAi(provider, authMethod)) {
             return DEFAULT_OPENAI_BASE_URL;
+        }
+        if (isAnthropicApiKey(provider, authMethod)) {
+            return DEFAULT_ANTHROPIC_BASE_URL;
         }
         return null;
     }

@@ -17,6 +17,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.Exceptions;
 import xyz.star4y.api.model.DefaultModelCatalogProvider;
+import xyz.star4y.api.platform.anthropic.AnthropicUpstreamClient;
 import xyz.star4y.api.platform.core.PlatformCompletionResult;
 import xyz.star4y.api.platform.openai.OpenAiAccountTestClient;
 import xyz.star4y.api.platform.kiro.KiroPayloadFactory;
@@ -48,7 +49,8 @@ class AccountTestServiceTest {
             accountPoolService,
             new KiroPayloadFactory(objectMapper, modelCatalog),
             upstreamClient,
-            openAiAccountTestClient
+            openAiAccountTestClient,
+            mock(AnthropicUpstreamClient.class)
         );
 
         AccountDtos.TestAccountsResponse response = service
@@ -90,7 +92,8 @@ class AccountTestServiceTest {
             accountPoolService,
             new KiroPayloadFactory(objectMapper, modelCatalog),
             upstreamClient,
-            openAiAccountTestClient
+            openAiAccountTestClient,
+            mock(AnthropicUpstreamClient.class)
         );
 
         AccountDtos.TestAccountsResponse response = service
@@ -126,7 +129,8 @@ class AccountTestServiceTest {
             accountPoolService,
             new KiroPayloadFactory(objectMapper, modelCatalog),
             upstreamClient,
-            openAiAccountTestClient
+            openAiAccountTestClient,
+            mock(AnthropicUpstreamClient.class)
         );
 
         AccountDtos.TestAccountsResponse response = service
@@ -143,6 +147,46 @@ class AccountTestServiceTest {
             });
         verify(openAiAccountTestClient).test(eq(account), eq("gpt-5.4-mini"), eq("ping"));
         verifyNoInteractions(upstreamClient);
+    }
+
+    @Test
+    void testsAnthropicApiKeyAccountsWithAnthropicClient() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        KiroUpstreamClient upstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiAccountTestClient openAiAccountTestClient = mock(OpenAiAccountTestClient.class);
+        AnthropicUpstreamClient anthropicUpstreamClient = mock(AnthropicUpstreamClient.class);
+        ProxyAccountEntity account = anthropicAccount("anthropic-main", "sk-ant-test");
+
+        when(repository.findAll()).thenReturn(Flux.just(account));
+        when(anthropicUpstreamClient.complete(eq(account), any(ObjectNode.class), eq("anthropic/claude-sonnet-4.5")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", PlatformUsage.zero())));
+        when(accountPoolService.recordTestSuccess(eq("anthropic-main"), eq(0L), eq(false))).thenReturn(Mono.empty());
+
+        AccountTestService service = new AccountTestService(
+            objectMapper,
+            repository,
+            accountPoolService,
+            new KiroPayloadFactory(objectMapper, modelCatalog),
+            upstreamClient,
+            openAiAccountTestClient,
+            anthropicUpstreamClient
+        );
+
+        AccountDtos.TestAccountsResponse response = service
+            .test(new AccountDtos.TestAccountsRequest(null, true, "auto", "ping", 1, false))
+            .block();
+
+        assertThat(response).isNotNull();
+        assertThat(response.success()).isEqualTo(1);
+        assertThat(response.items()).singleElement()
+            .satisfies(item -> {
+                assertThat(item.accountId()).isEqualTo("anthropic-main");
+                assertThat(item.model()).isEqualTo("anthropic/claude-sonnet-4.5");
+                assertThat(item.status()).isEqualTo("SUCCESS");
+            });
+        verify(anthropicUpstreamClient).complete(eq(account), any(ObjectNode.class), eq("anthropic/claude-sonnet-4.5"));
+        verifyNoInteractions(upstreamClient, openAiAccountTestClient);
     }
 
     @Test
@@ -164,7 +208,8 @@ class AccountTestServiceTest {
             accountPoolService,
             new KiroPayloadFactory(objectMapper, modelCatalog),
             upstreamClient,
-            openAiAccountTestClient
+            openAiAccountTestClient,
+            mock(AnthropicUpstreamClient.class)
         );
 
         AccountDtos.TestAccountsResponse response = service
@@ -198,7 +243,8 @@ class AccountTestServiceTest {
             accountPoolService,
             new KiroPayloadFactory(objectMapper, modelCatalog),
             upstreamClient,
-            openAiAccountTestClient
+            openAiAccountTestClient,
+            mock(AnthropicUpstreamClient.class)
         );
 
         AccountDtos.TestAccountsResponse response = service
@@ -228,7 +274,8 @@ class AccountTestServiceTest {
             accountPoolService,
             new KiroPayloadFactory(objectMapper, modelCatalog),
             upstreamClient,
-            openAiAccountTestClient
+            openAiAccountTestClient,
+            mock(AnthropicUpstreamClient.class)
         );
 
         AccountDtos.TestAccountsResponse response = service
@@ -261,7 +308,8 @@ class AccountTestServiceTest {
             accountPoolService,
             new KiroPayloadFactory(objectMapper, modelCatalog),
             upstreamClient,
-            openAiAccountTestClient
+            openAiAccountTestClient,
+            mock(AnthropicUpstreamClient.class)
         );
 
         AccountDtos.TestAccountsResponse response = service
@@ -283,7 +331,8 @@ class AccountTestServiceTest {
             mock(AccountPoolService.class),
             new KiroPayloadFactory(objectMapper, modelCatalog),
             mock(KiroUpstreamClient.class),
-            mock(OpenAiAccountTestClient.class)
+            mock(OpenAiAccountTestClient.class),
+            mock(AnthropicUpstreamClient.class)
         );
 
         AccountDtos.TestModelOptionsResponse options = service.modelOptions();
@@ -374,7 +423,8 @@ class AccountTestServiceTest {
             accountPoolService,
             new KiroPayloadFactory(objectMapper, modelCatalog),
             upstreamClient,
-            openAiAccountTestClient
+            openAiAccountTestClient,
+            mock(AnthropicUpstreamClient.class)
         );
 
         AccountDtos.TestAccountsResponse response = service
@@ -409,7 +459,8 @@ class AccountTestServiceTest {
             accountPoolService,
             new KiroPayloadFactory(objectMapper, modelCatalog),
             upstreamClient,
-            openAiAccountTestClient
+            openAiAccountTestClient,
+            mock(AnthropicUpstreamClient.class)
         );
 
         AccountDtos.TestAccountsResponse response = service
@@ -451,7 +502,8 @@ class AccountTestServiceTest {
             accountPoolService,
             new KiroPayloadFactory(objectMapper, modelCatalog),
             upstreamClient,
-            openAiAccountTestClient
+            openAiAccountTestClient,
+            mock(AnthropicUpstreamClient.class)
         );
 
         AccountDtos.TestAccountsResponse response = service
@@ -494,7 +546,8 @@ class AccountTestServiceTest {
             accountPoolService,
             new KiroPayloadFactory(objectMapper, modelCatalog),
             upstreamClient,
-            openAiAccountTestClient
+            openAiAccountTestClient,
+            mock(AnthropicUpstreamClient.class)
         );
 
         AccountDtos.TestAccountsResponse response = service
@@ -531,6 +584,15 @@ class AccountTestServiceTest {
         account.setAuthMethod(AccountPlatforms.OPENAI_API_KEY_AUTH);
         account.setProvider(AccountPlatforms.OPENAI_PROVIDER);
         account.setBaseUrl(AccountPlatforms.DEFAULT_OPENAI_BASE_URL);
+        return account;
+    }
+
+    private ProxyAccountEntity anthropicAccount(String accountId, String accessToken) {
+        ProxyAccountEntity account = account(accountId, accessToken);
+        account.setRegion(null);
+        account.setAuthMethod(AccountPlatforms.OPENAI_API_KEY_AUTH);
+        account.setProvider(AccountPlatforms.ANTHROPIC_PROVIDER);
+        account.setBaseUrl(AccountPlatforms.DEFAULT_ANTHROPIC_BASE_URL);
         return account;
     }
 }

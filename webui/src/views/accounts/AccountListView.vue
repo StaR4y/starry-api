@@ -218,6 +218,7 @@
 
   type FormMode = 'create' | 'edit';
   const OPENAI_COMPATIBLE_PROVIDER = 'OpenAI-compatible';
+  const ANTHROPIC_PROVIDER = 'Anthropic';
 
   const formVisible = ref(false);
   const formMode = ref<FormMode>('create');
@@ -248,19 +249,30 @@
 
   const isOpenAiCompatibleForm = computed(() => isOpenAiCompatibleProvider(form.provider));
   const isOpenAiApiKeyForm = computed(() => isOpenAiCompatibleForm.value || normalized(form.provider) === 'openai');
+  const isAnthropicApiKeyForm = computed(() => isAnthropicProvider(form.provider));
+  const isApiKeyForm = computed(() => isOpenAiApiKeyForm.value || isAnthropicApiKeyForm.value);
   const accessTokenLabel = computed(() => {
     const suffix = formMode.value === 'edit' ? '（留空则不修改）' : '';
-    return isOpenAiApiKeyForm.value ? `API Key${suffix}` : `Access Token${suffix}`;
+    return isApiKeyForm.value ? `API Key${suffix}` : `Access Token${suffix}`;
   });
-  const accessTokenPlaceholder = computed(() =>
-    isOpenAiApiKeyForm.value ? '输入上游网站 API Key，如 sk-...' : '输入 Access Token',
-  );
-  const baseUrlLabel = computed(() => isOpenAiCompatibleForm.value ? '第三方 Base URL' : 'Base URL');
-  const baseUrlPlaceholder = computed(() =>
-    isOpenAiCompatibleForm.value
-      ? '例如 https://joystar.cc、https://api.deepseek.com 或 https://openrouter.ai/api/v1'
-      : '默认 https://api.openai.com/v1',
-  );
+  const accessTokenPlaceholder = computed(() => {
+    if (isAnthropicApiKeyForm.value) return '输入 Anthropic / Claude API Key，如 sk-ant-...';
+    return isOpenAiApiKeyForm.value ? '输入上游网站 API Key，如 sk-...' : '输入 Access Token';
+  });
+  const baseUrlLabel = computed(() => {
+    if (isOpenAiCompatibleForm.value) return '第三方 Base URL';
+    if (isAnthropicApiKeyForm.value) return 'Anthropic Base URL';
+    return 'Base URL';
+  });
+  const baseUrlPlaceholder = computed(() => {
+    if (isOpenAiCompatibleForm.value) {
+      return '例如 https://joystar.cc、https://api.deepseek.com 或 https://openrouter.ai/api/v1';
+    }
+    if (isAnthropicApiKeyForm.value) {
+      return '默认 https://api.anthropic.com/v1，也可填第三方 Anthropic 兼容地址';
+    }
+    return '默认 https://api.openai.com/v1';
+  });
 
   const rules: FormRules = {
     accessToken: [{ required: true, message: 'API Key / accessToken 必填', trigger: 'blur' }],
@@ -343,6 +355,7 @@
     { label: 'BuilderID / Kiro', value: 'BuilderID' },
     { label: 'OpenAI 官方 API Key', value: 'OpenAI' },
     { label: '第三方 OpenAI 兼容 API Key', value: OPENAI_COMPATIBLE_PROVIDER },
+    { label: 'Anthropic / Claude API Key', value: ANTHROPIC_PROVIDER },
   ];
 
   const authMethodOptions = [
@@ -357,12 +370,23 @@
     return value === 'openai-compatible' || value === 'openaicompatibility';
   }
 
+  function isAnthropicProvider(provider: string | null | undefined) {
+    const value = normalized(provider);
+    return value === 'anthropic' || value === 'claude';
+  }
+
   function applyProviderDefaults(provider: string | null | undefined) {
     const value = normalized(provider);
     const auth = normalized(form.authMethod);
     if (isOpenAiCompatibleProvider(provider)) {
       form.authMethod = 'api-key';
       form.region = '';
+      return;
+    }
+    if (isAnthropicProvider(provider)) {
+      form.authMethod = 'api-key';
+      form.region = '';
+      if (!form.baseUrl) form.baseUrl = 'https://api.anthropic.com/v1';
       return;
     }
     if (value === 'openai') {
@@ -772,7 +796,7 @@
           ? { ...(parsed as Record<string, unknown>), upsert: importUpsert.value }
           : null;
     if (!isImportPayload(payload)) {
-      ElMessage.error('数据应为 Kiro / OpenAI Codex / OpenAI-API 导入 JSON');
+      ElMessage.error('数据应为 Kiro / OpenAI Codex / OpenAI-API / Anthropic 导入 JSON');
       return;
     }
 
@@ -1326,6 +1350,14 @@
         :closable="false"
         title="第三方 API Key 账号会按 OpenAI 兼容协议调用 Base URL；填写站点根地址时会自动使用 /v1。模型映射目标可写成 openai-compatible/真实模型ID，例如 openai-compatible/deepseek-chat。"
       />
+      <el-alert
+        v-else-if="isAnthropicApiKeyForm"
+        class="account-form-alert"
+        type="info"
+        show-icon
+        :closable="false"
+        title="Anthropic API Key 账号会按原生 Messages API 调用 Base URL；模型映射目标建议写成 anthropic/真实模型ID，例如 anthropic/claude-sonnet-4.5。"
+      />
       <el-row :gutter="20">
         <el-col v-if="formMode === 'create'" :span="12">
           <el-form-item label="账号 ID（可选）">
@@ -1403,6 +1435,9 @@
             <p v-if="isOpenAiCompatibleForm" class="form-hint">
               填到兼容 OpenAI 的 API 根路径，通常以 /v1 结尾；服务会自动追加 /chat/completions 或 /responses。
             </p>
+            <p v-else-if="isAnthropicApiKeyForm" class="form-hint">
+              填到 Anthropic Messages API 根路径，通常以 /v1 结尾；服务会自动追加 /messages。
+            </p>
           </el-form-item>
         </el-col>
         <el-col :span="12">
@@ -1442,7 +1477,7 @@
   <!-- 批量导入 -->
   <el-dialog v-model="importVisible" title="批量导入账号" width="720px">
     <div class="text-secondary mt-8" style="margin-bottom: 8px">
-      上传或粘贴 Kiro Account Manager、OpenAI Codex token、OpenAI-compatible 配置 JSON，或账号数组 /
+      上传或粘贴 Kiro Account Manager、OpenAI Codex token、OpenAI-compatible / Anthropic API Key 配置 JSON，或账号数组 /
       <span class="mono">{ "accounts": [...] }</span>
     </div>
 

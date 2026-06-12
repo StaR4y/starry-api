@@ -77,9 +77,9 @@ public class AccountImportParser {
         List<JsonNode> sources = accountSources(item);
         JsonNode usage = item.path("usage");
         String type = firstText(sources, "type");
-        String provider = firstNonBlank(firstText(sources, "provider", "idp"), type);
+        String provider = firstNonBlank(firstText(sources, "provider", "platform", "idp"), isApiKeyType(type) ? null : type);
         String authMethod = AccountPlatforms.normalizeAuthMethod(
-            firstText(sources, "authMethod", "auth_method", "auth-method"),
+            firstNonBlank(firstText(sources, "authMethod", "auth_method", "auth-method"), isApiKeyType(type) ? AccountPlatforms.OPENAI_API_KEY_AUTH : null),
             provider
         );
         String normalizedProvider = AccountPlatforms.normalizeProvider(provider, authMethod);
@@ -228,6 +228,11 @@ public class AccountImportParser {
             || body.has("api-key-entries")
             || body.has("api_key_entries")
             || body.has("keys");
+    }
+
+    private boolean isApiKeyType(String type) {
+        String normalized = type == null ? "" : type.trim().toLowerCase();
+        return "apikey".equals(normalized) || "api-key".equals(normalized) || "api_key".equals(normalized);
     }
 
     private List<JsonNode> accountSources(JsonNode item) {

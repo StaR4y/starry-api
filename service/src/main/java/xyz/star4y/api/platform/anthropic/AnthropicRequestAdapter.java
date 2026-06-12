@@ -25,6 +25,10 @@ public class AnthropicRequestAdapter {
         if (request.has("max_tokens")) chat.set("max_tokens", request.get("max_tokens"));
         if (request.has("temperature")) chat.set("temperature", request.get("temperature"));
         if (request.has("top_p")) chat.set("top_p", request.get("top_p"));
+        if (request.has("top_k")) chat.set("top_k", request.get("top_k"));
+        if (request.has("stop_sequences")) chat.set("stop_sequences", request.get("stop_sequences"));
+        if (request.has("metadata")) chat.set("metadata", request.get("metadata"));
+        if (request.has("thinking")) chat.set("thinking", request.get("thinking"));
         if (request.has("stream")) chat.set("stream", request.get("stream"));
         ArrayNode messages = chat.putArray("messages");
         if (request.hasNonNull("system")) {

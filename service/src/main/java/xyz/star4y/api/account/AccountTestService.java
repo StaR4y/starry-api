@@ -14,6 +14,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import xyz.star4y.api.platform.catalog.OpenRouterModelIds;
 import xyz.star4y.api.platform.core.PlatformCompletionResult;
+import xyz.star4y.api.platform.anthropic.AnthropicUpstreamClient;
 import xyz.star4y.api.platform.kiro.KiroPayloadFactory;
 import xyz.star4y.api.platform.kiro.KiroUpstreamClient;
 import xyz.star4y.api.platform.openai.OpenAiAccountTestClient;
@@ -27,6 +28,7 @@ public class AccountTestService {
     private static final String DEFAULT_MODEL = "auto";
     private static final String DEFAULT_PROMPT = "Reply OK in one short sentence.";
     private static final String DEFAULT_OPENAI_API_KEY_TEST_MODEL = OpenAiAccountTestClient.DEFAULT_CODEX_TEST_MODEL;
+    private static final String DEFAULT_ANTHROPIC_API_KEY_TEST_MODEL = "anthropic/claude-sonnet-4.5";
     private static final List<String> OPENAI_STYLE_TEST_MODEL_IDS = List.of(
         "gpt-5.5",
         "gpt-5.4",
@@ -81,6 +83,7 @@ public class AccountTestService {
     private final KiroPayloadFactory payloadFactory;
     private final KiroUpstreamClient upstreamClient;
     private final OpenAiAccountTestClient openAiAccountTestClient;
+    private final AnthropicUpstreamClient anthropicUpstreamClient;
 
     public AccountTestService(
         ObjectMapper objectMapper,
@@ -88,7 +91,8 @@ public class AccountTestService {
         AccountPoolService accountPoolService,
         KiroPayloadFactory payloadFactory,
         KiroUpstreamClient upstreamClient,
-        OpenAiAccountTestClient openAiAccountTestClient
+        OpenAiAccountTestClient openAiAccountTestClient,
+        AnthropicUpstreamClient anthropicUpstreamClient
     ) {
         this.objectMapper = objectMapper;
         this.repository = repository;
@@ -96,6 +100,7 @@ public class AccountTestService {
         this.payloadFactory = payloadFactory;
         this.upstreamClient = upstreamClient;
         this.openAiAccountTestClient = openAiAccountTestClient;
+        this.anthropicUpstreamClient = anthropicUpstreamClient;
     }
 
     public Mono<AccountDtos.TestAccountsResponse> test(AccountDtos.TestAccountsRequest request) {
@@ -141,7 +146,7 @@ public class AccountTestService {
 
         ProxyAccountEntity account = target.account();
         String requestedModel = firstNonBlank(request.model(), DEFAULT_MODEL);
-        String model = AccountPlatforms.isOpenAi(account) ? openAiModel(requestedModel, account) : requestedModel;
+        String model = testModel(requestedModel, account);
         boolean updateStatus = !Boolean.FALSE.equals(request.updateStatus());
         String skipReason = skipReason(account, request, updateStatus);
         if (skipReason != null) {
@@ -211,7 +216,10 @@ public class AccountTestService {
         if (AccountPlatforms.isOpenAi(account)) {
             return openAiAccountTestClient.test(account, model, prompt);
         }
-        if (AccountPlatforms.isGoogleApiKey(account) || AccountPlatforms.isAnthropicApiKey(account)) {
+        if (AccountPlatforms.isAnthropicApiKey(account)) {
+            return anthropicUpstreamClient.complete(account, testChatRequest(model, prompt), model);
+        }
+        if (AccountPlatforms.isGoogleApiKey(account)) {
             return Mono.error(new UpstreamException(
                 501,
                 "Direct " + account.getProvider() + " account testing is not implemented yet",
@@ -321,6 +329,29 @@ public class AccountTestService {
 
     private boolean recoverableStatus(int statusCode) {
         return statusCode == 402 || statusCode == 403 || statusCode == 429 || statusCode >= 500;
+    }
+
+    private String testModel(String requestedModel, ProxyAccountEntity account) {
+        if (AccountPlatforms.isOpenAi(account)) {
+            return openAiModel(requestedModel, account);
+        }
+        if (AccountPlatforms.isAnthropicApiKey(account)) {
+            return anthropicModel(requestedModel);
+        }
+        return requestedModel;
+    }
+
+    private String anthropicModel(String requestedModel) {
+        String model = firstNonBlank(requestedModel, DEFAULT_MODEL);
+        String normalized = model.toLowerCase(Locale.ROOT);
+        if ("auto".equals(normalized)
+            || "simple-task".equals(normalized)
+            || normalized.startsWith("gpt")
+            || normalized.startsWith("openai/")
+            || normalized.startsWith("openai-compatible/")) {
+            return DEFAULT_ANTHROPIC_API_KEY_TEST_MODEL;
+        }
+        return model;
     }
 
     private String openAiModel(String requestedModel, ProxyAccountEntity account) {

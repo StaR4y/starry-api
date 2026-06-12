@@ -250,6 +250,31 @@ class AccountImportParserTest {
     }
 
     @Test
+    void acceptsSub2ApiAnthropicApiKeyPassthroughShape() throws Exception {
+        AccountDtos.ImportAccountsRequest request = parser.parse(objectMapper.readTree("""
+            {
+              "name": "anthropic-key-1",
+              "platform": "anthropic",
+              "type": "apikey",
+              "credentials": {
+                "api_key": "sk-ant-xxx",
+                "base_url": "https://api.anthropic.com"
+              },
+              "extra": {
+                "anthropic_passthrough": true
+              }
+            }
+            """));
+
+        assertThat(request.accounts()).hasSize(1);
+        AccountDtos.CreateAccountRequest account = request.accounts().get(0);
+        assertThat(account.provider()).isEqualTo(AccountPlatforms.ANTHROPIC_PROVIDER);
+        assertThat(account.authMethod()).isEqualTo(AccountPlatforms.OPENAI_API_KEY_AUTH);
+        assertThat(account.accessToken()).isEqualTo("sk-ant-xxx");
+        assertThat(account.baseUrl()).isEqualTo("https://api.anthropic.com");
+    }
+
+    @Test
     void acceptsCombinedAccountsAndOpenAiCompatibilityBlocks() throws Exception {
         AccountDtos.ImportAccountsRequest request = parser.parse(objectMapper.readTree("""
             {

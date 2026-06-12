@@ -32,6 +32,7 @@ import xyz.star4y.api.model.ModelMappingService;
 import xyz.star4y.api.model.ModelPricingService;
 import xyz.star4y.api.platform.anthropic.AnthropicRequestAdapter;
 import xyz.star4y.api.platform.anthropic.AnthropicResponseFactory;
+import xyz.star4y.api.platform.anthropic.AnthropicUpstreamClient;
 import xyz.star4y.api.platform.core.PlatformCompletionResult;
 import xyz.star4y.api.platform.core.PlatformUsage;
 import xyz.star4y.api.platform.gemini.GeminiRequestAdapter;
@@ -61,7 +62,8 @@ public class ProxyFacade {
 
     private enum UpstreamRoute {
         KIRO,
-        OPENAI
+        OPENAI,
+        ANTHROPIC
     }
 
     private final ApiKeyService apiKeyService;
@@ -79,6 +81,7 @@ public class ProxyFacade {
     private final OpenAiResponseStateStore openAiResponseStateStore;
     private final AnthropicRequestAdapter anthropicRequestAdapter;
     private final AnthropicResponseFactory anthropicResponseFactory;
+    private final AnthropicUpstreamClient anthropicUpstreamClient;
     private final GeminiRequestAdapter geminiRequestAdapter;
     private final GeminiResponseFactory geminiResponseFactory;
     private final PaymentSettingsService paymentSettingsService;
@@ -101,6 +104,7 @@ public class ProxyFacade {
         OpenAiResponseStateStore openAiResponseStateStore,
         AnthropicRequestAdapter anthropicRequestAdapter,
         AnthropicResponseFactory anthropicResponseFactory,
+        AnthropicUpstreamClient anthropicUpstreamClient,
         GeminiRequestAdapter geminiRequestAdapter,
         GeminiResponseFactory geminiResponseFactory,
         PaymentSettingsService paymentSettingsService,
@@ -122,6 +126,7 @@ public class ProxyFacade {
         this.openAiResponseStateStore = openAiResponseStateStore;
         this.anthropicRequestAdapter = anthropicRequestAdapter;
         this.anthropicResponseFactory = anthropicResponseFactory;
+        this.anthropicUpstreamClient = anthropicUpstreamClient;
         this.geminiRequestAdapter = geminiRequestAdapter;
         this.geminiResponseFactory = geminiResponseFactory;
         this.paymentSettingsService = paymentSettingsService;
@@ -168,7 +173,7 @@ public class ProxyFacade {
         String upstreamModel = upstreamModelFor(mappedModel, requestedFastMode);
         String sessionHint = sessionHint(exchange, request, principal.keyId());
         boolean stream = responseMode != ResponseMode.GEMINI_GENERATE_CONTENT && request.path("stream").asBoolean(false);
-        UpstreamRoute route = routeFor(upstreamModel);
+        UpstreamRoute route = routeFor(upstreamModel, responseMode);
         boolean fastMode = requestedFastMode && route == UpstreamRoute.OPENAI;
         JsonNode upstreamRequest = fastMode ? openAiFastRequest(request) : request;
 
@@ -257,7 +262,7 @@ public class ProxyFacade {
         String upstreamModel = upstreamModelFor(mappedModel, requestedFastMode);
         String sessionHint = sessionHint(exchange, request, principal.keyId());
         boolean stream = request.path("stream").asBoolean(false);
-        UpstreamRoute route = routeFor(upstreamModel);
+        UpstreamRoute route = routeFor(upstreamModel, ResponseMode.OPENAI_RESPONSES);
         boolean fastMode = requestedFastMode && route == UpstreamRoute.OPENAI;
         boolean codexOnlyResponsesModel = isCodexOnlyResponsesModel(requestedModel)
             || isCodexOnlyResponsesModel(mappedModel)
@@ -344,6 +349,10 @@ public class ProxyFacade {
     private Mono<ProxyAccountEntity> selectAccount(UpstreamRoute route, String sessionHint) {
         return switch (route) {
             case OPENAI -> accountPoolService.selectOpenAiAccount(sessionHint);
+            case ANTHROPIC -> accountPoolService.selectAnthropicAccount(sessionHint)
+                .onErrorResume(error -> isNoAvailableAccount(error)
+                    ? accountPoolService.selectKiroAccount(sessionHint)
+                    : Mono.error(error));
             case KIRO -> accountPoolService.selectKiroAccount(sessionHint);
         };
     }
@@ -354,6 +363,10 @@ public class ProxyFacade {
         }
         return switch (route) {
             case OPENAI -> accountPoolService.selectOpenAiAccount(sessionHint, attemptedAccountIds);
+            case ANTHROPIC -> accountPoolService.selectAnthropicAccount(sessionHint, attemptedAccountIds)
+                .onErrorResume(error -> isNoAvailableAccount(error)
+                    ? accountPoolService.selectKiroAccount(sessionHint, attemptedAccountIds)
+                    : Mono.error(error));
             case KIRO -> accountPoolService.selectKiroAccount(sessionHint, attemptedAccountIds);
         };
     }
@@ -385,8 +398,12 @@ public class ProxyFacade {
         if (route == UpstreamRoute.OPENAI) {
             return openAiUpstreamClient.complete(account, request, mappedModel);
         }
-        ObjectNode payload = payloadFactory.fromOpenAiChat(request, account, mappedModel, "AI_EDITOR", sessionHint);
-        return upstreamClient.complete(account, payload, mappedModel);
+        if (route == UpstreamRoute.ANTHROPIC && AccountPlatforms.isAnthropicApiKey(account)) {
+            return anthropicUpstreamClient.complete(account, request, mappedModel);
+        }
+        String kiroModel = route == UpstreamRoute.ANTHROPIC ? stripAnthropicPrefix(mappedModel) : mappedModel;
+        ObjectNode payload = payloadFactory.fromOpenAiChat(request, account, kiroModel, "AI_EDITOR", sessionHint);
+        return upstreamClient.complete(account, payload, kiroModel);
     }
 
     private Mono<PlatformCompletionResult> callResponsesWithAccount(
@@ -400,12 +417,22 @@ public class ProxyFacade {
             return openAiUpstreamClient.completeResponses(account, request, mappedModel);
         }
         ObjectNode chat = openAiRequestAdapter.responsesToChat(request);
-        ObjectNode payload = payloadFactory.fromOpenAiChat(chat, account, mappedModel, "AI_EDITOR", sessionHint);
-        return upstreamClient.complete(account, payload, mappedModel);
+        if (route == UpstreamRoute.ANTHROPIC && AccountPlatforms.isAnthropicApiKey(account)) {
+            return anthropicUpstreamClient.complete(account, chat, mappedModel);
+        }
+        String kiroModel = route == UpstreamRoute.ANTHROPIC ? stripAnthropicPrefix(mappedModel) : mappedModel;
+        ObjectNode payload = payloadFactory.fromOpenAiChat(chat, account, kiroModel, "AI_EDITOR", sessionHint);
+        return upstreamClient.complete(account, payload, kiroModel);
     }
 
-    private UpstreamRoute routeFor(String model) {
+    private UpstreamRoute routeFor(String model, ResponseMode responseMode) {
         String normalized = routeModel(model);
+        if (normalized.startsWith("anthropic/") || normalized.startsWith("anthropic-compatible/")) {
+            return UpstreamRoute.ANTHROPIC;
+        }
+        if (responseMode == ResponseMode.ANTHROPIC_MESSAGES) {
+            return UpstreamRoute.ANTHROPIC;
+        }
         if (normalized.startsWith("openai/")
             || normalized.startsWith("openai-compatible/")
             || normalized.startsWith("gpt")
@@ -414,6 +441,21 @@ public class ProxyFacade {
             return UpstreamRoute.OPENAI;
         }
         return UpstreamRoute.KIRO;
+    }
+
+    private String stripAnthropicPrefix(String model) {
+        if (model == null) {
+            return null;
+        }
+        String trimmed = model.trim();
+        String normalized = trimmed.toLowerCase(Locale.ROOT);
+        if (normalized.startsWith("anthropic/")) {
+            return trimmed.substring("anthropic/".length());
+        }
+        if (normalized.startsWith("anthropic-compatible/")) {
+            return trimmed.substring("anthropic-compatible/".length());
+        }
+        return trimmed;
     }
 
     private String routeModel(String model) {

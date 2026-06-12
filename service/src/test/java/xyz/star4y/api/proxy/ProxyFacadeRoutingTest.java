@@ -38,6 +38,7 @@ import xyz.star4y.api.model.ModelMappingService;
 import xyz.star4y.api.model.ModelPricingService;
 import xyz.star4y.api.platform.anthropic.AnthropicRequestAdapter;
 import xyz.star4y.api.platform.anthropic.AnthropicResponseFactory;
+import xyz.star4y.api.platform.anthropic.AnthropicUpstreamClient;
 import xyz.star4y.api.platform.core.PlatformCompletionResult;
 import xyz.star4y.api.platform.core.PlatformToolUse;
 import xyz.star4y.api.platform.core.PlatformUsage;
@@ -157,6 +158,119 @@ class ProxyFacadeRoutingTest {
         verify(accountPoolService, never()).selectKiroAccount(any());
         verify(openAiUpstreamClient).complete(eq(account), eq(request), eq("openai-compatible/deepseek-chat"));
         verify(kiroUpstreamClient, never()).complete(any(), any(), any());
+    }
+
+    @Test
+    void anthropicPrefixedModelsUseAnthropicAccountPoolAndUpstream() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        AnthropicUpstreamClient anthropicUpstreamClient = mock(AnthropicUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity account = anthropicAccount();
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "claude",
+              "messages": [{"role": "user", "content": "hi"}]
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/chat/completions")
+        );
+
+        when(apiKeyService.authenticate(exchange))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("claude", "key-1")).thenReturn("anthropic/claude-sonnet-4.5");
+        when(accountPoolService.selectAnthropicAccount("key-1")).thenReturn(Mono.just(account));
+        when(anthropicUpstreamClient.complete(eq(account), eq(request), eq("anthropic/claude-sonnet-4.5")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
+        when(accountPoolService.recordSuccess("anthropic-main", 2L)).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
+        when(statsService.log(any())).thenReturn(Mono.empty());
+
+        proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            mock(AccountAutoSuspendService.class),
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService,
+            mock(AccountSettingsService.class),
+            paymentSettingsService(BigDecimal.ONE),
+            anthropicUpstreamClient
+        ).chat(request, exchange).block();
+
+        verify(accountPoolService).selectAnthropicAccount("key-1");
+        verify(anthropicUpstreamClient).complete(eq(account), eq(request), eq("anthropic/claude-sonnet-4.5"));
+        verify(openAiUpstreamClient, never()).complete(any(), any(), any());
+        verify(kiroUpstreamClient, never()).complete(any(), any(), any());
+    }
+
+    @Test
+    void anthropicMessagesFallbackToKiroWhenNoAnthropicApiKeyAccountExists() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        AnthropicUpstreamClient anthropicUpstreamClient = mock(AnthropicUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity account = kiroAccount();
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "claude-sonnet-4.5",
+              "max_tokens": 64,
+              "messages": [{"role": "user", "content": "hi"}]
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/messages")
+        );
+
+        when(apiKeyService.authenticate(exchange))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("claude-sonnet-4.5", "key-1")).thenReturn("claude-sonnet-4.5");
+        when(accountPoolService.selectAnthropicAccount("key-1"))
+            .thenReturn(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "No available Anthropic upstream account")));
+        when(accountPoolService.selectKiroAccount("key-1")).thenReturn(Mono.just(account));
+        when(kiroUpstreamClient.complete(eq(account), any(ObjectNode.class), eq("claude-sonnet-4.5")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
+        when(accountPoolService.recordSuccess("kiro-main", 2L)).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
+        when(statsService.log(any())).thenReturn(Mono.empty());
+
+        proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            mock(AccountAutoSuspendService.class),
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService,
+            mock(AccountSettingsService.class),
+            paymentSettingsService(BigDecimal.ONE),
+            anthropicUpstreamClient
+        ).messages(request, exchange).block();
+
+        verify(accountPoolService).selectAnthropicAccount("key-1");
+        verify(accountPoolService).selectKiroAccount("key-1");
+        verify(kiroUpstreamClient).complete(eq(account), any(ObjectNode.class), eq("claude-sonnet-4.5"));
+        verify(anthropicUpstreamClient, never()).complete(any(), any(), any());
     }
 
     @Test
@@ -1071,6 +1185,36 @@ class ProxyFacadeRoutingTest {
         AccountSettingsService accountSettingsService,
         PaymentSettingsService paymentSettingsService
     ) {
+        return proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService,
+            accountSettingsService,
+            paymentSettingsService,
+            mock(AnthropicUpstreamClient.class)
+        );
+    }
+
+    private ProxyFacade proxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        AccountAutoSuspendService accountAutoSuspendService,
+        DefaultModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroUpstreamClient kiroUpstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        StatsService statsService,
+        AccountSettingsService accountSettingsService,
+        PaymentSettingsService paymentSettingsService,
+        AnthropicUpstreamClient anthropicUpstreamClient
+    ) {
         return new ProxyFacade(
             apiKeyService,
             accountPoolService,
@@ -1087,6 +1231,7 @@ class ProxyFacadeRoutingTest {
             new OpenAiResponseStateStore(objectMapper),
             new AnthropicRequestAdapter(objectMapper, modelCatalog),
             new AnthropicResponseFactory(objectMapper),
+            anthropicUpstreamClient,
             new GeminiRequestAdapter(objectMapper),
             new GeminiResponseFactory(objectMapper),
             paymentSettingsService,
@@ -1161,6 +1306,16 @@ class ProxyFacadeRoutingTest {
     private ProxyAccountEntity codexAccount(String accountId) {
         ProxyAccountEntity account = openAiAccount(accountId);
         account.setAuthMethod(AccountPlatforms.OPENAI_CODEX_AUTH);
+        return account;
+    }
+
+    private ProxyAccountEntity anthropicAccount() {
+        ProxyAccountEntity account = new ProxyAccountEntity();
+        account.setAccountId("anthropic-main");
+        account.setProvider(AccountPlatforms.ANTHROPIC_PROVIDER);
+        account.setAuthMethod(AccountPlatforms.OPENAI_API_KEY_AUTH);
+        account.setAccessToken("sk-ant-test");
+        account.setEnabled(true);
         return account;
     }
 

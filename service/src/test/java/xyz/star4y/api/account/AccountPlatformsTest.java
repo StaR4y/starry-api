@@ -38,6 +38,18 @@ class AccountPlatformsTest {
         assertThat(AccountPlatforms.isKiroCompatible(account)).isFalse();
     }
 
+    @Test
+    void anthropicProviderDefaultsToApiKeyAndOfficialBaseUrl() {
+        String authMethod = AccountPlatforms.normalizeAuthMethod(null, "claude");
+        String provider = AccountPlatforms.normalizeProvider("claude", authMethod);
+
+        assertThat(provider).isEqualTo(AccountPlatforms.ANTHROPIC_PROVIDER);
+        assertThat(authMethod).isEqualTo(AccountPlatforms.OPENAI_API_KEY_AUTH);
+        assertThat(AccountPlatforms.defaultBaseUrl(provider, authMethod, null))
+            .isEqualTo(AccountPlatforms.DEFAULT_ANTHROPIC_BASE_URL);
+        assertThat(AccountPlatforms.isAnthropicApiKey(provider, authMethod)).isTrue();
+    }
+
     private ProxyAccountEntity account(String provider, String authMethod) {
         ProxyAccountEntity account = new ProxyAccountEntity();
         account.setProvider(provider);
