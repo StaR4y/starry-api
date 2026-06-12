@@ -50,14 +50,20 @@ public class OpenAiUpstreamClient {
         if (AccountPlatforms.isCodex(account)) {
             return completeCodex(account, request, openAiModel(model, account));
         }
-        return completeChatCompletions(account, request, openAiModel(model, account));
+        String upstreamModel = openAiModel(model, account);
+        return completeChatCompletions(account, request, upstreamModel)
+            .onErrorResume(error -> retryWithUnprefixedOpenAiModel(error, account, upstreamModel)
+                .flatMap(retryModel -> completeChatCompletions(account, request, retryModel)));
     }
 
     public Mono<PlatformCompletionResult> completeResponses(ProxyAccountEntity account, JsonNode request, String model) {
         if (AccountPlatforms.isCodex(account)) {
             return completeCodex(account, request, openAiModel(model, account));
         }
-        return completeResponsesApi(account, request, openAiModel(model, account));
+        String upstreamModel = openAiModel(model, account);
+        return completeResponsesApi(account, request, upstreamModel)
+            .onErrorResume(error -> retryWithUnprefixedOpenAiModel(error, account, upstreamModel)
+                .flatMap(retryModel -> completeResponsesApi(account, request, retryModel)));
     }
 
     private Mono<PlatformCompletionResult> completeChatCompletions(
@@ -654,6 +660,41 @@ public class OpenAiUpstreamClient {
         return normalized.contains("codex")
             || "codex-mini-latest".equals(normalized)
             || normalized.matches("gpt-5\\.5.*");
+    }
+
+    private Mono<String> retryWithUnprefixedOpenAiModel(
+        Throwable error,
+        ProxyAccountEntity account,
+        String upstreamModel
+    ) {
+        if (AccountPlatforms.isCodex(account) || isOfficialOpenAiBaseUrl(account) || !isModelNotFound(error)) {
+            return Mono.error(error);
+        }
+        String normalized = clean(upstreamModel);
+        if (normalized == null || !normalized.toLowerCase(Locale.ROOT).startsWith("openai/")) {
+            return Mono.error(error);
+        }
+        String retryModel = normalized.substring("openai/".length());
+        return retryModel.isBlank() ? Mono.error(error) : Mono.just(retryModel);
+    }
+
+    private boolean isModelNotFound(Throwable error) {
+        Throwable current = error;
+        while (current.getCause() != null && current.getCause() != current) {
+            current = current.getCause();
+        }
+        if (!(current instanceof UpstreamException upstream)) {
+            return false;
+        }
+        String message = upstream.getMessage();
+        if (message == null) {
+            return false;
+        }
+        String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains("model_not_found")
+            || normalized.contains("no available channel for model")
+            || normalized.contains("model does not exist")
+            || normalized.contains("does not support model");
     }
 
     private List<String> sseDataPayloads(String rawBody) {

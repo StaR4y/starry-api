@@ -10,6 +10,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -662,6 +663,60 @@ class OpenAiUpstreamClientTest {
             assertThat(result).isNotNull();
             JsonNode body = objectMapper.readTree(requestBody.get());
             assertThat(body.path("model").asText()).isEqualTo("openai/gpt-4o-mini");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void openAiCompatibleResponsesRetriesUnprefixedModelWhenPrefixedModelIsUnavailable() throws Exception {
+        AtomicInteger attempts = new AtomicInteger();
+        List<String> requestedModels = new ArrayList<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/responses", exchange -> {
+            JsonNode body = objectMapper.readTree(exchange.getRequestBody().readAllBytes());
+            String model = body.path("model").asText();
+            requestedModels.add(model);
+            int attempt = attempts.incrementAndGet();
+            if (attempt == 1) {
+                byte[] response = """
+                    {"error":{"code":"model_not_found","message":"No available channel for model openai/gpt-4o-mini under group codex-pro","type":"api_error"}}
+                    """.getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "application/json");
+                exchange.sendResponseHeaders(503, response.length);
+                exchange.getResponseBody().write(response);
+                exchange.close();
+                return;
+            }
+            byte[] response = """
+                {"output_text":"OK","usage":{"input_tokens":1,"output_tokens":1}}
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "application/json");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = openAiCompatibleAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {
+                  "model": "gpt-5.5",
+                  "input": "hi"
+                }
+                """);
+
+            PlatformCompletionResult result = client.completeResponses(account, request, "gpt-5.5").block();
+
+            assertThat(result).isNotNull();
+            assertThat(result.content()).isEqualTo("OK");
+            assertThat(requestedModels).containsExactly("openai/gpt-4o-mini", "gpt-4o-mini");
         } finally {
             server.stop(0);
         }
