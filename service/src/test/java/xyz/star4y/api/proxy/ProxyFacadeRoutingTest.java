@@ -690,7 +690,7 @@ class ProxyFacadeRoutingTest {
     }
 
     @Test
-    void codexOnlyResponsesModelDoesNotFallbackToOpenAiCompatibleAfterCodexUpstream503() throws Exception {
+    void codexPreferredResponsesModelFallsBackToOpenAiCompatibleAfterCodexUpstream503() throws Exception {
         ApiKeyService apiKeyService = mock(ApiKeyService.class);
         AccountPoolService accountPoolService = mock(AccountPoolService.class);
         AccountAutoSuspendService accountAutoSuspendService = mock(AccountAutoSuspendService.class);
@@ -701,6 +701,7 @@ class ProxyFacadeRoutingTest {
         StatsService statsService = mock(StatsService.class);
         DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
         ProxyAccountEntity codex = codexAccount("codex-main");
+        ProxyAccountEntity backup = openAiAccount("openai-backup");
         JsonNode request = objectMapper.readTree("""
             {
               "model": "gpt-5.5",
@@ -729,9 +730,15 @@ class ProxyFacadeRoutingTest {
         )).thenReturn(Mono.just(new AccountPoolService.RequestFailureRecord("codex-main", 1, 503, false)));
         when(accountPoolService.selectCodexOpenAiAccount(eq("key-1"), eq(List.of("codex-main"))))
             .thenReturn(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "No available Codex upstream account")));
+        when(accountPoolService.selectOpenAiAccount(eq("key-1"), eq(List.of("codex-main"))))
+            .thenReturn(Mono.just(backup));
+        when(openAiUpstreamClient.completeResponses(eq(backup), any(), eq("gpt-5.5")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
+        when(accountPoolService.recordSuccess("openai-backup", 2L)).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
-        assertThatThrownBy(() -> proxyFacade(
+        ResponseEntity<?> response = proxyFacade(
             apiKeyService,
             accountPoolService,
             accountAutoSuspendService,
@@ -741,15 +748,14 @@ class ProxyFacadeRoutingTest {
             kiroUpstreamClient,
             openAiUpstreamClient,
             statsService
-        ).responses(request, exchange).block())
-            .isInstanceOfSatisfying(ApiException.class, error -> {
-                assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_GATEWAY);
-                assertThat(error.getCode()).isEqualTo("UPSTREAM_ERROR");
-            });
+        ).responses(request, exchange).block();
+
+        assertThat(response).isNotNull();
         verify(accountPoolService).selectCodexOpenAiAccount("key-1");
         verify(accountPoolService).selectCodexOpenAiAccount(eq("key-1"), eq(List.of("codex-main")));
-        verify(accountPoolService, never()).selectOpenAiAccount(eq("key-1"), eq(List.of("codex-main")));
+        verify(accountPoolService).selectOpenAiAccount(eq("key-1"), eq(List.of("codex-main")));
         verify(openAiUpstreamClient).completeResponses(eq(codex), any(), eq("gpt-5.5"));
+        verify(openAiUpstreamClient).completeResponses(eq(backup), any(), eq("gpt-5.5"));
     }
 
     @Test

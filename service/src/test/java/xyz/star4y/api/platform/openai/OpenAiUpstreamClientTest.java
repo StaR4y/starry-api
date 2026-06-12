@@ -628,6 +628,46 @@ class OpenAiUpstreamClientTest {
     }
 
     @Test
+    void openAiCompatibleResponsesMapsCodexDisplayModelToApiFallbackModel() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/responses", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] response = """
+                {"output_text":"OK","usage":{"input_tokens":1,"output_tokens":1}}
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "application/json");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = openAiCompatibleAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {
+                  "model": "gpt-5.5",
+                  "input": "hi"
+                }
+                """);
+
+            PlatformCompletionResult result = client.completeResponses(account, request, "gpt-5.5").block();
+
+            assertThat(result).isNotNull();
+            JsonNode body = objectMapper.readTree(requestBody.get());
+            assertThat(body.path("model").asText()).isEqualTo("openai/gpt-4o-mini");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void openAiCompatibleModelPrefixRoutesWithoutSendingPrefixToUpstream() throws Exception {
         AtomicReference<String> requestBody = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);

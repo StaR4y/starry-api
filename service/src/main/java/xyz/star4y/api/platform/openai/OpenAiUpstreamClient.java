@@ -624,10 +624,13 @@ public class OpenAiUpstreamClient {
             return cleaned.substring("openai-compatible/".length());
         }
         String unprefixed = lower.startsWith("openai/") ? lower.substring("openai/".length()) : lower;
+        if (!lower.startsWith("openai/") && !AccountPlatforms.isCodex(account) && isCodexDisplayModel(unprefixed)) {
+            unprefixed = OpenAiAccountTestClient.DEFAULT_OPENAI_TEST_MODEL;
+        }
         if (AccountPlatforms.isCodex(account) || isOfficialOpenAiBaseUrl(account)) {
             return unprefixed;
         }
-        return lower.contains("/") ? lower : "openai/" + lower;
+        return unprefixed.contains("/") ? unprefixed : "openai/" + unprefixed;
     }
 
     private String codexCompatibleModel(String model) {
@@ -640,6 +643,17 @@ public class OpenAiUpstreamClient {
             return OpenAiAccountTestClient.DEFAULT_CODEX_TEST_MODEL;
         }
         return normalized;
+    }
+
+    private boolean isCodexDisplayModel(String model) {
+        String normalized = clean(model);
+        if (normalized == null) {
+            return false;
+        }
+        normalized = normalized.toLowerCase(Locale.ROOT);
+        return normalized.contains("codex")
+            || "codex-mini-latest".equals(normalized)
+            || normalized.matches("gpt-5\\.5.*");
     }
 
     private List<String> sseDataPayloads(String rawBody) {

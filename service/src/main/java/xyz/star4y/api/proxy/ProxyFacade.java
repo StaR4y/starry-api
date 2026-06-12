@@ -264,7 +264,6 @@ public class ProxyFacade {
             || isCodexOnlyResponsesModel(upstreamModel);
         boolean preferCodexAccounts = route == UpstreamRoute.OPENAI
             && (isCodexResponsesClient(exchange) || codexOnlyResponsesModel);
-        boolean requireCodexAccounts = route == UpstreamRoute.OPENAI && codexOnlyResponsesModel;
         JsonNode expandedRequest = openAiResponseStateStore.expand(request);
         JsonNode upstreamRequest = fastMode ? openAiFastRequest(expandedRequest) : expandedRequest;
 
@@ -280,7 +279,6 @@ public class ProxyFacade {
             route,
             fastMode,
             preferCodexAccounts,
-            requireCodexAccounts,
             requestId,
             start,
             List.of()
@@ -303,12 +301,11 @@ public class ProxyFacade {
         UpstreamRoute route,
         boolean fastMode,
         boolean preferCodexAccounts,
-        boolean requireCodexAccounts,
         String requestId,
         Instant start,
         List<String> attemptedAccountIds
     ) {
-        return selectAccount(route, sessionHint, attemptedAccountIds, preferCodexAccounts, requireCodexAccounts)
+        return selectAccount(route, sessionHint, attemptedAccountIds, preferCodexAccounts)
             .flatMap(account -> callResponsesWithAccount(route, account, upstreamRequest, mappedModel, sessionHint)
                 .flatMap(result -> {
                     Mono<Void> accounting = recordSuccess(requestId, principal, account, path, requestedModel, result, route, fastMode, start);
@@ -335,7 +332,6 @@ public class ProxyFacade {
                         route,
                         fastMode,
                         preferCodexAccounts,
-                        requireCodexAccounts,
                         requestId,
                         start,
                         nextAttempted
@@ -366,8 +362,7 @@ public class ProxyFacade {
         UpstreamRoute route,
         String sessionHint,
         List<String> attemptedAccountIds,
-        boolean preferCodexAccounts,
-        boolean requireCodexAccounts
+        boolean preferCodexAccounts
     ) {
         if (route != UpstreamRoute.OPENAI || !preferCodexAccounts) {
             return selectAccount(route, sessionHint, attemptedAccountIds);
@@ -375,9 +370,6 @@ public class ProxyFacade {
         Mono<ProxyAccountEntity> codexSelection = attemptedAccountIds == null || attemptedAccountIds.isEmpty()
             ? accountPoolService.selectCodexOpenAiAccount(sessionHint)
             : accountPoolService.selectCodexOpenAiAccount(sessionHint, attemptedAccountIds);
-        if (requireCodexAccounts) {
-            return codexSelection;
-        }
         return codexSelection.onErrorResume(error -> isNoAvailableAccount(error)
             ? selectAccount(route, sessionHint, attemptedAccountIds)
             : Mono.error(error));
