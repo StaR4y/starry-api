@@ -362,6 +362,65 @@ class OpenAiUpstreamClientTest {
     }
 
     @Test
+    void codexUpstreamParsesCustomToolCallInputDeltas() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/responses", exchange -> {
+            byte[] response = """
+                event: response.output_item.added
+                data: {"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_patch","name":"apply_patch","input":""}}
+
+                event: response.custom_tool_call_input.delta
+                data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","output_index":0,"delta":"*** Begin"}
+
+                event: response.custom_tool_call_input.delta
+                data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","output_index":0,"delta":" Patch"}
+
+                event: response.output_item.done
+                data: {"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_patch","name":"apply_patch","input":""}}
+
+                event: response.completed
+                data: {"type":"response.completed","response":{"usage":{"input_tokens":6,"output_tokens":2},"output":[]}}
+
+                data: [DONE]
+
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "text/event-stream");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {
+                  "model": "gpt-5.5",
+                  "input": "write a file",
+                  "tools": [{"type": "custom", "name": "apply_patch"}]
+                }
+                """);
+
+            PlatformCompletionResult result = client.completeResponses(account, request, "gpt-5.5").block();
+
+            assertThat(result).isNotNull();
+            assertThat(result.toolUses()).hasSize(1);
+            assertThat(result.toolUses().get(0).id()).isEqualTo("call_patch");
+            assertThat(result.toolUses().get(0).name()).isEqualTo("apply_patch");
+            assertThat(result.toolUses().get(0).type()).isEqualTo("custom_tool_call");
+            assertThat(result.toolUses().get(0).rawInput()).isEqualTo("*** Begin Patch");
+            assertThat(result.toolUses().get(0).rawOutputItem().path("input").asText()).isEqualTo("*** Begin Patch");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void codexResponsesRequestSanitizesFlatToolsAndNormalizesFunctionOutput() throws Exception {
         AtomicReference<String> requestBody = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -441,6 +500,70 @@ class OpenAiUpstreamClientTest {
             assertThat(body.path("input").path(2).path("output").asText()).isEqualTo("Done");
             assertThat(body.path("tool_choice").path("name").asText()).isEqualTo("apply_patch");
             assertThat(body.path("parallel_tool_calls").asBoolean(true)).isFalse();
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void codexResponsesRequestPreservesAgentExecutionFieldsAndOfficialHeaders() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        AtomicReference<String> userAgent = new AtomicReference<>();
+        AtomicReference<String> originator = new AtomicReference<>();
+        AtomicReference<String> beta = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/responses", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            userAgent.set(exchange.getRequestHeaders().getFirst(HttpHeaders.USER_AGENT));
+            originator.set(exchange.getRequestHeaders().getFirst("Originator"));
+            beta.set(exchange.getRequestHeaders().getFirst("OpenAI-Beta"));
+            byte[] response = """
+                event: response.output_text.delta
+                data: {"type":"response.output_text.delta","delta":"OK"}
+
+                data: [DONE]
+
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "text/event-stream");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {
+                  "model": "gpt-5.5",
+                  "input": [{"type": "message", "role": "user", "content": "continue"}],
+                  "prompt_cache_key": "session-1",
+                  "reasoning": {"effort": "high"},
+                  "include": ["reasoning.encrypted_content"],
+                  "metadata": {"drop": true},
+                  "max_output_tokens": 123
+                }
+                """);
+
+            PlatformCompletionResult result = client.completeResponses(account, request, "gpt-5.5").block();
+
+            assertThat(result).isNotNull();
+            JsonNode body = objectMapper.readTree(requestBody.get());
+            assertThat(body.path("prompt_cache_key").asText()).isEqualTo("session-1");
+            assertThat(body.path("reasoning").path("effort").asText()).isEqualTo("high");
+            assertThat(body.path("include").path(0).asText()).isEqualTo("reasoning.encrypted_content");
+            assertThat(body.has("metadata")).isFalse();
+            assertThat(body.has("max_output_tokens")).isFalse();
+            assertThat(body.path("store").asBoolean(true)).isFalse();
+            assertThat(body.path("stream").asBoolean(false)).isTrue();
+            assertThat(userAgent.get()).startsWith("codex_cli_rs/");
+            assertThat(originator.get()).isEqualTo("codex_cli_rs");
+            assertThat(beta.get()).isEqualTo("responses=experimental");
         } finally {
             server.stop(0);
         }

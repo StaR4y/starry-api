@@ -28,8 +28,8 @@ public class OpenAiAccountTestClient {
     public static final String DEFAULT_OPENAI_TEST_MODEL = "gpt-4o-mini";
     public static final String DEFAULT_CODEX_TEST_MODEL = "gpt-5.4-mini";
 
-    private static final String CODEX_USER_AGENT = "codex-tui/0.135.0";
-    private static final String CODEX_ORIGINATOR = "codex-tui";
+    private static final String CODEX_USER_AGENT = "codex_cli_rs/0.139.0";
+    private static final String CODEX_ORIGINATOR = "codex_cli_rs";
     private static final String CODEX_TEST_INSTRUCTIONS = "You are Codex. Reply to the account health check concisely.";
 
     private final ObjectMapper objectMapper;

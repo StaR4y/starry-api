@@ -130,6 +130,47 @@ class OpenAiResponseFactoryTest {
         assertThat(toolDone.path("item").path("arguments").asText()).isEqualTo("{\"command\":\"pwd\"}");
     }
 
+    @Test
+    void responsesApiStreamReturnsCustomToolCallEvents() {
+        PlatformCompletionResult result = new PlatformCompletionResult(
+            "",
+            List.of(new PlatformToolUse(
+                "call_patch",
+                "apply_patch",
+                objectMapper.createObjectNode().put("_rawArguments", "*** Begin Patch"),
+                "custom_tool_call",
+                "*** Begin Patch",
+                null
+            )),
+            new PlatformUsage(10, 2, java.math.BigDecimal.ZERO, 0, 0, 0)
+        );
+
+        List<ServerSentEvent<String>> events = factory.responsesStreamEvents("gpt-5.5", result, null)
+            .collectList()
+            .block();
+
+        assertThat(events).isNotNull();
+        List<JsonNode> jsonEvents = jsonEvents(events);
+        assertThat(jsonEvents)
+            .extracting(event -> event.path("type").asText())
+            .contains(
+                "response.output_item.added",
+                "response.custom_tool_call_input.delta",
+                "response.custom_tool_call_input.done",
+                "response.output_item.done",
+                "response.completed"
+            );
+
+        JsonNode toolDone = jsonEvents.stream()
+            .filter(event -> "response.output_item.done".equals(event.path("type").asText()))
+            .findFirst()
+            .orElseThrow();
+        assertThat(toolDone.path("item").path("type").asText()).isEqualTo("custom_tool_call");
+        assertThat(toolDone.path("item").path("call_id").asText()).isEqualTo("call_patch");
+        assertThat(toolDone.path("item").path("name").asText()).isEqualTo("apply_patch");
+        assertThat(toolDone.path("item").path("input").asText()).isEqualTo("*** Begin Patch");
+    }
+
     private List<JsonNode> jsonEvents(List<ServerSentEvent<String>> events) {
         return events.stream()
             .map(ServerSentEvent::data)

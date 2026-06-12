@@ -47,7 +47,7 @@ public class OpenAiResponseFactory {
                 call.put("type", "function");
                 ObjectNode function = call.putObject("function");
                 function.put("name", toolUse.name());
-                function.put("arguments", toolUse.input().toString());
+                function.put("arguments", toolInputString(toolUse));
             }
             choice.put("finish_reason", "tool_calls");
         }
@@ -91,13 +91,7 @@ public class OpenAiResponseFactory {
                 text.put("text", result.content());
             }
             for (PlatformToolUse toolUse : result.toolUses()) {
-                ObjectNode call = output.addObject();
-                call.put("type", "function_call");
-                call.put("id", generatedId("fc_"));
-                call.put("call_id", toolUse.id());
-                call.put("name", toolUse.name());
-                call.put("arguments", toolUse.input().toString());
-                call.put("status", "completed");
+                output.add(responseToolCallItem(toolUse));
             }
         }
         root.put("output_text", result.content());
@@ -154,6 +148,9 @@ public class OpenAiResponseFactory {
             } else if ("function_call".equals(item.path("type").asText())) {
                 appendFunctionCallStreamEvents(events, responseId, item, outputIndex, sequence);
                 sequence += functionCallEventCount(item);
+            } else if ("custom_tool_call".equals(item.path("type").asText())) {
+                appendCustomToolCallStreamEvents(events, responseId, item, outputIndex, sequence);
+                sequence += customToolCallEventCount(item);
             }
             events.add(responseSse(outputItemEvent("response.output_item.done", responseId, item, outputIndex, sequence++)));
         }
@@ -416,9 +413,104 @@ public class OpenAiResponseFactory {
         call.put("type", "function");
         ObjectNode function = call.putObject("function");
         function.put("name", toolUse.name());
-        function.put("arguments", toolUse.input().toString());
+        function.put("arguments", toolInputString(toolUse));
         choice.putNull("finish_reason");
         return root;
+    }
+
+    private ObjectNode responseToolCallItem(PlatformToolUse toolUse) {
+        ObjectNode call = toolUse.rawOutputItem() != null && toolUse.rawOutputItem().isObject()
+            ? toolUse.rawOutputItem().deepCopy()
+            : objectMapper.createObjectNode();
+        String type = toolUse.type() == null || toolUse.type().isBlank() ? "function_call" : toolUse.type();
+        call.put("type", type);
+        putIfBlank(call, "id", generatedId("custom_tool_call".equals(type) ? "ctc_" : "fc_"));
+        putIfBlank(call, "call_id", toolUse.id());
+        putIfBlank(call, "name", toolUse.name());
+        if ("custom_tool_call".equals(type)) {
+            putIfBlank(call, "input", toolInputString(toolUse));
+        } else {
+            putIfBlank(call, "arguments", toolInputString(toolUse));
+            putIfBlank(call, "status", "completed");
+        }
+        return call;
+    }
+
+    private void appendCustomToolCallStreamEvents(
+        List<ServerSentEvent<String>> events,
+        String responseId,
+        JsonNode item,
+        int outputIndex,
+        int sequence
+    ) {
+        String input = item.path("input").asText("");
+        if (!input.isEmpty()) {
+            events.add(responseSse(customToolCallInputEvent(
+                "response.custom_tool_call_input.delta",
+                responseId,
+                item,
+                outputIndex,
+                "delta",
+                input,
+                sequence++
+            )));
+        }
+        events.add(responseSse(customToolCallInputEvent(
+            "response.custom_tool_call_input.done",
+            responseId,
+            item,
+            outputIndex,
+            "input",
+            input,
+            sequence
+        )));
+    }
+
+    private int customToolCallEventCount(JsonNode item) {
+        return item.path("input").asText("").isEmpty() ? 1 : 2;
+    }
+
+    private ObjectNode customToolCallInputEvent(
+        String type,
+        String responseId,
+        JsonNode item,
+        int outputIndex,
+        String valueName,
+        String input,
+        int sequence
+    ) {
+        ObjectNode event = responseEvent(type, sequence);
+        event.put("response_id", responseId);
+        event.put("item_id", item.path("id").asText());
+        event.put("call_id", item.path("call_id").asText());
+        event.put("name", item.path("name").asText());
+        event.put("output_index", outputIndex);
+        event.put(valueName, input);
+        return event;
+    }
+
+    private void putIfBlank(ObjectNode node, String field, String value) {
+        if (value == null) {
+            return;
+        }
+        JsonNode current = node.path(field);
+        if (current.isMissingNode() || current.isNull() || current.asText("").isBlank()) {
+            node.put(field, value);
+        }
+    }
+
+    private String toolInputString(PlatformToolUse toolUse) {
+        if (toolUse.rawInput() != null) {
+            return toolUse.rawInput();
+        }
+        JsonNode input = toolUse.input();
+        if (input == null || input.isMissingNode() || input.isNull()) {
+            return "{}";
+        }
+        if (input.has("_rawArguments")) {
+            return input.path("_rawArguments").asText("");
+        }
+        return input.toString();
     }
 
     private void appendUsage(ObjectNode root, PlatformUsage usage, String inputName, String outputName) {

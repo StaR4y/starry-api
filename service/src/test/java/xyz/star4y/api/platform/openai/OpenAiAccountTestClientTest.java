@@ -107,7 +107,7 @@ class OpenAiAccountTestClientTest {
             assertThat(result.content()).isEqualTo("OK");
             assertThat(result.usage().totalTokens()).isEqualTo(2);
             assertThat(authorization.get()).containsExactly("Bearer test-access-token");
-            assertThat(originator.get()).containsExactly("codex-tui");
+            assertThat(originator.get()).containsExactly("codex_cli_rs");
             assertThat(accept.get()).singleElement().asString().contains("text/event-stream");
 
             JsonNode body = objectMapper.readTree(requestBody.get());

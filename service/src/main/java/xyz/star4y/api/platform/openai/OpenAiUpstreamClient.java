@@ -29,8 +29,8 @@ import xyz.star4y.api.platform.upstream.UpstreamException;
 @Component
 public class OpenAiUpstreamClient {
 
-    private static final String CODEX_USER_AGENT = "codex-tui/0.135.0";
-    private static final String CODEX_ORIGINATOR = "codex-tui";
+    private static final String CODEX_USER_AGENT = "codex_cli_rs/0.139.0";
+    private static final String CODEX_ORIGINATOR = "codex_cli_rs";
 
     private final ObjectMapper objectMapper;
     private final WebClient webClient;
@@ -82,19 +82,7 @@ public class OpenAiUpstreamClient {
         JsonNode request,
         String model
     ) {
-        ObjectNode body = objectMapper.createObjectNode();
-        body.put("model", codexCompatibleModel(model));
-        String instructions = codexInstructions(request);
-        if (instructions != null) {
-            body.put("instructions", instructions);
-        }
-        body.put("store", false);
-        body.put("stream", true);
-        body.set("input", codexInput(request));
-        if (request.hasNonNull("service_tier")) {
-            body.set("service_tier", request.get("service_tier"));
-        }
-        appendCodexTools(body, request);
+        ObjectNode body = codexRequestBody(request, model);
 
         return completeCodexOnce(account, body)
             .onErrorResume(error -> {
@@ -113,6 +101,31 @@ public class OpenAiUpstreamClient {
             .headers(headers -> applyCodexHeaders(headers, account))
             .bodyValue(body)
             .exchangeToMono(response -> handleResponse(response, this::parseResponses, endpoint));
+    }
+
+    private ObjectNode codexRequestBody(JsonNode request, String model) {
+        boolean responsesShape = request.has("input");
+        ObjectNode body = responsesShape && request.isObject()
+            ? request.deepCopy()
+            : objectMapper.createObjectNode();
+        body.put("model", codexCompatibleModel(model));
+        body.put("store", false);
+        body.put("stream", true);
+        if (responsesShape) {
+            body.set("input", codexResponsesInput(request.path("input")));
+        } else {
+            String instructions = codexInstructions(request);
+            if (instructions != null) {
+                body.put("instructions", instructions);
+            }
+            body.set("input", codexChatInput(request));
+            if (request.hasNonNull("service_tier")) {
+                body.set("service_tier", request.get("service_tier"));
+            }
+        }
+        stripCodexUnsupportedFields(body);
+        appendCodexTools(body, request);
+        return body;
     }
 
     private Mono<PlatformCompletionResult> completeResponsesApi(
@@ -143,6 +156,7 @@ public class OpenAiUpstreamClient {
         headers.set(HttpHeaders.USER_AGENT, CODEX_USER_AGENT);
         headers.set(HttpHeaders.CONNECTION, "Keep-Alive");
         headers.set("Originator", CODEX_ORIGINATOR);
+        headers.set("OpenAI-Beta", "responses=experimental");
         if (account.getUpstreamAccountId() != null && !account.getUpstreamAccountId().isBlank()) {
             headers.set("Chatgpt-Account-Id", account.getUpstreamAccountId());
         }
@@ -225,9 +239,11 @@ public class OpenAiUpstreamClient {
                 fallbackContent = firstNonBlank(fallbackContent, contentPartText(event.path("part")));
             } else if ("response.output_item.added".equals(type)) {
                 rememberResponseToolUse(pendingToolUses, event.path("item"));
-            } else if ("response.function_call_arguments.delta".equals(type)) {
+            } else if ("response.function_call_arguments.delta".equals(type)
+                || "response.custom_tool_call_input.delta".equals(type)) {
                 appendResponseToolUseArguments(pendingToolUses, event);
-            } else if ("response.function_call_arguments.done".equals(type)) {
+            } else if ("response.function_call_arguments.done".equals(type)
+                || "response.custom_tool_call_input.done".equals(type)) {
                 completeResponseToolUseArguments(pendingToolUses, event);
             } else if ("response.output_item.done".equals(type)) {
                 JsonNode item = event.path("item");
@@ -264,6 +280,22 @@ public class OpenAiUpstreamClient {
         if (request.has("parallel_tool_calls")) {
             body.set("parallel_tool_calls", request.path("parallel_tool_calls"));
         }
+    }
+
+    private void stripCodexUnsupportedFields(ObjectNode body) {
+        body.remove(List.of(
+            "max_output_tokens",
+            "max_completion_tokens",
+            "temperature",
+            "top_p",
+            "frequency_penalty",
+            "presence_penalty",
+            "user",
+            "metadata",
+            "prompt_cache_retention",
+            "safety_identifier",
+            "stream_options"
+        ));
     }
 
     private void applyOpenAiResponsesHeaders(HttpHeaders headers, ProxyAccountEntity account) {
@@ -681,7 +713,8 @@ public class OpenAiUpstreamClient {
     }
 
     private void appendResponseToolUse(List<PlatformToolUse> toolUses, JsonNode item) {
-        if (!"function_call".equals(item.path("type").asText())) {
+        String type = item.path("type").asText();
+        if (!isResponseToolCall(type)) {
             return;
         }
         String callId = firstNonBlank(item.path("call_id").asText(null), item.path("id").asText(null));
@@ -692,11 +725,20 @@ public class OpenAiUpstreamClient {
         if (toolUses.stream().anyMatch(toolUse -> callId.equals(toolUse.id()))) {
             return;
         }
-        toolUses.add(new PlatformToolUse(callId, name, parseToolArguments(item.path("arguments").asText("{}"))));
+        String rawInput = responseToolInput(item);
+        toolUses.add(new PlatformToolUse(
+            callId,
+            name,
+            parseToolArguments(rawInput),
+            type,
+            rawInput,
+            item.deepCopy()
+        ));
     }
 
     private void rememberResponseToolUse(Map<String, PendingResponseToolUse> pendingToolUses, JsonNode item) {
-        if (!"function_call".equals(item.path("type").asText())) {
+        String type = item.path("type").asText();
+        if (!isResponseToolCall(type)) {
             return;
         }
         String itemId = item.path("id").asText(null);
@@ -709,9 +751,13 @@ public class OpenAiUpstreamClient {
         pending.itemId = firstNonBlank(pending.itemId, itemId);
         pending.callId = firstNonBlank(pending.callId, callId);
         pending.name = firstNonBlank(pending.name, item.path("name").asText(null));
-        String arguments = item.path("arguments").asText(null);
-        if (arguments != null && !arguments.isBlank() && pending.arguments.length() == 0) {
-            pending.arguments.append(arguments);
+        pending.type = firstNonBlank(pending.type, type);
+        if (item.isObject()) {
+            pending.item = item.deepCopy();
+        }
+        String input = responseToolInput(item);
+        if (input != null && !input.isBlank() && pending.arguments.length() == 0) {
+            pending.arguments.append(input);
         }
     }
 
@@ -731,8 +777,8 @@ public class OpenAiUpstreamClient {
         if (pending == null) {
             return;
         }
-        String arguments = event.path("arguments").asText(null);
-        if (arguments != null && !arguments.isBlank()) {
+        String arguments = firstNonBlank(event.path("arguments").asText(null), event.path("input").asText(null));
+        if (!arguments.isBlank()) {
             pending.arguments.setLength(0);
             pending.arguments.append(arguments);
         }
@@ -764,8 +810,53 @@ public class OpenAiUpstreamClient {
             if (toolUses.stream().anyMatch(toolUse -> callId.equals(toolUse.id()))) {
                 continue;
             }
-            toolUses.add(new PlatformToolUse(callId, pending.name, parseToolArguments(pending.arguments.toString())));
+            String rawInput = pending.arguments.toString();
+            JsonNode rawItem = pendingItemWithInput(pending, rawInput);
+            toolUses.add(new PlatformToolUse(
+                callId,
+                pending.name,
+                parseToolArguments(rawInput),
+                firstNonBlank(pending.type, "function_call"),
+                rawInput,
+                rawItem
+            ));
         }
+    }
+
+    private boolean isResponseToolCall(String type) {
+        return "function_call".equals(type)
+            || "custom_tool_call".equals(type)
+            || "mcp_tool_call".equals(type)
+            || "tool_call".equals(type)
+            || "local_shell_call".equals(type)
+            || "tool_search_call".equals(type);
+    }
+
+    private String responseToolInput(JsonNode item) {
+        if (item == null || item.isMissingNode() || item.isNull()) {
+            return "{}";
+        }
+        if (item.has("arguments")) {
+            return item.path("arguments").isTextual() ? item.path("arguments").asText() : item.path("arguments").toString();
+        }
+        if (item.has("input")) {
+            return item.path("input").isTextual() ? item.path("input").asText() : item.path("input").toString();
+        }
+        return "{}";
+    }
+
+    private JsonNode pendingItemWithInput(PendingResponseToolUse pending, String rawInput) {
+        if (pending.item == null || !pending.item.isObject()) {
+            return null;
+        }
+        ObjectNode item = pending.item.deepCopy();
+        String type = firstNonBlank(pending.type, item.path("type").asText(null), "function_call");
+        if ("custom_tool_call".equals(type)) {
+            item.put("input", rawInput == null ? "" : rawInput);
+        } else {
+            item.put("arguments", rawInput == null || rawInput.isBlank() ? "{}" : rawInput);
+        }
+        return item;
     }
 
     private JsonNode parseToolArguments(String arguments) {
@@ -914,6 +1005,8 @@ public class OpenAiUpstreamClient {
         private String itemId;
         private String callId;
         private String name;
+        private String type;
+        private JsonNode item;
         private final StringBuilder arguments = new StringBuilder();
     }
 
