@@ -190,6 +190,42 @@ class AccountTestServiceTest {
     }
 
     @Test
+    void resolvesAnthropicCatalogAliasesBeforeTestingApiKeyAccounts() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        KiroUpstreamClient upstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiAccountTestClient openAiAccountTestClient = mock(OpenAiAccountTestClient.class);
+        AnthropicUpstreamClient anthropicUpstreamClient = mock(AnthropicUpstreamClient.class);
+        ProxyAccountEntity account = anthropicAccount("anthropic-main", "sk-ant-test");
+
+        when(repository.findAll()).thenReturn(Flux.just(account));
+        when(anthropicUpstreamClient.complete(eq(account), any(ObjectNode.class), eq("claude-sonnet-4.5")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", PlatformUsage.zero())));
+        when(accountPoolService.recordTestSuccess(eq("anthropic-main"), eq(0L), eq(false))).thenReturn(Mono.empty());
+
+        AccountTestService service = new AccountTestService(
+            objectMapper,
+            repository,
+            accountPoolService,
+            new KiroPayloadFactory(objectMapper, modelCatalog),
+            upstreamClient,
+            openAiAccountTestClient,
+            anthropicUpstreamClient
+        );
+
+        AccountDtos.TestAccountsResponse response = service
+            .test(new AccountDtos.TestAccountsRequest(null, true, "claude-opus-4.8", "ping", 1, false))
+            .block();
+
+        assertThat(response).isNotNull();
+        assertThat(response.success()).isEqualTo(1);
+        assertThat(response.items()).singleElement()
+            .satisfies(item -> assertThat(item.model()).isEqualTo("claude-sonnet-4.5"));
+        verify(anthropicUpstreamClient).complete(eq(account), any(ObjectNode.class), eq("claude-sonnet-4.5"));
+        verifyNoInteractions(upstreamClient, openAiAccountTestClient);
+    }
+
+    @Test
     void updatesAccountStatusWhenRequestedAfterSuccessfulTest() {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         AccountPoolService accountPoolService = mock(AccountPoolService.class);

@@ -24,11 +24,17 @@ class AnthropicUpstreamClientTest {
     void completeSendsNativeAnthropicMessagesRequest() throws Exception {
         AtomicReference<String> requestBody = new AtomicReference<>();
         AtomicReference<List<String>> apiKey = new AtomicReference<>();
+        AtomicReference<List<String>> authorization = new AtomicReference<>();
+        AtomicReference<List<String>> beta = new AtomicReference<>();
+        AtomicReference<List<String>> userAgent = new AtomicReference<>();
         AtomicReference<List<String>> version = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/v1/messages", exchange -> {
             requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             apiKey.set(exchange.getRequestHeaders().get("x-api-key"));
+            authorization.set(exchange.getRequestHeaders().get(HttpHeaders.AUTHORIZATION));
+            beta.set(exchange.getRequestHeaders().get("anthropic-beta"));
+            userAgent.set(exchange.getRequestHeaders().get(HttpHeaders.USER_AGENT));
             version.set(exchange.getRequestHeaders().get("anthropic-version"));
             byte[] response = """
                 {
@@ -68,6 +74,9 @@ class AnthropicUpstreamClientTest {
             assertThat(result.usage().inputTokens()).isEqualTo(3);
             assertThat(result.usage().outputTokens()).isEqualTo(2);
             assertThat(apiKey.get()).containsExactly("sk-ant-test");
+            assertThat(authorization.get()).containsExactly("Bearer sk-ant-test");
+            assertThat(beta.get()).containsExactly("claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14");
+            assertThat(userAgent.get()).containsExactly("claude-cli/2.1.161 (external, cli)");
             assertThat(version.get()).containsExactly("2023-06-01");
 
             JsonNode body = objectMapper.readTree(requestBody.get());

@@ -33,6 +33,21 @@ public class AnthropicUpstreamClient {
     private static final Pattern VERSION_SEGMENT = Pattern.compile("v\\d+(?:beta)?");
     private static final String ANTHROPIC_VERSION = "2023-06-01";
     private static final String DEFAULT_TEST_MODEL = "claude-sonnet-4.5";
+    private static final String API_KEY_BETA_HEADER =
+        "claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14";
+    private static final Map<String, String> CLAUDE_CODE_API_KEY_HEADERS = Map.ofEntries(
+        Map.entry(HttpHeaders.USER_AGENT, "claude-cli/2.1.161 (external, cli)"),
+        Map.entry("X-Stainless-Lang", "js"),
+        Map.entry("X-Stainless-Package-Version", "0.94.0"),
+        Map.entry("X-Stainless-OS", "Linux"),
+        Map.entry("X-Stainless-Arch", "arm64"),
+        Map.entry("X-Stainless-Runtime", "node"),
+        Map.entry("X-Stainless-Runtime-Version", "v24.3.0"),
+        Map.entry("X-Stainless-Retry-Count", "0"),
+        Map.entry("X-Stainless-Timeout", "600"),
+        Map.entry("X-App", "cli"),
+        Map.entry("Anthropic-Dangerous-Direct-Browser-Access", "true")
+    );
 
     private final ObjectMapper objectMapper;
     private final WebClient webClient;
@@ -564,10 +579,29 @@ public class AnthropicUpstreamClient {
     }
 
     private void applyAnthropicHeaders(HttpHeaders headers, ProxyAccountEntity account) {
-        headers.set("x-api-key", account.getAccessToken());
+        String token = account.getAccessToken();
+        headers.set("x-api-key", token);
+        if (!isOfficialAnthropicBaseUrl(account.getBaseUrl())) {
+            headers.setBearerAuth(token);
+            headers.set("anthropic-beta", API_KEY_BETA_HEADER);
+            CLAUDE_CODE_API_KEY_HEADERS.forEach(headers::set);
+        }
         headers.set("anthropic-version", ANTHROPIC_VERSION);
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.setAccept(List.of(MediaType.APPLICATION_JSON, MediaType.TEXT_EVENT_STREAM));
+    }
+
+    private boolean isOfficialAnthropicBaseUrl(String baseUrl) {
+        String base = clean(baseUrl);
+        if (base == null) {
+            return true;
+        }
+        try {
+            String host = URI.create(base).getHost();
+            return host != null && "api.anthropic.com".equals(host.toLowerCase(Locale.ROOT));
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        }
     }
 
     private boolean isRecoverableStatus(int statusCode) {

@@ -12,6 +12,8 @@ import java.util.stream.Stream;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import xyz.star4y.api.model.ModelDtos;
+import xyz.star4y.api.platform.anthropic.AnthropicModelCatalog;
 import xyz.star4y.api.platform.catalog.OpenRouterModelIds;
 import xyz.star4y.api.platform.core.PlatformCompletionResult;
 import xyz.star4y.api.platform.anthropic.AnthropicUpstreamClient;
@@ -351,10 +353,23 @@ public class AccountTestService {
             return DEFAULT_ANTHROPIC_API_KEY_TEST_MODEL;
         }
         if (normalized.startsWith("anthropic/")) {
-            return model.substring("anthropic/".length());
+            model = model.substring("anthropic/".length());
+            normalized = model.toLowerCase(Locale.ROOT);
+        } else if (normalized.startsWith("anthropic-compatible/")) {
+            model = model.substring("anthropic-compatible/".length());
+            normalized = model.toLowerCase(Locale.ROOT);
+        } else if (normalized.startsWith("starry/")) {
+            model = model.substring("starry/".length());
+            normalized = model.toLowerCase(Locale.ROOT);
         }
-        if (normalized.startsWith("anthropic-compatible/")) {
-            return model.substring("anthropic-compatible/".length());
+        for (ModelDtos.ModelSpec spec : AnthropicModelCatalog.models()) {
+            String id = spec.id().toLowerCase(Locale.ROOT);
+            if (id.startsWith("anthropic/")) {
+                id = id.substring("anthropic/".length());
+            }
+            if (normalized.equals(id)) {
+                return spec.targetModelId();
+            }
         }
         return model;
     }
