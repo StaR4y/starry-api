@@ -195,6 +195,18 @@ public class AccountPoolService {
         );
     }
 
+    public Mono<ProxyAccountEntity> selectCodexOpenAiAccount(String sessionHint) {
+        return selectAccount(sessionHint, AccountPlatforms::isCodex, "No available Codex upstream account");
+    }
+
+    public Mono<ProxyAccountEntity> selectCodexOpenAiAccount(String sessionHint, Collection<String> excludedAccountIds) {
+        return selectAccount(
+            sessionHint,
+            account -> AccountPlatforms.isCodex(account) && !isExcluded(account, excludedAccountIds),
+            "No available Codex upstream account"
+        );
+    }
+
     private Mono<ProxyAccountEntity> selectAccount(
         String sessionHint,
         Predicate<ProxyAccountEntity> filter,

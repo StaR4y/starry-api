@@ -18,6 +18,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import xyz.star4y.api.account.AccountAutoSuspendService;
 import xyz.star4y.api.account.AccountPoolService;
+import xyz.star4y.api.account.AccountPlatforms;
 import xyz.star4y.api.account.AccountSettingsService;
 import xyz.star4y.api.account.ProxyAccountEntity;
 import xyz.star4y.api.apikey.ApiKeyPrincipal;
@@ -254,6 +255,7 @@ public class ProxyFacade {
         boolean stream = request.path("stream").asBoolean(false);
         UpstreamRoute route = routeFor(upstreamModel);
         boolean fastMode = requestedFastMode && route == UpstreamRoute.OPENAI;
+        boolean preferCodexAccounts = route == UpstreamRoute.OPENAI && isCodexResponsesClient(exchange);
         JsonNode expandedRequest = openAiResponseStateStore.expand(request);
         JsonNode upstreamRequest = fastMode ? openAiFastRequest(expandedRequest) : expandedRequest;
 
@@ -268,6 +270,7 @@ public class ProxyFacade {
             stream,
             route,
             fastMode,
+            preferCodexAccounts,
             requestId,
             start,
             List.of()
@@ -289,11 +292,12 @@ public class ProxyFacade {
         boolean stream,
         UpstreamRoute route,
         boolean fastMode,
+        boolean preferCodexAccounts,
         String requestId,
         Instant start,
         List<String> attemptedAccountIds
     ) {
-        return selectAccount(route, sessionHint, attemptedAccountIds)
+        return selectAccount(route, sessionHint, attemptedAccountIds, preferCodexAccounts)
             .flatMap(account -> callResponsesWithAccount(route, account, upstreamRequest, mappedModel, sessionHint)
                 .flatMap(result -> {
                     Mono<Void> accounting = recordSuccess(requestId, principal, account, path, requestedModel, result, route, fastMode, start);
@@ -319,6 +323,7 @@ public class ProxyFacade {
                         stream,
                         route,
                         fastMode,
+                        preferCodexAccounts,
                         requestId,
                         start,
                         nextAttempted
@@ -343,6 +348,23 @@ public class ProxyFacade {
             case OPENAI -> accountPoolService.selectOpenAiAccount(sessionHint, attemptedAccountIds);
             case KIRO -> accountPoolService.selectKiroAccount(sessionHint, attemptedAccountIds);
         };
+    }
+
+    private Mono<ProxyAccountEntity> selectAccount(
+        UpstreamRoute route,
+        String sessionHint,
+        List<String> attemptedAccountIds,
+        boolean preferCodexAccounts
+    ) {
+        if (route != UpstreamRoute.OPENAI || !preferCodexAccounts) {
+            return selectAccount(route, sessionHint, attemptedAccountIds);
+        }
+        Mono<ProxyAccountEntity> codexSelection = attemptedAccountIds == null || attemptedAccountIds.isEmpty()
+            ? accountPoolService.selectCodexOpenAiAccount(sessionHint)
+            : accountPoolService.selectCodexOpenAiAccount(sessionHint, attemptedAccountIds);
+        return codexSelection.onErrorResume(error -> isNoAvailableAccount(error)
+            ? selectAccount(route, sessionHint, attemptedAccountIds)
+            : Mono.error(error));
     }
 
     private Mono<PlatformCompletionResult> callWithAccount(
@@ -389,6 +411,27 @@ public class ProxyFacade {
     private String routeModel(String model) {
         String normalized = model == null ? "" : model.trim().toLowerCase();
         return normalized.startsWith("starry/") ? normalized.substring("starry/".length()) : normalized;
+    }
+
+    private boolean isCodexResponsesClient(ServerWebExchange exchange) {
+        return isCodexClientHeader(exchange.getRequest().getHeaders().getFirst("User-Agent"))
+            || isCodexClientHeader(exchange.getRequest().getHeaders().getFirst("originator"));
+    }
+
+    private boolean isCodexClientHeader(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        String normalized = value.trim().toLowerCase();
+        return normalized.startsWith("codex_")
+            || normalized.startsWith("codex ")
+            || normalized.contains("codex_cli_rs/")
+            || normalized.contains("codex_vscode/")
+            || normalized.contains("codex_app/")
+            || normalized.contains("codex_chatgpt_desktop/")
+            || normalized.contains("codex_atlas/")
+            || normalized.contains("codex_exec/")
+            || normalized.contains("codex_sdk_ts/");
     }
 
     private boolean isFastRequested(JsonNode request, String requestedModel, String mappedModel) {

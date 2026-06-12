@@ -587,6 +587,127 @@ class ProxyFacadeRoutingTest {
     }
 
     @Test
+    void codexResponsesClientPrefersCodexAccountPool() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity codex = codexAccount("codex-main");
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "gpt-5.5",
+              "stream": false,
+              "input": "hi"
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/responses")
+                .header("User-Agent", "codex_cli_rs/0.139.0")
+        );
+
+        when(apiKeyService.authenticate(exchange))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("gpt-5.5", "key-1")).thenReturn("gpt-5.5");
+        when(accountPoolService.selectCodexOpenAiAccount("key-1")).thenReturn(Mono.just(codex));
+        when(openAiUpstreamClient.completeResponses(eq(codex), any(), eq("gpt-5.5")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
+        when(accountPoolService.recordSuccess("codex-main", 2L)).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
+        when(statsService.log(any())).thenReturn(Mono.empty());
+
+        ResponseEntity<?> response = proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService
+        ).responses(request, exchange).block();
+
+        assertThat(response).isNotNull();
+        verify(accountPoolService).selectCodexOpenAiAccount("key-1");
+        verify(accountPoolService, never()).selectOpenAiAccount(any(String.class));
+        verify(openAiUpstreamClient).completeResponses(eq(codex), any(), eq("gpt-5.5"));
+    }
+
+    @Test
+    void codexResponsesClientFallsBackAfterCodexUpstream503() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        AccountAutoSuspendService accountAutoSuspendService = mock(AccountAutoSuspendService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity codex = codexAccount("codex-main");
+        ProxyAccountEntity backup = openAiAccount("openai-backup");
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "gpt-5.5",
+              "stream": false,
+              "input": "hi"
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/responses")
+                .header("User-Agent", "codex_cli_rs/0.139.0")
+        );
+
+        when(apiKeyService.authenticate(exchange))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("gpt-5.5", "key-1")).thenReturn("gpt-5.5");
+        when(accountPoolService.selectCodexOpenAiAccount("key-1")).thenReturn(Mono.just(codex));
+        when(openAiUpstreamClient.completeResponses(eq(codex), any(), eq("gpt-5.5")))
+            .thenReturn(Mono.error(new UpstreamException(503, "OpenAI upstream error 503: Service temporarily unavailable", true)));
+        when(accountPoolService.recordRequestFailure(
+            eq("codex-main"),
+            eq(AccountPoolService.UpstreamErrorType.RECOVERABLE),
+            eq(503),
+            eq("OpenAI upstream error 503: Service temporarily unavailable")
+        )).thenReturn(Mono.just(new AccountPoolService.RequestFailureRecord("codex-main", 1, 503, false)));
+        when(accountPoolService.selectCodexOpenAiAccount(eq("key-1"), eq(List.of("codex-main"))))
+            .thenReturn(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "No available Codex upstream account")));
+        when(accountPoolService.selectOpenAiAccount(eq("key-1"), eq(List.of("codex-main"))))
+            .thenReturn(Mono.just(backup));
+        when(openAiUpstreamClient.completeResponses(eq(backup), any(), eq("gpt-5.5")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
+        when(accountPoolService.recordSuccess("openai-backup", 2L)).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
+        when(statsService.log(any())).thenReturn(Mono.empty());
+
+        ResponseEntity<?> response = proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService
+        ).responses(request, exchange).block();
+
+        assertThat(response).isNotNull();
+        verify(accountPoolService).selectCodexOpenAiAccount("key-1");
+        verify(accountPoolService).selectCodexOpenAiAccount(eq("key-1"), eq(List.of("codex-main")));
+        verify(accountPoolService).selectOpenAiAccount(eq("key-1"), eq(List.of("codex-main")));
+        verify(openAiUpstreamClient).completeResponses(eq(codex), any(), eq("gpt-5.5"));
+        verify(openAiUpstreamClient).completeResponses(eq(backup), any(), eq("gpt-5.5"));
+    }
+
+    @Test
     void responsesEndpointReplaysStoredPreviousResponseForToolContinuation() throws Exception {
         ApiKeyService apiKeyService = mock(ApiKeyService.class);
         AccountPoolService accountPoolService = mock(AccountPoolService.class);
@@ -914,6 +1035,12 @@ class ProxyFacadeRoutingTest {
         account.setAuthMethod(AccountPlatforms.OPENAI_API_KEY_AUTH);
         account.setAccessToken("sk-test");
         account.setEnabled(true);
+        return account;
+    }
+
+    private ProxyAccountEntity codexAccount(String accountId) {
+        ProxyAccountEntity account = openAiAccount(accountId);
+        account.setAuthMethod(AccountPlatforms.OPENAI_CODEX_AUTH);
         return account;
     }
 
