@@ -629,7 +629,7 @@ class OpenAiUpstreamClientTest {
     }
 
     @Test
-    void openAiCompatibleResponsesMapsCodexDisplayModelToApiFallbackModel() throws Exception {
+    void openAiCompatibleResponsesPreservesCodexDisplayModel() throws Exception {
         AtomicReference<String> requestBody = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/v1/responses", exchange -> {
@@ -662,7 +662,7 @@ class OpenAiUpstreamClientTest {
 
             assertThat(result).isNotNull();
             JsonNode body = objectMapper.readTree(requestBody.get());
-            assertThat(body.path("model").asText()).isEqualTo("openai/gpt-4o-mini");
+            assertThat(body.path("model").asText()).isEqualTo("openai/gpt-5.5");
         } finally {
             server.stop(0);
         }
@@ -680,7 +680,7 @@ class OpenAiUpstreamClientTest {
             int attempt = attempts.incrementAndGet();
             if (attempt == 1) {
                 byte[] response = """
-                    {"error":{"code":"model_not_found","message":"No available channel for model openai/gpt-4o-mini under group codex-pro","type":"api_error"}}
+                    {"error":{"code":"model_not_found","message":"No available channel for model openai/gpt-5.5 under group codex-pro","type":"api_error"}}
                     """.getBytes(StandardCharsets.UTF_8);
                 exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "application/json");
                 exchange.sendResponseHeaders(503, response.length);
@@ -716,7 +716,7 @@ class OpenAiUpstreamClientTest {
 
             assertThat(result).isNotNull();
             assertThat(result.content()).isEqualTo("OK");
-            assertThat(requestedModels).containsExactly("openai/gpt-4o-mini", "gpt-4o-mini");
+            assertThat(requestedModels).containsExactly("openai/gpt-5.5", "gpt-5.5");
         } finally {
             server.stop(0);
         }
