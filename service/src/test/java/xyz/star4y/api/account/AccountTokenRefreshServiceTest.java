@@ -1,6 +1,7 @@
 package xyz.star4y.api.account;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -146,6 +147,36 @@ class AccountTokenRefreshServiceTest {
         assertThat(refreshed.getClientId()).isEqualTo("codex-client-id");
         assertThat(refreshed.getTokenExpiresAt()).isAfterOrEqualTo(Instant.now().plusSeconds(3500));
         assertThat(service.canRefresh(account)).isTrue();
+    }
+
+    @Test
+    void codexRefreshRequiresRotatedRefreshToken() {
+        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.OK)
+            .header("Content-Type", "application/json")
+            .body("""
+                {
+                  "access_token":"codex-new-access",
+                  "expires_in":3600
+                }
+                """)
+            .build());
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ProxyAccountEntity account = codexAccount();
+
+        when(repository.findByAccountId("codex-main")).thenReturn(Mono.just(account));
+
+        AccountTokenRefreshService service = new AccountTokenRefreshService(
+            new ObjectMapper(),
+            WebClient.builder().exchangeFunction(exchange).build(),
+            repository,
+            accountPoolService
+        );
+
+        assertThatThrownBy(() -> service.refresh(account).block())
+            .hasMessageContaining("does not contain refresh_token");
+        assertThat(account.getAccessToken()).isEqualTo("codex-old-access");
+        assertThat(account.getRefreshToken()).isEqualTo("codex-old-refresh");
     }
 
     @Test
@@ -297,6 +328,56 @@ class AccountTokenRefreshServiceTest {
             eq(AccountPoolService.UpstreamErrorType.FATAL),
             eq(403),
             contains("app_session_terminated")
+        );
+    }
+
+    @Test
+    void scheduledRefreshDisablesCodexAccountOnInvalidatedRefreshToken() {
+        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.UNAUTHORIZED)
+            .header("Content-Type", "application/json")
+            .body("""
+                {
+                  "error": {
+                    "message": "Your refresh token has been invalidated. Please try signing in again.",
+                    "type": "invalid_request_error",
+                    "code": "refresh_token_invalidated"
+                  }
+                }
+                """)
+            .build());
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ProxyAccountEntity codex = codexAccount();
+        codex.setTokenExpiresAt(Instant.now().minusSeconds(60));
+
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(codex));
+        when(repository.findByAccountId("codex-main")).thenReturn(Mono.just(codex));
+        when(accountPoolService.recordRequestFailure(
+            eq("codex-main"),
+            eq(AccountPoolService.UpstreamErrorType.FATAL),
+            eq(403),
+            contains("refresh_token_invalidated")
+        )).thenReturn(Mono.empty());
+
+        AccountTokenRefreshService service = new AccountTokenRefreshService(
+            new ObjectMapper(),
+            WebClient.builder().exchangeFunction(exchange).build(),
+            repository,
+            accountPoolService
+        );
+
+        AccountTokenRefreshService.TokenRefreshSummary summary = service.refreshEligibleAccounts().block();
+
+        assertThat(summary).isNotNull();
+        assertThat(summary.total()).isEqualTo(1);
+        assertThat(summary.eligible()).isEqualTo(1);
+        assertThat(summary.refreshed()).isZero();
+        assertThat(summary.failed()).isEqualTo(1);
+        verify(accountPoolService).recordRequestFailure(
+            eq("codex-main"),
+            eq(AccountPoolService.UpstreamErrorType.FATAL),
+            eq(403),
+            contains("refresh_token_invalidated")
         );
     }
 

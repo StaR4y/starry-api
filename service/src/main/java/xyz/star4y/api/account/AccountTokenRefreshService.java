@@ -177,7 +177,7 @@ public class AccountTokenRefreshService {
                             "Codex token refresh failed " + response.statusCode().value() + ": " + text
                         )));
                 }
-                return response.bodyToMono(JsonNode.class).map(json -> tokenResult(json, refreshToken, clientId));
+                return response.bodyToMono(JsonNode.class).map(json -> tokenResult(json, null, clientId));
             });
     }
 
@@ -235,6 +235,9 @@ public class AccountTokenRefreshService {
     private Mono<ProxyAccountEntity> saveRefreshedToken(ProxyAccountEntity account, TokenRefreshResult result) {
         if (result.accessToken() == null || result.accessToken().isBlank()) {
             return Mono.error(refreshError("Refresh response does not contain accessToken"));
+        }
+        if (AccountPlatforms.isCodex(account) && clean(result.refreshToken()) == null) {
+            return Mono.error(refreshError("Codex refresh response does not contain refresh_token; refusing to keep an already-used refresh token"));
         }
         String accountId = account.getAccountId();
         return repository.findByAccountId(accountId)
@@ -317,7 +320,9 @@ public class AccountTokenRefreshService {
         String normalized = message.toLowerCase(Locale.ROOT);
         return normalized.contains("invalid_grant")
             || normalized.contains("refresh_token_reused")
+            || normalized.contains("refresh_token_invalidated")
             || (normalized.contains("refresh token") && normalized.contains("already used"))
+            || (normalized.contains("refresh token") && normalized.contains("invalidated"))
             || normalized.contains("invalid_client")
             || normalized.contains("unauthorized_client")
             || normalized.contains("access_denied")
