@@ -7,7 +7,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
@@ -47,6 +50,7 @@ import xyz.star4y.api.stats.StatsService;
 public class ProxyFacade {
 
     static final int MAX_MODEL_ID_LENGTH = 256;
+    private static final Logger log = LoggerFactory.getLogger(ProxyFacade.class);
 
     private enum ResponseMode {
         OPENAI_CHAT,
@@ -255,7 +259,12 @@ public class ProxyFacade {
         boolean stream = request.path("stream").asBoolean(false);
         UpstreamRoute route = routeFor(upstreamModel);
         boolean fastMode = requestedFastMode && route == UpstreamRoute.OPENAI;
-        boolean preferCodexAccounts = route == UpstreamRoute.OPENAI && isCodexResponsesClient(exchange);
+        boolean codexOnlyResponsesModel = isCodexOnlyResponsesModel(requestedModel)
+            || isCodexOnlyResponsesModel(mappedModel)
+            || isCodexOnlyResponsesModel(upstreamModel);
+        boolean preferCodexAccounts = route == UpstreamRoute.OPENAI
+            && (isCodexResponsesClient(exchange) || codexOnlyResponsesModel);
+        boolean requireCodexAccounts = route == UpstreamRoute.OPENAI && codexOnlyResponsesModel;
         JsonNode expandedRequest = openAiResponseStateStore.expand(request);
         JsonNode upstreamRequest = fastMode ? openAiFastRequest(expandedRequest) : expandedRequest;
 
@@ -271,6 +280,7 @@ public class ProxyFacade {
             route,
             fastMode,
             preferCodexAccounts,
+            requireCodexAccounts,
             requestId,
             start,
             List.of()
@@ -293,11 +303,12 @@ public class ProxyFacade {
         UpstreamRoute route,
         boolean fastMode,
         boolean preferCodexAccounts,
+        boolean requireCodexAccounts,
         String requestId,
         Instant start,
         List<String> attemptedAccountIds
     ) {
-        return selectAccount(route, sessionHint, attemptedAccountIds, preferCodexAccounts)
+        return selectAccount(route, sessionHint, attemptedAccountIds, preferCodexAccounts, requireCodexAccounts)
             .flatMap(account -> callResponsesWithAccount(route, account, upstreamRequest, mappedModel, sessionHint)
                 .flatMap(result -> {
                     Mono<Void> accounting = recordSuccess(requestId, principal, account, path, requestedModel, result, route, fastMode, start);
@@ -324,6 +335,7 @@ public class ProxyFacade {
                         route,
                         fastMode,
                         preferCodexAccounts,
+                        requireCodexAccounts,
                         requestId,
                         start,
                         nextAttempted
@@ -354,7 +366,8 @@ public class ProxyFacade {
         UpstreamRoute route,
         String sessionHint,
         List<String> attemptedAccountIds,
-        boolean preferCodexAccounts
+        boolean preferCodexAccounts,
+        boolean requireCodexAccounts
     ) {
         if (route != UpstreamRoute.OPENAI || !preferCodexAccounts) {
             return selectAccount(route, sessionHint, attemptedAccountIds);
@@ -362,6 +375,9 @@ public class ProxyFacade {
         Mono<ProxyAccountEntity> codexSelection = attemptedAccountIds == null || attemptedAccountIds.isEmpty()
             ? accountPoolService.selectCodexOpenAiAccount(sessionHint)
             : accountPoolService.selectCodexOpenAiAccount(sessionHint, attemptedAccountIds);
+        if (requireCodexAccounts) {
+            return codexSelection;
+        }
         return codexSelection.onErrorResume(error -> isNoAvailableAccount(error)
             ? selectAccount(route, sessionHint, attemptedAccountIds)
             : Mono.error(error));
@@ -432,6 +448,19 @@ public class ProxyFacade {
             || normalized.contains("codex_atlas/")
             || normalized.contains("codex_exec/")
             || normalized.contains("codex_sdk_ts/");
+    }
+
+    private boolean isCodexOnlyResponsesModel(String model) {
+        String normalized = routeModel(model);
+        if (normalized.startsWith("openai/")) {
+            normalized = normalized.substring("openai/".length());
+        } else if (normalized.startsWith("openai-compatible/")) {
+            normalized = normalized.substring("openai-compatible/".length());
+        }
+        normalized = normalized.toLowerCase(Locale.ROOT);
+        return normalized.contains("codex")
+            || "codex-mini-latest".equals(normalized)
+            || normalized.matches("gpt-5\\.5.*");
     }
 
     private boolean isFastRequested(JsonNode request, String requestedModel, String mappedModel) {
@@ -559,6 +588,16 @@ public class ProxyFacade {
             && (statusCode == 401 || statusCode == 402 || statusCode == 403 || statusCode == 429 || statusCode >= 500)
             ? AccountPoolService.UpstreamErrorType.RECOVERABLE
             : AccountPoolService.UpstreamErrorType.FATAL;
+        log.warn(
+            "Proxy upstream request failed path={} model={} accountId={} provider={} authMethod={} status={} error={}",
+            path,
+            model,
+            account.getAccountId(),
+            account.getProvider(),
+            account.getAuthMethod(),
+            statusCode,
+            failure.getMessage()
+        );
         Mono<Void> accountStats = accountPoolService.recordRequestFailure(account.getAccountId(), type, statusCode, failure.getMessage())
             .doOnNext(accountAutoSuspendService::scheduleIfNeeded)
             .then();

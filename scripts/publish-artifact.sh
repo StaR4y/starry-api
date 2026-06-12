@@ -164,6 +164,10 @@ use_docker_build() {
   esac
 }
 
+source_tree_dirty() {
+  git status --porcelain --untracked-files=all -- . ":(exclude)${ARTIFACT_DIR}" | grep -q .
+}
+
 build_with_gradle() {
   if [[ "$RUN_TESTS" == "true" ]]; then
     log "Running tests and building boot jar..."
@@ -225,7 +229,7 @@ main() {
   else
     java_version="docker:${DOCKER_BUILD_IMAGE}"
   fi
-  if git status --porcelain --untracked-files=all | grep -q .; then
+  if source_tree_dirty; then
     dirty=true
     log "Working tree has uncommitted changes; build-info.json will record dirty=true."
   else
