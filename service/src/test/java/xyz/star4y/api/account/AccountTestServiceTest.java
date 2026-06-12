@@ -159,7 +159,7 @@ class AccountTestServiceTest {
         ProxyAccountEntity account = anthropicAccount("anthropic-main", "sk-ant-test");
 
         when(repository.findAll()).thenReturn(Flux.just(account));
-        when(anthropicUpstreamClient.complete(eq(account), any(ObjectNode.class), eq("anthropic/claude-sonnet-4.5")))
+        when(anthropicUpstreamClient.complete(eq(account), any(ObjectNode.class), eq("claude-sonnet-4.5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", PlatformUsage.zero())));
         when(accountPoolService.recordTestSuccess(eq("anthropic-main"), eq(0L), eq(false))).thenReturn(Mono.empty());
 
@@ -182,10 +182,10 @@ class AccountTestServiceTest {
         assertThat(response.items()).singleElement()
             .satisfies(item -> {
                 assertThat(item.accountId()).isEqualTo("anthropic-main");
-                assertThat(item.model()).isEqualTo("anthropic/claude-sonnet-4.5");
+                assertThat(item.model()).isEqualTo("claude-sonnet-4.5");
                 assertThat(item.status()).isEqualTo("SUCCESS");
             });
-        verify(anthropicUpstreamClient).complete(eq(account), any(ObjectNode.class), eq("anthropic/claude-sonnet-4.5"));
+        verify(anthropicUpstreamClient).complete(eq(account), any(ObjectNode.class), eq("claude-sonnet-4.5"));
         verifyNoInteractions(upstreamClient, openAiAccountTestClient);
     }
 
@@ -372,12 +372,14 @@ class AccountTestServiceTest {
             .hasSizeGreaterThanOrEqualTo(27)
             .contains(
                 "auto",
-                "anthropic/claude-sonnet-4.5",
-                "anthropic/claude-sonnet-4-6",
-                "anthropic/claude-haiku-4-5-20251001",
-                "anthropic/claude-opus-4.8-fast",
-                "anthropic/claude-opus-latest"
+                "claude-sonnet-4.5",
+                "claude-sonnet-4-6",
+                "claude-haiku-4-5-20251001",
+                "claude-opus-4.8-fast",
+                "claude-opus-latest"
             );
+        assertThat(options.anthropic()).extracting(AccountDtos.TestModelOption::value)
+            .noneMatch(value -> value.startsWith("anthropic/"));
         assertThat(options.codex()).extracting(AccountDtos.TestModelOption::value)
             .containsExactly(
                 "auto",

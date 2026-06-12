@@ -28,7 +28,7 @@ public class AccountTestService {
     private static final String DEFAULT_MODEL = "auto";
     private static final String DEFAULT_PROMPT = "Reply OK in one short sentence.";
     private static final String DEFAULT_OPENAI_API_KEY_TEST_MODEL = OpenAiAccountTestClient.DEFAULT_CODEX_TEST_MODEL;
-    private static final String DEFAULT_ANTHROPIC_API_KEY_TEST_MODEL = "anthropic/claude-sonnet-4.5";
+    private static final String DEFAULT_ANTHROPIC_API_KEY_TEST_MODEL = "claude-sonnet-4.5";
     private static final List<String> OPENAI_STYLE_TEST_MODEL_IDS = List.of(
         "gpt-5.5",
         "gpt-5.4",
@@ -67,10 +67,9 @@ public class AccountTestService {
         "google",
         OpenRouterModelIds.GOOGLE
     );
-    private static final List<AccountDtos.TestModelOption> ANTHROPIC_TEST_MODELS = openRouterOptions(
-        option("auto (anthropic/claude-sonnet-4.5)", DEFAULT_MODEL),
-        "anthropic",
-        OpenRouterModelIds.ANTHROPIC
+    private static final List<AccountDtos.TestModelOption> ANTHROPIC_TEST_MODELS = testModelOptions(
+        option("auto (" + DEFAULT_ANTHROPIC_API_KEY_TEST_MODEL + ")", DEFAULT_MODEL),
+        unprefixedModelIds(OpenRouterModelIds.ANTHROPIC)
     );
     private static final List<AccountDtos.TestModelOption> CODEX_TEST_MODELS = testModelOptions(
         option("auto (" + OpenAiAccountTestClient.DEFAULT_CODEX_TEST_MODEL + ")", DEFAULT_MODEL),
@@ -351,6 +350,12 @@ public class AccountTestService {
             || normalized.startsWith("openai-compatible/")) {
             return DEFAULT_ANTHROPIC_API_KEY_TEST_MODEL;
         }
+        if (normalized.startsWith("anthropic/")) {
+            return model.substring("anthropic/".length());
+        }
+        if (normalized.startsWith("anthropic-compatible/")) {
+            return model.substring("anthropic-compatible/".length());
+        }
         return model;
     }
 
@@ -402,6 +407,20 @@ public class AccountTestService {
         return testModelOptions(autoOption, modelIds.stream()
             .map(id -> id.contains("/") ? id : providerPrefix + "/" + id)
             .toList());
+    }
+
+    private static List<String> unprefixedModelIds(List<String> modelIds) {
+        return modelIds.stream()
+            .map(AccountTestService::stripProviderPrefix)
+            .toList();
+    }
+
+    private static String stripProviderPrefix(String modelId) {
+        if (modelId == null) {
+            return "";
+        }
+        int slash = modelId.indexOf('/');
+        return slash >= 0 ? modelId.substring(slash + 1) : modelId;
     }
 
     private static List<AccountDtos.TestModelOption> testModelOptions(

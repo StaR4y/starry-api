@@ -560,9 +560,9 @@
       { label: 'google/gemini-2.5-flash', value: 'google/gemini-2.5-flash' },
     ],
     anthropic: [
-      { label: 'auto (anthropic/claude-sonnet-4.5)', value: 'auto' },
-      { label: 'anthropic/claude-sonnet-4.5', value: 'anthropic/claude-sonnet-4.5' },
-      { label: 'anthropic/claude-opus-4.5', value: 'anthropic/claude-opus-4.5' },
+      { label: 'auto (claude-sonnet-4.5)', value: 'auto' },
+      { label: 'claude-sonnet-4.5', value: 'claude-sonnet-4.5' },
+      { label: 'claude-opus-4.5', value: 'claude-opus-4.5' },
     ],
     codex: fallbackOpenAiStyleTestModels,
   };
