@@ -695,12 +695,29 @@ public class ProxyFacade {
         return switch (failure) {
             case ApiException api -> api;
             case UpstreamException upstream -> {
-                HttpStatus status = upstream.getStatusCode() == 429 || upstream.getStatusCode() == 402
-                    ? HttpStatus.TOO_MANY_REQUESTS
-                    : HttpStatus.BAD_GATEWAY;
+                HttpStatus status = mapUpstreamStatusCode(upstream.getStatusCode());
                 yield new ApiException(status, "UPSTREAM_ERROR", upstream.getMessage());
             }
             default -> new ApiException(HttpStatus.BAD_GATEWAY, "UPSTREAM_ERROR", failure.getMessage());
+        };
+    }
+
+    private HttpStatus mapUpstreamStatusCode(int upstreamStatusCode) {
+        return switch (upstreamStatusCode) {
+            case 400 -> HttpStatus.BAD_REQUEST;
+            case 401 -> HttpStatus.UNAUTHORIZED;
+            case 402, 429 -> HttpStatus.TOO_MANY_REQUESTS;
+            case 403 -> HttpStatus.FORBIDDEN;
+            case 404 -> HttpStatus.NOT_FOUND;
+            case 408 -> HttpStatus.REQUEST_TIMEOUT;
+            case 422 -> HttpStatus.UNPROCESSABLE_ENTITY;
+            case 500 -> HttpStatus.INTERNAL_SERVER_ERROR;
+            case 502 -> HttpStatus.BAD_GATEWAY;
+            case 503 -> HttpStatus.SERVICE_UNAVAILABLE;
+            case 504 -> HttpStatus.GATEWAY_TIMEOUT;
+            default -> upstreamStatusCode >= 500 && upstreamStatusCode < 600
+                ? HttpStatus.BAD_GATEWAY
+                : HttpStatus.BAD_REQUEST;
         };
     }
 
