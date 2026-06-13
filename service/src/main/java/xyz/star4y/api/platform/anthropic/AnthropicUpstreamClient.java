@@ -6,11 +6,14 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
 import java.net.URI;
+import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 import java.util.regex.Pattern;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatusCode;
@@ -32,11 +35,14 @@ public class AnthropicUpstreamClient {
 
     private static final Pattern VERSION_SEGMENT = Pattern.compile("v\\d+(?:beta)?");
     private static final String ANTHROPIC_VERSION = "2023-06-01";
-    private static final String DEFAULT_TEST_MODEL = "claude-sonnet-4.5";
+    private static final String CLAUDE_CODE_CLI_VERSION = "2.1.161";
+    private static final String CLAUDE_CODE_USER_AGENT = "claude-cli/" + CLAUDE_CODE_CLI_VERSION + " (external, cli)";
+    private static final String CLAUDE_CODE_SYSTEM_PROMPT = "You are Claude Code, Anthropic's official CLI for Claude.";
+    private static final String DEFAULT_TEST_MODEL = "claude-sonnet-4-5-20250929";
     private static final String API_KEY_BETA_HEADER =
         "claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14";
     private static final Map<String, String> CLAUDE_CODE_API_KEY_HEADERS = Map.ofEntries(
-        Map.entry(HttpHeaders.USER_AGENT, "claude-cli/2.1.161 (external, cli)"),
+        Map.entry(HttpHeaders.USER_AGENT, CLAUDE_CODE_USER_AGENT),
         Map.entry("X-Stainless-Lang", "js"),
         Map.entry("X-Stainless-Package-Version", "0.94.0"),
         Map.entry("X-Stainless-OS", "Linux"),
@@ -48,6 +54,7 @@ public class AnthropicUpstreamClient {
         Map.entry("X-App", "cli"),
         Map.entry("Anthropic-Dangerous-Direct-Browser-Access", "true")
     );
+    private static final SecureRandom RANDOM = new SecureRandom();
 
     private final ObjectMapper objectMapper;
     private final WebClient webClient;
@@ -66,6 +73,52 @@ public class AnthropicUpstreamClient {
             .headers(headers -> applyAnthropicHeaders(headers, account))
             .bodyValue(body)
             .exchangeToMono(response -> handleResponse(response, endpoint));
+    }
+
+    public Mono<PlatformCompletionResult> testClaudeCode(ProxyAccountEntity account, String model) {
+        String upstreamModel = anthropicModel(model);
+        ObjectNode body = claudeCodeTestRequest(upstreamModel);
+        String endpoint = anthropicApi(account.getBaseUrl(), "/messages");
+        return webClient.post()
+            .uri(endpoint)
+            .headers(headers -> applyAnthropicHeaders(headers, account))
+            .bodyValue(body)
+            .exchangeToMono(response -> handleResponse(response, endpoint));
+    }
+
+    private ObjectNode claudeCodeTestRequest(String model) {
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("model", model);
+        ArrayNode messages = body.putArray("messages");
+        ObjectNode message = messages.addObject();
+        message.put("role", "user");
+        ArrayNode content = message.putArray("content");
+        ObjectNode text = content.addObject();
+        text.put("type", "text");
+        text.put("text", "hi");
+        text.putObject("cache_control").put("type", "ephemeral");
+
+        ArrayNode system = body.putArray("system");
+        ObjectNode systemText = system.addObject();
+        systemText.put("type", "text");
+        systemText.put("text", CLAUDE_CODE_SYSTEM_PROMPT);
+        systemText.putObject("cache_control").put("type", "ephemeral");
+
+        body.putObject("metadata").put("user_id", claudeCodeMetadataUserId());
+        body.put("max_tokens", 1024);
+        body.put("temperature", 1);
+        body.put("stream", true);
+        return body;
+    }
+
+    private String claudeCodeMetadataUserId() {
+        byte[] deviceId = new byte[32];
+        RANDOM.nextBytes(deviceId);
+        ObjectNode userId = objectMapper.createObjectNode();
+        userId.put("device_id", HexFormat.of().formatHex(deviceId));
+        userId.put("account_uuid", "");
+        userId.put("session_id", UUID.randomUUID().toString());
+        return userId.toString();
     }
 
     private ObjectNode anthropicMessagesRequest(JsonNode request, String model) {
@@ -539,12 +592,25 @@ public class AnthropicUpstreamClient {
         }
         String lower = cleaned.toLowerCase(Locale.ROOT);
         if (lower.startsWith("anthropic/")) {
-            return cleaned.substring("anthropic/".length());
+            cleaned = cleaned.substring("anthropic/".length());
+            lower = cleaned.toLowerCase(Locale.ROOT);
+        } else if (lower.startsWith("anthropic-compatible/")) {
+            cleaned = cleaned.substring("anthropic-compatible/".length());
+            lower = cleaned.toLowerCase(Locale.ROOT);
         }
-        if (lower.startsWith("anthropic-compatible/")) {
-            return cleaned.substring("anthropic-compatible/".length());
+        return switch (lower) {
+            case "claude-sonnet-4.5", "claude-sonnet-4-5", "claude-sonnet-latest" -> "claude-sonnet-4-5-20250929";
+            case "claude-haiku-4.5", "claude-haiku-4-5", "claude-haiku-latest" -> "claude-haiku-4-5-20251001";
+            case "claude-opus-4.5", "claude-opus-4-5", "claude-opus-latest" -> "claude-opus-4-5-20251101";
+            default -> cleaned;
+        };
+    }
+
+    private String withBetaQuery(String endpoint) {
+        if (endpoint.contains("?")) {
+            return endpoint.matches(".*[?&]beta=.*") ? endpoint : endpoint + "&beta=true";
         }
-        return cleaned;
+        return endpoint + "?beta=true";
     }
 
     private String anthropicApi(String baseUrl, String suffix) {
@@ -555,12 +621,12 @@ public class AnthropicUpstreamClient {
         String normalizedBase = base.replaceAll("/+$", "");
         String normalizedSuffix = suffix.startsWith("/") ? suffix : "/" + suffix;
         if (normalizedBase.endsWith(normalizedSuffix)) {
-            return normalizedBase;
+            return withBetaQuery(normalizedBase);
         }
         if (!endsWithVersionSegment(normalizedBase)) {
-            return normalizedBase + "/v1" + normalizedSuffix;
+            return withBetaQuery(normalizedBase + "/v1" + normalizedSuffix);
         }
-        return normalizedBase + normalizedSuffix;
+        return withBetaQuery(normalizedBase + normalizedSuffix);
     }
 
     private boolean endsWithVersionSegment(String baseUrl) {
@@ -581,27 +647,11 @@ public class AnthropicUpstreamClient {
     private void applyAnthropicHeaders(HttpHeaders headers, ProxyAccountEntity account) {
         String token = account.getAccessToken();
         headers.set("x-api-key", token);
-        if (!isOfficialAnthropicBaseUrl(account.getBaseUrl())) {
-            headers.setBearerAuth(token);
-            headers.set("anthropic-beta", API_KEY_BETA_HEADER);
-            CLAUDE_CODE_API_KEY_HEADERS.forEach(headers::set);
-        }
+        headers.set("anthropic-beta", API_KEY_BETA_HEADER);
+        CLAUDE_CODE_API_KEY_HEADERS.forEach(headers::set);
         headers.set("anthropic-version", ANTHROPIC_VERSION);
         headers.setContentType(MediaType.APPLICATION_JSON);
-        headers.setAccept(List.of(MediaType.APPLICATION_JSON, MediaType.TEXT_EVENT_STREAM));
-    }
-
-    private boolean isOfficialAnthropicBaseUrl(String baseUrl) {
-        String base = clean(baseUrl);
-        if (base == null) {
-            return true;
-        }
-        try {
-            String host = URI.create(base).getHost();
-            return host != null && "api.anthropic.com".equals(host.toLowerCase(Locale.ROOT));
-        } catch (IllegalArgumentException ignored) {
-            return false;
-        }
+        headers.setAccept(List.of(MediaType.APPLICATION_JSON));
     }
 
     private boolean isRecoverableStatus(int statusCode) {

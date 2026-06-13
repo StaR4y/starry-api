@@ -28,8 +28,10 @@ class AnthropicUpstreamClientTest {
         AtomicReference<List<String>> beta = new AtomicReference<>();
         AtomicReference<List<String>> userAgent = new AtomicReference<>();
         AtomicReference<List<String>> version = new AtomicReference<>();
+        AtomicReference<String> query = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/v1/messages", exchange -> {
+            query.set(exchange.getRequestURI().getRawQuery());
             requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             apiKey.set(exchange.getRequestHeaders().get("x-api-key"));
             authorization.set(exchange.getRequestHeaders().get(HttpHeaders.AUTHORIZATION));
@@ -74,18 +76,80 @@ class AnthropicUpstreamClientTest {
             assertThat(result.usage().inputTokens()).isEqualTo(3);
             assertThat(result.usage().outputTokens()).isEqualTo(2);
             assertThat(apiKey.get()).containsExactly("sk-ant-test");
-            assertThat(authorization.get()).containsExactly("Bearer sk-ant-test");
+            assertThat(authorization.get()).isNull();
             assertThat(beta.get()).containsExactly("claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14");
             assertThat(userAgent.get()).containsExactly("claude-cli/2.1.161 (external, cli)");
             assertThat(version.get()).containsExactly("2023-06-01");
+            assertThat(query.get()).isEqualTo("beta=true");
 
             JsonNode body = objectMapper.readTree(requestBody.get());
-            assertThat(body.path("model").asText()).isEqualTo("claude-sonnet-4.5");
+            assertThat(body.path("model").asText()).isEqualTo("claude-sonnet-4-5-20250929");
             assertThat(body.path("max_tokens").asInt()).isEqualTo(64);
             assertThat(body.path("system").asText()).isEqualTo("Use short replies.");
             assertThat(body.path("messages").path(0).path("role").asText()).isEqualTo("user");
             assertThat(body.path("messages").path(0).path("content").path(0).path("type").asText()).isEqualTo("text");
             assertThat(body.path("messages").path(0).path("content").path(0).path("text").asText()).isEqualTo("ping");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void testClaudeCodeSendsSub2ApiStylePayload() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        AtomicReference<List<String>> apiKey = new AtomicReference<>();
+        AtomicReference<List<String>> authorization = new AtomicReference<>();
+        AtomicReference<List<String>> beta = new AtomicReference<>();
+        AtomicReference<String> query = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/messages", exchange -> {
+            query.set(exchange.getRequestURI().getRawQuery());
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            apiKey.set(exchange.getRequestHeaders().get("x-api-key"));
+            authorization.set(exchange.getRequestHeaders().get(HttpHeaders.AUTHORIZATION));
+            beta.set(exchange.getRequestHeaders().get("anthropic-beta"));
+            byte[] response = """
+                {
+                  "id": "msg_1",
+                  "type": "message",
+                  "role": "assistant",
+                  "content": [{"type": "text", "text": "OK"}],
+                  "usage": {"input_tokens": 3, "output_tokens": 2}
+                }
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "application/json");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, WebClient.builder().build());
+            ProxyAccountEntity account = anthropicAccount("http://127.0.0.1:" + server.getAddress().getPort());
+
+            PlatformCompletionResult result = client.testClaudeCode(account, "claude-sonnet-4.5").block();
+
+            assertThat(result).isNotNull();
+            assertThat(result.content()).isEqualTo("OK");
+            assertThat(apiKey.get()).containsExactly("sk-ant-test");
+            assertThat(authorization.get()).isNull();
+            assertThat(beta.get()).containsExactly("claude-code-20250219,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14");
+            assertThat(query.get()).isEqualTo("beta=true");
+
+            JsonNode body = objectMapper.readTree(requestBody.get());
+            assertThat(body.path("model").asText()).isEqualTo("claude-sonnet-4-5-20250929");
+            assertThat(body.path("max_tokens").asInt()).isEqualTo(1024);
+            assertThat(body.path("temperature").asInt()).isEqualTo(1);
+            assertThat(body.path("stream").asBoolean()).isTrue();
+            assertThat(body.path("messages").path(0).path("content").path(0).path("text").asText()).isEqualTo("hi");
+            assertThat(body.path("messages").path(0).path("content").path(0).path("cache_control").path("type").asText()).isEqualTo("ephemeral");
+            assertThat(body.path("system").path(0).path("text").asText()).isEqualTo("You are Claude Code, Anthropic's official CLI for Claude.");
+            assertThat(body.path("system").path(0).path("cache_control").path("type").asText()).isEqualTo("ephemeral");
+            JsonNode userId = objectMapper.readTree(body.path("metadata").path("user_id").asText());
+            assertThat(userId.path("device_id").asText()).hasSize(64);
+            assertThat(userId.path("account_uuid").asText()).isEmpty();
+            assertThat(userId.path("session_id").asText()).isNotBlank();
         } finally {
             server.stop(0);
         }

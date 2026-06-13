@@ -159,7 +159,7 @@ class AccountTestServiceTest {
         ProxyAccountEntity account = anthropicAccount("anthropic-main", "sk-ant-test");
 
         when(repository.findAll()).thenReturn(Flux.just(account));
-        when(anthropicUpstreamClient.complete(eq(account), any(ObjectNode.class), eq("claude-sonnet-4.5")))
+        when(anthropicUpstreamClient.testClaudeCode(eq(account), eq("claude-sonnet-4-5-20250929")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", PlatformUsage.zero())));
         when(accountPoolService.recordTestSuccess(eq("anthropic-main"), eq(0L), eq(false))).thenReturn(Mono.empty());
 
@@ -182,10 +182,10 @@ class AccountTestServiceTest {
         assertThat(response.items()).singleElement()
             .satisfies(item -> {
                 assertThat(item.accountId()).isEqualTo("anthropic-main");
-                assertThat(item.model()).isEqualTo("claude-sonnet-4.5");
+                assertThat(item.model()).isEqualTo("claude-sonnet-4-5-20250929");
                 assertThat(item.status()).isEqualTo("SUCCESS");
             });
-        verify(anthropicUpstreamClient).complete(eq(account), any(ObjectNode.class), eq("claude-sonnet-4.5"));
+        verify(anthropicUpstreamClient).testClaudeCode(eq(account), eq("claude-sonnet-4-5-20250929"));
         verifyNoInteractions(upstreamClient, openAiAccountTestClient);
     }
 
@@ -199,7 +199,7 @@ class AccountTestServiceTest {
         ProxyAccountEntity account = anthropicAccount("anthropic-main", "sk-ant-test");
 
         when(repository.findAll()).thenReturn(Flux.just(account));
-        when(anthropicUpstreamClient.complete(eq(account), any(ObjectNode.class), eq("claude-sonnet-4.5")))
+        when(anthropicUpstreamClient.testClaudeCode(eq(account), eq("claude-sonnet-4-5-20250929")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", PlatformUsage.zero())));
         when(accountPoolService.recordTestSuccess(eq("anthropic-main"), eq(0L), eq(false))).thenReturn(Mono.empty());
 
@@ -220,8 +220,8 @@ class AccountTestServiceTest {
         assertThat(response).isNotNull();
         assertThat(response.success()).isEqualTo(1);
         assertThat(response.items()).singleElement()
-            .satisfies(item -> assertThat(item.model()).isEqualTo("claude-sonnet-4.5"));
-        verify(anthropicUpstreamClient).complete(eq(account), any(ObjectNode.class), eq("claude-sonnet-4.5"));
+            .satisfies(item -> assertThat(item.model()).isEqualTo("claude-sonnet-4-5-20250929"));
+        verify(anthropicUpstreamClient).testClaudeCode(eq(account), eq("claude-sonnet-4-5-20250929"));
         verifyNoInteractions(upstreamClient, openAiAccountTestClient);
     }
 
@@ -408,6 +408,8 @@ class AccountTestServiceTest {
             .hasSizeGreaterThanOrEqualTo(27)
             .contains(
                 "auto",
+                "claude-sonnet-4-5-20250929",
+                "claude-opus-4-5-20251101",
                 "claude-sonnet-4.5",
                 "claude-sonnet-4-6",
                 "claude-haiku-4-5-20251001",

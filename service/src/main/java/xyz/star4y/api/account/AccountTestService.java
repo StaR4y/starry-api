@@ -30,7 +30,12 @@ public class AccountTestService {
     private static final String DEFAULT_MODEL = "auto";
     private static final String DEFAULT_PROMPT = "Reply OK in one short sentence.";
     private static final String DEFAULT_OPENAI_API_KEY_TEST_MODEL = OpenAiAccountTestClient.DEFAULT_CODEX_TEST_MODEL;
-    private static final String DEFAULT_ANTHROPIC_API_KEY_TEST_MODEL = "claude-sonnet-4.5";
+    private static final String DEFAULT_ANTHROPIC_API_KEY_TEST_MODEL = "claude-sonnet-4-5-20250929";
+    private static final List<String> CLAUDE_CODE_TEST_MODEL_IDS = List.of(
+        "claude-sonnet-4-5-20250929",
+        "claude-opus-4-5-20251101",
+        "claude-haiku-4-5-20251001"
+    );
     private static final List<String> OPENAI_STYLE_TEST_MODEL_IDS = List.of(
         "gpt-5.5",
         "gpt-5.4",
@@ -71,7 +76,9 @@ public class AccountTestService {
     );
     private static final List<AccountDtos.TestModelOption> ANTHROPIC_TEST_MODELS = testModelOptions(
         option("auto (" + DEFAULT_ANTHROPIC_API_KEY_TEST_MODEL + ")", DEFAULT_MODEL),
-        unprefixedModelIds(OpenRouterModelIds.ANTHROPIC)
+        Stream.concat(CLAUDE_CODE_TEST_MODEL_IDS.stream(), unprefixedModelIds(OpenRouterModelIds.ANTHROPIC).stream())
+            .distinct()
+            .toList()
     );
     private static final List<AccountDtos.TestModelOption> CODEX_TEST_MODELS = testModelOptions(
         option("auto (" + OpenAiAccountTestClient.DEFAULT_CODEX_TEST_MODEL + ")", DEFAULT_MODEL),
@@ -218,7 +225,7 @@ public class AccountTestService {
             return openAiAccountTestClient.test(account, model, prompt);
         }
         if (AccountPlatforms.isAnthropicApiKey(account)) {
-            return anthropicUpstreamClient.complete(account, testChatRequest(model, prompt), model);
+            return anthropicUpstreamClient.testClaudeCode(account, model);
         }
         if (AccountPlatforms.isGoogleApiKey(account)) {
             return Mono.error(new UpstreamException(
@@ -368,10 +375,19 @@ public class AccountTestService {
                 id = id.substring("anthropic/".length());
             }
             if (normalized.equals(id)) {
-                return spec.targetModelId();
+                return canonicalAnthropicTestModel(spec.targetModelId());
             }
         }
-        return model;
+        return canonicalAnthropicTestModel(model);
+    }
+
+    private String canonicalAnthropicTestModel(String model) {
+        return switch (firstNonBlank(model, DEFAULT_ANTHROPIC_API_KEY_TEST_MODEL).toLowerCase(Locale.ROOT)) {
+            case "claude-sonnet-4.5", "claude-sonnet-4-5", "claude-sonnet-latest" -> "claude-sonnet-4-5-20250929";
+            case "claude-haiku-4.5", "claude-haiku-4-5", "claude-haiku-latest" -> "claude-haiku-4-5-20251001";
+            case "claude-opus-4.5", "claude-opus-4-5", "claude-opus-latest" -> "claude-opus-4-5-20251101";
+            default -> model;
+        };
     }
 
     private String openAiModel(String requestedModel, ProxyAccountEntity account) {
