@@ -19,6 +19,8 @@
     displayName: string;
     contextTokens: number | null;
     outputTokens: number | null;
+    priceLabel: string;
+    priceTooltip: string;
   }
 
   interface FamilyGroup {
@@ -75,6 +77,8 @@
         displayName: model.name || model.modelName || model.id,
         contextTokens,
         outputTokens,
+        priceLabel: formatPublicPrice(model),
+        priceTooltip: formatPublicPriceTooltip(model),
       };
     });
   });
@@ -177,12 +181,34 @@
   function formatTokens(value: number | null | undefined) {
     if (value == null) return '-';
     if (value >= 1000000) {
-      return (value / 1000000).toFixed(0) + 'M';
+      return Number((value / 1000000).toFixed(value >= 10000000 ? 0 : 2)).toLocaleString() + 'M';
     }
     if (value >= 1000) {
-      return (value / 1000).toFixed(0) + 'K';
+      return Number((value / 1000).toFixed(value >= 100000 ? 0 : 1)).toLocaleString() + 'K';
     }
     return value.toLocaleString();
+  }
+
+  function formatPublicPrice(model: ModelInfo) {
+    if (model.tokensPer100Balance != null) {
+      return `${formatTokens(model.tokensPer100Balance)} token`;
+    }
+    if (model.inputTokensPer100Balance != null || model.outputTokensPer100Balance != null) {
+      return `入 ${formatTokens(model.inputTokensPer100Balance)} / 出 ${formatTokens(model.outputTokensPer100Balance)}`;
+    }
+    return '-';
+  }
+
+  function formatPublicPriceTooltip(model: ModelInfo) {
+    if (model.tokensPer100Balance != null) {
+      return `100 余额约可用 ${model.tokensPer100Balance.toLocaleString()} token`;
+    }
+    if (model.inputTokensPer100Balance != null || model.outputTokensPer100Balance != null) {
+      const input = model.inputTokensPer100Balance == null ? '-' : model.inputTokensPer100Balance.toLocaleString();
+      const output = model.outputTokensPer100Balance == null ? '-' : model.outputTokensPer100Balance.toLocaleString();
+      return `100 余额约可用：输入 ${input} token / 输出 ${output} token`;
+    }
+    return '未配置模型价格，使用全局计费倍率';
   }
 
   function getOwnerTagStyle(owner: string) {
@@ -436,7 +462,14 @@
                 <!-- Display Name Column -->
                 <el-table-column prop="displayName" label="显示名称" min-width="170" show-overflow-tooltip />
 
-
+                <!-- Public Price Column -->
+                <el-table-column label="100余额/token" width="170" align="center">
+                  <template #default="{ row }">
+                    <el-tooltip :content="row.priceTooltip" placement="top" effect="dark">
+                      <span class="price-badge">{{ row.priceLabel }}</span>
+                    </el-tooltip>
+                  </template>
+                </el-table-column>
 
                 <!-- Source Column -->
                 <el-table-column label="来源" width="120">

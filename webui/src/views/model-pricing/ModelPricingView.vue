@@ -3,7 +3,7 @@
   import { ElMessage, ElMessageBox } from 'element-plus';
   import { Refresh, Setting } from '@element-plus/icons-vue';
   import PageSection from '@/components/PageSection.vue';
-  import { modelPricingApi, systemApi } from '@/api';
+  import { adminPaymentApi, modelPricingApi, systemApi } from '@/api';
   import type {
     ModelInfo,
     ModelPricingRule,
@@ -16,20 +16,26 @@
     ruleId?: string;
     enabled: boolean;
     modelPattern: string;
-    inputPricePerMillionTokens: number | null;
-    outputPricePerMillionTokens: number | null;
-    totalPricePerMillionTokens: number | null;
+    inputRatio: number | null;
+    outputRatio: number | null;
+    totalRatio: number | null;
     priority: number;
     createdAt?: string | null;
     updatedAt?: string | null;
   }
 
+  type ProviderPresetKey = 'openai' | 'anthropic' | 'gemini' | 'all';
+
   const TOKENS_PER_MILLION = 1_000_000;
-  const DEFAULT_TOTAL_PRICE_PER_MILLION = 16.6666666667;
+  const DEFAULT_BASE_MULTIPLIER = 0.0000166666666667;
+  const DEFAULT_TOTAL_RATIO = 1;
+  const MAX_RULES = 200;
+
   const loading = ref(false);
   const submitting = ref(false);
   const rules = ref<EditableRule[]>([]);
   const models = ref<ModelInfo[]>([]);
+  const baseMultiplier = ref(DEFAULT_BASE_MULTIPLIER);
 
   const modelOptions = computed(() => {
     const presets = ['*', 'anthropic/*', 'openai/*', 'google/*', 'gpt-5*', 'claude-*', 'gemini-*'];
@@ -43,9 +49,17 @@
     return {
       total: rules.value.length,
       active: active.length,
-      totalPrice: active.filter((rule) => isPositive(rule.totalPricePerMillionTokens)).length,
-      splitPrice: active.filter((rule) => !isPositive(rule.totalPricePerMillionTokens)).length,
+      totalPrice: active.filter((rule) => isPositive(rule.totalRatio)).length,
+      splitPrice: active.filter((rule) => !isPositive(rule.totalRatio)).length,
     };
+  });
+
+  const baseTokensPer100Balance = computed(() => {
+    return baseMultiplier.value > 0 ? Math.round(100 / baseMultiplier.value) : 0;
+  });
+
+  const pricingHint = computed(() => {
+    return `管理员单位为倍率：1x = 全局 API 计费倍率 ${formatBaseMultiplier(baseMultiplier.value)}。按当前基准，100 余额约可用 ${formatTokenCapacity(baseTokensPer100Balance.value)} token。用户侧只展示 100 余额可用 token，不展示倍率。`;
   });
 
   function toEditable(rule: ModelPricingRule): EditableRule {
@@ -54,18 +68,9 @@
       ruleId: rule.ruleId,
       enabled: rule.enabled !== false,
       modelPattern: rule.modelPattern,
-      inputPricePerMillionTokens: pricePerMillionOrNull(
-        rule.inputPricePerMillionTokens,
-        rule.inputMultiplier,
-      ),
-      outputPricePerMillionTokens: pricePerMillionOrNull(
-        rule.outputPricePerMillionTokens,
-        rule.outputMultiplier,
-      ),
-      totalPricePerMillionTokens: pricePerMillionOrNull(
-        rule.totalPricePerMillionTokens,
-        rule.totalMultiplier,
-      ),
+      inputRatio: ratioOrNull(multiplierFromStored(rule.inputMultiplier, rule.inputPricePerMillionTokens)),
+      outputRatio: ratioOrNull(multiplierFromStored(rule.outputMultiplier, rule.outputPricePerMillionTokens)),
+      totalRatio: ratioOrNull(multiplierFromStored(rule.totalMultiplier, rule.totalPricePerMillionTokens)),
       priority: rule.priority ?? 100,
       createdAt: rule.createdAt,
       updatedAt: rule.updatedAt,
@@ -77,9 +82,9 @@
       tempId: crypto.randomUUID(),
       enabled: true,
       modelPattern: pattern,
-      inputPricePerMillionTokens: null,
-      outputPricePerMillionTokens: null,
-      totalPricePerMillionTokens: DEFAULT_TOTAL_PRICE_PER_MILLION,
+      inputRatio: null,
+      outputRatio: null,
+      totalRatio: DEFAULT_TOTAL_RATIO,
       priority: 100,
     });
   }
@@ -103,6 +108,14 @@
       const [settings, nextModels] = await Promise.all([
         modelPricingApi.settings(),
         systemApi.models().catch(() => []),
+        adminPaymentApi.settings()
+          .then((settings) => {
+            const value = Number(settings.apiBillingMultiplier);
+            if (Number.isFinite(value) && value > 0) {
+              baseMultiplier.value = value;
+            }
+          })
+          .catch(() => undefined),
       ]);
       rules.value = settings.rules.map(toEditable);
       models.value = nextModels;
@@ -140,11 +153,11 @@
       }
       seen.add(lowerPattern);
 
-      const totalPricePerMillionTokens = positiveOrNull(rule.totalPricePerMillionTokens);
-      const inputPricePerMillionTokens = positiveOrNull(rule.inputPricePerMillionTokens);
-      const outputPricePerMillionTokens = positiveOrNull(rule.outputPricePerMillionTokens);
-      if (!totalPricePerMillionTokens && (!inputPricePerMillionTokens || !outputPricePerMillionTokens)) {
-        ElMessage.warning(`第 ${index + 1} 条规则需要填写总价，或同时填写输入/输出价`);
+      const totalRatio = positiveOrNull(rule.totalRatio);
+      const inputRatio = positiveOrNull(rule.inputRatio);
+      const outputRatio = positiveOrNull(rule.outputRatio);
+      if (!totalRatio && (!inputRatio || !outputRatio)) {
+        ElMessage.warning(`第 ${index + 1} 条规则需要填写总倍率，或同时填写输入/输出倍率`);
         return null;
       }
 
@@ -152,9 +165,9 @@
         ruleId: rule.ruleId,
         enabled: rule.enabled,
         modelPattern: pattern,
-        totalPricePerMillionTokens,
-        inputPricePerMillionTokens: totalPricePerMillionTokens ? null : inputPricePerMillionTokens,
-        outputPricePerMillionTokens: totalPricePerMillionTokens ? null : outputPricePerMillionTokens,
+        totalMultiplier: totalRatio ? multiplierFromRatio(totalRatio) : null,
+        inputMultiplier: totalRatio ? null : multiplierFromRatio(inputRatio),
+        outputMultiplier: totalRatio ? null : multiplierFromRatio(outputRatio),
         priority: rule.priority ?? 100,
       });
     }
@@ -169,11 +182,25 @@
     return value === null || value === undefined ? null : Number(value);
   }
 
-  function pricePerMillionOrNull(price: number | null | undefined, multiplier: number | null | undefined) {
-    const normalizedPrice = numberOrNull(price);
-    if (normalizedPrice !== null) return normalizedPrice;
+  function multiplierFromStored(multiplier: number | null | undefined, pricePerMillion: number | null | undefined) {
     const normalizedMultiplier = numberOrNull(multiplier);
-    return normalizedMultiplier === null ? null : Number((normalizedMultiplier * TOKENS_PER_MILLION).toFixed(10));
+    if (normalizedMultiplier !== null) return normalizedMultiplier;
+    const normalizedPrice = numberOrNull(pricePerMillion);
+    return normalizedPrice === null ? null : normalizedPrice / TOKENS_PER_MILLION;
+  }
+
+  function ratioOrNull(multiplier: number | null) {
+    if (multiplier === null || !Number.isFinite(multiplier) || multiplier <= 0 || baseMultiplier.value <= 0) {
+      return null;
+    }
+    return Number((multiplier / baseMultiplier.value).toFixed(6));
+  }
+
+  function multiplierFromRatio(ratio: number | null) {
+    if (ratio === null || !Number.isFinite(ratio) || ratio <= 0) {
+      return null;
+    }
+    return Number((ratio * baseMultiplier.value).toFixed(16));
   }
 
   function positiveOrNull(value: number | null | undefined) {
@@ -186,14 +213,122 @@
   }
 
   function priceMode(rule: EditableRule) {
-    return isPositive(rule.totalPricePerMillionTokens) ? '总价' : '输入/输出';
+    return isPositive(rule.totalRatio) ? '总倍率' : '输入/输出';
+  }
+
+  function providerKeyForModel(model: ModelInfo): Exclude<ProviderPresetKey, 'all'> | 'other' {
+    const provider = (model.provider || '').toLowerCase();
+    const id = model.id.toLowerCase();
+    if (provider.includes('openai') || id.startsWith('openai/') || id.startsWith('gpt') || /^o\d/.test(id)) {
+      return 'openai';
+    }
+    if (provider.includes('anthropic') || id.startsWith('anthropic/') || id.startsWith('claude') || id.includes('/claude')) {
+      return 'anthropic';
+    }
+    if (provider.includes('gemini') || provider.includes('google') || id.startsWith('google/') || id.startsWith('gemini') || id.includes('/gemini')) {
+      return 'gemini';
+    }
+    return 'other';
+  }
+
+  function presetForModel(model: ModelInfo) {
+    const id = model.id.toLowerCase();
+    const provider = providerKeyForModel(model);
+
+    if (provider === 'openai') {
+      if (id.includes('nano')) return { inputRatio: 0.2, outputRatio: 1.25, priority: 35 };
+      if (id.includes('4o-mini')) return { inputRatio: 0.15, outputRatio: 0.6, priority: 35 };
+      if (id.includes('mini')) return { inputRatio: 0.75, outputRatio: 4.5, priority: 35 };
+      if (id.includes('codex')) return { inputRatio: 1.5, outputRatio: 12, priority: 30 };
+      if (id.includes('5.2')) return { inputRatio: 1.75, outputRatio: 14, priority: 30 };
+      if (id.includes('5.4') || id.includes('5.5') || id.includes('pro') || id.includes('high')) {
+        return { inputRatio: 2.5, outputRatio: 15, priority: 30 };
+      }
+      if (/\/?o\d/.test(id)) return { inputRatio: 1.1, outputRatio: 4.4, priority: 35 };
+      return { inputRatio: 1, outputRatio: 4, priority: 40 };
+    }
+
+    if (provider === 'anthropic') {
+      if (id.includes('haiku')) return { inputRatio: 1, outputRatio: 5, priority: 35 };
+      if (id.includes('opus')) return { inputRatio: 5, outputRatio: 25, priority: 30 };
+      if (id.includes('sonnet')) return { inputRatio: 3, outputRatio: 15, priority: 30 };
+      return { inputRatio: 3, outputRatio: 15, priority: 40 };
+    }
+
+    if (provider === 'gemini') {
+      if (id.includes('free') || id.includes('gemma') || id.includes('lite')) return { inputRatio: 0.1, outputRatio: 0.4, priority: 45 };
+      if (id.includes('flash')) return { inputRatio: 0.3, outputRatio: 2.5, priority: 35 };
+      if (id.includes('pro')) return { inputRatio: 2, outputRatio: 12, priority: 30 };
+      return { inputRatio: 0.5, outputRatio: 2, priority: 40 };
+    }
+
+    return { inputRatio: 1, outputRatio: 1, priority: 100 };
+  }
+
+  function applyProviderPreset(provider: ProviderPresetKey) {
+    const selected = models.value.filter((model) => {
+      const key = providerKeyForModel(model);
+      return provider === 'all' ? key !== 'other' : key === provider;
+    });
+    if (!selected.length) {
+      ElMessage.warning('当前模型列表里没有可生成的厂商模型');
+      return;
+    }
+
+    const generated: EditableRule[] = selected.map((model) => {
+      const preset = presetForModel(model);
+      return {
+        tempId: crypto.randomUUID(),
+        enabled: true,
+        modelPattern: model.id,
+        inputRatio: preset.inputRatio,
+        outputRatio: preset.outputRatio,
+        totalRatio: null,
+        priority: preset.priority,
+      };
+    });
+    const generatedPatterns = new Set(generated.map((rule) => rule.modelPattern.toLowerCase()));
+    const next = [
+      ...rules.value.filter((rule) => !generatedPatterns.has(rule.modelPattern.trim().toLowerCase())),
+      ...generated,
+    ].sort((a, b) => (a.priority ?? 100) - (b.priority ?? 100) || a.modelPattern.localeCompare(b.modelPattern));
+
+    if (next.length > MAX_RULES) {
+      ElMessage.warning(`规则数量不能超过 ${MAX_RULES} 条，请先清理旧规则`);
+      return;
+    }
+
+    rules.value = next;
+    ElMessage.success(`已按当前模型列表生成 ${generated.length} 条倍率规则，保存后生效`);
+  }
+
+  function formatBaseMultiplier(value: number) {
+    return value.toFixed(16).replace(/0+$/, '').replace(/\.$/, '');
+  }
+
+  function formatActualMultiplier(ratio: number | null | undefined) {
+    const normalized = positiveOrNull(ratio);
+    if (!normalized) return '';
+    return formatBaseMultiplier(normalized * baseMultiplier.value);
+  }
+
+  function formatRatio(value: number | null | undefined) {
+    const normalized = positiveOrNull(value);
+    return normalized === null ? '-' : `${normalized.toLocaleString(undefined, { maximumFractionDigits: 6 })}x`;
+  }
+
+  function formatTokenCapacity(value: number) {
+    if (!Number.isFinite(value) || value <= 0) return '-';
+    if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(2)).toLocaleString()}M`;
+    if (value >= 1_000) return `${Number((value / 1_000).toFixed(2)).toLocaleString()}K`;
+    return value.toLocaleString();
   }
 
   onMounted(load);
 </script>
 
 <template>
-  <PageSection title="模型价格" subtitle="按模型 ID 或通配符设置每 100 万 token 消耗多少余额，只有管理员可修改">
+  <PageSection title="模型价格" subtitle="按模型 ID 或通配符设置计费倍率，倍率只在管理员侧可见">
     <template #actions>
       <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
       <el-button @click="addRule()">新增规则</el-button>
@@ -211,7 +346,7 @@
           <strong>{{ formatNumber(stats.active) }}</strong>
         </div>
         <div class="metric">
-          <span class="metric__label">总价模式</span>
+          <span class="metric__label">总倍率模式</span>
           <strong>{{ formatNumber(stats.totalPrice) }}</strong>
         </div>
         <div class="metric">
@@ -224,13 +359,19 @@
         type="info"
         :closable="false"
         show-icon
-        title="单位统一为余额 / 1M token。总价优先；留空总价时，必须同时配置输入价和输出价。默认 16.6666666667 表示 100 余额约可用 600 万 token。"
+        :title="pricingHint"
       />
 
       <div class="table-actions">
         <div class="table-actions__hint">
           <el-icon><Setting /></el-icon>
-          <span>优先级数字越小越先匹配，模型匹配支持 * 通配符。</span>
+          <span>优先级数字越小越先匹配，模型匹配支持 * 通配符。总倍率优先；留空总倍率时使用输入/输出倍率。</span>
+        </div>
+        <div class="preset-actions">
+          <el-button size="small" @click="applyProviderPreset('openai')">生成 OpenAI 倍率</el-button>
+          <el-button size="small" @click="applyProviderPreset('anthropic')">生成 Anthropic 倍率</el-button>
+          <el-button size="small" @click="applyProviderPreset('gemini')">生成 Gemini 倍率</el-button>
+          <el-button size="small" type="primary" plain @click="applyProviderPreset('all')">生成全部厂商倍率</el-button>
         </div>
         <el-button link type="danger" :disabled="rules.length === 0" @click="clearRules">清空规则</el-button>
       </div>
@@ -268,51 +409,63 @@
           </template>
         </el-table-column>
 
-        <el-table-column label="总价 (余额/1M token)" width="210" align="right">
+        <el-table-column label="总倍率 (x)" width="190" align="right">
           <template #default="{ row }">
             <el-input-number
-              v-model="row.totalPricePerMillionTokens"
+              v-model="row.totalRatio"
               :min="0"
-              :precision="10"
+              :precision="6"
               :step="0.1"
               controls-position="right"
               placeholder="留空使用拆分价"
               style="width: 100%"
             />
+            <div v-if="isPositive(row.totalRatio)" class="multiplier-preview">
+              {{ formatActualMultiplier(row.totalRatio) }}/token
+            </div>
           </template>
         </el-table-column>
 
-        <el-table-column label="输入价 (余额/1M token)" width="210" align="right">
+        <el-table-column label="输入倍率 (x)" width="190" align="right">
           <template #default="{ row }">
             <el-input-number
-              v-model="row.inputPricePerMillionTokens"
+              v-model="row.inputRatio"
               :min="0"
-              :precision="10"
+              :precision="6"
               :step="0.1"
               controls-position="right"
-              :disabled="isPositive(row.totalPricePerMillionTokens)"
+              :disabled="isPositive(row.totalRatio)"
               style="width: 100%"
             />
+            <div v-if="!isPositive(row.totalRatio) && isPositive(row.inputRatio)" class="multiplier-preview">
+              {{ formatActualMultiplier(row.inputRatio) }}/token
+            </div>
           </template>
         </el-table-column>
 
-        <el-table-column label="输出价 (余额/1M token)" width="210" align="right">
+        <el-table-column label="输出倍率 (x)" width="190" align="right">
           <template #default="{ row }">
             <el-input-number
-              v-model="row.outputPricePerMillionTokens"
+              v-model="row.outputRatio"
               :min="0"
-              :precision="10"
+              :precision="6"
               :step="0.1"
               controls-position="right"
-              :disabled="isPositive(row.totalPricePerMillionTokens)"
+              :disabled="isPositive(row.totalRatio)"
               style="width: 100%"
             />
+            <div v-if="!isPositive(row.totalRatio) && isPositive(row.outputRatio)" class="multiplier-preview">
+              {{ formatActualMultiplier(row.outputRatio) }}/token
+            </div>
           </template>
         </el-table-column>
 
         <el-table-column label="计价模式" width="110">
           <template #default="{ row }">
             <el-tag effect="light">{{ priceMode(row) }}</el-tag>
+            <div class="ratio-summary">
+              {{ isPositive(row.totalRatio) ? formatRatio(row.totalRatio) : `${formatRatio(row.inputRatio)} / ${formatRatio(row.outputRatio)}` }}
+            </div>
           </template>
         </el-table-column>
 
@@ -392,8 +545,23 @@
     }
   }
 
+  .preset-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
   .pricing-table {
     width: 100%;
+  }
+
+  .multiplier-preview,
+  .ratio-summary {
+    margin-top: 4px;
+    color: var(--kp-text-muted);
+    font-size: 11px;
+    line-height: 1.2;
   }
 
   @media (max-width: 900px) {

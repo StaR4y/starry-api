@@ -7,7 +7,7 @@
    * 2. 若返回 firstLogin=true，跳转 /change-password。
    * 3. 否则跳回 redirect query 或 dashboard。
    */
-  import { computed, onMounted, reactive, ref } from 'vue';
+  import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
   import { useRoute, useRouter } from 'vue-router';
   import { ElMessage, type FormInstance, type FormRules } from 'element-plus';
   import { authApi } from '@/api';
@@ -28,6 +28,21 @@
   const emailVerifyEnabled = ref(false);
   const inviteCodeEnabled = ref(false);
   const allowedEmailSuffixes = ref<string[]>([]);
+  const turnstileEnabled = ref(false);
+  const turnstileSiteKey = ref('');
+  const turnstileToken = ref('');
+  const turnstileContainerRef = ref<HTMLElement | null>(null);
+  const turnstileWidgetId = ref<string | null>(null);
+
+  declare global {
+    interface Window {
+      turnstile?: {
+        render: (container: HTMLElement, options: Record<string, unknown>) => string;
+        reset: (widgetId?: string) => void;
+        remove: (widgetId: string) => void;
+      };
+    }
+  }
 
   const form = reactive({
     username: 'admin',
@@ -42,6 +57,7 @@
     password: '',
     confirm: '',
     verifyCode: '',
+    emailVerificationToken: '',
     inviteCode: '',
   });
 
@@ -78,16 +94,21 @@
       emailVerifyEnabled.value = settings.emailVerifyEnabled;
       inviteCodeEnabled.value = settings.inviteCodeEnabled;
       allowedEmailSuffixes.value = settings.registrationEmailSuffixWhitelist ?? [];
+      turnstileEnabled.value = Boolean(settings.turnstileEnabled);
+      turnstileSiteKey.value = settings.turnstileSiteKey ?? '';
     } catch {
       registrationEnabled.value = false;
       emailVerifyEnabled.value = false;
       inviteCodeEnabled.value = false;
       allowedEmailSuffixes.value = [];
+      turnstileEnabled.value = false;
+      turnstileSiteKey.value = '';
     }
   }
 
   function openRegister() {
     registerVisible.value = true;
+    renderTurnstileWhenReady();
   }
 
   function tickVerifyCodeCountdown() {
@@ -103,12 +124,20 @@
       ElMessage.warning('请先填写邮箱');
       return;
     }
+    if (turnstileEnabled.value && !turnstileToken.value) {
+      ElMessage.warning('请先完成人机验证');
+      return;
+    }
     verifyCodeSending.value = true;
     try {
-      const result = await authApi.sendVerifyCode({ email: registerForm.email });
+      const result = await authApi.sendVerifyCode({
+        email: registerForm.email,
+        turnstileToken: turnstileToken.value || undefined,
+      });
       verifyCodeCountdown.value = result.countdown || 60;
       tickVerifyCodeCountdown();
-      ElMessage.success('验证码已发送');
+      resetTurnstile();
+      ElMessage.success('注册链接已发送，请查看邮箱');
     } catch (err) {
       ElMessage.error((err as Error).message || '验证码发送失败');
     } finally {
@@ -153,6 +182,10 @@
       ElMessage.warning('请输入邀请码');
       return;
     }
+    if (!registerForm.emailVerificationToken && turnstileEnabled.value && !turnstileToken.value) {
+      ElMessage.warning('请先完成人机验证');
+      return;
+    }
 
     registerLoading.value = true;
     try {
@@ -161,8 +194,10 @@
         email: registerForm.email,
         displayName: registerForm.displayName || undefined,
         password: registerForm.password,
+        emailVerificationToken: registerForm.emailVerificationToken || undefined,
         verifyCode: registerForm.verifyCode || undefined,
         inviteCode: registerForm.inviteCode || undefined,
+        turnstileToken: registerForm.emailVerificationToken ? undefined : turnstileToken.value || undefined,
       });
       ElMessage.success('注册成功');
       registerVisible.value = false;
@@ -176,12 +211,105 @@
       router.replace(redirect);
     } catch (err) {
       ElMessage.error((err as Error).message || '注册失败');
+      resetTurnstile();
     } finally {
       registerLoading.value = false;
     }
   }
 
-  onMounted(loadRegistrationSettings);
+  function applyRegistrationTokenFromRoute() {
+    const token = typeof route.query.registrationToken === 'string' ? route.query.registrationToken : '';
+    if (!token) return;
+    registerForm.emailVerificationToken = token;
+    if (typeof route.query.email === 'string') {
+      registerForm.email = route.query.email;
+    }
+    registerVisible.value = true;
+  }
+
+  function shouldRenderTurnstile() {
+    return turnstileEnabled.value
+      && Boolean(turnstileSiteKey.value)
+      && registerVisible.value
+      && !registerForm.emailVerificationToken;
+  }
+
+  async function loadTurnstileScript() {
+    if (window.turnstile) return;
+    await new Promise<void>((resolve, reject) => {
+      const existing = document.querySelector<HTMLScriptElement>('script[data-turnstile="true"]');
+      if (existing) {
+        existing.addEventListener('load', () => resolve(), { once: true });
+        existing.addEventListener('error', () => reject(new Error('Cloudflare Turnstile 加载失败')), { once: true });
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+      script.async = true;
+      script.defer = true;
+      script.dataset.turnstile = 'true';
+      script.onload = () => resolve();
+      script.onerror = () => reject(new Error('Cloudflare Turnstile 加载失败'));
+      document.head.appendChild(script);
+    });
+  }
+
+  async function renderTurnstileWhenReady() {
+    if (!shouldRenderTurnstile()) return;
+    await nextTick();
+    if (!turnstileContainerRef.value || turnstileWidgetId.value) return;
+    try {
+      await loadTurnstileScript();
+      if (!window.turnstile || !turnstileContainerRef.value || !shouldRenderTurnstile()) return;
+      turnstileWidgetId.value = window.turnstile.render(turnstileContainerRef.value, {
+        sitekey: turnstileSiteKey.value,
+        callback: (token: string) => {
+          turnstileToken.value = token;
+        },
+        'expired-callback': () => {
+          turnstileToken.value = '';
+        },
+        'error-callback': () => {
+          turnstileToken.value = '';
+        },
+      });
+    } catch (err) {
+      ElMessage.error((err as Error).message || 'Cloudflare Turnstile 加载失败');
+    }
+  }
+
+  function resetTurnstile() {
+    turnstileToken.value = '';
+    if (window.turnstile && turnstileWidgetId.value) {
+      window.turnstile.reset(turnstileWidgetId.value);
+    }
+  }
+
+  function removeTurnstile() {
+    turnstileToken.value = '';
+    if (window.turnstile && turnstileWidgetId.value) {
+      window.turnstile.remove(turnstileWidgetId.value);
+    }
+    turnstileWidgetId.value = null;
+  }
+
+  watch(
+    () => [registerVisible.value, turnstileEnabled.value, turnstileSiteKey.value, registerForm.emailVerificationToken],
+    () => {
+      if (shouldRenderTurnstile()) {
+        renderTurnstileWhenReady();
+      } else {
+        removeTurnstile();
+      }
+    },
+  );
+
+  onMounted(async () => {
+    await loadRegistrationSettings();
+    applyRegistrationTokenFromRoute();
+  });
+
+  onBeforeUnmount(removeTurnstile);
 </script>
 
 <template>
@@ -254,17 +382,36 @@
           <el-input v-model="registerForm.inviteCode" placeholder="INV-XXXX-XXXX-XXXX" />
           <div class="login__register-hint">填写有效邀请码可直接注册。</div>
         </el-form-item>
-        <el-form-item v-if="emailVerifyEnabled && !registerForm.inviteCode" label="邮箱验证码">
+        <el-alert
+          v-if="registerForm.emailVerificationToken"
+          class="login__register-alert"
+          type="success"
+          :closable="false"
+          show-icon
+          title="邮箱链接已验证，请补全账号信息完成注册。"
+        />
+        <el-form-item
+          v-if="emailVerifyEnabled && !registerForm.inviteCode && !registerForm.emailVerificationToken"
+          label="邮箱注册链接"
+        >
           <div class="login__verify-row">
-            <el-input v-model="registerForm.verifyCode" maxlength="6" />
+            <el-input :model-value="registerForm.email" disabled placeholder="请先填写邮箱" />
             <el-button
               :disabled="verifyCodeCountdown > 0"
               :loading="verifyCodeSending"
               @click="sendVerifyCode"
             >
-              {{ verifyCodeCountdown > 0 ? `${verifyCodeCountdown}s` : '发送验证码' }}
+              {{ verifyCodeCountdown > 0 ? `${verifyCodeCountdown}s` : '发送注册链接' }}
             </el-button>
           </div>
+          <div class="login__register-hint">注册链接 10 分钟内有效且只能使用一次。</div>
+        </el-form-item>
+        <el-form-item
+          v-if="turnstileEnabled && !registerForm.emailVerificationToken"
+          label="人机验证"
+        >
+          <div ref="turnstileContainerRef" class="login__turnstile"></div>
+          <div v-if="!turnstileSiteKey" class="login__register-hint">管理员尚未配置 Cloudflare Turnstile Site Key。</div>
         </el-form-item>
         <el-form-item label="显示名">
           <el-input v-model="registerForm.displayName" />
@@ -363,10 +510,19 @@
       line-height: 1.5;
     }
 
+    &__register-alert {
+      margin-bottom: 14px;
+    }
+
     &__verify-row {
       display: grid;
       grid-template-columns: minmax(0, 1fr) auto;
       gap: 8px;
+      width: 100%;
+    }
+
+    &__turnstile {
+      min-height: 65px;
       width: 100%;
     }
 

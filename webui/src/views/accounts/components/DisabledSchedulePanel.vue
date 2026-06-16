@@ -279,7 +279,7 @@
                       style="width: 100%"
                     />
                   </el-form-item>
-                  <el-form-item label="单批额度">
+                  <el-form-item label="定时单批额度">
                     <el-input-number 
                       v-model="form.maxAccountsPerRun" 
                       :min="1" 
@@ -416,7 +416,7 @@
               <svg v-if="!running" class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
                 <polygon points="5 3 19 12 5 21 5 3" />
               </svg>
-              立即执行一次
+              立即测试全部账号
             </el-button>
             
             <el-button 

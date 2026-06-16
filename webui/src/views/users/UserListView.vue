@@ -33,6 +33,10 @@
     smtpFromName: '',
     smtpUseTls: false,
     smtpSecurity: 'auto' as SmtpSecurityMode,
+    turnstileEnabled: false,
+    turnstileSiteKey: '',
+    turnstileSecretKey: '',
+    turnstileSecretConfigured: false,
   });
   const inviteCodeForm = reactive({
     count: 1,
@@ -218,6 +222,10 @@
     registrationSettings.smtpFromName = settings.smtpFromName ?? '';
     registrationSettings.smtpUseTls = Boolean(settings.smtpUseTls);
     registrationSettings.smtpSecurity = normalizeSmtpSecurity(settings.smtpSecurity, settings.smtpUseTls);
+    registrationSettings.turnstileEnabled = Boolean(settings.turnstileEnabled);
+    registrationSettings.turnstileSiteKey = settings.turnstileSiteKey ?? '';
+    registrationSettings.turnstileSecretKey = '';
+    registrationSettings.turnstileSecretConfigured = Boolean(settings.turnstileSecretConfigured);
   }
 
   async function openRegistrationSettings() {
@@ -241,6 +249,9 @@
         smtpFromName: registrationSettings.smtpFromName,
         smtpUseTls: registrationSettings.smtpUseTls,
         smtpSecurity: registrationSettings.smtpSecurity,
+        turnstileEnabled: registrationSettings.turnstileEnabled,
+        turnstileSiteKey: registrationSettings.turnstileSiteKey,
+        turnstileSecretKey: registrationSettings.turnstileSecretKey || undefined,
       });
       registrationSettings.registrationEnabled = settings.registrationEnabled;
       registrationSettings.emailVerifyEnabled = settings.emailVerifyEnabled;
@@ -254,6 +265,10 @@
       registrationSettings.smtpFromName = settings.smtpFromName ?? '';
       registrationSettings.smtpUseTls = Boolean(settings.smtpUseTls);
       registrationSettings.smtpSecurity = normalizeSmtpSecurity(settings.smtpSecurity, settings.smtpUseTls);
+      registrationSettings.turnstileEnabled = Boolean(settings.turnstileEnabled);
+      registrationSettings.turnstileSiteKey = settings.turnstileSiteKey ?? '';
+      registrationSettings.turnstileSecretKey = '';
+      registrationSettings.turnstileSecretConfigured = Boolean(settings.turnstileSecretConfigured);
       ElMessage.success('注册设置已更新');
       registrationSettingsVisible.value = false;
     } finally {
@@ -470,6 +485,41 @@
           <el-switch v-model="registrationSettings.emailVerifyEnabled" />
         </div>
       </div>
+
+      <div class="setting-divider"></div>
+
+      <!-- Cloudflare Turnstile Row -->
+      <div class="setting-row">
+        <div class="setting-info">
+          <div class="setting-title">Cloudflare Turnstile 人机验证</div>
+          <div class="setting-desc">开启后，发送注册链接、邀请码注册和无邮箱验证注册都会先进行 Cloudflare 验证。</div>
+        </div>
+        <div class="setting-control">
+          <el-switch v-model="registrationSettings.turnstileEnabled" />
+        </div>
+      </div>
+
+      <transition name="fade-slide">
+        <div v-if="registrationSettings.turnstileEnabled" class="turnstile-section">
+          <div class="smtp-row">
+            <div class="smtp-col col-6">
+              <label class="smtp-label">Site Key</label>
+              <el-input v-model="registrationSettings.turnstileSiteKey" placeholder="0x4AAAA..." />
+            </div>
+            <div class="smtp-col col-6">
+              <label class="smtp-label">Secret Key</label>
+              <el-input
+                v-model="registrationSettings.turnstileSecretKey"
+                type="password"
+                show-password
+                :placeholder="registrationSettings.turnstileSecretConfigured ? '已配置，留空保持不变' : '请输入 Turnstile Secret Key'"
+                autocomplete="new-password"
+              />
+            </div>
+          </div>
+          <div class="setting-desc mt-12">Cloudflare 控制台创建 Turnstile Widget 后，将站点 key 用于前端展示，密钥用于后端校验。</div>
+        </div>
+      </transition>
 
       <div class="setting-divider"></div>
 
@@ -758,6 +808,14 @@
       align-items: center;
       gap: 8px;
     }
+  }
+
+  .turnstile-section {
+    margin: 10px 0 16px;
+    padding: 14px;
+    border: 1px solid var(--kp-divider);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.54);
   }
 
   .smtp-section-header {
