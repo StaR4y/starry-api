@@ -9,7 +9,6 @@
 
 import { createApp } from 'vue';
 import { createPinia } from 'pinia';
-import 'element-plus/theme-chalk/index.css';
 import './assets/styles/global.scss';
 
 import App from './App.vue';

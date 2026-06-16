@@ -50,10 +50,13 @@ export interface RegisterRequest {
   password: string;
   verifyCode?: string;
   inviteCode?: string;
+  emailVerificationToken?: string;
+  turnstileToken?: string;
 }
 
 export interface SendVerifyCodeRequest {
   email: string;
+  turnstileToken?: string;
 }
 
 export interface SendVerifyCodeResult {
@@ -107,6 +110,9 @@ export interface RegistrationSettings {
   smtpFromName?: string | null;
   smtpUseTls?: boolean | null;
   smtpSecurity?: SmtpSecurityMode | string | null;
+  turnstileEnabled?: boolean | null;
+  turnstileSiteKey?: string | null;
+  turnstileSecretConfigured?: boolean | null;
 }
 
 export type SmtpSecurityMode = 'auto' | 'ssl' | 'starttls' | 'none';
@@ -124,6 +130,9 @@ export interface UpdateRegistrationSettingsRequest {
   smtpFromName?: string;
   smtpUseTls?: boolean;
   smtpSecurity?: SmtpSecurityMode;
+  turnstileEnabled?: boolean;
+  turnstileSiteKey?: string;
+  turnstileSecretKey?: string;
 }
 
 export interface CreateInviteCodeRequest {
@@ -510,6 +519,10 @@ export interface ModelInfo {
   maxOutputTokens?: number;
   context_length?: number;
   max_output_tokens?: number;
+  billingMode?: 'total' | 'input_output' | string | null;
+  tokensPer100Balance?: number | null;
+  inputTokensPer100Balance?: number | null;
+  outputTokensPer100Balance?: number | null;
 }
 
 export interface HealthInfo {
