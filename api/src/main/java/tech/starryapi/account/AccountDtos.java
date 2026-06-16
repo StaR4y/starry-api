@@ -125,6 +125,7 @@ public final class AccountDtos {
         String model,
         String prompt,
         Boolean updateStatus,
+        Boolean autoRunWhenNoAvailableAccounts,
         Boolean includeDisabled,
         Boolean includeSuspended,
         Boolean includeQuotaExhausted,

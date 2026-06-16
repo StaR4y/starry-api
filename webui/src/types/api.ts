@@ -269,6 +269,7 @@ export interface DisabledAccountScheduledTestSettings {
   model: string;
   prompt: string | null;
   updateStatus: boolean;
+  autoRunWhenNoAvailableAccounts: boolean;
   includeDisabled: boolean;
   includeSuspended: boolean;
   includeQuotaExhausted: boolean;

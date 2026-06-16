@@ -15,6 +15,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -26,9 +27,11 @@ import org.springframework.mock.web.server.MockServerWebExchange;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import tech.starryapi.account.AccountAutoSuspendService;
+import tech.starryapi.account.AccountDtos;
 import tech.starryapi.account.AccountPoolService;
 import tech.starryapi.account.AccountPlatforms;
 import tech.starryapi.account.AccountSettingsService;
+import tech.starryapi.account.DisabledAccountScheduledTestService;
 import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.apikey.ApiKeyPrincipal;
 import tech.starryapi.apikey.ApiKeyService;
@@ -158,6 +161,88 @@ class ProxyFacadeRoutingTest {
         verify(accountPoolService, never()).selectKiroAccount(any());
         verify(openAiUpstreamClient).complete(eq(account), eq(request), eq("openai-compatible/deepseek-chat"));
         verify(kiroUpstreamClient, never()).complete(any(), any(), any());
+    }
+
+    @Test
+    void chatAutoRetestsDisabledAccountsOnceWhenNoOpenAiAccountIsAvailable() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        AccountAutoSuspendService accountAutoSuspendService = mock(AccountAutoSuspendService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        DisabledAccountScheduledTestService disabledAccountScheduledTestService = mock(DisabledAccountScheduledTestService.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity account = openAiAccount();
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "gpt-5",
+              "messages": [{"role": "user", "content": "hi"}]
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/chat/completions")
+        );
+        Instant now = Instant.now();
+
+        when(apiKeyService.authenticate(exchange))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("gpt-5", "key-1")).thenReturn("gpt-5");
+        when(accountPoolService.selectOpenAiAccount("key-1"))
+            .thenReturn(
+                Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "No available OpenAI upstream account")),
+                Mono.just(account)
+            );
+        when(disabledAccountScheduledTestService.runWhenNoAvailableAccounts(any()))
+            .thenReturn(Mono.just(new AccountDtos.TestAccountsResponse(
+                1,
+                1,
+                0,
+                0,
+                now,
+                now,
+                List.of(new AccountDtos.TestAccountItemResponse(
+                    account.getAccountId(),
+                    account.getEmail(),
+                    "SUCCESS",
+                    "OK",
+                    "OK",
+                    200,
+                    10L,
+                    now,
+                    "gpt-5"
+                ))
+            )));
+        when(openAiUpstreamClient.complete(eq(account), eq(request), eq("gpt-5")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
+        when(accountPoolService.recordSuccess("openai-main", 2L)).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
+        when(statsService.log(any())).thenReturn(Mono.empty());
+
+        ResponseEntity<?> response = proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService,
+            mock(AccountSettingsService.class),
+            paymentSettingsService(BigDecimal.ONE),
+            mock(AnthropicUpstreamClient.class),
+            disabledAccountScheduledTestService
+        ).chat(request, exchange).block();
+
+        assertThat(response).isNotNull();
+        verify(disabledAccountScheduledTestService).runWhenNoAvailableAccounts(any());
+        verify(accountPoolService, org.mockito.Mockito.times(2)).selectOpenAiAccount("key-1");
+        verify(openAiUpstreamClient).complete(eq(account), eq(request), eq("gpt-5"));
     }
 
     @Test
@@ -1215,11 +1300,44 @@ class ProxyFacadeRoutingTest {
         PaymentSettingsService paymentSettingsService,
         AnthropicUpstreamClient anthropicUpstreamClient
     ) {
+        return proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService,
+            accountSettingsService,
+            paymentSettingsService,
+            anthropicUpstreamClient,
+            mock(DisabledAccountScheduledTestService.class)
+        );
+    }
+
+    private ProxyFacade proxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        AccountAutoSuspendService accountAutoSuspendService,
+        DefaultModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroUpstreamClient kiroUpstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        StatsService statsService,
+        AccountSettingsService accountSettingsService,
+        PaymentSettingsService paymentSettingsService,
+        AnthropicUpstreamClient anthropicUpstreamClient,
+        DisabledAccountScheduledTestService disabledAccountScheduledTestService
+    ) {
         return new ProxyFacade(
             apiKeyService,
             accountPoolService,
             accountAutoSuspendService,
             accountSettingsService,
+            disabledAccountScheduledTestService,
             modelCatalog,
             modelMappingService,
             rateLimiterService,

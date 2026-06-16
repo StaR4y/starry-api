@@ -49,6 +49,7 @@
       model: 'auto',
       prompt: '',
       updateStatus: true,
+      autoRunWhenNoAvailableAccounts: false,
       includeDisabled: true,
       includeSuspended: true,
       includeQuotaExhausted: false,

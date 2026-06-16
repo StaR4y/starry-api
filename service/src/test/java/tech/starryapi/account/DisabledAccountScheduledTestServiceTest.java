@@ -117,6 +117,40 @@ class DisabledAccountScheduledTestServiceTest {
     }
 
     @Test
+    void runWhenNoAvailableAccountsUsesRuntimeAccountFilterIgnoringConfiguredProviders() {
+        AccountSettingsService settingsService = mock(AccountSettingsService.class);
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountTestService accountTestService = mock(AccountTestService.class);
+        when(settingsService.disabledAccountScheduledTestSettings()).thenReturn(Mono.just(settings(true)));
+        when(repository.findAll()).thenReturn(Flux.just(
+            account("openai-disabled", false, "OpenAI"),
+            account("anthropic-disabled", false, "Anthropic")
+        ));
+        when(accountTestService.test(org.mockito.ArgumentMatchers.any()))
+            .thenReturn(Mono.just(new AccountDtos.TestAccountsResponse(
+                1,
+                1,
+                0,
+                0,
+                Instant.now(),
+                Instant.now(),
+                List.of()
+            )));
+
+        DisabledAccountScheduledTestService service = new DisabledAccountScheduledTestService(
+            settingsService,
+            repository,
+            accountTestService
+        );
+
+        service.runWhenNoAvailableAccounts(AccountPlatforms::isOpenAi).block();
+
+        verify(accountTestService).test(argThat(request ->
+            request.accountIds().equals(List.of("openai-disabled"))
+        ));
+    }
+
+    @Test
     void runNowRejectsWhenAlreadyRunning() {
         AccountSettingsService settingsService = mock(AccountSettingsService.class);
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
@@ -158,6 +192,7 @@ class DisabledAccountScheduledTestServiceTest {
             1,
             "auto",
             "Reply OK",
+            true,
             true,
             true,
             false,

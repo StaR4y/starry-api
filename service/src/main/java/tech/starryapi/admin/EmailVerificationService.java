@@ -1,15 +1,20 @@
 package tech.starryapi.admin;
 
 import jakarta.mail.internet.MimeMessage;
+import java.nio.charset.StandardCharsets;
 import java.net.InetAddress;
 import java.net.URLEncoder;
 import java.net.UnknownHostException;
-import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.DateTimeException;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import org.springframework.http.HttpStatus;
 import org.springframework.mail.javamail.JavaMailSenderImpl;
 import org.springframework.mail.javamail.MimeMessageHelper;
@@ -24,18 +29,25 @@ public class EmailVerificationService {
 
     private static final Duration LINK_TTL = Duration.ofMinutes(10);
     private static final Duration SEND_COOLDOWN = Duration.ofSeconds(60);
+    private static final String SIGNING_SECRET_SETTING_KEY = "registration_email_link_signing_secret";
+    private static final String SIGNED_TOKEN_VERSION = "v2";
+    private static final Base64.Encoder BASE64_URL_ENCODER = Base64.getUrlEncoder().withoutPadding();
+    private static final Base64.Decoder BASE64_URL_DECODER = Base64.getUrlDecoder();
 
     private final RegistrationSettingsService registrationSettingsService;
     private final TurnstileVerificationService turnstileVerificationService;
+    private final SystemSettingRepository systemSettingRepository;
     private final Map<String, VerificationToken> tokensByEmail = new ConcurrentHashMap<>();
     private final Map<String, VerificationToken> tokensByHash = new ConcurrentHashMap<>();
 
     public EmailVerificationService(
         RegistrationSettingsService registrationSettingsService,
-        TurnstileVerificationService turnstileVerificationService
+        TurnstileVerificationService turnstileVerificationService,
+        SystemSettingRepository systemSettingRepository
     ) {
         this.registrationSettingsService = registrationSettingsService;
         this.turnstileVerificationService = turnstileVerificationService;
+        this.systemSettingRepository = systemSettingRepository;
     }
 
     public Mono<AdminDtos.SendVerifyCodeResponse> sendRegistrationLink(
@@ -69,17 +81,9 @@ public class EmailVerificationService {
                         "Please wait " + seconds + " seconds before requesting another verification code"
                     ));
                 }
-                String rawToken = Hashing.randomToken(32);
-                String tokenHash = Hashing.sha256(rawToken);
-                VerificationToken pending = new VerificationToken(
-                    tokenHash,
-                    normalizedEmail,
-                    now.plus(LINK_TTL),
-                    now.plus(SEND_COOLDOWN)
-                );
-                String link = registrationLink(registrationBaseUrl, rawToken, normalizedEmail);
-                return registrationSettingsService.smtpConfig()
-                    .flatMap(config -> {
+                Instant expiresAt = now.plus(LINK_TTL);
+                return registrationToken(normalizedEmail, expiresAt)
+                    .flatMap(rawToken -> registrationSettingsService.smtpConfig().flatMap(config -> {
                         if (!config.configured()) {
                             return Mono.error(new ApiException(
                                 HttpStatus.SERVICE_UNAVAILABLE,
@@ -87,6 +91,14 @@ public class EmailVerificationService {
                                 "SMTP settings are not configured"
                             ));
                         }
+                        String tokenHash = Hashing.sha256(rawToken);
+                        VerificationToken pending = new VerificationToken(
+                            tokenHash,
+                            normalizedEmail,
+                            expiresAt,
+                            now.plus(SEND_COOLDOWN)
+                        );
+                        String link = registrationLink(registrationBaseUrl, rawToken, normalizedEmail);
                         return sendEmail(config, normalizedEmail, link)
                             .doOnSuccess(ignored -> {
                                 VerificationToken previous = tokensByEmail.put(normalizedEmail, pending);
@@ -96,7 +108,7 @@ public class EmailVerificationService {
                                 tokensByHash.put(tokenHash, pending);
                             })
                             .thenReturn(new AdminDtos.SendVerifyCodeResponse("Registration link sent", (int) SEND_COOLDOWN.toSeconds()));
-                    });
+                    }));
             });
     }
 
@@ -118,27 +130,24 @@ public class EmailVerificationService {
                         "Email verification link token is required"
                     ));
                 }
-                String tokenHash = Hashing.sha256(token.trim());
+                String normalizedToken = token.trim();
+                String tokenHash = Hashing.sha256(normalizedToken);
                 VerificationToken stored = tokensByHash.get(tokenHash);
-                if (stored == null || stored.expiresAt().isBefore(Instant.now())) {
-                    if (stored != null) {
+                if (stored != null) {
+                    if (stored.expiresAt().isBefore(Instant.now())) {
                         removeToken(stored);
+                        return invalidVerificationLink();
                     }
-                    return Mono.error(new ApiException(
-                        HttpStatus.BAD_REQUEST,
-                        "INVALID_VERIFY_CODE",
-                        "Email verification link is invalid or expired"
-                    ));
+                    if (normalizedEmail == null || !stored.email().equals(normalizedEmail)) {
+                        return invalidVerificationLink();
+                    }
+                    removeToken(stored);
+                    return Mono.empty();
                 }
-                if (normalizedEmail == null || !stored.email().equals(normalizedEmail)) {
-                    return Mono.error(new ApiException(
-                        HttpStatus.BAD_REQUEST,
-                        "INVALID_VERIFY_CODE",
-                        "Email verification link is invalid or expired"
-                    ));
+                if (normalizedEmail == null) {
+                    return invalidVerificationLink();
                 }
-                removeToken(stored);
-                return Mono.empty();
+                return verifySignedRegistrationToken(normalizedEmail, normalizedToken);
             });
     }
 
@@ -260,6 +269,87 @@ public class EmailVerificationService {
         tokensByEmail.remove(token.email(), token);
     }
 
+    Mono<String> registrationToken(String normalizedEmail, Instant expiresAt) {
+        return signingSecret()
+            .map(secret -> signedRegistrationToken(normalizedEmail, expiresAt, Hashing.randomToken(16), secret));
+    }
+
+    private Mono<Void> verifySignedRegistrationToken(String normalizedEmail, String token) {
+        SignedRegistrationToken parsed = parseSignedRegistrationToken(token);
+        if (parsed == null || parsed.expiresAt().isBefore(Instant.now()) || !parsed.email().equals(normalizedEmail)) {
+            return invalidVerificationLink();
+        }
+        return signingSecret()
+            .flatMap(secret -> constantEquals(signature(parsed.signingInput(), secret), parsed.signature())
+                ? Mono.empty()
+                : invalidVerificationLink());
+    }
+
+    private SignedRegistrationToken parseSignedRegistrationToken(String token) {
+        try {
+            String[] parts = token.split("\\.", -1);
+            if (parts.length != 5 || !SIGNED_TOKEN_VERSION.equals(parts[0])) {
+                return null;
+            }
+            String signingInput = parts[0] + "." + parts[1] + "." + parts[2] + "." + parts[3];
+            String email = new String(BASE64_URL_DECODER.decode(parts[1]), StandardCharsets.UTF_8);
+            Instant expiresAt = Instant.ofEpochSecond(Long.parseLong(parts[2]));
+            if (parts[3].isBlank() || parts[4].isBlank()) {
+                return null;
+            }
+            return new SignedRegistrationToken(email, expiresAt, signingInput, parts[4]);
+        } catch (IllegalArgumentException | DateTimeException error) {
+            return null;
+        }
+    }
+
+    private String signedRegistrationToken(String email, Instant expiresAt, String nonce, String secret) {
+        String emailPart = base64Url(email);
+        String expiresPart = Long.toString(expiresAt.getEpochSecond());
+        String noncePart = base64Url(nonce);
+        String signingInput = SIGNED_TOKEN_VERSION + "." + emailPart + "." + expiresPart + "." + noncePart;
+        return signingInput + "." + signature(signingInput, secret);
+    }
+
+    private Mono<String> signingSecret() {
+        return systemSettingRepository.findById(SIGNING_SECRET_SETTING_KEY)
+            .map(SystemSettingEntity::getSettingValue)
+            .filter(value -> value != null && !value.isBlank())
+            .switchIfEmpty(Mono.defer(() -> {
+                String secret = Hashing.randomToken(32);
+                return systemSettingRepository.upsertSetting(SIGNING_SECRET_SETTING_KEY, secret).thenReturn(secret);
+            }));
+    }
+
+    private String signature(String signingInput, String secret) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            return BASE64_URL_ENCODER.encodeToString(mac.doFinal(signingInput.getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception error) {
+            throw new IllegalStateException("HmacSHA256 is unavailable", error);
+        }
+    }
+
+    private boolean constantEquals(String left, String right) {
+        return MessageDigest.isEqual(
+            left.getBytes(StandardCharsets.UTF_8),
+            right.getBytes(StandardCharsets.UTF_8)
+        );
+    }
+
+    private String base64Url(String value) {
+        return BASE64_URL_ENCODER.encodeToString(value.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private Mono<Void> invalidVerificationLink() {
+        return Mono.error(new ApiException(
+            HttpStatus.BAD_REQUEST,
+            "INVALID_VERIFY_CODE",
+            "Email verification link is invalid or expired"
+        ));
+    }
+
     private String registrationLink(String registrationBaseUrl, String token, String email) {
         String base = registrationBaseUrl == null || registrationBaseUrl.isBlank()
             ? "/#/login"
@@ -285,6 +375,14 @@ public class EmailVerificationService {
         String email,
         Instant expiresAt,
         Instant nextSendAt
+    ) {
+    }
+
+    private record SignedRegistrationToken(
+        String email,
+        Instant expiresAt,
+        String signingInput,
+        String signature
     ) {
     }
 }

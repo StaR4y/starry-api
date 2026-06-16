@@ -33,6 +33,7 @@
     model: 'auto',
     prompt: '',
     updateStatus: true,
+    autoRunWhenNoAvailableAccounts: false,
     includeDisabled: true,
     includeSuspended: true,
     includeQuotaExhausted: false,
@@ -368,6 +369,15 @@
                     <div class="check-info">
                       <span class="check-title text-primary">成功后恢复账号</span>
                       <span class="check-desc">测试成功后，自动将账号状态变更为正常</span>
+                    </div>
+                  </el-checkbox>
+                </div>
+
+                <div class="check-card highlight" :class="{ 'is-checked': form.autoRunWhenNoAvailableAccounts }">
+                  <el-checkbox v-model="form.autoRunWhenNoAvailableAccounts">
+                    <div class="check-info">
+                      <span class="check-title text-primary">账号不可用时自动复查</span>
+                      <span class="check-desc">当前请求没有可用账号时，自动复查一次对应平台账号并重新选择</span>
                     </div>
                   </el-checkbox>
                 </div>
@@ -839,17 +849,7 @@
     }
   }
 
-  .run-btn {
-    border-color: var(--kp-divider);
-    background: rgba(255, 255, 255, 0.5);
-    color: var(--kp-text-secondary);
 
-    &:hover {
-      background: white;
-      color: var(--kp-text);
-      border-color: var(--kp-text-muted);
-    }
-  }
 
   @keyframes pulse {
     0% {

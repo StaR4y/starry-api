@@ -30,6 +30,7 @@ public class AccountSettingsService {
     static final String DISABLED_TEST_MODEL = "disabled_account_scheduled_test_model";
     static final String DISABLED_TEST_PROMPT = "disabled_account_scheduled_test_prompt";
     static final String DISABLED_TEST_UPDATE_STATUS = "disabled_account_scheduled_test_update_status";
+    static final String DISABLED_TEST_AUTO_RUN_WHEN_NO_AVAILABLE = "disabled_account_scheduled_test_auto_run_when_no_available";
     static final String DISABLED_TEST_INCLUDE_DISABLED = "disabled_account_scheduled_test_include_disabled";
     static final String DISABLED_TEST_INCLUDE_SUSPENDED = "disabled_account_scheduled_test_include_suspended";
     static final String DISABLED_TEST_INCLUDE_QUOTA_EXHAUSTED = "disabled_account_scheduled_test_include_quota_exhausted";
@@ -49,6 +50,7 @@ public class AccountSettingsService {
         DISABLED_TEST_MODEL,
         DISABLED_TEST_PROMPT,
         DISABLED_TEST_UPDATE_STATUS,
+        DISABLED_TEST_AUTO_RUN_WHEN_NO_AVAILABLE,
         DISABLED_TEST_INCLUDE_DISABLED,
         DISABLED_TEST_INCLUDE_SUSPENDED,
         DISABLED_TEST_INCLUDE_QUOTA_EXHAUSTED,
@@ -132,6 +134,7 @@ public class AccountSettingsService {
             text(values.get(DISABLED_TEST_MODEL), "auto"),
             emptyToNull(values.get(DISABLED_TEST_PROMPT)),
             bool(values, DISABLED_TEST_UPDATE_STATUS, true),
+            bool(values, DISABLED_TEST_AUTO_RUN_WHEN_NO_AVAILABLE, false),
             bool(values, DISABLED_TEST_INCLUDE_DISABLED, true),
             bool(values, DISABLED_TEST_INCLUDE_SUSPENDED, true),
             bool(values, DISABLED_TEST_INCLUDE_QUOTA_EXHAUSTED, false),
@@ -163,6 +166,9 @@ public class AccountSettingsService {
             text(firstNonNull(request.model(), current.model()), "auto"),
             emptyToNull(firstNonNull(request.prompt(), current.prompt())),
             request.updateStatus() == null ? current.updateStatus() : Boolean.TRUE.equals(request.updateStatus()),
+            request.autoRunWhenNoAvailableAccounts() == null
+                ? current.autoRunWhenNoAvailableAccounts()
+                : Boolean.TRUE.equals(request.autoRunWhenNoAvailableAccounts()),
             request.includeDisabled() == null ? current.includeDisabled() : Boolean.TRUE.equals(request.includeDisabled()),
             request.includeSuspended() == null ? current.includeSuspended() : Boolean.TRUE.equals(request.includeSuspended()),
             request.includeQuotaExhausted() == null ? current.includeQuotaExhausted() : Boolean.TRUE.equals(request.includeQuotaExhausted()),
@@ -200,6 +206,7 @@ public class AccountSettingsService {
             set(DISABLED_TEST_MODEL, disabledTest.model()),
             set(DISABLED_TEST_PROMPT, disabledTest.prompt() == null ? "" : disabledTest.prompt()),
             set(DISABLED_TEST_UPDATE_STATUS, Boolean.toString(Boolean.TRUE.equals(disabledTest.updateStatus()))),
+            set(DISABLED_TEST_AUTO_RUN_WHEN_NO_AVAILABLE, Boolean.toString(Boolean.TRUE.equals(disabledTest.autoRunWhenNoAvailableAccounts()))),
             set(DISABLED_TEST_INCLUDE_DISABLED, Boolean.toString(Boolean.TRUE.equals(disabledTest.includeDisabled()))),
             set(DISABLED_TEST_INCLUDE_SUSPENDED, Boolean.toString(Boolean.TRUE.equals(disabledTest.includeSuspended()))),
             set(DISABLED_TEST_INCLUDE_QUOTA_EXHAUSTED, Boolean.toString(Boolean.TRUE.equals(disabledTest.includeQuotaExhausted()))),

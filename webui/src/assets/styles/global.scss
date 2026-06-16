@@ -137,18 +137,164 @@ body {
   box-shadow: 0 0 0 1px var(--kp-primary) inset !important;
 }
 
+/* Element Plus 按钮交互与视觉优化：去除交互时背景色变动，采用亮度与边框发光反馈 */
 .el-button {
-  border-radius: 10px;
+  border-radius: var(--el-border-radius-base) !important;
+  font-weight: 600;
+  transition: all 0.2s cubic-bezier(0.25, 0.8, 0.25, 1);
+  letter-spacing: 0.5px;
+  
+  // 仅在非禁用状态下应用悬浮与点击微位移动效
+  &:not(.is-disabled):not(:disabled) {
+    &:hover {
+      transform: translateY(-1.5px);
+    }
+    &:active {
+      transform: translateY(0.5px);
+    }
+  }
+
+  &.is-disabled,
+  &:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+    transform: none !important;
+    box-shadow: none !important;
+  }
 }
 
-.el-button--primary {
-  background: linear-gradient(135deg, var(--kp-primary), var(--kp-accent));
-  border: none;
+// 1. 主色按钮 (Primary) - 渐变与霓虹投影，仅用于非 link/text 的实体按钮
+.el-button--primary:not(.is-link):not(.is-text) {
+  background: linear-gradient(135deg, var(--kp-primary), var(--kp-accent)) !important;
+  border: 1px solid transparent !important;
+  color: white !important;
+  box-shadow: 0 2px 6px rgba(91, 141, 239, 0.15);
+
+  &:not(.is-disabled):not(:disabled) {
+    &:hover,
+    &:focus {
+      background: linear-gradient(135deg, var(--kp-primary), var(--kp-accent)) !important; // 保持原有渐变背景色
+      filter: brightness(1.08); // 通过亮度提升提供交互反馈
+      box-shadow: 0 6px 16px rgba(91, 141, 239, 0.3), 0 3px 8px rgba(179, 135, 255, 0.15) !important;
+      color: white !important;
+    }
+    &:active {
+      background: linear-gradient(135deg, var(--kp-primary), var(--kp-accent)) !important;
+      filter: brightness(0.92); // 降低亮度表现按压感
+      box-shadow: 0 2px 4px rgba(91, 141, 239, 0.2) !important;
+    }
+  }
 }
 
-.el-button--primary:hover,
-.el-button--primary:focus {
-  background: linear-gradient(135deg, #4d7ee5, #a273f4);
+// 2. 危险色按钮 (Danger) - 渐变与警告投影，仅用于非 link/text 的实体按钮
+.el-button--danger:not(.is-link):not(.is-text) {
+  background: linear-gradient(135deg, var(--kp-danger), #ff8a93) !important;
+  border: 1px solid transparent !important;
+  color: white !important;
+  box-shadow: 0 2px 6px rgba(239, 91, 107, 0.15);
+
+  &:not(.is-disabled):not(:disabled) {
+    &:hover,
+    &:focus {
+      background: linear-gradient(135deg, var(--kp-danger), #ff8a93) !important; // 保持原有渐变背景色
+      filter: brightness(1.08); // 通过亮度提升提供交互反馈
+      box-shadow: 0 6px 16px rgba(239, 91, 107, 0.3) !important;
+      color: white !important;
+    }
+    &:active {
+      background: linear-gradient(135deg, var(--kp-danger), #ff8a93) !important;
+      filter: brightness(0.92); // 降低亮度表现按压感
+      box-shadow: 0 2px 4px rgba(239, 91, 107, 0.2) !important;
+    }
+  }
+}
+
+// 3. 次要/默认按钮 (Default / Plain) - 采用实色扁平化设计，消除透明玻璃矩形感
+.el-button:not(.el-button--primary):not(.el-button--danger):not(.el-button--link):not(.el-button--text):not(.is-link):not(.is-text) {
+  background: #ffffff !important; // 采用纯实色白色背景
+  border: 1px solid rgba(15, 23, 42, 0.12) !important; // 浅灰色实色边框
+  color: var(--kp-text-secondary) !important;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+
+  &:not(.is-disabled):not(:disabled) {
+    &:hover,
+    &:focus {
+      background: #f8fafc !important; // 悬浮时轻微变灰
+      border-color: var(--kp-primary) !important; // 亮起蓝色边框
+      color: var(--kp-primary) !important; // 变蓝文字
+      box-shadow: 0 4px 12px rgba(91, 141, 239, 0.08) !important;
+    }
+    &:active {
+      background: #f1f5f9 !important;
+      border-color: var(--kp-primary-dark-2) !important;
+      color: var(--kp-primary-dark-2) !important;
+      box-shadow: 0 2px 4px rgba(15, 23, 42, 0.04) !important;
+    }
+  }
+
+  &.is-disabled,
+  &:disabled {
+    background: #f8fafc !important;
+    border-color: rgba(15, 23, 42, 0.06) !important;
+    color: var(--kp-text-muted) !important;
+  }
+}
+
+// 4. 文字/链接式按钮 (Link / Text) - 严格保持透明无框，仅变化文字颜色
+.el-button.is-link,
+.el-button.is-text,
+.el-button--text {
+  background: transparent !important;
+  background-color: transparent !important;
+  border: none !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+  transform: none !important; // 链接按钮不产生位移动效，确保表格等列表布局对齐稳定
+  padding: 0 4px !important;
+
+  &.el-button--primary {
+    color: var(--kp-primary) !important;
+    &:not(.is-disabled):not(:disabled) {
+      &:hover,
+      &:focus,
+      &:active {
+        color: var(--kp-accent) !important;
+        background: transparent !important;
+        background-color: transparent !important;
+        box-shadow: none !important;
+      }
+    }
+  }
+
+  &.el-button--danger {
+    color: var(--kp-danger) !important;
+    &:not(.is-disabled):not(:disabled) {
+      &:hover,
+      &:focus,
+      &:active {
+        color: #ff8a93 !important;
+        background: transparent !important;
+        background-color: transparent !important;
+        box-shadow: none !important;
+      }
+    }
+  }
+
+  &:not(.el-button--primary):not(.el-button--danger) {
+    color: var(--kp-text-secondary) !important;
+    &:not(.is-disabled):not(:disabled) {
+      &:hover,
+      &:focus,
+      &:active {
+        color: var(--kp-primary) !important;
+        background: transparent !important;
+        background-color: transparent !important;
+        box-shadow: none !important;
+      }
+    }
+  }
 }
 
 .el-tag {

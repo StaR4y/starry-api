@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -57,13 +58,23 @@ public class DisabledAccountScheduledTestService {
                 if (!due(settings, Instant.now())) {
                     return Mono.empty();
                 }
-                return runWithLock(settings, false, false).then();
+                return runWithLock(settings, false, false, account -> true, false).then();
             });
     }
 
     public Mono<AccountDtos.TestAccountsResponse> runNow() {
         return settingsService.disabledAccountScheduledTestSettings()
-            .flatMap(settings -> runWithLock(settings, true, true));
+            .flatMap(settings -> runWithLock(settings, true, true, account -> true, false));
+    }
+
+    public Mono<AccountDtos.TestAccountsResponse> runWhenNoAvailableAccounts(
+        Predicate<ProxyAccountEntity> accountFilter
+    ) {
+        Predicate<ProxyAccountEntity> safeFilter = accountFilter == null ? account -> true : accountFilter;
+        return settingsService.disabledAccountScheduledTestSettings()
+            .flatMap(settings -> Boolean.TRUE.equals(settings.autoRunWhenNoAvailableAccounts())
+                ? runWithLock(settings, false, true, safeFilter, true).defaultIfEmpty(emptyResponse())
+                : Mono.empty());
     }
 
     private boolean due(AccountDtos.DisabledAccountScheduledTestSettings settings, Instant now) {
@@ -98,7 +109,9 @@ public class DisabledAccountScheduledTestService {
     private Mono<AccountDtos.TestAccountsResponse> runWithLock(
         AccountDtos.DisabledAccountScheduledTestSettings settings,
         boolean failWhenRunning,
-        boolean manualRun
+        boolean manualRun,
+        Predicate<ProxyAccountEntity> accountFilter,
+        boolean ignoreConfiguredProviders
     ) {
         if (!running.compareAndSet(false, true)) {
             if (failWhenRunning) {
@@ -110,7 +123,7 @@ public class DisabledAccountScheduledTestService {
             }
             return Mono.empty();
         }
-        return targetAccountIds(settings, manualRun)
+        return targetAccountIds(settings, manualRun, accountFilter, ignoreConfiguredProviders)
             .flatMap(ids -> ids.isEmpty()
                 ? Mono.just(emptyResponse())
                 : accountTestService.test(new AccountDtos.TestAccountsRequest(
@@ -133,12 +146,16 @@ public class DisabledAccountScheduledTestService {
 
     private Mono<List<String>> targetAccountIds(
         AccountDtos.DisabledAccountScheduledTestSettings settings,
-        boolean manualRun
+        boolean manualRun,
+        Predicate<ProxyAccountEntity> accountFilter,
+        boolean ignoreConfiguredProviders
     ) {
         Instant now = Instant.now();
+        Predicate<ProxyAccountEntity> safeFilter = accountFilter == null ? account -> true : accountFilter;
         var targets = repository.findAll()
+            .filter(safeFilter)
             .filter(account -> manualRun || matchesState(account, settings))
-            .filter(account -> matchesProvider(account, settings.providers()))
+            .filter(account -> ignoreConfiguredProviders || matchesProvider(account, settings.providers()))
             .filter(account -> manualRun || oldEnough(account, settings.minAgeMinutes(), now))
             .map(ProxyAccountEntity::getAccountId)
             .filter(accountId -> accountId != null && !accountId.isBlank());

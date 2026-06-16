@@ -31,6 +31,7 @@ class AccountSettingsServiceTest {
         assertThat(response.disabledAccountScheduledTest().enabled()).isFalse();
         assertThat(response.disabledAccountScheduledTest().scheduleMode()).isEqualTo("interval");
         assertThat(response.disabledAccountScheduledTest().intervalMinutes()).isEqualTo(60);
+        assertThat(response.disabledAccountScheduledTest().autoRunWhenNoAvailableAccounts()).isFalse();
     }
 
     @Test
@@ -67,6 +68,7 @@ class AccountSettingsServiceTest {
             true,
             true,
             true,
+            true,
             30,
             java.util.List.of("Anthropic", "OpenAI-compatible")
         );
@@ -78,8 +80,10 @@ class AccountSettingsServiceTest {
         assertThat(response).isNotNull();
         assertThat(response.disabledAccountScheduledTest().enabled()).isTrue();
         assertThat(response.disabledAccountScheduledTest().scheduleMode()).isEqualTo("cron");
+        assertThat(response.disabledAccountScheduledTest().autoRunWhenNoAvailableAccounts()).isTrue();
         assertThat(response.disabledAccountScheduledTest().providers()).containsExactly("Anthropic", "OpenAI-compatible");
         assertThat(store.get(AccountSettingsService.DISABLED_TEST_ENABLED)).isEqualTo("true");
+        assertThat(store.get(AccountSettingsService.DISABLED_TEST_AUTO_RUN_WHEN_NO_AVAILABLE)).isEqualTo("true");
         assertThat(store.get(AccountSettingsService.DISABLED_TEST_CRON_EXPRESSION)).isEqualTo("0 */15 * * * *");
         assertThat(store.get(AccountSettingsService.DISABLED_TEST_PROVIDERS)).isEqualTo("Anthropic,OpenAI-compatible");
     }

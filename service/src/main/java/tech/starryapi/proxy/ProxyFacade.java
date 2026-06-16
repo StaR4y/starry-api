@@ -23,6 +23,7 @@ import tech.starryapi.account.AccountAutoSuspendService;
 import tech.starryapi.account.AccountPoolService;
 import tech.starryapi.account.AccountPlatforms;
 import tech.starryapi.account.AccountSettingsService;
+import tech.starryapi.account.DisabledAccountScheduledTestService;
 import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.apikey.ApiKeyPrincipal;
 import tech.starryapi.apikey.ApiKeyService;
@@ -70,6 +71,7 @@ public class ProxyFacade {
     private final AccountPoolService accountPoolService;
     private final AccountAutoSuspendService accountAutoSuspendService;
     private final AccountSettingsService accountSettingsService;
+    private final DisabledAccountScheduledTestService disabledAccountScheduledTestService;
     private final ModelCatalogProvider modelCatalog;
     private final ModelMappingService modelMappingService;
     private final RateLimiterService rateLimiterService;
@@ -93,6 +95,7 @@ public class ProxyFacade {
         AccountPoolService accountPoolService,
         AccountAutoSuspendService accountAutoSuspendService,
         AccountSettingsService accountSettingsService,
+        DisabledAccountScheduledTestService disabledAccountScheduledTestService,
         ModelCatalogProvider modelCatalog,
         ModelMappingService modelMappingService,
         RateLimiterService rateLimiterService,
@@ -115,6 +118,7 @@ public class ProxyFacade {
         this.accountPoolService = accountPoolService;
         this.accountAutoSuspendService = accountAutoSuspendService;
         this.accountSettingsService = accountSettingsService;
+        this.disabledAccountScheduledTestService = disabledAccountScheduledTestService;
         this.modelCatalog = modelCatalog;
         this.modelMappingService = modelMappingService;
         this.rateLimiterService = rateLimiterService;
@@ -211,7 +215,7 @@ public class ProxyFacade {
         Instant start,
         List<String> attemptedAccountIds
     ) {
-        return selectAccount(route, sessionHint, attemptedAccountIds)
+        return selectAccountWithAutoRetest(route, sessionHint, attemptedAccountIds, false)
             .flatMap(account -> callWithAccount(route, account, upstreamRequest, mappedModel, sessionHint)
                 .flatMap(result -> {
                     Mono<Void> accounting = recordSuccess(requestId, principal, account, path, requestedModel, result, route, fastMode, start);
@@ -310,7 +314,7 @@ public class ProxyFacade {
         Instant start,
         List<String> attemptedAccountIds
     ) {
-        return selectAccount(route, sessionHint, attemptedAccountIds, preferCodexAccounts)
+        return selectAccountWithAutoRetest(route, sessionHint, attemptedAccountIds, preferCodexAccounts)
             .flatMap(account -> callResponsesWithAccount(route, account, upstreamRequest, mappedModel, sessionHint)
                 .flatMap(result -> {
                     Mono<Void> accounting = recordSuccess(requestId, principal, account, path, requestedModel, result, route, fastMode, start);
@@ -386,6 +390,52 @@ public class ProxyFacade {
         return codexSelection.onErrorResume(error -> isNoAvailableAccount(error)
             ? selectAccount(route, sessionHint, attemptedAccountIds)
             : Mono.error(error));
+    }
+
+    private Mono<ProxyAccountEntity> selectAccountWithAutoRetest(
+        UpstreamRoute route,
+        String sessionHint,
+        List<String> attemptedAccountIds,
+        boolean preferCodexAccounts
+    ) {
+        return selectAccount(route, sessionHint, attemptedAccountIds, preferCodexAccounts)
+            .onErrorResume(error -> {
+                if (!shouldAutoRetestUnavailableAccounts(error, attemptedAccountIds)) {
+                    return Mono.error(error);
+                }
+                return disabledAccountScheduledTestService.runWhenNoAvailableAccounts(accountFilterFor(route))
+                    .doOnNext(response -> log.info(
+                        "Auto disabled account retest after no available account completed: route={}, total={}, success={}, failed={}, skipped={}",
+                        route,
+                        response.total(),
+                        response.success(),
+                        response.failed(),
+                        response.skipped()
+                    ))
+                    .filter(response -> response.success() != null && response.success() > 0)
+                    .flatMap(response -> selectAccount(route, sessionHint, attemptedAccountIds, preferCodexAccounts))
+                    .switchIfEmpty(Mono.error(error))
+                    .onErrorResume(retestError -> {
+                        if (!isNoAvailableAccount(retestError)) {
+                            log.warn("Auto disabled account retest failed after no available account", retestError);
+                        }
+                        return Mono.error(error);
+                    });
+            });
+    }
+
+    private boolean shouldAutoRetestUnavailableAccounts(Throwable error, List<String> attemptedAccountIds) {
+        return isNoAvailableAccount(error)
+            && (attemptedAccountIds == null || attemptedAccountIds.isEmpty());
+    }
+
+    private java.util.function.Predicate<ProxyAccountEntity> accountFilterFor(UpstreamRoute route) {
+        return switch (route) {
+            case OPENAI -> AccountPlatforms::isOpenAi;
+            case ANTHROPIC -> account -> AccountPlatforms.isAnthropicApiKey(account)
+                || AccountPlatforms.isKiroCompatible(account);
+            case KIRO -> AccountPlatforms::isKiroCompatible;
+        };
     }
 
     private Mono<PlatformCompletionResult> callWithAccount(

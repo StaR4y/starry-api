@@ -1,10 +1,19 @@
 package tech.starryapi.admin;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.net.InetAddress;
+import java.time.Instant;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Properties;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
+import tech.starryapi.common.ApiException;
 
 class EmailVerificationServiceTest {
 
@@ -54,6 +63,30 @@ class EmailVerificationServiceTest {
         assertThat(EmailVerificationService.isFakeIpAddress(InetAddress.getByName("127.0.0.1"))).isFalse();
     }
 
+    @Test
+    void signedRegistrationTokenSurvivesServiceRecreation() {
+        Map<String, String> store = new HashMap<>();
+        SystemSettingRepository repository = mockRepository(store);
+        EmailVerificationService issuer = service(repository);
+
+        String token = issuer.registrationToken("user@example.com", Instant.now().plusSeconds(600)).block();
+
+        assertThat(token).startsWith("v2.");
+        EmailVerificationService verifier = service(repository);
+        verifier.verifyRegistrationToken("USER@example.com", token).block();
+    }
+
+    @Test
+    void signedRegistrationTokenRejectsDifferentEmail() {
+        Map<String, String> store = new HashMap<>();
+        EmailVerificationService service = service(mockRepository(store));
+        String token = service.registrationToken("user@example.com", Instant.now().plusSeconds(600)).block();
+
+        assertThatThrownBy(() -> service.verifyRegistrationToken("other@example.com", token).block())
+            .isInstanceOf(ApiException.class)
+            .hasMessageContaining("Email verification link is invalid or expired");
+    }
+
     private Properties propertiesFor(RegistrationSettingsService.SmtpConfig config) {
         Properties properties = new Properties();
         EmailVerificationService.configureSmtpProperties(properties, config);
@@ -71,5 +104,35 @@ class EmailVerificationServiceTest {
             useTls,
             security
         );
+    }
+
+    private EmailVerificationService service(SystemSettingRepository repository) {
+        RegistrationSettingsService settingsService = mock(RegistrationSettingsService.class);
+        when(settingsService.emailVerifyEnabled()).thenReturn(Mono.just(true));
+        return new EmailVerificationService(
+            settingsService,
+            mock(TurnstileVerificationService.class),
+            repository
+        );
+    }
+
+    private SystemSettingRepository mockRepository(Map<String, String> store) {
+        SystemSettingRepository repository = mock(SystemSettingRepository.class);
+        when(repository.findById(anyString())).thenAnswer(invocation -> {
+            String key = invocation.getArgument(0);
+            return Mono.justOrEmpty(store.get(key)).map(value -> {
+                SystemSettingEntity entity = new SystemSettingEntity();
+                entity.setSettingKey(key);
+                entity.setSettingValue(value);
+                return entity;
+            });
+        });
+        when(repository.upsertSetting(anyString(), anyString())).thenAnswer(invocation -> {
+            String key = invocation.getArgument(0);
+            String value = invocation.getArgument(1);
+            store.put(key, value);
+            return Mono.just(1);
+        });
+        return repository;
     }
 }
