@@ -5,14 +5,14 @@
   "compose": "docker-compose.artifact.yml",
   "version": "0.1.0-SNAPSHOT",
   "branch": "main",
-  "commit": "d1ec75a5f2c33fe4839bda82e56b061e31823b12",
-  "dirty": true,
-  "builtAt": "2026-06-16T09:43:45Z",
+  "commit": "29ead2b9d42e1573afa35432f9d79198c3102f31",
+  "dirty": false,
+  "builtAt": "2026-06-16T09:51:07Z",
   "sourceJar": "service/build/libs/service-0.1.0-SNAPSHOT.jar",
   "sizeBytes": 44698167,
   "webuiSizeBytes": 384067,
   "sha256": "535017835dad6f1ec89cceb857d869ca01f4234a10d5b857d30c1c2dccad62b2",
-  "webuiSha256": "f39cf0725510b67040d1431840b15cd6d6314394327f8bb256fe1f337e006ca8",
+  "webuiSha256": "1be7f4924f5e9f8605a21176fbd3ca36f2bec9077bcaef6be392b7a509dc4a3b",
   "composeSha256": "e3c76da65935919f4338321dd4d6c36cfbcea54f6d5cea9cb49751dd34863d5f",
   "java": "openjdk version \"25.0.3\" 2026-04-21 LTS"
 }
