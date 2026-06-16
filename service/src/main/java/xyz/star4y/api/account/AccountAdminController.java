@@ -17,6 +17,7 @@ public class AccountAdminController implements AccountAdminApi {
     private final AccountPoolService service;
     private final AccountImportParser importParser;
     private final AccountTestService testService;
+    private final DisabledAccountScheduledTestService disabledAccountScheduledTestService;
     private final AccountOpenAiQuotaService openAiQuotaService;
     private final AccountSettingsService settingsService;
     private final AdminAuth adminAuth;
@@ -25,6 +26,7 @@ public class AccountAdminController implements AccountAdminApi {
         AccountPoolService service,
         AccountImportParser importParser,
         AccountTestService testService,
+        DisabledAccountScheduledTestService disabledAccountScheduledTestService,
         AccountOpenAiQuotaService openAiQuotaService,
         AccountSettingsService settingsService,
         AdminAuth adminAuth
@@ -32,6 +34,7 @@ public class AccountAdminController implements AccountAdminApi {
         this.service = service;
         this.importParser = importParser;
         this.testService = testService;
+        this.disabledAccountScheduledTestService = disabledAccountScheduledTestService;
         this.openAiQuotaService = openAiQuotaService;
         this.settingsService = settingsService;
         this.adminAuth = adminAuth;
@@ -128,6 +131,12 @@ public class AccountAdminController implements AccountAdminApi {
     ) {
         adminAuth.verifyAdmin(exchange);
         return testService.test(request).map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<AccountDtos.TestAccountsResponse>> runDisabledScheduledTest(ServerWebExchange exchange) {
+        adminAuth.verifyAdmin(exchange);
+        return disabledAccountScheduledTestService.runNow().map(ApiResponse::ok);
     }
 
     @Override

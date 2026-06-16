@@ -19,6 +19,7 @@
     Account,
     AccountSettings,
     CreateAccountRequest,
+    DisabledAccountScheduledTestSettings,
     ImportAccountItem,
     ImportAccountsResult,
     TestAccountItem,
@@ -34,8 +35,32 @@
   const loading = ref(false);
   const accounts = ref<Account[]>([]);
   const keyword = ref('');
-  const accountSettings = ref<AccountSettings>({ gptFastModeEnabled: false });
+  const defaultDisabledScheduledTest = (): DisabledAccountScheduledTestSettings => ({
+    enabled: false,
+    scheduleMode: 'interval',
+    intervalMinutes: 60,
+    cronExpression: '0 0 * * * *',
+    timezone: 'Asia/Shanghai',
+    initialDelayMinutes: 5,
+    maxConcurrency: 2,
+    maxAccountsPerRun: 20,
+    model: 'auto',
+    prompt: '',
+    updateStatus: true,
+    includeDisabled: true,
+    includeSuspended: true,
+    includeQuotaExhausted: false,
+    minAgeMinutes: 10,
+    providers: [],
+  });
+  const accountSettings = ref<AccountSettings>({
+    gptFastModeEnabled: false,
+    disabledAccountScheduledTest: defaultDisabledScheduledTest(),
+  });
+  const disabledScheduleForm = reactive<DisabledAccountScheduledTestSettings>(defaultDisabledScheduledTest());
   const settingsSaving = ref(false);
+  const disabledScheduleSaving = ref(false);
+  const disabledScheduleRunning = ref(false);
   const clearingAccounts = ref(false);
 
   const visibleAccounts = computed(() => {
@@ -193,9 +218,14 @@
 
   async function loadAccountSettings() {
     try {
-      accountSettings.value = await accountsApi.settings();
+      const settings = await accountsApi.settings();
+      accountSettings.value = {
+        ...settings,
+        disabledAccountScheduledTest: normalizeDisabledSchedule(settings.disabledAccountScheduledTest),
+      };
+      Object.assign(disabledScheduleForm, accountSettings.value.disabledAccountScheduledTest);
     } catch (err) {
-      if (err instanceof ApiError) ElMessage.warning(`Fast 模式配置加载失败：${err.message}`);
+      if (err instanceof ApiError) ElMessage.warning(`账号配置加载失败：${err.message}`);
     }
   }
 
@@ -211,6 +241,84 @@
       if (err instanceof ApiError) ElMessage.error(err.message);
     } finally {
       settingsSaving.value = false;
+    }
+  }
+
+  function normalizeDisabledSchedule(
+    value: Partial<DisabledAccountScheduledTestSettings> | null | undefined,
+  ): DisabledAccountScheduledTestSettings {
+    const defaults = defaultDisabledScheduledTest();
+    return {
+      ...defaults,
+      ...(value ?? {}),
+      prompt: value?.prompt ?? '',
+      providers: Array.isArray(value?.providers) ? [...value.providers] : [],
+    };
+  }
+
+  const disabledScheduleProviderOptions = [
+    { label: 'Kiro / BuilderID', value: 'BuilderID' },
+    { label: 'OpenAI', value: 'OpenAI' },
+    { label: 'OpenAI-compatible', value: 'OpenAI-compatible' },
+    { label: 'Anthropic', value: 'Anthropic' },
+    { label: 'Google / Gemini', value: 'Google' },
+    { label: 'Codex', value: 'codex' },
+  ];
+
+  function disabledSchedulePayload() {
+    return {
+      ...disabledScheduleForm,
+      prompt: disabledScheduleForm.prompt?.trim() || null,
+      providers: [...disabledScheduleForm.providers],
+    };
+  }
+
+  async function persistDisabledSchedule(showMessage: boolean) {
+    disabledScheduleSaving.value = true;
+    try {
+      const settings = await accountsApi.updateSettings({
+        disabledAccountScheduledTest: disabledSchedulePayload(),
+      });
+      accountSettings.value = {
+        ...settings,
+        disabledAccountScheduledTest: normalizeDisabledSchedule(settings.disabledAccountScheduledTest),
+      };
+      Object.assign(disabledScheduleForm, accountSettings.value.disabledAccountScheduledTest);
+      if (showMessage) {
+        ElMessage.success('已保存停用账号定时复检策略');
+      }
+      return true;
+    } catch (err) {
+      if (err instanceof ApiError) ElMessage.error(err.message);
+      return false;
+    } finally {
+      disabledScheduleSaving.value = false;
+    }
+  }
+
+  async function saveDisabledSchedule() {
+    await persistDisabledSchedule(true);
+  }
+
+  async function runDisabledScheduleNow() {
+    disabledScheduleRunning.value = true;
+    try {
+      const saved = await persistDisabledSchedule(false);
+      if (!saved) return;
+      const result = await accountsApi.runDisabledScheduledTest();
+      const nextResults = { ...latestTestResults.value };
+      result.items.forEach((item) => {
+        nextResults[item.accountId] = item;
+      });
+      latestTestResults.value = nextResults;
+      testDetail.value = result.items.find((item) => item.status === 'FAILED') ?? result.items[0] ?? null;
+      testDetailVisible.value = Boolean(testDetail.value);
+      ElMessage.success(`复检完成：成功 ${result.success}，失败 ${result.failed}，跳过 ${result.skipped}`);
+      await loadAccounts();
+    } catch (err) {
+      if (err instanceof ApiError) ElMessage.error(err.message);
+    } finally {
+      disabledScheduleRunning.value = false;
     }
   }
 
@@ -1060,6 +1168,93 @@
       </div>
     </div>
 
+    <div class="scheduled-test-panel glass-panel">
+      <div class="scheduled-test-panel__head">
+        <div>
+          <div class="scheduled-test-panel__title">停用账号定时复检</div>
+          <div class="scheduled-test-panel__desc">
+            定时测试已停用、挂起或配额异常账号；开启“更新状态”后，测试成功会自动恢复账号。
+          </div>
+        </div>
+        <div class="scheduled-test-panel__switch">
+          <span>{{ disabledScheduleForm.enabled ? '已开启' : '已关闭' }}</span>
+          <el-switch v-model="disabledScheduleForm.enabled" />
+        </div>
+      </div>
+
+      <el-form class="scheduled-test-form" label-position="top" size="small">
+        <el-form-item label="调度方式">
+          <el-segmented
+            v-model="disabledScheduleForm.scheduleMode"
+            :options="[
+              { label: '固定间隔', value: 'interval' },
+              { label: 'Cron', value: 'cron' },
+            ]"
+          />
+        </el-form-item>
+        <el-form-item v-if="disabledScheduleForm.scheduleMode !== 'cron'" label="间隔分钟">
+          <el-input-number v-model="disabledScheduleForm.intervalMinutes" :min="1" :max="10080" controls-position="right" />
+        </el-form-item>
+        <el-form-item v-else label="Cron 表达式">
+          <el-input v-model="disabledScheduleForm.cronExpression" placeholder="0 */30 * * * *" />
+        </el-form-item>
+        <el-form-item label="时区">
+          <el-input v-model="disabledScheduleForm.timezone" placeholder="Asia/Shanghai" />
+        </el-form-item>
+        <el-form-item label="启动延迟分钟">
+          <el-input-number v-model="disabledScheduleForm.initialDelayMinutes" :min="0" :max="1440" controls-position="right" />
+        </el-form-item>
+        <el-form-item label="每批账号数">
+          <el-input-number v-model="disabledScheduleForm.maxAccountsPerRun" :min="1" :max="1000" controls-position="right" />
+        </el-form-item>
+        <el-form-item label="并发数">
+          <el-input-number v-model="disabledScheduleForm.maxConcurrency" :min="1" :max="16" controls-position="right" />
+        </el-form-item>
+        <el-form-item label="模型">
+          <el-input v-model="disabledScheduleForm.model" placeholder="auto" />
+        </el-form-item>
+        <el-form-item label="停用多久后测试">
+          <el-input-number v-model="disabledScheduleForm.minAgeMinutes" :min="0" :max="43200" controls-position="right" />
+        </el-form-item>
+        <el-form-item class="scheduled-test-form__wide" label="平台过滤">
+          <el-select
+            v-model="disabledScheduleForm.providers"
+            multiple
+            filterable
+            allow-create
+            default-first-option
+            placeholder="留空表示全部平台"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="item in disabledScheduleProviderOptions"
+              :key="item.value"
+              :label="item.label"
+              :value="item.value"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item class="scheduled-test-form__wide" label="提示词">
+          <el-input v-model="disabledScheduleForm.prompt" placeholder="留空使用默认测试提示词" />
+        </el-form-item>
+        <div class="scheduled-test-form__checks">
+          <el-checkbox v-model="disabledScheduleForm.includeDisabled">包含手动停用</el-checkbox>
+          <el-checkbox v-model="disabledScheduleForm.includeSuspended">包含挂起账号</el-checkbox>
+          <el-checkbox v-model="disabledScheduleForm.includeQuotaExhausted">包含配额耗尽</el-checkbox>
+          <el-checkbox v-model="disabledScheduleForm.updateStatus">成功后恢复账号状态</el-checkbox>
+        </div>
+      </el-form>
+
+      <div class="scheduled-test-panel__actions">
+        <el-button :loading="disabledScheduleRunning" @click="runDisabledScheduleNow">
+          立即执行一次
+        </el-button>
+        <el-button type="primary" :loading="disabledScheduleSaving" @click="saveDisabledSchedule">
+          保存复检策略
+        </el-button>
+      </div>
+    </div>
+
     <el-table v-loading="loading" :data="visibleAccounts" stripe>
       <el-table-column label="账号类型" width="160">
         <template #default="{ row }">
@@ -1627,6 +1822,64 @@
 </template>
 
 <style scoped lang="scss">
+  .scheduled-test-panel {
+    display: grid;
+    gap: 14px;
+    margin-bottom: 16px;
+    padding: 16px;
+
+    &__head,
+    &__actions {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    &__title {
+      font-weight: 800;
+      color: var(--kp-text-primary);
+    }
+
+    &__desc {
+      margin-top: 4px;
+      color: var(--kp-text-secondary);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    &__switch {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--kp-text-secondary);
+      font-weight: 700;
+    }
+  }
+
+  .scheduled-test-form {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 2px 12px;
+
+    :deep(.el-form-item) {
+      margin-bottom: 10px;
+    }
+
+    &__wide,
+    &__checks {
+      grid-column: 1 / -1;
+    }
+
+    &__checks {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px 18px;
+      padding-top: 2px;
+    }
+  }
+
   .row-test-panel {
     display: grid;
     gap: 10px;

@@ -102,13 +102,38 @@ public final class AccountDtos {
     }
 
     public record AccountSettingsResponse(
-        Boolean gptFastModeEnabled
+        Boolean gptFastModeEnabled,
+        DisabledAccountScheduledTestSettings disabledAccountScheduledTest
     ) {
     }
 
     public record UpdateAccountSettingsRequest(
-        Boolean gptFastModeEnabled
+        Boolean gptFastModeEnabled,
+        DisabledAccountScheduledTestSettings disabledAccountScheduledTest
     ) {
+    }
+
+    public record DisabledAccountScheduledTestSettings(
+        Boolean enabled,
+        String scheduleMode,
+        Integer intervalMinutes,
+        String cronExpression,
+        String timezone,
+        Integer initialDelayMinutes,
+        Integer maxConcurrency,
+        Integer maxAccountsPerRun,
+        String model,
+        String prompt,
+        Boolean updateStatus,
+        Boolean includeDisabled,
+        Boolean includeSuspended,
+        Boolean includeQuotaExhausted,
+        Integer minAgeMinutes,
+        List<String> providers
+    ) {
+        public DisabledAccountScheduledTestSettings {
+            providers = providers == null ? List.of() : List.copyOf(providers);
+        }
     }
 
     public record ImportAccountsRequest(

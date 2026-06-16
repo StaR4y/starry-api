@@ -62,6 +62,11 @@ export const accountsApi = {
       http.post<ApiResponse<TestAccountsResult>>('/admin/accounts/test', payload),
     );
   },
+  runDisabledScheduledTest() {
+    return unwrap<TestAccountsResult>(
+      http.post<ApiResponse<TestAccountsResult>>('/admin/accounts/disabled-scheduled-test/run'),
+    );
+  },
   testModels() {
     return unwrap<TestModelOptionsResult>(
       http.get<ApiResponse<TestModelOptionsResult>>('/admin/accounts/test-models'),

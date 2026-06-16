@@ -240,10 +240,31 @@ export type UpdateAccountRequest = Partial<
 
 export interface AccountSettings {
   gptFastModeEnabled: boolean;
+  disabledAccountScheduledTest: DisabledAccountScheduledTestSettings;
 }
 
 export interface UpdateAccountSettingsRequest {
   gptFastModeEnabled?: boolean;
+  disabledAccountScheduledTest?: Partial<DisabledAccountScheduledTestSettings>;
+}
+
+export interface DisabledAccountScheduledTestSettings {
+  enabled: boolean;
+  scheduleMode: 'interval' | 'cron' | string;
+  intervalMinutes: number;
+  cronExpression: string;
+  timezone: string;
+  initialDelayMinutes: number;
+  maxConcurrency: number;
+  maxAccountsPerRun: number;
+  model: string;
+  prompt: string | null;
+  updateStatus: boolean;
+  includeDisabled: boolean;
+  includeSuspended: boolean;
+  includeQuotaExhausted: boolean;
+  minAgeMinutes: number;
+  providers: string[];
 }
 
 export interface SuspendAccountRequest {

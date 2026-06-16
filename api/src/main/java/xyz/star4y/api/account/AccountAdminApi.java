@@ -70,6 +70,9 @@ public interface AccountAdminApi {
         @RequestBody AccountDtos.TestAccountsRequest request
     );
 
+    @PostMapping("/disabled-scheduled-test/run")
+    Mono<ApiResponse<AccountDtos.TestAccountsResponse>> runDisabledScheduledTest(ServerWebExchange exchange);
+
     @GetMapping("/test-models")
     Mono<ApiResponse<AccountDtos.TestModelOptionsResponse>> testModels(ServerWebExchange exchange);
 

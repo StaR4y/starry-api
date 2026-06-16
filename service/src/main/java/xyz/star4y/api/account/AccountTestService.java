@@ -26,7 +26,7 @@ import xyz.star4y.api.platform.upstream.UpstreamException;
 public class AccountTestService {
 
     private static final int DEFAULT_CONCURRENCY = 3;
-    private static final int MAX_CONCURRENCY = 8;
+    private static final int MAX_CONCURRENCY = 16;
     private static final String DEFAULT_MODEL = "auto";
     private static final String DEFAULT_PROMPT = "Reply OK in one short sentence.";
     private static final String DEFAULT_OPENAI_API_KEY_TEST_MODEL = OpenAiAccountTestClient.DEFAULT_CODEX_TEST_MODEL;
