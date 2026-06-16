@@ -10,6 +10,7 @@ WEBUI_DIST_NAME="${WEBUI_DIST_NAME:-starry-api-webui.tar.gz}"
 COMPOSE_NAME="${COMPOSE_NAME:-docker-compose.artifact.yml}"
 CHECKSUMS_NAME="${CHECKSUMS_NAME:-sha256sums.txt}"
 RUN_TESTS="${RUN_TESTS:-true}"
+SKIP_BUILD="${SKIP_BUILD:-false}"
 COMMIT_ARTIFACTS="${COMMIT_ARTIFACTS:-false}"
 PUSH_ARTIFACTS="${PUSH_ARTIFACTS:-false}"
 BUILD_WITH_DOCKER="${BUILD_WITH_DOCKER:-auto}"
@@ -165,7 +166,7 @@ use_docker_build() {
 }
 
 source_tree_dirty() {
-  git status --porcelain --untracked-files=all -- . ":(exclude)${ARTIFACT_DIR}" | grep -q .
+  git status --porcelain --untracked-files=no -- . ":(exclude)${ARTIFACT_DIR}" | grep -q .
 }
 
 build_with_gradle() {
@@ -236,7 +237,9 @@ main() {
     dirty=false
   fi
 
-  if use_docker_build; then
+  if [[ "$SKIP_BUILD" == "true" ]]; then
+    log "Skipping build step; using existing service/build/libs and webui/dist outputs."
+  elif use_docker_build; then
     build_with_docker
   else
     has_java || fail "Java is not available. Install JDK 25, set JAVA_HOME, or run with BUILD_WITH_DOCKER=true."
