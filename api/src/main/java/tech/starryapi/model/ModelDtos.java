@@ -60,7 +60,9 @@ public final class ModelDtos {
         String billingMode,
         BigDecimal tokensPer100Balance,
         BigDecimal inputTokensPer100Balance,
-        BigDecimal outputTokensPer100Balance
+        BigDecimal outputTokensPer100Balance,
+        BigDecimal cacheWriteTokensPer100Balance,
+        BigDecimal cacheReadTokensPer100Balance
     ) {
         public ModelListItem {
             supportedInputTypes = supportedInputTypes == null ? List.of() : List.copyOf(supportedInputTypes);
@@ -89,7 +91,9 @@ public final class ModelDtos {
                 pricing.billingMode(),
                 pricing.tokensPer100Balance(),
                 pricing.inputTokensPer100Balance(),
-                pricing.outputTokensPer100Balance()
+                pricing.outputTokensPer100Balance(),
+                pricing.cacheWriteTokensPer100Balance(),
+                pricing.cacheReadTokensPer100Balance()
             );
         }
     }
@@ -98,8 +102,18 @@ public final class ModelDtos {
         String billingMode,
         BigDecimal tokensPer100Balance,
         BigDecimal inputTokensPer100Balance,
-        BigDecimal outputTokensPer100Balance
+        BigDecimal outputTokensPer100Balance,
+        BigDecimal cacheWriteTokensPer100Balance,
+        BigDecimal cacheReadTokensPer100Balance
     ) {
+        public ModelPublicPricing(
+            String billingMode,
+            BigDecimal tokensPer100Balance,
+            BigDecimal inputTokensPer100Balance,
+            BigDecimal outputTokensPer100Balance
+        ) {
+            this(billingMode, tokensPer100Balance, inputTokensPer100Balance, outputTokensPer100Balance, null, null);
+        }
     }
 
     public record CreateMappingRequest(
@@ -146,9 +160,13 @@ public final class ModelDtos {
         String modelPattern,
         BigDecimal inputMultiplier,
         BigDecimal outputMultiplier,
+        BigDecimal cacheWriteMultiplier,
+        BigDecimal cacheReadMultiplier,
         BigDecimal totalMultiplier,
         BigDecimal inputPricePerMillionTokens,
         BigDecimal outputPricePerMillionTokens,
+        BigDecimal cacheWritePricePerMillionTokens,
+        BigDecimal cacheReadPricePerMillionTokens,
         BigDecimal totalPricePerMillionTokens,
         Integer priority,
         Instant createdAt,
@@ -170,12 +188,45 @@ public final class ModelDtos {
         @NotBlank String modelPattern,
         BigDecimal inputMultiplier,
         BigDecimal outputMultiplier,
+        BigDecimal cacheWriteMultiplier,
+        BigDecimal cacheReadMultiplier,
         BigDecimal totalMultiplier,
         BigDecimal inputPricePerMillionTokens,
         BigDecimal outputPricePerMillionTokens,
+        BigDecimal cacheWritePricePerMillionTokens,
+        BigDecimal cacheReadPricePerMillionTokens,
         BigDecimal totalPricePerMillionTokens,
         Integer priority
     ) {
+        public UpdateModelPricingRuleRequest(
+            String ruleId,
+            Boolean enabled,
+            String modelPattern,
+            BigDecimal inputMultiplier,
+            BigDecimal outputMultiplier,
+            BigDecimal totalMultiplier,
+            BigDecimal inputPricePerMillionTokens,
+            BigDecimal outputPricePerMillionTokens,
+            BigDecimal totalPricePerMillionTokens,
+            Integer priority
+        ) {
+            this(
+                ruleId,
+                enabled,
+                modelPattern,
+                inputMultiplier,
+                outputMultiplier,
+                null,
+                null,
+                totalMultiplier,
+                inputPricePerMillionTokens,
+                outputPricePerMillionTokens,
+                null,
+                null,
+                totalPricePerMillionTokens,
+                priority
+            );
+        }
     }
 
     public record UpdateModelPricingRequest(

@@ -96,6 +96,8 @@ public interface ModelCatalogProvider {
             null,
             null,
             null,
+            null,
+            null,
             null
         );
     }

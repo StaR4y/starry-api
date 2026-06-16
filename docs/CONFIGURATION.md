@@ -112,6 +112,8 @@ The settings follow the sub2api-style keys stored in `system_settings`:
 | `EASYPAY_API_BASE`, `EASYPAY_PID`, `EASYPAY_PKEY` | EasyPay gateway URL and merchant credentials. |
 | `EASYPAY_PAYMENT_MODE` | `popup` for submit-page redirect, `qrcode` for `mapi.php`. |
 
+Model-specific pricing is managed from `模型价格`. The admin form has two modes: total pricing is entered as an equivalent multiplier (`x`) against the current `API_BILLING_MULTIPLIER` baseline, while split pricing follows the sub2api/LiteLLM style with input, output, cache-write, and cache-read prices entered as balance per 1M tokens (`余额/MTok`). The one-click preset action replaces the current rule list with a compact wildcard catalog for OpenAI, Anthropic, Gemini/Google, and a global fallback. Runtime billing either applies the total multiplier to all billable tokens or itemizes those token classes before deducting balance.
+
 `EASYPAY_PKEY` is only accepted from the admin update API and is never returned to the WebUI; the admin page only shows whether it has already been configured.
 
 ## Performance Metrics

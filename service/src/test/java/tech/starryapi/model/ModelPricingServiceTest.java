@@ -67,6 +67,41 @@ class ModelPricingServiceTest {
     }
 
     @Test
+    void chargesCacheReadAndWriteWithSub2ApiStyleItemizedPrices() {
+        Map<String, String> store = new ConcurrentHashMap<>();
+        SystemSettingRepository repository = mockRepository(store);
+        ModelPricingService service = new ModelPricingService(repository, objectMapper);
+
+        service.update(new ModelDtos.UpdateModelPricingRequest(List.of(
+            new ModelDtos.UpdateModelPricingRuleRequest(
+                null,
+                true,
+                "gpt-5.4",
+                null,
+                null,
+                null,
+                null,
+                null,
+                new BigDecimal("2.5"),
+                new BigDecimal("15"),
+                new BigDecimal("2.5"),
+                new BigDecimal("0.25"),
+                null,
+                10
+            )
+        ))).block();
+
+        BigDecimal cost = service.cost(
+            "gpt-5.4",
+            new PlatformUsage(1_000_000, 1_000_000, BigDecimal.ZERO, 1_000_000, 1_000_000, 0),
+            false,
+            BigDecimal.ONE
+        ).block();
+
+        assertThat(cost).isEqualByComparingTo("20.250000");
+    }
+
+    @Test
     void usesPriorityAndTotalMultiplierWhenMultipleRulesMatch() {
         Map<String, String> store = new ConcurrentHashMap<>();
         SystemSettingRepository repository = mockRepository(store);
@@ -88,7 +123,7 @@ class ModelPricingServiceTest {
     }
 
     @Test
-    void chargesTotalPricePerMillionTokens() {
+    void chargesTotalMultiplier() {
         Map<String, String> store = new ConcurrentHashMap<>();
         SystemSettingRepository repository = mockRepository(store);
         ModelPricingService service = new ModelPricingService(repository, objectMapper);
@@ -100,16 +135,17 @@ class ModelPricingServiceTest {
                 "*",
                 null,
                 null,
+                PaymentSettingsService.DEFAULT_API_BILLING_MULTIPLIER,
                 null,
                 null,
                 null,
-                new BigDecimal("16.6666666667"),
                 100
             )
         ))).block();
 
         assertThat(response).isNotNull();
-        assertThat(response.rules().getFirst().totalPricePerMillionTokens()).isEqualByComparingTo("16.6666666667");
+        assertThat(response.rules().getFirst().totalMultiplier())
+            .isEqualByComparingTo(PaymentSettingsService.DEFAULT_API_BILLING_MULTIPLIER);
 
         BigDecimal cost = service.cost(
             "gpt-5.4-mini",

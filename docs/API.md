@@ -195,11 +195,18 @@ The model list is OpenAI-compatible and includes platform metadata. It keeps leg
       "maxInputTokens": 200000,
       "maxOutputTokens": 64000,
       "context_length": 200000,
-      "max_output_tokens": 64000
+      "max_output_tokens": 64000,
+      "billingMode": "input_output",
+      "inputTokensPer100Balance": 66666666,
+      "outputTokensPer100Balance": 6666666,
+      "cacheWriteTokensPer100Balance": 53333333,
+      "cacheReadTokensPer100Balance": 333333333
     }
   ]
 }
 ```
+
+When model-specific pricing is configured, public model entries expose user-facing token capacity per 100 balance. Administrators configure total model pricing in `模型价格` as an equivalent multiplier (`x`) against the current billing baseline, or configure split input/output/cache prices as balance per 1M tokens in the sub2api/LiteLLM style; ordinary users only see token capacity. The admin preset action uses a sub2api-style wildcard catalog, so pricing can be reset in one operation without creating one rule for every discovered model ID.
 
 Current provider groups:
 

@@ -42,6 +42,8 @@ public class ModelPricingService {
     private static final int TOKENS_PER_100_BALANCE_SCALE = 0;
     private static final BigDecimal DISPLAY_BALANCE_UNIT = BigDecimal.valueOf(100);
     private static final BigDecimal TOKENS_PER_MILLION = BigDecimal.valueOf(1_000_000);
+    private static final BigDecimal FAST_MODE_MULTIPLIER = BigDecimal.valueOf(2);
+    private static final BigDecimal DEFAULT_CACHE_READ_RATIO = new BigDecimal("0.1");
     private static final String BILLING_MODE_TOTAL = "total";
     private static final String BILLING_MODE_INPUT_OUTPUT = "input_output";
 
@@ -165,7 +167,9 @@ public class ModelPricingService {
                 BILLING_MODE_INPUT_OUTPUT,
                 null,
                 tokensPer100Balance(matchedRule.inputMultiplier()),
-                tokensPer100Balance(matchedRule.outputMultiplier())
+                tokensPer100Balance(matchedRule.outputMultiplier()),
+                tokensPer100Balance(effectiveCacheWriteMultiplier(matchedRule)),
+                tokensPer100Balance(effectiveCacheReadMultiplier(matchedRule))
             );
         }
         return totalPublicPricing(fallbackMultiplier);
@@ -191,29 +195,68 @@ public class ModelPricingService {
         if (positive(rule.totalMultiplier())) {
             return totalCost(usage, fastMode, rule.totalMultiplier());
         }
-        if (usage.totalTokens() <= 0) {
+        if (billableTokenUnits(usage).signum() <= 0) {
             return totalCost(usage, fastMode, fallbackMultiplier);
         }
-        BigDecimal inputCost = BigDecimal.valueOf(Math.max(0, usage.inputTokens())).multiply(rule.inputMultiplier());
-        BigDecimal outputCost = BigDecimal.valueOf(Math.max(0, usage.outputTokens())).multiply(rule.outputMultiplier());
-        BigDecimal cost = inputCost.add(outputCost);
+        BigDecimal inputCost = tokenCost(usage.inputTokens(), rule.inputMultiplier());
+        BigDecimal outputCost = tokenCost(usage.outputTokens(), rule.outputMultiplier());
+        BigDecimal cacheWriteCost = tokenCost(usage.cacheWriteTokens(), effectiveCacheWriteMultiplier(rule));
+        BigDecimal cacheReadCost = tokenCost(usage.cacheReadTokens(), effectiveCacheReadMultiplier(rule));
+        BigDecimal cost = inputCost.add(outputCost).add(cacheWriteCost).add(cacheReadCost);
         if (fastMode) {
-            cost = cost.multiply(BigDecimal.valueOf(2));
+            cost = cost.multiply(FAST_MODE_MULTIPLIER);
         }
         return cost.setScale(6, RoundingMode.HALF_UP);
     }
 
     private BigDecimal totalCost(PlatformUsage usage, boolean fastMode, BigDecimal multiplier) {
-        BigDecimal units = usage.totalTokens() > 0
-            ? BigDecimal.valueOf(usage.totalTokens())
+        BigDecimal units = billableTokenUnits(usage).signum() > 0
+            ? billableTokenUnits(usage)
             : usage.credits() == null ? BigDecimal.ZERO : usage.credits();
         if (fastMode) {
-            units = units.multiply(BigDecimal.valueOf(2));
+            units = units.multiply(FAST_MODE_MULTIPLIER);
         }
         BigDecimal safeMultiplier = positive(multiplier)
             ? multiplier
             : PaymentSettingsService.DEFAULT_API_BILLING_MULTIPLIER;
         return units.multiply(safeMultiplier).setScale(6, RoundingMode.HALF_UP);
+    }
+
+    private BigDecimal tokenCost(long tokens, BigDecimal multiplier) {
+        if (tokens <= 0 || !positive(multiplier)) {
+            return BigDecimal.ZERO;
+        }
+        return BigDecimal.valueOf(tokens).multiply(multiplier);
+    }
+
+    private BigDecimal billableTokenUnits(PlatformUsage usage) {
+        if (usage == null) {
+            return BigDecimal.ZERO;
+        }
+        long units = Math.max(0, usage.inputTokens())
+            + Math.max(0, usage.outputTokens())
+            + Math.max(0, usage.cacheWriteTokens())
+            + Math.max(0, usage.cacheReadTokens());
+        return BigDecimal.valueOf(units);
+    }
+
+    private BigDecimal effectiveCacheWriteMultiplier(ModelPricingRule rule) {
+        if (rule == null) {
+            return null;
+        }
+        return positive(rule.cacheWriteMultiplier()) ? rule.cacheWriteMultiplier() : rule.inputMultiplier();
+    }
+
+    private BigDecimal effectiveCacheReadMultiplier(ModelPricingRule rule) {
+        if (rule == null) {
+            return null;
+        }
+        if (positive(rule.cacheReadMultiplier())) {
+            return rule.cacheReadMultiplier();
+        }
+        return positive(rule.inputMultiplier())
+            ? rule.inputMultiplier().multiply(DEFAULT_CACHE_READ_RATIO).setScale(MULTIPLIER_SCALE, RoundingMode.HALF_UP)
+            : null;
     }
 
     private ModelDtos.ModelPublicPricing totalPublicPricing(BigDecimal multiplier) {
@@ -261,6 +304,8 @@ public class ModelPricingService {
         BigDecimal totalMultiplier = normalizeStoredMultiplier(rule.totalMultiplier());
         BigDecimal inputMultiplier = normalizeStoredMultiplier(rule.inputMultiplier());
         BigDecimal outputMultiplier = normalizeStoredMultiplier(rule.outputMultiplier());
+        BigDecimal cacheWriteMultiplier = normalizeStoredMultiplier(rule.cacheWriteMultiplier());
+        BigDecimal cacheReadMultiplier = normalizeStoredMultiplier(rule.cacheReadMultiplier());
         if (!positive(totalMultiplier) && (!positive(inputMultiplier) || !positive(outputMultiplier))) {
             return null;
         }
@@ -270,6 +315,8 @@ public class ModelPricingService {
             pattern,
             inputMultiplier,
             outputMultiplier,
+            cacheWriteMultiplier,
+            cacheReadMultiplier,
             totalMultiplier,
             rule.priority() == null ? 100 : rule.priority(),
             rule.createdAt(),
@@ -296,10 +343,9 @@ public class ModelPricingService {
                 "Model pattern must be at most " + MAX_MODEL_PATTERN_LENGTH + " characters"
             );
         }
-        BigDecimal totalMultiplier = normalizeRequestMultiplier(
-            request.totalPricePerMillionTokens(),
+        BigDecimal totalMultiplier = normalizeTotalRequestMultiplier(
             request.totalMultiplier(),
-            "totalPricePerMillionTokens"
+            request.totalPricePerMillionTokens()
         );
         BigDecimal inputMultiplier = normalizeRequestMultiplier(
             request.inputPricePerMillionTokens(),
@@ -311,11 +357,21 @@ public class ModelPricingService {
             request.outputMultiplier(),
             "outputPricePerMillionTokens"
         );
+        BigDecimal cacheWriteMultiplier = normalizeRequestMultiplier(
+            request.cacheWritePricePerMillionTokens(),
+            request.cacheWriteMultiplier(),
+            "cacheWritePricePerMillionTokens"
+        );
+        BigDecimal cacheReadMultiplier = normalizeRequestMultiplier(
+            request.cacheReadPricePerMillionTokens(),
+            request.cacheReadMultiplier(),
+            "cacheReadPricePerMillionTokens"
+        );
         if (!positive(totalMultiplier) && (!positive(inputMultiplier) || !positive(outputMultiplier))) {
             throw new ApiException(
                 HttpStatus.BAD_REQUEST,
                 "MODEL_PRICE_REQUIRED",
-                "Configure totalPricePerMillionTokens, or both inputPricePerMillionTokens and outputPricePerMillionTokens"
+                "Configure totalMultiplier, or both inputPricePerMillionTokens and outputPricePerMillionTokens"
             );
         }
         String requestedRuleId = clean(request.ruleId());
@@ -327,6 +383,8 @@ public class ModelPricingService {
             pattern,
             inputMultiplier,
             outputMultiplier,
+            cacheWriteMultiplier,
+            cacheReadMultiplier,
             totalMultiplier,
             request.priority() == null ? 100 : request.priority(),
             previous == null || previous.createdAt() == null ? now : previous.createdAt(),
@@ -344,9 +402,13 @@ public class ModelPricingService {
                     rule.modelPattern(),
                     rule.inputMultiplier(),
                     rule.outputMultiplier(),
+                    rule.cacheWriteMultiplier(),
+                    rule.cacheReadMultiplier(),
                     rule.totalMultiplier(),
                     pricePerMillion(rule.inputMultiplier()),
                     pricePerMillion(rule.outputMultiplier()),
+                    pricePerMillion(rule.cacheWriteMultiplier()),
+                    pricePerMillion(rule.cacheReadMultiplier()),
                     pricePerMillion(rule.totalMultiplier()),
                     rule.priority(),
                     rule.createdAt(),
@@ -421,6 +483,13 @@ public class ModelPricingService {
         return value.setScale(MULTIPLIER_SCALE, RoundingMode.HALF_UP);
     }
 
+    private BigDecimal normalizeTotalRequestMultiplier(BigDecimal multiplier, BigDecimal legacyPricePerMillion) {
+        if (multiplier != null) {
+            return normalizeRequestMultiplier(null, multiplier, "totalMultiplier");
+        }
+        return normalizeRequestMultiplier(legacyPricePerMillion, null, "totalPricePerMillionTokens");
+    }
+
     private BigDecimal normalizeStoredMultiplier(BigDecimal value) {
         return value == null || value.compareTo(BigDecimal.ZERO) <= 0
             ? null
@@ -462,6 +531,8 @@ public class ModelPricingService {
         String modelPattern,
         BigDecimal inputMultiplier,
         BigDecimal outputMultiplier,
+        BigDecimal cacheWriteMultiplier,
+        BigDecimal cacheReadMultiplier,
         BigDecimal totalMultiplier,
         Integer priority,
         Instant createdAt,

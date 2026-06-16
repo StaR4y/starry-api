@@ -440,9 +440,13 @@ export interface ModelPricingRule {
   modelPattern: string;
   inputMultiplier: number | null;
   outputMultiplier: number | null;
+  cacheWriteMultiplier: number | null;
+  cacheReadMultiplier: number | null;
   totalMultiplier: number | null;
   inputPricePerMillionTokens: number | null;
   outputPricePerMillionTokens: number | null;
+  cacheWritePricePerMillionTokens: number | null;
+  cacheReadPricePerMillionTokens: number | null;
   totalPricePerMillionTokens: number | null;
   priority: number;
   createdAt: string | null;
@@ -459,10 +463,13 @@ export interface UpdateModelPricingRuleRequest {
   modelPattern: string;
   inputMultiplier?: number | null;
   outputMultiplier?: number | null;
+  cacheWriteMultiplier?: number | null;
+  cacheReadMultiplier?: number | null;
   totalMultiplier?: number | null;
   inputPricePerMillionTokens?: number | null;
   outputPricePerMillionTokens?: number | null;
-  totalPricePerMillionTokens?: number | null;
+  cacheWritePricePerMillionTokens?: number | null;
+  cacheReadPricePerMillionTokens?: number | null;
   priority?: number;
 }
 
@@ -524,6 +531,8 @@ export interface ModelInfo {
   tokensPer100Balance?: number | null;
   inputTokensPer100Balance?: number | null;
   outputTokensPer100Balance?: number | null;
+  cacheWriteTokensPer100Balance?: number | null;
+  cacheReadTokensPer100Balance?: number | null;
 }
 
 export interface HealthInfo {

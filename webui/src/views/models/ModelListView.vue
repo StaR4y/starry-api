@@ -206,7 +206,9 @@
     if (model.inputTokensPer100Balance != null || model.outputTokensPer100Balance != null) {
       const input = model.inputTokensPer100Balance == null ? '-' : model.inputTokensPer100Balance.toLocaleString();
       const output = model.outputTokensPer100Balance == null ? '-' : model.outputTokensPer100Balance.toLocaleString();
-      return `100 余额约可用：输入 ${input} token / 输出 ${output} token`;
+      const cacheWrite = model.cacheWriteTokensPer100Balance == null ? '-' : model.cacheWriteTokensPer100Balance.toLocaleString();
+      const cacheRead = model.cacheReadTokensPer100Balance == null ? '-' : model.cacheReadTokensPer100Balance.toLocaleString();
+      return `100 余额约可用：输入 ${input} token / 输出 ${output} token / 缓存写入 ${cacheWrite} token / 缓存读取 ${cacheRead} token`;
     }
     return '未配置模型价格，使用全局计费倍率';
   }
