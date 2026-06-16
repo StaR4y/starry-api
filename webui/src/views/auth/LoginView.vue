@@ -87,6 +87,11 @@
     return `允许邮箱后缀：${allowedEmailSuffixes.value.join('、')}`;
   });
 
+  const showRegisterDetails = computed(() => {
+    if (!emailVerifyEnabled.value) return true;
+    return Boolean(registerForm.emailVerificationToken) || (inviteCodeEnabled.value && Boolean(registerForm.inviteCode));
+  });
+
   async function loadRegistrationSettings() {
     try {
       const settings = await authApi.registrationSettings();
@@ -369,13 +374,10 @@
         :model="registerForm"
         :rules="registerRules"
         label-position="top"
-        @submit.prevent="submitRegister"
+        @submit.prevent="showRegisterDetails ? submitRegister : sendVerifyCode"
       >
-        <el-form-item label="用户名" prop="username">
-          <el-input v-model="registerForm.username" autocomplete="username" />
-        </el-form-item>
         <el-form-item label="邮箱" prop="email">
-          <el-input v-model="registerForm.email" autocomplete="email" />
+          <el-input v-model="registerForm.email" :disabled="Boolean(registerForm.emailVerificationToken)" autocomplete="email" />
           <div class="login__register-hint">{{ registrationHint }}</div>
         </el-form-item>
         <el-form-item v-if="inviteCodeEnabled" label="邀请码">
@@ -391,47 +393,52 @@
           title="邮箱链接已验证，请补全账号信息完成注册。"
         />
         <el-form-item
-          v-if="emailVerifyEnabled && !registerForm.inviteCode && !registerForm.emailVerificationToken"
-          label="邮箱注册链接"
-        >
-          <div class="login__verify-row">
-            <el-input :model-value="registerForm.email" disabled placeholder="请先填写邮箱" />
-            <el-button
-              :disabled="verifyCodeCountdown > 0"
-              :loading="verifyCodeSending"
-              @click="sendVerifyCode"
-            >
-              {{ verifyCodeCountdown > 0 ? `${verifyCodeCountdown}s` : '发送注册链接' }}
-            </el-button>
-          </div>
-          <div class="login__register-hint">注册链接 10 分钟内有效且只能使用一次。</div>
-        </el-form-item>
-        <el-form-item
           v-if="turnstileEnabled && !registerForm.emailVerificationToken"
           label="人机验证"
         >
           <div ref="turnstileContainerRef" class="login__turnstile"></div>
           <div v-if="!turnstileSiteKey" class="login__register-hint">管理员尚未配置 Cloudflare Turnstile Site Key。</div>
         </el-form-item>
-        <el-form-item label="显示名">
-          <el-input v-model="registerForm.displayName" />
-        </el-form-item>
-        <el-form-item label="密码" prop="password">
-          <el-input v-model="registerForm.password" type="password" show-password autocomplete="new-password" />
-        </el-form-item>
-        <el-form-item label="确认密码" prop="confirm">
-          <el-input
-            v-model="registerForm.confirm"
-            type="password"
-            show-password
-            autocomplete="new-password"
-            @keyup.enter="submitRegister"
-          />
-        </el-form-item>
+        <template v-if="showRegisterDetails">
+          <el-form-item label="用户名" prop="username">
+            <el-input v-model="registerForm.username" autocomplete="username" />
+          </el-form-item>
+          <el-form-item label="显示名">
+            <el-input v-model="registerForm.displayName" />
+          </el-form-item>
+          <el-form-item label="密码" prop="password">
+            <el-input v-model="registerForm.password" type="password" show-password autocomplete="new-password" />
+          </el-form-item>
+          <el-form-item label="确认密码" prop="confirm">
+            <el-input
+              v-model="registerForm.confirm"
+              type="password"
+              show-password
+              autocomplete="new-password"
+              @keyup.enter="submitRegister"
+            />
+          </el-form-item>
+        </template>
       </el-form>
       <template #footer>
         <el-button @click="registerVisible = false">取消</el-button>
-        <el-button type="primary" :loading="registerLoading" @click="submitRegister">注册</el-button>
+        <el-button 
+          v-if="!showRegisterDetails"
+          type="primary" 
+          :disabled="verifyCodeCountdown > 0"
+          :loading="verifyCodeSending" 
+          @click="sendVerifyCode"
+        >
+          {{ verifyCodeCountdown > 0 ? `${verifyCodeCountdown}s` : '发送注册链接' }}
+        </el-button>
+        <el-button 
+          v-else
+          type="primary" 
+          :loading="registerLoading" 
+          @click="submitRegister"
+        >
+          注册
+        </el-button>
       </template>
     </el-dialog>
 

@@ -243,20 +243,8 @@ public class RegistrationSettingsService {
             .defaultIfEmpty(fallback);
     }
 
-    private Mono<SystemSettingEntity> set(String key, String value) {
-        return repository.findById(key)
-            .defaultIfEmpty(newSetting(key))
-            .flatMap(entity -> {
-                entity.setSettingValue(value);
-                return repository.save(entity);
-            });
-    }
-
-    private SystemSettingEntity newSetting(String key) {
-        SystemSettingEntity entity = new SystemSettingEntity();
-        entity.setSettingKey(key);
-        entity.setSettingValue("");
-        return entity;
+    private Mono<Integer> set(String key, String value) {
+        return repository.upsertSetting(key, value == null ? "" : value);
     }
 
     private List<String> parseWhitelist(String raw) {

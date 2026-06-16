@@ -234,6 +234,16 @@
   }
 
   async function submitRegistrationSettings() {
+    const turnstileSiteKey = registrationSettings.turnstileSiteKey.trim();
+    const turnstileSecretKey = registrationSettings.turnstileSecretKey.trim();
+    if (registrationSettings.turnstileEnabled && !turnstileSiteKey) {
+      ElMessage.warning('请填写 Cloudflare Turnstile Site Key');
+      return;
+    }
+    if (registrationSettings.turnstileEnabled && !registrationSettings.turnstileSecretConfigured && !turnstileSecretKey) {
+      ElMessage.warning('请填写 Cloudflare Turnstile Secret Key');
+      return;
+    }
     registrationSettingsSubmitting.value = true;
     try {
       const settings = await usersApi.updateRegistrationSettings({
@@ -250,8 +260,8 @@
         smtpUseTls: registrationSettings.smtpUseTls,
         smtpSecurity: registrationSettings.smtpSecurity,
         turnstileEnabled: registrationSettings.turnstileEnabled,
-        turnstileSiteKey: registrationSettings.turnstileSiteKey,
-        turnstileSecretKey: registrationSettings.turnstileSecretKey || undefined,
+        turnstileSiteKey,
+        turnstileSecretKey: turnstileSecretKey || undefined,
       });
       registrationSettings.registrationEnabled = settings.registrationEnabled;
       registrationSettings.emailVerifyEnabled = settings.emailVerifyEnabled;

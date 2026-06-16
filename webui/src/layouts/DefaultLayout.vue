@@ -27,7 +27,7 @@
     { name: 'model-pricing', label: '模型价格', icon: '', adminOnly: true },
     { name: 'models', label: '模型 ID', icon: '' },
     { name: 'logs', label: '请求日志', icon: '', adminOnly: true },
-    { name: 'users', label: '账号', icon: '', adminOnly: true },
+    { name: 'users', label: '用户管理', icon: '', adminOnly: true },
     { name: 'payment-settings', label: '支付设置', icon: '', adminOnly: true },
     { name: 'redemption-codes', label: '兑换码', icon: '', adminOnly: true },
   ];
