@@ -115,6 +115,12 @@ class AccountSettingsServiceTest {
             store.put(entity.getSettingKey(), entity.getSettingValue());
             return Mono.just(entity);
         });
+        when(repository.upsertSetting(anyString(), anyString())).thenAnswer(invocation -> {
+            String key = invocation.getArgument(0);
+            String value = invocation.getArgument(1);
+            store.put(key, value);
+            return Mono.just(1);
+        });
         return repository;
     }
 
