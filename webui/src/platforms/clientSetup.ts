@@ -21,9 +21,9 @@ export type {
 
 const CODEX_MODEL = 'gpt-5.5';
 const CODEX_REVIEW_MODEL = 'gpt-5.5';
-const CLAUDE_MODEL = 'claude-sonnet-4.5';
+const CLAUDE_MODEL = 'claude-opus-4.8';
 const CLAUDE_FAST_MODEL = 'claude-haiku-4.5';
-const CLAUDE_OPUS_MODEL = 'claude-opus-4.5';
+const CLAUDE_OPUS_MODEL = 'claude-opus-4.8';
 const OPENCODE_MODEL = 'starry/gpt-5.5';
 const OPENCODE_SMALL_MODEL = 'starry/gpt-5.4-mini';
 
@@ -102,14 +102,11 @@ export function createCcSwitchLinks(context: SetupContext): CcSwitchLink[] {
       client: 'codex',
       label: 'Codex CLI',
       description: '导入 Codex CLI 的 OpenAI Responses 供应商',
-      url: ccSwitchProviderUrl({
-        app: 'codex',
+      url: codexCcSwitchProviderUrl({
         name: 'Starry API Codex',
         homepage: context.apiOrigin,
-        endpoint: context.apiBaseUrl,
         apiKey,
-        model: CODEX_MODEL,
-        icon: 'openai',
+        context,
         notes: 'Starry API OpenAI Responses provider for Codex CLI.',
       }),
     },
@@ -304,8 +301,35 @@ function copyableFilesText(files: SetupFileBlock[]) {
   return files.map((file) => [`# ${file.path}`, file.content].join('\n')).join('\n\n');
 }
 
+function codexCcSwitchProviderUrl(input: {
+  name: string;
+  homepage: string;
+  apiKey: string;
+  context: SetupContext;
+  notes?: string;
+}) {
+  const config = {
+    auth: { OPENAI_API_KEY: input.apiKey },
+    config: codexConfigToml(input.context),
+  };
+  const params = new URLSearchParams([
+    ['resource', 'provider'],
+    ['app', 'codex'],
+    ['name', input.name],
+    ['homepage', input.homepage],
+    ['apiKey', input.apiKey],
+    ['model', CODEX_MODEL],
+    ['icon', 'openai'],
+    ['enabled', 'true'],
+    ['configFormat', 'json'],
+    ['config', base64EncodeUtf8(JSON.stringify(config))],
+  ]);
+  if (input.notes) params.set('notes', input.notes);
+  return `ccswitch://v1/import?${params.toString()}`;
+}
+
 function ccSwitchProviderUrl(input: {
-  app: 'claude' | 'codex' | 'opencode';
+  app: 'claude' | 'opencode';
   name: string;
   homepage: string;
   endpoint: string;
@@ -327,10 +351,20 @@ function ccSwitchProviderUrl(input: {
     ['model', input.model],
     ['icon', input.icon],
     ['enabled', 'true'],
+    ['configFormat', 'json'],
   ]);
   if (input.notes) params.set('notes', input.notes);
   if (input.haikuModel) params.set('haikuModel', input.haikuModel);
   if (input.sonnetModel) params.set('sonnetModel', input.sonnetModel);
   if (input.opusModel) params.set('opusModel', input.opusModel);
   return `ccswitch://v1/import?${params.toString()}`;
+}
+
+function base64EncodeUtf8(value: string) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = '';
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+  return btoa(binary);
 }

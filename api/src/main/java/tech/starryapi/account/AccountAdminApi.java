@@ -35,6 +35,9 @@ public interface AccountAdminApi {
     @GetMapping("/settings")
     Mono<ApiResponse<AccountDtos.AccountSettingsResponse>> settings(ServerWebExchange exchange);
 
+    @GetMapping("/pool-status")
+    Mono<ApiResponse<AccountDtos.AccountPoolStatusResponse>> poolStatus(ServerWebExchange exchange);
+
     @PatchMapping("/settings")
     Mono<ApiResponse<AccountDtos.AccountSettingsResponse>> updateSettings(
         ServerWebExchange exchange,

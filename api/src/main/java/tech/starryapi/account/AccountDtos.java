@@ -28,6 +28,8 @@ public final class AccountDtos {
         String profileArn,
         String machineId,
         String proxyUrl,
+        String poolTier,
+        Integer poolWeight,
         Long quotaLimit,
         Long quota5hLimit,
         Long quota7dLimit
@@ -50,6 +52,8 @@ public final class AccountDtos {
         String profileArn,
         String machineId,
         String proxyUrl,
+        String poolTier,
+        Integer poolWeight,
         Boolean enabled,
         Long quotaUsed,
         Long quotaLimit,
@@ -103,13 +107,15 @@ public final class AccountDtos {
 
     public record AccountSettingsResponse(
         Boolean gptFastModeEnabled,
-        DisabledAccountScheduledTestSettings disabledAccountScheduledTest
+        DisabledAccountScheduledTestSettings disabledAccountScheduledTest,
+        PoolPolicySettings poolPolicy
     ) {
     }
 
     public record UpdateAccountSettingsRequest(
         Boolean gptFastModeEnabled,
-        DisabledAccountScheduledTestSettings disabledAccountScheduledTest
+        DisabledAccountScheduledTestSettings disabledAccountScheduledTest,
+        PoolPolicySettings poolPolicy
     ) {
     }
 
@@ -135,6 +141,19 @@ public final class AccountDtos {
         public DisabledAccountScheduledTestSettings {
             providers = providers == null ? List.of() : List.copyOf(providers);
         }
+    }
+
+    public record PoolPolicySettings(
+        Boolean enabled,
+        Integer windowMinutes,
+        Integer minSampleSize,
+        Double retestThresholdPercent,
+        Double failoverThresholdPercent,
+        Double recoveryThresholdPercent,
+        Integer retestIntervalMinutes,
+        Integer retestMaxConcurrency,
+        Boolean autoWeightEnabled
+    ) {
     }
 
     public record ImportAccountsRequest(
@@ -228,6 +247,8 @@ public final class AccountDtos {
         String profileArn,
         String machineId,
         String proxyUrl,
+        String poolTier,
+        Integer poolWeight,
         Boolean enabled,
         Long requestCount,
         Integer errorCount,
@@ -248,5 +269,41 @@ public final class AccountDtos {
         Instant createdAt,
         Instant updatedAt
     ) {
+    }
+
+    public record AccountFailureRankingResponse(
+        String accountId,
+        String email,
+        String provider,
+        String authMethod,
+        String poolTier,
+        Long requests,
+        Long failures,
+        Double failureRatePercent,
+        Integer errorCount,
+        Integer configuredWeight,
+        Integer effectiveWeight,
+        Instant lastFailureAt
+    ) {
+    }
+
+    public record AccountPoolStatusResponse(
+        Boolean enabled,
+        String activeTier,
+        Boolean primaryDisabled,
+        Double primaryFailureRatePercent,
+        Long primaryRequests,
+        Long primaryFailures,
+        Instant windowStartedAt,
+        Instant lastEvaluatedAt,
+        Instant lastRetestAt,
+        Double lastRetestFailureRatePercent,
+        Boolean retestRunning,
+        PoolPolicySettings settings,
+        List<AccountFailureRankingResponse> failureRanking
+    ) {
+        public AccountPoolStatusResponse {
+            failureRanking = failureRanking == null ? List.of() : List.copyOf(failureRanking);
+        }
     }
 }

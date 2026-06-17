@@ -20,6 +20,8 @@ public class AccountAdminController implements AccountAdminApi {
     private final DisabledAccountScheduledTestService disabledAccountScheduledTestService;
     private final AccountOpenAiQuotaService openAiQuotaService;
     private final AccountSettingsService settingsService;
+    private final AccountPoolPolicyService poolPolicyService;
+    private final AccountPoolRetestService poolRetestService;
     private final AdminAuth adminAuth;
 
     public AccountAdminController(
@@ -29,6 +31,8 @@ public class AccountAdminController implements AccountAdminApi {
         DisabledAccountScheduledTestService disabledAccountScheduledTestService,
         AccountOpenAiQuotaService openAiQuotaService,
         AccountSettingsService settingsService,
+        AccountPoolPolicyService poolPolicyService,
+        AccountPoolRetestService poolRetestService,
         AdminAuth adminAuth
     ) {
         this.service = service;
@@ -37,6 +41,8 @@ public class AccountAdminController implements AccountAdminApi {
         this.disabledAccountScheduledTestService = disabledAccountScheduledTestService;
         this.openAiQuotaService = openAiQuotaService;
         this.settingsService = settingsService;
+        this.poolPolicyService = poolPolicyService;
+        this.poolRetestService = poolRetestService;
         this.adminAuth = adminAuth;
     }
 
@@ -72,6 +78,14 @@ public class AccountAdminController implements AccountAdminApi {
     public Mono<ApiResponse<AccountDtos.AccountSettingsResponse>> settings(ServerWebExchange exchange) {
         adminAuth.verifyAdmin(exchange);
         return settingsService.settings().map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<AccountDtos.AccountPoolStatusResponse>> poolStatus(ServerWebExchange exchange) {
+        adminAuth.verifyAdmin(exchange);
+        return poolPolicyService.evaluate()
+            .then(poolPolicyService.status(poolRetestService.isRunning()))
+            .map(ApiResponse::ok);
     }
 
     @Override

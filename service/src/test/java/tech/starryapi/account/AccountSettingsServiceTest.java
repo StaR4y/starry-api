@@ -40,7 +40,7 @@ class AccountSettingsServiceTest {
         SystemSettingRepository repository = mockRepository(store);
 
         AccountDtos.AccountSettingsResponse response = new AccountSettingsService(repository)
-            .update(new AccountDtos.UpdateAccountSettingsRequest(true, null))
+            .update(new AccountDtos.UpdateAccountSettingsRequest(true, null, null))
             .block();
 
         assertThat(response).isNotNull();
@@ -74,7 +74,7 @@ class AccountSettingsServiceTest {
         );
 
         AccountDtos.AccountSettingsResponse response = new AccountSettingsService(repository)
-            .update(new AccountDtos.UpdateAccountSettingsRequest(null, request))
+            .update(new AccountDtos.UpdateAccountSettingsRequest(null, request, null))
             .block();
 
         assertThat(response).isNotNull();

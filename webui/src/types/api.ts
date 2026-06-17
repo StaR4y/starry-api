@@ -214,6 +214,8 @@ export interface Account {
   profileArn: string | null;
   machineId: string | null;
   proxyUrl: string | null;
+  poolTier: 'primary' | 'secondary' | string;
+  poolWeight: number;
   enabled: boolean;
   requestCount: number | null;
   errorCount: number | null;
@@ -254,6 +256,8 @@ export interface CreateAccountRequest {
   profileArn?: string;
   machineId?: string;
   proxyUrl?: string;
+  poolTier?: 'primary' | 'secondary' | string;
+  poolWeight?: number;
   quotaLimit?: number;
   quota5hLimit?: number;
   quota7dLimit?: number;
@@ -287,17 +291,21 @@ export type UpdateAccountRequest = Partial<
     quota7dUsed: number;
     quota7dLimit: number;
     quota7dResetAt: string;
+    poolTier: 'primary' | 'secondary' | string;
+    poolWeight: number;
   }
 >;
 
 export interface AccountSettings {
   gptFastModeEnabled: boolean;
   disabledAccountScheduledTest: DisabledAccountScheduledTestSettings;
+  poolPolicy: AccountPoolPolicySettings;
 }
 
 export interface UpdateAccountSettingsRequest {
   gptFastModeEnabled?: boolean;
   disabledAccountScheduledTest?: Partial<DisabledAccountScheduledTestSettings>;
+  poolPolicy?: Partial<AccountPoolPolicySettings>;
 }
 
 export interface DisabledAccountScheduledTestSettings {
@@ -318,6 +326,49 @@ export interface DisabledAccountScheduledTestSettings {
   includeQuotaExhausted: boolean;
   minAgeMinutes: number;
   providers: string[];
+}
+
+export interface AccountPoolPolicySettings {
+  enabled: boolean;
+  windowMinutes: number;
+  minSampleSize: number;
+  retestThresholdPercent: number;
+  failoverThresholdPercent: number;
+  recoveryThresholdPercent: number;
+  retestIntervalMinutes: number;
+  retestMaxConcurrency: number;
+  autoWeightEnabled: boolean;
+}
+
+export interface AccountFailureRankingItem {
+  accountId: string;
+  email: string | null;
+  provider: string | null;
+  authMethod: string | null;
+  poolTier: 'primary' | 'secondary' | string;
+  requests: number;
+  failures: number;
+  failureRatePercent: number;
+  errorCount: number;
+  configuredWeight: number;
+  effectiveWeight: number;
+  lastFailureAt: string | null;
+}
+
+export interface AccountPoolStatus {
+  enabled: boolean;
+  activeTier: 'primary' | 'secondary' | 'all' | string;
+  primaryDisabled: boolean;
+  primaryFailureRatePercent: number;
+  primaryRequests: number;
+  primaryFailures: number;
+  windowStartedAt: string | null;
+  lastEvaluatedAt: string | null;
+  lastRetestAt: string | null;
+  lastRetestFailureRatePercent: number;
+  retestRunning: boolean;
+  settings: AccountPoolPolicySettings;
+  failureRanking: AccountFailureRankingItem[];
 }
 
 export interface SuspendAccountRequest {

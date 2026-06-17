@@ -36,6 +36,15 @@ public class AccountSettingsService {
     static final String DISABLED_TEST_INCLUDE_QUOTA_EXHAUSTED = "disabled_account_scheduled_test_include_quota_exhausted";
     static final String DISABLED_TEST_MIN_AGE_MINUTES = "disabled_account_scheduled_test_min_age_minutes";
     static final String DISABLED_TEST_PROVIDERS = "disabled_account_scheduled_test_providers";
+    static final String POOL_POLICY_ENABLED = "account_pool_policy_enabled";
+    static final String POOL_POLICY_WINDOW_MINUTES = "account_pool_policy_window_minutes";
+    static final String POOL_POLICY_MIN_SAMPLE_SIZE = "account_pool_policy_min_sample_size";
+    static final String POOL_POLICY_RETEST_THRESHOLD_PERCENT = "account_pool_policy_retest_threshold_percent";
+    static final String POOL_POLICY_FAILOVER_THRESHOLD_PERCENT = "account_pool_policy_failover_threshold_percent";
+    static final String POOL_POLICY_RECOVERY_THRESHOLD_PERCENT = "account_pool_policy_recovery_threshold_percent";
+    static final String POOL_POLICY_RETEST_INTERVAL_MINUTES = "account_pool_policy_retest_interval_minutes";
+    static final String POOL_POLICY_RETEST_MAX_CONCURRENCY = "account_pool_policy_retest_max_concurrency";
+    static final String POOL_POLICY_AUTO_WEIGHT_ENABLED = "account_pool_policy_auto_weight_enabled";
 
     private static final List<String> ACCOUNT_SETTING_KEYS = List.of(
         GPT_FAST_MODE_ENABLED,
@@ -55,7 +64,16 @@ public class AccountSettingsService {
         DISABLED_TEST_INCLUDE_SUSPENDED,
         DISABLED_TEST_INCLUDE_QUOTA_EXHAUSTED,
         DISABLED_TEST_MIN_AGE_MINUTES,
-        DISABLED_TEST_PROVIDERS
+        DISABLED_TEST_PROVIDERS,
+        POOL_POLICY_ENABLED,
+        POOL_POLICY_WINDOW_MINUTES,
+        POOL_POLICY_MIN_SAMPLE_SIZE,
+        POOL_POLICY_RETEST_THRESHOLD_PERCENT,
+        POOL_POLICY_FAILOVER_THRESHOLD_PERCENT,
+        POOL_POLICY_RECOVERY_THRESHOLD_PERCENT,
+        POOL_POLICY_RETEST_INTERVAL_MINUTES,
+        POOL_POLICY_RETEST_MAX_CONCURRENCY,
+        POOL_POLICY_AUTO_WEIGHT_ENABLED
     );
 
     private final SystemSettingRepository repository;
@@ -79,8 +97,12 @@ public class AccountSettingsService {
                     current.disabledAccountScheduledTest(),
                     request == null ? null : request.disabledAccountScheduledTest()
                 );
-                return saveSettings(gptFastMode, disabledTest)
-                    .thenReturn(new AccountDtos.AccountSettingsResponse(gptFastMode, disabledTest));
+                AccountDtos.PoolPolicySettings poolPolicy = mergePoolPolicySettings(
+                    current.poolPolicy(),
+                    request == null ? null : request.poolPolicy()
+                );
+                return saveSettings(gptFastMode, disabledTest, poolPolicy)
+                    .thenReturn(new AccountDtos.AccountSettingsResponse(gptFastMode, disabledTest, poolPolicy));
             });
     }
 
@@ -117,7 +139,8 @@ public class AccountSettingsService {
     private AccountDtos.AccountSettingsResponse response(Map<String, String> values) {
         return new AccountDtos.AccountSettingsResponse(
             bool(values, GPT_FAST_MODE_ENABLED, false),
-            disabledTestSettings(values)
+            disabledTestSettings(values),
+            poolPolicySettings(values)
         );
     }
 
@@ -140,6 +163,28 @@ public class AccountSettingsService {
             bool(values, DISABLED_TEST_INCLUDE_QUOTA_EXHAUSTED, false),
             intValue(values, DISABLED_TEST_MIN_AGE_MINUTES, 10, 0, 30 * 24 * 60),
             providers(values.get(DISABLED_TEST_PROVIDERS))
+        );
+    }
+
+    AccountDtos.PoolPolicySettings defaultPoolPolicySettings() {
+        return poolPolicySettings(Map.of());
+    }
+
+    public Mono<AccountDtos.PoolPolicySettings> poolPolicySettings() {
+        return values().map(values -> response(values).poolPolicy());
+    }
+
+    private AccountDtos.PoolPolicySettings poolPolicySettings(Map<String, String> values) {
+        return new AccountDtos.PoolPolicySettings(
+            bool(values, POOL_POLICY_ENABLED, true),
+            intValue(values, POOL_POLICY_WINDOW_MINUTES, 5, 1, 24 * 60),
+            intValue(values, POOL_POLICY_MIN_SAMPLE_SIZE, 10, 1, 100000),
+            doubleValue(values, POOL_POLICY_RETEST_THRESHOLD_PERCENT, 50.0, 0.0, 100.0),
+            doubleValue(values, POOL_POLICY_FAILOVER_THRESHOLD_PERCENT, 70.0, 0.0, 100.0),
+            doubleValue(values, POOL_POLICY_RECOVERY_THRESHOLD_PERCENT, 10.0, 0.0, 100.0),
+            intValue(values, POOL_POLICY_RETEST_INTERVAL_MINUTES, 5, 1, 24 * 60),
+            intValue(values, POOL_POLICY_RETEST_MAX_CONCURRENCY, 4, 1, 16),
+            bool(values, POOL_POLICY_AUTO_WEIGHT_ENABLED, true)
         );
     }
 
@@ -177,6 +222,49 @@ public class AccountSettingsService {
         );
     }
 
+    private AccountDtos.PoolPolicySettings mergePoolPolicySettings(
+        AccountDtos.PoolPolicySettings current,
+        AccountDtos.PoolPolicySettings request
+    ) {
+        if (request == null) {
+            return current;
+        }
+        return normalizePoolPolicySettings(new AccountDtos.PoolPolicySettings(
+            request.enabled() == null ? current.enabled() : Boolean.TRUE.equals(request.enabled()),
+            firstNonNull(request.windowMinutes(), current.windowMinutes()),
+            firstNonNull(request.minSampleSize(), current.minSampleSize()),
+            firstNonNull(request.retestThresholdPercent(), current.retestThresholdPercent()),
+            firstNonNull(request.failoverThresholdPercent(), current.failoverThresholdPercent()),
+            firstNonNull(request.recoveryThresholdPercent(), current.recoveryThresholdPercent()),
+            firstNonNull(request.retestIntervalMinutes(), current.retestIntervalMinutes()),
+            firstNonNull(request.retestMaxConcurrency(), current.retestMaxConcurrency()),
+            request.autoWeightEnabled() == null ? current.autoWeightEnabled() : Boolean.TRUE.equals(request.autoWeightEnabled())
+        ));
+    }
+
+    private AccountDtos.PoolPolicySettings normalizePoolPolicySettings(AccountDtos.PoolPolicySettings settings) {
+        double retest = clamp(firstNonNull(settings.retestThresholdPercent(), 50.0), 0.0, 100.0);
+        double failover = clamp(firstNonNull(settings.failoverThresholdPercent(), 70.0), 0.0, 100.0);
+        double recovery = clamp(firstNonNull(settings.recoveryThresholdPercent(), 10.0), 0.0, 100.0);
+        if (failover < retest) {
+            failover = retest;
+        }
+        if (recovery > retest) {
+            recovery = retest;
+        }
+        return new AccountDtos.PoolPolicySettings(
+            Boolean.TRUE.equals(settings.enabled()),
+            clamp(firstNonNull(settings.windowMinutes(), 5), 1, 24 * 60),
+            clamp(firstNonNull(settings.minSampleSize(), 10), 1, 100000),
+            retest,
+            failover,
+            recovery,
+            clamp(firstNonNull(settings.retestIntervalMinutes(), 5), 1, 24 * 60),
+            clamp(firstNonNull(settings.retestMaxConcurrency(), 4), 1, 16),
+            Boolean.TRUE.equals(settings.autoWeightEnabled())
+        );
+    }
+
     private void validateSchedule(String scheduleMode, String cronExpression, String timezone) {
         try {
             ZoneId.of(timezone);
@@ -192,7 +280,11 @@ public class AccountSettingsService {
         }
     }
 
-    private Mono<Void> saveSettings(boolean gptFastMode, AccountDtos.DisabledAccountScheduledTestSettings disabledTest) {
+    private Mono<Void> saveSettings(
+        boolean gptFastMode,
+        AccountDtos.DisabledAccountScheduledTestSettings disabledTest,
+        AccountDtos.PoolPolicySettings poolPolicy
+    ) {
         return Flux.concat(
             set(GPT_FAST_MODE_ENABLED, Boolean.toString(gptFastMode)),
             set(DISABLED_TEST_ENABLED, Boolean.toString(Boolean.TRUE.equals(disabledTest.enabled()))),
@@ -211,7 +303,16 @@ public class AccountSettingsService {
             set(DISABLED_TEST_INCLUDE_SUSPENDED, Boolean.toString(Boolean.TRUE.equals(disabledTest.includeSuspended()))),
             set(DISABLED_TEST_INCLUDE_QUOTA_EXHAUSTED, Boolean.toString(Boolean.TRUE.equals(disabledTest.includeQuotaExhausted()))),
             set(DISABLED_TEST_MIN_AGE_MINUTES, Integer.toString(disabledTest.minAgeMinutes())),
-            set(DISABLED_TEST_PROVIDERS, String.join(",", disabledTest.providers()))
+            set(DISABLED_TEST_PROVIDERS, String.join(",", disabledTest.providers())),
+            set(POOL_POLICY_ENABLED, Boolean.toString(Boolean.TRUE.equals(poolPolicy.enabled()))),
+            set(POOL_POLICY_WINDOW_MINUTES, Integer.toString(poolPolicy.windowMinutes())),
+            set(POOL_POLICY_MIN_SAMPLE_SIZE, Integer.toString(poolPolicy.minSampleSize())),
+            set(POOL_POLICY_RETEST_THRESHOLD_PERCENT, Double.toString(poolPolicy.retestThresholdPercent())),
+            set(POOL_POLICY_FAILOVER_THRESHOLD_PERCENT, Double.toString(poolPolicy.failoverThresholdPercent())),
+            set(POOL_POLICY_RECOVERY_THRESHOLD_PERCENT, Double.toString(poolPolicy.recoveryThresholdPercent())),
+            set(POOL_POLICY_RETEST_INTERVAL_MINUTES, Integer.toString(poolPolicy.retestIntervalMinutes())),
+            set(POOL_POLICY_RETEST_MAX_CONCURRENCY, Integer.toString(poolPolicy.retestMaxConcurrency())),
+            set(POOL_POLICY_AUTO_WEIGHT_ENABLED, Boolean.toString(Boolean.TRUE.equals(poolPolicy.autoWeightEnabled())))
         ).then();
     }
 
@@ -235,6 +336,19 @@ public class AccountSettingsService {
     private int clamp(Integer value, int min, int max) {
         int safeValue = value == null ? min : value;
         return Math.max(min, Math.min(max, safeValue));
+    }
+
+    private double clamp(Double value, double min, double max) {
+        double safeValue = value == null ? min : value;
+        return Math.max(min, Math.min(max, safeValue));
+    }
+
+    private double doubleValue(Map<String, String> values, String key, double fallback, double min, double max) {
+        try {
+            return clamp(Double.parseDouble(text(values.get(key), Double.toString(fallback))), min, max);
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
     }
 
     private String mode(String value) {

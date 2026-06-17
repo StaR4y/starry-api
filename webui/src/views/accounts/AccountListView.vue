@@ -18,6 +18,7 @@
   import { ApiError } from '@/utils/http';
   import type {
     Account,
+    AccountPoolStatus,
     AccountSettings,
     CreateAccountRequest,
     ImportAccountItem,
@@ -56,8 +57,21 @@
       minAgeMinutes: 10,
       providers: [],
     },
+    poolPolicy: {
+      enabled: true,
+      windowMinutes: 5,
+      minSampleSize: 10,
+      retestThresholdPercent: 50,
+      failoverThresholdPercent: 70,
+      recoveryThresholdPercent: 10,
+      retestIntervalMinutes: 5,
+      retestMaxConcurrency: 4,
+      autoWeightEnabled: true,
+    },
   });
+  const poolStatus = ref<AccountPoolStatus | null>(null);
   const settingsSaving = ref(false);
+  const poolPolicySaving = ref(false);
   const clearingAccounts = ref(false);
 
   const visibleAccounts = computed(() => {
@@ -84,6 +98,10 @@
 
     const totalRequests = accounts.value.reduce((sum, a) => sum + (a.requestCount || 0), 0);
     const totalErrors = accounts.value.reduce((sum, a) => sum + (a.errorCount || 0), 0);
+    const primary = accounts.value.filter((a) => normalizedPoolTier(a.poolTier) === 'primary').length;
+    const secondary = accounts.value.filter(
+      (a) => normalizedPoolTier(a.poolTier) === 'secondary',
+    ).length;
 
     return {
       total,
@@ -91,6 +109,8 @@
       abnormal,
       totalRequests,
       totalErrors,
+      primary,
+      secondary,
     };
   });
 
@@ -230,6 +250,35 @@
     }
   }
 
+  async function loadPoolStatus() {
+    try {
+      poolStatus.value = await accountsApi.poolStatus();
+      if (poolStatus.value?.settings) {
+        accountSettings.value = {
+          ...accountSettings.value,
+          poolPolicy: poolStatus.value.settings,
+        };
+      }
+    } catch (err) {
+      if (err instanceof ApiError) ElMessage.warning(`账号池状态加载失败：${err.message}`);
+    }
+  }
+
+  async function savePoolPolicy() {
+    poolPolicySaving.value = true;
+    try {
+      accountSettings.value = await accountsApi.updateSettings({
+        poolPolicy: accountSettings.value.poolPolicy,
+      });
+      await loadPoolStatus();
+      ElMessage.success('账号池策略已保存');
+    } catch (err) {
+      if (err instanceof ApiError) ElMessage.error(err.message);
+    } finally {
+      poolPolicySaving.value = false;
+    }
+  }
+
   async function toggleGptFastMode(value: string | number | boolean) {
     settingsSaving.value = true;
     try {
@@ -296,6 +345,8 @@
     profileArn: '',
     machineId: '',
     proxyUrl: '',
+    poolTier: 'primary',
+    poolWeight: 100,
     quotaLimit: undefined as number | undefined,
     enabled: true,
   });
@@ -367,6 +418,8 @@
       profileArn: '',
       machineId: '',
       proxyUrl: '',
+      poolTier: 'primary',
+      poolWeight: 100,
       quotaLimit: undefined,
       enabled: true,
     });
@@ -395,6 +448,8 @@
       profileArn: row.profileArn ?? '',
       machineId: row.machineId ?? '',
       proxyUrl: row.proxyUrl ?? '',
+      poolTier: normalizedPoolTier(row.poolTier),
+      poolWeight: row.poolWeight ?? 100,
       quotaLimit: row.quotaLimit ?? undefined,
       enabled: row.enabled,
     });
@@ -712,6 +767,18 @@
 
   function normalized(value: string | null | undefined) {
     return (value ?? '').trim().toLowerCase();
+  }
+
+  function normalizedPoolTier(value: string | null | undefined) {
+    return normalized(value) === 'secondary' ? 'secondary' : 'primary';
+  }
+
+  function poolTierLabel(value: string | null | undefined) {
+    return normalizedPoolTier(value) === 'secondary' ? '二级号池' : '一级号池';
+  }
+
+  function poolTierTagType(value: string | null | undefined) {
+    return normalizedPoolTier(value) === 'secondary' ? 'warning' : 'success';
   }
 
   function openTestDetail(row: Account) {
@@ -1048,6 +1115,7 @@
 
   onMounted(() => {
     loadAccountSettings();
+    loadPoolStatus();
     loadTestModelOptions();
     loadAccounts();
   });
@@ -1144,6 +1212,117 @@
           <span class="metric-value__sub">/ {{ formatNumber(summary.totalErrors) }}</span>
         </div>
       </div>
+
+      <div class="metric-divider" />
+
+      <div class="metric-item">
+        <div class="metric-item__header">
+          <span class="metric-dot dot-requests" />
+          <span class="metric-label">一级 / 二级</span>
+        </div>
+        <div class="metric-value">
+          {{ summary.primary }}
+          <span class="metric-value__sub">/ {{ summary.secondary }}</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="pool-policy-panel glass-panel">
+      <div class="pool-policy-panel__status">
+        <div>
+          <div class="panel-title">账号池熔断策略</div>
+          <div class="panel-subtitle">
+            当前路由：
+            <el-tag
+              :type="poolStatus?.activeTier === 'secondary' ? 'warning' : 'success'"
+              effect="light"
+              round
+            >
+              {{ poolStatus?.activeTier === 'secondary' ? '二级号池' : poolStatus?.activeTier === 'all' ? '全部账号' : '一级号池' }}
+            </el-tag>
+            <span class="pool-status-text">
+              一级池错误率 {{ poolStatus?.primaryFailureRatePercent ?? 0 }}%
+              （{{ poolStatus?.primaryFailures ?? 0 }}/{{ poolStatus?.primaryRequests ?? 0 }}）
+            </span>
+            <span v-if="poolStatus?.retestRunning" class="pool-status-text is-running">
+              正在复测
+            </span>
+          </div>
+        </div>
+        <el-button size="small" @click="loadPoolStatus">刷新状态</el-button>
+      </div>
+
+      <el-form class="pool-policy-form" label-position="top" size="small">
+        <el-row :gutter="12">
+          <el-col :span="3">
+            <el-form-item label="启用">
+              <el-switch v-model="accountSettings.poolPolicy.enabled" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="3">
+            <el-form-item label="自动权重">
+              <el-switch v-model="accountSettings.poolPolicy.autoWeightEnabled" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="3">
+            <el-form-item label="窗口(分钟)">
+              <el-input-number v-model="accountSettings.poolPolicy.windowMinutes" :min="1" :max="1440" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="3">
+            <el-form-item label="最小样本">
+              <el-input-number v-model="accountSettings.poolPolicy.minSampleSize" :min="1" :max="100000" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="3">
+            <el-form-item label="复测阈值%">
+              <el-input-number v-model="accountSettings.poolPolicy.retestThresholdPercent" :min="0" :max="100" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="3">
+            <el-form-item label="切二级%">
+              <el-input-number v-model="accountSettings.poolPolicy.failoverThresholdPercent" :min="0" :max="100" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="3">
+            <el-form-item label="恢复%">
+              <el-input-number v-model="accountSettings.poolPolicy.recoveryThresholdPercent" :min="0" :max="100" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="3">
+            <el-form-item label="复测间隔">
+              <el-input-number v-model="accountSettings.poolPolicy.retestIntervalMinutes" :min="1" :max="1440" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <div class="pool-policy-actions">
+          <span class="text-secondary">
+            当一级池错误率达到复测阈值时会全量测试账号；达到切二级阈值时临时将请求转到二级号池，直到一级池复测错误率低于恢复阈值。
+          </span>
+          <el-button type="primary" :loading="poolPolicySaving" @click="savePoolPolicy">
+            保存账号池策略
+          </el-button>
+        </div>
+      </el-form>
+
+      <div v-if="poolStatus?.failureRanking?.length" class="failure-ranking">
+        <div class="failure-ranking__title">账号失败率排行</div>
+        <div class="failure-ranking__list">
+          <div
+            v-for="item in poolStatus.failureRanking.slice(0, 6)"
+            :key="item.accountId"
+            class="failure-ranking__item"
+          >
+            <span class="mono">{{ shorten(item.accountId, 8, 4) }}</span>
+            <el-tag :type="poolTierTagType(item.poolTier)" size="small" effect="light" round>
+              {{ poolTierLabel(item.poolTier) }}
+            </el-tag>
+            <span>{{ item.failureRatePercent }}%</span>
+            <span class="text-secondary">{{ item.failures }}/{{ item.requests }}</span>
+            <span class="text-secondary">权重 {{ item.effectiveWeight }}</span>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- 2. Suspended Accounts Periodic Review Collapsible Module -->
@@ -1217,6 +1396,16 @@
         </template>
       </el-table-column>
       <el-table-column prop="region" label="区域" width="100" />
+      <el-table-column label="号池 / 权重" width="130">
+        <template #default="{ row }">
+          <div class="pool-cell">
+            <el-tag :type="poolTierTagType(row.poolTier)" effect="light" round>
+              {{ poolTierLabel(row.poolTier) }}
+            </el-tag>
+            <span class="text-secondary">权重 {{ row.poolWeight ?? 100 }}</span>
+          </div>
+        </template>
+      </el-table-column>
       <el-table-column label="状态" width="100">
         <template #default="{ row }">
           <el-tag :type="statusOf(row).tone" effect="light" round>{{ statusOf(row).label }}</el-tag>
@@ -1597,6 +1786,27 @@
         <el-col :span="12">
           <el-form-item label="Machine ID">
             <el-input v-model="form.machineId" placeholder="机器 ID，可选" />
+          </el-form-item>
+        </el-col>
+
+        <el-col :span="12">
+          <el-form-item label="账号池级别">
+            <el-radio-group v-model="form.poolTier">
+              <el-radio-button label="primary">一级号池</el-radio-button>
+              <el-radio-button label="secondary">二级号池</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+        </el-col>
+        <el-col :span="12">
+          <el-form-item label="基础权重">
+            <el-input-number
+              v-model="form.poolWeight"
+              :min="1"
+              :max="10000"
+              :step="10"
+              style="width: 100%"
+            />
+            <p class="form-hint">自动权重开启时，连续错误越多，实际调度权重越低。</p>
           </el-form-item>
         </el-col>
 
@@ -2342,6 +2552,93 @@
       align-self: center;
       flex-shrink: 0;
     }
+  }
+
+  .pool-policy-panel {
+    display: grid;
+    gap: 14px;
+    padding: 18px 22px;
+    margin-bottom: 24px;
+  }
+
+  .pool-policy-panel__status,
+  .pool-policy-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .panel-title {
+    font-size: 15px;
+    font-weight: 800;
+    color: var(--kp-text);
+  }
+
+  .panel-subtitle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 6px;
+    color: var(--kp-text-secondary);
+    font-size: 12px;
+  }
+
+  .pool-status-text {
+    color: var(--kp-text-secondary);
+
+    &.is-running {
+      color: var(--el-color-warning);
+      font-weight: 700;
+    }
+  }
+
+  .pool-policy-form {
+    :deep(.el-form-item) {
+      margin-bottom: 8px;
+    }
+
+    :deep(.el-input-number) {
+      width: 100%;
+    }
+  }
+
+  .failure-ranking {
+    display: grid;
+    gap: 8px;
+    padding-top: 12px;
+    border-top: 1px solid var(--kp-divider);
+  }
+
+  .failure-ranking__title {
+    color: var(--kp-text-secondary);
+    font-size: 12px;
+    font-weight: 800;
+  }
+
+  .failure-ranking__list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .failure-ranking__item {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 9px;
+    border: 1px solid var(--kp-divider);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.58);
+    font-size: 12px;
+  }
+
+  .pool-cell {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 5px;
   }
 
   .actions-wrapper {

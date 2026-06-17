@@ -124,6 +124,8 @@ public class AccountImportParser {
             firstText(item, null, "profileArn", "profile_arn"),
             firstText(item, null, "machineId", "machine_id"),
             firstText(sources, "proxyUrl", "proxy_url", "proxy-url"),
+            firstText(sources, "poolTier", "pool_tier", "pool-tier", "tier"),
+            firstInt(sources, "poolWeight", "pool_weight", "pool-weight", "weight"),
             firstLong(item.path("quotaLimit"), item.path("quota_limit"), usage.path("limit")),
             firstLong(item.path("quota5hLimit"), item.path("quota_5h_limit"), usage.path("limit5h"), usage.path("limit_5h")),
             firstLong(item.path("quota7dLimit"), item.path("quota_7d_limit"), usage.path("limit7d"), usage.path("limit_7d"))
@@ -193,6 +195,8 @@ public class AccountImportParser {
             null,
             null,
             proxyUrl,
+            firstText(entry, null, "poolTier", "pool_tier", "pool-tier", "tier"),
+            firstInt(entry, "poolWeight", "pool_weight", "pool-weight", "weight"),
             firstLong(entry.path("quotaLimit"), entry.path("quota_limit")),
             firstLong(entry.path("quota5hLimit"), entry.path("quota_5h_limit")),
             firstLong(entry.path("quota7dLimit"), entry.path("quota_7d_limit"))
@@ -340,6 +344,42 @@ public class AccountImportParser {
                     return Long.parseLong(node.asText().trim());
                 } catch (NumberFormatException ignored) {
                     // Ignore malformed optional quota fields.
+                }
+            }
+        }
+        return null;
+    }
+
+    private Integer firstInt(List<JsonNode> sources, String... names) {
+        if (sources == null || sources.isEmpty()) {
+            return null;
+        }
+        for (JsonNode source : sources) {
+            Integer value = firstInt(source, names);
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private Integer firstInt(JsonNode node, String... names) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        for (String name : names) {
+            JsonNode value = node.path(name);
+            if (value.isMissingNode() || value.isNull()) {
+                continue;
+            }
+            if (value.canConvertToInt()) {
+                return value.asInt();
+            }
+            if (value.isTextual()) {
+                try {
+                    return Integer.parseInt(value.asText().trim());
+                } catch (NumberFormatException ignored) {
+                    // Ignore malformed optional integer fields.
                 }
             }
         }

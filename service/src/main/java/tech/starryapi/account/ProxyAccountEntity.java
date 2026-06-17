@@ -26,6 +26,8 @@ public class ProxyAccountEntity {
     private String profileArn;
     private String machineId;
     private String proxyUrl;
+    private String poolTier;
+    private Integer poolWeight;
     private Boolean enabled;
     private Long requestCount;
     private Integer errorCount;
@@ -186,6 +188,22 @@ public class ProxyAccountEntity {
 
     public void setProxyUrl(String proxyUrl) {
         this.proxyUrl = proxyUrl;
+    }
+
+    public String getPoolTier() {
+        return poolTier;
+    }
+
+    public void setPoolTier(String poolTier) {
+        this.poolTier = poolTier;
+    }
+
+    public Integer getPoolWeight() {
+        return poolWeight;
+    }
+
+    public void setPoolWeight(Integer poolWeight) {
+        this.poolWeight = poolWeight;
     }
 
     public Boolean getEnabled() {

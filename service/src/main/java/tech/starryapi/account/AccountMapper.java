@@ -17,6 +17,8 @@ final class AccountMapper {
             entity.getProfileArn(),
             entity.getMachineId(),
             entity.getProxyUrl(),
+            AccountPoolPolicyService.normalizePoolTier(entity.getPoolTier()),
+            AccountPoolPolicyService.normalizeWeight(entity.getPoolWeight()),
             entity.getEnabled(),
             entity.getRequestCount(),
             entity.getErrorCount(),

@@ -14,6 +14,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Predicate;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -37,6 +38,7 @@ public class AccountPoolService {
     private final ProxyAccountRepository repository;
     private final R2dbcEntityTemplate template;
     private final ProxyProperties properties;
+    private final AccountPoolPolicyService poolPolicyService;
     private final AtomicInteger nextIndex = new AtomicInteger();
     private final Map<String, AffinityEntry> affinity = new ConcurrentHashMap<>();
     private volatile List<ProxyAccountEntity> cachedAccounts = List.of();
@@ -46,9 +48,20 @@ public class AccountPoolService {
         R2dbcEntityTemplate template,
         ProxyProperties properties
     ) {
+        this(repository, template, properties, null);
+    }
+
+    @Autowired
+    public AccountPoolService(
+        ProxyAccountRepository repository,
+        R2dbcEntityTemplate template,
+        ProxyProperties properties,
+        AccountPoolPolicyService poolPolicyService
+    ) {
         this.repository = repository;
         this.template = template;
         this.properties = properties;
+        this.poolPolicyService = poolPolicyService;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -112,6 +125,8 @@ public class AccountPoolService {
                 if (request.profileArn() != null) entity.setProfileArn(request.profileArn());
                 if (request.machineId() != null) entity.setMachineId(request.machineId());
                 if (request.proxyUrl() != null) entity.setProxyUrl(request.proxyUrl());
+                if (request.poolTier() != null) entity.setPoolTier(normalizePoolTier(request.poolTier()));
+                if (request.poolWeight() != null) entity.setPoolWeight(AccountPoolPolicyService.normalizeWeight(request.poolWeight()));
                 if (request.enabled() != null) entity.setEnabled(request.enabled());
                 if (request.quotaUsed() != null) entity.setQuotaUsed(request.quotaUsed());
                 if (request.quotaLimit() != null) entity.setQuotaLimit(request.quotaLimit());
@@ -224,10 +239,10 @@ public class AccountPoolService {
         Predicate<ProxyAccountEntity> filter,
         String unavailableMessage
     ) {
-        List<ProxyAccountEntity> accounts = cachedAccounts.stream().filter(filter).toList();
+        List<ProxyAccountEntity> accounts = applyTierPolicy(cachedAccounts.stream().filter(filter).toList());
         if (accounts.isEmpty()) {
             return refreshCache()
-                .then(Mono.defer(() -> Mono.justOrEmpty(selectFrom(cachedAccounts.stream().filter(filter).toList(), sessionHint))))
+                .then(Mono.defer(() -> Mono.justOrEmpty(selectFrom(applyTierPolicy(cachedAccounts.stream().filter(filter).toList()), sessionHint))))
                 .switchIfEmpty(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", unavailableMessage)));
         }
         return Mono.justOrEmpty(selectFrom(accounts, sessionHint))
@@ -477,6 +492,8 @@ public class AccountPoolService {
         ProxyAccountEntity selected;
         if (properties.getAccountSelectionStrategy() == ProxyProperties.AccountSelectionStrategy.STICKY) {
             selected = available.get(0);
+        } else if (shouldUseWeights(available)) {
+            selected = weightedPick(available);
         } else {
             int index = Math.floorMod(nextIndex.getAndIncrement(), available.size());
             selected = available.get(index);
@@ -485,6 +502,38 @@ public class AccountPoolService {
             affinity.put(sessionHint, new AffinityEntry(selected.getAccountId(), Instant.now()));
         }
         return selected;
+    }
+
+    private boolean shouldUseWeights(List<ProxyAccountEntity> accounts) {
+        return accounts.stream().anyMatch(account -> effectiveWeight(account) != 100);
+    }
+
+    private ProxyAccountEntity weightedPick(List<ProxyAccountEntity> accounts) {
+        int total = accounts.stream()
+            .mapToInt(this::effectiveWeight)
+            .sum();
+        if (total <= 0) {
+            return accounts.get(Math.floorMod(nextIndex.getAndIncrement(), accounts.size()));
+        }
+        int cursor = ThreadLocalRandom.current().nextInt(total);
+        int seen = 0;
+        for (ProxyAccountEntity account : accounts) {
+            seen += effectiveWeight(account);
+            if (cursor < seen) {
+                return account;
+            }
+        }
+        return accounts.get(accounts.size() - 1);
+    }
+
+    private List<ProxyAccountEntity> applyTierPolicy(List<ProxyAccountEntity> accounts) {
+        return poolPolicyService == null ? accounts : poolPolicyService.applyTierPolicy(accounts);
+    }
+
+    private int effectiveWeight(ProxyAccountEntity account) {
+        return poolPolicyService == null
+            ? AccountPoolPolicyService.normalizeWeight(account == null ? null : account.getPoolWeight())
+            : poolPolicyService.effectiveWeight(account);
     }
 
     private boolean isAvailable(ProxyAccountEntity account) {
@@ -637,6 +686,8 @@ public class AccountPoolService {
         entity.setProfileArn(request.profileArn());
         entity.setMachineId(request.machineId());
         entity.setProxyUrl(request.proxyUrl());
+        entity.setPoolTier(normalizePoolTier(request.poolTier()));
+        entity.setPoolWeight(AccountPoolPolicyService.normalizeWeight(request.poolWeight()));
         entity.setQuotaLimit(request.quotaLimit());
         entity.setQuota5hLimit(request.quota5hLimit());
         entity.setQuota7dLimit(request.quota7dLimit());
@@ -672,6 +723,10 @@ public class AccountPoolService {
             return null;
         }
         return email.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private String normalizePoolTier(String value) {
+        return AccountPoolPolicyService.normalizePoolTier(value);
     }
 
     private String importCreatedMessage(AccountDtos.CreateAccountRequest request, ProxyAccountEntity saved) {

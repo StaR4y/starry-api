@@ -2,6 +2,7 @@
 import http, { unwrap } from '@/utils/http';
 import type {
   Account,
+  AccountPoolStatus,
   AccountSettings,
   ApiResponse,
   ClearAccountsResult,
@@ -37,6 +38,11 @@ export const accountsApi = {
   settings() {
     return unwrap<AccountSettings>(
       http.get<ApiResponse<AccountSettings>>('/admin/accounts/settings'),
+    );
+  },
+  poolStatus() {
+    return unwrap<AccountPoolStatus>(
+      http.get<ApiResponse<AccountPoolStatus>>('/admin/accounts/pool-status'),
     );
   },
   updateSettings(payload: UpdateAccountSettingsRequest) {
