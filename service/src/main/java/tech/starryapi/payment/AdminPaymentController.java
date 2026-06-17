@@ -11,6 +11,7 @@ import tech.starryapi.common.AdminAuth;
 import tech.starryapi.common.ApiResponse;
 import tech.starryapi.payment.PaymentDtos.CreateRedemptionCodeRequest;
 import tech.starryapi.payment.PaymentDtos.CreateRedemptionCodesResponse;
+import tech.starryapi.payment.PaymentDtos.InviteRebateRecordResponse;
 import tech.starryapi.payment.PaymentDtos.PaymentOrderResponse;
 import tech.starryapi.payment.PaymentDtos.PaymentSettingsResponse;
 import tech.starryapi.payment.PaymentDtos.RedemptionCodeResponse;
@@ -22,17 +23,20 @@ public class AdminPaymentController implements AdminPaymentApi {
     private final PaymentSettingsService settingsService;
     private final PaymentService paymentService;
     private final RedemptionCodeService redemptionCodeService;
+    private final InviteRebateService inviteRebateService;
     private final AdminAuth adminAuth;
 
     public AdminPaymentController(
         PaymentSettingsService settingsService,
         PaymentService paymentService,
         RedemptionCodeService redemptionCodeService,
+        InviteRebateService inviteRebateService,
         AdminAuth adminAuth
     ) {
         this.settingsService = settingsService;
         this.paymentService = paymentService;
         this.redemptionCodeService = redemptionCodeService;
+        this.inviteRebateService = inviteRebateService;
         this.adminAuth = adminAuth;
     }
 
@@ -67,6 +71,12 @@ public class AdminPaymentController implements AdminPaymentApi {
     public Mono<ApiResponse<List<RedemptionCodeResponse>>> redemptionCodes(ServerWebExchange exchange) {
         adminAuth.verifyAdmin(exchange);
         return redemptionCodeService.list().collectList().map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<List<InviteRebateRecordResponse>>> inviteRebates(ServerWebExchange exchange) {
+        adminAuth.verifyAdmin(exchange);
+        return inviteRebateService.listRecent().collectList().map(ApiResponse::ok);
     }
 
     @Override

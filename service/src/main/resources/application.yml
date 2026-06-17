@@ -46,6 +46,11 @@ springdoc:
   api-docs:
     path: /v3/api-docs
 
+starry:
+  data-transfer:
+    backup-dir: ${STARRY_BACKUP_DIR:${user.home}/.starry-api/backups}
+    max-import-bytes: ${STARRY_MAX_IMPORT_BYTES:268435456}
+
 kiro:
   proxy:
     admin-token: ${KIRO_ADMIN_TOKEN:}

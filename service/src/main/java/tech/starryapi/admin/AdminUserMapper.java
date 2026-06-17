@@ -10,6 +10,9 @@ final class AdminUserMapper {
     static AdminDtos.AdminUserResponse toResponse(AdminUserEntity entity) {
         return new AdminDtos.AdminUserResponse(
             entity.getUserId(),
+            entity.getAffiliateCode(),
+            entity.getInvitedByUserId(),
+            entity.getInviteSourceCode(),
             entity.getUsername(),
             entity.getEmail(),
             entity.getDisplayName(),

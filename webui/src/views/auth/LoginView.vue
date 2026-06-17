@@ -35,6 +35,7 @@
   const turnstileContainerRef = ref<HTMLElement | null>(null);
   const turnstileWidgetId = ref<string | null>(null);
   let turnstileScriptPromise: Promise<void> | null = null;
+  const AFFILIATE_STORAGE_KEY = 'starry-api-pending-affiliate-code';
 
   declare global {
     interface Window {
@@ -62,6 +63,7 @@
     verifyCode: '',
     emailVerificationToken: '',
     inviteCode: '',
+    affiliateCode: '',
   });
 
   const rules: FormRules = {
@@ -94,7 +96,7 @@
     if (!emailVerifyEnabled.value) return true;
     return (
       Boolean(registerForm.emailVerificationToken) ||
-      (inviteCodeEnabled.value && Boolean(registerForm.inviteCode))
+      (inviteCodeEnabled.value && (Boolean(registerForm.inviteCode) || Boolean(registerForm.affiliateCode)))
     );
   });
 
@@ -155,6 +157,7 @@
       const result = await authApi.sendVerifyCode({
         email: registerForm.email,
         turnstileToken: turnstileToken.value || undefined,
+        affiliateCode: registerForm.affiliateCode || undefined,
       });
       verifyCodeCountdown.value = result.countdown || 60;
       tickVerifyCodeCountdown();
@@ -200,8 +203,13 @@
       ElMessage.error('两次输入的密码不一致');
       return;
     }
-    if (inviteCodeEnabled.value && !registrationEnabled.value && !registerForm.inviteCode) {
-      ElMessage.warning('请输入邀请码');
+    if (
+      inviteCodeEnabled.value &&
+      !registrationEnabled.value &&
+      !registerForm.inviteCode &&
+      !registerForm.affiliateCode
+    ) {
+      ElMessage.warning('请输入邀请码或使用推荐链接');
       return;
     }
     if (showTurnstile.value && !turnstileSiteKey.value) {
@@ -224,12 +232,14 @@
         emailVerificationToken: registerForm.emailVerificationToken || undefined,
         verifyCode: registerForm.verifyCode || undefined,
         inviteCode: registerForm.inviteCode || undefined,
+        affiliateCode: registerForm.affiliateCode || undefined,
         turnstileToken: registerForm.emailVerificationToken
           ? undefined
           : turnstileToken.value || undefined,
       });
       ElMessage.success('注册成功');
       registerVisible.value = false;
+      window.localStorage.removeItem(AFFILIATE_STORAGE_KEY);
 
       if (result.user.firstLogin) {
         router.replace({ name: 'change-password' });
@@ -255,6 +265,23 @@
       registerForm.email = route.query.email;
     }
     registerVisible.value = true;
+  }
+
+  function applyAffiliateCodeFromRoute() {
+    const routeAffiliateCode = typeof route.query.aff === 'string' ? route.query.aff.trim() : '';
+    if (routeAffiliateCode) {
+      registerForm.affiliateCode = routeAffiliateCode;
+      window.localStorage.setItem(AFFILIATE_STORAGE_KEY, routeAffiliateCode);
+      registerVisible.value = true;
+      return;
+    }
+    if (route.name === 'register') {
+      registerVisible.value = true;
+    }
+    const hasRegistrationToken = typeof route.query.registrationToken === 'string';
+    if (hasRegistrationToken && !registerForm.affiliateCode) {
+      registerForm.affiliateCode = window.localStorage.getItem(AFFILIATE_STORAGE_KEY) ?? '';
+    }
   }
 
   function shouldRenderTurnstile() {
@@ -374,6 +401,7 @@
 
   onMounted(async () => {
     await loadRegistrationSettings();
+    applyAffiliateCodeFromRoute();
     applyRegistrationTokenFromRoute();
   });
 
@@ -384,7 +412,7 @@
   <div class="login">
     <div class="login__panel glass-panel glass-panel--strong">
       <div class="login__header">
-        <img class="login__brand-logo" src="/logo.svg" alt="Starry API" />
+        <img class="login__brand-logo" src="/logo.svg" alt="Starry API">
         <h1 class="login__title">控制台登录</h1>
         <p class="login__hint text-secondary" />
       </div>
@@ -450,6 +478,14 @@
           <el-input v-model="registerForm.inviteCode" placeholder="INV-XXXX-XXXX-XXXX" />
           <div class="login__register-hint">填写有效邀请码可直接注册。</div>
         </el-form-item>
+        <el-alert
+          v-if="registerForm.affiliateCode"
+          class="login__register-alert"
+          type="info"
+          :closable="false"
+          show-icon
+          :title="`已使用推荐码 ${registerForm.affiliateCode}`"
+        />
         <el-alert
           v-if="registerForm.emailVerificationToken"
           class="login__register-alert"

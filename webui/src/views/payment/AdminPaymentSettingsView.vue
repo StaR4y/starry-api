@@ -10,6 +10,7 @@
   import PageSection from '@/components/PageSection.vue';
   import { adminPaymentApi } from '@/api';
   import type {
+    InviteRebateRecord,
     PaymentOrder,
     PaymentSettings,
     PaymentType,
@@ -20,9 +21,17 @@
   const loading = ref(false);
   const submitting = ref(false);
   const orders = ref<PaymentOrder[]>([]);
+  const rebates = ref<InviteRebateRecord[]>([]);
   const pkeyConfigured = ref(false);
 
-  const form = reactive<Required<UpdatePaymentSettingsRequest>>({
+  type PaymentSettingsForm = Required<
+    Omit<UpdatePaymentSettingsRequest, 'inviteRebateStartAt' | 'inviteRebateEndAt'>
+  > & {
+    inviteRebateStartAt: Date | null;
+    inviteRebateEndAt: Date | null;
+  };
+
+  const form = reactive<PaymentSettingsForm>({
     enabled: false,
     minAmount: 1,
     maxAmount: 1000,
@@ -41,6 +50,11 @@
     easypayPid: '',
     easypayPkey: '',
     easypayPaymentMode: 'popup',
+    inviteRebateEnabled: false,
+    inviteRebateRate: 0.1,
+    inviteRebateMaxOrders: 10,
+    inviteRebateStartAt: null,
+    inviteRebateEndAt: null,
   });
 
   function togglePaymentType(type: PaymentType) {
@@ -69,6 +83,32 @@
     };
   });
 
+  const inviteRebateRatePercent = computed({
+    get: () => Number(((form.inviteRebateRate || 0) * 100).toFixed(2)),
+    set: (value: number) => {
+      form.inviteRebateRate = Number((value / 100).toFixed(6));
+    },
+  });
+
+  const inviteRebateStartDate = computed<Date | undefined>({
+    get: () => form.inviteRebateStartAt ?? undefined,
+    set: (value) => {
+      form.inviteRebateStartAt = value ?? null;
+    },
+  });
+
+  const inviteRebateEndDate = computed<Date | undefined>({
+    get: () => form.inviteRebateEndAt ?? undefined,
+    set: (value) => {
+      form.inviteRebateEndAt = value ?? null;
+    },
+  });
+
+  const rebateStats = computed(() => ({
+    count: rebates.value.length,
+    total: rebates.value.reduce((sum, record) => sum + record.rebateAmount, 0),
+  }));
+
   function applySettings(settings: PaymentSettings) {
     form.enabled = settings.enabled;
     form.minAmount = settings.minAmount;
@@ -88,18 +128,25 @@
     form.easypayPid = settings.easypayPid ?? '';
     form.easypayPkey = '';
     form.easypayPaymentMode = settings.easypayPaymentMode === 'qrcode' ? 'qrcode' : 'popup';
+    form.inviteRebateEnabled = Boolean(settings.inviteRebateEnabled);
+    form.inviteRebateRate = settings.inviteRebateRate ?? 0.1;
+    form.inviteRebateMaxOrders = settings.inviteRebateMaxOrders ?? 10;
+    form.inviteRebateStartAt = parseDate(settings.inviteRebateStartAt);
+    form.inviteRebateEndAt = parseDate(settings.inviteRebateEndAt);
     pkeyConfigured.value = Boolean(settings.easypayPkeyConfigured);
   }
 
   async function load() {
     loading.value = true;
     try {
-      const [settings, nextOrders] = await Promise.all([
+      const [settings, nextOrders, nextRebates] = await Promise.all([
         adminPaymentApi.settings(),
         adminPaymentApi.orders(),
+        adminPaymentApi.inviteRebates(),
       ]);
       applySettings(settings);
       orders.value = nextOrders;
+      rebates.value = nextRebates;
     } finally {
       loading.value = false;
     }
@@ -116,6 +163,22 @@
     }
     if (form.apiBillingMultiplier <= 0) {
       ElMessage.warning('API计费倍率必须大于 0');
+      return;
+    }
+    if (form.inviteRebateRate < 0.1 || form.inviteRebateRate > 0.2) {
+      ElMessage.warning('邀请返利比例必须在 10% 到 20% 之间');
+      return;
+    }
+    if (form.inviteRebateMaxOrders < 1) {
+      ElMessage.warning('邀请返利订单数必须大于 0');
+      return;
+    }
+    if (
+      form.inviteRebateStartAt &&
+      form.inviteRebateEndAt &&
+      form.inviteRebateStartAt >= form.inviteRebateEndAt
+    ) {
+      ElMessage.warning('返利活动开始时间必须早于结束时间');
       return;
     }
 
@@ -139,6 +202,11 @@
         easypayApiBase: form.easypayApiBase,
         easypayPid: form.easypayPid,
         easypayPaymentMode: form.easypayPaymentMode,
+        inviteRebateEnabled: form.inviteRebateEnabled,
+        inviteRebateRate: form.inviteRebateRate,
+        inviteRebateMaxOrders: form.inviteRebateMaxOrders,
+        inviteRebateStartAt: isoDate(form.inviteRebateStartAt),
+        inviteRebateEndAt: isoDate(form.inviteRebateEndAt),
       };
       if (form.easypayPkey) payload.easypayPkey = form.easypayPkey;
       const next = await adminPaymentApi.updateSettings(payload);
@@ -163,6 +231,14 @@
 
   function paymentTypeLabel(type: PaymentType) {
     return type === 'wxpay' ? '微信支付' : '支付宝';
+  }
+
+  function parseDate(value?: string | null) {
+    return value ? new Date(value) : null;
+  }
+
+  function isoDate(value: Date | null) {
+    return value ? value.toISOString() : null;
   }
 
   function getUserInitials(name?: string) {
@@ -469,6 +545,122 @@
             </el-form-item>
           </el-form>
         </div>
+
+        <!-- 邀请返利配置 -->
+        <div class="payment-admin__panel payment-admin__panel--wide">
+          <div class="payment-admin__panel-header">
+            <el-icon class="panel-header-icon"><Setting /></el-icon>
+            <span class="panel-header-title">邀请返利活动</span>
+          </div>
+
+          <el-form label-position="top">
+            <div class="payment-admin__row payment-admin__row--switch">
+              <div class="switch-info">
+                <span class="switch-title">启用充值返利</span>
+                <p class="switch-desc text-muted">
+                  用户通过 register?aff=推广码 注册后，前 N 笔成功充值按到账余额返还给邀请人。
+                </p>
+              </div>
+              <el-switch v-model="form.inviteRebateEnabled" />
+            </div>
+
+            <div class="payment-admin__form-grid">
+              <el-form-item label="返利比例 (%)">
+                <el-input-number
+                  v-model="inviteRebateRatePercent"
+                  :min="10"
+                  :max="20"
+                  :precision="2"
+                  :step="1"
+                  controls-position="right"
+                  style="width: 100%"
+                />
+                <p class="field-hint text-muted">默认 10%，可在 10% 到 20% 之间调整。</p>
+              </el-form-item>
+              <el-form-item label="每个被邀请用户返利订单数">
+                <el-input-number
+                  v-model="form.inviteRebateMaxOrders"
+                  :min="1"
+                  :max="100"
+                  controls-position="right"
+                  style="width: 100%"
+                />
+                <p class="field-hint text-muted">默认前 10 笔成功充值参与返利。</p>
+              </el-form-item>
+              <el-form-item label="活动开始时间">
+                <el-date-picker
+                  v-model="inviteRebateStartDate"
+                  type="datetime"
+                  placeholder="不限制开始时间"
+                  clearable
+                  style="width: 100%"
+                />
+              </el-form-item>
+              <el-form-item label="活动结束时间">
+                <el-date-picker
+                  v-model="inviteRebateEndDate"
+                  type="datetime"
+                  placeholder="不限制结束时间"
+                  clearable
+                  style="width: 100%"
+                />
+              </el-form-item>
+            </div>
+
+            <p class="field-hint text-muted">
+              当前已记录 {{ formatNumber(rebateStats.count) }} 笔返利，共发放
+              {{ formatNumber(rebateStats.total) }} 余额。返利只会在订单首次真实入账时执行一次。
+            </p>
+          </el-form>
+        </div>
+      </section>
+
+      <!-- 返利记录 -->
+      <section class="payment-admin__orders">
+        <div class="payment-admin__panel-header">
+          <el-icon class="panel-header-icon"><Setting /></el-icon>
+          <span class="panel-header-title">近期邀请返利</span>
+        </div>
+        <el-table :data="rebates" stripe style="width: 100%" empty-text="暂无返利记录">
+          <el-table-column label="推广码" width="120">
+            <template #default="{ row }">
+              <span class="mono-code">{{ row.affiliateCode }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="邀请人" min-width="170">
+            <template #default="{ row }">
+              <span class="mono-code">{{ row.inviterUserId }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="被邀请用户" min-width="170">
+            <template #default="{ row }">
+              <span class="mono-code">{{ row.invitedUserId }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="充值余额" width="120" align="right">
+            <template #default="{ row }">
+              {{ formatNumber(row.baseAmount) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="比例" width="90" align="right">
+            <template #default="{ row }">
+              {{ formatNumber(row.rebateRate * 100) }}%
+            </template>
+          </el-table-column>
+          <el-table-column label="返利余额" width="120" align="right">
+            <template #default="{ row }">
+              <span class="amount-val amount-val--credited">+{{ formatNumber(row.rebateAmount) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="第几笔" width="90" align="center">
+            <template #default="{ row }">第 {{ row.rebateOrderNo }} 笔</template>
+          </el-table-column>
+          <el-table-column label="返利时间" width="170">
+            <template #default="{ row }">
+              <span class="time-text">{{ formatDateTime(row.createdAt) }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
       </section>
 
       <!-- 订单记录 -->
@@ -576,6 +768,10 @@
         box-shadow: var(--kp-shadow-lg);
         border-color: rgba(91, 141, 239, 0.25);
       }
+    }
+
+    &__panel--wide {
+      grid-column: 1 / -1;
     }
 
     &__panel-header {

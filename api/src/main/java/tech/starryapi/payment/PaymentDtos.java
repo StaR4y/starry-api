@@ -31,7 +31,12 @@ public final class PaymentDtos {
         String easypayApiBase,
         String easypayPid,
         Boolean easypayPkeyConfigured,
-        String easypayPaymentMode
+        String easypayPaymentMode,
+        Boolean inviteRebateEnabled,
+        BigDecimal inviteRebateRate,
+        Integer inviteRebateMaxOrders,
+        Instant inviteRebateStartAt,
+        Instant inviteRebateEndAt
     ) {
         public PaymentSettingsResponse {
             enabledTypes = enabledTypes == null ? List.of() : List.copyOf(enabledTypes);
@@ -56,7 +61,12 @@ public final class PaymentDtos {
         String easypayApiBase,
         String easypayPid,
         String easypayPkey,
-        String easypayPaymentMode
+        String easypayPaymentMode,
+        Boolean inviteRebateEnabled,
+        BigDecimal inviteRebateRate,
+        Integer inviteRebateMaxOrders,
+        Instant inviteRebateStartAt,
+        Instant inviteRebateEndAt
     ) {
     }
 
@@ -97,6 +107,20 @@ public final class PaymentDtos {
         Instant cancelledAt,
         Instant createdAt,
         Instant updatedAt
+    ) {
+    }
+
+    public record InviteRebateRecordResponse(
+        String rebateId,
+        String affiliateCode,
+        String paymentOrderId,
+        String inviterUserId,
+        String invitedUserId,
+        BigDecimal baseAmount,
+        BigDecimal rebateRate,
+        BigDecimal rebateAmount,
+        Integer rebateOrderNo,
+        Instant createdAt
     ) {
     }
 

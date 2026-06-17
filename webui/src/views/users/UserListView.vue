@@ -154,6 +154,19 @@
     }
   }
 
+  function affiliateRegisterUrl(code?: string | null) {
+    if (!code) return '';
+    return `${window.location.origin}${window.location.pathname}#/register?aff=${encodeURIComponent(code)}`;
+  }
+
+  async function copyAffiliateLink(row: AdminUser) {
+    if (!row.affiliateCode) {
+      ElMessage.warning('该账号暂无推广码');
+      return;
+    }
+    await copy(affiliateRegisterUrl(row.affiliateCode));
+  }
+
   async function submitForm() {
     if (!formRef.value) return;
     const valid = await formRef.value.validate().catch(() => false);
@@ -387,6 +400,17 @@
 
     <el-table v-loading="loading" :data="users" stripe>
       <el-table-column prop="username" label="用户名" min-width="160" />
+      <el-table-column label="推广码" min-width="170">
+        <template #default="{ row }">
+          <div v-if="row.affiliateCode" class="invite-code-cell">
+            <span class="mono-code">{{ row.affiliateCode }}</span>
+            <el-button link type="primary" size="small" @click.stop="copyAffiliateLink(row)">
+              复制链接
+            </el-button>
+          </div>
+          <span v-else class="text-muted">—</span>
+        </template>
+      </el-table-column>
       <el-table-column label="邮箱" min-width="220">
         <template #default="{ row }">{{ row.email || '—' }}</template>
       </el-table-column>
@@ -865,6 +889,12 @@
       align-items: center;
       gap: 8px;
     }
+  }
+
+  .invite-code-cell {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
 
   .turnstile-section {

@@ -2,6 +2,7 @@ package tech.starryapi.payment;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -36,7 +37,14 @@ public class PaymentSettingsService {
     static final String EASYPAY_PID = "EASYPAY_PID";
     static final String EASYPAY_PKEY = "EASYPAY_PKEY";
     static final String EASYPAY_PAYMENT_MODE = "EASYPAY_PAYMENT_MODE";
+    static final String INVITE_REBATE_ENABLED = "INVITE_REBATE_ENABLED";
+    static final String INVITE_REBATE_RATE = "INVITE_REBATE_RATE";
+    static final String INVITE_REBATE_MAX_ORDERS = "INVITE_REBATE_MAX_ORDERS";
+    static final String INVITE_REBATE_START_AT = "INVITE_REBATE_START_AT";
+    static final String INVITE_REBATE_END_AT = "INVITE_REBATE_END_AT";
     public static final BigDecimal DEFAULT_API_BILLING_MULTIPLIER = new BigDecimal("0.0000166666666667");
+    public static final BigDecimal DEFAULT_INVITE_REBATE_RATE = new BigDecimal("0.10");
+    public static final int DEFAULT_INVITE_REBATE_MAX_ORDERS = 10;
 
     private static final List<String> SETTING_KEYS = List.of(
         PAYMENT_ENABLED,
@@ -56,7 +64,12 @@ public class PaymentSettingsService {
         EASYPAY_API_BASE,
         EASYPAY_PID,
         EASYPAY_PKEY,
-        EASYPAY_PAYMENT_MODE
+        EASYPAY_PAYMENT_MODE,
+        INVITE_REBATE_ENABLED,
+        INVITE_REBATE_RATE,
+        INVITE_REBATE_MAX_ORDERS,
+        INVITE_REBATE_START_AT,
+        INVITE_REBATE_END_AT
     );
 
     private final SystemSettingRepository repository;
@@ -99,7 +112,12 @@ public class PaymentSettingsService {
                     request.easypayApiBase() == null ? current.easypayApiBase() : clean(request.easypayApiBase()),
                     request.easypayPid() == null ? current.easypayPid() : clean(request.easypayPid()),
                     passwordValue(request.easypayPkey(), current.easypayPkey()),
-                    normalizePaymentMode(request.easypayPaymentMode() == null ? current.easypayPaymentMode() : request.easypayPaymentMode())
+                    normalizePaymentMode(request.easypayPaymentMode() == null ? current.easypayPaymentMode() : request.easypayPaymentMode()),
+                    request.inviteRebateEnabled() == null ? current.inviteRebateEnabled() : Boolean.TRUE.equals(request.inviteRebateEnabled()),
+                    normalizeInviteRebateRate(request.inviteRebateRate() == null ? current.inviteRebateRate() : request.inviteRebateRate()),
+                    normalizeInviteRebateMaxOrders(request.inviteRebateMaxOrders() == null ? current.inviteRebateMaxOrders() : request.inviteRebateMaxOrders()),
+                    request.inviteRebateStartAt(),
+                    request.inviteRebateEndAt()
                 );
                 validateRange(next);
                 return Mono.when(
@@ -120,7 +138,12 @@ public class PaymentSettingsService {
                     set(EASYPAY_API_BASE, next.easypayApiBase()),
                     set(EASYPAY_PID, next.easypayPid()),
                     set(EASYPAY_PKEY, next.easypayPkey()),
-                    set(EASYPAY_PAYMENT_MODE, next.easypayPaymentMode())
+                    set(EASYPAY_PAYMENT_MODE, next.easypayPaymentMode()),
+                    set(INVITE_REBATE_ENABLED, Boolean.toString(next.inviteRebateEnabled())),
+                    set(INVITE_REBATE_RATE, next.inviteRebateRate().toPlainString()),
+                    set(INVITE_REBATE_MAX_ORDERS, Integer.toString(next.inviteRebateMaxOrders())),
+                    set(INVITE_REBATE_START_AT, instantValue(next.inviteRebateStartAt())),
+                    set(INVITE_REBATE_END_AT, instantValue(next.inviteRebateEndAt()))
                 )
                 .then(settingValues())
                 .map(saved -> toResponse(parseConfig(saved), true));
@@ -152,7 +175,12 @@ public class PaymentSettingsService {
             clean(values.get(EASYPAY_API_BASE)),
             clean(values.get(EASYPAY_PID)),
             clean(values.get(EASYPAY_PKEY)),
-            normalizePaymentMode(values.get(EASYPAY_PAYMENT_MODE))
+            normalizePaymentMode(values.get(EASYPAY_PAYMENT_MODE)),
+            bool(values, INVITE_REBATE_ENABLED, false),
+            normalizeInviteRebateRate(amount(values, INVITE_REBATE_RATE, DEFAULT_INVITE_REBATE_RATE)),
+            normalizeInviteRebateMaxOrders(number(values, INVITE_REBATE_MAX_ORDERS, DEFAULT_INVITE_REBATE_MAX_ORDERS)),
+            instant(values.get(INVITE_REBATE_START_AT)),
+            instant(values.get(INVITE_REBATE_END_AT))
         );
         validateRange(config);
         return config;
@@ -177,7 +205,12 @@ public class PaymentSettingsService {
             includeProviderConfig ? config.easypayApiBase() : null,
             includeProviderConfig ? config.easypayPid() : null,
             includeProviderConfig ? !config.easypayPkey().isBlank() : null,
-            includeProviderConfig ? config.easypayPaymentMode() : null
+            includeProviderConfig ? config.easypayPaymentMode() : null,
+            config.inviteRebateEnabled(),
+            config.inviteRebateRate(),
+            config.inviteRebateMaxOrders(),
+            config.inviteRebateStartAt(),
+            config.inviteRebateEndAt()
         );
     }
 
@@ -200,6 +233,9 @@ public class PaymentSettingsService {
             case MAX_PENDING_ORDERS -> "3";
             case ENABLED_PAYMENT_TYPES -> "alipay,wxpay";
             case EASYPAY_PAYMENT_MODE -> "popup";
+            case INVITE_REBATE_ENABLED -> "false";
+            case INVITE_REBATE_RATE -> DEFAULT_INVITE_REBATE_RATE.toPlainString();
+            case INVITE_REBATE_MAX_ORDERS -> Integer.toString(DEFAULT_INVITE_REBATE_MAX_ORDERS);
             default -> "";
         };
     }
@@ -207,6 +243,11 @@ public class PaymentSettingsService {
     private void validateRange(PaymentConfig config) {
         if (config.maxAmount().signum() > 0 && config.minAmount().compareTo(config.maxAmount()) > 0) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_PAYMENT_RANGE", "Minimum amount must not exceed maximum amount");
+        }
+        if (config.inviteRebateStartAt() != null
+            && config.inviteRebateEndAt() != null
+            && !config.inviteRebateStartAt().isBefore(config.inviteRebateEndAt())) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_INVITE_REBATE_WINDOW", "Invite rebate start time must be before end time");
         }
     }
 
@@ -263,6 +304,20 @@ public class PaymentSettingsService {
         return rate.setScale(6, RoundingMode.HALF_UP);
     }
 
+    private BigDecimal normalizeInviteRebateRate(BigDecimal value) {
+        BigDecimal rate = value == null ? DEFAULT_INVITE_REBATE_RATE : value;
+        BigDecimal min = new BigDecimal("0.10");
+        BigDecimal max = new BigDecimal("0.20");
+        if (rate.compareTo(min) < 0 || rate.compareTo(max) > 0) {
+            throw new ApiException(
+                HttpStatus.BAD_REQUEST,
+                "INVALID_INVITE_REBATE_RATE",
+                "Invite rebate rate must be between 10% and 20%"
+            );
+        }
+        return rate.setScale(6, RoundingMode.HALF_UP);
+    }
+
     private int normalizeOrderTimeout(Integer value) {
         if (value == null || value < 1) {
             return 30;
@@ -275,6 +330,13 @@ public class PaymentSettingsService {
             return 3;
         }
         return Math.min(value, 50);
+    }
+
+    private int normalizeInviteRebateMaxOrders(Integer value) {
+        if (value == null || value < 1) {
+            return DEFAULT_INVITE_REBATE_MAX_ORDERS;
+        }
+        return Math.min(value, 100);
     }
 
     private String normalizePaymentMode(String value) {
@@ -309,6 +371,19 @@ public class PaymentSettingsService {
         }
     }
 
+    private Instant instant(String value) {
+        try {
+            String cleaned = clean(value);
+            return cleaned.isBlank() ? null : Instant.parse(cleaned);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private String instantValue(Instant value) {
+        return value == null ? "" : value.toString();
+    }
+
     private String clean(String value) {
         return value == null ? "" : value.trim();
     }
@@ -331,10 +406,25 @@ public class PaymentSettingsService {
         String easypayApiBase,
         String easypayPid,
         String easypayPkey,
-        String easypayPaymentMode
+        String easypayPaymentMode,
+        boolean inviteRebateEnabled,
+        BigDecimal inviteRebateRate,
+        int inviteRebateMaxOrders,
+        Instant inviteRebateStartAt,
+        Instant inviteRebateEndAt
     ) {
         boolean easypayConfigured() {
             return !easypayApiBase.isBlank() && !easypayPid.isBlank() && !easypayPkey.isBlank();
+        }
+
+        boolean inviteRebateActiveAt(Instant now) {
+            if (!inviteRebateEnabled) {
+                return false;
+            }
+            if (inviteRebateStartAt != null && now.isBefore(inviteRebateStartAt)) {
+                return false;
+            }
+            return inviteRebateEndAt == null || now.isBefore(inviteRebateEndAt);
         }
     }
 }

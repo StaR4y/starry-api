@@ -30,6 +30,7 @@
     { name: 'users', label: '用户管理', icon: '', adminOnly: true },
     { name: 'payment-settings', label: '支付设置', icon: '', adminOnly: true },
     { name: 'redemption-codes', label: '兑换码', icon: '', adminOnly: true },
+    { name: 'data-transfer', label: '数据管理', icon: '', adminOnly: true },
   ];
 
   const menus = computed(() =>
@@ -70,7 +71,7 @@
   <div class="layout">
     <aside class="layout__sider glass-panel">
       <div class="layout__brand">
-        <img class="layout__brand-logo" src="/logo.svg" alt="" aria-hidden="true" />
+        <img class="layout__brand-logo" src="/logo.svg" alt="" aria-hidden="true">
         <span class="layout__brand-text">Starry API</span>
       </div>
 

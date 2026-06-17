@@ -19,6 +19,9 @@ export type AdminUserRole = 'ADMIN' | 'USER';
 
 export interface AdminUser {
   userId: string;
+  affiliateCode: string | null;
+  invitedByUserId: string | null;
+  inviteSourceCode: string | null;
   username: string;
   email: string | null;
   displayName: string | null;
@@ -52,11 +55,13 @@ export interface RegisterRequest {
   inviteCode?: string;
   emailVerificationToken?: string;
   turnstileToken?: string;
+  affiliateCode?: string;
 }
 
 export interface SendVerifyCodeRequest {
   email: string;
   turnstileToken?: string;
+  affiliateCode?: string;
 }
 
 export interface SendVerifyCodeResult {
@@ -155,6 +160,44 @@ export interface InviteCode {
 export interface CreateInviteCodesResponse {
   total: number;
   codes: InviteCode[];
+}
+
+/* ================== 数据迁移 / 备份 ================== */
+
+export interface DataTransferStatus {
+  database: string;
+  backupDir: string;
+  maxImportBytes: number;
+  backupCount: number;
+  backupBytes: number;
+}
+
+export interface BackupFile {
+  fileName: string;
+  sizeBytes: number;
+  createdAt: string;
+}
+
+export interface BackupListResponse {
+  backupDir: string;
+  files: BackupFile[];
+}
+
+export interface BackupCreateResponse {
+  file: BackupFile;
+}
+
+export interface DeleteBackupResponse {
+  fileName: string;
+  deleted: boolean;
+}
+
+export interface ImportDataResult {
+  fileName: string;
+  sourceType: 'SQL' | 'ZIP' | string;
+  statements: number;
+  preRestoreBackupName: string | null;
+  importedAt: string;
 }
 
 /* ================== 账号 ================== */
@@ -612,6 +655,11 @@ export interface PaymentSettings {
   easypayPid?: string | null;
   easypayPkeyConfigured?: boolean | null;
   easypayPaymentMode?: 'popup' | 'qrcode' | string | null;
+  inviteRebateEnabled?: boolean | null;
+  inviteRebateRate?: number | null;
+  inviteRebateMaxOrders?: number | null;
+  inviteRebateStartAt?: string | null;
+  inviteRebateEndAt?: string | null;
 }
 
 export interface UpdatePaymentSettingsRequest {
@@ -633,6 +681,24 @@ export interface UpdatePaymentSettingsRequest {
   easypayPid?: string;
   easypayPkey?: string;
   easypayPaymentMode?: 'popup' | 'qrcode';
+  inviteRebateEnabled?: boolean;
+  inviteRebateRate?: number;
+  inviteRebateMaxOrders?: number;
+  inviteRebateStartAt?: string | null;
+  inviteRebateEndAt?: string | null;
+}
+
+export interface InviteRebateRecord {
+  rebateId: string;
+  affiliateCode: string;
+  paymentOrderId: string;
+  inviterUserId: string;
+  invitedUserId: string;
+  baseAmount: number;
+  rebateRate: number;
+  rebateAmount: number;
+  rebateOrderNo: number;
+  createdAt: string;
 }
 
 export interface CreatePaymentOrderRequest {

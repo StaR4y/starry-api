@@ -1378,7 +1378,12 @@ class ProxyFacadeRoutingTest {
             "",
             "",
             "",
-            "popup"
+            "popup",
+            false,
+            new BigDecimal("0.10"),
+            10,
+            null,
+            null
         )));
         return service;
     }

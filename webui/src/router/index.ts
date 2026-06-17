@@ -18,6 +18,12 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '登录', anonymous: true },
   },
   {
+    path: '/register',
+    name: 'register',
+    component: () => import('@/views/auth/LoginView.vue'),
+    meta: { title: '注册', anonymous: true },
+  },
+  {
     path: '/change-password',
     name: 'change-password',
     component: () => import('@/views/auth/ChangePasswordView.vue'),
@@ -100,6 +106,12 @@ const routes: RouteRecordRaw[] = [
         name: 'redemption-codes',
         component: () => import('@/views/payment/AdminRedemptionCodesView.vue'),
         meta: { title: '兑换码', adminOnly: true },
+      },
+      {
+        path: 'data-transfer',
+        name: 'data-transfer',
+        component: () => import('@/views/data-transfer/DataTransferView.vue'),
+        meta: { title: '数据管理', adminOnly: true },
       },
     ],
   },

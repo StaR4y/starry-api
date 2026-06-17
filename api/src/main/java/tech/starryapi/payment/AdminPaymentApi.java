@@ -36,6 +36,9 @@ public interface AdminPaymentApi {
     @GetMapping("/redemption-codes")
     Mono<ApiResponse<List<PaymentDtos.RedemptionCodeResponse>>> redemptionCodes(ServerWebExchange exchange);
 
+    @GetMapping("/invite-rebates")
+    Mono<ApiResponse<List<PaymentDtos.InviteRebateRecordResponse>>> inviteRebates(ServerWebExchange exchange);
+
     @PostMapping("/redemption-codes")
     Mono<ApiResponse<PaymentDtos.CreateRedemptionCodesResponse>> createRedemptionCodes(
         ServerWebExchange exchange,

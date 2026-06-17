@@ -51,6 +51,42 @@ class AdminUserServiceTest {
         assertThat(captor.getValue().getBalance()).isEqualByComparingTo(BigDecimal.ZERO);
         assertThat(captor.getValue().getEnabled()).isTrue();
         assertThat(captor.getValue().getFirstLogin()).isFalse();
+        assertThat(captor.getValue().getAffiliateCode()).isNotBlank();
+    }
+
+    @Test
+    void registersUserWithAffiliateCodeAndRecordsInviteRelation() {
+        AdminUserRepository repository = mock(AdminUserRepository.class);
+        RegistrationSettingsService settingsService = mock(RegistrationSettingsService.class);
+        AdminUserService service = service(repository, settingsService);
+        AdminUserEntity inviter = user("inviter-1", "inviter", "inviter@example.com", "secret123");
+        inviter.setAffiliateCode("ffOabc");
+
+        when(settingsService.registrationPolicy()).thenReturn(Mono.just(publicRegistrationPolicy()));
+        when(repository.findByAffiliateCode("ffOabc")).thenReturn(Mono.just(inviter));
+        when(repository.save(any(AdminUserEntity.class))).thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
+
+        AdminDtos.LoginResponse response = service.register(new AdminDtos.RegisterRequest(
+            "invited-user",
+            "invited@example.com",
+            "Invited User",
+            "secret123",
+            "123456",
+            null,
+            null,
+            null,
+            "ffOabc"
+        )).block();
+
+        assertThat(response).isNotNull();
+        assertThat(response.user().inviteSourceCode()).isEqualTo("ffOabc");
+        assertThat(response.user().invitedByUserId()).isEqualTo("inviter-1");
+
+        ArgumentCaptor<AdminUserEntity> captor = ArgumentCaptor.forClass(AdminUserEntity.class);
+        verify(repository).save(captor.capture());
+        assertThat(captor.getValue().getInvitedByUserId()).isEqualTo("inviter-1");
+        assertThat(captor.getValue().getInviteSourceCode()).isEqualTo("ffOabc");
+        assertThat(captor.getValue().getAffiliateCode()).isNotBlank();
     }
 
     @Test
