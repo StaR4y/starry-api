@@ -12,8 +12,18 @@
   import { computed, onMounted, ref } from 'vue';
   import { ElMessage } from 'element-plus';
   import PageSection from '@/components/PageSection.vue';
-  import { accountsApi, apiKeysApi, logsApi, systemApi } from '@/api';
-  import type { Account, ApiKey, HealthInfo, ModelInfo, PerformanceMetric, RequestLog } from '@/types/api';
+  import { accountsApi, apiKeysApi, logsApi, systemApi, usersApi } from '@/api';
+  import type {
+    Account,
+    AdminUser,
+    ApiKey,
+    HealthInfo,
+    ModelInfo,
+    PerformanceMetric,
+    RequestLog,
+    ActiveUserUsage,
+    UsageSummary,
+  } from '@/types/api';
   import { formatDateTime, formatNumber } from '@/utils/format';
 
   const loading = ref(false);
@@ -21,8 +31,10 @@
   const models = ref<ModelInfo[]>([]);
   const accounts = ref<Account[]>([]);
   const apiKeys = ref<ApiKey[]>([]);
+  const users = ref<AdminUser[]>([]);
   const logs = ref<RequestLog[]>([]);
   const performanceMetrics = ref<PerformanceMetric[]>([]);
+  const usageSummary = ref<UsageSummary | null>(null);
 
   const chartWidth = 760;
   const chartHeight = 320;
@@ -43,6 +55,23 @@
     tokens: number;
     averageLatency: number | null;
     share: number;
+    lastUsedAt: string | null;
+    color: string;
+  }
+
+  interface UserUsageSummary {
+    id: string;
+    name: string;
+    secondary: string;
+    count: number;
+    success: number;
+    failed: number;
+    successRate: number;
+    tokens: number;
+    credits: number;
+    averageLatency: number | null;
+    share: number;
+    keyCount: number;
     lastUsedAt: string | null;
     color: string;
   }
@@ -114,6 +143,11 @@
     return (log.inputTokens ?? 0) + (log.outputTokens ?? 0);
   }
 
+  function creditsOf(log: RequestLog) {
+    const value = Number(log.credits ?? 0);
+    return Number.isFinite(value) ? Math.max(0, value) : 0;
+  }
+
   function validTime(value: string) {
     const time = new Date(value).getTime();
     return Number.isNaN(time) ? null : time;
@@ -124,6 +158,40 @@
     if (value >= 10_000) return `${Math.round(value / 1_000)}k`;
     if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
     return String(value);
+  }
+
+  function shortId(value: string | null | undefined) {
+    if (!value) return '—';
+    return value.length <= 10 ? value : `${value.slice(0, 8)}…`;
+  }
+
+  function userDisplayName(user: AdminUser) {
+    return user.displayName?.trim() || user.username || shortId(user.userId);
+  }
+
+  function activeUserDisplayName(user: ActiveUserUsage) {
+    return user.displayName?.trim()
+      || user.username?.trim()
+      || user.email?.trim()
+      || shortId(user.userId)
+      || '匿名 / 未识别';
+  }
+
+  function activeUserSecondary(user: ActiveUserUsage) {
+    const parts = [
+      user.email?.trim(),
+      user.apiKeyCount > 0 ? `${formatNumber(user.apiKeyCount)} Key` : null,
+      user.userId ? `ID ${shortId(user.userId)}` : null,
+    ].filter(Boolean);
+    return parts.join(' · ') || '无用户信息';
+  }
+
+  function balanceText(value: number | null | undefined) {
+    if (value === null || value === undefined || Number.isNaN(value)) return '—';
+    const fractionDigits = Math.abs(value) >= 100 ? 2 : 4;
+    return value.toLocaleString(undefined, {
+      maximumFractionDigits: fractionDigits,
+    });
   }
 
   function percentText(value: number | null | undefined) {
@@ -270,6 +338,98 @@
       .map((item, index) => ({ ...item, color: getChartColor(index) }));
   }
 
+  function summarizeUsers(source: ParsedLog[]): UserUsageSummary[] {
+    const total = source.length;
+    const apiKeyById = new Map(apiKeys.value.map((key) => [key.keyId, key]));
+    const userById = new Map(users.value.map((user) => [user.userId, user]));
+    const map = new Map<
+      string,
+      {
+        name: string;
+        secondary: string;
+        count: number;
+        success: number;
+        failed: number;
+        tokens: number;
+        credits: number;
+        latencies: number[];
+        keyIds: Set<string>;
+        lastUsedAt: string | null;
+      }
+    >();
+
+    for (const item of source) {
+      const apiKey = item.log.apiKeyId ? apiKeyById.get(item.log.apiKeyId) : null;
+      const user = apiKey?.userId ? userById.get(apiKey.userId) : null;
+      const groupId = user?.userId || apiKey?.userId || item.log.apiKeyId || 'anonymous';
+      const fallbackKeyName = apiKey?.name?.trim() || `API Key ${shortId(item.log.apiKeyId)}`;
+      const name = user ? userDisplayName(user) : item.log.apiKeyId ? fallbackKeyName : '匿名 / 未识别';
+      const secondary = user
+        ? user.email || `用户 ${shortId(user.userId)}`
+        : apiKey
+          ? `${apiKey.keyPrefix || shortId(apiKey.keyId)} · ${apiKey.name}`
+          : item.log.apiKeyId
+            ? `未匹配 API Key ${shortId(item.log.apiKeyId)}`
+            : '无 API Key 信息';
+      const current = map.get(groupId) ?? {
+        name,
+        secondary,
+        count: 0,
+        success: 0,
+        failed: 0,
+        tokens: 0,
+        credits: 0,
+        latencies: [],
+        keyIds: new Set<string>(),
+        lastUsedAt: null,
+      };
+
+      current.count += 1;
+      if (item.log.success) {
+        current.success += 1;
+      } else {
+        current.failed += 1;
+      }
+      current.tokens += tokensOf(item.log);
+      current.credits += creditsOf(item.log);
+      if (item.log.apiKeyId) {
+        current.keyIds.add(item.log.apiKeyId);
+      }
+      if (item.log.latencyMs !== null && item.log.latencyMs !== undefined) {
+        current.latencies.push(item.log.latencyMs);
+      }
+      if (!current.lastUsedAt || item.time > (validTime(current.lastUsedAt) ?? 0)) {
+        current.lastUsedAt = item.log.createdAt;
+      }
+      map.set(groupId, current);
+    }
+
+    return Array.from(map.entries())
+      .map(([id, item], index) => ({
+        id,
+        name: item.name,
+        secondary: item.secondary,
+        count: item.count,
+        success: item.success,
+        failed: item.failed,
+        successRate: item.count ? (item.success / item.count) * 100 : 0,
+        tokens: item.tokens,
+        credits: item.credits,
+        averageLatency: average(item.latencies),
+        share: total ? (item.count / total) * 100 : 0,
+        keyCount: item.keyIds.size,
+        lastUsedAt: item.lastUsedAt,
+        color: getChartColor(index),
+      }))
+      .sort((a, b) => b.count - a.count || b.tokens - a.tokens || a.name.localeCompare(b.name))
+      .map((item, index) => ({ ...item, color: getChartColor(index) }));
+  }
+
+  function barWidth(value: number, maxValue: number) {
+    if (maxValue <= 0 || value <= 0) return '0%';
+    return `${Math.max((value / maxValue) * 100, 4)}%`;
+  }
+
   function buildChart(source: RequestLog[]): ChartData {
     const parsed = parseLogs(source);
     const bucketCount = 12;
@@ -367,6 +527,23 @@
   const enabledApiKeys = computed(() => apiKeys.value.filter((key) => key.enabled).length);
   const parsedLogs = computed(() => parseLogs(logs.value));
   const modelSummaries = computed(() => summarizeModels(parsedLogs.value));
+  const userSummaries = computed(() => summarizeUsers(parsedLogs.value));
+  const topUsersByRequests = computed(() => userSummaries.value.slice(0, 8));
+  const topUsersByTokens = computed(() =>
+    [...userSummaries.value].sort((a, b) => b.tokens - a.tokens || b.count - a.count).slice(0, 8),
+  );
+  const topUsersByCredits = computed(() =>
+    [...userSummaries.value].sort((a, b) => b.credits - a.credits || b.count - a.count).slice(0, 8),
+  );
+  const riskyUsers = computed(() =>
+    [...userSummaries.value]
+      .filter((user) => user.failed > 0)
+      .sort((a, b) => a.successRate - b.successRate || b.failed - a.failed || b.count - a.count)
+      .slice(0, 6),
+  );
+  const maxUserRequests = computed(() => Math.max(0, ...topUsersByRequests.value.map((user) => user.count)));
+  const maxUserTokens = computed(() => Math.max(0, ...topUsersByTokens.value.map((user) => user.tokens)));
+  const maxUserCredits = computed(() => Math.max(0, ...topUsersByCredits.value.map((user) => user.credits)));
   const chartData = computed(() => buildChart(logs.value));
   const performanceSamples = computed(() =>
     performanceMetrics.value
@@ -422,6 +599,17 @@
     ),
   );
   const activeModelCount = computed(() => new Set(parsedLogs.value.map((log) => log.model)).size);
+  const totalCredits = computed(() => logs.value.reduce((sum, log) => sum + creditsOf(log), 0));
+  const usageTotalRequests = computed(() => usageSummary.value?.totalRequests ?? totalRequests.value);
+  const usageTotalTokens = computed(() => usageSummary.value?.totalTokens ?? totalTokens.value);
+  const usageTotalCredits = computed(() => usageSummary.value?.totalCredits ?? totalCredits.value);
+  const recentActiveUsers = computed(() => usageSummary.value?.activeUsers ?? []);
+  const recentActiveUserCount = computed(() => usageSummary.value?.activeUserCount ?? 0);
+  const activeWindowStartedAt = computed(() => usageSummary.value?.activeWindowStartedAt ?? null);
+  const topUserRequests = computed(() => topUsersByRequests.value[0]?.count ?? 0);
+  const userAverageSuccessRate = computed(() =>
+    average(userSummaries.value.map((user) => user.successRate)),
+  );
 
   function shouldShowBucketLabel(index: number) {
     return index === 0 || index === chartData.value.buckets.length - 1 || index % 2 === 0;
@@ -430,20 +618,24 @@
   async function loadAll() {
     loading.value = true;
     try {
-      const [h, m, a, k, l, p] = await Promise.allSettled([
+      const [h, m, a, k, u, l, p, s] = await Promise.allSettled([
         systemApi.health(),
         systemApi.models(),
         accountsApi.list(),
         apiKeysApi.list(),
+        usersApi.list(),
         logsApi.list(),
         logsApi.performance(),
+        logsApi.usageSummary(),
       ]);
       if (h.status === 'fulfilled') health.value = h.value;
       if (m.status === 'fulfilled') models.value = m.value;
       if (a.status === 'fulfilled') accounts.value = a.value;
       if (k.status === 'fulfilled') apiKeys.value = k.value;
+      if (u.status === 'fulfilled') users.value = u.value;
       if (l.status === 'fulfilled') logs.value = l.value;
       if (p.status === 'fulfilled') performanceMetrics.value = p.value;
+      if (s.status === 'fulfilled') usageSummary.value = s.value;
     } catch (e) {
       ElMessage.error((e as Error).message);
     } finally {
@@ -1014,6 +1206,198 @@
     </div>
   </PageSection>
 
+  <PageSection
+    title="用户使用分析"
+    subtitle="按用户聚合最新请求日志，并显示全量 Token 与近五分钟活跃用户"
+  >
+    <div class="user-usage-dashboard">
+      <div class="usage-stats">
+        <div class="usage-stat">
+          <span class="usage-stat__label">使用总 Token</span>
+          <strong>{{ formatNumber(usageTotalTokens) }}</strong>
+        </div>
+        <div class="usage-stat">
+          <span class="usage-stat__label">累计请求</span>
+          <strong>{{ formatNumber(usageTotalRequests) }}</strong>
+        </div>
+        <div class="usage-stat">
+          <span class="usage-stat__label">5分钟活跃用户</span>
+          <strong>{{ formatNumber(recentActiveUserCount) }}</strong>
+        </div>
+        <div class="usage-stat">
+          <span class="usage-stat__label">消耗余额</span>
+          <strong>{{ balanceText(usageTotalCredits) }}</strong>
+        </div>
+        <div class="usage-stat">
+          <span class="usage-stat__label">最高调用</span>
+          <strong>{{ formatNumber(topUserRequests) }}</strong>
+        </div>
+        <div class="usage-stat">
+          <span class="usage-stat__label">用户平均成功率</span>
+          <strong>{{ percentText(userAverageSuccessRate) }}</strong>
+        </div>
+      </div>
+
+      <div class="user-chart-grid">
+        <div class="user-chart-card active-users-card">
+          <div class="user-chart-card__header">
+            <div>
+              <h3>近五分钟活跃用户</h3>
+              <p class="text-muted">
+                <span v-if="activeWindowStartedAt">自 {{ formatDateTime(activeWindowStartedAt) }} 起</span>
+                <span v-else>按最近 5 分钟请求统计</span>
+              </p>
+            </div>
+            <span class="text-muted">{{ formatNumber(recentActiveUsers.length) }} 个</span>
+          </div>
+          <div v-if="recentActiveUsers.length" class="active-user-list">
+            <div
+              v-for="(user, index) in recentActiveUsers"
+              :key="user.userId || user.email || `${user.lastActiveAt}-${index}`"
+              class="active-user-item"
+            >
+              <div class="active-user-item__main">
+                <strong :title="activeUserDisplayName(user)">{{ activeUserDisplayName(user) }}</strong>
+                <span class="text-muted">{{ activeUserSecondary(user) }}</span>
+              </div>
+              <div class="active-user-item__stats">
+                <span>{{ formatNumber(user.requestCount) }} 次</span>
+                <span>{{ formatNumber(user.totalTokens) }} token</span>
+                <small class="text-muted">最近 {{ formatDateTime(user.lastActiveAt) }}</small>
+              </div>
+            </div>
+          </div>
+          <div v-else class="user-chart-empty text-muted">最近五分钟暂无活跃用户</div>
+        </div>
+
+        <div class="user-chart-card">
+          <div class="user-chart-card__header">
+            <div>
+              <h3>用户调用量排行</h3>
+              <p class="text-muted">按请求次数排序</p>
+            </div>
+            <span class="text-muted">Top {{ formatNumber(topUsersByRequests.length) }}</span>
+          </div>
+          <div v-if="topUsersByRequests.length" class="user-bars">
+            <div v-for="user in topUsersByRequests" :key="user.id" class="user-bar-row">
+              <div class="user-bar-row__head">
+                <div class="user-bar-row__identity">
+                  <span class="user-rank-dot" :style="{ backgroundColor: user.color }" />
+                  <strong :title="user.name">{{ user.name }}</strong>
+                </div>
+                <span>{{ formatNumber(user.count) }} 次</span>
+              </div>
+              <div class="user-bar-track">
+                <span
+                  :style="{
+                    width: barWidth(user.count, maxUserRequests),
+                    backgroundColor: user.color,
+                  }"
+                />
+              </div>
+              <div class="user-bar-row__meta text-muted">
+                <span>{{ user.secondary }}</span>
+                <span>{{ user.keyCount }} Key · 成功率 {{ percentText(user.successRate) }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-else class="user-chart-empty text-muted">暂无用户调用数据</div>
+        </div>
+
+        <div class="user-chart-card">
+          <div class="user-chart-card__header">
+            <div>
+              <h3>Token 消耗排行</h3>
+              <p class="text-muted">输入 + 输出 token</p>
+            </div>
+            <span class="text-muted">Top {{ formatNumber(topUsersByTokens.length) }}</span>
+          </div>
+          <div v-if="topUsersByTokens.length" class="user-bars">
+            <div v-for="user in topUsersByTokens" :key="user.id" class="user-bar-row">
+              <div class="user-bar-row__head">
+                <div class="user-bar-row__identity">
+                  <span class="user-rank-dot" :style="{ backgroundColor: user.color }" />
+                  <strong :title="user.name">{{ user.name }}</strong>
+                </div>
+                <span>{{ formatNumber(user.tokens) }}</span>
+              </div>
+              <div class="user-bar-track">
+                <span
+                  :style="{
+                    width: barWidth(user.tokens, maxUserTokens),
+                    backgroundColor: user.color,
+                  }"
+                />
+              </div>
+              <div class="user-bar-row__meta text-muted">
+                <span>{{ user.secondary }}</span>
+                <span>{{ latencyText(user.averageLatency) }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-else class="user-chart-empty text-muted">暂无 Token 消耗数据</div>
+        </div>
+
+        <div class="user-chart-card">
+          <div class="user-chart-card__header">
+            <div>
+              <h3>余额消耗排行</h3>
+              <p class="text-muted">按本次日志窗口扣费统计</p>
+            </div>
+            <span class="text-muted">Top {{ formatNumber(topUsersByCredits.length) }}</span>
+          </div>
+          <div v-if="topUsersByCredits.length" class="user-bars">
+            <div v-for="user in topUsersByCredits" :key="user.id" class="user-bar-row">
+              <div class="user-bar-row__head">
+                <div class="user-bar-row__identity">
+                  <span class="user-rank-dot" :style="{ backgroundColor: user.color }" />
+                  <strong :title="user.name">{{ user.name }}</strong>
+                </div>
+                <span>{{ balanceText(user.credits) }}</span>
+              </div>
+              <div class="user-bar-track">
+                <span
+                  :style="{
+                    width: barWidth(user.credits, maxUserCredits),
+                    backgroundColor: user.color,
+                  }"
+                />
+              </div>
+              <div class="user-bar-row__meta text-muted">
+                <span>{{ user.secondary }}</span>
+                <span>最近 {{ formatDateTime(user.lastUsedAt) }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-else class="user-chart-empty text-muted">暂无余额消耗数据</div>
+        </div>
+
+        <div class="user-chart-card user-risk-card">
+          <div class="user-chart-card__header">
+            <div>
+              <h3>异常用户</h3>
+              <p class="text-muted">按失败率优先排序</p>
+            </div>
+            <span class="text-muted">{{ formatNumber(riskyUsers.length) }} 个</span>
+          </div>
+          <div v-if="riskyUsers.length" class="risk-list">
+            <div v-for="user in riskyUsers" :key="user.id" class="risk-item">
+              <div>
+                <strong :title="user.name">{{ user.name }}</strong>
+                <span class="text-muted">{{ user.secondary }}</span>
+              </div>
+              <div class="risk-item__stats">
+                <el-tag type="danger" effect="light" round>{{ user.failed }} 失败</el-tag>
+                <span>成功率 {{ percentText(user.successRate) }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-else class="user-chart-empty text-muted">当前日志窗口内没有失败用户</div>
+        </div>
+      </div>
+    </div>
+  </PageSection>
+
   <PageSection title="最近请求" subtitle="仅展示最新 6 条，完整列表请前往请求日志">
     <el-table :data="recentLogs" stripe>
       <el-table-column label="时间" width="180">
@@ -1074,6 +1458,12 @@
       flex-direction: column;
       gap: 16px;
     }
+  }
+
+  .user-usage-dashboard {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
   }
 
   .performance-dashboard {
@@ -1153,7 +1543,8 @@
   }
 
   .chart-shell,
-  .model-rank {
+  .model-rank,
+  .user-chart-card {
     border: 1px solid rgba(15, 23, 42, 0.07);
     border-radius: 16px;
     background: linear-gradient(180deg, rgba(255, 255, 255, 0.74), rgba(255, 255, 255, 0.44)),
@@ -1183,6 +1574,238 @@
         font-size: 12px;
       }
     }
+  }
+
+  .user-chart-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+  }
+
+  .user-chart-card {
+    min-width: 0;
+    padding: 18px;
+
+    &__header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 16px;
+
+      h3 {
+        margin: 0;
+        font-size: 16px;
+        font-weight: 700;
+        letter-spacing: 0;
+      }
+
+      p {
+        margin: 2px 0 0;
+        font-size: 12px;
+      }
+
+      > span {
+        font-size: 12px;
+        white-space: nowrap;
+      }
+    }
+  }
+
+  .user-bars {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .user-bar-row {
+    min-width: 0;
+
+    &__head,
+    &__meta {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    &__head {
+      margin-bottom: 8px;
+
+      > span {
+        color: var(--kp-text);
+        font-size: 13px;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+    }
+
+    &__identity {
+      min-width: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+
+      strong {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 13px;
+        letter-spacing: 0;
+      }
+    }
+
+    &__meta {
+      margin-top: 6px;
+      font-size: 12px;
+
+      span {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+    }
+  }
+
+  .user-rank-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex: 0 0 auto;
+  }
+
+  .user-bar-track {
+    height: 9px;
+    border-radius: 999px;
+    background: rgba(31, 42, 68, 0.08);
+    overflow: hidden;
+
+    span {
+      display: block;
+      height: 100%;
+      border-radius: inherit;
+      transition: width 0.2s ease;
+    }
+  }
+
+  .risk-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .active-users-card {
+    grid-column: 1 / -1;
+  }
+
+  .active-user-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .active-user-item {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: center;
+    padding: 12px;
+    border: 1px solid rgba(37, 99, 235, 0.1);
+    border-radius: 12px;
+    background: rgba(37, 99, 235, 0.045);
+
+    &__main {
+      min-width: 0;
+
+      strong,
+      span {
+        display: block;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      strong {
+        font-size: 13px;
+        letter-spacing: 0;
+      }
+
+      span {
+        margin-top: 3px;
+        font-size: 12px;
+      }
+    }
+
+    &__stats {
+      display: flex;
+      align-items: flex-end;
+      flex-direction: column;
+      gap: 4px;
+      font-size: 12px;
+      white-space: nowrap;
+
+      span {
+        color: var(--kp-text);
+        font-weight: 700;
+      }
+    }
+  }
+
+  .risk-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    border: 1px solid rgba(239, 91, 107, 0.11);
+    border-radius: 12px;
+    background: rgba(239, 91, 107, 0.045);
+
+    strong,
+    span {
+      display: block;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    strong {
+      font-size: 13px;
+      letter-spacing: 0;
+    }
+
+    span {
+      margin-top: 3px;
+      font-size: 12px;
+    }
+
+    &__stats {
+      display: flex;
+      align-items: flex-end;
+      flex-direction: column;
+      gap: 6px;
+      color: var(--kp-text-secondary);
+      font-size: 12px;
+      white-space: nowrap;
+
+      span {
+        margin-top: 0;
+      }
+    }
+  }
+
+  .user-chart-empty {
+    min-height: 250px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    font-size: 13px;
   }
 
   .chart-legend {
@@ -1440,6 +2063,10 @@
       }
     }
 
+    .user-chart-grid {
+      grid-template-columns: 1fr;
+    }
+
     .model-rank {
       align-self: auto;
     }
@@ -1458,6 +2085,26 @@
     .chart-legend {
       max-width: none;
       justify-content: flex-start;
+    }
+
+    .risk-item {
+      grid-template-columns: 1fr;
+
+      &__stats {
+        align-items: flex-start;
+      }
+    }
+
+    .active-user-list {
+      grid-template-columns: 1fr;
+    }
+
+    .active-user-item {
+      grid-template-columns: 1fr;
+
+      &__stats {
+        align-items: flex-start;
+      }
     }
 
     .usage-chart {

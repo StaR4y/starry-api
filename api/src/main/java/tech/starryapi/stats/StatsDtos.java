@@ -42,4 +42,33 @@ public final class StatsDtos {
         Instant sampledAt
     ) {
     }
+
+    public record UsageSummaryResponse(
+        Long totalRequests,
+        Long successfulRequests,
+        Long failedRequests,
+        Long totalInputTokens,
+        Long totalOutputTokens,
+        Long totalTokens,
+        BigDecimal totalCredits,
+        Instant activeWindowStartedAt,
+        Integer activeUserCount,
+        java.util.List<ActiveUserResponse> activeUsers
+    ) {
+    }
+
+    public record ActiveUserResponse(
+        String userId,
+        String username,
+        String displayName,
+        String email,
+        Long requestCount,
+        Long apiKeyCount,
+        Long inputTokens,
+        Long outputTokens,
+        Long totalTokens,
+        BigDecimal credits,
+        Instant lastActiveAt
+    ) {
+    }
 }

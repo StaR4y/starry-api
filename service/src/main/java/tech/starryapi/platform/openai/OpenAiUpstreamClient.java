@@ -200,10 +200,21 @@ public class OpenAiUpstreamClient {
 
     private PlatformCompletionResult parseResponses(String rawBody) throws Exception {
         String trimmed = rawBody == null ? "" : rawBody.trim();
-        if (trimmed.startsWith("data:") || trimmed.startsWith("event:")) {
+        if (isSseResponse(trimmed)) {
             return parseResponsesStream(rawBody);
         }
         return parseResponsesJson(readJson(rawBody));
+    }
+
+    private boolean isSseResponse(String body) {
+        if (body == null || body.isBlank()) {
+            return false;
+        }
+        if (body.startsWith("data:") || body.startsWith("event:") || body.startsWith(":")) {
+            return true;
+        }
+        return body.contains("\ndata:") || body.contains("\nevent:") || body.contains("\rdata:")
+            || body.contains("\revent:");
     }
 
     private JsonNode readJson(String rawBody) throws Exception {

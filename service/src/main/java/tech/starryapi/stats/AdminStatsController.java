@@ -12,15 +12,18 @@ public class AdminStatsController implements AdminStatsApi {
 
     private final RequestLogRepository requestLogRepository;
     private final PerformanceMetricService performanceMetricService;
+    private final StatsAnalyticsService statsAnalyticsService;
     private final AdminAuth adminAuth;
 
     public AdminStatsController(
         RequestLogRepository requestLogRepository,
         PerformanceMetricService performanceMetricService,
+        StatsAnalyticsService statsAnalyticsService,
         AdminAuth adminAuth
     ) {
         this.requestLogRepository = requestLogRepository;
         this.performanceMetricService = performanceMetricService;
+        this.statsAnalyticsService = statsAnalyticsService;
         this.adminAuth = adminAuth;
     }
 
@@ -37,6 +40,13 @@ public class AdminStatsController implements AdminStatsApi {
     public Mono<ApiResponse<List<StatsDtos.PerformanceMetricResponse>>> performance(ServerWebExchange exchange) {
         adminAuth.verifyAdmin(exchange);
         return performanceMetricService.history()
+            .map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<StatsDtos.UsageSummaryResponse>> usageSummary(ServerWebExchange exchange) {
+        adminAuth.verifyAdmin(exchange);
+        return statsAnalyticsService.usageSummary()
             .map(ApiResponse::ok);
     }
 }

@@ -495,6 +495,33 @@ export interface RequestLog {
   createdAt: string;
 }
 
+export interface ActiveUserUsage {
+  userId: string | null;
+  username: string | null;
+  displayName: string | null;
+  email: string | null;
+  requestCount: number;
+  apiKeyCount: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  credits: number | null;
+  lastActiveAt: string | null;
+}
+
+export interface UsageSummary {
+  totalRequests: number;
+  successfulRequests: number;
+  failedRequests: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalTokens: number;
+  totalCredits: number | null;
+  activeWindowStartedAt: string;
+  activeUserCount: number;
+  activeUsers: ActiveUserUsage[];
+}
+
 export interface PerformanceMetric {
   systemCpuLoadPercent: number | null;
   processCpuLoadPercent: number | null;

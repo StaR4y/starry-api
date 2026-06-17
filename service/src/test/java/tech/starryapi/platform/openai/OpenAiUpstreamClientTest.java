@@ -764,6 +764,54 @@ class OpenAiUpstreamClientTest {
     }
 
     @Test
+    void openAiCompatibleResponsesParsesStreamAfterPingComment() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/responses", exchange -> {
+            byte[] response = """
+                : PING
+
+                event: response.created
+                data: {"type":"response.created","response":{"id":"resp_test","status":"in_progress"}}
+
+                event: response.output_text.delta
+                data: {"type":"response.output_text.delta","delta":"OK"}
+
+                event: response.completed
+                data: {"type":"response.completed","response":{"usage":{"input_tokens":3,"output_tokens":2},"output":[]}}
+
+                data: [DONE]
+
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "text/event-stream");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = openAiCompatibleAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {"model":"gpt-5.5","input":"hi"}
+                """);
+
+            PlatformCompletionResult result = client.completeResponses(account, request, "gpt-5.5").block();
+
+            assertThat(result).isNotNull();
+            assertThat(result.content()).isEqualTo("OK");
+            assertThat(result.usage().inputTokens()).isEqualTo(3);
+            assertThat(result.usage().outputTokens()).isEqualTo(2);
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void codexResponsesInputPreservesMultimodalContent() throws Exception {
         AtomicReference<String> requestBody = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);

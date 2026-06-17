@@ -15,4 +15,7 @@ public interface AdminStatsApi {
 
     @GetMapping("/performance")
     Mono<ApiResponse<List<StatsDtos.PerformanceMetricResponse>>> performance(ServerWebExchange exchange);
+
+    @GetMapping("/usage-summary")
+    Mono<ApiResponse<StatsDtos.UsageSummaryResponse>> usageSummary(ServerWebExchange exchange);
 }
