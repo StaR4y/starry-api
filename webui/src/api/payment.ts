@@ -6,6 +6,7 @@ import type {
   CreatePaymentOrderResponse,
   CreateRedemptionCodeRequest,
   CreateRedemptionCodesResponse,
+  InviteRebateRecord,
   PaymentOrder,
   PaymentSettings,
   RedeemCodeRequest,
@@ -55,6 +56,11 @@ export const adminPaymentApi = {
   redemptionCodes() {
     return unwrap<RedemptionCode[]>(
       http.get<ApiResponse<RedemptionCode[]>>('/admin/payment/redemption-codes'),
+    );
+  },
+  inviteRebates() {
+    return unwrap<InviteRebateRecord[]>(
+      http.get<ApiResponse<InviteRebateRecord[]>>('/admin/payment/invite-rebates'),
     );
   },
   createRedemptionCodes(payload: CreateRedemptionCodeRequest) {

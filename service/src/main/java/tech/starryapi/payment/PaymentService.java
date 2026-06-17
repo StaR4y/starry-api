@@ -46,19 +46,22 @@ public class PaymentService {
     private final R2dbcEntityTemplate template;
     private final PaymentSettingsService settingsService;
     private final EasyPayClient easyPayClient;
+    private final InviteRebateService inviteRebateService;
 
     public PaymentService(
         PaymentOrderRepository repository,
         AdminUserRepository userRepository,
         R2dbcEntityTemplate template,
         PaymentSettingsService settingsService,
-        EasyPayClient easyPayClient
+        EasyPayClient easyPayClient,
+        InviteRebateService inviteRebateService
     ) {
         this.repository = repository;
         this.userRepository = userRepository;
         this.template = template;
         this.settingsService = settingsService;
         this.easyPayClient = easyPayClient;
+        this.inviteRebateService = inviteRebateService;
     }
 
     public Mono<CreatePaymentOrderResponse> createOrder(
@@ -276,7 +279,7 @@ public class PaymentService {
                 }
                 Instant now = Instant.now();
                 return markOrderCompleted(notification, now)
-                    .then(creditBalanceOnce(notification.outTradeNo(), now))
+                    .then(creditAndRebateOnce(notification.outTradeNo(), now))
                     .then();
             });
     }
@@ -286,7 +289,7 @@ public class PaymentService {
             return Mono.just(order);
         }
         if (STATUS_COMPLETED.equals(order.getStatus()) && order.getCreditedAt() == null) {
-            return creditBalanceOnce(order.getOutTradeNo(), Instant.now())
+            return creditAndRebateOnce(order.getOutTradeNo(), Instant.now())
                 .then(reloadOrder(order));
         }
         if (!shouldQueryProvider(order)) {
@@ -377,6 +380,15 @@ public class PaymentService {
             .bind("completedStatus", STATUS_COMPLETED)
             .fetch()
             .rowsUpdated();
+    }
+
+    private Mono<Long> creditAndRebateOnce(String outTradeNo, Instant now) {
+        return creditBalanceOnce(outTradeNo, now)
+            .flatMap(rows -> rows > 0
+                ? repository.findByOutTradeNo(outTradeNo)
+                    .flatMap(inviteRebateService::applyIfEligible)
+                    .thenReturn(rows)
+                : Mono.just(rows));
     }
 
     private Mono<AdminUserEntity> user(AdminPrincipal principal) {

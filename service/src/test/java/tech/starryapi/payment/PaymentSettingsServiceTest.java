@@ -43,7 +43,12 @@ class PaymentSettingsServiceTest {
                 "https://pay.example.com/submit.php",
                 "10001",
                 "secret",
-                "qrcode"
+                "qrcode",
+                true,
+                new BigDecimal("0.15"),
+                10,
+                null,
+                null
             ))
             .block();
 
@@ -57,11 +62,14 @@ class PaymentSettingsServiceTest {
         assertThat(response.easypayPid()).isEqualTo("10001");
         assertThat(response.easypayPkeyConfigured()).isTrue();
         assertThat(response.easypayPaymentMode()).isEqualTo("qrcode");
+        assertThat(response.inviteRebateEnabled()).isTrue();
+        assertThat(response.inviteRebateRate()).isEqualByComparingTo("0.150000");
 
         verify(repository).upsertSetting(PaymentSettingsService.PAYMENT_ENABLED, "true");
         verify(repository).upsertSetting(PaymentSettingsService.MAX_RECHARGE_AMOUNT, "0.00");
         verify(repository).upsertSetting(PaymentSettingsService.API_BILLING_MULTIPLIER, "0.0000200000000000");
         verify(repository).upsertSetting(PaymentSettingsService.EASYPAY_PKEY, "secret");
+        verify(repository).upsertSetting(PaymentSettingsService.INVITE_REBATE_RATE, "0.150000");
     }
 
     @Test

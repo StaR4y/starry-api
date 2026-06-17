@@ -11,6 +11,9 @@ public class AdminUserEntity {
     @Id
     private Long id;
     private String userId;
+    private String affiliateCode;
+    private String invitedByUserId;
+    private String inviteSourceCode;
     private String username;
     private String email;
     private String displayName;
@@ -38,6 +41,30 @@ public class AdminUserEntity {
 
     public void setUserId(String userId) {
         this.userId = userId;
+    }
+
+    public String getAffiliateCode() {
+        return affiliateCode;
+    }
+
+    public void setAffiliateCode(String affiliateCode) {
+        this.affiliateCode = affiliateCode;
+    }
+
+    public String getInvitedByUserId() {
+        return invitedByUserId;
+    }
+
+    public void setInvitedByUserId(String invitedByUserId) {
+        this.invitedByUserId = invitedByUserId;
+    }
+
+    public String getInviteSourceCode() {
+        return inviteSourceCode;
+    }
+
+    public void setInviteSourceCode(String inviteSourceCode) {
+        this.inviteSourceCode = inviteSourceCode;
     }
 
     public String getUsername() {

@@ -1,6 +1,7 @@
 package tech.starryapi.admin;
 
 import java.math.BigDecimal;
+import java.security.SecureRandom;
 import java.time.Instant;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
@@ -17,6 +18,9 @@ public class AdminUserService {
     private static final String DEFAULT_ADMIN_USERNAME = "admin";
     private static final String DEFAULT_ADMIN_ROLE = "ADMIN";
     private static final String DEFAULT_USER_ROLE = "USER";
+    private static final char[] AFFILIATE_ALPHABET =
+        "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789".toCharArray();
+    private static final int AFFILIATE_CODE_LENGTH = 8;
 
     private final AdminUserRepository repository;
     private final PasswordHasher passwordHasher;
@@ -25,6 +29,7 @@ public class AdminUserService {
     private final EmailVerificationService emailVerificationService;
     private final InviteCodeService inviteCodeService;
     private final TurnstileVerificationService turnstileVerificationService;
+    private final SecureRandom random = new SecureRandom();
 
     public AdminUserService(
         AdminUserRepository repository,
@@ -59,6 +64,7 @@ public class AdminUserService {
                 entity.setBalance(BigDecimal.ZERO);
                 entity.setEnabled(true);
                 entity.setFirstLogin(true);
+                assignAffiliateCode(entity);
                 applyPassword(entity, password);
                 return repository.save(entity)
                     .map(saved -> BootstrapAdmin.created(saved.getUsername(), password))
@@ -94,6 +100,7 @@ public class AdminUserService {
         entity.setBalance(normalizeBalance(request.balance()));
         entity.setEnabled(true);
         entity.setFirstLogin(true);
+        assignAffiliateCode(entity);
         applyPassword(entity, password);
         return repository.save(entity)
             .map(saved -> new AdminDtos.AdminUserCreatedResponse(AdminUserMapper.toResponse(saved), password))
@@ -113,6 +120,7 @@ public class AdminUserService {
         String username = normalizeUsername(request.username());
         String email = RegistrationEmailPolicy.normalizeEmail(request.email());
         String inviteCode = normalizeInviteCode(request.inviteCode());
+        String affiliateCode = normalizeAffiliateCode(request.affiliateCode());
         AdminUserEntity entity = new AdminUserEntity();
         entity.setUserId(Hashing.shortUuid());
         entity.setUsername(username);
@@ -122,6 +130,7 @@ public class AdminUserService {
         entity.setBalance(BigDecimal.ZERO);
         entity.setEnabled(true);
         entity.setFirstLogin(false);
+        assignAffiliateCode(entity);
         applyPassword(entity, request.password());
 
         return registrationSettingsService.registrationPolicy()
@@ -129,11 +138,19 @@ public class AdminUserService {
                     email,
                     firstNonBlank(request.emailVerificationToken(), request.verifyCode()),
                     inviteCode,
+                    affiliateCode,
                     request.turnstileToken(),
                     remoteIp,
                     policy
                 )
-                .then(Mono.defer(() -> repository.save(entity)))
+                .then(resolveAffiliateInvite(affiliateCode))
+                .flatMap(invite -> {
+                    if (invite.present()) {
+                        entity.setInvitedByUserId(invite.inviterUserId());
+                        entity.setInviteSourceCode(invite.affiliateCode());
+                    }
+                    return repository.save(entity);
+                })
                 .flatMap(saved -> consumeInviteCodeIfNeeded(saved, inviteCode, policy))
             )
             .map(this::loginResponse)
@@ -212,6 +229,12 @@ public class AdminUserService {
         entity.setPasswordHash(passwordHasher.hash(password, salt));
     }
 
+    private void assignAffiliateCode(AdminUserEntity entity) {
+        if (entity.getAffiliateCode() == null || entity.getAffiliateCode().isBlank()) {
+            entity.setAffiliateCode(generateAffiliateCode());
+        }
+    }
+
     private Mono<AdminUserEntity> findLoginUser(String usernameOrEmail) {
         String credential = normalizeUsername(usernameOrEmail);
         Mono<AdminUserEntity> byUsername = repository.findByUsername(credential);
@@ -240,6 +263,7 @@ public class AdminUserService {
         String email,
         String verificationToken,
         String inviteCode,
+        String affiliateCode,
         String turnstileToken,
         String remoteIp,
         RegistrationSettingsService.RegistrationPolicy policy
@@ -256,6 +280,9 @@ public class AdminUserService {
             return turnstileVerificationService.verifyIfRequired(turnstileToken, remoteIp);
         }
         if (!policy.registrationEnabled()) {
+            if (!affiliateCode.isBlank() && policy.inviteCodeEnabled()) {
+                return turnstileVerificationService.verifyIfRequired(turnstileToken, remoteIp);
+            }
             return Mono.error(new ApiException(
                 HttpStatus.FORBIDDEN,
                 "REGISTRATION_DISABLED",
@@ -267,6 +294,28 @@ public class AdminUserService {
             return emailVerificationService.verifyRegistrationToken(email, verificationToken);
         }
         return turnstileVerificationService.verifyIfRequired(turnstileToken, remoteIp);
+    }
+
+    private Mono<AffiliateInvite> resolveAffiliateInvite(String affiliateCode) {
+        if (affiliateCode.isBlank()) {
+            return Mono.just(AffiliateInvite.none());
+        }
+        return repository.findByAffiliateCode(affiliateCode)
+            .switchIfEmpty(Mono.error(new ApiException(
+                HttpStatus.BAD_REQUEST,
+                "INVALID_AFFILIATE_CODE",
+                "Affiliate code is invalid"
+            )))
+            .flatMap(inviter -> {
+                if (Boolean.FALSE.equals(inviter.getEnabled())) {
+                    return Mono.error(new ApiException(
+                        HttpStatus.BAD_REQUEST,
+                        "INVALID_AFFILIATE_CODE",
+                        "Affiliate code is invalid"
+                    ));
+                }
+                return Mono.just(new AffiliateInvite(inviter.getUserId(), inviter.getAffiliateCode(), true));
+            });
     }
 
     private Mono<AdminUserEntity> consumeInviteCodeIfNeeded(
@@ -282,6 +331,18 @@ public class AdminUserService {
 
     private String normalizeInviteCode(String inviteCode) {
         return inviteCode == null ? "" : inviteCode.trim();
+    }
+
+    private String normalizeAffiliateCode(String affiliateCode) {
+        return affiliateCode == null ? "" : affiliateCode.trim();
+    }
+
+    private String generateAffiliateCode() {
+        StringBuilder builder = new StringBuilder(AFFILIATE_CODE_LENGTH);
+        for (int index = 0; index < AFFILIATE_CODE_LENGTH; index++) {
+            builder.append(AFFILIATE_ALPHABET[random.nextInt(AFFILIATE_ALPHABET.length)]);
+        }
+        return builder.toString();
     }
 
     private String firstNonBlank(String value, String fallback) {
@@ -316,6 +377,12 @@ public class AdminUserService {
 
         static BootstrapAdmin existing(String username, boolean firstLogin) {
             return new BootstrapAdmin(false, username, null, firstLogin);
+        }
+    }
+
+    private record AffiliateInvite(String inviterUserId, String affiliateCode, boolean present) {
+        static AffiliateInvite none() {
+            return new AffiliateInvite(null, null, false);
         }
     }
 }

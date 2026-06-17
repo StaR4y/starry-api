@@ -42,7 +42,8 @@ public final class AdminDtos {
         String verifyCode,
         String inviteCode,
         String emailVerificationToken,
-        String turnstileToken
+        String turnstileToken,
+        String affiliateCode
     ) {
         public RegisterRequest(
             String username,
@@ -52,16 +53,17 @@ public final class AdminDtos {
             String verifyCode,
             String inviteCode
         ) {
-            this(username, email, displayName, password, verifyCode, inviteCode, null, null);
+            this(username, email, displayName, password, verifyCode, inviteCode, null, null, null);
         }
     }
 
     public record SendVerifyCodeRequest(
         @Email @NotBlank String email,
-        String turnstileToken
+        String turnstileToken,
+        String affiliateCode
     ) {
         public SendVerifyCodeRequest(String email) {
-            this(email, null);
+            this(email, null, null);
         }
     }
 
@@ -181,6 +183,9 @@ public final class AdminDtos {
 
     public record AdminUserResponse(
         String userId,
+        String affiliateCode,
+        String invitedByUserId,
+        String inviteSourceCode,
         String username,
         String email,
         String displayName,

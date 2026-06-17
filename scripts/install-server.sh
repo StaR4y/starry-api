@@ -228,7 +228,7 @@ webui_url() {
 prepare_install_dir() {
   log "Preparing ${INSTALL_DIR}..."
   log "Using prebuilt artifact base ${REPO_RAW_BASE}."
-  root_cmd mkdir -p "$INSTALL_DIR/app" "$INSTALL_DIR/data/mysql"
+  root_cmd mkdir -p "$INSTALL_DIR/app" "$INSTALL_DIR/data/mysql" "$INSTALL_DIR/data/backups"
 }
 
 load_github_token() {

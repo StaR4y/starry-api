@@ -53,6 +53,7 @@ public class EmailVerificationService {
     public Mono<AdminDtos.SendVerifyCodeResponse> sendRegistrationLink(
         String email,
         String turnstileToken,
+        String affiliateCode,
         String registrationBaseUrl,
         String remoteIp
     ) {
@@ -98,7 +99,7 @@ public class EmailVerificationService {
                             expiresAt,
                             now.plus(SEND_COOLDOWN)
                         );
-                        String link = registrationLink(registrationBaseUrl, rawToken, normalizedEmail);
+                        String link = registrationLink(registrationBaseUrl, rawToken, normalizedEmail, affiliateCode);
                         return sendEmail(config, normalizedEmail, link)
                             .doOnSuccess(ignored -> {
                                 VerificationToken previous = tokensByEmail.put(normalizedEmail, pending);
@@ -113,7 +114,7 @@ public class EmailVerificationService {
     }
 
     public Mono<AdminDtos.SendVerifyCodeResponse> sendRegistrationCode(String email) {
-        return sendRegistrationLink(email, null, null, null);
+        return sendRegistrationLink(email, null, null, null, null);
     }
 
     public Mono<Void> verifyRegistrationToken(String email, String token) {
@@ -350,14 +351,16 @@ public class EmailVerificationService {
         ));
     }
 
-    private String registrationLink(String registrationBaseUrl, String token, String email) {
+    private String registrationLink(String registrationBaseUrl, String token, String email, String affiliateCode) {
         String base = registrationBaseUrl == null || registrationBaseUrl.isBlank()
             ? "/#/login"
             : registrationBaseUrl.trim();
         String separator = base.contains("?") ? "&" : "?";
-        return base + separator
+        String link = base + separator
             + "registrationToken=" + encode(token)
             + "&email=" + encode(email);
+        String cleanedAffiliateCode = affiliateCode == null ? "" : affiliateCode.trim();
+        return cleanedAffiliateCode.isBlank() ? link : link + "&aff=" + encode(cleanedAffiliateCode);
     }
 
     private String encode(String value) {

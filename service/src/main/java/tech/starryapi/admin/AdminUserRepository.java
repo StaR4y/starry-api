@@ -10,4 +10,6 @@ public interface AdminUserRepository extends ReactiveCrudRepository<AdminUserEnt
     Mono<AdminUserEntity> findByEmail(String email);
 
     Mono<AdminUserEntity> findByUserId(String userId);
+
+    Mono<AdminUserEntity> findByAffiliateCode(String affiliateCode);
 }

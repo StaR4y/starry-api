@@ -228,6 +228,48 @@ OpenCode may send a separate `small_model` request for lightweight tasks such as
 The WebUI API Key page can generate copy-ready scripts for generic shell variables, Claude Code, OpenCode, or all client settings at once.
 It now includes OpenAI, Anthropic, Gemini, OpenCode, and generic Starry API variables.
 
+## Database Backup and Data Transfer
+
+Log in as an administrator and open `数据管理`.
+
+Available operations:
+
+- `导出 SQL`: downloads a full SQL dump with table structure and data.
+- `下载 ZIP`: downloads a portable backup package containing `database.sql`, `metadata.json`, and a README.
+- `创建备份`: writes a ZIP backup to the server backup directory.
+- `导入并恢复`: uploads a `.sql` or Starry API `.zip` backup and restores it into the current database.
+
+Importing data is intentionally guarded. The WebUI asks you to type:
+
+```text
+RESTORE_DATABASE
+```
+
+Before every import, the service automatically creates a server-side rollback backup. The import endpoint is still destructive because the exported SQL includes `DROP TABLE IF EXISTS` statements, so keep an offline copy before migrating production data.
+
+Deployment notes:
+
+- Docker and prebuilt artifact deployments mount backups at `./data/backups:/app/backups`.
+- Override the backup directory with `STARRY_BACKUP_DIR`.
+- Override the upload/import size limit with `STARRY_MAX_IMPORT_BYTES` in bytes. The default is `268435456` bytes.
+
+Admin API examples:
+
+```bash
+curl -OJ http://127.0.0.1:8080/admin/data-transfer/database.sql \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+
+curl -OJ http://127.0.0.1:8080/admin/data-transfer/backup.zip \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+
+curl -X POST http://127.0.0.1:8080/admin/data-transfer/backups \
+  -H "Authorization: Bearer $ADMIN_TOKEN"
+
+curl -X POST 'http://127.0.0.1:8080/admin/data-transfer/import?confirm=RESTORE_DATABASE' \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -F "file=@/path/to/starry-api-backup.zip"
+```
+
 ## Configure Online Recharge
 
 Log in as an administrator and open `支付设置`.

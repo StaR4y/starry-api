@@ -58,6 +58,7 @@ public class AdminAuthController implements AdminAuthApi {
         return emailVerificationService.sendRegistrationLink(
             request.email(),
             request.turnstileToken(),
+            request.affiliateCode(),
             registrationBaseUrl(exchange),
             clientIp(exchange)
         ).map(ApiResponse::ok);
