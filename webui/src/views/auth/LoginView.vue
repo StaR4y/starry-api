@@ -92,10 +92,15 @@
 
   const showRegisterDetails = computed(() => {
     if (!emailVerifyEnabled.value) return true;
-    return Boolean(registerForm.emailVerificationToken) || (inviteCodeEnabled.value && Boolean(registerForm.inviteCode));
+    return (
+      Boolean(registerForm.emailVerificationToken) ||
+      (inviteCodeEnabled.value && Boolean(registerForm.inviteCode))
+    );
   });
 
-  const showTurnstile = computed(() => turnstileEnabled.value && !registerForm.emailVerificationToken);
+  const showTurnstile = computed(
+    () => turnstileEnabled.value && !registerForm.emailVerificationToken,
+  );
 
   async function loadRegistrationSettings() {
     try {
@@ -219,7 +224,9 @@
         emailVerificationToken: registerForm.emailVerificationToken || undefined,
         verifyCode: registerForm.verifyCode || undefined,
         inviteCode: registerForm.inviteCode || undefined,
-        turnstileToken: registerForm.emailVerificationToken ? undefined : turnstileToken.value || undefined,
+        turnstileToken: registerForm.emailVerificationToken
+          ? undefined
+          : turnstileToken.value || undefined,
       });
       ElMessage.success('注册成功');
       registerVisible.value = false;
@@ -240,7 +247,8 @@
   }
 
   function applyRegistrationTokenFromRoute() {
-    const token = typeof route.query.registrationToken === 'string' ? route.query.registrationToken : '';
+    const token =
+      typeof route.query.registrationToken === 'string' ? route.query.registrationToken : '';
     if (!token) return;
     registerForm.emailVerificationToken = token;
     if (typeof route.query.email === 'string') {
@@ -250,9 +258,7 @@
   }
 
   function shouldRenderTurnstile() {
-    return showTurnstile.value
-      && Boolean(turnstileSiteKey.value)
-      && registerVisible.value;
+    return showTurnstile.value && Boolean(turnstileSiteKey.value) && registerVisible.value;
   }
 
   async function loadTurnstileScript() {
@@ -278,7 +284,8 @@
       };
       window.__starryTurnstileOnLoad = resolveReady;
       const script = document.createElement('script');
-      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=__starryTurnstileOnLoad';
+      script.src =
+        'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit&onload=__starryTurnstileOnLoad';
       script.async = true;
       script.defer = true;
       script.dataset.turnstile = 'true';
@@ -349,7 +356,12 @@
   }
 
   watch(
-    () => [registerVisible.value, turnstileEnabled.value, turnstileSiteKey.value, registerForm.emailVerificationToken],
+    () => [
+      registerVisible.value,
+      turnstileEnabled.value,
+      turnstileSiteKey.value,
+      registerForm.emailVerificationToken,
+    ],
     () => {
       if (shouldRenderTurnstile()) {
         renderTurnstileWhenReady();
@@ -372,10 +384,9 @@
   <div class="login">
     <div class="login__panel glass-panel glass-panel--strong">
       <div class="login__header">
-        <span class="login__brand">⌁ Starry API</span>
+        <img class="login__brand-logo" src="/logo.svg" alt="Starry API" />
         <h1 class="login__title">控制台登录</h1>
-        <p class="login__hint text-secondary">
-        </p>
+        <p class="login__hint text-secondary" />
       </div>
 
       <el-form
@@ -428,7 +439,11 @@
         @submit.prevent="showRegisterDetails ? submitRegister : sendVerifyCode"
       >
         <el-form-item label="邮箱" prop="email">
-          <el-input v-model="registerForm.email" :disabled="Boolean(registerForm.emailVerificationToken)" autocomplete="email" />
+          <el-input
+            v-model="registerForm.email"
+            :disabled="Boolean(registerForm.emailVerificationToken)"
+            autocomplete="email"
+          />
           <div class="login__register-hint">{{ registrationHint }}</div>
         </el-form-item>
         <el-form-item v-if="inviteCodeEnabled" label="邀请码">
@@ -444,8 +459,10 @@
           title="邮箱链接已验证，请补全账号信息完成注册。"
         />
         <el-form-item v-if="showTurnstile" label="人机验证">
-          <div ref="turnstileContainerRef" class="login__turnstile"></div>
-          <div v-if="!turnstileSiteKey" class="login__register-hint">管理员尚未配置 Cloudflare Turnstile Site Key。</div>
+          <div ref="turnstileContainerRef" class="login__turnstile" />
+          <div v-if="!turnstileSiteKey" class="login__register-hint">
+            管理员尚未配置 Cloudflare Turnstile Site Key。
+          </div>
         </el-form-item>
         <template v-if="showRegisterDetails">
           <el-form-item label="用户名" prop="username">
@@ -455,7 +472,12 @@
             <el-input v-model="registerForm.displayName" />
           </el-form-item>
           <el-form-item label="密码" prop="password">
-            <el-input v-model="registerForm.password" type="password" show-password autocomplete="new-password" />
+            <el-input
+              v-model="registerForm.password"
+              type="password"
+              show-password
+              autocomplete="new-password"
+            />
           </el-form-item>
           <el-form-item label="确认密码" prop="confirm">
             <el-input
@@ -470,21 +492,16 @@
       </el-form>
       <template #footer>
         <el-button @click="registerVisible = false">取消</el-button>
-        <el-button 
+        <el-button
           v-if="!showRegisterDetails"
-          type="primary" 
+          type="primary"
           :disabled="verifyCodeCountdown > 0"
-          :loading="verifyCodeSending" 
+          :loading="verifyCodeSending"
           @click="sendVerifyCode"
         >
           {{ verifyCodeCountdown > 0 ? `${verifyCodeCountdown}s` : '发送注册链接' }}
         </el-button>
-        <el-button 
-          v-else
-          type="primary" 
-          :loading="registerLoading" 
-          @click="submitRegister"
-        >
+        <el-button v-else type="primary" :loading="registerLoading" @click="submitRegister">
           注册
         </el-button>
       </template>
@@ -515,20 +532,18 @@
 
     &__header {
       margin-bottom: 24px;
+      text-align: center;
     }
 
-    &__brand {
-      display: inline-block;
-      padding: 4px 12px;
-      border-radius: 999px;
-      font-weight: 600;
-      background: rgba(91, 141, 239, 0.12);
-      color: var(--kp-primary);
-      font-size: 13px;
+    &__brand-logo {
+      width: 76px;
+      height: 76px;
+      display: block;
+      margin: 0 auto;
     }
 
     &__title {
-      margin: 14px 0 6px;
+      margin: 18px 0 6px;
       font-size: 26px;
       letter-spacing: 0.5px;
     }

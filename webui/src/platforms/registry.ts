@@ -20,14 +20,20 @@ export function getFamilyOrder() {
 }
 
 export function platformClass(provider: string) {
-  return platformDefinitions.find((item) => item.provider === provider)?.className ?? otherPlatform.className;
+  return (
+    platformDefinitions.find((item) => item.provider === provider)?.className ??
+    otherPlatform.className
+  );
 }
 
 export function inferModelProvider(model: ModelInfo) {
   if (model.provider) {
     return model.provider;
   }
-  return providerPlatforms.find((platform) => platform.matches?.(model))?.provider ?? otherPlatform.provider;
+  return (
+    providerPlatforms.find((platform) => platform.matches?.(model))?.provider ??
+    otherPlatform.provider
+  );
 }
 
 export function inferModelFamily(model: ModelInfo) {
@@ -36,7 +42,10 @@ export function inferModelFamily(model: ModelInfo) {
   }
 
   const provider = inferModelProvider(model);
-  return platformDefinitions.find((platform) => platform.provider === provider)?.familyOf?.(model) ?? otherPlatform.families[0];
+  return (
+    platformDefinitions.find((platform) => platform.provider === provider)?.familyOf?.(model) ??
+    otherPlatform.families[0]
+  );
 }
 
 export function orderOf<T>(order: T[], value: T) {

@@ -247,11 +247,7 @@
 
       <el-form-item label="目标模型">
         <div class="target-list">
-          <div
-            v-for="(_, idx) in form.targetModels"
-            :key="idx"
-            class="target-list__row"
-          >
+          <div v-for="(_, idx) in form.targetModels" :key="idx" class="target-list__row">
             <el-input v-model="form.targetModels[idx]" placeholder="claude-sonnet-4.5" />
             <el-input-number
               v-if="form.mappingType === 'loadbalance'"
@@ -261,7 +257,12 @@
               style="width: 120px"
               placeholder="权重"
             />
-            <el-button link type="danger" :disabled="form.targetModels.length === 1" @click="removeTarget(idx)">
+            <el-button
+              link
+              type="danger"
+              :disabled="form.targetModels.length === 1"
+              @click="removeTarget(idx)"
+            >
               移除
             </el-button>
           </div>

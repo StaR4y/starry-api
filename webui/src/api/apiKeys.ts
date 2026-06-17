@@ -13,9 +13,7 @@ export const apiKeysApi = {
     return unwrap<ApiKey[]>(http.get<ApiResponse<ApiKey[]>>('/admin/api-keys'));
   },
   create(payload: CreateApiKeyRequest) {
-    return unwrap<CreatedApiKey>(
-      http.post<ApiResponse<CreatedApiKey>>('/admin/api-keys', payload),
-    );
+    return unwrap<CreatedApiKey>(http.post<ApiResponse<CreatedApiKey>>('/admin/api-keys', payload));
   },
   update(keyId: string, payload: UpdateApiKeyRequest) {
     return unwrap<ApiKey>(http.patch<ApiResponse<ApiKey>>(`/admin/api-keys/${keyId}`, payload));

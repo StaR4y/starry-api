@@ -5,62 +5,62 @@
    * 配置项参考 sub2api 的支付设置，实际落库由后端 payment settings 服务负责。
    */
   import { computed, onMounted, reactive, ref } from 'vue';
-import { ElMessage } from 'element-plus';
-import { Refresh, Check, Setting, Connection } from '@element-plus/icons-vue';
-import PageSection from '@/components/PageSection.vue';
-import { adminPaymentApi } from '@/api';
-import type {
-  PaymentOrder,
-  PaymentSettings,
-  PaymentType,
-  UpdatePaymentSettingsRequest,
-} from '@/types/api';
-import { formatDateTime, formatNumber } from '@/utils/format';
+  import { ElMessage } from 'element-plus';
+  import { Refresh, Check, Setting, Connection } from '@element-plus/icons-vue';
+  import PageSection from '@/components/PageSection.vue';
+  import { adminPaymentApi } from '@/api';
+  import type {
+    PaymentOrder,
+    PaymentSettings,
+    PaymentType,
+    UpdatePaymentSettingsRequest,
+  } from '@/types/api';
+  import { formatDateTime, formatNumber } from '@/utils/format';
 
-const loading = ref(false);
-const submitting = ref(false);
-const orders = ref<PaymentOrder[]>([]);
-const pkeyConfigured = ref(false);
+  const loading = ref(false);
+  const submitting = ref(false);
+  const orders = ref<PaymentOrder[]>([]);
+  const pkeyConfigured = ref(false);
 
-const form = reactive<Required<UpdatePaymentSettingsRequest>>({
-  enabled: false,
-  minAmount: 1,
-  maxAmount: 1000,
-  dailyLimit: 1000,
-  orderTimeoutMinutes: 30,
-  maxPendingOrders: 3,
-  enabledTypes: ['alipay', 'wxpay'],
-  balanceRechargeMultiplier: 1,
-  apiBillingMultiplier: 0.0000166666666667,
-  rechargeFeeRate: 0,
-  productNamePrefix: 'Starry API',
-  productNameSuffix: '余额充值',
-  helpImageUrl: '',
-  helpText: '',
-  easypayApiBase: '',
-  easypayPid: '',
-  easypayPkey: '',
-  easypayPaymentMode: 'popup',
-});
+  const form = reactive<Required<UpdatePaymentSettingsRequest>>({
+    enabled: false,
+    minAmount: 1,
+    maxAmount: 1000,
+    dailyLimit: 1000,
+    orderTimeoutMinutes: 30,
+    maxPendingOrders: 3,
+    enabledTypes: ['alipay', 'wxpay'],
+    balanceRechargeMultiplier: 1,
+    apiBillingMultiplier: 0.0000166666666667,
+    rechargeFeeRate: 0,
+    productNamePrefix: 'Starry API',
+    productNameSuffix: '余额充值',
+    helpImageUrl: '',
+    helpText: '',
+    easypayApiBase: '',
+    easypayPid: '',
+    easypayPkey: '',
+    easypayPaymentMode: 'popup',
+  });
 
-
-
-function togglePaymentType(type: PaymentType) {
-  const index = form.enabledTypes.indexOf(type);
-  if (index > -1) {
-    if (form.enabledTypes.length === 1) {
-      ElMessage.warning('至少启用一种支付方式');
-      return;
+  function togglePaymentType(type: PaymentType) {
+    const index = form.enabledTypes.indexOf(type);
+    if (index > -1) {
+      if (form.enabledTypes.length === 1) {
+        ElMessage.warning('至少启用一种支付方式');
+        return;
+      }
+      form.enabledTypes.splice(index, 1);
+    } else {
+      form.enabledTypes.push(type);
     }
-    form.enabledTypes.splice(index, 1);
-  } else {
-    form.enabledTypes.push(type);
   }
-}
 
   const orderStats = computed(() => {
     const completed = orders.value.filter((order) => order.status === 'COMPLETED');
-    const pending = orders.value.filter((order) => order.status === 'PENDING' || order.status === 'PAID');
+    const pending = orders.value.filter(
+      (order) => order.status === 'PENDING' || order.status === 'PAID',
+    );
     return {
       completed: completed.length,
       pending: pending.length,
@@ -161,8 +161,6 @@ function togglePaymentType(type: PaymentType) {
     return map[status] ?? status;
   }
 
-
-
   function paymentTypeLabel(type: PaymentType) {
     return type === 'wxpay' ? '微信支付' : '支付宝';
   }
@@ -182,7 +180,7 @@ function togglePaymentType(type: PaymentType) {
       '#ef5b6b',
       '#2ea9df',
       '#f596aa',
-      '#fc9d9a'
+      '#fc9d9a',
     ];
     let hash = 0;
     for (let i = 0; i < name.length; i++) {
@@ -208,40 +206,48 @@ function togglePaymentType(type: PaymentType) {
       <div class="metrics-panel glass-panel">
         <div class="metric-item">
           <div class="metric-item__header">
-            <span class="metric-dot dot-success"></span>
+            <span class="metric-dot dot-success" />
             <span class="metric-label">已入账订单</span>
           </div>
-          <div class="metric-value text-success">{{ formatNumber(orderStats.completed) }}<span class="metric-value__unit"> 笔</span></div>
+          <div class="metric-value text-success">
+            {{ formatNumber(orderStats.completed) }}<span class="metric-value__unit"> 笔</span>
+          </div>
         </div>
 
-        <div class="metric-divider"></div>
+        <div class="metric-divider" />
 
         <div class="metric-item">
           <div class="metric-item__header">
-            <span class="metric-dot dot-warning"></span>
+            <span class="metric-dot dot-warning" />
             <span class="metric-label">待处理订单</span>
           </div>
-          <div class="metric-value text-warning">{{ formatNumber(orderStats.pending) }}<span class="metric-value__unit"> 笔</span></div>
+          <div class="metric-value text-warning">
+            {{ formatNumber(orderStats.pending) }}<span class="metric-value__unit"> 笔</span>
+          </div>
         </div>
 
-        <div class="metric-divider"></div>
+        <div class="metric-divider" />
 
         <div class="metric-item">
           <div class="metric-item__header">
-            <span class="metric-dot dot-primary"></span>
+            <span class="metric-dot dot-primary" />
             <span class="metric-label">实际收入</span>
           </div>
-          <div class="metric-value">{{ formatNumber(orderStats.actualIncome) }}<span class="metric-value__unit"> 元</span></div>
+          <div class="metric-value">
+            {{ formatNumber(orderStats.actualIncome) }}<span class="metric-value__unit"> 元</span>
+          </div>
         </div>
 
-        <div class="metric-divider"></div>
+        <div class="metric-divider" />
 
         <div class="metric-item">
           <div class="metric-item__header">
-            <span class="metric-dot dot-accent"></span>
+            <span class="metric-dot dot-accent" />
             <span class="metric-label">发放余额</span>
           </div>
-          <div class="metric-value">{{ formatNumber(orderStats.creditedAmount) }}<span class="metric-value__unit"> 元</span></div>
+          <div class="metric-value">
+            {{ formatNumber(orderStats.creditedAmount) }}<span class="metric-value__unit"> 元</span>
+          </div>
         </div>
       </div>
 
@@ -258,48 +264,72 @@ function togglePaymentType(type: PaymentType) {
             <div class="payment-admin__row payment-admin__row--switch">
               <div class="switch-info">
                 <span class="switch-title">启用在线充值</span>
-                <p class="switch-desc text-muted">关闭后用户无法创建新的支付订单，历史订单仍可查看。</p>
+                <p class="switch-desc text-muted">
+                  关闭后用户无法创建新的支付订单，历史订单仍可查看。
+                </p>
               </div>
               <el-switch v-model="form.enabled" />
             </div>
 
             <el-form-item label="支付方式">
               <div class="payment-method-selector">
-                <div 
+                <div
                   class="payment-method-card alipay"
                   :class="{ active: form.enabledTypes.includes('alipay') }"
                   @click="togglePaymentType('alipay')"
                 >
                   <div class="payment-method-card__icon-brand">
-                    <svg viewBox="0 0 1024 1024" class="alipay-svg" fill="currentColor" style="width: 22px; height: 22px;">
-                      <path d="M787 555c-7-59-40-118-98-174h148v-68H647c30-56 59-119 83-186l-68-21c-25 70-55 131-87 187-48-70-92-146-121-222l-65 20c31 78 78 158 129 230H302c-40 56-92 112-153 163l43 54c60-47 109-98 149-150h264c-36 58-80 116-130 168-51-38-96-86-133-140l-50 47c43 60 96 112 156 153-97 77-225 136-391 172l20 68c191-43 334-112 438-202 54 45 116 83 185 111l31-62c-64-26-121-62-172-103 46-47 84-98 116-150h141c5 7 10 15 14 24 15 30 22 62 22 95-1 102-54 162-158 179l20 67c139-24 206-104 205-244 0-38-8-75-22-110z"/>
+                    <svg
+                      viewBox="0 0 1024 1024"
+                      class="alipay-svg"
+                      fill="currentColor"
+                      style="width: 22px; height: 22px"
+                    >
+                      <path
+                        d="M787 555c-7-59-40-118-98-174h148v-68H647c30-56 59-119 83-186l-68-21c-25 70-55 131-87 187-48-70-92-146-121-222l-65 20c31 78 78 158 129 230H302c-40 56-92 112-153 163l43 54c60-47 109-98 149-150h264c-36 58-80 116-130 168-51-38-96-86-133-140l-50 47c43 60 96 112 156 153-97 77-225 136-391 172l20 68c191-43 334-112 438-202 54 45 116 83 185 111l31-62c-64-26-121-62-172-103 46-47 84-98 116-150h141c5 7 10 15 14 24 15 30 22 62 22 95-1 102-54 162-158 179l20 67c139-24 206-104 205-244 0-38-8-75-22-110z"
+                      />
                     </svg>
                   </div>
                   <div class="payment-method-card__info">
                     <span class="payment-method-card__title">支付宝 (Alipay)</span>
                     <span class="payment-method-card__desc">使用支付宝快捷支付接口</span>
                   </div>
-                  <div class="payment-method-card__badge" v-if="form.enabledTypes.includes('alipay')">
+                  <div
+                    v-if="form.enabledTypes.includes('alipay')"
+                    class="payment-method-card__badge"
+                  >
                     <el-icon><Check /></el-icon>
                   </div>
                 </div>
 
-                <div 
+                <div
                   class="payment-method-card wxpay"
                   :class="{ active: form.enabledTypes.includes('wxpay') }"
                   @click="togglePaymentType('wxpay')"
                 >
                   <div class="payment-method-card__icon-brand">
-                    <svg viewBox="0 0 1024 1024" class="wxpay-svg" fill="currentColor" style="width: 22px; height: 22px;">
-                      <path d="M647.4 340.6c11.9 0 23.7.9 35.3 2.6-32.9-77-109-131-198.8-131-131.7 0-238.4 92.5-238.4 206.7 0 63 64.9 123.6 161.7 165.7l-41.2 81.3 92.8-48.4c20.3 5.4 41.5 8.2 63.3 8.2 11.9 0 23.7-.9 35.3-2.6-9.6-34.9-14.8-71.8-14.8-110 0-95.2 62.9-172.5 140.2-172.5zm-149 71.9c-14.2 0-25.7-10.4-25.7-23.2s11.5-23.2 25.7-23.2c14.2 0 25.7 10.4 25.7 23.2s-11.5 23.2-25.7 23.2zm-128.4 0c-14.2 0-25.7-10.4-25.7-23.2s11.5-23.2 25.7-23.2c14.2 0 25.7 10.4 25.7 23.2s-11.5 23.2-25.7 23.2z"/>
-                      <path d="M856.2 590.2c0-95.2-90.3-172.3-201.7-172.3-111.4 0-201.7 77.2-201.7 172.3s90.3 172.3 201.7 172.3c18.5 0 36.4-2.1 53.7-6.2l78.8 41.2-34.9-69.3c63.7-35.3 104.1-87 104.1-138zM600.8 567c-11.9 0-21.6-8.7-21.6-19.4s9.7-19.4 21.6-19.4 21.6 8.7 21.6 19.4-9.7 19.4-21.6 19.4zm108 0c-11.9 0-21.6-8.7-21.6-19.4s9.7-19.4 21.6-19.4c11.9 0 21.6 8.7 21.6 19.4s-9.7 19.4-21.6 19.4z"/>
+                    <svg
+                      viewBox="0 0 1024 1024"
+                      class="wxpay-svg"
+                      fill="currentColor"
+                      style="width: 22px; height: 22px"
+                    >
+                      <path
+                        d="M647.4 340.6c11.9 0 23.7.9 35.3 2.6-32.9-77-109-131-198.8-131-131.7 0-238.4 92.5-238.4 206.7 0 63 64.9 123.6 161.7 165.7l-41.2 81.3 92.8-48.4c20.3 5.4 41.5 8.2 63.3 8.2 11.9 0 23.7-.9 35.3-2.6-9.6-34.9-14.8-71.8-14.8-110 0-95.2 62.9-172.5 140.2-172.5zm-149 71.9c-14.2 0-25.7-10.4-25.7-23.2s11.5-23.2 25.7-23.2c14.2 0 25.7 10.4 25.7 23.2s-11.5 23.2-25.7 23.2zm-128.4 0c-14.2 0-25.7-10.4-25.7-23.2s11.5-23.2 25.7-23.2c14.2 0 25.7 10.4 25.7 23.2s-11.5 23.2-25.7 23.2z"
+                      />
+                      <path
+                        d="M856.2 590.2c0-95.2-90.3-172.3-201.7-172.3-111.4 0-201.7 77.2-201.7 172.3s90.3 172.3 201.7 172.3c18.5 0 36.4-2.1 53.7-6.2l78.8 41.2-34.9-69.3c63.7-35.3 104.1-87 104.1-138zM600.8 567c-11.9 0-21.6-8.7-21.6-19.4s9.7-19.4 21.6-19.4 21.6 8.7 21.6 19.4-9.7 19.4-21.6 19.4zm108 0c-11.9 0-21.6-8.7-21.6-19.4s9.7-19.4 21.6-19.4c11.9 0 21.6 8.7 21.6 19.4s-9.7 19.4-21.6 19.4z"
+                      />
                     </svg>
                   </div>
                   <div class="payment-method-card__info">
                     <span class="payment-method-card__title">微信支付 (WeChat Pay)</span>
                     <span class="payment-method-card__desc">使用微信扫码/内置公众号支付</span>
                   </div>
-                  <div class="payment-method-card__badge" v-if="form.enabledTypes.includes('wxpay')">
+                  <div
+                    v-if="form.enabledTypes.includes('wxpay')"
+                    class="payment-method-card__badge"
+                  >
                     <el-icon><Check /></el-icon>
                   </div>
                 </div>
@@ -370,7 +400,9 @@ function togglePaymentType(type: PaymentType) {
                   controls-position="right"
                   style="width: 100%"
                 />
-                <p class="field-hint text-muted">默认 0.0000166666666667，即 100 余额约可用 600 万 token。</p>
+                <p class="field-hint text-muted">
+                  默认 0.0000166666666667，即 100 余额约可用 600 万 token。
+                </p>
               </el-form-item>
               <el-form-item label="充值手续费率 (例如 0.006)">
                 <el-input-number
@@ -428,7 +460,12 @@ function togglePaymentType(type: PaymentType) {
               <el-input v-model="form.helpImageUrl" placeholder="https://example.com/help.png" />
             </el-form-item>
             <el-form-item label="充值帮助说明 (Markdown 或纯文本)">
-              <el-input v-model="form.helpText" type="textarea" :rows="3" placeholder="请输入在充值界面展示的提示信息" />
+              <el-input
+                v-model="form.helpText"
+                type="textarea"
+                :rows="3"
+                placeholder="请输入在充值界面展示的提示信息"
+              />
             </el-form-item>
           </el-form>
         </div>
@@ -449,9 +486,11 @@ function togglePaymentType(type: PaymentType) {
           <el-table-column label="充值用户" min-width="180">
             <template #default="{ row }">
               <div class="user-cell">
-                <div 
-                  class="user-cell__avatar" 
-                  :style="{ backgroundColor: getUserColor(row.username || row.email || row.userId) }"
+                <div
+                  class="user-cell__avatar"
+                  :style="{
+                    backgroundColor: getUserColor(row.username || row.email || row.userId),
+                  }"
                 >
                   {{ getUserInitials(row.username || row.email || row.userId) }}
                 </div>
@@ -462,7 +501,7 @@ function togglePaymentType(type: PaymentType) {
           <el-table-column label="支付方式" width="120">
             <template #default="{ row }">
               <div class="payment-type-badge" :class="row.paymentType">
-                <span class="dot"></span>
+                <span class="dot" />
                 {{ paymentTypeLabel(row.paymentType) }}
               </div>
             </template>
@@ -497,7 +536,9 @@ function togglePaymentType(type: PaymentType) {
           </el-table-column>
           <el-table-column label="入账时间" width="170">
             <template #default="{ row }">
-              <span v-if="row.completedAt" class="time-text">{{ formatDateTime(row.completedAt) }}</span>
+              <span v-if="row.completedAt" class="time-text">{{
+                formatDateTime(row.completedAt)
+              }}</span>
               <span v-else class="text-muted">—</span>
             </template>
           </el-table-column>
@@ -793,7 +834,9 @@ function togglePaymentType(type: PaymentType) {
       &.active {
         border-color: #1677ff;
         background: rgba(22, 119, 255, 0.05);
-        box-shadow: 0 0 0 1px #1677ff, var(--kp-shadow);
+        box-shadow:
+          0 0 0 1px #1677ff,
+          var(--kp-shadow);
         .payment-method-card__icon-brand {
           background: #1677ff;
           color: #fff;
@@ -813,7 +856,9 @@ function togglePaymentType(type: PaymentType) {
       &.active {
         border-color: #07c160;
         background: rgba(7, 193, 96, 0.05);
-        box-shadow: 0 0 0 1px #07c160, var(--kp-shadow);
+        box-shadow:
+          0 0 0 1px #07c160,
+          var(--kp-shadow);
         .payment-method-card__icon-brand {
           background: #07c160;
           color: #fff;
@@ -931,12 +976,14 @@ function togglePaymentType(type: PaymentType) {
       color: var(--kp-success);
     }
 
-    &.pending, &.paid {
+    &.pending,
+    &.paid {
       background: rgba(240, 168, 77, 0.12);
       color: var(--kp-warning);
     }
 
-    &.failed, &.expired {
+    &.failed,
+    &.expired {
       background: rgba(239, 91, 107, 0.12);
       color: var(--kp-danger);
     }
@@ -983,7 +1030,7 @@ function togglePaymentType(type: PaymentType) {
   @media (max-width: 1024px) {
     .metrics-panel {
       padding: 16px 20px;
-      
+
       .metric-divider {
         margin: 0 20px;
       }

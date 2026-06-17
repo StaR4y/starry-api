@@ -66,7 +66,7 @@
     return models.value.map((model) => {
       const contextTokens = model.maxInputTokens ?? model.context_length ?? null;
       const outputTokens = model.maxOutputTokens ?? model.max_output_tokens ?? null;
-      
+
       const provider = inferModelProvider(model);
       const family = inferModelFamily(model);
 
@@ -87,20 +87,26 @@
     const items = parsedModels.value;
     return {
       total: items.length,
-      openAi: items.filter(item => item.provider === 'OpenAI').length,
-      anthropic: items.filter(item => item.provider === 'Anthropic').length,
-      gemini: items.filter(item => item.provider === 'Gemini').length,
-      internalIds: items.filter(item => item.family === 'CodeWhisperer Internal').length,
-      textOnly: items.filter(item => item.supportedInputTypes?.length === 1 && item.supportedInputTypes[0] === 'TEXT').length
+      openAi: items.filter((item) => item.provider === 'OpenAI').length,
+      anthropic: items.filter((item) => item.provider === 'Anthropic').length,
+      gemini: items.filter((item) => item.provider === 'Gemini').length,
+      internalIds: items.filter((item) => item.family === 'CodeWhisperer Internal').length,
+      textOnly: items.filter(
+        (item) => item.supportedInputTypes?.length === 1 && item.supportedInputTypes[0] === 'TEXT',
+      ).length,
     };
   });
 
   const allFamilies = computed(() => {
-    return Array.from(new Set(parsedModels.value.map(m => m.family))).filter(Boolean).sort();
+    return Array.from(new Set(parsedModels.value.map((m) => m.family)))
+      .filter(Boolean)
+      .sort();
   });
 
   const allOwners = computed(() => {
-    return Array.from(new Set(parsedModels.value.map(m => m.owned_by))).filter(Boolean).sort();
+    return Array.from(new Set(parsedModels.value.map((m) => m.owned_by)))
+      .filter(Boolean)
+      .sort();
   });
 
   const filteredModels = computed(() => {
@@ -108,7 +114,7 @@
     return parsedModels.value.filter((model) => {
       if (familyFilter.value !== 'all' && model.family !== familyFilter.value) return false;
       if (ownerFilter.value !== 'all' && model.owned_by !== ownerFilter.value) return false;
-      
+
       if (!q) return true;
       return [
         model.id,
@@ -124,7 +130,7 @@
   const groupedModels = computed<ProviderGroup[]>(() => {
     const items = filteredModels.value;
     const providerMap = new Map<string, Map<string, ModelCatalogItem[]>>();
-    
+
     items.forEach((item) => {
       if (!providerMap.has(item.provider)) {
         providerMap.set(item.provider, new Map());
@@ -153,19 +159,23 @@
       .sort((a, b) => orderOf(providerOrder, a.provider) - orderOf(providerOrder, b.provider));
   });
 
-  watch(groupedModels, (newGroups) => {
-    if (newGroups && newGroups.length) {
-      if (!activeProvider.value || !newGroups.some(g => g.provider === activeProvider.value)) {
-        activeProvider.value = newGroups[0].provider;
+  watch(
+    groupedModels,
+    (newGroups) => {
+      if (newGroups && newGroups.length) {
+        if (!activeProvider.value || !newGroups.some((g) => g.provider === activeProvider.value)) {
+          activeProvider.value = newGroups[0].provider;
+        }
+      } else {
+        activeProvider.value = null;
       }
-    } else {
-      activeProvider.value = null;
-    }
-  }, { immediate: true });
+    },
+    { immediate: true },
+  );
 
   const activeGroup = computed(() => {
     if (!activeProvider.value) return null;
-    return groupedModels.value.find(g => g.provider === activeProvider.value) || null;
+    return groupedModels.value.find((g) => g.provider === activeProvider.value) || null;
   });
 
   const allModelIds = computed(() => models.value.map((model) => model.id).join('\n'));
@@ -204,10 +214,22 @@
       return `100 余额约可用 ${model.tokensPer100Balance.toLocaleString()} token`;
     }
     if (model.inputTokensPer100Balance != null || model.outputTokensPer100Balance != null) {
-      const input = model.inputTokensPer100Balance == null ? '-' : model.inputTokensPer100Balance.toLocaleString();
-      const output = model.outputTokensPer100Balance == null ? '-' : model.outputTokensPer100Balance.toLocaleString();
-      const cacheWrite = model.cacheWriteTokensPer100Balance == null ? '-' : model.cacheWriteTokensPer100Balance.toLocaleString();
-      const cacheRead = model.cacheReadTokensPer100Balance == null ? '-' : model.cacheReadTokensPer100Balance.toLocaleString();
+      const input =
+        model.inputTokensPer100Balance == null
+          ? '-'
+          : model.inputTokensPer100Balance.toLocaleString();
+      const output =
+        model.outputTokensPer100Balance == null
+          ? '-'
+          : model.outputTokensPer100Balance.toLocaleString();
+      const cacheWrite =
+        model.cacheWriteTokensPer100Balance == null
+          ? '-'
+          : model.cacheWriteTokensPer100Balance.toLocaleString();
+      const cacheRead =
+        model.cacheReadTokensPer100Balance == null
+          ? '-'
+          : model.cacheReadTokensPer100Balance.toLocaleString();
       return `100 余额约可用：输入 ${input} token / 输出 ${output} token / 缓存写入 ${cacheWrite} token / 缓存读取 ${cacheRead} token`;
     }
     return '未配置模型价格，使用全局计费倍率';
@@ -216,15 +238,31 @@
   function getOwnerTagStyle(owner: string) {
     const o = owner.toLowerCase();
     if (o.includes('proxy')) {
-      return { background: 'rgba(239, 91, 107, 0.08)', color: '#ef5b6b', border: '1px solid rgba(239, 91, 107, 0.2)' };
+      return {
+        background: 'rgba(239, 91, 107, 0.08)',
+        color: '#ef5b6b',
+        border: '1px solid rgba(239, 91, 107, 0.2)',
+      };
     }
     if (o.includes('api') || o.includes('kiro')) {
-      return { background: 'rgba(179, 135, 255, 0.08)', color: '#b387ff', border: '1px solid rgba(179, 135, 255, 0.2)' };
+      return {
+        background: 'rgba(179, 135, 255, 0.08)',
+        color: '#b387ff',
+        border: '1px solid rgba(179, 135, 255, 0.2)',
+      };
     }
     if (o === 'openai' || o === 'system') {
-      return { background: 'rgba(91, 141, 239, 0.08)', color: '#5b8def', border: '1px solid rgba(91, 141, 239, 0.2)' };
+      return {
+        background: 'rgba(91, 141, 239, 0.08)',
+        color: '#5b8def',
+        border: '1px solid rgba(91, 141, 239, 0.2)',
+      };
     }
-    return { background: 'rgba(15, 23, 42, 0.05)', color: 'var(--kp-text-secondary)', border: '1px solid rgba(15, 23, 42, 0.1)' };
+    return {
+      background: 'rgba(15, 23, 42, 0.05)',
+      color: 'var(--kp-text-secondary)',
+      border: '1px solid rgba(15, 23, 42, 0.1)',
+    };
   }
 
   function getInputTagStyle(type: string) {
@@ -249,20 +287,54 @@
     <template #actions>
       <div class="model-page__buttons">
         <el-button class="action-btn" @click="copy(allModelIds, '已复制全部模型 ID')">
-          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="btn-icon">
-            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="btn-icon"
+          >
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
           </svg>
           复制全部 ID
         </el-button>
         <el-button class="action-btn" :loading="loading" type="primary" @click="loadModels">
           <template #loading>
-            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="btn-icon spin-icon">
-              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path>
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              class="btn-icon spin-icon"
+            >
+              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
             </svg>
           </template>
-          <svg v-if="!loading" xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="btn-icon">
-            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"></path>
+          <svg
+            v-if="!loading"
+            xmlns="http://www.w3.org/2000/svg"
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="btn-icon"
+          >
+            <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
           </svg>
           刷新
         </el-button>
@@ -273,61 +345,61 @@
     <div class="metrics-panel glass-panel">
       <div class="metric-item">
         <div class="metric-item__header">
-          <span class="metric-dot dot-total"></span>
+          <span class="metric-dot dot-total" />
           <span class="metric-label">总模型数</span>
         </div>
         <div class="metric-value">{{ summary.total }}</div>
         <div class="metric-subtext">已集成 LLM 总计</div>
       </div>
 
-      <div class="metric-divider"></div>
+      <div class="metric-divider" />
 
       <div class="metric-item">
         <div class="metric-item__header">
-          <span class="metric-dot dot-openai"></span>
+          <span class="metric-dot dot-openai" />
           <span class="metric-label">OpenAI</span>
         </div>
         <div class="metric-value text-openai">{{ summary.openAi }}</div>
         <div class="metric-subtext">GPT 系列</div>
       </div>
 
-      <div class="metric-divider"></div>
+      <div class="metric-divider" />
 
       <div class="metric-item">
         <div class="metric-item__header">
-          <span class="metric-dot dot-anthropic"></span>
+          <span class="metric-dot dot-anthropic" />
           <span class="metric-label">Anthropic</span>
         </div>
         <div class="metric-value text-anthropic">{{ summary.anthropic }}</div>
         <div class="metric-subtext">Claude 系列</div>
       </div>
 
-      <div class="metric-divider"></div>
+      <div class="metric-divider" />
 
       <div class="metric-item">
         <div class="metric-item__header">
-          <span class="metric-dot dot-gemini"></span>
+          <span class="metric-dot dot-gemini" />
           <span class="metric-label">Gemini</span>
         </div>
         <div class="metric-value text-gemini">{{ summary.gemini }}</div>
         <div class="metric-subtext">Google 系列</div>
       </div>
 
-      <div class="metric-divider"></div>
+      <div class="metric-divider" />
 
       <div class="metric-item">
         <div class="metric-item__header">
-          <span class="metric-dot dot-internal"></span>
+          <span class="metric-dot dot-internal" />
           <span class="metric-label">内部 ID</span>
         </div>
         <div class="metric-value text-internal">{{ summary.internalIds }}</div>
       </div>
 
-      <div class="metric-divider"></div>
+      <div class="metric-divider" />
 
       <div class="metric-item">
         <div class="metric-item__header">
-          <span class="metric-dot dot-textonly"></span>
+          <span class="metric-dot dot-textonly" />
           <span class="metric-label">仅限文本</span>
         </div>
         <div class="metric-value">{{ summary.textOnly }}</div>
@@ -344,14 +416,23 @@
           clearable
         >
           <template #prefix>
-            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="search-icon">
-              <circle cx="11" cy="11" r="8"></circle>
-              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              class="search-icon"
+            >
+              <circle cx="11" cy="11" r="8" />
+              <line x1="21" y1="21" x2="16.65" y2="16.65" />
             </svg>
           </template>
         </el-input>
       </div>
-      
+
       <div class="model-filter__selects">
         <div class="filter-group">
           <span class="filter-group__label">分类</span>
@@ -379,21 +460,47 @@
         class="provider-tab-card glass-panel"
         :class="[
           `provider-tab-card--${platformClass(group.provider)}`,
-          { 'is-active': activeProvider === group.provider }
+          { 'is-active': activeProvider === group.provider },
         ]"
         @click="selectProvider(group.provider)"
       >
         <div class="provider-tab-card__left">
-          <span class="provider-logo-badge" :class="`provider-logo-badge--${platformClass(group.provider)}`">
+          <span
+            class="provider-logo-badge"
+            :class="`provider-logo-badge--${platformClass(group.provider)}`"
+          >
             <!-- OpenAI Inline SVG -->
-            <svg v-if="group.provider === 'OpenAI'" viewBox="0 0 24 24" width="22" height="22" fill="currentColor" class="logo-svg" style="color: #10a37f;">
-              <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>
+            <svg
+              v-if="group.provider === 'OpenAI'"
+              viewBox="0 0 24 24"
+              width="22"
+              height="22"
+              fill="currentColor"
+              class="logo-svg"
+              style="color: #10a37f"
+            >
+              <path
+                d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"
+              />
             </svg>
             <!-- Anthropic Inline SVG -->
-            <svg v-else-if="group.provider === 'Anthropic'" viewBox="0 0 24 24" width="22" height="22" fill="currentColor" class="logo-svg" style="color: #d97757;">
-              <path d="M12.5 3L4.2 19h4l2.1-4.2h5.4l2.1 4.2h4L13.5 3h-1zM11.3 12l1.7-3.4 1.7 3.4h-3.4z"/>
+            <svg
+              v-else-if="group.provider === 'Anthropic'"
+              viewBox="0 0 24 24"
+              width="22"
+              height="22"
+              fill="currentColor"
+              class="logo-svg"
+              style="color: #d97757"
+            >
+              <path
+                d="M12.5 3L4.2 19h4l2.1-4.2h5.4l2.1 4.2h4L13.5 3h-1zM11.3 12l1.7-3.4 1.7 3.4h-3.4z"
+              />
             </svg>
-            <span v-else-if="group.provider === 'Gemini'" class="provider-logo-fallback provider-logo-fallback--gemini">G</span>
+            <span
+              v-else-if="group.provider === 'Gemini'"
+              class="provider-logo-fallback provider-logo-fallback--gemini"
+            >G</span>
             <span v-else class="provider-logo-fallback">{{ group.provider.slice(0, 1) }}</span>
           </span>
           <div class="provider-tab-card__info">
@@ -402,8 +509,19 @@
           </div>
         </div>
         <div class="provider-tab-card__arrow">
-          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="arrow-icon">
-            <polyline points="6 9 12 15 18 9"></polyline>
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="arrow-icon"
+          >
+            <polyline points="6 9 12 15 18 9" />
           </svg>
         </div>
       </div>
@@ -419,22 +537,26 @@
       >
         <div class="active-provider-content__header">
           <div class="header-title-area">
-            <span class="brand-indicator"></span>
+            <span class="brand-indicator" />
             <h3 class="panel-title">{{ activeGroup.provider }} 官方模型明细</h3>
           </div>
           <span class="active-badge">{{ activeGroup.families.length }} 个分类</span>
         </div>
 
         <div v-loading="loading" class="active-provider-content__body">
-          <div v-for="family in activeGroup.families" :key="family.name" class="model-family-section">
+          <div
+            v-for="family in activeGroup.families"
+            :key="family.name"
+            class="model-family-section"
+          >
             <div class="model-family-section__header">
               <div class="model-family-section__title-row">
-                <span class="bullet-dot"></span>
+                <span class="bullet-dot" />
                 <span class="family-name">{{ family.name }}</span>
               </div>
               <span class="family-badge">{{ family.models.length }} 个模型</span>
             </div>
-            
+
             <div class="table-wrapper">
               <el-table :data="family.models" class="model-table" stripe>
                 <!-- Model ID Column -->
@@ -449,12 +571,22 @@
                         class="copy-btn"
                         link
                         type="primary"
-                        @click.stop="copy(row.id, '已复制模型 ID')"
                         title="复制模型 ID"
+                        @click.stop="copy(row.id, '已复制模型 ID')"
                       >
-                        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-                          <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                        <svg
+                          xmlns="http://www.w3.org/2000/svg"
+                          width="13"
+                          height="13"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          stroke-width="2.5"
+                          stroke-linecap="round"
+                          stroke-linejoin="round"
+                        >
+                          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
                         </svg>
                       </el-button>
                     </div>
@@ -462,7 +594,12 @@
                 </el-table-column>
 
                 <!-- Display Name Column -->
-                <el-table-column prop="displayName" label="显示名称" min-width="170" show-overflow-tooltip />
+                <el-table-column
+                  prop="displayName"
+                  label="显示名称"
+                  min-width="170"
+                  show-overflow-tooltip
+                />
 
                 <!-- Public Price Column -->
                 <el-table-column label="100余额/token" width="170" align="center">
@@ -487,14 +624,17 @@
                   <template #default="{ row }">
                     <div class="tags-container">
                       <span
-                        v-for="inputType in (row.supportedInputTypes || [])"
+                        v-for="inputType in row.supportedInputTypes || []"
                         :key="inputType"
                         class="pill-tag"
                         :style="getInputTagStyle(inputType)"
                       >
                         {{ inputType }}
                       </span>
-                      <span v-if="!row.supportedInputTypes || !row.supportedInputTypes.length" class="empty-placeholder">-</span>
+                      <span
+                        v-if="!row.supportedInputTypes || !row.supportedInputTypes.length"
+                        class="empty-placeholder"
+                      >-</span>
                     </div>
                   </template>
                 </el-table-column>
@@ -508,7 +648,9 @@
                       placement="top"
                       effect="dark"
                     >
-                      <span class="token-value font-mono">{{ formatTokens(row.contextTokens) }}</span>
+                      <span class="token-value font-mono">{{
+                        formatTokens(row.contextTokens)
+                      }}</span>
                     </el-tooltip>
                     <span v-else class="empty-placeholder">-</span>
                   </template>
@@ -523,7 +665,9 @@
                       placement="top"
                       effect="dark"
                     >
-                      <span class="token-value font-mono">{{ formatTokens(row.outputTokens) }}</span>
+                      <span class="token-value font-mono">{{
+                        formatTokens(row.outputTokens)
+                      }}</span>
                     </el-tooltip>
                     <span v-else class="empty-placeholder">-</span>
                   </template>
@@ -606,10 +750,18 @@
         line-height: 1.15;
         font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Consolas, monospace;
 
-        &.text-openai { color: #10a37f; }
-        &.text-anthropic { color: #d97757; }
-        &.text-gemini { color: #4285f4; }
-        &.text-internal { color: var(--kp-accent); }
+        &.text-openai {
+          color: #10a37f;
+        }
+        &.text-anthropic {
+          color: #d97757;
+        }
+        &.text-gemini {
+          color: #4285f4;
+        }
+        &.text-internal {
+          color: var(--kp-accent);
+        }
       }
 
       .metric-subtext {
@@ -648,7 +800,7 @@
 
     &__search {
       width: 100%;
-      
+
       .search-icon {
         width: 15px;
         height: 15px;
@@ -740,10 +892,12 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      
+
       .arrow-icon {
         color: var(--kp-text-muted);
-        transition: transform 0.3s, color 0.3s;
+        transition:
+          transform 0.3s,
+          color 0.3s;
       }
     }
 
@@ -759,29 +913,45 @@
     &--openai.is-active {
       border-color: #10a37f;
       box-shadow: 0 8px 24px rgba(16, 163, 127, 0.08);
-      .provider-tab-card__arrow .arrow-icon { color: #10a37f; }
-      .provider-tab-card__title { color: #10a37f; }
+      .provider-tab-card__arrow .arrow-icon {
+        color: #10a37f;
+      }
+      .provider-tab-card__title {
+        color: #10a37f;
+      }
     }
 
     &--anthropic.is-active {
       border-color: #d97757;
       box-shadow: 0 8px 24px rgba(217, 119, 87, 0.08);
-      .provider-tab-card__arrow .arrow-icon { color: #d97757; }
-      .provider-tab-card__title { color: #d97757; }
+      .provider-tab-card__arrow .arrow-icon {
+        color: #d97757;
+      }
+      .provider-tab-card__title {
+        color: #d97757;
+      }
     }
 
     &--gemini.is-active {
       border-color: #4285f4;
       box-shadow: 0 8px 24px rgba(66, 133, 244, 0.08);
-      .provider-tab-card__arrow .arrow-icon { color: #4285f4; }
-      .provider-tab-card__title { color: #4285f4; }
+      .provider-tab-card__arrow .arrow-icon {
+        color: #4285f4;
+      }
+      .provider-tab-card__title {
+        color: #4285f4;
+      }
     }
 
     &--other.is-active {
       border-color: var(--kp-primary);
       box-shadow: 0 8px 24px rgba(91, 141, 239, 0.08);
-      .provider-tab-card__arrow .arrow-icon { color: var(--kp-primary); }
-      .provider-tab-card__title { color: var(--kp-primary); }
+      .provider-tab-card__arrow .arrow-icon {
+        color: var(--kp-primary);
+      }
+      .provider-tab-card__title {
+        color: var(--kp-primary);
+      }
     }
   }
 
@@ -808,7 +978,10 @@
 
     &--anthropic {
       background: #faf9f5;
-      img { width: 25px; height: 25px; }
+      img {
+        width: 25px;
+        height: 25px;
+      }
     }
 
     &--gemini {
@@ -884,25 +1057,33 @@
 
     &--openai {
       border-top: 4px solid #10a37f;
-      .brand-indicator { background-color: #10a37f; }
+      .brand-indicator {
+        background-color: #10a37f;
+      }
     }
     &--anthropic {
       border-top: 4px solid #d97757;
-      .brand-indicator { background-color: #d97757; }
+      .brand-indicator {
+        background-color: #d97757;
+      }
     }
     &--gemini {
       border-top: 4px solid #4285f4;
-      .brand-indicator { background-color: #4285f4; }
+      .brand-indicator {
+        background-color: #4285f4;
+      }
     }
     &--other {
       border-top: 4px solid var(--kp-primary);
-      .brand-indicator { background-color: var(--kp-primary); }
+      .brand-indicator {
+        background-color: var(--kp-primary);
+      }
     }
   }
 
   .model-family-section {
     padding: 16px 24px 20px;
-    
+
     &:not(:last-child) {
       border-bottom: 1px solid rgba(15, 23, 42, 0.05);
     }
@@ -946,10 +1127,18 @@
     }
   }
 
-  .active-provider-content--openai .bullet-dot { background-color: #10a37f; }
-  .active-provider-content--anthropic .bullet-dot { background-color: #d97757; }
-  .active-provider-content--gemini .bullet-dot { background-color: #4285f4; }
-  .active-provider-content--other .bullet-dot { background-color: var(--kp-primary); }
+  .active-provider-content--openai .bullet-dot {
+    background-color: #10a37f;
+  }
+  .active-provider-content--anthropic .bullet-dot {
+    background-color: #d97757;
+  }
+  .active-provider-content--gemini .bullet-dot {
+    background-color: #4285f4;
+  }
+  .active-provider-content--other .bullet-dot {
+    background-color: var(--kp-primary);
+  }
 
   .table-wrapper {
     box-shadow: 0 2px 12px rgba(15, 23, 42, 0.02);
@@ -989,7 +1178,6 @@
     max-width: 120px; /* Neat small rectangle */
     display: inline-block;
     vertical-align: middle;
-
   }
 
   .copy-btn {
@@ -997,7 +1185,9 @@
     height: auto;
     color: var(--kp-text-muted);
     opacity: 0;
-    transition: opacity 0.2s, color 0.2s;
+    transition:
+      opacity 0.2s,
+      color 0.2s;
 
     &:hover {
       color: var(--kp-primary);
@@ -1007,7 +1197,6 @@
   .model-id-cell:hover .copy-btn {
     opacity: 1;
   }
-
 
   .custom-badge {
     display: inline-block;
@@ -1071,7 +1260,7 @@
     align-items: center;
     gap: 6px;
     font-weight: 500;
-    
+
     .btn-icon {
       flex-shrink: 0;
     }
@@ -1082,14 +1271,20 @@
   }
 
   @keyframes spin {
-    from { transform: rotate(0deg); }
-    to { transform: rotate(360deg); }
+    from {
+      transform: rotate(0deg);
+    }
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   /* Transitions */
   .fade-slide-enter-active,
   .fade-slide-leave-active {
-    transition: opacity 0.25s, transform 0.25s;
+    transition:
+      opacity 0.25s,
+      transform 0.25s;
   }
   .fade-slide-enter-from {
     opacity: 0;
@@ -1106,13 +1301,22 @@
       align-items: stretch;
       gap: 12px;
 
-      &__search-wrapper { width: 100%; }
-      &__selects { width: 100%; justify-content: space-between; }
-      
+      &__search-wrapper {
+        width: 100%;
+      }
+      &__selects {
+        width: 100%;
+        justify-content: space-between;
+      }
+
       .filter-group {
         flex: 1;
-        &__label { display: none; }
-        .model-filter__select { width: 100%; }
+        &__label {
+          display: none;
+        }
+        .model-filter__select {
+          width: 100%;
+        }
       }
     }
   }
@@ -1122,7 +1326,7 @@
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 16px;
-      
+
       .metric-divider {
         display: none;
       }
@@ -1133,9 +1337,15 @@
     .metrics-panel {
       grid-template-columns: repeat(2, minmax(0, 1fr));
     }
-    .provider-tabs { grid-template-columns: 1fr; }
-    .active-provider-content__header { padding: 14px 16px; }
-    .model-family-section { padding: 12px 16px; }
+    .provider-tabs {
+      grid-template-columns: 1fr;
+    }
+    .active-provider-content__header {
+      padding: 14px 16px;
+    }
+    .model-family-section {
+      padding: 12px 16px;
+    }
   }
 
   @media (max-width: 480px) {

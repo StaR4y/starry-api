@@ -672,6 +672,7 @@ public class ProxyFacade {
             && (statusCode == 401 || statusCode == 402 || statusCode == 403 || statusCode == 429 || statusCode >= 500)
             ? AccountPoolService.UpstreamErrorType.RECOVERABLE
             : AccountPoolService.UpstreamErrorType.FATAL;
+        String failureMessage = safeFailureMessage(failure);
         log.warn(
             "Proxy upstream request failed path={} model={} accountId={} provider={} authMethod={} status={} error={}",
             path,
@@ -680,9 +681,9 @@ public class ProxyFacade {
             account.getProvider(),
             account.getAuthMethod(),
             statusCode,
-            failure.getMessage()
+            failureMessage
         );
-        Mono<Void> accountStats = accountPoolService.recordRequestFailure(account.getAccountId(), type, statusCode, failure.getMessage())
+        Mono<Void> accountStats = accountPoolService.recordRequestFailure(account.getAccountId(), type, statusCode, failureMessage)
             .doOnNext(accountAutoSuspendService::scheduleIfNeeded)
             .then();
         Mono<Void> log = statsService.log(new StatsService.RequestLog(
@@ -697,7 +698,7 @@ public class ProxyFacade {
             0,
             BigDecimal.ZERO,
             Duration.between(start, Instant.now()).toMillis(),
-            failure.getMessage()
+            failureMessage
         ));
         return Mono.whenDelayError(accountStats, log).then();
     }
@@ -746,10 +747,19 @@ public class ProxyFacade {
             case ApiException api -> api;
             case UpstreamException upstream -> {
                 HttpStatus status = mapUpstreamStatusCode(upstream.getStatusCode());
-                yield new ApiException(status, "UPSTREAM_ERROR", upstream.getMessage());
+                yield new ApiException(status, "UPSTREAM_ERROR", safeFailureMessage(upstream));
             }
-            default -> new ApiException(HttpStatus.BAD_GATEWAY, "UPSTREAM_ERROR", failure.getMessage());
+            default -> new ApiException(HttpStatus.BAD_GATEWAY, "UPSTREAM_ERROR", safeFailureMessage(failure));
         };
+    }
+
+    private String safeFailureMessage(Throwable failure) {
+        String message = failure == null ? null : failure.getMessage();
+        if (message == null || message.isBlank()) {
+            return failure == null ? "Unknown upstream error" : failure.getClass().getSimpleName();
+        }
+        String singleLine = message.replaceAll("\\s+", " ").trim();
+        return singleLine.length() <= 800 ? singleLine : singleLine.substring(0, 800) + "...";
     }
 
     private HttpStatus mapUpstreamStatusCode(int upstreamStatusCode) {

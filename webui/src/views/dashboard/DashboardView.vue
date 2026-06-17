@@ -19,6 +19,7 @@
     ApiKey,
     HealthInfo,
     ModelInfo,
+    ModelUsageSummary,
     PerformanceMetric,
     RequestLog,
     ActiveUserUsage,
@@ -170,11 +171,13 @@
   }
 
   function activeUserDisplayName(user: ActiveUserUsage) {
-    return user.displayName?.trim()
-      || user.username?.trim()
-      || user.email?.trim()
-      || shortId(user.userId)
-      || '匿名 / 未识别';
+    return (
+      user.displayName?.trim() ||
+      user.username?.trim() ||
+      user.email?.trim() ||
+      shortId(user.userId) ||
+      '匿名 / 未识别'
+    );
   }
 
   function activeUserSecondary(user: ActiveUserUsage) {
@@ -257,7 +260,7 @@
       const p1 = coords[i + 1];
       const cpX1 = p0.x + (p1.x - p0.x) / 3;
       const cpY1 = p0.y;
-      const cpX2 = p0.x + 2 * (p1.x - p0.x) / 3;
+      const cpX2 = p0.x + (2 * (p1.x - p0.x)) / 3;
       const cpY2 = p1.y;
       d += ` C ${cpX1.toFixed(2)} ${cpY1.toFixed(2)}, ${cpX2.toFixed(2)} ${cpY2.toFixed(2)}, ${p1.x.toFixed(2)} ${p1.y.toFixed(2)}`;
     }
@@ -363,7 +366,11 @@
       const user = apiKey?.userId ? userById.get(apiKey.userId) : null;
       const groupId = user?.userId || apiKey?.userId || item.log.apiKeyId || 'anonymous';
       const fallbackKeyName = apiKey?.name?.trim() || `API Key ${shortId(item.log.apiKeyId)}`;
-      const name = user ? userDisplayName(user) : item.log.apiKeyId ? fallbackKeyName : '匿名 / 未识别';
+      const name = user
+        ? userDisplayName(user)
+        : item.log.apiKeyId
+          ? fallbackKeyName
+          : '匿名 / 未识别';
       const secondary = user
         ? user.email || `用户 ${shortId(user.userId)}`
         : apiKey
@@ -484,7 +491,10 @@
     };
   }
 
-  function buildPerformanceChart(defs: PerformanceSeriesDef[], fixedMax?: number): PerformanceChartData {
+  function buildPerformanceChart(
+    defs: PerformanceSeriesDef[],
+    fixedMax?: number,
+  ): PerformanceChartData {
     const samples = performanceSamples.value;
     const buckets = samples.map((metric) => ({
       timestamp: validTime(metric.sampledAt) ?? Date.now(),
@@ -493,7 +503,9 @@
     const seriesValues = defs.map((def) =>
       samples.map((metric) => {
         const value = def.value(metric);
-        return value === null || value === undefined || Number.isNaN(value) ? 0 : Math.max(0, value);
+        return value === null || value === undefined || Number.isNaN(value)
+          ? 0
+          : Math.max(0, value);
       }),
     );
     const maxValue = fixedMax ?? Math.max(1, ...seriesValues.flat());
@@ -541,9 +553,15 @@
       .sort((a, b) => a.successRate - b.successRate || b.failed - a.failed || b.count - a.count)
       .slice(0, 6),
   );
-  const maxUserRequests = computed(() => Math.max(0, ...topUsersByRequests.value.map((user) => user.count)));
-  const maxUserTokens = computed(() => Math.max(0, ...topUsersByTokens.value.map((user) => user.tokens)));
-  const maxUserCredits = computed(() => Math.max(0, ...topUsersByCredits.value.map((user) => user.credits)));
+  const maxUserRequests = computed(() =>
+    Math.max(0, ...topUsersByRequests.value.map((user) => user.count)),
+  );
+  const maxUserTokens = computed(() =>
+    Math.max(0, ...topUsersByTokens.value.map((user) => user.tokens)),
+  );
+  const maxUserCredits = computed(() =>
+    Math.max(0, ...topUsersByCredits.value.map((user) => user.credits)),
+  );
   const chartData = computed(() => buildChart(logs.value));
   const performanceSamples = computed(() =>
     performanceMetrics.value
@@ -554,7 +572,10 @@
   const heapUsedPercent = computed(() => {
     const latest = latestPerformance.value;
     if (!latest?.heapUsedBytes) return null;
-    const max = latest.heapMaxBytes && latest.heapMaxBytes > 0 ? latest.heapMaxBytes : latest.heapCommittedBytes;
+    const max =
+      latest.heapMaxBytes && latest.heapMaxBytes > 0
+        ? latest.heapMaxBytes
+        : latest.heapCommittedBytes;
     if (!max || max <= 0) return null;
     return (latest.heapUsedBytes / max) * 100;
   });
@@ -598,18 +619,45 @@
         .filter((value): value is number => value !== null && value !== undefined),
     ),
   );
-  const activeModelCount = computed(() => new Set(parsedLogs.value.map((log) => log.model)).size);
   const totalCredits = computed(() => logs.value.reduce((sum, log) => sum + creditsOf(log), 0));
-  const usageTotalRequests = computed(() => usageSummary.value?.totalRequests ?? totalRequests.value);
+  const usageTotalRequests = computed(
+    () => usageSummary.value?.totalRequests ?? totalRequests.value,
+  );
   const usageTotalTokens = computed(() => usageSummary.value?.totalTokens ?? totalTokens.value);
   const usageTotalCredits = computed(() => usageSummary.value?.totalCredits ?? totalCredits.value);
   const recentActiveUsers = computed(() => usageSummary.value?.activeUsers ?? []);
   const recentActiveUserCount = computed(() => usageSummary.value?.activeUserCount ?? 0);
   const activeWindowStartedAt = computed(() => usageSummary.value?.activeWindowStartedAt ?? null);
+  const modelUsageSummaries = computed<ModelUsageSummary[]>(() => {
+    const models = usageSummary.value?.models ?? [];
+    if (models.length) {
+      return models;
+    }
+    return modelSummaries.value.map((model) => ({
+      model: model.name,
+      requestCount: model.count,
+      successfulRequests: model.success,
+      failedRequests: model.count - model.success,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: model.tokens,
+      credits: null,
+      lastUsedAt: model.lastUsedAt,
+    }));
+  });
+  const topModelUsage = computed(() => modelUsageSummaries.value.slice(0, 8));
+  const maxModelUsageTokens = computed(() =>
+    Math.max(0, ...topModelUsage.value.map((model) => model.totalTokens)),
+  );
   const topUserRequests = computed(() => topUsersByRequests.value[0]?.count ?? 0);
   const userAverageSuccessRate = computed(() =>
     average(userSummaries.value.map((user) => user.successRate)),
   );
+
+  function modelUsageSuccessRate(model: ModelUsageSummary) {
+    if (!model.requestCount) return null;
+    return (model.successfulRequests / model.requestCount) * 100;
+  }
 
   function shouldShowBucketLabel(index: number) {
     return index === 0 || index === chartData.value.buckets.length - 1 || index % 2 === 0;
@@ -689,7 +737,10 @@
     </div>
   </PageSection>
 
-  <PageSection title="性能日志" subtitle="每 30 秒记录一次 CPU、内存与网络吞吐，展示最近 120 个采样点">
+  <PageSection
+    title="性能日志"
+    subtitle="每 30 秒记录一次 CPU、内存与网络吞吐，展示最近 120 个采样点"
+  >
     <div class="performance-dashboard">
       <div class="performance-stats">
         <div class="performance-stat">
@@ -768,11 +819,15 @@
               </g>
               <g class="chart-series">
                 <g v-for="(series, index) in resourceChart.series" :key="series.name">
-                  <path class="chart-area" :d="series.areaPoints" :fill="`url(#resource-fill-${index})`" />
+                  <path
+                    class="chart-area"
+                    :d="series.areaPoints"
+                    :fill="`url(#resource-fill-${index})`"
+                  />
                   <path class="chart-line" :d="series.points" :stroke="series.color" />
                 </g>
               </g>
-              
+
               <!-- Hover Guide Line -->
               <line
                 v-if="hoveredResourceIndex !== null"
@@ -796,7 +851,7 @@
                   r="6"
                   stroke="#fff"
                   stroke-width="2.5"
-                  style="filter: drop-shadow(0 2px 4px rgba(0,0,0,0.15))"
+                  style="filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.15))"
                 />
               </g>
 
@@ -805,9 +860,16 @@
                 <rect
                   v-for="(bucket, idx) in resourceChart.buckets"
                   :key="bucket.timestamp"
-                  :x="xFor(idx, resourceChart.buckets.length) - (xFor(1, resourceChart.buckets.length) - xFor(0, resourceChart.buckets.length)) / 2"
+                  :x="
+                    xFor(idx, resourceChart.buckets.length) -
+                      (xFor(1, resourceChart.buckets.length) -
+                        xFor(0, resourceChart.buckets.length)) /
+                      2
+                  "
                   y="0"
-                  :width="xFor(1, resourceChart.buckets.length) - xFor(0, resourceChart.buckets.length)"
+                  :width="
+                    xFor(1, resourceChart.buckets.length) - xFor(0, resourceChart.buckets.length)
+                  "
                   :height="chartHeight"
                   fill="transparent"
                   style="cursor: crosshair"
@@ -839,12 +901,20 @@
                 v-if="hoveredResourceIndex !== null && resourceChart.buckets[hoveredResourceIndex]"
                 class="chart-tooltip glass-panel"
                 :style="{
-                  left: xFor(hoveredResourceIndex, resourceChart.buckets.length) > chartWidth / 2 ? '58px' : 'auto',
-                  right: xFor(hoveredResourceIndex, resourceChart.buckets.length) > chartWidth / 2 ? 'auto' : '58px',
+                  left:
+                    xFor(hoveredResourceIndex, resourceChart.buckets.length) > chartWidth / 2
+                      ? '58px'
+                      : 'auto',
+                  right:
+                    xFor(hoveredResourceIndex, resourceChart.buckets.length) > chartWidth / 2
+                      ? 'auto'
+                      : '58px',
                 }"
               >
-                <div class="tooltip-time">{{ resourceChart.buckets[hoveredResourceIndex].label }}</div>
-                <div class="tooltip-divider"></div>
+                <div class="tooltip-time">
+                  {{ resourceChart.buckets[hoveredResourceIndex].label }}
+                </div>
+                <div class="tooltip-divider" />
                 <div v-for="series in resourceChart.series" :key="series.name" class="tooltip-row">
                   <i :style="{ backgroundColor: series.color }" class="tooltip-dot" />
                   <span class="tooltip-name">{{ series.name }}</span>
@@ -908,11 +978,15 @@
               </g>
               <g class="chart-series">
                 <g v-for="(series, index) in memoryChart.series" :key="series.name">
-                  <path class="chart-area" :d="series.areaPoints" :fill="`url(#memory-fill-${index})`" />
+                  <path
+                    class="chart-area"
+                    :d="series.areaPoints"
+                    :fill="`url(#memory-fill-${index})`"
+                  />
                   <path class="chart-line" :d="series.points" :stroke="series.color" />
                 </g>
               </g>
-              
+
               <!-- Hover Guide Line -->
               <line
                 v-if="hoveredMemoryIndex !== null"
@@ -936,7 +1010,7 @@
                   r="6"
                   stroke="#fff"
                   stroke-width="2.5"
-                  style="filter: drop-shadow(0 2px 4px rgba(0,0,0,0.15))"
+                  style="filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.15))"
                 />
               </g>
 
@@ -945,7 +1019,10 @@
                 <rect
                   v-for="(bucket, idx) in memoryChart.buckets"
                   :key="bucket.timestamp"
-                  :x="xFor(idx, memoryChart.buckets.length) - (xFor(1, memoryChart.buckets.length) - xFor(0, memoryChart.buckets.length)) / 2"
+                  :x="
+                    xFor(idx, memoryChart.buckets.length) -
+                      (xFor(1, memoryChart.buckets.length) - xFor(0, memoryChart.buckets.length)) / 2
+                  "
                   y="0"
                   :width="xFor(1, memoryChart.buckets.length) - xFor(0, memoryChart.buckets.length)"
                   :height="chartHeight"
@@ -979,12 +1056,18 @@
                 v-if="hoveredMemoryIndex !== null && memoryChart.buckets[hoveredMemoryIndex]"
                 class="chart-tooltip glass-panel"
                 :style="{
-                  left: xFor(hoveredMemoryIndex, memoryChart.buckets.length) > chartWidth / 2 ? '58px' : 'auto',
-                  right: xFor(hoveredMemoryIndex, memoryChart.buckets.length) > chartWidth / 2 ? 'auto' : '58px',
+                  left:
+                    xFor(hoveredMemoryIndex, memoryChart.buckets.length) > chartWidth / 2
+                      ? '58px'
+                      : 'auto',
+                  right:
+                    xFor(hoveredMemoryIndex, memoryChart.buckets.length) > chartWidth / 2
+                      ? 'auto'
+                      : '58px',
                 }"
               >
                 <div class="tooltip-time">{{ memoryChart.buckets[hoveredMemoryIndex].label }}</div>
-                <div class="tooltip-divider"></div>
+                <div class="tooltip-divider" />
                 <div v-for="series in memoryChart.series" :key="series.name" class="tooltip-row">
                   <i :style="{ backgroundColor: series.color }" class="tooltip-dot" />
                   <span class="tooltip-name">{{ series.name }}</span>
@@ -1000,10 +1083,7 @@
     </div>
   </PageSection>
 
-  <PageSection
-    title="模型调用仪表盘"
-    subtitle="基于最新请求日志聚合，展示活跃模型的调用趋势与健康度"
-  >
+  <PageSection title="模型调用仪表盘" subtitle="基于最新请求日志聚合，展示模型调用趋势与请求健康度">
     <div class="usage-dashboard">
       <div class="usage-dashboard__main">
         <div class="usage-stats">
@@ -1024,8 +1104,8 @@
             <strong>{{ latencyText(averageLatencyMs) }}</strong>
           </div>
           <div class="usage-stat">
-            <span class="usage-stat__label">活跃模型</span>
-            <strong>{{ formatNumber(activeModelCount) }}</strong>
+            <span class="usage-stat__label">近5分钟活跃用户</span>
+            <strong>{{ formatNumber(recentActiveUserCount) }}</strong>
           </div>
         </div>
 
@@ -1081,11 +1161,15 @@
 
               <g class="chart-series">
                 <g v-for="(series, index) in chartData.series" :key="series.name">
-                  <path class="chart-area" :d="series.areaPoints" :fill="`url(#series-fill-${index})`" />
+                  <path
+                    class="chart-area"
+                    :d="series.areaPoints"
+                    :fill="`url(#series-fill-${index})`"
+                  />
                   <path class="chart-line" :d="series.points" :stroke="series.color" />
                 </g>
               </g>
-              
+
               <!-- Hover Guide Line -->
               <line
                 v-if="hoveredUsageIndex !== null"
@@ -1109,7 +1193,7 @@
                   r="6"
                   stroke="#fff"
                   stroke-width="2.5"
-                  style="filter: drop-shadow(0 2px 4px rgba(0,0,0,0.15))"
+                  style="filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.15))"
                 />
               </g>
 
@@ -1118,7 +1202,10 @@
                 <rect
                   v-for="(bucket, idx) in chartData.buckets"
                   :key="bucket.timestamp"
-                  :x="xFor(idx, chartData.buckets.length) - (xFor(1, chartData.buckets.length) - xFor(0, chartData.buckets.length)) / 2"
+                  :x="
+                    xFor(idx, chartData.buckets.length) -
+                      (xFor(1, chartData.buckets.length) - xFor(0, chartData.buckets.length)) / 2
+                  "
                   y="0"
                   :width="xFor(1, chartData.buckets.length) - xFor(0, chartData.buckets.length)"
                   :height="chartHeight"
@@ -1153,12 +1240,18 @@
                 v-if="hoveredUsageIndex !== null && chartData.buckets[hoveredUsageIndex]"
                 class="chart-tooltip glass-panel"
                 :style="{
-                  left: xFor(hoveredUsageIndex, chartData.buckets.length) > chartWidth / 2 ? '58px' : 'auto',
-                  right: xFor(hoveredUsageIndex, chartData.buckets.length) > chartWidth / 2 ? 'auto' : '58px',
+                  left:
+                    xFor(hoveredUsageIndex, chartData.buckets.length) > chartWidth / 2
+                      ? '58px'
+                      : 'auto',
+                  right:
+                    xFor(hoveredUsageIndex, chartData.buckets.length) > chartWidth / 2
+                      ? 'auto'
+                      : '58px',
                 }"
               >
                 <div class="tooltip-time">{{ chartData.buckets[hoveredUsageIndex].label }}</div>
-                <div class="tooltip-divider"></div>
+                <div class="tooltip-divider" />
                 <div v-for="series in chartData.series" :key="series.name" class="tooltip-row">
                   <i :style="{ backgroundColor: series.color }" class="tooltip-dot" />
                   <span class="tooltip-name">{{ series.name }}</span>
@@ -1213,7 +1306,7 @@
     <div class="user-usage-dashboard">
       <div class="usage-stats">
         <div class="usage-stat">
-          <span class="usage-stat__label">使用总 Token</span>
+          <span class="usage-stat__label">使用 Token 总数</span>
           <strong>{{ formatNumber(usageTotalTokens) }}</strong>
         </div>
         <div class="usage-stat">
@@ -1257,7 +1350,9 @@
               class="active-user-item"
             >
               <div class="active-user-item__main">
-                <strong :title="activeUserDisplayName(user)">{{ activeUserDisplayName(user) }}</strong>
+                <strong :title="activeUserDisplayName(user)">{{
+                  activeUserDisplayName(user)
+                }}</strong>
                 <span class="text-muted">{{ activeUserSecondary(user) }}</span>
               </div>
               <div class="active-user-item__stats">
@@ -1268,6 +1363,47 @@
             </div>
           </div>
           <div v-else class="user-chart-empty text-muted">最近五分钟暂无活跃用户</div>
+        </div>
+
+        <div class="user-chart-card model-usage-card">
+          <div class="user-chart-card__header">
+            <div>
+              <h3>模型使用情况</h3>
+              <p class="text-muted">按全量请求日志聚合模型调用和 token 消耗</p>
+            </div>
+            <span class="text-muted">总 Token {{ formatNumber(usageTotalTokens) }}</span>
+          </div>
+          <div v-if="topModelUsage.length" class="user-bars">
+            <div
+              v-for="(model, index) in topModelUsage"
+              :key="model.model || index"
+              class="user-bar-row"
+            >
+              <div class="user-bar-row__head">
+                <div class="user-bar-row__identity">
+                  <span class="user-rank-dot" :style="{ backgroundColor: getChartColor(index) }" />
+                  <strong :title="model.model || '未指定模型'">{{
+                    model.model || '未指定模型'
+                  }}</strong>
+                </div>
+                <span>{{ formatNumber(model.totalTokens) }} token</span>
+              </div>
+              <div class="user-bar-track">
+                <span
+                  :style="{
+                    width: barWidth(model.totalTokens, maxModelUsageTokens),
+                    backgroundColor: getChartColor(index),
+                  }"
+                />
+              </div>
+              <div class="user-bar-row__meta text-muted">
+                <span>{{ formatNumber(model.requestCount) }} 次 · 成功率
+                  {{ percentText(modelUsageSuccessRate(model)) }}</span>
+                <span>最近 {{ formatDateTime(model.lastUsedAt) }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-else class="user-chart-empty text-muted">暂无模型使用数据</div>
         </div>
 
         <div class="user-chart-card">
@@ -1696,7 +1832,8 @@
     gap: 12px;
   }
 
-  .active-users-card {
+  .active-users-card,
+  .model-usage-card {
     grid-column: 1 / -1;
   }
 
@@ -1883,7 +2020,9 @@
       r: 3.5;
       stroke: rgba(255, 255, 255, 0.95);
       stroke-width: 1.5;
-      transition: r 0.2s ease, stroke-width 0.2s ease;
+      transition:
+        r 0.2s ease,
+        stroke-width 0.2s ease;
     }
   }
 

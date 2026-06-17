@@ -4,14 +4,14 @@
    *
    * 金额、支付方式和订单列表都从后端支付模块读取，前端只负责展示与跳转收银台。
    */
-import { computed, onMounted, reactive, ref } from 'vue';
-import { ElMessage, ElMessageBox } from 'element-plus';
-import { Refresh, Wallet, Timer, Check, Calendar, Warning } from '@element-plus/icons-vue';
-import PageSection from '@/components/PageSection.vue';
-import { paymentApi } from '@/api';
-import { useAuthStore } from '@/stores/auth';
-import type { PaymentOrder, PaymentSettings, PaymentType } from '@/types/api';
-import { formatDateTime, formatNumber } from '@/utils/format';
+  import { computed, onMounted, reactive, ref } from 'vue';
+  import { ElMessage, ElMessageBox } from 'element-plus';
+  import { Refresh, Wallet, Timer, Check, Calendar, Warning } from '@element-plus/icons-vue';
+  import PageSection from '@/components/PageSection.vue';
+  import { paymentApi } from '@/api';
+  import { useAuthStore } from '@/stores/auth';
+  import type { PaymentOrder, PaymentSettings, PaymentType } from '@/types/api';
+  import { formatDateTime, formatNumber } from '@/utils/format';
 
   const auth = useAuthStore();
   const loading = ref(false);
@@ -43,12 +43,14 @@ import { formatDateTime, formatNumber } from '@/utils/format';
     () => Boolean(settings.value?.enabled) && availableTypes.value.length > 0,
   );
   const currentBalance = computed(() => auth.user?.balance ?? 0);
-  const feeRateText = computed(() => `${formatNumber((settings.value?.rechargeFeeRate ?? 0) * 100)}%`);
-  const creditedAmount = computed(
-    () => Number((form.amount * (settings.value?.balanceRechargeMultiplier ?? 1)).toFixed(6)),
+  const feeRateText = computed(
+    () => `${formatNumber((settings.value?.rechargeFeeRate ?? 0) * 100)}%`,
   );
-  const payAmount = computed(
-    () => Number((form.amount * (1 + (settings.value?.rechargeFeeRate ?? 0))).toFixed(6)),
+  const creditedAmount = computed(() =>
+    Number((form.amount * (settings.value?.balanceRechargeMultiplier ?? 1)).toFixed(6)),
+  );
+  const payAmount = computed(() =>
+    Number((form.amount * (1 + (settings.value?.rechargeFeeRate ?? 0))).toFixed(6)),
   );
   const maxAmountLimit = computed(() => {
     const value = settings.value?.maxAmount ?? 0;
@@ -72,8 +74,6 @@ import { formatDateTime, formatNumber } from '@/utils/format';
     };
     return map[status] ?? status;
   }
-
-
 
   function paymentTypeLabel(type: PaymentType | string) {
     return type === 'wxpay' ? '微信支付' : '支付宝';
@@ -141,7 +141,10 @@ import { formatDateTime, formatNumber } from '@/utils/format';
         mobile: /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent),
       });
       activeOrder.value = result.order;
-      orders.value = [result.order, ...orders.value.filter((order) => order.orderId !== result.order.orderId)];
+      orders.value = [
+        result.order,
+        ...orders.value.filter((order) => order.orderId !== result.order.orderId),
+      ];
       ElMessage.success('充值订单已创建');
       const target = result.payUrl || result.order.payUrl;
       if (target) window.open(target, '_blank', 'noopener,noreferrer');
@@ -214,7 +217,8 @@ import { formatDateTime, formatNumber } from '@/utils/format';
           </div>
           <div class="stat-card__content">
             <span class="stat-card__label">待支付订单数</span>
-            <strong class="stat-card__value mono">{{ formatNumber(pendingOrders.length) }}<span class="stat-card__unit">笔</span></strong>
+            <strong class="stat-card__value mono">{{ formatNumber(pendingOrders.length)
+            }}<span class="stat-card__unit">笔</span></strong>
           </div>
         </article>
         <article class="stat-card stat-card--completed">
@@ -223,7 +227,10 @@ import { formatDateTime, formatNumber } from '@/utils/format';
           </div>
           <div class="stat-card__content">
             <span class="stat-card__label">最近一次充值入账</span>
-            <strong class="stat-card__value" style="font-size: 14px; font-weight: 600; padding: 4px 0;">
+            <strong
+              class="stat-card__value"
+              style="font-size: 14px; font-weight: 600; padding: 4px 0"
+            >
               {{ latestCompleted ? formatDateTime(latestCompleted.completedAt) : '无充值记录' }}
             </strong>
           </div>
@@ -247,7 +254,7 @@ import { formatDateTime, formatNumber } from '@/utils/format';
             :closable="false"
             show-icon
             title="管理员尚未启用在线支付，目前无法进行余额充值。"
-            style="margin-bottom: 16px;"
+            style="margin-bottom: 16px"
           />
 
           <el-form v-if="settings" label-position="top" class="payment__form">
@@ -261,7 +268,7 @@ import { formatDateTime, formatNumber } from '@/utils/format';
                 controls-position="right"
                 style="width: 100%"
               />
-              
+
               <!-- 快捷选额按钮组 -->
               <div class="quick-amounts">
                 <button
@@ -270,7 +277,11 @@ import { formatDateTime, formatNumber } from '@/utils/format';
                   type="button"
                   class="quick-amount-btn"
                   :class="{ active: form.amount === amt }"
-                  :disabled="!isPaymentEnabled || amt < settings.minAmount || (settings.maxAmount > 0 && amt > settings.maxAmount)"
+                  :disabled="
+                    !isPaymentEnabled ||
+                      amt < settings.minAmount ||
+                      (settings.maxAmount > 0 && amt > settings.maxAmount)
+                  "
                   @click="form.amount = amt"
                 >
                   ¥{{ amt }}
@@ -280,7 +291,7 @@ import { formatDateTime, formatNumber } from '@/utils/format';
 
             <el-form-item label="支付方式">
               <div class="payment-method-selector">
-                <div 
+                <div
                   v-for="type in availableTypes"
                   :key="type"
                   class="payment-method-card"
@@ -288,19 +299,39 @@ import { formatDateTime, formatNumber } from '@/utils/format';
                   @click="isPaymentEnabled && (form.paymentType = type)"
                 >
                   <div class="payment-method-card__icon-brand">
-                    <svg v-if="type === 'alipay'" viewBox="0 0 1024 1024" class="alipay-svg" fill="currentColor" style="width: 22px; height: 22px;">
-                      <path d="M787 555c-7-59-40-118-98-174h148v-68H647c30-56 59-119 83-186l-68-21c-25 70-55 131-87 187-48-70-92-146-121-222l-65 20c31 78 78 158 129 230H302c-40 56-92 112-153 163l43 54c60-47 109-98 149-150h264c-36 58-80 116-130 168-51-38-96-86-133-140l-50 47c43 60 96 112 156 153-97 77-225 136-391 172l20 68c191-43 334-112 438-202 54 45 116 83 185 111l31-62c-64-26-121-62-172-103 46-47 84-98 116-150h141c5 7 10 15 14 24 15 30 22 62 22 95-1 102-54 162-158 179l20 67c139-24 206-104 205-244 0-38-8-75-22-110z"/>
+                    <svg
+                      v-if="type === 'alipay'"
+                      viewBox="0 0 1024 1024"
+                      class="alipay-svg"
+                      fill="currentColor"
+                      style="width: 22px; height: 22px"
+                    >
+                      <path
+                        d="M787 555c-7-59-40-118-98-174h148v-68H647c30-56 59-119 83-186l-68-21c-25 70-55 131-87 187-48-70-92-146-121-222l-65 20c31 78 78 158 129 230H302c-40 56-92 112-153 163l43 54c60-47 109-98 149-150h264c-36 58-80 116-130 168-51-38-96-86-133-140l-50 47c43 60 96 112 156 153-97 77-225 136-391 172l20 68c191-43 334-112 438-202 54 45 116 83 185 111l31-62c-64-26-121-62-172-103 46-47 84-98 116-150h141c5 7 10 15 14 24 15 30 22 62 22 95-1 102-54 162-158 179l20 67c139-24 206-104 205-244 0-38-8-75-22-110z"
+                      />
                     </svg>
-                    <svg v-else-if="type === 'wxpay'" viewBox="0 0 1024 1024" class="wxpay-svg" fill="currentColor" style="width: 22px; height: 22px;">
-                      <path d="M647.4 340.6c11.9 0 23.7.9 35.3 2.6-32.9-77-109-131-198.8-131-131.7 0-238.4 92.5-238.4 206.7 0 63 64.9 123.6 161.7 165.7l-41.2 81.3 92.8-48.4c20.3 5.4 41.5 8.2 63.3 8.2 11.9 0 23.7-.9 35.3-2.6-9.6-34.9-14.8-71.8-14.8-110 0-95.2 62.9-172.5 140.2-172.5zm-149 71.9c-14.2 0-25.7-10.4-25.7-23.2s11.5-23.2 25.7-23.2c14.2 0 25.7 10.4 25.7 23.2s-11.5 23.2-25.7 23.2zm-128.4 0c-14.2 0-25.7-10.4-25.7-23.2s11.5-23.2 25.7-23.2c14.2 0 25.7 10.4 25.7 23.2s-11.5 23.2-25.7 23.2z"/>
-                      <path d="M856.2 590.2c0-95.2-90.3-172.3-201.7-172.3-111.4 0-201.7 77.2-201.7 172.3s90.3 172.3 201.7 172.3c18.5 0 36.4-2.1 53.7-6.2l78.8 41.2-34.9-69.3c63.7-35.3 104.1-87 104.1-138zM600.8 567c-11.9 0-21.6-8.7-21.6-19.4s9.7-19.4 21.6-19.4 21.6 8.7 21.6 19.4-9.7 19.4-21.6 19.4zm108 0c-11.9 0-21.6-8.7-21.6-19.4s9.7-19.4 21.6-19.4c11.9 0 21.6 8.7 21.6 19.4s-9.7 19.4-21.6 19.4z"/>
+                    <svg
+                      v-else-if="type === 'wxpay'"
+                      viewBox="0 0 1024 1024"
+                      class="wxpay-svg"
+                      fill="currentColor"
+                      style="width: 22px; height: 22px"
+                    >
+                      <path
+                        d="M647.4 340.6c11.9 0 23.7.9 35.3 2.6-32.9-77-109-131-198.8-131-131.7 0-238.4 92.5-238.4 206.7 0 63 64.9 123.6 161.7 165.7l-41.2 81.3 92.8-48.4c20.3 5.4 41.5 8.2 63.3 8.2 11.9 0 23.7-.9 35.3-2.6-9.6-34.9-14.8-71.8-14.8-110 0-95.2 62.9-172.5 140.2-172.5zm-149 71.9c-14.2 0-25.7-10.4-25.7-23.2s11.5-23.2 25.7-23.2c14.2 0 25.7 10.4 25.7 23.2s-11.5 23.2-25.7 23.2zm-128.4 0c-14.2 0-25.7-10.4-25.7-23.2s11.5-23.2 25.7-23.2c14.2 0 25.7 10.4 25.7 23.2s-11.5 23.2-25.7 23.2z"
+                      />
+                      <path
+                        d="M856.2 590.2c0-95.2-90.3-172.3-201.7-172.3-111.4 0-201.7 77.2-201.7 172.3s90.3 172.3 201.7 172.3c18.5 0 36.4-2.1 53.7-6.2l78.8 41.2-34.9-69.3c63.7-35.3 104.1-87 104.1-138zM600.8 567c-11.9 0-21.6-8.7-21.6-19.4s9.7-19.4 21.6-19.4 21.6 8.7 21.6 19.4-9.7 19.4-21.6 19.4zm108 0c-11.9 0-21.6-8.7-21.6-19.4s9.7-19.4 21.6-19.4c11.9 0 21.6 8.7 21.6 19.4s-9.7 19.4-21.6 19.4z"
+                      />
                     </svg>
                   </div>
                   <div class="payment-method-card__info">
                     <span class="payment-method-card__title">{{ paymentTypeLabels[type] }}</span>
-                    <span class="payment-method-card__desc">{{ type === 'wxpay' ? '微信扫码完成支付' : '跳转支付宝网页支付' }}</span>
+                    <span class="payment-method-card__desc">{{
+                      type === 'wxpay' ? '微信扫码完成支付' : '跳转支付宝网页支付'
+                    }}</span>
                   </div>
-                  <div class="payment-method-card__badge" v-if="form.paymentType === type">
+                  <div v-if="form.paymentType === type" class="payment-method-card__badge">
                     <el-icon><Check /></el-icon>
                   </div>
                 </div>
@@ -325,7 +356,9 @@ import { formatDateTime, formatNumber } from '@/utils/format';
             <div class="payment__limits text-muted">
               <el-icon><Warning /></el-icon>
               <span>
-                交易规则：单笔金额 {{ amountRangeText(settings) }}，每日限额 {{ limitText(settings.dailyLimit) }}。每个账号最多允许保留 {{ formatNumber(settings.maxPendingOrders) }} 个未支付订单。
+                交易规则：单笔金额 {{ amountRangeText(settings) }}，每日限额
+                {{ limitText(settings.dailyLimit) }}。每个账号最多允许保留
+                {{ formatNumber(settings.maxPendingOrders) }} 个未支付订单。
               </span>
             </div>
 
@@ -364,12 +397,7 @@ import { formatDateTime, formatNumber } from '@/utils/format';
               <span>兑换码为一次性使用，兑换成功后余额会直接加入当前账号。</span>
             </div>
 
-            <el-button
-              type="primary"
-              :loading="redeeming"
-              class="submit-btn"
-              @click="redeemCode"
-            >
+            <el-button type="primary" :loading="redeeming" class="submit-btn" @click="redeemCode">
               兑换余额
             </el-button>
           </el-form>
@@ -401,21 +429,22 @@ import { formatDateTime, formatNumber } from '@/utils/format';
             </div>
 
             <!-- 二维码显示 -->
-            <div class="qr-container" v-if="isQrCodeImage(activeOrder.qrCode)">
-              <img
-                class="payment__qr"
-                :src="activeOrder.qrCode || ''"
-                alt="支付二维码"
-              />
+            <div v-if="isQrCodeImage(activeOrder.qrCode)" class="qr-container">
+              <img class="payment__qr" :src="activeOrder.qrCode || ''" alt="支付二维码">
               <span class="qr-tip">请使用微信或支付宝扫码支付</span>
             </div>
-            <div class="qr-container" v-else-if="activeOrder.qrCode">
+            <div v-else-if="activeOrder.qrCode" class="qr-container">
               <code class="payment__qr-text">{{ activeOrder.qrCode }}</code>
               <span class="qr-tip">商户支付请求链接，请点击下方按钮支付</span>
             </div>
 
             <div class="payment__actions">
-              <el-button type="primary" :disabled="!activeOrder.payUrl" class="action-pay-btn" @click="openPay(activeOrder)">
+              <el-button
+                type="primary"
+                :disabled="!activeOrder.payUrl"
+                class="action-pay-btn"
+                @click="openPay(activeOrder)"
+              >
                 立即打开支付
               </el-button>
               <el-button
@@ -445,7 +474,7 @@ import { formatDateTime, formatNumber } from '@/utils/format';
           <el-table-column label="支付方式" width="120">
             <template #default="{ row }">
               <div class="payment-type-badge" :class="row.paymentType">
-                <span class="dot"></span>
+                <span class="dot" />
                 {{ paymentTypeLabel(row.paymentType) }}
               </div>
             </template>
@@ -474,7 +503,9 @@ import { formatDateTime, formatNumber } from '@/utils/format';
           </el-table-column>
           <el-table-column label="入账时间" width="170">
             <template #default="{ row }">
-              <span v-if="row.completedAt" class="time-text">{{ formatDateTime(row.completedAt) }}</span>
+              <span v-if="row.completedAt" class="time-text">{{
+                formatDateTime(row.completedAt)
+              }}</span>
               <span v-else class="text-muted">—</span>
             </template>
           </el-table-column>
@@ -590,13 +621,17 @@ import { formatDateTime, formatNumber } from '@/utils/format';
         &--credited {
           border-color: rgba(54, 192, 138, 0.25);
           background: rgba(54, 192, 138, 0.02);
-          .quote-val { color: var(--kp-success); }
+          .quote-val {
+            color: var(--kp-success);
+          }
         }
 
         &--pay {
           border-color: rgba(91, 141, 239, 0.25);
           background: rgba(91, 141, 239, 0.02);
-          .quote-val { color: var(--kp-primary); }
+          .quote-val {
+            color: var(--kp-primary);
+          }
         }
       }
 
@@ -820,8 +855,12 @@ import { formatDateTime, formatNumber } from '@/utils/format';
 
     /* 各卡片特有颜色方案 */
     &--completed {
-      &::before { background: var(--kp-success); }
-      &:hover { border-color: rgba(54, 192, 138, 0.3); }
+      &::before {
+        background: var(--kp-success);
+      }
+      &:hover {
+        border-color: rgba(54, 192, 138, 0.3);
+      }
       .stat-card__icon-wrapper {
         background: rgba(54, 192, 138, 0.12);
         color: var(--kp-success);
@@ -829,8 +868,12 @@ import { formatDateTime, formatNumber } from '@/utils/format';
     }
 
     &--pending {
-      &::before { background: var(--kp-warning); }
-      &:hover { border-color: rgba(240, 168, 77, 0.3); }
+      &::before {
+        background: var(--kp-warning);
+      }
+      &:hover {
+        border-color: rgba(240, 168, 77, 0.3);
+      }
       .stat-card__icon-wrapper {
         background: rgba(240, 168, 77, 0.12);
         color: var(--kp-warning);
@@ -838,8 +881,12 @@ import { formatDateTime, formatNumber } from '@/utils/format';
     }
 
     &--balance {
-      &::before { background: var(--kp-primary); }
-      &:hover { border-color: rgba(91, 141, 239, 0.3); }
+      &::before {
+        background: var(--kp-primary);
+      }
+      &:hover {
+        border-color: rgba(91, 141, 239, 0.3);
+      }
       .stat-card__icon-wrapper {
         background: rgba(91, 141, 239, 0.12);
         color: var(--kp-primary);
@@ -975,7 +1022,9 @@ import { formatDateTime, formatNumber } from '@/utils/format';
       &.active {
         border-color: #1677ff;
         background: rgba(22, 119, 255, 0.05);
-        box-shadow: 0 0 0 1px #1677ff, var(--kp-shadow);
+        box-shadow:
+          0 0 0 1px #1677ff,
+          var(--kp-shadow);
         .payment-method-card__icon-brand {
           background: #1677ff;
           color: #fff;
@@ -995,7 +1044,9 @@ import { formatDateTime, formatNumber } from '@/utils/format';
       &.active {
         border-color: #07c160;
         background: rgba(7, 193, 96, 0.05);
-        box-shadow: 0 0 0 1px #07c160, var(--kp-shadow);
+        box-shadow:
+          0 0 0 1px #07c160,
+          var(--kp-shadow);
         .payment-method-card__icon-brand {
           background: #07c160;
           color: #fff;
@@ -1066,12 +1117,14 @@ import { formatDateTime, formatNumber } from '@/utils/format';
       color: var(--kp-success);
     }
 
-    &.pending, &.paid {
+    &.pending,
+    &.paid {
       background: rgba(240, 168, 77, 0.12);
       color: var(--kp-warning);
     }
 
-    &.failed, &.expired {
+    &.failed,
+    &.expired {
       background: rgba(239, 91, 107, 0.12);
       color: var(--kp-danger);
     }

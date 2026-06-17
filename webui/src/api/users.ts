@@ -24,9 +24,7 @@ export const usersApi = {
     );
   },
   update(userId: string, payload: UpdateAdminUserRequest) {
-    return unwrap<AdminUser>(
-      http.patch<ApiResponse<AdminUser>>(`/admin/users/${userId}`, payload),
-    );
+    return unwrap<AdminUser>(http.patch<ApiResponse<AdminUser>>(`/admin/users/${userId}`, payload));
   },
   resetPassword(userId: string) {
     return unwrap<ResetPasswordResult>(

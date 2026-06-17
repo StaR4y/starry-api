@@ -10,7 +10,13 @@
   import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus';
   import PageSection from '@/components/PageSection.vue';
   import { usersApi } from '@/api';
-  import type { AdminUser, AdminUserRole, CreateAdminUserRequest, InviteCode, SmtpSecurityMode } from '@/types/api';
+  import type {
+    AdminUser,
+    AdminUserRole,
+    CreateAdminUserRequest,
+    InviteCode,
+    SmtpSecurityMode,
+  } from '@/types/api';
   import { formatDateTime, formatNumber } from '@/utils/format';
 
   const loading = ref(false);
@@ -132,7 +138,7 @@
   }
 
   function balancePayload() {
-    return form.role === 'USER' ? form.balance ?? 0 : undefined;
+    return form.role === 'USER' ? (form.balance ?? 0) : undefined;
   }
 
   /* 一次性密码弹窗 */
@@ -197,11 +203,11 @@
   }
 
   async function resetPassword(row: AdminUser) {
-    await ElMessageBox.confirm(
-      `确认重置 ${row.username} 的密码？将生成新随机密码。`,
-      '重置密码',
-      { confirmButtonText: '重置', cancelButtonText: '取消', type: 'warning' },
-    ).catch(() => Promise.reject(new Error('cancel')));
+    await ElMessageBox.confirm(`确认重置 ${row.username} 的密码？将生成新随机密码。`, '重置密码', {
+      confirmButtonText: '重置',
+      cancelButtonText: '取消',
+      type: 'warning',
+    }).catch(() => Promise.reject(new Error('cancel')));
     const result = await usersApi.resetPassword(row.userId);
     credInfo.value = { username: result.username, password: result.password };
     credVisible.value = true;
@@ -221,7 +227,10 @@
     registrationSettings.smtpFromEmail = settings.smtpFromEmail ?? '';
     registrationSettings.smtpFromName = settings.smtpFromName ?? '';
     registrationSettings.smtpUseTls = Boolean(settings.smtpUseTls);
-    registrationSettings.smtpSecurity = normalizeSmtpSecurity(settings.smtpSecurity, settings.smtpUseTls);
+    registrationSettings.smtpSecurity = normalizeSmtpSecurity(
+      settings.smtpSecurity,
+      settings.smtpUseTls,
+    );
     registrationSettings.turnstileEnabled = Boolean(settings.turnstileEnabled);
     registrationSettings.turnstileSiteKey = settings.turnstileSiteKey ?? '';
     registrationSettings.turnstileSecretKey = '';
@@ -240,7 +249,11 @@
       ElMessage.warning('请填写 Cloudflare Turnstile Site Key');
       return;
     }
-    if (registrationSettings.turnstileEnabled && !registrationSettings.turnstileSecretConfigured && !turnstileSecretKey) {
+    if (
+      registrationSettings.turnstileEnabled &&
+      !registrationSettings.turnstileSecretConfigured &&
+      !turnstileSecretKey
+    ) {
       ElMessage.warning('请填写 Cloudflare Turnstile Secret Key');
       return;
     }
@@ -274,7 +287,10 @@
       registrationSettings.smtpFromEmail = settings.smtpFromEmail ?? '';
       registrationSettings.smtpFromName = settings.smtpFromName ?? '';
       registrationSettings.smtpUseTls = Boolean(settings.smtpUseTls);
-      registrationSettings.smtpSecurity = normalizeSmtpSecurity(settings.smtpSecurity, settings.smtpUseTls);
+      registrationSettings.smtpSecurity = normalizeSmtpSecurity(
+        settings.smtpSecurity,
+        settings.smtpUseTls,
+      );
       registrationSettings.turnstileEnabled = Boolean(settings.turnstileEnabled);
       registrationSettings.turnstileSiteKey = settings.turnstileSiteKey ?? '';
       registrationSettings.turnstileSecretKey = '';
@@ -315,7 +331,11 @@
   }
 
   async function createInviteCode() {
-    if (!Number.isInteger(inviteCodeForm.count) || inviteCodeForm.count < 1 || inviteCodeForm.count > 100) {
+    if (
+      !Number.isInteger(inviteCodeForm.count) ||
+      inviteCodeForm.count < 1 ||
+      inviteCodeForm.count > 100
+    ) {
       ElMessage.warning('邀请码生成数量需在 1 到 100 之间');
       return;
     }
@@ -483,7 +503,7 @@
         </div>
       </transition>
 
-      <div class="setting-divider"></div>
+      <div class="setting-divider" />
 
       <!-- 注册邮箱验证 Row -->
       <div class="setting-row">
@@ -496,13 +516,15 @@
         </div>
       </div>
 
-      <div class="setting-divider"></div>
+      <div class="setting-divider" />
 
       <!-- Cloudflare Turnstile Row -->
       <div class="setting-row">
         <div class="setting-info">
           <div class="setting-title">Cloudflare Turnstile 人机验证</div>
-          <div class="setting-desc">开启后，发送注册链接、邀请码注册和无邮箱验证注册都会先进行 Cloudflare 验证。</div>
+          <div class="setting-desc">
+            开启后，发送注册链接、邀请码注册和无邮箱验证注册都会先进行 Cloudflare 验证。
+          </div>
         </div>
         <div class="setting-control">
           <el-switch v-model="registrationSettings.turnstileEnabled" />
@@ -522,16 +544,22 @@
                 v-model="registrationSettings.turnstileSecretKey"
                 type="password"
                 show-password
-                :placeholder="registrationSettings.turnstileSecretConfigured ? '已配置，留空保持不变' : '请输入 Turnstile Secret Key'"
+                :placeholder="
+                  registrationSettings.turnstileSecretConfigured
+                    ? '已配置，留空保持不变'
+                    : '请输入 Turnstile Secret Key'
+                "
                 autocomplete="new-password"
               />
             </div>
           </div>
-          <div class="setting-desc mt-12">Cloudflare 控制台创建 Turnstile Widget 后，将站点 key 用于前端展示，密钥用于后端校验。</div>
+          <div class="setting-desc mt-12">
+            Cloudflare 控制台创建 Turnstile Widget 后，将站点 key 用于前端展示，密钥用于后端校验。
+          </div>
         </div>
       </transition>
 
-      <div class="setting-divider"></div>
+      <div class="setting-divider" />
 
       <!-- 邀请码注册 Row -->
       <div class="setting-row">
@@ -571,7 +599,13 @@
             </div>
           </div>
 
-          <el-table v-loading="inviteCodeLoading" :data="inviteCodes" size="small" max-height="260" stripe>
+          <el-table
+            v-loading="inviteCodeLoading"
+            :data="inviteCodes"
+            size="small"
+            max-height="260"
+            stripe
+          >
             <el-table-column label="邀请码" min-width="190">
               <template #default="{ row }">
                 <code class="mono">{{ row.code }}</code>
@@ -614,7 +648,7 @@
       <transition name="fade-slide">
         <div v-if="registrationSettings.emailVerifyEnabled" class="smtp-minimal-section">
           <div class="smtp-section-header">SMTP 发送服务配置</div>
-          
+
           <div class="smtp-grid">
             <div class="smtp-row">
               <div class="smtp-col col-8">
@@ -636,7 +670,10 @@
             <div class="smtp-row mt-12">
               <div class="smtp-col col-6">
                 <label class="smtp-label">SMTP 用户名</label>
-                <el-input v-model="registrationSettings.smtpUsername" placeholder="user@example.com" />
+                <el-input
+                  v-model="registrationSettings.smtpUsername"
+                  placeholder="user@example.com"
+                />
               </div>
               <div class="smtp-col col-6">
                 <label class="smtp-label">SMTP 密码</label>
@@ -644,7 +681,11 @@
                   v-model="registrationSettings.smtpPassword"
                   type="password"
                   show-password
-                  :placeholder="registrationSettings.smtpPasswordConfigured ? '已配置，留空保持不变' : '请输入密码'"
+                  :placeholder="
+                    registrationSettings.smtpPasswordConfigured
+                      ? '已配置，留空保持不变'
+                      : '请输入密码'
+                  "
                   autocomplete="new-password"
                 />
               </div>
@@ -653,7 +694,10 @@
             <div class="smtp-row mt-12">
               <div class="smtp-col col-6">
                 <label class="smtp-label">发件邮箱</label>
-                <el-input v-model="registrationSettings.smtpFromEmail" placeholder="noreply@example.com" />
+                <el-input
+                  v-model="registrationSettings.smtpFromEmail"
+                  placeholder="noreply@example.com"
+                />
               </div>
               <div class="smtp-col col-6">
                 <label class="smtp-label">发件名称</label>
@@ -662,7 +706,10 @@
             </div>
 
             <div class="smtp-row mt-16 align-center">
-              <div class="smtp-col col-12 flex-between" style="flex-direction: row; align-items: center;">
+              <div
+                class="smtp-col col-12 flex-between"
+                style="flex-direction: row; align-items: center"
+              >
                 <div class="switch-label-group">
                   <span class="switch-title">SMTP 加密方式</span>
                   <span class="switch-subtitle">腾讯企业邮箱建议使用 465 + SSL，或 587 + STARTTLS</span>
@@ -855,10 +902,22 @@
     flex-direction: column;
     gap: 6px;
 
-    &.col-12 { flex: 0 0 100%; width: 100%; }
-    &.col-8  { flex: 0 0 calc(66.666% - 8px); width: calc(66.666% - 8px); }
-    &.col-6  { flex: 0 0 calc(50% - 8px); width: calc(50% - 8px); }
-    &.col-4  { flex: 0 0 calc(33.333% - 8px); width: calc(33.333% - 8px); }
+    &.col-12 {
+      flex: 0 0 100%;
+      width: 100%;
+    }
+    &.col-8 {
+      flex: 0 0 calc(66.666% - 8px);
+      width: calc(66.666% - 8px);
+    }
+    &.col-6 {
+      flex: 0 0 calc(50% - 8px);
+      width: calc(50% - 8px);
+    }
+    &.col-4 {
+      flex: 0 0 calc(33.333% - 8px);
+      width: calc(33.333% - 8px);
+    }
   }
 
   .smtp-label {

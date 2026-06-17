@@ -70,7 +70,7 @@
   <div class="layout">
     <aside class="layout__sider glass-panel">
       <div class="layout__brand">
-        <span class="layout__brand-mark">⌁</span>
+        <img class="layout__brand-logo" src="/logo.svg" alt="" aria-hidden="true" />
         <span class="layout__brand-text">Starry API</span>
       </div>
 
@@ -97,7 +97,10 @@
           <span class="layout__crumbs-sep">/</span>
           <span>{{ currentTitle }}</span>
         </div>
-        <el-dropdown trigger="click" @command="(cmd: string) => cmd === 'logout' ? handleLogout() : handleChangePassword()">
+        <el-dropdown
+          trigger="click"
+          @command="(cmd: string) => (cmd === 'logout' ? handleLogout() : handleChangePassword())"
+        >
           <span class="layout__user">
             <span v-if="!auth.isAdmin" class="layout__balance">余额 {{ balanceText }}</span>
             <el-avatar :size="32" class="layout__avatar">
@@ -153,16 +156,11 @@
       font-size: 18px;
     }
 
-    &__brand-mark {
-      width: 32px;
-      height: 32px;
-      border-radius: 10px;
-      background: linear-gradient(135deg, var(--kp-primary), var(--kp-accent));
-      color: #fff;
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 18px;
+    &__brand-logo {
+      width: 34px;
+      height: 34px;
+      flex: 0 0 auto;
+      display: block;
     }
 
     &__menu {
@@ -184,7 +182,9 @@
       font-size: 14px;
       color: var(--kp-text-secondary);
       text-align: left;
-      transition: background 0.15s ease, color 0.15s ease;
+      transition:
+        background 0.15s ease,
+        color 0.15s ease;
 
       &:hover {
         background: rgba(91, 141, 239, 0.08);

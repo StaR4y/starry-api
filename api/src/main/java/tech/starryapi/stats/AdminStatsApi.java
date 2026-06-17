@@ -18,4 +18,7 @@ public interface AdminStatsApi {
 
     @GetMapping("/usage-summary")
     Mono<ApiResponse<StatsDtos.UsageSummaryResponse>> usageSummary(ServerWebExchange exchange);
+
+    @GetMapping("/usage-summary/me")
+    Mono<ApiResponse<StatsDtos.UsageSummaryResponse>> myUsageSummary(ServerWebExchange exchange);
 }

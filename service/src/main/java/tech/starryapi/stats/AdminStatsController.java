@@ -4,6 +4,7 @@ import java.util.List;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
+import tech.starryapi.admin.AdminPrincipal;
 import tech.starryapi.common.AdminAuth;
 import tech.starryapi.common.ApiResponse;
 
@@ -47,6 +48,13 @@ public class AdminStatsController implements AdminStatsApi {
     public Mono<ApiResponse<StatsDtos.UsageSummaryResponse>> usageSummary(ServerWebExchange exchange) {
         adminAuth.verifyAdmin(exchange);
         return statsAnalyticsService.usageSummary()
+            .map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<StatsDtos.UsageSummaryResponse>> myUsageSummary(ServerWebExchange exchange) {
+        AdminPrincipal principal = adminAuth.verify(exchange);
+        return statsAnalyticsService.usageSummaryForUser(principal.userId())
             .map(ApiResponse::ok);
     }
 }

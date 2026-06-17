@@ -75,12 +75,16 @@
 
   const summary = computed(() => {
     const total = accounts.value.length;
-    const active = accounts.value.filter((a) => a.enabled && !a.suspendedAt && !a.quotaExhaustedAt).length;
-    const abnormal = accounts.value.filter((a) => a.suspendedAt || a.quotaExhaustedAt || !a.enabled).length;
-    
+    const active = accounts.value.filter(
+      (a) => a.enabled && !a.suspendedAt && !a.quotaExhaustedAt,
+    ).length;
+    const abnormal = accounts.value.filter(
+      (a) => a.suspendedAt || a.quotaExhaustedAt || !a.enabled,
+    ).length;
+
     const totalRequests = accounts.value.reduce((sum, a) => sum + (a.requestCount || 0), 0);
     const totalErrors = accounts.value.reduce((sum, a) => sum + (a.errorCount || 0), 0);
-    
+
     return {
       total,
       active,
@@ -108,7 +112,7 @@
         used,
         percentage: 100,
         remaining: 0,
-        status: 'success' as const
+        status: 'success' as const,
       };
     }
 
@@ -128,11 +132,13 @@
       limit,
       remaining,
       percentage,
-      status
+      status,
     };
   }
 
-  const openAiQuotas = ref<Record<string, { loading: boolean; error?: string; data?: OpenAiQuotaResponse }>>({});
+  const openAiQuotas = ref<
+    Record<string, { loading: boolean; error?: string; data?: OpenAiQuotaResponse }>
+  >({});
 
   function isCodexAccount(row: Account) {
     const provider = (row.provider || '').trim().toLowerCase();
@@ -160,7 +166,7 @@
         percentage: 100,
         status: 'success' as const,
         label: '未知',
-        activeWindow: null
+        activeWindow: null,
       };
     }
 
@@ -169,7 +175,10 @@
 
     let activeWindow = fiveHour || sevenDay;
     if (fiveHour && sevenDay) {
-      activeWindow = (fiveHour.remainingPercent ?? 100) < (sevenDay.remainingPercent ?? 100) ? fiveHour : sevenDay;
+      activeWindow =
+        (fiveHour.remainingPercent ?? 100) < (sevenDay.remainingPercent ?? 100)
+          ? fiveHour
+          : sevenDay;
     }
 
     if (!activeWindow) {
@@ -178,7 +187,7 @@
         percentage: 100,
         status: 'success' as const,
         label: '无限制',
-        activeWindow: null
+        activeWindow: null,
       };
     }
 
@@ -195,7 +204,7 @@
       percentage,
       status,
       label: activeWindow.label || (activeWindow.key === '5h' ? '5小时' : '7天'),
-      activeWindow
+      activeWindow,
     };
   }
 
@@ -227,9 +236,11 @@
       accountSettings.value = await accountsApi.updateSettings({
         gptFastModeEnabled: Boolean(value),
       });
-      ElMessage.success(accountSettings.value.gptFastModeEnabled ? '已允许 GPT Fast 模式' : '已关闭 GPT Fast 模式');
+      ElMessage.success(
+        accountSettings.value.gptFastModeEnabled ? '已允许 GPT Fast 模式' : '已关闭 GPT Fast 模式',
+      );
     } catch (err) {
-      accountSettings.value.gptFastModeEnabled = !Boolean(value);
+      accountSettings.value.gptFastModeEnabled = !value;
       if (err instanceof ApiError) ElMessage.error(err.message);
     } finally {
       settingsSaving.value = false;
@@ -244,7 +255,8 @@
     latestTestResults.value = nextResults;
     batchTestResult.value = result;
     batchTestVisible.value = true;
-    testDetail.value = result.items.find((item) => item.status === 'FAILED') ?? result.items[0] ?? null;
+    testDetail.value =
+      result.items.find((item) => item.status === 'FAILED') ?? result.items[0] ?? null;
     testDetailVisible.value = false;
     const message = `复检完成：总计 ${result.total}，成功 ${result.success}，失败 ${result.failed}，跳过 ${result.skipped}`;
     if (result.total === 0) {
@@ -289,7 +301,9 @@
   });
 
   const isOpenAiCompatibleForm = computed(() => isOpenAiCompatibleProvider(form.provider));
-  const isOpenAiApiKeyForm = computed(() => isOpenAiCompatibleForm.value || normalized(form.provider) === 'openai');
+  const isOpenAiApiKeyForm = computed(
+    () => isOpenAiCompatibleForm.value || normalized(form.provider) === 'openai',
+  );
   const isAnthropicApiKeyForm = computed(() => isAnthropicProvider(form.provider));
   const isApiKeyForm = computed(() => isOpenAiApiKeyForm.value || isAnthropicApiKeyForm.value);
   const accessTokenLabel = computed(() => {
@@ -317,21 +331,23 @@
 
   const rules: FormRules = {
     accessToken: [{ required: true, message: 'API Key / accessToken 必填', trigger: 'blur' }],
-    baseUrl: [{
-      validator: (_rule, value, callback) => {
-        const text = typeof value === 'string' ? value.trim() : '';
-        if (isOpenAiCompatibleForm.value && !text) {
-          callback(new Error('第三方 API Key 账号必须填写 Base URL'));
-          return;
-        }
-        if (text && !/^https?:\/\//i.test(text)) {
-          callback(new Error('Base URL 必须以 http:// 或 https:// 开头'));
-          return;
-        }
-        callback();
+    baseUrl: [
+      {
+        validator: (_rule, value, callback) => {
+          const text = typeof value === 'string' ? value.trim() : '';
+          if (isOpenAiCompatibleForm.value && !text) {
+            callback(new Error('第三方 API Key 账号必须填写 Base URL'));
+            return;
+          }
+          if (text && !/^https?:\/\//i.test(text)) {
+            callback(new Error('Base URL 必须以 http:// 或 https:// 开头'));
+            return;
+          }
+          callback();
+        },
+        trigger: 'blur',
       },
-      trigger: 'blur',
-    }],
+    ],
   };
 
   function resetForm() {
@@ -444,7 +460,13 @@
       return;
     }
     if (value.includes('builder') || value.includes('kiro')) {
-      if (!auth || auth === 'api-key' || auth === 'apikey' || auth === 'openai-api-key' || auth === 'codex') {
+      if (
+        !auth ||
+        auth === 'api-key' ||
+        auth === 'apikey' ||
+        auth === 'openai-api-key' ||
+        auth === 'codex'
+      ) {
         form.authMethod = 'idc';
       }
       if (!form.region) form.region = 'us-east-1';
@@ -520,11 +542,11 @@
   }
 
   async function removeAccount(row: Account) {
-    await ElMessageBox.confirm(
-      `确认删除账号 ${row.accountId}？操作不可恢复。`,
-      '危险操作',
-      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'error' },
-    ).catch(() => Promise.reject(new Error('cancel')));
+    await ElMessageBox.confirm(`确认删除账号 ${row.accountId}？操作不可恢复。`, '危险操作', {
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+      type: 'error',
+    }).catch(() => Promise.reject(new Error('cancel')));
     await accountsApi.remove(row.accountId);
     ElMessage.success('已删除');
     await loadAccounts();
@@ -644,7 +666,12 @@
     const provider = normalized(account.provider);
     const authMethod = normalized(account.authMethod);
     if (provider === 'codex' || authMethod === 'codex') return 'codex';
-    if (provider === 'google' || provider === 'gemini' || authMethod === 'google' || authMethod === 'gemini') {
+    if (
+      provider === 'google' ||
+      provider === 'gemini' ||
+      authMethod === 'google' ||
+      authMethod === 'gemini'
+    ) {
       return 'google';
     }
     if (provider === 'anthropic' || provider === 'claude' || authMethod === 'anthropic') {
@@ -752,8 +779,6 @@
   const importFilePayloads = ref<Array<{ name: string; payload: unknown }>>([]);
   const isDragover = ref(false);
 
-
-
   function openImport() {
     importContent.value = '';
     importResult.value = null;
@@ -812,7 +837,7 @@
   async function onDrop(event: DragEvent) {
     isDragover.value = false;
     const files = Array.from(event.dataTransfer?.files ?? []).filter(
-      (file) => file.type === 'application/json' || file.name.endsWith('.json')
+      (file) => file.type === 'application/json' || file.name.endsWith('.json'),
     );
     if (files.length === 0) {
       ElMessage.warning('请拖拽有效的 JSON 配置文件');
@@ -840,12 +865,11 @@
       ElMessage.error('JSON 格式错误');
       return;
     }
-    const payload =
-      Array.isArray(parsed)
-        ? { accounts: parsed, upsert: importUpsert.value }
-        : parsed && typeof parsed === 'object'
-          ? { ...(parsed as Record<string, unknown>), upsert: importUpsert.value }
-          : null;
+    const payload = Array.isArray(parsed)
+      ? { accounts: parsed, upsert: importUpsert.value }
+      : parsed && typeof parsed === 'object'
+        ? { ...(parsed as Record<string, unknown>), upsert: importUpsert.value }
+        : null;
     if (!isImportPayload(payload)) {
       ElMessage.error('数据应为 Kiro / OpenAI Codex / OpenAI-API / Anthropic 导入 JSON');
       return;
@@ -1048,9 +1072,18 @@
         style="width: 280px"
       >
         <template #prefix>
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="width: 14px; height: 14px; color: var(--kp-text-muted); margin-right: 4px;">
-            <circle cx="11" cy="11" r="8"></circle>
-            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            style="width: 14px; height: 14px; color: var(--kp-text-muted); margin-right: 4px"
+          >
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
           </svg>
         </template>
       </el-input>
@@ -1071,37 +1104,39 @@
     <div class="metrics-panel glass-panel">
       <div class="metric-item">
         <div class="metric-item__header">
-          <span class="metric-dot dot-total"></span>
+          <span class="metric-dot dot-total" />
           <span class="metric-label">总账号数</span>
         </div>
         <div class="metric-value">{{ summary.total }}</div>
       </div>
 
-      <div class="metric-divider"></div>
+      <div class="metric-divider" />
 
       <div class="metric-item">
         <div class="metric-item__header">
-          <span class="metric-dot dot-active"></span>
+          <span class="metric-dot dot-active" />
           <span class="metric-label">正常运行</span>
         </div>
         <div class="metric-value text-success">{{ summary.active }}</div>
       </div>
 
-      <div class="metric-divider"></div>
+      <div class="metric-divider" />
 
       <div class="metric-item">
         <div class="metric-item__header">
-          <span class="metric-dot dot-suspended"></span>
+          <span class="metric-dot dot-suspended" />
           <span class="metric-label">异常 / 停用</span>
         </div>
-        <div class="metric-value" :class="{ 'text-danger': summary.abnormal > 0 }">{{ summary.abnormal }}</div>
+        <div class="metric-value" :class="{ 'text-danger': summary.abnormal > 0 }">
+          {{ summary.abnormal }}
+        </div>
       </div>
 
-      <div class="metric-divider"></div>
+      <div class="metric-divider" />
 
       <div class="metric-item">
         <div class="metric-item__header">
-          <span class="metric-dot dot-requests"></span>
+          <span class="metric-dot dot-requests" />
           <span class="metric-label">累计请求 / 错误</span>
         </div>
         <div class="metric-value">
@@ -1119,20 +1154,50 @@
         <template #default="{ row }">
           <span class="provider-badge" :style="getProviderTagStyle(row.provider)">
             <!-- OpenAI Logo -->
-            <svg v-if="['OPENAI', 'OPENAI-COMPATIBLE'].includes((row.provider || '').toUpperCase())" class="provider-logo" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"/>
+            <svg
+              v-if="['OPENAI', 'OPENAI-COMPATIBLE'].includes((row.provider || '').toUpperCase())"
+              class="provider-logo"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+            >
+              <path
+                d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"
+              />
             </svg>
             <!-- Gemini / Google Logo -->
-            <svg v-else-if="['GEMINI', 'GOOGLE'].includes((row.provider || '').toUpperCase())" class="provider-logo" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M12 2c0 5.5-4.5 10-10 10 5.5 0 10 4.5 10 10 0-5.5 4.5-10 10-10-5.5 0-10-4.5-10-10z"/>
+            <svg
+              v-else-if="['GEMINI', 'GOOGLE'].includes((row.provider || '').toUpperCase())"
+              class="provider-logo"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+            >
+              <path
+                d="M12 2c0 5.5-4.5 10-10 10 5.5 0 10 4.5 10 10 0-5.5 4.5-10 10-10-5.5 0-10-4.5-10-10z"
+              />
             </svg>
             <!-- Anthropic Logo -->
-            <svg v-else-if="(row.provider || '').toUpperCase() === 'ANTHROPIC'" class="provider-logo" viewBox="0 0 24 24" fill="currentColor">
-              <path d="M12.5 3L4.2 19h4l2.1-4.2h5.4l2.1 4.2h4L13.5 3h-1zM11.3 12l1.7-3.4 1.7 3.4h-3.4z"/>
+            <svg
+              v-else-if="(row.provider || '').toUpperCase() === 'ANTHROPIC'"
+              class="provider-logo"
+              viewBox="0 0 24 24"
+              fill="currentColor"
+            >
+              <path
+                d="M12.5 3L4.2 19h4l2.1-4.2h5.4l2.1 4.2h4L13.5 3h-1zM11.3 12l1.7-3.4 1.7 3.4h-3.4z"
+              />
             </svg>
             <!-- Other Shield Logo -->
-            <svg v-else class="provider-logo" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+            <svg
+              v-else
+              class="provider-logo"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
             </svg>
             <span class="provider-name">{{ getProviderDisplayName(row.provider) }}</span>
           </span>
@@ -1168,7 +1233,7 @@
             <template v-if="openAiQuotas[row.accountId]?.loading">
               <div class="quota-meta">
                 <span class="quota-loading-text">
-                  <span class="quota-spinner"></span>
+                  <span class="quota-spinner" />
                   正在获取官方配额...
                 </span>
               </div>
@@ -1176,11 +1241,32 @@
             </template>
             <template v-else-if="openAiQuotas[row.accountId]?.error">
               <div class="quota-meta">
-                <el-tooltip :content="openAiQuotas[row.accountId].error" placement="top" effect="dark">
+                <el-tooltip
+                  :content="openAiQuotas[row.accountId].error"
+                  placement="top"
+                  effect="dark"
+                >
                   <span class="quota-error-text">获取失败</span>
                 </el-tooltip>
-                <el-button link type="primary" size="small" class="quota-refresh-btn" @click.stop="fetchOpenAiQuota(row.accountId, true)">
-                  <svg class="icon-refresh" viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 2px;">
+                <el-button
+                  link
+                  type="primary"
+                  size="small"
+                  class="quota-refresh-btn"
+                  @click.stop="fetchOpenAiQuota(row.accountId, true)"
+                >
+                  <svg
+                    class="icon-refresh"
+                    viewBox="0 0 24 24"
+                    width="10"
+                    height="10"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    style="margin-right: 2px"
+                  >
                     <polyline points="23 4 23 10 17 10" />
                     <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
                   </svg>
@@ -1203,33 +1289,63 @@
                   <div class="quota-tooltip-content">
                     <div v-if="openAiQuotas[row.accountId]?.data?.fiveHour">
                       <strong>5小时窗口:</strong>
-                      已用 {{ openAiQuotas[row.accountId]?.data?.fiveHour?.usedPercent }}%,
-                      剩余 {{ openAiQuotas[row.accountId]?.data?.fiveHour?.remainingPercent }}%
+                      已用 {{ openAiQuotas[row.accountId]?.data?.fiveHour?.usedPercent }}%, 剩余
+                      {{ openAiQuotas[row.accountId]?.data?.fiveHour?.remainingPercent }}%
                       <span v-if="openAiQuotas[row.accountId]?.data?.fiveHour?.resetAt">
-                        (重置: {{ formatDateTime(openAiQuotas[row.accountId]?.data?.fiveHour?.resetAt) }})
+                        (重置:
+                        {{ formatDateTime(openAiQuotas[row.accountId]?.data?.fiveHour?.resetAt) }})
                       </span>
                     </div>
-                    <div v-if="openAiQuotas[row.accountId]?.data?.sevenDay" style="margin-top: 4px;">
+                    <div v-if="openAiQuotas[row.accountId]?.data?.sevenDay" style="margin-top: 4px">
                       <strong>7天窗口:</strong>
-                      已用 {{ openAiQuotas[row.accountId]?.data?.sevenDay?.usedPercent }}%,
-                      剩余 {{ openAiQuotas[row.accountId]?.data?.sevenDay?.remainingPercent }}%
+                      已用 {{ openAiQuotas[row.accountId]?.data?.sevenDay?.usedPercent }}%, 剩余
+                      {{ openAiQuotas[row.accountId]?.data?.sevenDay?.remainingPercent }}%
                       <span v-if="openAiQuotas[row.accountId]?.data?.sevenDay?.resetAt">
-                        (重置: {{ formatDateTime(openAiQuotas[row.accountId]?.data?.sevenDay?.resetAt) }})
+                        (重置:
+                        {{ formatDateTime(openAiQuotas[row.accountId]?.data?.sevenDay?.resetAt) }})
                       </span>
                     </div>
-                    <div style="margin-top: 6px; font-size: 10px; opacity: 0.8; border-top: 1px solid rgba(255,255,255,0.15); padding-top: 4px;">
-                      数据源: {{ openAiQuotas[row.accountId]?.data?.source }}<br />
+                    <div
+                      style="
+                        margin-top: 6px;
+                        font-size: 10px;
+                        opacity: 0.8;
+                        border-top: 1px solid rgba(255, 255, 255, 0.15);
+                        padding-top: 4px;
+                      "
+                    >
+                      数据源: {{ openAiQuotas[row.accountId]?.data?.source }}<br>
                       更新时间: {{ formatDateTime(openAiQuotas[row.accountId]?.data?.checkedAt) }}
                     </div>
                   </div>
                 </template>
                 <div class="quota-wrapper-hoverable">
                   <div class="quota-meta">
-                    <span class="quota-remaining" :class="'is-' + getOpenAiQuotaInfo(openAiQuotas[row.accountId]?.data).status">
-                      {{ getOpenAiQuotaInfo(openAiQuotas[row.accountId]?.data).percentage }}% 剩余 ({{ getOpenAiQuotaInfo(openAiQuotas[row.accountId]?.data).label }})
+                    <span
+                      class="quota-remaining"
+                      :class="'is-' + getOpenAiQuotaInfo(openAiQuotas[row.accountId]?.data).status"
+                    >
+                      {{ getOpenAiQuotaInfo(openAiQuotas[row.accountId]?.data).percentage }}% 剩余
+                      ({{ getOpenAiQuotaInfo(openAiQuotas[row.accountId]?.data).label }})
                     </span>
-                    <el-button link type="primary" size="small" class="quota-refresh-btn-mini" @click.stop="fetchOpenAiQuota(row.accountId, true)">
-                      <svg class="icon-refresh" viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <el-button
+                      link
+                      type="primary"
+                      size="small"
+                      class="quota-refresh-btn-mini"
+                      @click.stop="fetchOpenAiQuota(row.accountId, true)"
+                    >
+                      <svg
+                        class="icon-refresh"
+                        viewBox="0 0 24 24"
+                        width="10"
+                        height="10"
+                        fill="none"
+                        stroke="currentColor"
+                        stroke-width="2"
+                        stroke-linecap="round"
+                        stroke-linejoin="round"
+                      >
                         <polyline points="23 4 23 10 17 10" />
                         <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
                       </svg>
@@ -1248,8 +1364,25 @@
             <template v-else>
               <div class="quota-meta">
                 <span class="quota-fallback-label">未获取官方配额</span>
-                <el-button link type="primary" size="small" class="quota-refresh-btn" @click.stop="fetchOpenAiQuota(row.accountId, true)">
-                  <svg class="icon-refresh" viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 2px;">
+                <el-button
+                  link
+                  type="primary"
+                  size="small"
+                  class="quota-refresh-btn"
+                  @click.stop="fetchOpenAiQuota(row.accountId, true)"
+                >
+                  <svg
+                    class="icon-refresh"
+                    viewBox="0 0 24 24"
+                    width="10"
+                    height="10"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="2"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    style="margin-right: 2px"
+                  >
                     <polyline points="23 4 23 10 17 10" />
                     <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
                   </svg>
@@ -1303,7 +1436,12 @@
         <template #default="{ row }">
           <div class="actions-wrapper">
             <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-            <el-popover placement="bottom-end" width="320" trigger="click" @show="ensureTestModel(row)">
+            <el-popover
+              placement="bottom-end"
+              width="320"
+              trigger="click"
+              @show="ensureTestModel(row)"
+            >
               <template #reference>
                 <el-button link type="primary">测试</el-button>
               </template>
@@ -1343,7 +1481,9 @@
                   </el-form-item>
                   <div class="row-test-panel__checks">
                     <el-checkbox v-model="testOptions.onlyEnabled">仅测试当前可用账号</el-checkbox>
-                    <el-checkbox v-model="testOptions.updateStatus">测试后自动更新账号状态</el-checkbox>
+                    <el-checkbox v-model="testOptions.updateStatus">
+                      测试后自动更新账号状态
+                    </el-checkbox>
                   </div>
                 </el-form>
                 <div class="row-test-panel__actions">
@@ -1462,7 +1602,12 @@
 
         <el-col :span="24">
           <el-form-item :label="accessTokenLabel" prop="accessToken">
-            <el-input v-model="form.accessToken" type="textarea" :rows="2" :placeholder="accessTokenPlaceholder" />
+            <el-input
+              v-model="form.accessToken"
+              type="textarea"
+              :rows="2"
+              :placeholder="accessTokenPlaceholder"
+            />
           </el-form-item>
         </el-col>
 
@@ -1473,13 +1618,21 @@
         </el-col>
         <el-col :span="12">
           <el-form-item label="上游账号 ID">
-            <el-input v-model="form.upstreamAccountId" placeholder="Codex ChatGPT Account ID，可选" />
+            <el-input
+              v-model="form.upstreamAccountId"
+              placeholder="Codex ChatGPT Account ID，可选"
+            />
           </el-form-item>
         </el-col>
 
         <el-col :span="24">
           <el-form-item label="ID Token">
-            <el-input v-model="form.idToken" type="textarea" :rows="2" placeholder="Codex id_token，可选" />
+            <el-input
+              v-model="form.idToken"
+              type="textarea"
+              :rows="2"
+              placeholder="Codex id_token，可选"
+            />
           </el-form-item>
         </el-col>
 
@@ -1487,7 +1640,8 @@
           <el-form-item :label="baseUrlLabel" prop="baseUrl">
             <el-input v-model="form.baseUrl" :placeholder="baseUrlPlaceholder" />
             <p v-if="isOpenAiCompatibleForm" class="form-hint">
-              填到兼容 OpenAI 的 API 根路径，通常以 /v1 结尾；服务会自动追加 /chat/completions 或 /responses。
+              填到兼容 OpenAI 的 API 根路径，通常以 /v1 结尾；服务会自动追加 /chat/completions 或
+              /responses。
             </p>
             <p v-else-if="isAnthropicApiKeyForm" class="form-hint">
               填到 Anthropic Messages API 根路径，通常以 /v1 结尾；服务会自动追加 /messages。
@@ -1509,7 +1663,12 @@
           <el-row :gutter="12">
             <el-col :span="formMode === 'edit' ? 16 : 24">
               <el-form-item label="配额上限">
-                <el-input-number v-model="form.quotaLimit" :min="0" :step="1000" style="width: 100%" />
+                <el-input-number
+                  v-model="form.quotaLimit"
+                  :min="0"
+                  :step="1000"
+                  style="width: 100%"
+                />
               </el-form-item>
             </el-col>
             <el-col v-if="formMode === 'edit'" :span="8">
@@ -1531,7 +1690,8 @@
   <!-- 批量导入 -->
   <el-dialog v-model="importVisible" title="批量导入账号" width="720px">
     <div class="text-secondary mt-8" style="margin-bottom: 8px">
-      上传或粘贴 Kiro Account Manager、OpenAI Codex token、OpenAI-compatible / Anthropic API Key 配置 JSON，或账号数组 /
+      上传或粘贴 Kiro Account Manager、OpenAI Codex token、OpenAI-compatible / Anthropic API Key
+      配置 JSON，或账号数组 /
       <span class="mono">{ "accounts": [...] }</span>
     </div>
 
@@ -1550,36 +1710,69 @@
         type="file"
         accept=".json,application/json"
         multiple
-        style="display: none;"
+        style="display: none"
         @change="handleImportFiles"
-      />
+      >
 
       <div v-if="importFileNames.length === 0" class="drop-zone-prompt">
-        <svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="drop-icon">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-          <polyline points="17 8 12 3 7 8"></polyline>
-          <line x1="12" y1="3" x2="12" y2="15"></line>
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="36"
+          height="36"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          class="drop-icon"
+        >
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="17 8 12 3 7 8" />
+          <line x1="12" y1="3" x2="12" y2="15" />
         </svg>
         <div class="prompt-text">将 JSON 配置文件拖拽到此处，或<span>点击上传</span></div>
         <div class="prompt-hint">支持单个或多个 .json 配置文件</div>
       </div>
       <div v-else class="drop-zone-files" @click.stop>
         <div class="files-header">
-          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="success-icon">
-            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
-            <polyline points="22 4 12 14.01 9 11.01"></polyline>
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            class="success-icon"
+          >
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
+            <polyline points="22 4 12 14.01 9 11.01" />
           </svg>
           <span class="files-title">已选择 {{ importFileNames.length }} 个 JSON 文件</span>
           <el-button size="small" type="danger" link @click="clearImportFiles">清除文件</el-button>
         </div>
         <div class="files-list">
           <div v-for="name in importFileNames" :key="name" class="file-item">
-            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="file-icon">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-              <polyline points="14 2 14 8 20 8"></polyline>
-              <line x1="16" y1="13" x2="8" y2="13"></line>
-              <line x1="16" y1="17" x2="8" y2="17"></line>
-              <polyline points="10 9 9 9 8 9"></polyline>
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              class="file-icon"
+            >
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="16" y1="13" x2="8" y2="13" />
+              <line x1="16" y1="17" x2="8" y2="17" />
+              <polyline points="10 9 9 9 8 9" />
             </svg>
             <span class="file-name" :title="name">{{ name }}</span>
           </div>
@@ -1587,7 +1780,9 @@
       </div>
     </div>
 
-    <div class="text-secondary mt-16" style="margin-bottom: 8px">或者，在此直接粘贴 JSON 文本：</div>
+    <div class="text-secondary mt-16" style="margin-bottom: 8px">
+      或者，在此直接粘贴 JSON 文本：
+    </div>
     <el-input
       v-model="importContent"
       type="textarea"
@@ -1617,7 +1812,9 @@
 
     <template #footer>
       <el-button @click="importVisible = false">关闭</el-button>
-      <el-button type="primary" :loading="importSubmitting" @click="submitImport">开始导入</el-button>
+      <el-button type="primary" :loading="importSubmitting" @click="submitImport">
+        开始导入
+      </el-button>
     </template>
   </el-dialog>
 
@@ -1667,7 +1864,11 @@
           <template #default="{ row }">{{ row.statusCode ?? '—' }}</template>
         </el-table-column>
         <el-table-column label="耗时" width="105" align="right">
-          <template #default="{ row }">{{ row.latencyMs == null ? '—' : `${row.latencyMs}ms` }}</template>
+          <template #default="{ row }">
+            {{
+              row.latencyMs == null ? '—' : `${row.latencyMs}ms`
+            }}
+          </template>
         </el-table-column>
         <el-table-column prop="message" label="消息" min-width="260" show-overflow-tooltip />
         <el-table-column label="操作" width="140" fixed="right" align="center">
@@ -1895,10 +2096,11 @@
     min-height: 120px;
     user-select: none;
 
-    &:hover, &.is-dragover {
+    &:hover,
+    &.is-dragover {
       border-color: var(--kp-primary);
       background: rgba(91, 141, 239, 0.04);
-      
+
       .drop-icon {
         color: var(--kp-primary);
         transform: translateY(-2px);
@@ -2264,7 +2466,12 @@
       .quota-loading-bar {
         height: 6px;
         border-radius: 100px;
-        background: linear-gradient(90deg, rgba(66, 133, 244, 0.1) 25%, rgba(66, 133, 244, 0.3) 50%, rgba(66, 133, 244, 0.1) 75%);
+        background: linear-gradient(
+          90deg,
+          rgba(66, 133, 244, 0.1) 25%,
+          rgba(66, 133, 244, 0.3) 50%,
+          rgba(66, 133, 244, 0.1) 75%
+        );
         background-size: 200% 100%;
         animation: quota-loading-sweep 1.5s infinite linear;
         width: 100%;
@@ -2285,7 +2492,7 @@
         display: inline-flex;
         align-items: center;
         gap: 2px;
-        
+
         .icon-refresh {
           transition: transform 0.25s ease;
         }
@@ -2304,10 +2511,12 @@
         transition: opacity 0.2s ease;
         display: inline-flex;
         align-items: center;
-        
+
         .icon-refresh {
           color: var(--kp-text-muted);
-          transition: transform 0.25s ease, color 0.2s ease;
+          transition:
+            transform 0.25s ease,
+            color 0.2s ease;
         }
 
         &:hover .icon-refresh {
@@ -2339,25 +2548,31 @@
     line-height: 1.55;
     padding: 2px 4px;
     font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Consolas, monospace;
-    
+
     strong {
       color: #93c5fd;
     }
   }
 
   @keyframes quota-spin {
-    to { transform: rotate(360deg); }
+    to {
+      transform: rotate(360deg);
+    }
   }
 
   @keyframes quota-loading-sweep {
-    0% { background-position: 200% 0; }
-    100% { background-position: -200% 0; }
+    0% {
+      background-position: 200% 0;
+    }
+    100% {
+      background-position: -200% 0;
+    }
   }
 
   @media (max-width: 1024px) {
     .metrics-panel {
       padding: 16px 20px;
-      
+
       .metric-divider {
         margin: 0 20px;
       }

@@ -509,6 +509,18 @@ export interface ActiveUserUsage {
   lastActiveAt: string | null;
 }
 
+export interface ModelUsageSummary {
+  model: string | null;
+  requestCount: number;
+  successfulRequests: number;
+  failedRequests: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  credits: number | null;
+  lastUsedAt: string | null;
+}
+
 export interface UsageSummary {
   totalRequests: number;
   successfulRequests: number;
@@ -520,6 +532,7 @@ export interface UsageSummary {
   activeWindowStartedAt: string;
   activeUserCount: number;
   activeUsers: ActiveUserUsage[];
+  models: ModelUsageSummary[];
 }
 
 export interface PerformanceMetric {
@@ -572,7 +585,13 @@ export interface HealthInfo {
 
 export type PaymentType = 'alipay' | 'wxpay';
 
-export type PaymentOrderStatus = 'PENDING' | 'COMPLETED' | 'EXPIRED' | 'CANCELLED' | 'FAILED' | 'PAID';
+export type PaymentOrderStatus =
+  | 'PENDING'
+  | 'COMPLETED'
+  | 'EXPIRED'
+  | 'CANCELLED'
+  | 'FAILED'
+  | 'PAID';
 
 export interface PaymentSettings {
   enabled: boolean;

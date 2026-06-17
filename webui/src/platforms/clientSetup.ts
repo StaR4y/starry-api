@@ -29,14 +29,22 @@ const OPENCODE_SMALL_MODEL = 'starry/gpt-5.4-mini';
 
 export const setupClients: Array<SetupOption<SetupClient>> = [
   { value: 'codex', label: 'Codex CLI', description: '使用 API Key 的 Codex HTTP Responses 配置' },
-  { value: 'claude', label: 'Claude Code', description: '使用 Anthropic 兼容环境变量连接 Claude Code' },
+  {
+    value: 'claude',
+    label: 'Claude Code',
+    description: '使用 Anthropic 兼容环境变量连接 Claude Code',
+  },
   { value: 'opencode', label: 'OpenCode', description: '生成项目级 opencode.json 配置' },
 ];
 
 export const setupPlatforms: Array<SetupOption<SetupPlatform>> = [
   { value: 'unix', label: 'macOS / Linux', description: '适用于 bash、zsh、fish 等类 Unix 终端' },
   { value: 'cmd', label: 'Windows CMD', description: '适用于 Windows Command Prompt' },
-  { value: 'powershell', label: 'PowerShell', description: '适用于 Windows PowerShell 或 PowerShell Core' },
+  {
+    value: 'powershell',
+    label: 'PowerShell',
+    description: '适用于 Windows PowerShell 或 PowerShell Core',
+  },
 ];
 
 export function createConnectionText(context: SetupContext) {
@@ -131,7 +139,11 @@ function platformOption(platform: SetupPlatform) {
   return setupPlatforms.find((item) => item.value === platform) ?? setupPlatforms[0];
 }
 
-function buildSetupFiles(client: SetupClient, platform: SetupPlatform, context: SetupContext): SetupFileBlock[] {
+function buildSetupFiles(
+  client: SetupClient,
+  platform: SetupPlatform,
+  context: SetupContext,
+): SetupFileBlock[] {
   switch (client) {
     case 'codex':
       return codexFiles(platform, context);
@@ -289,9 +301,7 @@ function copyableFilesText(files: SetupFileBlock[]) {
   if (files.length === 1) {
     return files[0].content;
   }
-  return files
-    .map((file) => [`# ${file.path}`, file.content].join('\n'))
-    .join('\n\n');
+  return files.map((file) => [`# ${file.path}`, file.content].join('\n')).join('\n\n');
 }
 
 function ccSwitchProviderUrl(input: {

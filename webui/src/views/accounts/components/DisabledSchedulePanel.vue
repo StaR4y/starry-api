@@ -3,10 +3,7 @@
   import { ElMessage, ElCollapseTransition } from 'element-plus';
   import { accountsApi } from '@/api';
   import { ApiError } from '@/utils/http';
-  import type {
-    DisabledAccountScheduledTestSettings,
-    TestAccountsResult,
-  } from '@/types/api';
+  import type { DisabledAccountScheduledTestSettings, TestAccountsResult } from '@/types/api';
 
   const emit = defineEmits<{
     (e: 'test-completed', result: TestAccountsResult): void;
@@ -147,12 +144,12 @@
   // Summary helper text
   const scheduleSummary = computed(() => {
     if (!form.enabled) return '已关闭定时复检策略';
-    const modeText = form.scheduleMode === 'interval' 
-      ? `每 ${form.intervalMinutes} 分钟` 
-      : `Cron: "${form.cronExpression}"`;
-    const filterText = form.providers.length > 0 
-      ? `过滤: ${form.providers.join(', ')}` 
-      : '全部平台';
+    const modeText =
+      form.scheduleMode === 'interval'
+        ? `每 ${form.intervalMinutes} 分钟`
+        : `Cron: "${form.cronExpression}"`;
+    const filterText =
+      form.providers.length > 0 ? `过滤: ${form.providers.join(', ')}` : '全部平台';
     return `运行中 (${modeText} • ${filterText})`;
   });
 
@@ -162,24 +159,34 @@
 </script>
 
 <template>
-  <div 
-    class="disabled-schedule-card glass-panel" 
-    :class="{ 'is-active': form.enabled, 'is-expanded': isExpanded }"
+  <div
     v-loading="loading"
+    class="disabled-schedule-card glass-panel"
+    :class="{ 'is-active': form.enabled, 'is-expanded': isExpanded }"
   >
     <!-- Collapsible Header -->
     <div class="card-header" @click="toggleExpand">
       <div class="header-left">
         <div class="header-icon-container">
-          <svg class="header-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+          <svg
+            class="header-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <path
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"
+            />
           </svg>
         </div>
         <div class="title-section">
           <div class="title-row">
             <span class="title-text">停用账号定期复检</span>
             <span class="status-badge" :class="{ 'is-enabled': form.enabled }">
-              <span class="status-dot"></span>
+              <span class="status-dot" />
               {{ form.enabled ? '已开启' : '已关闭' }}
             </span>
           </div>
@@ -188,17 +195,20 @@
           </div>
         </div>
       </div>
-      
+
       <div class="header-right" @click.stop>
         <div class="switch-container">
-          <el-switch 
-            v-model="form.enabled" 
-            inline-prompt
-            @change="handleEnabledChange"
-          />
+          <el-switch v-model="form.enabled" inline-prompt @change="handleEnabledChange" />
         </div>
         <div class="expand-toggle-btn" @click="toggleExpand">
-          <svg class="chevron-icon" :class="{ 'rotated': isExpanded }" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+          <svg
+            class="chevron-icon"
+            :class="{ rotated: isExpanded }"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2.5"
+          >
             <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
           </svg>
         </div>
@@ -208,13 +218,19 @@
     <!-- Collapsible Body -->
     <el-collapse-transition>
       <div v-show="isExpanded" class="card-body">
-        <div class="divider"></div>
+        <div class="divider" />
         <el-form class="panel-form" label-position="top" size="default">
           <div class="form-grid">
             <!-- Group 1: Time & Schedule -->
             <div class="form-group-section">
               <div class="group-header">
-                <svg class="group-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <svg
+                  class="group-icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
                   <circle cx="12" cy="12" r="10" />
                   <polyline points="12 6 12 12 16 14" />
                 </svg>
@@ -231,24 +247,24 @@
                     style="width: 100%"
                   />
                 </el-form-item>
-                
+
                 <el-form-item v-if="form.scheduleMode !== 'cron'" label="间隔时间">
                   <div class="input-with-unit">
-                    <el-input-number 
-                      v-model="form.intervalMinutes" 
-                      :min="1" 
-                      :max="10080" 
+                    <el-input-number
+                      v-model="form.intervalMinutes"
+                      :min="1"
+                      :max="10080"
                       controls-position="right"
                       style="width: 100%"
                     />
                     <span class="unit-label">分钟</span>
                   </div>
                 </el-form-item>
-                
+
                 <el-form-item v-else label="Cron 表达式">
                   <el-input v-model="form.cronExpression" placeholder="0 */30 * * * *" />
                 </el-form-item>
-                
+
                 <el-form-item label="时区">
                   <el-input v-model="form.timezone" placeholder="Asia/Shanghai" />
                 </el-form-item>
@@ -258,7 +274,13 @@
             <!-- Group 2: Concurrency & Restrictions -->
             <div class="form-group-section">
               <div class="group-header">
-                <svg class="group-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <svg
+                  class="group-icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
                   <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
                   <line x1="8" y1="21" x2="16" y2="21" />
                   <line x1="12" y1="17" x2="12" y2="21" />
@@ -269,34 +291,34 @@
                 <el-form-item label="测试模型">
                   <el-input v-model="form.model" placeholder="auto" />
                 </el-form-item>
-                
+
                 <div class="grid-2-cols">
                   <el-form-item label="最大并发">
-                    <el-input-number 
-                      v-model="form.maxConcurrency" 
-                      :min="1" 
-                      :max="16" 
+                    <el-input-number
+                      v-model="form.maxConcurrency"
+                      :min="1"
+                      :max="16"
                       controls-position="right"
                       style="width: 100%"
                     />
                   </el-form-item>
                   <el-form-item label="定时单批额度">
-                    <el-input-number 
-                      v-model="form.maxAccountsPerRun" 
-                      :min="1" 
-                      :max="1000" 
+                    <el-input-number
+                      v-model="form.maxAccountsPerRun"
+                      :min="1"
+                      :max="1000"
                       controls-position="right"
                       style="width: 100%"
                     />
                   </el-form-item>
                 </div>
-                
+
                 <el-form-item label="启动延迟">
                   <div class="input-with-unit">
-                    <el-input-number 
-                      v-model="form.initialDelayMinutes" 
-                      :min="0" 
-                      :max="1440" 
+                    <el-input-number
+                      v-model="form.initialDelayMinutes"
+                      :min="0"
+                      :max="1440"
                       controls-position="right"
                       style="width: 100%"
                     />
@@ -308,16 +330,19 @@
                   <template #label>
                     <span class="custom-label">
                       停用多久后测试
-                      <el-tooltip content="账号变更状态后需要等待多少分钟才进行复检，避免频繁测试" placement="top">
+                      <el-tooltip
+                        content="账号变更状态后需要等待多少分钟才进行复检，避免频繁测试"
+                        placement="top"
+                      >
                         <span class="info-icon">?</span>
                       </el-tooltip>
                     </span>
                   </template>
                   <div class="input-with-unit">
-                    <el-input-number 
-                      v-model="form.minAgeMinutes" 
-                      :min="0" 
-                      :max="43200" 
+                    <el-input-number
+                      v-model="form.minAgeMinutes"
+                      :min="0"
+                      :max="43200"
                       controls-position="right"
                       style="width: 100%"
                     />
@@ -330,7 +355,13 @@
             <!-- Group 3: Scope & Recovery -->
             <div class="form-group-section">
               <div class="group-header">
-                <svg class="group-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <svg
+                  class="group-icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2"
+                >
                   <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
                   <polyline points="22 4 12 14.01 9 11.01" />
                 </svg>
@@ -373,7 +404,10 @@
                   </el-checkbox>
                 </div>
 
-                <div class="check-card highlight" :class="{ 'is-checked': form.autoRunWhenNoAvailableAccounts }">
+                <div
+                  class="check-card highlight"
+                  :class="{ 'is-checked': form.autoRunWhenNoAvailableAccounts }"
+                >
                   <el-checkbox v-model="form.autoRunWhenNoAvailableAccounts">
                     <div class="check-info">
                       <span class="check-title text-primary">账号不可用时自动复查</span>
@@ -407,35 +441,45 @@
             </el-form-item>
 
             <el-form-item label="自定义测试提示词">
-              <el-input 
-                v-model="form.prompt" 
+              <el-input
+                v-model="form.prompt"
                 type="textarea"
                 :rows="2"
-                placeholder="留空使用系统默认测试提示词 (e.g. Say hello to verify connection)" 
+                placeholder="留空使用系统默认测试提示词 (e.g. Say hello to verify connection)"
               />
             </el-form-item>
           </div>
 
           <!-- Action Buttons -->
           <div class="form-actions">
-            <el-button 
-              :loading="running" 
-              class="action-btn run-btn"
-              @click="runNow"
-            >
-              <svg v-if="!running" class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+            <el-button :loading="running" class="action-btn run-btn" @click="runNow">
+              <svg
+                v-if="!running"
+                class="btn-icon"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.5"
+              >
                 <polygon points="5 3 19 12 5 21 5 3" />
               </svg>
               立即测试全部账号
             </el-button>
-            
-            <el-button 
-              type="primary" 
-              :loading="saving" 
+
+            <el-button
+              type="primary"
+              :loading="saving"
               class="action-btn save-btn"
               @click="saveSettings(true)"
             >
-              <svg v-if="!saving" class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+              <svg
+                v-if="!saving"
+                class="btn-icon"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.5"
+              >
                 <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
                 <polyline points="17 21 17 13 7 13 7 21" />
                 <polyline points="7 3 7 8 15 8" />
@@ -456,11 +500,13 @@
     overflow: hidden;
     position: relative;
     border: 1px solid rgba(255, 255, 255, 0.5);
-    
+
     &.is-active {
       border-color: rgba(91, 141, 239, 0.25);
-      box-shadow: 0 8px 30px rgba(91, 141, 239, 0.06), var(--kp-shadow);
-      
+      box-shadow:
+        0 8px 30px rgba(91, 141, 239, 0.06),
+        var(--kp-shadow);
+
       .header-icon-container {
         background: rgba(91, 141, 239, 0.12);
         color: var(--kp-primary);
@@ -469,7 +515,9 @@
 
     &:hover {
       border-color: rgba(91, 141, 239, 0.4);
-      box-shadow: 0 10px 35px rgba(91, 141, 239, 0.1), var(--kp-shadow);
+      box-shadow:
+        0 10px 35px rgba(91, 141, 239, 0.1),
+        var(--kp-shadow);
     }
   }
 
@@ -592,7 +640,9 @@
     align-items: center;
     justify-content: center;
     color: var(--kp-text-muted);
-    transition: background-color 0.2s ease, color 0.2s ease;
+    transition:
+      background-color 0.2s ease,
+      color 0.2s ease;
 
     &:hover {
       background-color: rgba(15, 23, 42, 0.05);
@@ -670,7 +720,7 @@
 
     :deep(.el-form-item) {
       margin-bottom: 12px;
-      
+
       .el-form-item__label {
         font-weight: 600;
         color: var(--kp-text-secondary);
@@ -811,7 +861,7 @@
 
     :deep(.el-form-item) {
       margin-bottom: 12px;
-      
+
       &:last-child {
         margin-bottom: 0;
       }
@@ -848,8 +898,6 @@
       height: 14px;
     }
   }
-
-
 
   @keyframes pulse {
     0% {

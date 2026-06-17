@@ -13,12 +13,14 @@ export const anthropicPlatform: PlatformDefinition = {
 export function isAnthropicModel(model: ModelInfo) {
   const lowerId = model.id.toLowerCase();
   const localId = anthropicLocalId(lowerId);
-  return model.owned_by === 'kiro-api'
-    || lowerId.startsWith('anthropic/')
-    || localId.startsWith('claude')
-    || model.id.startsWith('CLAUDE_')
-    || lowerId === 'auto'
-    || lowerId === 'simple-task';
+  return (
+    model.owned_by === 'kiro-api' ||
+    lowerId.startsWith('anthropic/') ||
+    localId.startsWith('claude') ||
+    model.id.startsWith('CLAUDE_') ||
+    lowerId === 'auto' ||
+    lowerId === 'simple-task'
+  );
 }
 
 export function anthropicModelFamily(model: ModelInfo) {

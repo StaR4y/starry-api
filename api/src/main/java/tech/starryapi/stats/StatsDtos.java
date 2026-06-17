@@ -2,6 +2,7 @@ package tech.starryapi.stats;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 
 public final class StatsDtos {
 
@@ -53,7 +54,8 @@ public final class StatsDtos {
         BigDecimal totalCredits,
         Instant activeWindowStartedAt,
         Integer activeUserCount,
-        java.util.List<ActiveUserResponse> activeUsers
+        List<ActiveUserResponse> activeUsers,
+        List<ModelUsageResponse> models
     ) {
     }
 
@@ -69,6 +71,19 @@ public final class StatsDtos {
         Long totalTokens,
         BigDecimal credits,
         Instant lastActiveAt
+    ) {
+    }
+
+    public record ModelUsageResponse(
+        String model,
+        Long requestCount,
+        Long successfulRequests,
+        Long failedRequests,
+        Long inputTokens,
+        Long outputTokens,
+        Long totalTokens,
+        BigDecimal credits,
+        Instant lastUsedAt
     ) {
     }
 }

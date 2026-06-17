@@ -5,7 +5,19 @@ export const geminiPlatform: PlatformDefinition = {
   provider: 'Gemini',
   className: 'gemini',
   color: '#4285f4',
-  families: ['Gemini 3.5', 'Gemini 3.1', 'Gemini 3', 'Gemini 2.5', 'Gemini 2.0', 'Gemini 1.5', 'Gemma 4', 'Gemma 3', 'Gemma 2', 'Lyria', 'Google'],
+  families: [
+    'Gemini 3.5',
+    'Gemini 3.1',
+    'Gemini 3',
+    'Gemini 2.5',
+    'Gemini 2.0',
+    'Gemini 1.5',
+    'Gemma 4',
+    'Gemma 3',
+    'Gemma 2',
+    'Lyria',
+    'Google',
+  ],
   matches: isGeminiModel,
   familyOf: geminiModelFamily,
 };
@@ -13,7 +25,12 @@ export const geminiPlatform: PlatformDefinition = {
 export function isGeminiModel(model: ModelInfo) {
   const lowerId = model.id.toLowerCase();
   const localId = googleLocalId(lowerId);
-  return lowerId.startsWith('google/') || localId.startsWith('gemini') || localId.startsWith('gemma') || localId.startsWith('lyria');
+  return (
+    lowerId.startsWith('google/') ||
+    localId.startsWith('gemini') ||
+    localId.startsWith('gemma') ||
+    localId.startsWith('lyria')
+  );
 }
 
 export function geminiModelFamily(model: ModelInfo) {

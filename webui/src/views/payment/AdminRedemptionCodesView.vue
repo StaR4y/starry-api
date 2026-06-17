@@ -110,7 +110,10 @@
 </script>
 
 <template>
-  <PageSection title="兑换码" subtitle="生成可兑换指定余额的一次性兑换码，用户在余额充值页兑换后自动入账">
+  <PageSection
+    title="兑换码"
+    subtitle="生成可兑换指定余额的一次性兑换码，用户在余额充值页兑换后自动入账"
+  >
     <template #actions>
       <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
     </template>
@@ -193,7 +196,11 @@
             </template>
           </el-table-column>
           <el-table-column label="使用用户" min-width="160">
-            <template #default="{ row }">{{ row.usedByUsername || row.usedByUserId || '—' }}</template>
+            <template #default="{ row }">
+              {{
+                row.usedByUsername || row.usedByUserId || '—'
+              }}
+            </template>
           </el-table-column>
           <el-table-column label="过期时间" width="170">
             <template #default="{ row }">{{ formatDateTime(row.expiresAt) }}</template>

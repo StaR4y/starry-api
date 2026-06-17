@@ -122,7 +122,11 @@
   }
 
   const setupScriptBlock = computed(() =>
-    createSetupScriptBlock(newSetupClient.value, newSetupPlatform.value, setupContext(newKey.value?.key)),
+    createSetupScriptBlock(
+      newSetupClient.value,
+      newSetupPlatform.value,
+      setupContext(newKey.value?.key),
+    ),
   );
   const connectionText = computed(() => createConnectionText(setupContext(newKey.value?.key)));
   const ccSwitchLinks = computed(() => createCcSwitchLinks(setupContext(newKey.value?.key)));
@@ -170,7 +174,9 @@
   );
   const pastedConfigApiKey = computed(() => configFullApiKey.value.trim());
   const storedConfigApiKey = computed(() => fullApiKeyOf(configKey.value));
-  const effectiveConfigApiKey = computed(() => pastedConfigApiKey.value || storedConfigApiKey.value);
+  const effectiveConfigApiKey = computed(
+    () => pastedConfigApiKey.value || storedConfigApiKey.value,
+  );
   const hasConfigFullApiKey = computed(() => {
     const value = effectiveConfigApiKey.value;
     return isUsableApiKey(value);
@@ -209,9 +215,15 @@
     await copy(key, '已复制 API Key');
   }
 
-  const configConnectionText = computed(() => createConnectionText(setupContext(configApiKey.value)));
+  const configConnectionText = computed(() =>
+    createConnectionText(setupContext(configApiKey.value)),
+  );
   const configScriptBlock = computed(() =>
-    createSetupScriptBlock(configSetupClient.value, configSetupPlatform.value, setupContext(configApiKey.value)),
+    createSetupScriptBlock(
+      configSetupClient.value,
+      configSetupPlatform.value,
+      setupContext(configApiKey.value),
+    ),
   );
   const configCcSwitchLinks = computed(() => createCcSwitchLinks(setupContext(configApiKey.value)));
 
@@ -406,7 +418,11 @@
             <h3>连接信息</h3>
             <p>{{ configKeyHint }}</p>
           </div>
-          <el-button size="small" :disabled="!hasConfigFullApiKey" @click="copyConfigConnectionText">
+          <el-button
+            size="small"
+            :disabled="!hasConfigFullApiKey"
+            @click="copyConfigConnectionText"
+          >
             复制连接信息
           </el-button>
         </div>
@@ -424,7 +440,9 @@
         <div class="secret-fields">
           <div class="secret-field">
             <span class="secret-field__label">名称</span>
-            <code class="secret-field__value mono" :title="configKey.name">{{ configKey.name }}</code>
+            <code class="secret-field__value mono" :title="configKey.name">{{
+              configKey.name
+            }}</code>
           </div>
           <div class="secret-field">
             <span class="secret-field__label">Codex</span>
@@ -446,7 +464,9 @@
           <div class="secret-field">
             <span class="secret-field__label">API Key</span>
             <code class="secret-field__value mono" :title="configApiKey">{{ configApiKey }}</code>
-            <el-button size="small" :disabled="!hasConfigFullApiKey" @click="copy(configApiKey)">复制</el-button>
+            <el-button size="small" :disabled="!hasConfigFullApiKey" @click="copy(configApiKey)">
+              复制
+            </el-button>
           </div>
           <div class="secret-field secret-field--compact">
             <span class="secret-field__label">端口</span>
@@ -494,12 +514,20 @@
         <div class="script-preview">
           <div>
             <h4>{{ configScriptBlock.clientLabel }} / {{ configScriptBlock.platformLabel }}</h4>
-            <p>{{ configScriptBlock.clientDescription }}；{{ configScriptBlock.platformDescription }}。</p>
+            <p>
+              {{ configScriptBlock.clientDescription }}；{{
+                configScriptBlock.platformDescription
+              }}。
+            </p>
           </div>
           <div v-for="file in configScriptBlock.files" :key="file.path" class="setup-file">
             <div class="setup-file__head">
               <span class="mono">{{ file.path }}</span>
-              <el-button size="small" :disabled="!hasConfigFullApiKey" @click="copyConfigSetupFile(file)">
+              <el-button
+                size="small"
+                :disabled="!hasConfigFullApiKey"
+                @click="copyConfigSetupFile(file)"
+              >
                 复制
               </el-button>
             </div>
@@ -524,10 +552,19 @@
               <span>{{ link.description }}</span>
             </div>
             <div class="cc-switch-item__actions">
-              <el-button size="small" type="primary" :disabled="!hasConfigFullApiKey" @click="openConfigCcSwitch(link)">
+              <el-button
+                size="small"
+                type="primary"
+                :disabled="!hasConfigFullApiKey"
+                @click="openConfigCcSwitch(link)"
+              >
                 打开
               </el-button>
-              <el-button size="small" :disabled="!hasConfigFullApiKey" @click="copyConfigCcSwitch(link)">
+              <el-button
+                size="small"
+                :disabled="!hasConfigFullApiKey"
+                @click="copyConfigCcSwitch(link)"
+              >
                 复制链接
               </el-button>
             </div>
@@ -634,12 +671,16 @@
         <div class="script-preview">
           <div>
             <h4>{{ setupScriptBlock.clientLabel }} / {{ setupScriptBlock.platformLabel }}</h4>
-            <p>{{ setupScriptBlock.clientDescription }}；{{ setupScriptBlock.platformDescription }}。</p>
+            <p>
+              {{ setupScriptBlock.clientDescription }}；{{ setupScriptBlock.platformDescription }}。
+            </p>
           </div>
           <div v-for="file in setupScriptBlock.files" :key="file.path" class="setup-file">
             <div class="setup-file__head">
               <span class="mono">{{ file.path }}</span>
-              <el-button size="small" @click="copy(file.content, setupFileCopyMessage(file))">复制</el-button>
+              <el-button size="small" @click="copy(file.content, setupFileCopyMessage(file))">
+                复制
+              </el-button>
             </div>
             <p v-if="file.hint" class="setup-file__hint">{{ file.hint }}</p>
             <pre class="setup-scripts__code"><code>{{ file.content }}</code></pre>
@@ -663,7 +704,10 @@
             </div>
             <div class="cc-switch-item__actions">
               <el-button size="small" type="primary" @click="openCcSwitch(link)">打开</el-button>
-              <el-button size="small" @click="copy(link.url, `已复制 ${link.label} CC Switch 链接`)">
+              <el-button
+                size="small"
+                @click="copy(link.url, `已复制 ${link.label} CC Switch 链接`)"
+              >
                 复制链接
               </el-button>
             </div>

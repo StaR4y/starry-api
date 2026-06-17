@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Starry API Logo</title>
+  <desc id="desc">A minimal glassmorphism logo with a five-point star outline and subtle API route nodes.</desc>
+  <defs>
+    <linearGradient id="base" x1="44" y1="36" x2="214" y2="220" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#5B8DEF" />
+      <stop offset="1" stop-color="#B387FF" />
+    </linearGradient>
+    <linearGradient id="starStroke" x1="54" y1="42" x2="202" y2="210" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" />
+      <stop offset="0.5" stop-color="#EAF1FF" />
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.84" />
+    </linearGradient>
+    <radialGradient id="light" cx="35%" cy="24%" r="72%">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.62" />
+      <stop offset="0.44" stop-color="#FFFFFF" stop-opacity="0.12" />
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="aura" cx="66%" cy="72%" r="58%">
+      <stop offset="0" stop-color="#CDF3FF" stop-opacity="0.55" />
+      <stop offset="0.72" stop-color="#CDF3FF" stop-opacity="0.08" />
+      <stop offset="1" stop-color="#CDF3FF" stop-opacity="0" />
+    </radialGradient>
+    <filter id="shadow" x="-24%" y="-22%" width="148%" height="158%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#1F2A44" flood-opacity="0.2" />
+    </filter>
+  </defs>
+
+  <g filter="url(#shadow)">
+    <rect x="28" y="28" width="200" height="200" rx="48" fill="url(#base)" />
+    <rect x="28" y="28" width="200" height="200" rx="48" fill="url(#light)" />
+    <rect x="28" y="28" width="200" height="200" rx="48" fill="url(#aura)" />
+    <rect x="29" y="29" width="198" height="198" rx="47" fill="none" stroke="#FFFFFF" stroke-opacity="0.32" stroke-width="2" />
+
+    <path
+      d="M128 52L150.8 100.3L203.8 106.9L164.9 143.5L174.9 196L128 170.4L81.1 196L91.1 143.5L52.2 106.9L105.2 100.3Z"
+      fill="none"
+      stroke="url(#starStroke)"
+      stroke-width="7"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+    />
+
+    <path
+      d="M91.1 143.5C111.7 126.5 137.5 118.7 164.9 143.5"
+      fill="none"
+      stroke="#FFFFFF"
+      stroke-width="3"
+      stroke-linecap="round"
+      stroke-opacity="0.62"
+    />
+    <path
+      d="M105.2 100.3C119.8 95.5 135.4 95.4 150.8 100.3"
+      fill="none"
+      stroke="#FFFFFF"
+      stroke-width="3"
+      stroke-linecap="round"
+      stroke-opacity="0.5"
+    />
+
+    <circle cx="105.2" cy="100.3" r="4.6" fill="#FFFFFF" opacity="0.9" />
+    <circle cx="150.8" cy="100.3" r="4.6" fill="#FFFFFF" opacity="0.9" />
+    <circle cx="164.9" cy="143.5" r="4" fill="#FFFFFF" opacity="0.78" />
+    <circle cx="91.1" cy="143.5" r="4" fill="#FFFFFF" opacity="0.78" />
+    <circle cx="128" cy="52" r="3.8" fill="#FFFFFF" opacity="0.86" />
+  </g>
+</svg>

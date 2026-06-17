@@ -74,6 +74,7 @@ public class OpenAiUpstreamClient {
         ObjectNode body = request.deepCopy();
         body.put("model", model);
         normalizeChatTokenLimit(body, model);
+        forceNonStreaming(body);
 
         String endpoint = OpenAiEndpoints.openAiApi(account.getBaseUrl(), "/chat/completions");
         return webClient.post()
@@ -141,6 +142,7 @@ public class OpenAiUpstreamClient {
     ) {
         ObjectNode body = request.deepCopy();
         body.put("model", model);
+        forceNonStreaming(body);
 
         String endpoint = OpenAiEndpoints.openAiApi(account.getBaseUrl(), "/responses");
         return webClient.post()
@@ -180,7 +182,7 @@ public class OpenAiUpstreamClient {
                 if (status.isError()) {
                     return Mono.error(new UpstreamException(
                         status.value(),
-                        "OpenAI upstream error " + status.value() + ": " + rawBody,
+                        "OpenAI upstream error " + status.value() + ": " + truncate(rawBody),
                         isRecoverableStatus(status.value())
                     ));
                 }
@@ -627,6 +629,11 @@ public class OpenAiUpstreamClient {
             body.set("max_completion_tokens", maxOutputTokens);
         }
         body.remove(List.of("max_tokens", "max_output_tokens"));
+    }
+
+    private void forceNonStreaming(ObjectNode body) {
+        body.put("stream", false);
+        body.remove("stream_options");
     }
 
     private String openAiModel(String model, ProxyAccountEntity account) {

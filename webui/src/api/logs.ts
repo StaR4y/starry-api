@@ -14,4 +14,7 @@ export const logsApi = {
   usageSummary() {
     return unwrap<UsageSummary>(http.get<ApiResponse<UsageSummary>>('/admin/usage-summary'));
   },
+  myUsageSummary() {
+    return unwrap<UsageSummary>(http.get<ApiResponse<UsageSummary>>('/admin/usage-summary/me'));
+  },
 };

@@ -5,7 +5,16 @@ export const openAiPlatform: PlatformDefinition = {
   provider: 'OpenAI',
   className: 'openai',
   color: '#10a37f',
-  families: ['GPT-5', 'GPT-4', 'GPT-3.5', 'OpenAI Reasoning', 'OpenAI OSS', 'OpenAI Audio', 'OpenAI Image', 'OpenAI'],
+  families: [
+    'GPT-5',
+    'GPT-4',
+    'GPT-3.5',
+    'OpenAI Reasoning',
+    'OpenAI OSS',
+    'OpenAI Audio',
+    'OpenAI Image',
+    'OpenAI',
+  ],
   matches: isOpenAiModel,
   familyOf: openAiModelFamily,
 };
@@ -13,10 +22,12 @@ export const openAiPlatform: PlatformDefinition = {
 export function isOpenAiModel(model: ModelInfo) {
   const lowerId = model.id.toLowerCase();
   const localId = openAiLocalId(lowerId);
-  return lowerId.startsWith('openai/')
-    || localId.startsWith('gpt-')
-    || localId.startsWith('chatgpt-')
-    || /^o\d/.test(localId);
+  return (
+    lowerId.startsWith('openai/') ||
+    localId.startsWith('gpt-') ||
+    localId.startsWith('chatgpt-') ||
+    /^o\d/.test(localId)
+  );
 }
 
 export function openAiModelFamily(model: ModelInfo) {

@@ -40,7 +40,9 @@ export const paymentApi = {
 
 export const adminPaymentApi = {
   settings() {
-    return unwrap<PaymentSettings>(http.get<ApiResponse<PaymentSettings>>('/admin/payment/settings'));
+    return unwrap<PaymentSettings>(
+      http.get<ApiResponse<PaymentSettings>>('/admin/payment/settings'),
+    );
   },
   updateSettings(payload: UpdatePaymentSettingsRequest) {
     return unwrap<PaymentSettings>(
@@ -57,7 +59,10 @@ export const adminPaymentApi = {
   },
   createRedemptionCodes(payload: CreateRedemptionCodeRequest) {
     return unwrap<CreateRedemptionCodesResponse>(
-      http.post<ApiResponse<CreateRedemptionCodesResponse>>('/admin/payment/redemption-codes', payload),
+      http.post<ApiResponse<CreateRedemptionCodesResponse>>(
+        '/admin/payment/redemption-codes',
+        payload,
+      ),
     );
   },
   revokeRedemptionCode(codeId: string) {

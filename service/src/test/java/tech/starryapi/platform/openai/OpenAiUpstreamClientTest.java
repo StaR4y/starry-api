@@ -764,6 +764,50 @@ class OpenAiUpstreamClientTest {
     }
 
     @Test
+    void openAiCompatibleChatForcesNonStreamingUpstreamRequest() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] response = """
+                {"choices":[{"message":{"content":"OK"}}],"usage":{"prompt_tokens":2,"completion_tokens":1}}
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "application/json");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = openAiCompatibleAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {
+                  "model": "gpt-5.4-mini",
+                  "stream": true,
+                  "stream_options": {"include_usage": true},
+                  "messages": [{"role": "user", "content": "hi"}]
+                }
+                """);
+
+            PlatformCompletionResult result = client.complete(account, request, "gpt-5.4-mini").block();
+
+            assertThat(result).isNotNull();
+            assertThat(result.content()).isEqualTo("OK");
+            JsonNode body = objectMapper.readTree(requestBody.get());
+            assertThat(body.path("stream").asBoolean(true)).isFalse();
+            assertThat(body.has("stream_options")).isFalse();
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
     void openAiCompatibleResponsesParsesStreamAfterPingComment() throws Exception {
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/v1/responses", exchange -> {

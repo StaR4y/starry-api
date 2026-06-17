@@ -97,13 +97,23 @@
     </el-table>
   </PageSection>
 
-  <el-drawer v-model="detailVisible" title="请求详情" size="480px" direction="rtl" :with-header="true">
+  <el-drawer
+    v-model="detailVisible"
+    title="请求详情"
+    size="480px"
+    direction="rtl"
+    :with-header="true"
+  >
     <template v-if="detail">
       <el-descriptions :column="1" border>
         <el-descriptions-item label="请求 ID">
           <span class="mono">{{ detail.requestId }}</span>
         </el-descriptions-item>
-        <el-descriptions-item label="时间">{{ formatDateTime(detail.createdAt) }}</el-descriptions-item>
+        <el-descriptions-item label="时间">
+          {{
+            formatDateTime(detail.createdAt)
+          }}
+        </el-descriptions-item>
         <el-descriptions-item label="路径">{{ detail.path }}</el-descriptions-item>
         <el-descriptions-item label="模型">{{ detail.model || '—' }}</el-descriptions-item>
         <el-descriptions-item label="状态">{{ detail.statusCode || '—' }}</el-descriptions-item>
