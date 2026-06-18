@@ -66,10 +66,7 @@ export const dataTransferApi = {
     );
   },
   downloadBackup(fileName: string) {
-    return download(
-      `/admin/data-transfer/backups/${encodeURIComponent(fileName)}`,
-      fileName,
-    );
+    return download(`/admin/data-transfer/backups/${encodeURIComponent(fileName)}`, fileName);
   },
   deleteBackup(fileName: string) {
     return unwrap<DeleteBackupResponse>(

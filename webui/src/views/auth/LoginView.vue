@@ -96,7 +96,8 @@
     if (!emailVerifyEnabled.value) return true;
     return (
       Boolean(registerForm.emailVerificationToken) ||
-      (inviteCodeEnabled.value && (Boolean(registerForm.inviteCode) || Boolean(registerForm.affiliateCode)))
+      (inviteCodeEnabled.value &&
+        (Boolean(registerForm.inviteCode) || Boolean(registerForm.affiliateCode)))
     );
   });
 

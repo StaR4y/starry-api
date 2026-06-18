@@ -643,9 +643,7 @@
             </template>
           </el-table-column>
           <el-table-column label="比例" width="90" align="right">
-            <template #default="{ row }">
-              {{ formatNumber(row.rebateRate * 100) }}%
-            </template>
+            <template #default="{ row }"> {{ formatNumber(row.rebateRate * 100) }}% </template>
           </el-table-column>
           <el-table-column label="返利余额" width="120" align="right">
             <template #default="{ row }">

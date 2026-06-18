@@ -63,7 +63,7 @@
       minSampleSize: 10,
       retestThresholdPercent: 50,
       failoverThresholdPercent: 70,
-      recoveryThresholdPercent: 10,
+      recoveryThresholdPercent: 70,
       retestIntervalMinutes: 5,
       retestMaxConcurrency: 4,
       autoWeightEnabled: true,
@@ -73,6 +73,9 @@
   const settingsSaving = ref(false);
   const poolPolicySaving = ref(false);
   const clearingAccounts = ref(false);
+  const poolDragAccountId = ref<string | null>(null);
+  const poolDropTarget = ref<'primary' | 'secondary' | null>(null);
+  const poolUpdatingAccountIds = ref<Record<string, boolean>>({});
 
   const visibleAccounts = computed(() => {
     const q = keyword.value.trim().toLowerCase();
@@ -98,7 +101,9 @@
 
     const totalRequests = accounts.value.reduce((sum, a) => sum + (a.requestCount || 0), 0);
     const totalErrors = accounts.value.reduce((sum, a) => sum + (a.errorCount || 0), 0);
-    const primary = accounts.value.filter((a) => normalizedPoolTier(a.poolTier) === 'primary').length;
+    const primary = accounts.value.filter(
+      (a) => normalizedPoolTier(a.poolTier) === 'primary',
+    ).length;
     const secondary = accounts.value.filter(
       (a) => normalizedPoolTier(a.poolTier) === 'secondary',
     ).length;
@@ -113,6 +118,14 @@
       secondary,
     };
   });
+
+  const primaryPoolAccounts = computed(() =>
+    visibleAccounts.value.filter((account) => normalizedPoolTier(account.poolTier) === 'primary'),
+  );
+
+  const secondaryPoolAccounts = computed(() =>
+    visibleAccounts.value.filter((account) => normalizedPoolTier(account.poolTier) === 'secondary'),
+  );
 
   function statusOf(account: Account) {
     if (!account.enabled) return { label: '已停用', tone: 'info' as const };
@@ -327,6 +340,7 @@
   const formRef = ref<FormInstance>();
   const formSubmitting = ref(false);
   const formAccountId = ref<string | null>(null);
+  const activeFormTab = ref('basic');
 
   // 与后端 DTO 字段一致；可选字段使用空字符串占位，提交时再清洗
   const form = reactive({
@@ -429,6 +443,7 @@
     formMode.value = 'create';
     formAccountId.value = null;
     resetForm();
+    activeFormTab.value = 'basic';
     formVisible.value = true;
   }
 
@@ -436,6 +451,7 @@
     formMode.value = 'edit';
     formAccountId.value = row.accountId;
     resetForm();
+    activeFormTab.value = 'basic';
     Object.assign(form, {
       accountId: row.accountId,
       email: row.email ?? '',
@@ -779,6 +795,96 @@
 
   function poolTierTagType(value: string | null | undefined) {
     return normalizedPoolTier(value) === 'secondary' ? 'warning' : 'success';
+  }
+
+  function poolColumnDescription(tier: 'primary' | 'secondary') {
+    return tier === 'primary'
+      ? '主力账号池，正常情况下优先承接请求'
+      : '备用账号池，一级池熔断时自动接管请求';
+  }
+
+  function isPoolUpdating(accountId: string) {
+    return Boolean(poolUpdatingAccountIds.value[accountId]);
+  }
+
+  function setPoolUpdating(accountId: string, value: boolean) {
+    poolUpdatingAccountIds.value = {
+      ...poolUpdatingAccountIds.value,
+      [accountId]: value,
+    };
+  }
+
+  function onPoolDragStart(event: DragEvent, account: Account) {
+    poolDragAccountId.value = account.accountId;
+    event.dataTransfer?.setData('text/plain', account.accountId);
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move';
+    }
+  }
+
+  function onPoolDragEnd() {
+    poolDragAccountId.value = null;
+    poolDropTarget.value = null;
+  }
+
+  function onPoolDragOver(event: DragEvent, tier: 'primary' | 'secondary') {
+    event.preventDefault();
+    const account = draggedPoolAccount(event);
+    if (account && normalizedPoolTier(account.poolTier) !== tier) {
+      poolDropTarget.value = tier;
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = 'move';
+      }
+    }
+  }
+
+  function onPoolDragLeave(tier: 'primary' | 'secondary') {
+    if (poolDropTarget.value === tier) {
+      poolDropTarget.value = null;
+    }
+  }
+
+  async function onPoolDrop(event: DragEvent, tier: 'primary' | 'secondary') {
+    event.preventDefault();
+    const account = draggedPoolAccount(event);
+    poolDropTarget.value = null;
+    poolDragAccountId.value = null;
+    if (
+      !account ||
+      normalizedPoolTier(account.poolTier) === tier ||
+      isPoolUpdating(account.accountId)
+    ) {
+      return;
+    }
+    await moveAccountToPool(account, tier);
+  }
+
+  function draggedPoolAccount(event: DragEvent) {
+    const accountId = event.dataTransfer?.getData('text/plain') || poolDragAccountId.value;
+    if (!accountId) return null;
+    return accounts.value.find((account) => account.accountId === accountId) ?? null;
+  }
+
+  async function moveAccountToPool(account: Account, tier: 'primary' | 'secondary') {
+    const previousTier = normalizedPoolTier(account.poolTier);
+    setPoolUpdating(account.accountId, true);
+    accounts.value = accounts.value.map((item) =>
+      item.accountId === account.accountId ? { ...item, poolTier: tier } : item,
+    );
+    try {
+      await accountsApi.update(account.accountId, { poolTier: tier });
+      ElMessage.success(
+        `${account.email || shorten(account.accountId, 8, 4)} 已移动到${poolTierLabel(tier)}`,
+      );
+      await loadPoolStatus();
+    } catch (err) {
+      accounts.value = accounts.value.map((item) =>
+        item.accountId === account.accountId ? { ...item, poolTier: previousTier } : item,
+      );
+      if (err instanceof ApiError) ElMessage.error(err.message);
+    } finally {
+      setPoolUpdating(account.accountId, false);
+    }
   }
 
   function openTestDetail(row: Account) {
@@ -1229,7 +1335,8 @@
 
     <div class="pool-policy-panel glass-panel">
       <div class="pool-policy-panel__status">
-        <div>
+        <div class="panel-header-left">
+          <span class="brand-indicator" />
           <div class="panel-title">账号池熔断策略</div>
           <div class="panel-subtitle">
             当前路由：
@@ -1238,88 +1345,384 @@
               effect="light"
               round
             >
-              {{ poolStatus?.activeTier === 'secondary' ? '二级号池' : poolStatus?.activeTier === 'all' ? '全部账号' : '一级号池' }}
+              {{
+                poolStatus?.activeTier === 'secondary'
+                  ? '二级号池'
+                  : poolStatus?.activeTier === 'all'
+                    ? '全部账号'
+                    : '一级号池'
+              }}
             </el-tag>
             <span class="pool-status-text">
-              一级池错误率 {{ poolStatus?.primaryFailureRatePercent ?? 0 }}%
-              （{{ poolStatus?.primaryFailures ?? 0 }}/{{ poolStatus?.primaryRequests ?? 0 }}）
+              一级池错误率 {{ poolStatus?.primaryFailureRatePercent ?? 0 }}% （{{
+                poolStatus?.primaryFailures ?? 0
+              }}/{{ poolStatus?.primaryRequests ?? 0 }}）
+            </span>
+            <span v-if="poolStatus?.lastRetestAt" class="pool-status-text">
+              最近复测成功率 {{ poolStatus?.lastRetestRecoveryRatePercent ?? 0 }}%
             </span>
             <span v-if="poolStatus?.retestRunning" class="pool-status-text is-running">
               正在复测
             </span>
           </div>
         </div>
-        <el-button size="small" @click="loadPoolStatus">刷新状态</el-button>
+        <el-button size="small" @click="loadPoolStatus">
+          <template #icon>
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="12"
+              height="12"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              style="margin-right: 4px"
+            >
+              <polyline points="23 4 23 10 17 10" />
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+            </svg>
+          </template>
+          刷新状态
+        </el-button>
       </div>
 
       <el-form class="pool-policy-form" label-position="top" size="small">
-        <el-row :gutter="12">
-          <el-col :span="3">
-            <el-form-item label="启用">
+        <el-row :gutter="16">
+          <el-col :xs="12" :sm="6" :md="3">
+            <el-form-item label="启用熔断">
               <el-switch v-model="accountSettings.poolPolicy.enabled" />
             </el-form-item>
           </el-col>
-          <el-col :span="3">
+          <el-col :xs="12" :sm="6" :md="3">
             <el-form-item label="自动权重">
               <el-switch v-model="accountSettings.poolPolicy.autoWeightEnabled" />
             </el-form-item>
           </el-col>
-          <el-col :span="3">
+          <el-col :xs="12" :sm="6" :md="3">
             <el-form-item label="窗口(分钟)">
-              <el-input-number v-model="accountSettings.poolPolicy.windowMinutes" :min="1" :max="1440" />
+              <el-input-number
+                v-model="accountSettings.poolPolicy.windowMinutes"
+                :min="1"
+                :max="1440"
+                controls-position="right"
+              />
             </el-form-item>
           </el-col>
-          <el-col :span="3">
+          <el-col :xs="12" :sm="6" :md="3">
             <el-form-item label="最小样本">
-              <el-input-number v-model="accountSettings.poolPolicy.minSampleSize" :min="1" :max="100000" />
+              <el-input-number
+                v-model="accountSettings.poolPolicy.minSampleSize"
+                :min="1"
+                :max="100000"
+                controls-position="right"
+              />
             </el-form-item>
           </el-col>
-          <el-col :span="3">
+          <el-col :xs="12" :sm="6" :md="3">
             <el-form-item label="复测阈值%">
-              <el-input-number v-model="accountSettings.poolPolicy.retestThresholdPercent" :min="0" :max="100" />
+              <el-input-number
+                v-model="accountSettings.poolPolicy.retestThresholdPercent"
+                :min="0"
+                :max="100"
+                controls-position="right"
+              />
             </el-form-item>
           </el-col>
-          <el-col :span="3">
+          <el-col :xs="12" :sm="6" :md="3">
             <el-form-item label="切二级%">
-              <el-input-number v-model="accountSettings.poolPolicy.failoverThresholdPercent" :min="0" :max="100" />
+              <el-input-number
+                v-model="accountSettings.poolPolicy.failoverThresholdPercent"
+                :min="0"
+                :max="100"
+                controls-position="right"
+              />
             </el-form-item>
           </el-col>
-          <el-col :span="3">
-            <el-form-item label="恢复%">
-              <el-input-number v-model="accountSettings.poolPolicy.recoveryThresholdPercent" :min="0" :max="100" />
+          <el-col :xs="12" :sm="6" :md="3">
+            <el-form-item label="恢复成功率%">
+              <el-input-number
+                v-model="accountSettings.poolPolicy.recoveryThresholdPercent"
+                :min="0"
+                :max="100"
+                controls-position="right"
+              />
             </el-form-item>
           </el-col>
-          <el-col :span="3">
+          <el-col :xs="12" :sm="6" :md="3">
             <el-form-item label="复测间隔">
-              <el-input-number v-model="accountSettings.poolPolicy.retestIntervalMinutes" :min="1" :max="1440" />
+              <el-input-number
+                v-model="accountSettings.poolPolicy.retestIntervalMinutes"
+                :min="1"
+                :max="1440"
+                controls-position="right"
+              />
             </el-form-item>
           </el-col>
         </el-row>
-        <div class="pool-policy-actions">
-          <span class="text-secondary">
-            当一级池错误率达到复测阈值时会全量测试账号；达到切二级阈值时临时将请求转到二级号池，直到一级池复测错误率低于恢复阈值。
-          </span>
+        <div class="pool-policy-footer">
+          <div class="info-alert">
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              class="info-alert-icon"
+            >
+              <circle cx="12" cy="12" r="10" />
+              <line x1="12" y1="16" x2="12" y2="12" />
+              <line x1="12" y1="8" x2="12.01" y2="8" />
+            </svg>
+            <span>
+              当一级池错误率达到复测阈值时会全量测试账号；达到切二级阈值时临时将请求转到二级号池，并持续复测所有账号，直到全账号复测成功率达到恢复成功率阈值。
+            </span>
+          </div>
           <el-button type="primary" :loading="poolPolicySaving" @click="savePoolPolicy">
             保存账号池策略
           </el-button>
         </div>
       </el-form>
 
+      <div class="pool-drag-board">
+        <div
+          class="pool-drag-column"
+          :class="{
+            'is-drop-target': poolDropTarget === 'primary',
+            'is-active-route': poolStatus?.activeTier === 'primary',
+          }"
+          @dragover="(event) => onPoolDragOver(event, 'primary')"
+          @dragleave="onPoolDragLeave('primary')"
+          @drop="(event) => onPoolDrop(event, 'primary')"
+        >
+          <div class="pool-drag-column__head">
+            <div>
+              <div class="pool-drag-column__title">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  style="color: var(--kp-primary); margin-right: 4px"
+                >
+                  <polygon
+                    points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"
+                  />
+                </svg>
+                一级号池
+                <el-tag
+                  v-if="poolStatus?.activeTier === 'primary'"
+                  size="small"
+                  type="success"
+                  effect="light"
+                  round
+                >
+                  当前路由
+                </el-tag>
+              </div>
+              <div class="pool-drag-column__desc">{{ poolColumnDescription('primary') }}</div>
+            </div>
+            <strong>{{ primaryPoolAccounts.length }}</strong>
+          </div>
+
+          <div v-if="primaryPoolAccounts.length === 0" class="pool-drag-empty">
+            拖入账号作为一级号池
+          </div>
+          <div
+            v-for="account in primaryPoolAccounts"
+            :key="account.accountId"
+            class="pool-account-card"
+            :class="{
+              'is-dragging': poolDragAccountId === account.accountId,
+              'is-updating': isPoolUpdating(account.accountId),
+            }"
+            draggable="true"
+            @dragstart="(event) => onPoolDragStart(event, account)"
+            @dragend="onPoolDragEnd"
+          >
+            <div class="pool-account-card__drag-handle">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <circle cx="9" cy="5" r="1" />
+                <circle cx="9" cy="12" r="1" />
+                <circle cx="9" cy="19" r="1" />
+                <circle cx="15" cy="5" r="1" />
+                <circle cx="15" cy="12" r="1" />
+                <circle cx="15" cy="19" r="1" />
+              </svg>
+            </div>
+            <div class="pool-account-card__info-wrapper">
+              <div class="pool-account-card__main">
+                <span class="pool-account-card__name" :title="account.email || account.accountId">
+                  {{ account.email || shorten(account.accountId, 10, 6) }}
+                </span>
+                <span class="pool-account-card__id mono">{{
+                  shorten(account.accountId, 10, 4)
+                }}</span>
+              </div>
+              <div class="pool-account-card__meta">
+                <el-tag size="small" effect="plain">
+                  {{ getProviderDisplayName(account.provider) }}
+                </el-tag>
+                <el-tag size="small" :type="statusOf(account).tone" effect="light">
+                  {{ statusOf(account).label }}
+                </el-tag>
+                <span class="meta-item">权重: <strong>{{ account.poolWeight ?? 100 }}</strong></span>
+                <span class="meta-item">错误:
+                  <strong class="text-danger">{{ formatNumber(account.errorCount) }}</strong></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div
+          class="pool-drag-column is-secondary"
+          :class="{
+            'is-drop-target': poolDropTarget === 'secondary',
+            'is-active-route': poolStatus?.activeTier === 'secondary',
+          }"
+          @dragover="(event) => onPoolDragOver(event, 'secondary')"
+          @dragleave="onPoolDragLeave('secondary')"
+          @drop="(event) => onPoolDrop(event, 'secondary')"
+        >
+          <div class="pool-drag-column__head">
+            <div>
+              <div class="pool-drag-column__title">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  style="color: var(--kp-warning); margin-right: 4px"
+                >
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                  <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                </svg>
+                二级号池
+                <el-tag
+                  v-if="poolStatus?.activeTier === 'secondary'"
+                  size="small"
+                  type="warning"
+                  effect="light"
+                  round
+                >
+                  当前接管
+                </el-tag>
+              </div>
+              <div class="pool-drag-column__desc">{{ poolColumnDescription('secondary') }}</div>
+            </div>
+            <strong>{{ secondaryPoolAccounts.length }}</strong>
+          </div>
+
+          <div v-if="secondaryPoolAccounts.length === 0" class="pool-drag-empty">
+            拖入账号作为熔断备用池
+          </div>
+          <div
+            v-for="account in secondaryPoolAccounts"
+            :key="account.accountId"
+            class="pool-account-card"
+            :class="{
+              'is-dragging': poolDragAccountId === account.accountId,
+              'is-updating': isPoolUpdating(account.accountId),
+            }"
+            draggable="true"
+            @dragstart="(event) => onPoolDragStart(event, account)"
+            @dragend="onPoolDragEnd"
+          >
+            <div class="pool-account-card__drag-handle">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                width="12"
+                height="12"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <circle cx="9" cy="5" r="1" />
+                <circle cx="9" cy="12" r="1" />
+                <circle cx="9" cy="19" r="1" />
+                <circle cx="15" cy="5" r="1" />
+                <circle cx="15" cy="12" r="1" />
+                <circle cx="15" cy="19" r="1" />
+              </svg>
+            </div>
+            <div class="pool-account-card__info-wrapper">
+              <div class="pool-account-card__main">
+                <span class="pool-account-card__name" :title="account.email || account.accountId">
+                  {{ account.email || shorten(account.accountId, 10, 6) }}
+                </span>
+                <span class="pool-account-card__id mono">{{
+                  shorten(account.accountId, 10, 4)
+                }}</span>
+              </div>
+              <div class="pool-account-card__meta">
+                <el-tag size="small" effect="plain">
+                  {{ getProviderDisplayName(account.provider) }}
+                </el-tag>
+                <el-tag size="small" :type="statusOf(account).tone" effect="light">
+                  {{ statusOf(account).label }}
+                </el-tag>
+                <span class="meta-item">权重: <strong>{{ account.poolWeight ?? 100 }}</strong></span>
+                <span class="meta-item">错误:
+                  <strong class="text-danger">{{ formatNumber(account.errorCount) }}</strong></span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div v-if="poolStatus?.failureRanking?.length" class="failure-ranking">
-        <div class="failure-ranking__title">账号失败率排行</div>
+        <div class="failure-ranking__title">账号错误率排行</div>
         <div class="failure-ranking__list">
           <div
             v-for="item in poolStatus.failureRanking.slice(0, 6)"
             :key="item.accountId"
             class="failure-ranking__item"
           >
-            <span class="mono">{{ shorten(item.accountId, 8, 4) }}</span>
-            <el-tag :type="poolTierTagType(item.poolTier)" size="small" effect="light" round>
-              {{ poolTierLabel(item.poolTier) }}
-            </el-tag>
-            <span>{{ item.failureRatePercent }}%</span>
-            <span class="text-secondary">{{ item.failures }}/{{ item.requests }}</span>
-            <span class="text-secondary">权重 {{ item.effectiveWeight }}</span>
+            <div style="display: flex; align-items: center; gap: 8px">
+              <span class="item-id">{{ shorten(item.accountId, 8, 4) }}</span>
+              <el-tag :type="poolTierTagType(item.poolTier)" size="small" effect="light" round>
+                {{ poolTierLabel(item.poolTier) }}
+              </el-tag>
+            </div>
+            <div class="item-stats">
+              <span class="failure-pct" :class="{ 'is-zero': item.failureRatePercent === 0 }">
+                {{ item.failureRatePercent }}%
+              </span>
+              <span class="text-secondary" style="font-size: 11px">
+                ({{ item.failures }}/{{ item.requests }})
+              </span>
+              <span class="text-secondary" style="font-size: 11px; margin-left: 2px">
+                W:{{ item.effectiveWeight }}
+              </span>
+            </div>
           </div>
         </div>
       </div>
@@ -1621,10 +2024,29 @@
       <el-table-column label="最近使用" width="160">
         <template #default="{ row }">{{ formatDateTime(row.lastUsedAt) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="220" fixed="right">
+      <el-table-column label="操作" width="230" fixed="right">
         <template #default="{ row }">
           <div class="actions-wrapper">
-            <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+            <el-button link type="primary" @click="openEdit(row)">
+              <template #icon>
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  style="margin-right: 2px"
+                >
+                  <path d="M12 20h9" />
+                  <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+                </svg>
+              </template>
+              编辑
+            </el-button>
             <el-popover
               placement="bottom-end"
               width="320"
@@ -1632,7 +2054,25 @@
               @show="ensureTestModel(row)"
             >
               <template #reference>
-                <el-button link type="primary">测试</el-button>
+                <el-button link type="primary">
+                  <template #icon>
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="2.5"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                      style="margin-right: 2px"
+                    >
+                      <polygon points="5 3 19 12 5 21 5 3" />
+                    </svg>
+                  </template>
+                  测试
+                </el-button>
               </template>
               <div class="row-test-panel">
                 <div class="row-test-panel__title">
@@ -1695,6 +2135,40 @@
               </div>
             </el-popover>
             <el-button link :type="row.enabled ? 'danger' : 'success'" @click="toggleEnabled(row)">
+              <template #icon>
+                <svg
+                  v-if="row.enabled"
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  style="margin-right: 2px"
+                >
+                  <rect x="1" y="5" width="22" height="14" rx="7" ry="7" />
+                  <circle cx="16" cy="12" r="3" />
+                </svg>
+                <svg
+                  v-else
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="12"
+                  height="12"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="2.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  style="margin-right: 2px"
+                >
+                  <rect x="1" y="5" width="22" height="14" rx="7" ry="7" />
+                  <circle cx="8" cy="12" r="3" />
+                </svg>
+              </template>
               {{ row.enabled ? '停用' : '启用' }}
             </el-button>
             <span class="action-divider">|</span>
@@ -1723,6 +2197,7 @@
     v-model="formVisible"
     :title="formMode === 'create' ? '新建账号' : '编辑账号'"
     width="720px"
+    destroy-on-close
   >
     <el-form ref="formRef" :model="form" :rules="rules" label-position="top">
       <el-alert
@@ -1741,154 +2216,178 @@
         :closable="false"
         title="Anthropic API Key 账号会按原生 Messages API 调用 Base URL；模型映射目标建议写成 anthropic/真实模型ID，例如 anthropic/claude-sonnet-4.5。"
       />
-      <el-row :gutter="20">
-        <el-col v-if="formMode === 'create'" :span="12">
-          <el-form-item label="账号 ID（可选）">
-            <el-input v-model="form.accountId" placeholder="留空时自动生成" />
-          </el-form-item>
-        </el-col>
-        <el-col :span="formMode === 'create' ? 12 : 24">
-          <el-form-item label="邮箱">
-            <el-input v-model="form.email" placeholder="如 email@example.com" />
-          </el-form-item>
-        </el-col>
 
-        <el-col :span="12">
-          <el-form-item label="Provider">
-            <el-select v-model="form.provider" allow-create filterable style="width: 100%">
-              <el-option
-                v-for="item in providerOptions"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
-              />
-            </el-select>
-          </el-form-item>
-        </el-col>
-        <el-col :span="12">
-          <el-form-item label="认证方式">
-            <el-select v-model="form.authMethod" allow-create filterable style="width: 100%">
-              <el-option
-                v-for="item in authMethodOptions"
-                :key="item.value"
-                :label="item.label"
-                :value="item.value"
-              />
-            </el-select>
-          </el-form-item>
-        </el-col>
+      <el-tabs v-model="activeFormTab" class="account-form-tabs">
+        <!-- Tab 1: Basic Info -->
+        <el-tab-pane label="基本配置" name="basic">
+          <div class="tab-pane-content">
+            <el-row :gutter="20">
+              <el-col v-if="formMode === 'create'" :span="12">
+                <el-form-item label="账号 ID（可选）">
+                  <el-input v-model="form.accountId" placeholder="留空时自动生成" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="formMode === 'create' ? 12 : 24">
+                <el-form-item label="邮箱">
+                  <el-input v-model="form.email" placeholder="如 email@example.com" />
+                </el-form-item>
+              </el-col>
 
-        <el-col :span="12">
-          <el-form-item label="区域">
-            <el-input v-model="form.region" placeholder="如 us-east-1" />
-          </el-form-item>
-        </el-col>
-        <el-col :span="12">
-          <el-form-item label="Machine ID">
-            <el-input v-model="form.machineId" placeholder="机器 ID，可选" />
-          </el-form-item>
-        </el-col>
+              <el-col :span="12">
+                <el-form-item label="Provider">
+                  <el-select v-model="form.provider" allow-create filterable style="width: 100%">
+                    <el-option
+                      v-for="item in providerOptions"
+                      :key="item.value"
+                      :label="item.label"
+                      :value="item.value"
+                    />
+                  </el-select>
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="认证方式">
+                  <el-select v-model="form.authMethod" allow-create filterable style="width: 100%">
+                    <el-option
+                      v-for="item in authMethodOptions"
+                      :key="item.value"
+                      :label="item.label"
+                      :value="item.value"
+                    />
+                  </el-select>
+                </el-form-item>
+              </el-col>
 
-        <el-col :span="12">
-          <el-form-item label="账号池级别">
-            <el-radio-group v-model="form.poolTier">
-              <el-radio-button label="primary">一级号池</el-radio-button>
-              <el-radio-button label="secondary">二级号池</el-radio-button>
-            </el-radio-group>
-          </el-form-item>
-        </el-col>
-        <el-col :span="12">
-          <el-form-item label="基础权重">
-            <el-input-number
-              v-model="form.poolWeight"
-              :min="1"
-              :max="10000"
-              :step="10"
-              style="width: 100%"
-            />
-            <p class="form-hint">自动权重开启时，连续错误越多，实际调度权重越低。</p>
-          </el-form-item>
-        </el-col>
+              <el-col :span="12">
+                <el-form-item label="账号池级别">
+                  <el-radio-group v-model="form.poolTier">
+                    <el-radio-button label="primary">一级号池</el-radio-button>
+                    <el-radio-button label="secondary">二级号池</el-radio-button>
+                  </el-radio-group>
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="基础权重">
+                  <el-input-number
+                    v-model="form.poolWeight"
+                    :min="1"
+                    :max="10000"
+                    :step="10"
+                    style="width: 100%"
+                  />
+                  <p class="form-hint">自动权重开启时，连续错误越多，实际调度权重越低。</p>
+                </el-form-item>
+              </el-col>
 
-        <el-col :span="24">
-          <el-form-item :label="accessTokenLabel" prop="accessToken">
-            <el-input
-              v-model="form.accessToken"
-              type="textarea"
-              :rows="2"
-              :placeholder="accessTokenPlaceholder"
-            />
-          </el-form-item>
-        </el-col>
+              <el-col :span="24">
+                <el-form-item label="出站代理 URL">
+                  <el-input v-model="form.proxyUrl" placeholder="http://user:pass@host:port" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+          </div>
+        </el-tab-pane>
 
-        <el-col :span="12">
-          <el-form-item label="Refresh Token">
-            <el-input v-model="form.refreshToken" placeholder="输入 Refresh Token，可选" />
-          </el-form-item>
-        </el-col>
-        <el-col :span="12">
-          <el-form-item label="上游账号 ID">
-            <el-input
-              v-model="form.upstreamAccountId"
-              placeholder="Codex ChatGPT Account ID，可选"
-            />
-          </el-form-item>
-        </el-col>
+        <!-- Tab 2: Credentials -->
+        <el-tab-pane label="凭证配置" name="credentials">
+          <div class="tab-pane-content">
+            <el-row :gutter="20">
+              <el-col :span="24">
+                <el-form-item :label="accessTokenLabel" prop="accessToken">
+                  <el-input
+                    v-model="form.accessToken"
+                    type="textarea"
+                    :rows="3"
+                    :placeholder="accessTokenPlaceholder"
+                  />
+                </el-form-item>
+              </el-col>
 
-        <el-col :span="24">
-          <el-form-item label="ID Token">
-            <el-input
-              v-model="form.idToken"
-              type="textarea"
-              :rows="2"
-              placeholder="Codex id_token，可选"
-            />
-          </el-form-item>
-        </el-col>
+              <el-col :span="24">
+                <el-form-item label="Refresh Token">
+                  <el-input v-model="form.refreshToken" placeholder="输入 Refresh Token，可选" />
+                </el-form-item>
+              </el-col>
 
-        <el-col :span="12">
-          <el-form-item :label="baseUrlLabel" prop="baseUrl">
-            <el-input v-model="form.baseUrl" :placeholder="baseUrlPlaceholder" />
-            <p v-if="isOpenAiCompatibleForm" class="form-hint">
-              填到兼容 OpenAI 的 API 根路径，通常以 /v1 结尾；服务会自动追加 /chat/completions 或
-              /responses。
-            </p>
-            <p v-else-if="isAnthropicApiKeyForm" class="form-hint">
-              填到 Anthropic Messages API 根路径，通常以 /v1 结尾；服务会自动追加 /messages。
-            </p>
-          </el-form-item>
-        </el-col>
-        <el-col :span="12">
-          <el-form-item label="Profile ARN">
-            <el-input v-model="form.profileArn" placeholder="AWS Profile ARN，可选" />
-          </el-form-item>
-        </el-col>
+              <el-col :span="24">
+                <el-form-item label="ID Token">
+                  <el-input
+                    v-model="form.idToken"
+                    type="textarea"
+                    :rows="2"
+                    placeholder="Codex id_token，可选"
+                  />
+                </el-form-item>
+              </el-col>
 
-        <el-col :span="12">
-          <el-form-item label="出站代理 URL">
-            <el-input v-model="form.proxyUrl" placeholder="http://user:pass@host:port" />
-          </el-form-item>
-        </el-col>
-        <el-col :span="12">
-          <el-row :gutter="12">
-            <el-col :span="formMode === 'edit' ? 16 : 24">
-              <el-form-item label="配额上限">
-                <el-input-number
-                  v-model="form.quotaLimit"
-                  :min="0"
-                  :step="1000"
-                  style="width: 100%"
-                />
-              </el-form-item>
-            </el-col>
-            <el-col v-if="formMode === 'edit'" :span="8">
-              <el-form-item label="启用">
-                <el-switch v-model="form.enabled" style="margin-top: 6px" />
-              </el-form-item>
-            </el-col>
-          </el-row>
-        </el-col>
-      </el-row>
+              <el-col :span="24">
+                <el-form-item label="Profile ARN">
+                  <el-input v-model="form.profileArn" placeholder="AWS Profile ARN，可选" />
+                </el-form-item>
+              </el-col>
+            </el-row>
+          </div>
+        </el-tab-pane>
+
+        <!-- Tab 3: Advanced & Routing -->
+        <el-tab-pane label="高级与路由" name="advanced">
+          <div class="tab-pane-content">
+            <el-row :gutter="20">
+              <el-col :span="24">
+                <el-form-item :label="baseUrlLabel" prop="baseUrl">
+                  <el-input v-model="form.baseUrl" :placeholder="baseUrlPlaceholder" />
+                  <p v-if="isOpenAiCompatibleForm" class="form-hint">
+                    填到兼容 OpenAI 的 API 根路径，通常以 /v1 结尾；服务会自动追加 /chat/completions
+                    或 /responses。
+                  </p>
+                  <p v-else-if="isAnthropicApiKeyForm" class="form-hint">
+                    填到 Anthropic Messages API 根路径，通常以 /v1 结尾；服务会自动追加 /messages。
+                  </p>
+                </el-form-item>
+              </el-col>
+
+              <el-col :span="12">
+                <el-form-item label="上游账号 ID">
+                  <el-input
+                    v-model="form.upstreamAccountId"
+                    placeholder="Codex ChatGPT Account ID，可选"
+                  />
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-form-item label="Machine ID">
+                  <el-input v-model="form.machineId" placeholder="机器 ID，可选" />
+                </el-form-item>
+              </el-col>
+
+              <el-col :span="12">
+                <el-form-item label="区域">
+                  <el-input v-model="form.region" placeholder="如 us-east-1" />
+                </el-form-item>
+              </el-col>
+              <el-col :span="12">
+                <el-row :gutter="12">
+                  <el-col :span="formMode === 'edit' ? 16 : 24">
+                    <el-form-item label="配额上限">
+                      <el-input-number
+                        v-model="form.quotaLimit"
+                        :min="0"
+                        :step="1000"
+                        style="width: 100%"
+                      />
+                    </el-form-item>
+                  </el-col>
+                  <el-col v-if="formMode === 'edit'" :span="8">
+                    <el-form-item label="启用">
+                      <el-switch v-model="form.enabled" style="margin-top: 6px" />
+                    </el-form-item>
+                  </el-col>
+                </el-row>
+              </el-col>
+            </el-row>
+          </div>
+        </el-tab-pane>
+      </el-tabs>
     </el-form>
 
     <template #footer>
@@ -2075,9 +2574,7 @@
         </el-table-column>
         <el-table-column label="耗时" width="105" align="right">
           <template #default="{ row }">
-            {{
-              row.latencyMs == null ? '—' : `${row.latencyMs}ms`
-            }}
+            {{ row.latencyMs == null ? '—' : `${row.latencyMs}ms` }}
           </template>
         </el-table-column>
         <el-table-column prop="message" label="消息" min-width="260" show-overflow-tooltip />
@@ -2556,41 +3053,70 @@
 
   .pool-policy-panel {
     display: grid;
-    gap: 14px;
-    padding: 18px 22px;
+    gap: 16px;
+    padding: 20px 24px;
     margin-bottom: 24px;
   }
 
-  .pool-policy-panel__status,
-  .pool-policy-actions {
+  .pool-policy-panel__status {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
+    flex-wrap: wrap;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--kp-divider);
   }
 
-  .panel-title {
-    font-size: 15px;
-    font-weight: 800;
-    color: var(--kp-text);
-  }
-
-  .panel-subtitle {
+  .panel-header-left {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 12px;
     flex-wrap: wrap;
-    margin-top: 6px;
-    color: var(--kp-text-secondary);
-    font-size: 12px;
+
+    .brand-indicator {
+      width: 4px;
+      height: 16px;
+      border-radius: 99px;
+      background: var(--kp-primary);
+    }
+
+    .panel-title {
+      font-size: 15px;
+      font-weight: 800;
+      color: var(--kp-text);
+      line-height: 1;
+    }
+
+    .panel-subtitle {
+      margin-top: 0;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--kp-text-secondary);
+      font-size: 12.5px;
+
+      .pool-status-text strong {
+        color: var(--kp-danger);
+      }
+
+      .is-running {
+        color: var(--el-color-warning);
+        font-weight: 700;
+        animation: pulse-warn 1.5s infinite;
+      }
+    }
   }
 
-  .pool-status-text {
-    color: var(--kp-text-secondary);
-
-    &.is-running {
-      color: var(--el-color-warning);
-      font-weight: 700;
+  @keyframes pulse-warn {
+    0% {
+      opacity: 0.6;
+    }
+    50% {
+      opacity: 1;
+    }
+    100% {
+      opacity: 0.6;
     }
   }
 
@@ -2604,34 +3130,286 @@
     }
   }
 
-  .failure-ranking {
-    display: grid;
-    gap: 8px;
+  .pool-policy-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-top: 12px;
     padding-top: 12px;
-    border-top: 1px solid var(--kp-divider);
+    border-top: 1px dashed var(--kp-divider);
+
+    .info-alert {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex: 1;
+
+      &-icon {
+        color: var(--kp-primary);
+        flex-shrink: 0;
+      }
+
+      span {
+        font-size: 12px;
+        color: var(--kp-text-secondary);
+        line-height: 1.4;
+      }
+    }
   }
 
-  .failure-ranking__title {
-    color: var(--kp-text-secondary);
-    font-size: 12px;
+  .pool-drag-board {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+  }
+
+  .pool-drag-column {
+    min-height: 240px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 16px;
+    border: 1px solid rgba(54, 192, 138, 0.18);
+    border-radius: var(--kp-radius-sm);
+    background: linear-gradient(180deg, rgba(54, 192, 138, 0.04), rgba(255, 255, 255, 0.6));
+    transition: all 0.25s ease;
+
+    &.is-secondary {
+      border-color: rgba(245, 158, 11, 0.2);
+      background: linear-gradient(180deg, rgba(245, 158, 11, 0.04), rgba(255, 255, 255, 0.6));
+    }
+
+    &.is-active-route {
+      border-color: rgba(91, 141, 239, 0.4);
+      box-shadow: 0 8px 24px rgba(91, 141, 239, 0.08);
+    }
+
+    &.is-drop-target {
+      border-color: var(--kp-primary);
+      box-shadow: 0 0 0 3px rgba(91, 141, 239, 0.12);
+      transform: translateY(-2px);
+    }
+  }
+
+  .pool-drag-column__head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--kp-divider);
+
+    strong {
+      min-width: 34px;
+      text-align: right;
+      color: var(--kp-text);
+      font-size: 24px;
+      line-height: 1;
+      font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+    }
+  }
+
+  .pool-drag-column__title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--kp-text);
+    font-size: 14.5px;
     font-weight: 800;
   }
 
-  .failure-ranking__list {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
+  .pool-drag-column__desc {
+    margin-top: 4px;
+    color: var(--kp-text-secondary);
+    font-size: 12px;
   }
 
-  .failure-ranking__item {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    padding: 6px 9px;
-    border: 1px solid var(--kp-divider);
-    border-radius: 6px;
-    background: rgba(255, 255, 255, 0.58);
+  .pool-drag-empty {
+    display: grid;
+    place-items: center;
+    min-height: 120px;
+    border: 2px dashed rgba(15, 23, 42, 0.12);
+    border-radius: var(--kp-radius-sm);
+    color: var(--kp-text-muted);
     font-size: 12px;
+    background: rgba(255, 255, 255, 0.35);
+  }
+
+  .pool-account-card {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid rgba(15, 23, 42, 0.08);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.75);
+    cursor: grab;
+    user-select: none;
+    transition: all 0.2s cubic-bezier(0.25, 0.8, 0.25, 1);
+
+    &__drag-handle {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--kp-text-muted);
+      cursor: grab;
+      margin-top: 4px;
+      flex-shrink: 0;
+      opacity: 0.4;
+      transition: opacity 0.2s ease;
+    }
+
+    &:hover {
+      border-color: rgba(91, 141, 239, 0.36);
+      box-shadow: 0 6px 14px rgba(15, 23, 42, 0.06);
+      transform: translateY(-1.5px);
+      background: #ffffff;
+
+      .pool-account-card__drag-handle {
+        opacity: 0.8;
+        color: var(--kp-primary);
+      }
+    }
+
+    &:active {
+      cursor: grabbing;
+      .pool-account-card__drag-handle {
+        cursor: grabbing;
+      }
+    }
+
+    &.is-dragging {
+      opacity: 0.5;
+      border-style: dashed;
+    }
+
+    &.is-updating {
+      pointer-events: none;
+      opacity: 0.6;
+    }
+
+    &__info-wrapper {
+      flex: 1;
+      min-width: 0;
+      display: grid;
+      gap: 6px;
+    }
+
+    &__main {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    &__name {
+      min-width: 0;
+      overflow: hidden;
+      color: var(--kp-text);
+      font-size: 13px;
+      font-weight: 700;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    &__id {
+      flex: 0 0 auto;
+      color: var(--kp-text-muted);
+      font-size: 11px;
+    }
+
+    &__meta {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      color: var(--kp-text-secondary);
+      font-size: 11px;
+
+      .meta-item {
+        color: var(--kp-text-secondary);
+
+        strong {
+          color: var(--kp-text);
+        }
+        .text-danger {
+          color: var(--kp-danger) !important;
+        }
+      }
+    }
+  }
+
+  .failure-ranking {
+    display: grid;
+    gap: 10px;
+    padding-top: 16px;
+    border-top: 1px solid var(--kp-divider);
+
+    &__title {
+      color: var(--kp-text-secondary);
+      font-size: 12.5px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+
+      &::before {
+        content: '';
+        width: 3px;
+        height: 12px;
+        background-color: var(--kp-danger);
+        border-radius: 4px;
+      }
+    }
+
+    &__list {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 10px;
+    }
+
+    &__item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px;
+      border: 1px solid var(--kp-divider);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.45);
+      font-size: 12px;
+      transition: all 0.2s ease;
+
+      &:hover {
+        background: #ffffff;
+        border-color: rgba(239, 91, 107, 0.24);
+        box-shadow: 0 4px 10px rgba(15, 23, 42, 0.04);
+        transform: translateY(-1px);
+      }
+
+      .item-id {
+        font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+        font-weight: 600;
+        color: var(--kp-text);
+      }
+
+      .item-stats {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--kp-text-secondary);
+      }
+
+      .failure-pct {
+        font-weight: 700;
+        color: var(--kp-danger);
+
+        &.is-zero {
+          color: var(--kp-success);
+        }
+      }
+    }
   }
 
   .pool-cell {
@@ -2863,6 +3641,35 @@
     }
     100% {
       background-position: -200% 0;
+    }
+  }
+
+  .account-form-tabs {
+    margin-top: 10px;
+
+    :deep(.el-tabs__header) {
+      margin-bottom: 20px;
+    }
+
+    :deep(.el-tabs__item) {
+      font-weight: 600;
+      font-size: 14px;
+      padding: 0 20px;
+      color: var(--kp-text-secondary);
+
+      &:hover {
+        color: var(--kp-primary);
+      }
+      &.is-active {
+        color: var(--kp-primary);
+        font-weight: 700;
+      }
+    }
+
+    .tab-pane-content {
+      padding: 4px 2px;
+      max-height: 480px;
+      overflow-y: auto;
     }
   }
 

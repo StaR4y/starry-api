@@ -27,6 +27,7 @@ public class AccountPoolPolicyService {
     private volatile Instant lastEvaluatedAt;
     private volatile Instant lastRetestAt;
     private volatile double lastRetestFailureRatePercent = 0.0;
+    private volatile double lastRetestRecoveryRatePercent = 0.0;
     private volatile long primaryRequests = 0;
     private volatile long primaryFailures = 0;
     private volatile double primaryFailureRatePercent = 0.0;
@@ -63,6 +64,7 @@ public class AccountPoolPolicyService {
                         lastEvaluatedAt,
                         lastRetestAt,
                         lastRetestFailureRatePercent,
+                        lastRetestRecoveryRatePercent,
                         retestRunning,
                         settings,
                         ranking
@@ -104,18 +106,19 @@ public class AccountPoolPolicyService {
         lastRetestAt = Instant.now();
     }
 
-    public void markRetestCompleted(double primaryRetestFailureRatePercent, long primaryRetestSamples) {
+    public void markRetestCompleted(double retestRecoveryRatePercent, long retestSamples) {
         lastRetestAt = Instant.now();
-        lastRetestFailureRatePercent = roundPercent(primaryRetestFailureRatePercent);
+        lastRetestRecoveryRatePercent = roundPercent(retestRecoveryRatePercent);
+        lastRetestFailureRatePercent = roundPercent(Math.max(0.0, 100.0 - retestRecoveryRatePercent));
         AccountDtos.PoolPolicySettings settings = cachedSettings;
-        if (primaryRetestSamples <= 0 || !Boolean.TRUE.equals(settings.enabled())) {
+        if (retestSamples <= 0 || !Boolean.TRUE.equals(settings.enabled())) {
             return;
         }
-        if (primaryDisabled && primaryRetestFailureRatePercent <= settings.recoveryThresholdPercent()) {
+        if (primaryDisabled && retestRecoveryRatePercent >= settings.recoveryThresholdPercent()) {
             primaryDisabled = false;
             return;
         }
-        if (!primaryDisabled && primaryRetestFailureRatePercent >= settings.failoverThresholdPercent()) {
+        if (!primaryDisabled && lastRetestFailureRatePercent >= settings.failoverThresholdPercent()) {
             primaryDisabled = true;
         }
     }

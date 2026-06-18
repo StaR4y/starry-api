@@ -1,9 +1,7 @@
 package tech.starryapi.account;
 
-import java.util.Map;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.function.Function;
-import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -57,15 +55,17 @@ public class AccountPoolRetestService {
         return repository.findAll()
             .collectList()
             .flatMap(accounts -> {
-                Map<String, ProxyAccountEntity> byId = accounts.stream()
-                    .filter(account -> account.getAccountId() != null && !account.getAccountId().isBlank())
-                    .collect(Collectors.toMap(ProxyAccountEntity::getAccountId, Function.identity(), (left, right) -> left));
-                if (byId.isEmpty()) {
+                List<String> accountIds = accounts.stream()
+                    .map(ProxyAccountEntity::getAccountId)
+                    .filter(accountId -> accountId != null && !accountId.isBlank())
+                    .sorted()
+                    .toList();
+                if (accountIds.isEmpty()) {
                     policyService.markRetestCompleted(0.0, 0);
                     return Mono.empty();
                 }
                 return accountTestService.test(new AccountDtos.TestAccountsRequest(
-                        byId.keySet().stream().sorted().toList(),
+                        accountIds,
                         false,
                         "auto",
                         "Reply OK in one short sentence.",
@@ -73,16 +73,16 @@ public class AccountPoolRetestService {
                         true
                     ))
                     .doOnNext(response -> {
-                        PrimaryRetestStats stats = primaryRetestStats(response, byId);
-                        policyService.markRetestCompleted(stats.failureRatePercent(), stats.samples());
+                        RetestRecoveryStats stats = retestRecoveryStats(response);
+                        policyService.markRetestCompleted(stats.recoveryRatePercent(), stats.samples());
                         log.info(
-                            "Account pool retest completed: total={}, success={}, failed={}, skipped={}, primarySamples={}, primaryFailureRate={}%",
+                            "Account pool retest completed: total={}, success={}, failed={}, skipped={}, samples={}, recoveryRate={}%",
                             response.total(),
                             response.success(),
                             response.failed(),
                             response.skipped(),
                             stats.samples(),
-                            stats.failureRatePercent()
+                            stats.recoveryRatePercent()
                         );
                     })
                     .then();
@@ -90,29 +90,22 @@ public class AccountPoolRetestService {
             .doFinally(signal -> running.set(false));
     }
 
-    private PrimaryRetestStats primaryRetestStats(
-        AccountDtos.TestAccountsResponse response,
-        Map<String, ProxyAccountEntity> accounts
-    ) {
+    private RetestRecoveryStats retestRecoveryStats(AccountDtos.TestAccountsResponse response) {
         long samples = 0;
-        long failures = 0;
+        long successes = 0;
         for (AccountDtos.TestAccountItemResponse item : response.items()) {
-            ProxyAccountEntity account = accounts.get(item.accountId());
-            if (account == null || !AccountPoolPolicyService.PRIMARY_TIER.equals(AccountPoolPolicyService.normalizePoolTier(account.getPoolTier()))) {
-                continue;
-            }
             if ("SKIPPED".equals(item.status())) {
                 continue;
             }
             samples++;
-            if (!"SUCCESS".equals(item.status())) {
-                failures++;
+            if ("SUCCESS".equals(item.status())) {
+                successes++;
             }
         }
-        double rate = samples <= 0 ? 0.0 : AccountPoolPolicyService.roundPercent(failures * 100.0 / samples);
-        return new PrimaryRetestStats(samples, failures, rate);
+        double rate = samples <= 0 ? 0.0 : AccountPoolPolicyService.roundPercent(successes * 100.0 / samples);
+        return new RetestRecoveryStats(samples, successes, rate);
     }
 
-    private record PrimaryRetestStats(long samples, long failures, double failureRatePercent) {
+    private record RetestRecoveryStats(long samples, long successes, double recoveryRatePercent) {
     }
 }

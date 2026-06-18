@@ -181,7 +181,7 @@ public class AccountSettingsService {
             intValue(values, POOL_POLICY_MIN_SAMPLE_SIZE, 10, 1, 100000),
             doubleValue(values, POOL_POLICY_RETEST_THRESHOLD_PERCENT, 50.0, 0.0, 100.0),
             doubleValue(values, POOL_POLICY_FAILOVER_THRESHOLD_PERCENT, 70.0, 0.0, 100.0),
-            doubleValue(values, POOL_POLICY_RECOVERY_THRESHOLD_PERCENT, 10.0, 0.0, 100.0),
+            doubleValue(values, POOL_POLICY_RECOVERY_THRESHOLD_PERCENT, 70.0, 0.0, 100.0),
             intValue(values, POOL_POLICY_RETEST_INTERVAL_MINUTES, 5, 1, 24 * 60),
             intValue(values, POOL_POLICY_RETEST_MAX_CONCURRENCY, 4, 1, 16),
             bool(values, POOL_POLICY_AUTO_WEIGHT_ENABLED, true)
@@ -245,12 +245,9 @@ public class AccountSettingsService {
     private AccountDtos.PoolPolicySettings normalizePoolPolicySettings(AccountDtos.PoolPolicySettings settings) {
         double retest = clamp(firstNonNull(settings.retestThresholdPercent(), 50.0), 0.0, 100.0);
         double failover = clamp(firstNonNull(settings.failoverThresholdPercent(), 70.0), 0.0, 100.0);
-        double recovery = clamp(firstNonNull(settings.recoveryThresholdPercent(), 10.0), 0.0, 100.0);
+        double recovery = clamp(firstNonNull(settings.recoveryThresholdPercent(), 70.0), 0.0, 100.0);
         if (failover < retest) {
             failover = retest;
-        }
-        if (recovery > retest) {
-            recovery = retest;
         }
         return new AccountDtos.PoolPolicySettings(
             Boolean.TRUE.equals(settings.enabled()),

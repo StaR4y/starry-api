@@ -366,6 +366,7 @@ export interface AccountPoolStatus {
   lastEvaluatedAt: string | null;
   lastRetestAt: string | null;
   lastRetestFailureRatePercent: number;
+  lastRetestRecoveryRatePercent: number;
   retestRunning: boolean;
   settings: AccountPoolPolicySettings;
   failureRanking: AccountFailureRankingItem[];

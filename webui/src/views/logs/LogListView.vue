@@ -110,9 +110,7 @@
           <span class="mono">{{ detail.requestId }}</span>
         </el-descriptions-item>
         <el-descriptions-item label="时间">
-          {{
-            formatDateTime(detail.createdAt)
-          }}
+          {{ formatDateTime(detail.createdAt) }}
         </el-descriptions-item>
         <el-descriptions-item label="路径">{{ detail.path }}</el-descriptions-item>
         <el-descriptions-item label="模型">{{ detail.model || '—' }}</el-descriptions-item>

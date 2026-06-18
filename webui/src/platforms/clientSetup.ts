@@ -317,9 +317,6 @@ function codexCcSwitchProviderUrl(input: {
     ['app', 'codex'],
     ['name', input.name],
     ['homepage', input.homepage],
-    ['apiKey', input.apiKey],
-    ['model', CODEX_MODEL],
-    ['icon', 'openai'],
     ['enabled', 'true'],
     ['configFormat', 'json'],
     ['config', base64EncodeUtf8(JSON.stringify(config))],
@@ -351,7 +348,6 @@ function ccSwitchProviderUrl(input: {
     ['model', input.model],
     ['icon', input.icon],
     ['enabled', 'true'],
-    ['configFormat', 'json'],
   ]);
   if (input.notes) params.set('notes', input.notes);
   if (input.haikuModel) params.set('haikuModel', input.haikuModel);

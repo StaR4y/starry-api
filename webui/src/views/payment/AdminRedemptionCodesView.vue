@@ -197,9 +197,7 @@
           </el-table-column>
           <el-table-column label="使用用户" min-width="160">
             <template #default="{ row }">
-              {{
-                row.usedByUsername || row.usedByUserId || '—'
-              }}
+              {{ row.usedByUsername || row.usedByUserId || '—' }}
             </template>
           </el-table-column>
           <el-table-column label="过期时间" width="170">

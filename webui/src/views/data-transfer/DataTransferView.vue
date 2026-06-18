@@ -191,11 +191,7 @@
             <h3>下载完整备份包</h3>
             <p>打包 database.sql、备份元数据和说明文件，适合跨服务器迁移。</p>
           </div>
-          <el-button
-            :icon="Download"
-            :loading="downloading === 'backup'"
-            @click="exportBackup"
-          >
+          <el-button :icon="Download" :loading="downloading === 'backup'" @click="exportBackup">
             下载 ZIP
           </el-button>
         </article>
@@ -216,7 +212,10 @@
           <el-icon><Warning /></el-icon>
           <div>
             <strong>导入会修改当前数据库</strong>
-            <p>支持上传 .sql 或 Starry API .zip 备份包。导入前会自动创建回滚备份，但仍建议先下载一份离线备份。</p>
+            <p>
+              支持上传 .sql 或 Starry API .zip
+              备份包。导入前会自动创建回滚备份，但仍建议先下载一份离线备份。
+            </p>
           </div>
         </div>
 
@@ -230,7 +229,11 @@
           >
           <el-button :icon="Upload" @click="chooseFile">选择文件</el-button>
           <span class="import-panel__filename">
-            {{ selectedFile ? `${selectedFile.name} · ${formatBytes(selectedFile.size)}` : '未选择文件' }}
+            {{
+              selectedFile
+                ? `${selectedFile.name} · ${formatBytes(selectedFile.size)}`
+                : '未选择文件'
+            }}
           </span>
           <el-button
             type="danger"

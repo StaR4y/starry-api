@@ -298,6 +298,7 @@ public final class AccountDtos {
         Instant lastEvaluatedAt,
         Instant lastRetestAt,
         Double lastRetestFailureRatePercent,
+        Double lastRetestRecoveryRatePercent,
         Boolean retestRunning,
         PoolPolicySettings settings,
         List<AccountFailureRankingResponse> failureRanking
