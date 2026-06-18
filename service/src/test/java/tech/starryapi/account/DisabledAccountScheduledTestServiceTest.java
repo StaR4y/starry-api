@@ -117,6 +117,76 @@ class DisabledAccountScheduledTestServiceTest {
     }
 
     @Test
+    void tickTestsSuspendedAccountsWhenIncluded() {
+        AccountSettingsService settingsService = mock(AccountSettingsService.class);
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountTestService accountTestService = mock(AccountTestService.class);
+        when(settingsService.disabledAccountScheduledTestSettings()).thenReturn(Mono.just(settings(true)));
+        when(repository.findAll()).thenReturn(Flux.just(
+            suspendedAccount("anthropic-suspended", "Anthropic", Instant.parse("2026-06-07T08:00:00Z")),
+            account("openai-suspended", false, "OpenAI")
+        ));
+        when(accountTestService.test(org.mockito.ArgumentMatchers.any()))
+            .thenReturn(Mono.just(new AccountDtos.TestAccountsResponse(
+                1,
+                1,
+                0,
+                0,
+                Instant.now(),
+                Instant.now(),
+                List.of()
+            )));
+
+        DisabledAccountScheduledTestService service = new DisabledAccountScheduledTestService(
+            settingsService,
+            repository,
+            accountTestService
+        );
+
+        service.tick().block();
+
+        verify(accountTestService).test(argThat(request ->
+            request.accountIds().equals(List.of("anthropic-suspended"))
+                && Boolean.FALSE.equals(request.onlyEnabled())
+                && Boolean.TRUE.equals(request.updateStatus())
+        ));
+    }
+
+    @Test
+    void tickPrioritizesOldestEligibleAccountWhenBatchIsLimited() {
+        AccountSettingsService settingsService = mock(AccountSettingsService.class);
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountTestService accountTestService = mock(AccountTestService.class);
+        when(settingsService.disabledAccountScheduledTestSettings()).thenReturn(Mono.just(settings(true)));
+        when(repository.findAll()).thenReturn(Flux.just(
+            suspendedAccount("newer-suspended", "Anthropic", Instant.parse("2026-06-07T09:00:00Z")),
+            suspendedAccount("older-suspended", "Anthropic", Instant.parse("2026-06-07T07:00:00Z"))
+        ));
+        when(accountTestService.test(org.mockito.ArgumentMatchers.any()))
+            .thenReturn(Mono.just(new AccountDtos.TestAccountsResponse(
+                1,
+                1,
+                0,
+                0,
+                Instant.now(),
+                Instant.now(),
+                List.of()
+            )));
+
+        DisabledAccountScheduledTestService service = new DisabledAccountScheduledTestService(
+            settingsService,
+            repository,
+            accountTestService
+        );
+
+        service.tick().block();
+
+        verify(accountTestService).test(argThat(request ->
+            request.accountIds().equals(List.of("older-suspended"))
+        ));
+    }
+
+    @Test
     void runWhenNoAvailableAccountsUsesRuntimeAccountFilterIgnoringConfiguredProviders() {
         AccountSettingsService settingsService = mock(AccountSettingsService.class);
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
@@ -147,6 +217,41 @@ class DisabledAccountScheduledTestServiceTest {
 
         verify(accountTestService).test(argThat(request ->
             request.accountIds().equals(List.of("openai-disabled"))
+        ));
+    }
+
+    @Test
+    void runWhenNoAvailableAccountsIgnoresMinimumAgeForFreshlySuspendedAccounts() {
+        AccountSettingsService settingsService = mock(AccountSettingsService.class);
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountTestService accountTestService = mock(AccountTestService.class);
+        when(settingsService.disabledAccountScheduledTestSettings()).thenReturn(Mono.just(settings(true, 30)));
+        when(repository.findAll()).thenReturn(Flux.just(
+            suspendedAccount("openai-suspended", "OpenAI", Instant.now())
+        ));
+        when(accountTestService.test(org.mockito.ArgumentMatchers.any()))
+            .thenReturn(Mono.just(new AccountDtos.TestAccountsResponse(
+                1,
+                1,
+                0,
+                0,
+                Instant.now(),
+                Instant.now(),
+                List.of()
+            )));
+
+        DisabledAccountScheduledTestService service = new DisabledAccountScheduledTestService(
+            settingsService,
+            repository,
+            accountTestService
+        );
+
+        service.runWhenNoAvailableAccounts(AccountPlatforms::isOpenAi).block();
+
+        verify(accountTestService).test(argThat(request ->
+            request.accountIds().equals(List.of("openai-suspended"))
+                && Boolean.FALSE.equals(request.onlyEnabled())
+                && Boolean.TRUE.equals(request.updateStatus())
         ));
     }
 
@@ -195,7 +300,7 @@ class DisabledAccountScheduledTestServiceTest {
             true,
             true,
             true,
-            false,
+            true,
             false,
             minAgeMinutes,
             List.of("Anthropic")
@@ -213,6 +318,12 @@ class DisabledAccountScheduledTestServiceTest {
         account.setProvider(provider);
         account.setAuthMethod(AccountPlatforms.OPENAI_API_KEY_AUTH);
         account.setUpdatedAt(updatedAt);
+        return account;
+    }
+
+    private ProxyAccountEntity suspendedAccount(String accountId, String provider, Instant suspendedAt) {
+        ProxyAccountEntity account = account(accountId, false, provider, suspendedAt.minusSeconds(60));
+        account.setSuspendedAt(suspendedAt);
         return account;
     }
 }

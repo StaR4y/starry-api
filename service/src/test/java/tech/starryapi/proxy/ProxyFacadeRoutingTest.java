@@ -246,6 +246,98 @@ class ProxyFacadeRoutingTest {
     }
 
     @Test
+    void chatAutoRetestsDisabledAccountsAfterRetryPoolIsExhausted() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        AccountAutoSuspendService accountAutoSuspendService = mock(AccountAutoSuspendService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        DisabledAccountScheduledTestService disabledAccountScheduledTestService = mock(DisabledAccountScheduledTestService.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity account = openAiAccount();
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "gpt-5",
+              "messages": [{"role": "user", "content": "hi"}]
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/chat/completions")
+        );
+        Instant now = Instant.now();
+
+        when(apiKeyService.authenticate(exchange))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("gpt-5", "key-1")).thenReturn("gpt-5");
+        when(accountPoolService.selectOpenAiAccount("key-1"))
+            .thenReturn(Mono.just(account), Mono.just(account));
+        when(accountPoolService.selectOpenAiAccount(eq("key-1"), eq(List.of("openai-main"))))
+            .thenReturn(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "No available OpenAI upstream account")));
+        when(openAiUpstreamClient.complete(eq(account), eq(request), eq("gpt-5")))
+            .thenReturn(
+                Mono.error(new UpstreamException(429, "quota exhausted", true)),
+                Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0)))
+            );
+        when(accountPoolService.recordRequestFailure(
+            "openai-main",
+            AccountPoolService.UpstreamErrorType.RECOVERABLE,
+            429,
+            "quota exhausted"
+        )).thenReturn(Mono.just(new AccountPoolService.RequestFailureRecord("openai-main", 2, 429, true)));
+        when(disabledAccountScheduledTestService.runWhenNoAvailableAccounts(any()))
+            .thenReturn(Mono.just(new AccountDtos.TestAccountsResponse(
+                1,
+                1,
+                0,
+                0,
+                now,
+                now,
+                List.of(new AccountDtos.TestAccountItemResponse(
+                    account.getAccountId(),
+                    account.getEmail(),
+                    "SUCCESS",
+                    "OK",
+                    "OK",
+                    200,
+                    10L,
+                    now,
+                    "gpt-5"
+                ))
+            )));
+        when(accountPoolService.recordSuccess("openai-main", 2L)).thenReturn(Mono.empty());
+        when(apiKeyService.recordUsage(eq("key-1"), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
+        when(statsService.log(any())).thenReturn(Mono.empty());
+
+        ResponseEntity<?> response = proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService,
+            mock(AccountSettingsService.class),
+            paymentSettingsService(BigDecimal.ONE),
+            mock(AnthropicUpstreamClient.class),
+            disabledAccountScheduledTestService
+        ).chat(request, exchange).block();
+
+        assertThat(response).isNotNull();
+        verify(accountPoolService, org.mockito.Mockito.times(2)).selectOpenAiAccount("key-1");
+        verify(accountPoolService).selectOpenAiAccount(eq("key-1"), eq(List.of("openai-main")));
+        verify(disabledAccountScheduledTestService).runWhenNoAvailableAccounts(any());
+        verify(openAiUpstreamClient, org.mockito.Mockito.times(2)).complete(eq(account), eq(request), eq("gpt-5"));
+        verify(accountPoolService).recordSuccess("openai-main", 2L);
+    }
+
+    @Test
     void anthropicPrefixedModelsUseAnthropicAccountPoolAndUpstream() throws Exception {
         ApiKeyService apiKeyService = mock(ApiKeyService.class);
         AccountPoolService accountPoolService = mock(AccountPoolService.class);

@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -58,13 +59,13 @@ public class DisabledAccountScheduledTestService {
                 if (!due(settings, Instant.now())) {
                     return Mono.empty();
                 }
-                return runWithLock(settings, false, false, account -> true, false).then();
+                return runWithLock(settings, false, false, account -> true, false, false).then();
             });
     }
 
     public Mono<AccountDtos.TestAccountsResponse> runNow() {
         return settingsService.disabledAccountScheduledTestSettings()
-            .flatMap(settings -> runWithLock(settings, true, true, account -> true, false));
+            .flatMap(settings -> runWithLock(settings, true, true, account -> true, false, true));
     }
 
     public Mono<AccountDtos.TestAccountsResponse> runWhenNoAvailableAccounts(
@@ -73,7 +74,7 @@ public class DisabledAccountScheduledTestService {
         Predicate<ProxyAccountEntity> safeFilter = accountFilter == null ? account -> true : accountFilter;
         return settingsService.disabledAccountScheduledTestSettings()
             .flatMap(settings -> Boolean.TRUE.equals(settings.autoRunWhenNoAvailableAccounts())
-                ? runWithLock(settings, false, true, safeFilter, true).defaultIfEmpty(emptyResponse())
+                ? runWithLock(settings, false, false, safeFilter, true, true).defaultIfEmpty(emptyResponse())
                 : Mono.empty());
     }
 
@@ -111,7 +112,8 @@ public class DisabledAccountScheduledTestService {
         boolean failWhenRunning,
         boolean manualRun,
         Predicate<ProxyAccountEntity> accountFilter,
-        boolean ignoreConfiguredProviders
+        boolean ignoreConfiguredProviders,
+        boolean ignoreMinAge
     ) {
         if (!running.compareAndSet(false, true)) {
             if (failWhenRunning) {
@@ -123,17 +125,25 @@ public class DisabledAccountScheduledTestService {
             }
             return Mono.empty();
         }
-        return targetAccountIds(settings, manualRun, accountFilter, ignoreConfiguredProviders)
-            .flatMap(ids -> ids.isEmpty()
-                ? Mono.just(emptyResponse())
-                : accountTestService.test(new AccountDtos.TestAccountsRequest(
-                    ids,
-                    false,
-                    settings.model(),
-                    settings.prompt(),
-                    settings.maxConcurrency(),
+        return targetAccountIds(settings, manualRun, accountFilter, ignoreConfiguredProviders, ignoreMinAge)
+            .flatMap(ids -> {
+                log.info(
+                    "Disabled account scheduled test selected {} target accounts: manualRun={}, updateStatus={}",
+                    ids.size(),
+                    manualRun,
                     settings.updateStatus()
-                )))
+                );
+                return ids.isEmpty()
+                    ? Mono.just(emptyResponse())
+                    : accountTestService.test(new AccountDtos.TestAccountsRequest(
+                        ids,
+                        false,
+                        settings.model(),
+                        settings.prompt(),
+                        settings.maxConcurrency(),
+                        settings.updateStatus()
+                    ));
+            })
             .doOnNext(response -> log.info(
                 "Disabled account scheduled test completed: total={}, success={}, failed={}, skipped={}",
                 response.total(),
@@ -148,21 +158,25 @@ public class DisabledAccountScheduledTestService {
         AccountDtos.DisabledAccountScheduledTestSettings settings,
         boolean manualRun,
         Predicate<ProxyAccountEntity> accountFilter,
-        boolean ignoreConfiguredProviders
+        boolean ignoreConfiguredProviders,
+        boolean ignoreMinAge
     ) {
         Instant now = Instant.now();
         Predicate<ProxyAccountEntity> safeFilter = accountFilter == null ? account -> true : accountFilter;
-        var targets = repository.findAll()
+        return repository.findAll()
             .filter(safeFilter)
             .filter(account -> manualRun || matchesState(account, settings))
             .filter(account -> ignoreConfiguredProviders || matchesProvider(account, settings.providers()))
-            .filter(account -> manualRun || oldEnough(account, settings.minAgeMinutes(), now))
-            .map(ProxyAccountEntity::getAccountId)
-            .filter(accountId -> accountId != null && !accountId.isBlank());
-        if (!manualRun) {
-            targets = targets.take(settings.maxAccountsPerRun());
-        }
-        return targets.collectList();
+            .filter(account -> manualRun || ignoreMinAge || oldEnough(account, settings.minAgeMinutes(), now))
+            .filter(account -> account.getAccountId() != null && !account.getAccountId().isBlank())
+            .collectList()
+            .map(accounts -> accounts.stream()
+                .sorted(Comparator
+                    .comparing((ProxyAccountEntity account) -> eligibleSince(account))
+                    .thenComparing(account -> account.getAccountId() == null ? "" : account.getAccountId()))
+                .limit(manualRun ? Long.MAX_VALUE : scheduledBatchLimit(settings))
+                .map(ProxyAccountEntity::getAccountId)
+                .toList());
     }
 
     private boolean matchesState(
@@ -193,14 +207,23 @@ public class DisabledAccountScheduledTestService {
         if (minutes == 0) {
             return true;
         }
-        Instant since = firstNonNull(
+        Instant since = eligibleSince(account);
+        return since == null || !since.plus(Duration.ofMinutes(minutes)).isAfter(now);
+    }
+
+    private Instant eligibleSince(ProxyAccountEntity account) {
+        return firstNonNull(
             account.getSuspendedAt(),
             account.getQuotaExhaustedAt(),
             account.getUpdatedAt(),
             account.getCreatedAt(),
-            account.getLastUsedAt()
+            account.getLastUsedAt(),
+            Instant.EPOCH
         );
-        return since == null || !since.plus(Duration.ofMinutes(minutes)).isAfter(now);
+    }
+
+    private long scheduledBatchLimit(AccountDtos.DisabledAccountScheduledTestSettings settings) {
+        return Math.max(1, settings.maxAccountsPerRun() == null ? 1 : settings.maxAccountsPerRun());
     }
 
     private AccountDtos.TestAccountsResponse emptyResponse() {

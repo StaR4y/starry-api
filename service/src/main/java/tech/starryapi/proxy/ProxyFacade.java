@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
@@ -195,7 +196,8 @@ public class ProxyFacade {
             fastMode,
             requestId,
             start,
-            List.of()
+            List.of(),
+            new AtomicBoolean(false)
         )));
     }
 
@@ -213,9 +215,10 @@ public class ProxyFacade {
         boolean fastMode,
         String requestId,
         Instant start,
-        List<String> attemptedAccountIds
+        List<String> attemptedAccountIds,
+        AtomicBoolean autoRetestAttempted
     ) {
-        return selectAccountWithAutoRetest(route, sessionHint, attemptedAccountIds, false)
+        return selectAccountWithAutoRetest(route, sessionHint, attemptedAccountIds, false, autoRetestAttempted)
             .flatMap(account -> callWithAccount(route, account, upstreamRequest, mappedModel, sessionHint)
                 .flatMap(result -> {
                     Mono<Void> accounting = recordSuccess(requestId, principal, account, path, requestedModel, result, route, fastMode, start);
@@ -244,7 +247,8 @@ public class ProxyFacade {
                         fastMode,
                         requestId,
                         start,
-                        nextAttempted
+                        nextAttempted,
+                        autoRetestAttempted
                     ).onErrorResume(retryError -> isNoAvailableAccount(retryError)
                         ? Mono.<ResponseEntity<?>>error(mapError(error))
                         : Mono.<ResponseEntity<?>>error(retryError)));
@@ -290,7 +294,8 @@ public class ProxyFacade {
             preferCodexAccounts,
             requestId,
             start,
-            List.of()
+            List.of(),
+            new AtomicBoolean(false)
         )));
     }
 
@@ -312,9 +317,10 @@ public class ProxyFacade {
         boolean preferCodexAccounts,
         String requestId,
         Instant start,
-        List<String> attemptedAccountIds
+        List<String> attemptedAccountIds,
+        AtomicBoolean autoRetestAttempted
     ) {
-        return selectAccountWithAutoRetest(route, sessionHint, attemptedAccountIds, preferCodexAccounts)
+        return selectAccountWithAutoRetest(route, sessionHint, attemptedAccountIds, preferCodexAccounts, autoRetestAttempted)
             .flatMap(account -> callResponsesWithAccount(route, account, upstreamRequest, mappedModel, sessionHint)
                 .flatMap(result -> {
                     Mono<Void> accounting = recordSuccess(requestId, principal, account, path, requestedModel, result, route, fastMode, start);
@@ -343,7 +349,8 @@ public class ProxyFacade {
                         preferCodexAccounts,
                         requestId,
                         start,
-                        nextAttempted
+                        nextAttempted,
+                        autoRetestAttempted
                     ).onErrorResume(retryError -> isNoAvailableAccount(retryError)
                         ? Mono.<ResponseEntity<?>>error(mapError(error))
                         : Mono.<ResponseEntity<?>>error(retryError)));
@@ -396,11 +403,12 @@ public class ProxyFacade {
         UpstreamRoute route,
         String sessionHint,
         List<String> attemptedAccountIds,
-        boolean preferCodexAccounts
+        boolean preferCodexAccounts,
+        AtomicBoolean autoRetestAttempted
     ) {
         return selectAccount(route, sessionHint, attemptedAccountIds, preferCodexAccounts)
             .onErrorResume(error -> {
-                if (!shouldAutoRetestUnavailableAccounts(error, attemptedAccountIds)) {
+                if (!shouldAutoRetestUnavailableAccounts(error, autoRetestAttempted)) {
                     return Mono.error(error);
                 }
                 return disabledAccountScheduledTestService.runWhenNoAvailableAccounts(accountFilterFor(route))
@@ -413,7 +421,7 @@ public class ProxyFacade {
                         response.skipped()
                     ))
                     .filter(response -> response.success() != null && response.success() > 0)
-                    .flatMap(response -> selectAccount(route, sessionHint, attemptedAccountIds, preferCodexAccounts))
+                    .flatMap(response -> selectAccount(route, sessionHint, List.of(), preferCodexAccounts))
                     .switchIfEmpty(Mono.error(error))
                     .onErrorResume(retestError -> {
                         if (!isNoAvailableAccount(retestError)) {
@@ -424,9 +432,10 @@ public class ProxyFacade {
             });
     }
 
-    private boolean shouldAutoRetestUnavailableAccounts(Throwable error, List<String> attemptedAccountIds) {
+    private boolean shouldAutoRetestUnavailableAccounts(Throwable error, AtomicBoolean autoRetestAttempted) {
         return isNoAvailableAccount(error)
-            && (attemptedAccountIds == null || attemptedAccountIds.isEmpty());
+            && autoRetestAttempted != null
+            && autoRetestAttempted.compareAndSet(false, true);
     }
 
     private java.util.function.Predicate<ProxyAccountEntity> accountFilterFor(UpstreamRoute route) {
