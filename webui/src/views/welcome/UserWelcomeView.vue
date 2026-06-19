@@ -54,11 +54,6 @@
     return model.model?.trim() || '未指定模型';
   }
 
-  function successRate(model: ModelUsageSummary) {
-    if (!model.requestCount) return '—';
-    return `${Math.round((model.successfulRequests / model.requestCount) * 100)}%`;
-  }
-
   function barWidth(value: number, maxValue: number) {
     if (maxValue <= 0 || value <= 0) return '0%';
     return `${Math.max((value / maxValue) * 100, 4)}%`;
@@ -183,10 +178,7 @@
               </div>
               <div class="welcome__model-meta text-muted">
                 <span>
-                  <strong>{{ formatNumber(model.requestCount) }}</strong> 次调用 · 成功率
-                  <strong
-                    :class="{ 'text-success': model.successfulRequests === model.requestCount }"
-                  >{{ successRate(model) }}</strong>
+                  <strong>{{ formatNumber(model.requestCount) }}</strong> 次调用
                 </span>
                 <span>最近 {{ formatDateTime(model.lastUsedAt) }}</span>
               </div>

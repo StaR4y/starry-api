@@ -141,7 +141,13 @@ public class OpenAiResponseFactory {
 
         for (int outputIndex = 0; outputIndex < output.size(); outputIndex++) {
             JsonNode item = output.get(outputIndex);
-            events.add(responseSse(outputItemEvent("response.output_item.added", responseId, item, outputIndex, sequence++)));
+            events.add(responseSse(outputItemEvent(
+                "response.output_item.added",
+                responseId,
+                outputItemAddedShape(item),
+                outputIndex,
+                sequence++
+            )));
             if ("message".equals(item.path("type").asText())) {
                 appendMessageStreamEvents(events, responseId, item, outputIndex, sequence);
                 sequence += messageEventCount(item);
@@ -292,6 +298,20 @@ public class OpenAiResponseFactory {
         event.put("output_index", outputIndex);
         event.set("item", item.deepCopy());
         return event;
+    }
+
+    private JsonNode outputItemAddedShape(JsonNode item) {
+        if (!item.isObject()) {
+            return item;
+        }
+        ObjectNode copy = item.deepCopy();
+        String type = copy.path("type").asText("");
+        if ("function_call".equals(type)) {
+            copy.put("arguments", "");
+        } else if ("custom_tool_call".equals(type)) {
+            copy.put("input", "");
+        }
+        return copy;
     }
 
     private ObjectNode contentPartEvent(

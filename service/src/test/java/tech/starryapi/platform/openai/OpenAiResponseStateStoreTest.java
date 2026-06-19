@@ -80,4 +80,52 @@ class OpenAiResponseStateStoreTest {
         assertThat(expanded.path("previous_response_id").asText()).isEqualTo("resp_missing");
         assertThat(expanded.path("input").asText()).isEqualTo("continue");
     }
+
+    @Test
+    void expandsCustomToolCallHistoryWithoutRewritingItAsFunctionTool() throws Exception {
+        JsonNode firstRequest = objectMapper.readTree("""
+            {
+              "model": "gpt-5.5",
+              "input": "write a file"
+            }
+            """);
+        ObjectNode firstResponse = (ObjectNode) objectMapper.readTree("""
+            {
+              "id": "resp_1",
+              "output": [
+                {
+                  "type": "custom_tool_call",
+                  "id": "ctc_1",
+                  "call_id": "call_patch",
+                  "name": "apply_patch",
+                  "input": "*** Begin Patch\\n*** Add File: 1.txt\\n+hello\\n*** End Patch"
+                }
+              ]
+            }
+            """);
+        JsonNode nextRequest = objectMapper.readTree("""
+            {
+              "model": "gpt-5.5",
+              "previous_response_id": "resp_1",
+              "input": [
+                {
+                  "type": "custom_tool_call_output",
+                  "call_id": "call_patch",
+                  "output": "Done"
+                }
+              ]
+            }
+            """);
+
+        store.remember(firstResponse, firstRequest);
+        ObjectNode expanded = store.expand(nextRequest);
+
+        JsonNode input = expanded.path("input");
+        assertThat(input).hasSize(3);
+        assertThat(input.path(1).path("type").asText()).isEqualTo("custom_tool_call");
+        assertThat(input.path(1).path("call_id").asText()).isEqualTo("call_patch");
+        assertThat(input.path(1).path("input").asText()).startsWith("*** Begin Patch");
+        assertThat(input.path(2).path("type").asText()).isEqualTo("custom_tool_call_output");
+        assertThat(input.path(2).path("call_id").asText()).isEqualTo("call_patch");
+    }
 }

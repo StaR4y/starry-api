@@ -120,6 +120,12 @@ class OpenAiResponseFactoryTest {
             .extracting(event -> event.path("type").asText())
             .contains("response.output_item.added", "response.function_call_arguments.done", "response.output_item.done", "response.completed");
 
+        JsonNode toolAdded = jsonEvents.stream()
+            .filter(event -> "response.output_item.added".equals(event.path("type").asText()))
+            .findFirst()
+            .orElseThrow();
+        assertThat(toolAdded.path("item").path("arguments").asText()).isEmpty();
+
         JsonNode toolDone = jsonEvents.stream()
             .filter(event -> "response.output_item.done".equals(event.path("type").asText()))
             .findFirst()
@@ -160,6 +166,12 @@ class OpenAiResponseFactoryTest {
                 "response.output_item.done",
                 "response.completed"
             );
+
+        JsonNode toolAdded = jsonEvents.stream()
+            .filter(event -> "response.output_item.added".equals(event.path("type").asText()))
+            .findFirst()
+            .orElseThrow();
+        assertThat(toolAdded.path("item").path("input").asText()).isEmpty();
 
         JsonNode toolDone = jsonEvents.stream()
             .filter(event -> "response.output_item.done".equals(event.path("type").asText()))
