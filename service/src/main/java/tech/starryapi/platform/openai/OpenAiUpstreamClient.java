@@ -31,6 +31,7 @@ public class OpenAiUpstreamClient {
 
     private static final String CODEX_USER_AGENT = "codex_cli_rs/0.139.0";
     private static final String CODEX_ORIGINATOR = "codex_cli_rs";
+    private static final String APPLY_PATCH_TOOL_NAME = "apply_patch";
 
     private final ObjectMapper objectMapper;
     private final WebClient webClient;
@@ -142,6 +143,7 @@ public class OpenAiUpstreamClient {
     ) {
         ObjectNode body = request.deepCopy();
         body.put("model", model);
+        normalizeResponsesApplyPatchTool(body);
         forceNonStreaming(body);
 
         String endpoint = OpenAiEndpoints.openAiApi(account.getBaseUrl(), "/responses");
@@ -331,6 +333,10 @@ public class OpenAiUpstreamClient {
             }
             JsonNode function = tool.path("function");
             JsonNode source = function.isObject() ? function : tool;
+            if (isApplyPatchTool(source)) {
+                converted.add(codexCustomTool(tool, source));
+                continue;
+            }
             ObjectNode codexTool = converted.addObject();
             codexTool.put("type", "function");
             codexTool.put("name", source.path("name").asText());
@@ -347,18 +353,94 @@ public class OpenAiUpstreamClient {
         return converted;
     }
 
+    private void normalizeResponsesApplyPatchTool(ObjectNode body) {
+        JsonNode tools = body.path("tools");
+        if (tools.isArray() && !tools.isEmpty()) {
+            ArrayNode converted = objectMapper.createArrayNode();
+            boolean changed = false;
+            for (JsonNode tool : tools) {
+                JsonNode normalized = applyPatchCustomTool(tool);
+                changed = changed || normalized != tool;
+                converted.add(normalized);
+            }
+            if (changed) {
+                body.set("tools", converted);
+            }
+        }
+        if (body.has("tool_choice")) {
+            JsonNode normalizedToolChoice = applyPatchToolChoice(body.path("tool_choice"));
+            if (normalizedToolChoice != body.path("tool_choice")) {
+                body.set("tool_choice", normalizedToolChoice);
+            }
+        }
+    }
+
+    private JsonNode applyPatchCustomTool(JsonNode tool) {
+        if (!"function".equals(tool.path("type").asText())) {
+            return tool;
+        }
+        JsonNode function = tool.path("function");
+        JsonNode source = function.isObject() ? function : tool;
+        if (!isApplyPatchTool(source)) {
+            return tool;
+        }
+        return codexCustomTool(tool, source);
+    }
+
+    private ObjectNode codexCustomTool(JsonNode tool, JsonNode source) {
+        ObjectNode codexTool = objectMapper.createObjectNode();
+        codexTool.put("type", "custom");
+        codexTool.put("name", firstNonBlank(source.path("name").asText(null), tool.path("name").asText(null)));
+        JsonNode description = presentNode(source.path("description"), tool.path("description"));
+        if (description != null && !description.isMissingNode() && !description.isNull()) {
+            codexTool.set("description", description);
+        }
+        JsonNode format = presentNode(source.path("format"), tool.path("format"));
+        if (format != null && !format.isMissingNode() && !format.isNull()) {
+            codexTool.set("format", format.deepCopy());
+        }
+        return codexTool;
+    }
+
+    private boolean isApplyPatchTool(JsonNode source) {
+        return APPLY_PATCH_TOOL_NAME.equals(source.path("name").asText(null));
+    }
+
     private JsonNode codexToolChoice(JsonNode toolChoice) {
+        JsonNode applyPatchChoice = applyPatchToolChoice(toolChoice);
+        if (applyPatchChoice != toolChoice) {
+            return applyPatchChoice;
+        }
         if (!toolChoice.isObject() || !"function".equals(toolChoice.path("type").asText())) {
             return toolChoice;
         }
-        JsonNode function = toolChoice.path("function");
-        if (function.isMissingNode() || function.isNull()) {
+        String name = toolChoiceName(toolChoice);
+        if (name.isBlank()) {
             return toolChoice;
         }
         ObjectNode converted = objectMapper.createObjectNode();
         converted.put("type", "function");
-        converted.put("name", function.path("name").asText());
+        converted.put("name", name);
         return converted;
+    }
+
+    private JsonNode applyPatchToolChoice(JsonNode toolChoice) {
+        if (!toolChoice.isObject() || !"function".equals(toolChoice.path("type").asText())) {
+            return toolChoice;
+        }
+        String name = toolChoiceName(toolChoice);
+        if (!APPLY_PATCH_TOOL_NAME.equals(name)) {
+            return toolChoice;
+        }
+        ObjectNode converted = objectMapper.createObjectNode();
+        converted.put("type", "custom");
+        converted.put("name", name);
+        return converted;
+    }
+
+    private String toolChoiceName(JsonNode toolChoice) {
+        JsonNode function = toolChoice.path("function");
+        return firstNonBlank(function.path("name").asText(null), toolChoice.path("name").asText(null));
     }
 
     private ArrayNode codexInput(JsonNode request) {
@@ -784,14 +866,16 @@ public class OpenAiUpstreamClient {
         if (toolUses.stream().anyMatch(toolUse -> callId.equals(toolUse.id()))) {
             return;
         }
-        String rawInput = responseToolInput(item);
+        String effectiveType = responseToolUseType(type, name);
+        String rawInput = responseToolUseRawInput(effectiveType, name, responseToolInput(item));
+        JsonNode rawItem = responseToolOutputItem(item, effectiveType, rawInput);
         toolUses.add(new PlatformToolUse(
             callId,
             name,
             parseToolArguments(rawInput),
-            type,
+            effectiveType,
             rawInput,
-            item.deepCopy()
+            rawItem
         ));
     }
 
@@ -810,11 +894,11 @@ public class OpenAiUpstreamClient {
         pending.itemId = firstNonBlank(pending.itemId, itemId);
         pending.callId = firstNonBlank(pending.callId, callId);
         pending.name = firstNonBlank(pending.name, item.path("name").asText(null));
-        pending.type = firstNonBlank(pending.type, type);
+        pending.type = firstNonBlank(pending.type, responseToolUseType(type, pending.name));
         if (item.isObject()) {
             pending.item = item.deepCopy();
         }
-        String input = responseToolInput(item);
+        String input = responseToolUseRawInput(pending.type, pending.name, responseToolInput(item));
         if (input != null && !input.isBlank() && pending.arguments.length() == 0) {
             pending.arguments.append(input);
         }
@@ -869,13 +953,14 @@ public class OpenAiUpstreamClient {
             if (toolUses.stream().anyMatch(toolUse -> callId.equals(toolUse.id()))) {
                 continue;
             }
-            String rawInput = pending.arguments.toString();
+            String effectiveType = responseToolUseType(firstNonBlank(pending.type, "function_call"), pending.name);
+            String rawInput = responseToolUseRawInput(effectiveType, pending.name, pending.arguments.toString());
             JsonNode rawItem = pendingItemWithInput(pending, rawInput);
             toolUses.add(new PlatformToolUse(
                 callId,
                 pending.name,
                 parseToolArguments(rawInput),
-                firstNonBlank(pending.type, "function_call"),
+                effectiveType,
                 rawInput,
                 rawItem
             ));
@@ -909,13 +994,70 @@ public class OpenAiUpstreamClient {
             return null;
         }
         ObjectNode item = pending.item.deepCopy();
-        String type = firstNonBlank(pending.type, item.path("type").asText(null), "function_call");
+        String type = responseToolUseType(firstNonBlank(pending.type, item.path("type").asText(null), "function_call"), pending.name);
+        item.put("type", type);
         if ("custom_tool_call".equals(type)) {
+            item.remove(List.of("arguments", "status"));
             item.put("input", rawInput == null ? "" : rawInput);
         } else {
             item.put("arguments", rawInput == null || rawInput.isBlank() ? "{}" : rawInput);
         }
         return item;
+    }
+
+    private JsonNode responseToolOutputItem(JsonNode item, String type, String rawInput) {
+        if (item == null || !item.isObject()) {
+            return null;
+        }
+        ObjectNode copy = item.deepCopy();
+        copy.put("type", type);
+        if ("custom_tool_call".equals(type)) {
+            copy.remove(List.of("arguments", "status"));
+            copy.put("input", rawInput == null ? "" : rawInput);
+        } else if ("function_call".equals(type)) {
+            copy.remove("input");
+            copy.put("arguments", rawInput == null || rawInput.isBlank() ? "{}" : rawInput);
+        }
+        return copy;
+    }
+
+    private String responseToolUseType(String type, String name) {
+        if (APPLY_PATCH_TOOL_NAME.equals(name) && "function_call".equals(type)) {
+            return "custom_tool_call";
+        }
+        return type;
+    }
+
+    private String responseToolUseRawInput(String type, String name, String rawInput) {
+        if (!"custom_tool_call".equals(type) || !APPLY_PATCH_TOOL_NAME.equals(name)) {
+            return rawInput;
+        }
+        return extractCustomToolInput(rawInput);
+    }
+
+    private String extractCustomToolInput(String rawInput) {
+        if (rawInput == null || rawInput.isBlank()) {
+            return "";
+        }
+        try {
+            JsonNode parsed = objectMapper.readTree(rawInput);
+            if (parsed.isTextual()) {
+                return parsed.asText();
+            }
+            if (parsed.isObject()) {
+                String text = firstNonBlank(
+                    parsed.path("patch").asText(null),
+                    parsed.path("input").asText(null),
+                    parsed.path("text").asText(null)
+                );
+                if (!text.isBlank()) {
+                    return text;
+                }
+            }
+        } catch (Exception ignored) {
+            // The normal custom-tool path is already raw text.
+        }
+        return rawInput;
     }
 
     private JsonNode parseToolArguments(String arguments) {

@@ -303,9 +303,11 @@ class OpenAiUpstreamClientTest {
     }
 
     @Test
-    void codexUpstreamParsesIncrementalFunctionCallArguments() throws Exception {
+    void codexUpstreamConvertsFunctionApplyPatchArgumentsToCustomToolInput() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/responses", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             byte[] response = """
                 event: response.output_item.added
                 data: {"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_write","name":"apply_patch","arguments":""}}
@@ -346,7 +348,8 @@ class OpenAiUpstreamClientTest {
                 {
                   "model": "gpt-5.4-mini",
                   "input": "edit the file",
-                  "tools": [{"type": "function", "name": "apply_patch", "parameters": {"type": "object", "properties": {}}}]
+                  "tools": [{"type": "function", "name": "apply_patch", "parameters": {"type": "object", "properties": {}}}],
+                  "tool_choice": {"type": "function", "name": "apply_patch"}
                 }
                 """);
 
@@ -356,7 +359,18 @@ class OpenAiUpstreamClientTest {
             assertThat(result.toolUses()).hasSize(1);
             assertThat(result.toolUses().get(0).id()).isEqualTo("call_write");
             assertThat(result.toolUses().get(0).name()).isEqualTo("apply_patch");
-            assertThat(result.toolUses().get(0).input().path("patch").asText()).isEqualTo("*** Begin Patch");
+            assertThat(result.toolUses().get(0).type()).isEqualTo("custom_tool_call");
+            assertThat(result.toolUses().get(0).rawInput()).isEqualTo("*** Begin Patch");
+            assertThat(result.toolUses().get(0).input().path("_rawArguments").asText()).isEqualTo("*** Begin Patch");
+            assertThat(result.toolUses().get(0).rawOutputItem().path("type").asText()).isEqualTo("custom_tool_call");
+            assertThat(result.toolUses().get(0).rawOutputItem().path("input").asText()).isEqualTo("*** Begin Patch");
+            assertThat(result.toolUses().get(0).rawOutputItem().has("arguments")).isFalse();
+            JsonNode body = objectMapper.readTree(requestBody.get());
+            assertThat(body.path("tools").path(0).path("type").asText()).isEqualTo("custom");
+            assertThat(body.path("tools").path(0).path("name").asText()).isEqualTo("apply_patch");
+            assertThat(body.path("tools").path(0).has("parameters")).isFalse();
+            assertThat(body.path("tool_choice").path("type").asText()).isEqualTo("custom");
+            assertThat(body.path("tool_choice").path("name").asText()).isEqualTo("apply_patch");
         } finally {
             server.stop(0);
         }
@@ -453,13 +467,13 @@ class OpenAiUpstreamClientTest {
                   "model": "gpt-5.4-mini",
                   "input": [
                     {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "edit file"}]},
-                    {"type": "function_call", "call_id": "call_write", "name": "apply_patch", "arguments": {"patch": "*** Begin Patch"}},
+                    {"type": "function_call", "call_id": "call_write", "name": "edit_file", "arguments": {"patch": "*** Begin Patch"}},
                     {"type": "function_call_output", "call_id": "call_write", "output": [{"type": "output_text", "text": "Done"}]}
                   ],
                   "tools": [
                     {
                       "type": "function",
-                      "name": "apply_patch",
+                      "name": "edit_file",
                       "description": "Apply a patch to files",
                       "parameters": {
                         "type": "object",
@@ -476,7 +490,7 @@ class OpenAiUpstreamClientTest {
                       "strict": true
                     }
                   ],
-                  "tool_choice": {"type": "function", "name": "apply_patch"},
+                  "tool_choice": {"type": "function", "name": "edit_file"},
                   "parallel_tool_calls": false
                 }
                 """);
@@ -487,7 +501,7 @@ class OpenAiUpstreamClientTest {
             JsonNode body = objectMapper.readTree(requestBody.get());
             JsonNode tool = body.path("tools").get(0);
             assertThat(tool.path("type").asText()).isEqualTo("function");
-            assertThat(tool.path("name").asText()).isEqualTo("apply_patch");
+            assertThat(tool.path("name").asText()).isEqualTo("edit_file");
             assertThat(tool.path("function").isMissingNode()).isTrue();
             JsonNode page = tool.path("parameters").path("properties").path("page");
             assertThat(page.path("type").asText()).isEqualTo("integer");
@@ -499,7 +513,7 @@ class OpenAiUpstreamClientTest {
             assertThat(tool.path("strict").asBoolean()).isTrue();
             assertThat(body.path("input").path(1).path("arguments").asText()).isEqualTo("{\"patch\":\"*** Begin Patch\"}");
             assertThat(body.path("input").path(2).path("output").asText()).isEqualTo("Done");
-            assertThat(body.path("tool_choice").path("name").asText()).isEqualTo("apply_patch");
+            assertThat(body.path("tool_choice").path("name").asText()).isEqualTo("edit_file");
             assertThat(body.path("parallel_tool_calls").asBoolean(true)).isFalse();
         } finally {
             server.stop(0);
@@ -623,6 +637,61 @@ class OpenAiUpstreamClientTest {
             assertThat(content.path(2).path("type").asText()).isEqualTo("input_file");
             assertThat(content.path(2).path("file_id").asText()).isEqualTo("file_123");
             assertThat(content.path(2).path("filename").asText()).isEqualTo("notes.txt");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void openAiResponsesApiForcesApplyPatchFunctionToolToCustomTool() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/responses", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] response = """
+                {"output_text":"OK","usage":{"input_tokens":1,"output_tokens":1}}
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "application/json");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = openAiAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {
+                  "model": "gpt-5.5",
+                  "input": "write a file",
+                  "tools": [
+                    {
+                      "type": "function",
+                      "name": "apply_patch",
+                      "description": "Apply a raw unified patch",
+                      "parameters": {"type": "object", "properties": {"patch": {"type": "string"}}}
+                    }
+                  ],
+                  "tool_choice": {"type": "function", "name": "apply_patch"}
+                }
+                """);
+
+            PlatformCompletionResult result = client.completeResponses(account, request, "gpt-5.5").block();
+
+            assertThat(result).isNotNull();
+            JsonNode body = objectMapper.readTree(requestBody.get());
+            JsonNode tool = body.path("tools").path(0);
+            assertThat(tool.path("type").asText()).isEqualTo("custom");
+            assertThat(tool.path("name").asText()).isEqualTo("apply_patch");
+            assertThat(tool.path("description").asText()).isEqualTo("Apply a raw unified patch");
+            assertThat(tool.has("parameters")).isFalse();
+            assertThat(body.path("tool_choice").path("type").asText()).isEqualTo("custom");
+            assertThat(body.path("tool_choice").path("name").asText()).isEqualTo("apply_patch");
         } finally {
             server.stop(0);
         }
