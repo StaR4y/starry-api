@@ -161,17 +161,19 @@ class OpenAiResponseFactoryTest {
             .extracting(event -> event.path("type").asText())
             .contains(
                 "response.output_item.added",
-                "response.custom_tool_call_input.delta",
                 "response.custom_tool_call_input.done",
                 "response.output_item.done",
                 "response.completed"
             );
+        assertThat(jsonEvents)
+            .extracting(event -> event.path("type").asText())
+            .doesNotContain("response.custom_tool_call_input.delta");
 
         JsonNode toolAdded = jsonEvents.stream()
             .filter(event -> "response.output_item.added".equals(event.path("type").asText()))
             .findFirst()
             .orElseThrow();
-        assertThat(toolAdded.path("item").path("input").asText()).isEmpty();
+        assertThat(toolAdded.path("item").path("input").asText()).isEqualTo("*** Begin Patch");
 
         JsonNode toolDone = jsonEvents.stream()
             .filter(event -> "response.output_item.done".equals(event.path("type").asText()))

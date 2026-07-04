@@ -921,9 +921,11 @@ public class OpenAiUpstreamClient {
             return;
         }
         String arguments = firstNonBlank(event.path("arguments").asText(null), event.path("input").asText(null));
-        if (!arguments.isBlank()) {
+        String type = responseToolUseType(firstNonBlank(pending.type, "function_call"), pending.name);
+        String input = responseToolUseRawInput(type, pending.name, arguments);
+        if (!input.isBlank()) {
             pending.arguments.setLength(0);
-            pending.arguments.append(arguments);
+            pending.arguments.append(input);
         }
     }
 
@@ -1052,6 +1054,9 @@ public class OpenAiUpstreamClient {
                 );
                 if (!text.isBlank()) {
                     return text;
+                }
+                if (parsed.isEmpty()) {
+                    return "";
                 }
             }
         } catch (Exception ignored) {

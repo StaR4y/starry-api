@@ -309,9 +309,14 @@ public class OpenAiResponseFactory {
         if ("function_call".equals(type)) {
             copy.put("arguments", "");
         } else if ("custom_tool_call".equals(type)) {
-            copy.put("input", "");
+            copy.put("input", isApplyPatchCustomToolCall(copy) ? copy.path("input").asText("") : "");
         }
         return copy;
+    }
+
+    private boolean isApplyPatchCustomToolCall(JsonNode item) {
+        return "custom_tool_call".equals(item.path("type").asText(""))
+            && "apply_patch".equals(item.path("name").asText(""));
     }
 
     private ObjectNode contentPartEvent(
@@ -464,7 +469,7 @@ public class OpenAiResponseFactory {
         int sequence
     ) {
         String input = item.path("input").asText("");
-        if (!input.isEmpty()) {
+        if (!input.isEmpty() && !isApplyPatchCustomToolCall(item)) {
             events.add(responseSse(customToolCallInputEvent(
                 "response.custom_tool_call_input.delta",
                 responseId,
@@ -487,7 +492,7 @@ public class OpenAiResponseFactory {
     }
 
     private int customToolCallEventCount(JsonNode item) {
-        return item.path("input").asText("").isEmpty() ? 1 : 2;
+        return item.path("input").asText("").isEmpty() || isApplyPatchCustomToolCall(item) ? 1 : 2;
     }
 
     private ObjectNode customToolCallInputEvent(

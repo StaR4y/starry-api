@@ -382,7 +382,7 @@ class OpenAiUpstreamClientTest {
         server.createContext("/responses", exchange -> {
             byte[] response = """
                 event: response.output_item.added
-                data: {"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_patch","name":"apply_patch","input":""}}
+                data: {"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_patch","name":"apply_patch","input":{}}}
 
                 event: response.custom_tool_call_input.delta
                 data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","output_index":0,"delta":"*** Begin"}
@@ -391,7 +391,7 @@ class OpenAiUpstreamClientTest {
                 data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","output_index":0,"delta":" Patch"}
 
                 event: response.output_item.done
-                data: {"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_patch","name":"apply_patch","input":""}}
+                data: {"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_patch","name":"apply_patch","input":{}}}
 
                 event: response.completed
                 data: {"type":"response.completed","response":{"usage":{"input_tokens":6,"output_tokens":2},"output":[]}}
