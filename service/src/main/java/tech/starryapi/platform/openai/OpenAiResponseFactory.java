@@ -520,17 +520,38 @@ public class OpenAiResponseFactory {
     }
 
     private String toolInputString(PlatformToolUse toolUse) {
+        boolean applyPatchCustomTool = "custom_tool_call".equals(toolUse.type())
+            && "apply_patch".equals(toolUse.name());
         if (toolUse.rawInput() != null) {
-            return toolUse.rawInput();
+            return applyPatchCustomTool ? normalizeApplyPatchInput(toolUse.rawInput()) : toolUse.rawInput();
         }
         JsonNode input = toolUse.input();
         if (input == null || input.isMissingNode() || input.isNull()) {
             return "{}";
         }
         if (input.has("_rawArguments")) {
-            return input.path("_rawArguments").asText("");
+            String raw = input.path("_rawArguments").asText("");
+            return applyPatchCustomTool ? normalizeApplyPatchInput(raw) : raw;
         }
-        return input.toString();
+        String raw = input.toString();
+        return applyPatchCustomTool ? normalizeApplyPatchInput(raw) : raw;
+    }
+
+    private String normalizeApplyPatchInput(String value) {
+        if (value == null || value.isBlank()) {
+            return "";
+        }
+        String normalized = value.replace("\r\n", "\n").replace('\r', '\n');
+        int begin = normalized.indexOf("*** Begin Patch");
+        if (begin > 0) {
+            normalized = normalized.substring(begin);
+        }
+        int end = normalized.lastIndexOf("*** End Patch");
+        if (end >= 0) {
+            normalized = normalized.substring(0, end + "*** End Patch".length());
+            return normalized + "\n";
+        }
+        return normalized;
     }
 
     private void appendUsage(ObjectNode root, PlatformUsage usage, String inputName, String outputName) {

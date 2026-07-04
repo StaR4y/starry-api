@@ -899,7 +899,10 @@ public class OpenAiUpstreamClient {
             pending.item = item.deepCopy();
         }
         String input = responseToolUseRawInput(pending.type, pending.name, responseToolInput(item));
-        if (input != null && !input.isBlank() && pending.arguments.length() == 0) {
+        if (input != null
+            && !input.isBlank()
+            && shouldReplacePendingToolInput(pending.type, pending.name, pending.arguments, input)) {
+            pending.arguments.setLength(0);
             pending.arguments.append(input);
         }
     }
@@ -1048,7 +1051,7 @@ public class OpenAiUpstreamClient {
         if (!"custom_tool_call".equals(type) || !APPLY_PATCH_TOOL_NAME.equals(name)) {
             return rawInput;
         }
-        return extractCustomToolInput(rawInput);
+        return normalizeApplyPatchInput(extractCustomToolInput(rawInput));
     }
 
     private String extractCustomToolInput(String rawInput) {
@@ -1085,6 +1088,23 @@ public class OpenAiUpstreamClient {
         }
         String normalized = value.replace("\r\n", "\n").replace('\r', '\n').stripTrailing();
         return normalized.endsWith("*** End Patch");
+    }
+
+    private String normalizeApplyPatchInput(String value) {
+        if (value == null || value.isBlank()) {
+            return "";
+        }
+        String normalized = value.replace("\r\n", "\n").replace('\r', '\n');
+        int begin = normalized.indexOf("*** Begin Patch");
+        if (begin > 0) {
+            normalized = normalized.substring(begin);
+        }
+        int end = normalized.lastIndexOf("*** End Patch");
+        if (end >= 0) {
+            normalized = normalized.substring(0, end + "*** End Patch".length());
+            return normalized + "\n";
+        }
+        return normalized;
     }
 
     private JsonNode parseToolArguments(String arguments) {

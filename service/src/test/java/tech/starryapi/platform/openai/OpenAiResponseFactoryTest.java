@@ -180,13 +180,13 @@ class OpenAiResponseFactoryTest {
             .filter(event -> "response.custom_tool_call_input.delta".equals(event.path("type").asText()))
             .findFirst()
             .orElseThrow();
-        assertThat(inputDelta.path("delta").asText()).endsWith("*** End Patch");
+        assertThat(inputDelta.path("delta").asText()).endsWith("*** End Patch\n");
 
         JsonNode inputDone = jsonEvents.stream()
             .filter(event -> "response.custom_tool_call_input.done".equals(event.path("type").asText()))
             .findFirst()
             .orElseThrow();
-        assertThat(inputDone.path("input").asText()).endsWith("*** End Patch");
+        assertThat(inputDone.path("input").asText()).endsWith("*** End Patch\n");
 
         JsonNode toolDone = jsonEvents.stream()
             .filter(event -> "response.output_item.done".equals(event.path("type").asText()))
@@ -195,7 +195,7 @@ class OpenAiResponseFactoryTest {
         assertThat(toolDone.path("item").path("type").asText()).isEqualTo("custom_tool_call");
         assertThat(toolDone.path("item").path("call_id").asText()).isEqualTo("call_patch");
         assertThat(toolDone.path("item").path("name").asText()).isEqualTo("apply_patch");
-        assertThat(toolDone.path("item").path("input").asText()).endsWith("*** End Patch");
+        assertThat(toolDone.path("item").path("input").asText()).endsWith("*** End Patch\n");
     }
 
     private List<JsonNode> jsonEvents(List<ServerSentEvent<String>> events) {

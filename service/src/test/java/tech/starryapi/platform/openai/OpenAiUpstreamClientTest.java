@@ -431,8 +431,8 @@ class OpenAiUpstreamClientTest {
             assertThat(result.toolUses().get(0).id()).isEqualTo("call_patch");
             assertThat(result.toolUses().get(0).name()).isEqualTo("apply_patch");
             assertThat(result.toolUses().get(0).type()).isEqualTo("custom_tool_call");
-            assertThat(result.toolUses().get(0).rawInput()).endsWith("*** End Patch");
-            assertThat(result.toolUses().get(0).rawOutputItem().path("input").asText()).endsWith("*** End Patch");
+            assertThat(result.toolUses().get(0).rawInput()).endsWith("*** End Patch\n");
+            assertThat(result.toolUses().get(0).rawOutputItem().path("input").asText()).endsWith("*** End Patch\n");
         } finally {
             server.stop(0);
         }
@@ -485,7 +485,109 @@ class OpenAiUpstreamClientTest {
             assertThat(result).isNotNull();
             assertThat(result.toolUses()).hasSize(1);
             assertThat(result.toolUses().get(0).rawInput()).startsWith("*** Begin Patch");
-            assertThat(result.toolUses().get(0).rawInput()).endsWith("*** End Patch");
+            assertThat(result.toolUses().get(0).rawInput()).endsWith("*** End Patch\n");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void codexUpstreamUsesCompleteOutputItemDoneInputWhenDeltasArePartial() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/responses", exchange -> {
+            byte[] response = """
+                event: response.output_item.added
+                data: {"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_patch","name":"apply_patch","input":""}}
+
+                event: response.custom_tool_call_input.delta
+                data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","output_index":0,"delta":"*** Begin Patch\\n"}
+
+                event: response.output_item.done
+                data: {"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_patch","name":"apply_patch","input":"*** Begin Patch\\n*** Add File: codex_apply_patch_test.txt\\n+hello\\n*** End Patch"}}
+
+                event: response.completed
+                data: {"type":"response.completed","response":{"usage":{"input_tokens":6,"output_tokens":2},"output":[]}}
+
+                data: [DONE]
+
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "text/event-stream");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {
+                  "model": "gpt-5.5",
+                  "input": "write a file",
+                  "tools": [{"type": "custom", "name": "apply_patch"}]
+                }
+                """);
+
+            PlatformCompletionResult result = client.completeResponses(account, request, "gpt-5.5").block();
+
+            assertThat(result).isNotNull();
+            assertThat(result.toolUses()).hasSize(1);
+            assertThat(result.toolUses().get(0).rawInput()).startsWith("*** Begin Patch");
+            assertThat(result.toolUses().get(0).rawInput()).endsWith("*** End Patch\n");
+            assertThat(result.toolUses().get(0).rawOutputItem().path("input").asText()).endsWith("*** End Patch\n");
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void codexUpstreamTrimsApplyPatchInputAfterLastEndPatchLine() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/responses", exchange -> {
+            byte[] response = """
+                event: response.output_item.done
+                data: {"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_patch","name":"apply_patch","input":"prefix text\\n*** Begin Patch\\n*** Add File: codex_apply_patch_test.txt\\n+hello\\n*** End Patch\\nextra tail"}}
+
+                event: response.completed
+                data: {"type":"response.completed","response":{"usage":{"input_tokens":6,"output_tokens":2},"output":[]}}
+
+                data: [DONE]
+
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "text/event-stream");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {
+                  "model": "gpt-5.5",
+                  "input": "write a file",
+                  "tools": [{"type": "custom", "name": "apply_patch"}]
+                }
+                """);
+
+            PlatformCompletionResult result = client.completeResponses(account, request, "gpt-5.5").block();
+
+            assertThat(result).isNotNull();
+            assertThat(result.toolUses()).hasSize(1);
+            assertThat(result.toolUses().get(0).rawInput()).isEqualTo(
+                "*** Begin Patch\n*** Add File: codex_apply_patch_test.txt\n+hello\n*** End Patch\n"
+            );
         } finally {
             server.stop(0);
         }
