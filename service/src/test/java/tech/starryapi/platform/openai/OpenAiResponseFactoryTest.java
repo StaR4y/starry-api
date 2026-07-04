@@ -143,9 +143,12 @@ class OpenAiResponseFactoryTest {
             List.of(new PlatformToolUse(
                 "call_patch",
                 "apply_patch",
-                objectMapper.createObjectNode().put("_rawArguments", "*** Begin Patch"),
+                objectMapper.createObjectNode().put(
+                    "_rawArguments",
+                    "*** Begin Patch\n*** Add File: codex_apply_patch_test.txt\n+hello\n*** End Patch"
+                ),
                 "custom_tool_call",
-                "*** Begin Patch",
+                "*** Begin Patch\n*** Add File: codex_apply_patch_test.txt\n+hello\n*** End Patch",
                 null
             )),
             new PlatformUsage(10, 2, java.math.BigDecimal.ZERO, 0, 0, 0)
@@ -173,7 +176,7 @@ class OpenAiResponseFactoryTest {
             .filter(event -> "response.output_item.added".equals(event.path("type").asText()))
             .findFirst()
             .orElseThrow();
-        assertThat(toolAdded.path("item").path("input").asText()).isEqualTo("*** Begin Patch");
+        assertThat(toolAdded.path("item").path("input").asText()).endsWith("*** End Patch");
 
         JsonNode toolDone = jsonEvents.stream()
             .filter(event -> "response.output_item.done".equals(event.path("type").asText()))
@@ -182,7 +185,7 @@ class OpenAiResponseFactoryTest {
         assertThat(toolDone.path("item").path("type").asText()).isEqualTo("custom_tool_call");
         assertThat(toolDone.path("item").path("call_id").asText()).isEqualTo("call_patch");
         assertThat(toolDone.path("item").path("name").asText()).isEqualTo("apply_patch");
-        assertThat(toolDone.path("item").path("input").asText()).isEqualTo("*** Begin Patch");
+        assertThat(toolDone.path("item").path("input").asText()).endsWith("*** End Patch");
     }
 
     private List<JsonNode> jsonEvents(List<ServerSentEvent<String>> events) {

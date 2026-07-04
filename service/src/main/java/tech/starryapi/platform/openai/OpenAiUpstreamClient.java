@@ -923,10 +923,24 @@ public class OpenAiUpstreamClient {
         String arguments = firstNonBlank(event.path("arguments").asText(null), event.path("input").asText(null));
         String type = responseToolUseType(firstNonBlank(pending.type, "function_call"), pending.name);
         String input = responseToolUseRawInput(type, pending.name, arguments);
-        if (!input.isBlank()) {
+        if (!input.isBlank() && shouldReplacePendingToolInput(type, pending.name, pending.arguments, input)) {
             pending.arguments.setLength(0);
             pending.arguments.append(input);
         }
+    }
+
+    private boolean shouldReplacePendingToolInput(String type, String name, StringBuilder current, String replacement) {
+        if (!"custom_tool_call".equals(type) || !APPLY_PATCH_TOOL_NAME.equals(name)) {
+            return true;
+        }
+        if (current == null || current.isEmpty()) {
+            return true;
+        }
+        String currentInput = current.toString();
+        if (looksLikeCompletePatch(currentInput) && !looksLikeCompletePatch(replacement)) {
+            return false;
+        }
+        return replacement.length() >= currentInput.length();
     }
 
     private PendingResponseToolUse pendingResponseToolUse(Map<String, PendingResponseToolUse> pendingToolUses, JsonNode event) {
@@ -1063,6 +1077,14 @@ public class OpenAiUpstreamClient {
             // The normal custom-tool path is already raw text.
         }
         return rawInput;
+    }
+
+    private boolean looksLikeCompletePatch(String value) {
+        if (value == null || value.isBlank()) {
+            return false;
+        }
+        String normalized = value.replace("\r\n", "\n").replace('\r', '\n').stripTrailing();
+        return normalized.endsWith("*** End Patch");
     }
 
     private JsonNode parseToolArguments(String arguments) {

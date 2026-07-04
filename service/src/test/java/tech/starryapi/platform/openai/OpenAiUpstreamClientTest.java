@@ -385,10 +385,13 @@ class OpenAiUpstreamClientTest {
                 data: {"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_patch","name":"apply_patch","input":{}}}
 
                 event: response.custom_tool_call_input.delta
-                data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","output_index":0,"delta":"*** Begin"}
+                data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","output_index":0,"delta":"*** Begin Patch\\n"}
 
                 event: response.custom_tool_call_input.delta
-                data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","output_index":0,"delta":" Patch"}
+                data: {"type":"response.custom_tool_call_input.delta","item_id":"ctc_1","output_index":0,"delta":"*** Add File: codex_apply_patch_test.txt\\n+hello\\n*** End Patch"}
+
+                event: response.custom_tool_call_input.done
+                data: {"type":"response.custom_tool_call_input.done","item_id":"ctc_1","output_index":0,"input":"*** Begin Patch\\n*** Add File: codex_apply_patch_test.txt\\n+hello"}
 
                 event: response.output_item.done
                 data: {"type":"response.output_item.done","output_index":0,"item":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_patch","name":"apply_patch","input":{}}}
@@ -428,8 +431,8 @@ class OpenAiUpstreamClientTest {
             assertThat(result.toolUses().get(0).id()).isEqualTo("call_patch");
             assertThat(result.toolUses().get(0).name()).isEqualTo("apply_patch");
             assertThat(result.toolUses().get(0).type()).isEqualTo("custom_tool_call");
-            assertThat(result.toolUses().get(0).rawInput()).isEqualTo("*** Begin Patch");
-            assertThat(result.toolUses().get(0).rawOutputItem().path("input").asText()).isEqualTo("*** Begin Patch");
+            assertThat(result.toolUses().get(0).rawInput()).endsWith("*** End Patch");
+            assertThat(result.toolUses().get(0).rawOutputItem().path("input").asText()).endsWith("*** End Patch");
         } finally {
             server.stop(0);
         }
