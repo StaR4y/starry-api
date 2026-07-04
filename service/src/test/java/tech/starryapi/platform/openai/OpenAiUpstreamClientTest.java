@@ -366,10 +366,11 @@ class OpenAiUpstreamClientTest {
             assertThat(result.toolUses().get(0).rawOutputItem().path("input").asText()).isEqualTo("*** Begin Patch");
             assertThat(result.toolUses().get(0).rawOutputItem().has("arguments")).isFalse();
             JsonNode body = objectMapper.readTree(requestBody.get());
-            assertThat(body.path("tools").path(0).path("type").asText()).isEqualTo("custom");
+            assertThat(body.path("tools").path(0).path("type").asText()).isEqualTo("function");
             assertThat(body.path("tools").path(0).path("name").asText()).isEqualTo("apply_patch");
-            assertThat(body.path("tools").path(0).has("parameters")).isFalse();
-            assertThat(body.path("tool_choice").path("type").asText()).isEqualTo("custom");
+            assertThat(body.path("tools").path(0).path("parameters").path("properties").path("patch").path("type").asText())
+                .isEqualTo("string");
+            assertThat(body.path("tool_choice").path("type").asText()).isEqualTo("function");
             assertThat(body.path("tool_choice").path("name").asText()).isEqualTo("apply_patch");
         } finally {
             server.stop(0);
@@ -378,8 +379,10 @@ class OpenAiUpstreamClientTest {
 
     @Test
     void codexUpstreamParsesCustomToolCallInputDeltas() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/responses", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             byte[] response = """
                 event: response.output_item.added
                 data: {"type":"response.output_item.added","output_index":0,"item":{"type":"custom_tool_call","id":"ctc_1","call_id":"call_patch","name":"apply_patch","input":{}}}
@@ -420,7 +423,8 @@ class OpenAiUpstreamClientTest {
                 {
                   "model": "gpt-5.5",
                   "input": "write a file",
-                  "tools": [{"type": "custom", "name": "apply_patch"}]
+                  "tools": [{"type": "custom", "name": "apply_patch"}],
+                  "tool_choice": {"type": "custom", "name": "apply_patch"}
                 }
                 """);
 
@@ -433,6 +437,11 @@ class OpenAiUpstreamClientTest {
             assertThat(result.toolUses().get(0).type()).isEqualTo("custom_tool_call");
             assertThat(result.toolUses().get(0).rawInput()).endsWith("*** End Patch\n");
             assertThat(result.toolUses().get(0).rawOutputItem().path("input").asText()).endsWith("*** End Patch\n");
+            JsonNode body = objectMapper.readTree(requestBody.get());
+            assertThat(body.path("tools").path(0).path("type").asText()).isEqualTo("function");
+            assertThat(body.path("tools").path(0).path("parameters").path("properties").path("patch").path("type").asText())
+                .isEqualTo("string");
+            assertThat(body.path("tool_choice").path("type").asText()).isEqualTo("function");
         } finally {
             server.stop(0);
         }
@@ -801,7 +810,7 @@ class OpenAiUpstreamClientTest {
     }
 
     @Test
-    void openAiResponsesApiForcesApplyPatchFunctionToolToCustomTool() throws Exception {
+    void openAiResponsesApiForcesApplyPatchToolToPatchFunctionSchema() throws Exception {
         AtomicReference<String> requestBody = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/v1/responses", exchange -> {
@@ -844,11 +853,11 @@ class OpenAiUpstreamClientTest {
             assertThat(result).isNotNull();
             JsonNode body = objectMapper.readTree(requestBody.get());
             JsonNode tool = body.path("tools").path(0);
-            assertThat(tool.path("type").asText()).isEqualTo("custom");
+            assertThat(tool.path("type").asText()).isEqualTo("function");
             assertThat(tool.path("name").asText()).isEqualTo("apply_patch");
             assertThat(tool.path("description").asText()).isEqualTo("Apply a raw unified patch");
-            assertThat(tool.has("parameters")).isFalse();
-            assertThat(body.path("tool_choice").path("type").asText()).isEqualTo("custom");
+            assertThat(tool.path("parameters").path("properties").path("patch").path("type").asText()).isEqualTo("string");
+            assertThat(body.path("tool_choice").path("type").asText()).isEqualTo("function");
             assertThat(body.path("tool_choice").path("name").asText()).isEqualTo("apply_patch");
         } finally {
             server.stop(0);

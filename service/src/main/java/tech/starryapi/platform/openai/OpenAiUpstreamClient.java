@@ -327,6 +327,10 @@ public class OpenAiUpstreamClient {
     private ArrayNode codexTools(JsonNode tools) {
         ArrayNode converted = objectMapper.createArrayNode();
         for (JsonNode tool : tools) {
+            if (isApplyPatchTool(tool)) {
+                converted.add(applyPatchFunctionTool(tool));
+                continue;
+            }
             if (!"function".equals(tool.path("type").asText())) {
                 converted.add(tool);
                 continue;
@@ -334,7 +338,7 @@ public class OpenAiUpstreamClient {
             JsonNode function = tool.path("function");
             JsonNode source = function.isObject() ? function : tool;
             if (isApplyPatchTool(source)) {
-                converted.add(codexCustomTool(tool, source));
+                converted.add(applyPatchFunctionTool(source));
                 continue;
             }
             ObjectNode codexTool = converted.addObject();
@@ -376,30 +380,35 @@ public class OpenAiUpstreamClient {
     }
 
     private JsonNode applyPatchCustomTool(JsonNode tool) {
-        if (!"function".equals(tool.path("type").asText())) {
-            return tool;
-        }
         JsonNode function = tool.path("function");
         JsonNode source = function.isObject() ? function : tool;
         if (!isApplyPatchTool(source)) {
             return tool;
         }
-        return codexCustomTool(tool, source);
+        return applyPatchFunctionTool(source);
     }
 
-    private ObjectNode codexCustomTool(JsonNode tool, JsonNode source) {
-        ObjectNode codexTool = objectMapper.createObjectNode();
-        codexTool.put("type", "custom");
-        codexTool.put("name", firstNonBlank(source.path("name").asText(null), tool.path("name").asText(null)));
-        JsonNode description = presentNode(source.path("description"), tool.path("description"));
-        if (description != null && !description.isMissingNode() && !description.isNull()) {
-            codexTool.set("description", description);
+    private ObjectNode applyPatchFunctionTool(JsonNode source) {
+        ObjectNode tool = objectMapper.createObjectNode();
+        tool.put("type", "function");
+        tool.put("name", APPLY_PATCH_TOOL_NAME);
+        String description = firstNonBlank(
+            source.path("description").asText(null),
+            "Apply a raw patch. The patch string must start with *** Begin Patch and end with *** End Patch."
+        );
+        tool.put("description", description);
+        ObjectNode parameters = tool.putObject("parameters");
+        parameters.put("type", "object");
+        ObjectNode properties = parameters.putObject("properties");
+        ObjectNode patch = properties.putObject("patch");
+        patch.put("type", "string");
+        patch.put("description", "Raw apply_patch payload, including the *** Begin Patch and *** End Patch lines.");
+        ArrayNode required = parameters.putArray("required");
+        required.add("patch");
+        if (source.has("strict")) {
+            tool.set("strict", source.get("strict"));
         }
-        JsonNode format = presentNode(source.path("format"), tool.path("format"));
-        if (format != null && !format.isMissingNode() && !format.isNull()) {
-            codexTool.set("format", format.deepCopy());
-        }
-        return codexTool;
+        return tool;
     }
 
     private boolean isApplyPatchTool(JsonNode source) {
@@ -425,7 +434,7 @@ public class OpenAiUpstreamClient {
     }
 
     private JsonNode applyPatchToolChoice(JsonNode toolChoice) {
-        if (!toolChoice.isObject() || !"function".equals(toolChoice.path("type").asText())) {
+        if (!toolChoice.isObject()) {
             return toolChoice;
         }
         String name = toolChoiceName(toolChoice);
@@ -433,7 +442,7 @@ public class OpenAiUpstreamClient {
             return toolChoice;
         }
         ObjectNode converted = objectMapper.createObjectNode();
-        converted.put("type", "custom");
+        converted.put("type", "function");
         converted.put("name", name);
         return converted;
     }
