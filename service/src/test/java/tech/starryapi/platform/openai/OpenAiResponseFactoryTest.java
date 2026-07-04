@@ -164,19 +164,29 @@ class OpenAiResponseFactoryTest {
             .extracting(event -> event.path("type").asText())
             .contains(
                 "response.output_item.added",
+                "response.custom_tool_call_input.delta",
                 "response.custom_tool_call_input.done",
                 "response.output_item.done",
                 "response.completed"
             );
-        assertThat(jsonEvents)
-            .extracting(event -> event.path("type").asText())
-            .doesNotContain("response.custom_tool_call_input.delta");
 
         JsonNode toolAdded = jsonEvents.stream()
             .filter(event -> "response.output_item.added".equals(event.path("type").asText()))
             .findFirst()
             .orElseThrow();
-        assertThat(toolAdded.path("item").path("input").asText()).endsWith("*** End Patch");
+        assertThat(toolAdded.path("item").path("input").asText()).isEmpty();
+
+        JsonNode inputDelta = jsonEvents.stream()
+            .filter(event -> "response.custom_tool_call_input.delta".equals(event.path("type").asText()))
+            .findFirst()
+            .orElseThrow();
+        assertThat(inputDelta.path("delta").asText()).endsWith("*** End Patch");
+
+        JsonNode inputDone = jsonEvents.stream()
+            .filter(event -> "response.custom_tool_call_input.done".equals(event.path("type").asText()))
+            .findFirst()
+            .orElseThrow();
+        assertThat(inputDone.path("input").asText()).endsWith("*** End Patch");
 
         JsonNode toolDone = jsonEvents.stream()
             .filter(event -> "response.output_item.done".equals(event.path("type").asText()))
