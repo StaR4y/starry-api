@@ -16,6 +16,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.scheduling.support.CronExpression;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import tech.starryapi.common.ApiException;
 
@@ -163,7 +164,10 @@ public class DisabledAccountScheduledTestService {
     ) {
         Instant now = Instant.now();
         Predicate<ProxyAccountEntity> safeFilter = accountFilter == null ? account -> true : accountFilter;
-        return repository.findAll()
+        Flux<ProxyAccountEntity> candidates = manualRun
+            ? repository.findAll()
+            : repository.findAllByEnabledFalseOrSuspendedAtNotNullOrQuotaExhaustedAtNotNull();
+        return candidates
             .filter(safeFilter)
             .filter(account -> manualRun || matchesState(account, settings))
             .filter(account -> ignoreConfiguredProviders || matchesProvider(account, settings.providers()))

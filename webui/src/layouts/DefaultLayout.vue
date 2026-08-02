@@ -222,6 +222,9 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
+      position: sticky;
+      top: 20px;
+      z-index: 10;
     }
 
     &__crumbs {
@@ -261,6 +264,9 @@
 
     &__content {
       flex: 1;
+      width: 100%;
+      max-width: 1600px;
+      margin: 0 auto;
     }
 
     &__main-footer {
@@ -273,6 +279,24 @@
       display: flex;
       justify-content: center;
       align-items: center;
+    }
+  }
+
+  // 窄屏基础降级：缩小留白、收窄侧边栏，菜单样式保持不变
+  @media (max-width: 1024px) {
+    .layout {
+      padding: 12px;
+      gap: 12px;
+
+      &__sider {
+        width: 200px;
+        top: 12px;
+        height: calc(100vh - 24px);
+      }
+
+      &__topbar {
+        top: 12px;
+      }
     }
   }
 </style>

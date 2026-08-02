@@ -83,7 +83,7 @@ class DisabledAccountScheduledTestServiceTest {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         AccountTestService accountTestService = mock(AccountTestService.class);
         when(settingsService.disabledAccountScheduledTestSettings()).thenReturn(Mono.just(settings(true)));
-        when(repository.findAll()).thenReturn(Flux.just(
+        when(repository.findAllByEnabledFalseOrSuspendedAtNotNullOrQuotaExhaustedAtNotNull()).thenReturn(Flux.just(
             account("anthropic-disabled", false, "Anthropic"),
             account("anthropic-enabled", true, "Anthropic"),
             account("openai-disabled", false, "OpenAI")
@@ -122,7 +122,7 @@ class DisabledAccountScheduledTestServiceTest {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         AccountTestService accountTestService = mock(AccountTestService.class);
         when(settingsService.disabledAccountScheduledTestSettings()).thenReturn(Mono.just(settings(true)));
-        when(repository.findAll()).thenReturn(Flux.just(
+        when(repository.findAllByEnabledFalseOrSuspendedAtNotNullOrQuotaExhaustedAtNotNull()).thenReturn(Flux.just(
             suspendedAccount("anthropic-suspended", "Anthropic", Instant.parse("2026-06-07T08:00:00Z")),
             account("openai-suspended", false, "OpenAI")
         ));
@@ -158,7 +158,7 @@ class DisabledAccountScheduledTestServiceTest {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         AccountTestService accountTestService = mock(AccountTestService.class);
         when(settingsService.disabledAccountScheduledTestSettings()).thenReturn(Mono.just(settings(true)));
-        when(repository.findAll()).thenReturn(Flux.just(
+        when(repository.findAllByEnabledFalseOrSuspendedAtNotNullOrQuotaExhaustedAtNotNull()).thenReturn(Flux.just(
             suspendedAccount("newer-suspended", "Anthropic", Instant.parse("2026-06-07T09:00:00Z")),
             suspendedAccount("older-suspended", "Anthropic", Instant.parse("2026-06-07T07:00:00Z"))
         ));
@@ -192,7 +192,7 @@ class DisabledAccountScheduledTestServiceTest {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         AccountTestService accountTestService = mock(AccountTestService.class);
         when(settingsService.disabledAccountScheduledTestSettings()).thenReturn(Mono.just(settings(true)));
-        when(repository.findAll()).thenReturn(Flux.just(
+        when(repository.findAllByEnabledFalseOrSuspendedAtNotNullOrQuotaExhaustedAtNotNull()).thenReturn(Flux.just(
             account("openai-disabled", false, "OpenAI"),
             account("anthropic-disabled", false, "Anthropic")
         ));
@@ -226,7 +226,7 @@ class DisabledAccountScheduledTestServiceTest {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         AccountTestService accountTestService = mock(AccountTestService.class);
         when(settingsService.disabledAccountScheduledTestSettings()).thenReturn(Mono.just(settings(true, 30)));
-        when(repository.findAll()).thenReturn(Flux.just(
+        when(repository.findAllByEnabledFalseOrSuspendedAtNotNullOrQuotaExhaustedAtNotNull()).thenReturn(Flux.just(
             suspendedAccount("openai-suspended", "OpenAI", Instant.now())
         ));
         when(accountTestService.test(org.mockito.ArgumentMatchers.any()))

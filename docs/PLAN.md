@@ -27,11 +27,12 @@ Completed in this phase:
   - `clientSetup.ts` for OS-specific setup script aggregation
 - Updated visible WebUI brand from the legacy Kiro-only name to Starry API.
 - Rewrote README, architecture, package guide, API, and configuration docs for the platform model.
+- Established PostgreSQL 17 as the persistence baseline with database/schema `starry_api`, R2DBC pooling, a fresh Flyway baseline, partitioned request logs, rollups, and custom-format backups.
 
 Still intentionally preserved:
 
 - Kiro/AWS is still the only real upstream adapter.
-- Existing database defaults and `KIRO_*` runtime variables remain for migration/deployment compatibility.
+- `KIRO_*` runtime variables remain for the active Kiro/AWS upstream adapter.
 - Kiro Account Manager import format is still supported directly.
 
 ## Design Rules
@@ -113,11 +114,11 @@ Goal: make deployment and upgrades predictable.
 
 Tasks:
 
-1. Add Testcontainers MySQL integration tests.
+1. Keep PostgreSQL 17 Testcontainers integration tests mandatory and validate PostgreSQL 18 compatibility in CI.
 2. Add production profile defaults.
 3. Add Prometheus metrics for platform, upstream, account state, latency, and errors.
 4. Add structured request IDs to logs.
-5. Add migration recovery notes for production.
+5. Maintain PostgreSQL backup/restore, Flyway recovery, partition retention, and capacity-planning runbooks.
 6. Add a deployment upgrade guide for the Kiro-to-Starry naming transition.
 
 ## Verification Checklist
@@ -138,8 +139,8 @@ For packaged deployment changes:
 For local runtime changes:
 
 ```bash
-mysql -uroot -e "CREATE DATABASE IF NOT EXISTS kiro_proxy CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-./gradlew :service:bootRun
+# Initialize the four PostgreSQL roles as shown in README.md, then:
+./scripts/start-proxy.sh
 curl http://127.0.0.1:8080/health
 curl http://127.0.0.1:8080/v1/models
 ```

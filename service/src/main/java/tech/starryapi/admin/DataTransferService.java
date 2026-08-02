@@ -1,30 +1,43 @@
 package tech.starryapi.admin;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.math.BigDecimal;
+import java.io.InputStream;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.sql.Types;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.zip.Deflater;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
 import java.util.zip.ZipOutputStream;
@@ -42,17 +55,128 @@ public class DataTransferService {
     public static final String IMPORT_CONFIRMATION = "RESTORE_DATABASE";
 
     private static final String BACKUP_EXTENSION = ".zip";
-    private static final String SQL_EXTENSION = ".sql";
+    private static final String DUMP_EXTENSION = ".dump";
+    private static final String DATABASE_DUMP_ENTRY = "database.dump";
+    private static final String POSTGRES_DATABASE = "starry_api";
+    private static final String POSTGRES_SCHEMA = "starry_api";
+    private static final String POSTGRES_OWNER_ROLE = "starry_api_owner";
+    private static final String POSTGRES_RUNTIME_ROLE = "starry_api_runtime";
+    private static final String POSTGRES_RUNTIME_LOGIN = "starry_api";
+    private static final long DATA_TRANSFER_LOCK_KEY = 0x5354415252594150L;
+    private static final int COPY_BUFFER_BYTES = 64 * 1024;
+    private static final int MAX_PROCESS_OUTPUT_BYTES = 64 * 1024;
+    private static final int MAX_TOC_OUTPUT_BYTES = 8 * 1024 * 1024;
+    private static final int MAX_ZIP_ENTRIES = 32;
+    private static final Set<Integer> SUPPORTED_POSTGRES_MAJORS = Set.of(17);
+    private static final Set<String> REQUIRED_RESTORE_TABLES = Set.of(
+        "flyway_schema_history",
+        "admin_users",
+        "system_settings",
+        "proxy_accounts",
+        "api_keys",
+        "request_logs",
+        "payment_orders",
+        "balance_ledger"
+    );
+    private static final Set<String> GLOBAL_TOC_TYPES = Set.of(
+        "ENCODING",
+        "STDSTRINGS",
+        "SEARCHPATH",
+        "DATABASE",
+        "DATABASE PROPERTIES",
+        "PRE-DATA BOUNDARY",
+        "POST-DATA BOUNDARY"
+    );
+    private static final List<String> TOC_OBJECT_TYPES = List.of(
+        "MATERIALIZED VIEW DATA",
+        "SEQUENCE OWNED BY",
+        "DATABASE PROPERTIES",
+        "POST-DATA BOUNDARY",
+        "PRE-DATA BOUNDARY",
+        "PUBLICATION TABLE",
+        "PROCEDURAL LANGUAGE",
+        "CHECK CONSTRAINT",
+        "FK CONSTRAINT",
+        "DEFAULT ACL",
+        "SECURITY LABEL",
+        "INDEX ATTACH",
+        "TABLE ATTACH",
+        "TABLE DATA",
+        "SEQUENCE SET",
+        "MATERIALIZED VIEW",
+        "BLOB DATA",
+        "FOREIGN TABLE",
+        "FOREIGN DATA WRAPPER",
+        "SERVER",
+        "USER MAPPING",
+        "ACCESS METHOD",
+        "EVENT TRIGGER",
+        "TEXT SEARCH CONFIGURATION",
+        "TEXT SEARCH DICTIONARY",
+        "TEXT SEARCH PARSER",
+        "TEXT SEARCH TEMPLATE",
+        "OPERATOR CLASS",
+        "OPERATOR FAMILY",
+        "CAST",
+        "TRANSFORM",
+        "COLLATION",
+        "CONVERSION",
+        "DOMAIN CONSTRAINT",
+        "DATABASE",
+        "ENCODING",
+        "STDSTRINGS",
+        "SEARCHPATH",
+        "SCHEMA",
+        "EXTENSION",
+        "TYPE",
+        "SHELL TYPE",
+        "DOMAIN",
+        "FUNCTION",
+        "PROCEDURE",
+        "AGGREGATE",
+        "OPERATOR",
+        "TABLE",
+        "VIEW",
+        "SEQUENCE",
+        "DEFAULT",
+        "CONSTRAINT",
+        "INDEX",
+        "STATISTICS",
+        "RULE",
+        "TRIGGER",
+        "POLICY",
+        "PUBLICATION",
+        "SUBSCRIPTION",
+        "COMMENT",
+        "ACL",
+        "BLOB",
+        "BLOBS"
+    );
+    private static final Pattern TOC_ENTRY = Pattern.compile("^\\d+;\\s+\\d+\\s+\\d+\\s+(.+)$");
+    private static final Pattern TOC_DATABASE = Pattern.compile("(?m)^;\\s+dbname:\\s+([^\\s]+)\\s*$");
+    private static final Pattern TOC_DATABASE_VERSION = Pattern.compile(
+        "(?m)^;\\s+Dumped from database version:\\s+(\\d+)(?:\\.|\\s|$)"
+    );
+    private static final Pattern TOC_DUMP_VERSION = Pattern.compile(
+        "(?m)^;\\s+Dumped by pg_dump version:\\s+(\\d+)(?:\\.|\\s|$)"
+    );
+    private static final Set<String> SUPPORTED_SSL_MODES = Set.of(
+        "disable", "allow", "prefer", "require", "verify-ca", "verify-full"
+    );
+    private static final Duration PROCESS_TERMINATION_GRACE = Duration.ofSeconds(5);
     private static final DateTimeFormatter FILE_TIMESTAMP = DateTimeFormatter
-        .ofPattern("yyyyMMdd-HHmmss")
+        .ofPattern("yyyyMMdd-HHmmss-SSS")
         .withZone(ZoneId.of("Asia/Shanghai"));
 
     private final ObjectMapper objectMapper;
-    private final String jdbcUrl;
+    private final PostgresConnection database;
     private final String username;
     private final String password;
     private final Path backupDir;
     private final long maxImportBytes;
+    private final Duration processTimeout;
+    private final RuntimeStateInvalidator runtimeStateInvalidator;
+    private final ReentrantReadWriteLock maintenanceLock = new ReentrantReadWriteLock(true);
 
     public DataTransferService(
         ObjectMapper objectMapper,
@@ -60,14 +184,27 @@ public class DataTransferService {
         @Value("${spring.flyway.user}") String username,
         @Value("${spring.flyway.password:}") String password,
         @Value("${starry.data-transfer.backup-dir:${user.home}/.starry-api/backups}") String backupDir,
-        @Value("${starry.data-transfer.max-import-bytes:268435456}") long maxImportBytes
+        @Value("${starry.data-transfer.max-import-bytes:268435456}") long maxImportBytes,
+        @Value("${starry.data-transfer.process-timeout:30m}") Duration processTimeout,
+        RuntimeStateInvalidator runtimeStateInvalidator
     ) {
+        if (maxImportBytes <= 0) {
+            throw new IllegalArgumentException("starry.data-transfer.max-import-bytes must be positive");
+        }
+        if (processTimeout == null || processTimeout.isZero() || processTimeout.isNegative()) {
+            throw new IllegalArgumentException("starry.data-transfer.process-timeout must be positive");
+        }
         this.objectMapper = objectMapper;
-        this.jdbcUrl = jdbcUrl;
-        this.username = username;
-        this.password = password;
-        this.backupDir = Paths.get(backupDir).toAbsolutePath().normalize();
+        this.database = parsePostgresJdbcUrl(jdbcUrl);
+        this.username = requireSafeValue(username, "PostgreSQL username");
+        this.password = password == null ? "" : password;
+        if (this.password.indexOf('\0') >= 0) {
+            throw new IllegalArgumentException("PostgreSQL password must not contain a null character");
+        }
+        this.backupDir = Path.of(backupDir).toAbsolutePath().normalize();
         this.maxImportBytes = maxImportBytes;
+        this.processTimeout = processTimeout;
+        this.runtimeStateInvalidator = runtimeStateInvalidator;
     }
 
     public Mono<DataTransferDtos.DataTransferStatusResponse> status() {
@@ -75,7 +212,7 @@ public class DataTransferService {
             List<DataTransferDtos.BackupFileResponse> backups = listBackupFiles();
             long size = backups.stream().mapToLong(DataTransferDtos.BackupFileResponse::sizeBytes).sum();
             return new DataTransferDtos.DataTransferStatusResponse(
-                databaseName(),
+                database.database(),
                 backupDir.toString(),
                 maxImportBytes,
                 backups.size(),
@@ -85,17 +222,35 @@ public class DataTransferService {
     }
 
     public Mono<ExportFile> exportDatabase() {
-        return Mono.fromCallable(() -> {
-            String sql = buildSqlDump();
-            return new ExportFile(
-                "starry-api-database-" + FILE_TIMESTAMP.format(Instant.now()) + SQL_EXTENSION,
-                sql.getBytes(StandardCharsets.UTF_8)
-            );
-        }).subscribeOn(Schedulers.boundedElastic());
+        return Mono.fromCallable(() -> withBackupLock(() -> {
+            Path export = Files.createTempFile("starry-api-export-", DUMP_EXTENSION);
+            try {
+                runDatabaseTool(pgDumpCommand(export));
+                return ExportFile.temporary(
+                    "starry-api-database-" + FILE_TIMESTAMP.format(Instant.now()) + DUMP_EXTENSION,
+                    export
+                );
+            } catch (Exception exception) {
+                deleteTempFile(export);
+                throw exception;
+            }
+        })).subscribeOn(Schedulers.boundedElastic());
     }
 
     public Mono<ExportFile> exportBackup() {
-        return Mono.fromCallable(() -> createBackupPayload()).subscribeOn(Schedulers.boundedElastic());
+        return Mono.fromCallable(() -> withBackupLock(() -> {
+            Path export = Files.createTempFile("starry-api-backup-export-", BACKUP_EXTENSION);
+            try {
+                createBackupArchive(export, Instant.now());
+                return ExportFile.temporary(
+                    "starry-api-backup-" + FILE_TIMESTAMP.format(Instant.now()) + BACKUP_EXTENSION,
+                    export
+                );
+            } catch (Exception exception) {
+                deleteTempFile(export);
+                throw exception;
+            }
+        })).subscribeOn(Schedulers.boundedElastic());
     }
 
     public Mono<DataTransferDtos.BackupListResponse> backups() {
@@ -106,19 +261,13 @@ public class DataTransferService {
     }
 
     public Mono<DataTransferDtos.BackupCreateResponse> createBackup() {
-        return Mono.fromCallable(() -> {
-            ExportFile payload = createBackupPayload();
-            Path target = ensureBackupDir().resolve(payload.fileName());
-            Files.write(target, payload.bytes());
-            return new DataTransferDtos.BackupCreateResponse(toBackupFile(target));
-        }).subscribeOn(Schedulers.boundedElastic());
+        return Mono.fromCallable(() -> withBackupLock(this::createStoredBackup))
+            .subscribeOn(Schedulers.boundedElastic());
     }
 
     public Mono<ExportFile> downloadBackup(String fileName) {
-        return Mono.fromCallable(() -> {
-            Path path = resolveBackupFile(fileName);
-            return new ExportFile(path.getFileName().toString(), Files.readAllBytes(path));
-        }).subscribeOn(Schedulers.boundedElastic());
+        return Mono.fromCallable(() -> ExportFile.stored(resolveBackupFile(fileName)))
+            .subscribeOn(Schedulers.boundedElastic());
     }
 
     public Mono<DataTransferDtos.DeleteBackupResponse> deleteBackup(String fileName) {
@@ -134,348 +283,657 @@ public class DataTransferService {
             return Mono.error(new ApiException(
                 HttpStatus.BAD_REQUEST,
                 "DATA_IMPORT_CONFIRMATION_REQUIRED",
-                "Database import requires confirm=RESTORE_DATABASE"
+                "PostgreSQL database import requires confirm=RESTORE_DATABASE"
             ));
         }
         return filePart.flatMap(file -> Mono.fromCallable(() -> Files.createTempFile("starry-api-import-", ".upload"))
             .subscribeOn(Schedulers.boundedElastic())
             .flatMap(tempFile -> file.transferTo(tempFile)
-                .then(Mono.fromCallable(() -> importFromFile(file.filename(), tempFile)).subscribeOn(Schedulers.boundedElastic()))
+                .then(Mono.fromCallable(() -> importFromFile(file.filename(), tempFile))
+                    .subscribeOn(Schedulers.boundedElastic()))
                 .doFinally(signal -> deleteTempFile(tempFile))));
     }
 
-    private DataTransferDtos.ImportResultResponse importFromFile(String originalName, Path file) throws IOException, SQLException {
-        long size = Files.size(file);
-        if (size > maxImportBytes) {
-            throw new ApiException(
-                HttpStatus.PAYLOAD_TOO_LARGE,
-                "DATA_IMPORT_FILE_TOO_LARGE",
-                "Import file exceeds the configured limit"
-            );
-        }
-
+    private DataTransferDtos.ImportResultResponse importFromFile(String originalName, Path upload) throws Exception {
+        validateImportSize(upload, "Import file exceeds the configured limit");
         String fileName = sanitizeUploadName(originalName);
-        String lower = fileName.toLowerCase(Locale.ROOT);
+        String lowerName = fileName.toLowerCase(Locale.ROOT);
+
+        Path restoreFile = upload;
+        boolean deleteRestoreFile = false;
         String sourceType;
-        String sql;
-        if (lower.endsWith(BACKUP_EXTENSION)) {
+        if (lowerName.endsWith(BACKUP_EXTENSION)) {
             sourceType = "ZIP";
-            sql = extractSqlFromZip(Files.readAllBytes(file));
-        } else if (lower.endsWith(SQL_EXTENSION)) {
-            sourceType = "SQL";
-            sql = Files.readString(file, StandardCharsets.UTF_8);
+            restoreFile = extractDumpFromZip(upload);
+            deleteRestoreFile = true;
+        } else if (lowerName.endsWith(DUMP_EXTENSION)) {
+            sourceType = "DUMP";
         } else {
             throw new ApiException(
                 HttpStatus.BAD_REQUEST,
                 "DATA_IMPORT_UNSUPPORTED_FILE",
-                "Only .sql and .zip backup files can be imported"
+                "Only PostgreSQL .dump and Starry API .zip backup files can be imported"
             );
         }
 
-        DataTransferDtos.BackupCreateResponse preRestoreBackup = createBackup().block();
-        int statements = executeSql(sql);
-        String preRestoreBackupName = preRestoreBackup == null ? null : preRestoreBackup.file().fileName();
-        return new DataTransferDtos.ImportResultResponse(
-            fileName,
-            sourceType,
-            statements,
-            preRestoreBackupName,
-            Instant.now()
+        try {
+            validateRestoreArchive(restoreFile);
+            return restoreDatabase(fileName, sourceType, restoreFile);
+        } finally {
+            if (deleteRestoreFile) {
+                deleteTempFile(restoreFile);
+            }
+        }
+    }
+
+    private DataTransferDtos.ImportResultResponse restoreDatabase(
+        String fileName,
+        String sourceType,
+        Path restoreFile
+    ) throws Exception {
+        Lock restoreLock = maintenanceLock.writeLock();
+        if (!restoreLock.tryLock()) {
+            throw new ApiException(
+                HttpStatus.CONFLICT,
+                "DATA_DATABASE_MAINTENANCE_IN_PROGRESS",
+                "Another PostgreSQL backup or restore operation is in progress"
+            );
+        }
+        try (MaintenanceSession maintenance = acquireMaintenanceSession(false)) {
+            DataTransferDtos.BackupCreateResponse preRestoreBackup;
+            Exception restoreFailure = null;
+            boolean runtimeStateRequiresInvalidation = false;
+            Path rollbackDump = null;
+            try {
+                runtimeStateRequiresInvalidation = true;
+                maintenance.suspendRuntimeConnections();
+                preRestoreBackup = createStoredBackup();
+                rollbackDump = extractDumpFromZip(
+                    resolveBackupFile(preRestoreBackup.file().fileName()),
+                    Long.MAX_VALUE
+                );
+                Path rollbackArchive = rollbackDump;
+                restoreWithRollback(
+                    () -> runDatabaseTool(pgRestoreCommand(restoreFile)),
+                    maintenance::verifyAndAnalyzeRestoredDatabase,
+                    () -> runDatabaseTool(pgRestoreCommand(rollbackArchive)),
+                    maintenance::verifyAndAnalyzeRestoredDatabase
+                );
+            } catch (Exception exception) {
+                restoreFailure = exception;
+                throw exception;
+            } finally {
+                deleteTempFile(rollbackDump);
+                Exception cleanupFailure = null;
+                try {
+                    ensureRuntimeConnectionsAllowed(maintenance);
+                } catch (SQLException reconnectFailure) {
+                    cleanupFailure = reconnectFailure;
+                }
+                if (runtimeStateRequiresInvalidation) {
+                    try {
+                        runtimeStateInvalidator.invalidateAll();
+                    } catch (RuntimeException invalidationFailure) {
+                        if (cleanupFailure == null) {
+                            cleanupFailure = invalidationFailure;
+                        } else {
+                            cleanupFailure.addSuppressed(invalidationFailure);
+                        }
+                    }
+                }
+                if (cleanupFailure != null) {
+                    if (restoreFailure != null) {
+                        restoreFailure.addSuppressed(cleanupFailure);
+                    } else {
+                        throw cleanupFailure;
+                    }
+                }
+            }
+
+            return new DataTransferDtos.ImportResultResponse(
+                fileName,
+                sourceType,
+                preRestoreBackup.file().fileName(),
+                Instant.now()
+            );
+        } finally {
+            restoreLock.unlock();
+        }
+    }
+
+    private DataTransferDtos.BackupCreateResponse createStoredBackup() throws Exception {
+        Instant now = Instant.now();
+        String uniqueSuffix = UUID.randomUUID().toString().substring(0, 8);
+        String fileName = "starry-api-backup-" + FILE_TIMESTAMP.format(now) + "-" + uniqueSuffix + BACKUP_EXTENSION;
+        Path target = ensureBackupDir().resolve(fileName);
+        Path partial = Files.createTempFile(backupDir, ".starry-api-backup-", ".part");
+        try {
+            createBackupArchive(partial, now);
+            moveAtomically(partial, target);
+            return new DataTransferDtos.BackupCreateResponse(toBackupFile(target));
+        } finally {
+            deleteTempFile(partial);
+        }
+    }
+
+    private void createBackupArchive(Path target, Instant createdAt) throws Exception {
+        Path dump = Files.createTempFile("starry-api-database-", DUMP_EXTENSION);
+        try {
+            runDatabaseTool(pgDumpCommand(dump));
+
+            Map<String, Object> metadata = new LinkedHashMap<>();
+            metadata.put("application", "starry-api");
+            metadata.put("database", database.database());
+            metadata.put("databaseEngine", "postgresql");
+            metadata.put("createdAt", createdAt.toString());
+            metadata.put("format", "starry-api-postgresql-backup-v2");
+            metadata.put("content", DATABASE_DUMP_ENTRY);
+
+            try (ZipOutputStream zip = new ZipOutputStream(
+                Files.newOutputStream(target, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE),
+                StandardCharsets.UTF_8
+            )) {
+                zip.setLevel(Deflater.NO_COMPRESSION);
+                putZipFileEntry(zip, DATABASE_DUMP_ENTRY, dump);
+                putZipEntry(
+                    zip,
+                    "metadata.json",
+                    objectMapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(metadata)
+                );
+                putZipEntry(zip, "README.txt", """
+                    Starry API PostgreSQL backup package.
+
+                    database.dump is a PostgreSQL custom-format archive created with pg_dump.
+                    Restore this package from the Starry API admin data-transfer page.
+                    """.getBytes(StandardCharsets.UTF_8));
+            }
+        } finally {
+            deleteTempFile(dump);
+        }
+    }
+
+    List<String> pgDumpCommand(Path output) {
+        return List.of(
+            "pg_dump",
+            "--host", database.host(),
+            "--port", Integer.toString(database.port()),
+            "--username", username,
+            "--dbname", database.database(),
+            "--no-password",
+            "--role", POSTGRES_OWNER_ROLE,
+            "--schema", POSTGRES_SCHEMA,
+            "--format", "custom",
+            "--no-owner",
+            "--file", output.toAbsolutePath().normalize().toString()
         );
     }
 
-    private ExportFile createBackupPayload() throws IOException, SQLException {
-        Instant now = Instant.now();
-        String fileName = "starry-api-backup-" + FILE_TIMESTAMP.format(now) + BACKUP_EXTENSION;
-        String sql = buildSqlDump();
-        Map<String, Object> metadata = new LinkedHashMap<>();
-        metadata.put("application", "starry-api");
-        metadata.put("database", databaseName());
-        metadata.put("createdAt", now.toString());
-        metadata.put("format", "starry-api-backup-v1");
-
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes, StandardCharsets.UTF_8)) {
-            putZipEntry(zip, "database.sql", sql.getBytes(StandardCharsets.UTF_8));
-            putZipEntry(zip, "metadata.json", objectMapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(metadata));
-            putZipEntry(zip, "README.txt", """
-                Starry API backup package.
-
-                database.sql contains the full SQL export and can be restored from the admin data-transfer page.
-                Always keep a copy before importing it into another server.
-                """.getBytes(StandardCharsets.UTF_8));
-        }
-        return new ExportFile(fileName, bytes.toByteArray());
+    List<String> pgRestoreValidationCommand(Path archive) {
+        return List.of(
+            "pg_restore",
+            "--list",
+            archive.toAbsolutePath().normalize().toString()
+        );
     }
 
-    private String buildSqlDump() throws SQLException {
-        StringBuilder sql = new StringBuilder(1024 * 1024);
-        sql.append("-- Starry API database export\n");
-        sql.append("-- Database: ").append(databaseName()).append('\n');
-        sql.append("-- Created at: ").append(Instant.now()).append("\n\n");
-        sql.append("SET FOREIGN_KEY_CHECKS=0;\n");
-        sql.append("SET SQL_MODE='NO_AUTO_VALUE_ON_ZERO';\n\n");
-
-        try (Connection connection = openConnection()) {
-            List<String> tables = listTables(connection);
-            for (String table : tables) {
-                appendTableDump(connection, table, sql);
-            }
-        }
-
-        sql.append("SET FOREIGN_KEY_CHECKS=1;\n");
-        return sql.toString();
+    List<String> pgRestoreCommand(Path archive) {
+        return List.of(
+            "pg_restore",
+            "--host", database.host(),
+            "--port", Integer.toString(database.port()),
+            "--username", username,
+            "--dbname", database.database(),
+            "--no-password",
+            "--role", POSTGRES_OWNER_ROLE,
+            "--schema", POSTGRES_SCHEMA,
+            "--clean",
+            "--if-exists",
+            "--no-owner",
+            "--single-transaction",
+            "--exit-on-error",
+            archive.toAbsolutePath().normalize().toString()
+        );
     }
 
-    private void appendTableDump(Connection connection, String table, StringBuilder sql) throws SQLException {
-        sql.append("\n-- --------------------------------------------------------\n");
-        sql.append("-- Table `").append(table).append("`\n\n");
-        sql.append("DROP TABLE IF EXISTS ").append(quoteIdentifier(table)).append(";\n");
-        try (Statement statement = connection.createStatement();
-             ResultSet resultSet = statement.executeQuery("SHOW CREATE TABLE " + quoteIdentifier(table))) {
-            if (resultSet.next()) {
-                sql.append(resultSet.getString(2)).append(";\n\n");
-            }
+    private void validateRestoreArchive(Path archive) {
+        ProcessOutput toc;
+        try {
+            toc = runDatabaseToolForOutput(pgRestoreValidationCommand(archive), MAX_TOC_OUTPUT_BYTES);
+        } catch (IOException exception) {
+            throw new ApiException(
+                HttpStatus.BAD_REQUEST,
+                "DATA_IMPORT_INVALID_ARCHIVE",
+                "The uploaded file is not a readable PostgreSQL custom-format archive"
+            );
         }
-
-        try (Statement statement = connection.createStatement(ResultSet.TYPE_FORWARD_ONLY, ResultSet.CONCUR_READ_ONLY)) {
-            statement.setFetchSize(Integer.MIN_VALUE);
-            try (ResultSet rows = statement.executeQuery("SELECT * FROM " + quoteIdentifier(table))) {
-                appendRows(table, rows, sql);
-            }
+        if (toc.truncated()) {
+            throw incompatibleArchive("PostgreSQL archive table of contents exceeds the validation limit");
         }
+        validateRestoreToc(toc.text());
     }
 
-    private void appendRows(String table, ResultSet rows, StringBuilder sql) throws SQLException {
-        ResultSetMetaData metaData = rows.getMetaData();
-        int columnCount = metaData.getColumnCount();
-        StringBuilder columns = new StringBuilder();
-        for (int index = 1; index <= columnCount; index++) {
-            if (index > 1) {
-                columns.append(", ");
-            }
-            columns.append(quoteIdentifier(metaData.getColumnName(index)));
+    static void validateRestoreToc(String toc) {
+        if (toc == null || toc.isBlank()) {
+            throw incompatibleArchive("PostgreSQL archive table of contents is empty");
         }
 
-        while (rows.next()) {
-            sql.append("INSERT INTO ")
-                .append(quoteIdentifier(table))
-                .append(" (")
-                .append(columns)
-                .append(") VALUES (");
-            for (int index = 1; index <= columnCount; index++) {
-                if (index > 1) {
-                    sql.append(", ");
-                }
-                sql.append(toSqlLiteral(rows.getObject(index), metaData.getColumnType(index)));
-            }
-            sql.append(");\n");
+        String databaseName = requiredHeaderValue(TOC_DATABASE, toc, "database name");
+        if (!POSTGRES_DATABASE.equals(databaseName)) {
+            throw incompatibleArchive("PostgreSQL archive must originate from database " + POSTGRES_DATABASE);
         }
-        sql.append('\n');
-    }
+        validatePostgresMajor(TOC_DATABASE_VERSION, toc, "source database");
+        validatePostgresMajor(TOC_DUMP_VERSION, toc, "pg_dump");
 
-    private int executeSql(String sql) throws SQLException {
-        List<String> statements = splitStatements(sql);
-        int executed = 0;
-        try (Connection connection = openConnection();
-             Statement statement = connection.createStatement()) {
-            statement.execute("SET FOREIGN_KEY_CHECKS=0");
-            for (String sqlStatement : statements) {
-                if (sqlStatement.isBlank()) {
-                    continue;
-                }
-                statement.execute(sqlStatement);
-                executed++;
+        boolean schemaFound = false;
+        Set<String> tables = new HashSet<>();
+        for (String line : toc.lines().toList()) {
+            String trimmed = line.strip();
+            if (trimmed.isEmpty() || trimmed.startsWith(";")) {
+                continue;
             }
-            statement.execute("SET FOREIGN_KEY_CHECKS=1");
-        }
-        return executed;
-    }
-
-    private List<String> splitStatements(String sql) {
-        List<String> statements = new ArrayList<>();
-        StringBuilder current = new StringBuilder();
-        boolean inSingleQuote = false;
-        boolean inDoubleQuote = false;
-        boolean inBacktick = false;
-        boolean inLineComment = false;
-        boolean inBlockComment = false;
-
-        for (int index = 0; index < sql.length(); index++) {
-            char currentChar = sql.charAt(index);
-            char nextChar = index + 1 < sql.length() ? sql.charAt(index + 1) : '\0';
-
-            if (inLineComment) {
-                if (currentChar == '\n' || currentChar == '\r') {
-                    inLineComment = false;
-                    current.append('\n');
+            Matcher matcher = TOC_ENTRY.matcher(trimmed);
+            if (!matcher.matches()) {
+                throw incompatibleArchive("PostgreSQL archive contains an unrecognized TOC entry");
+            }
+            TocObject object = parseTocObject(matcher.group(1));
+            if (POSTGRES_SCHEMA.equals(object.namespace())) {
+                if ("TABLE".equals(object.type())) {
+                    tables.add(readIdentifier(object.details()).value());
                 }
                 continue;
             }
-
-            if (inBlockComment) {
-                if (currentChar == '*' && nextChar == '/') {
-                    inBlockComment = false;
-                    index++;
-                    current.append(' ');
+            if (!"-".equals(object.namespace())) {
+                throw incompatibleArchive("PostgreSQL archive contains objects outside schema " + POSTGRES_SCHEMA);
+            }
+            if ("SCHEMA".equals(object.type())) {
+                Identifier schema = readIdentifier(object.details());
+                if (!POSTGRES_SCHEMA.equals(schema.value())) {
+                    throw incompatibleArchive("PostgreSQL archive contains an unexpected schema");
                 }
+                schemaFound = true;
                 continue;
             }
-
-            if (!inSingleQuote && !inDoubleQuote && !inBacktick) {
-                if (currentChar == '-' && nextChar == '-') {
-                    inLineComment = true;
-                    index++;
-                    continue;
-                }
-                if (currentChar == '#') {
-                    inLineComment = true;
-                    continue;
-                }
-                if (currentChar == '/' && nextChar == '*') {
-                    inBlockComment = true;
-                    index++;
-                    continue;
-                }
-                if (currentChar == ';') {
-                    addStatement(statements, current);
-                    continue;
-                }
-                if (currentChar == '\'') {
-                    inSingleQuote = true;
-                } else if (currentChar == '"') {
-                    inDoubleQuote = true;
-                } else if (currentChar == '`') {
-                    inBacktick = true;
-                }
-                current.append(currentChar);
+            if (("ACL".equals(object.type()) || "COMMENT".equals(object.type()))
+                && isStarrySchemaMetadata(object.details())) {
                 continue;
             }
+            if (!GLOBAL_TOC_TYPES.contains(object.type())) {
+                throw incompatibleArchive("PostgreSQL archive contains unsupported global objects");
+            }
+            if (("DATABASE".equals(object.type()) || "DATABASE PROPERTIES".equals(object.type()))
+                && !POSTGRES_DATABASE.equals(readIdentifier(object.details()).value())) {
+                throw incompatibleArchive("PostgreSQL archive targets an unexpected database");
+            }
+        }
 
-            current.append(currentChar);
-            if ((inSingleQuote || inDoubleQuote) && currentChar == '\\' && nextChar != '\0') {
-                current.append(nextChar);
+        if (!schemaFound) {
+            throw incompatibleArchive("PostgreSQL archive does not contain the required schema object");
+        }
+        Set<String> missingTables = new HashSet<>(REQUIRED_RESTORE_TABLES);
+        missingTables.removeAll(tables);
+        if (!missingTables.isEmpty()) {
+            throw incompatibleArchive(
+                "PostgreSQL archive is missing required Starry API tables: "
+                    + missingTables.stream().sorted().toList()
+            );
+        }
+    }
+
+    private static TocObject parseTocObject(String body) {
+        for (String type : TOC_OBJECT_TYPES) {
+            String prefix = type + " ";
+            if (!body.startsWith(prefix)) {
+                continue;
+            }
+            Identifier namespace = readIdentifier(body.substring(prefix.length()));
+            return new TocObject(type, namespace.value(), namespace.remaining());
+        }
+        throw incompatibleArchive("PostgreSQL archive contains an unsupported TOC object type");
+    }
+
+    private static Identifier readIdentifier(String input) {
+        String value = input == null ? "" : input.stripLeading();
+        if (value.isEmpty()) {
+            throw incompatibleArchive("PostgreSQL archive contains an incomplete TOC entry");
+        }
+        if (value.charAt(0) != '"') {
+            int separator = firstWhitespace(value);
+            return separator < 0
+                ? new Identifier(value, "")
+                : new Identifier(value.substring(0, separator), value.substring(separator).stripLeading());
+        }
+
+        StringBuilder identifier = new StringBuilder();
+        for (int index = 1; index < value.length(); index++) {
+            char current = value.charAt(index);
+            if (current != '"') {
+                identifier.append(current);
+                continue;
+            }
+            if (index + 1 < value.length() && value.charAt(index + 1) == '"') {
+                identifier.append('"');
                 index++;
                 continue;
             }
-            if (inSingleQuote && currentChar == '\'') {
-                inSingleQuote = false;
-            } else if (inDoubleQuote && currentChar == '"') {
-                inDoubleQuote = false;
-            } else if (inBacktick && currentChar == '`') {
-                inBacktick = false;
+            return new Identifier(identifier.toString(), value.substring(index + 1).stripLeading());
+        }
+        throw incompatibleArchive("PostgreSQL archive contains an invalid quoted identifier");
+    }
+
+    private static int firstWhitespace(String value) {
+        for (int index = 0; index < value.length(); index++) {
+            if (Character.isWhitespace(value.charAt(index))) {
+                return index;
             }
         }
-        addStatement(statements, current);
-        return statements;
+        return -1;
     }
 
-    private void addStatement(List<String> statements, StringBuilder current) {
-        String statement = current.toString().trim();
-        if (!statement.isEmpty()) {
-            statements.add(statement);
+    private static boolean isStarrySchemaMetadata(String details) {
+        Identifier objectType = readIdentifier(details);
+        return "SCHEMA".equals(objectType.value())
+            && POSTGRES_SCHEMA.equals(readIdentifier(objectType.remaining()).value());
+    }
+
+    private static String requiredHeaderValue(Pattern pattern, String toc, String label) {
+        Matcher matcher = pattern.matcher(toc);
+        if (!matcher.find()) {
+            throw incompatibleArchive("PostgreSQL archive is missing its " + label + " metadata");
         }
-        current.setLength(0);
+        return matcher.group(1);
     }
 
-    private List<String> listTables(Connection connection) throws SQLException {
-        List<String> tables = new ArrayList<>();
-        try (Statement statement = connection.createStatement();
-             ResultSet resultSet = statement.executeQuery("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'")) {
-            while (resultSet.next()) {
-                tables.add(resultSet.getString(1));
+    private static void validatePostgresMajor(Pattern pattern, String toc, String label) {
+        String value = requiredHeaderValue(pattern, toc, label + " version");
+        int major;
+        try {
+            major = Integer.parseInt(value);
+        } catch (NumberFormatException exception) {
+            throw incompatibleArchive("PostgreSQL archive has an invalid " + label + " version");
+        }
+        if (!SUPPORTED_POSTGRES_MAJORS.contains(major)) {
+            throw incompatibleArchive(
+                "PostgreSQL archive " + label + " major version " + major + " is not supported"
+            );
+        }
+    }
+
+    private static ApiException incompatibleArchive(String message) {
+        return new ApiException(HttpStatus.BAD_REQUEST, "DATA_IMPORT_INCOMPATIBLE_ARCHIVE", message);
+    }
+
+    static void restoreWithRollback(
+        CheckedRunnable restore,
+        CheckedRunnable verify,
+        CheckedRunnable rollback,
+        CheckedRunnable verifyRollback
+    ) throws Exception {
+        restore.run();
+        try {
+            verify.run();
+        } catch (Exception verificationFailure) {
+            try {
+                rollback.run();
+                verifyRollback.run();
+            } catch (Exception rollbackFailure) {
+                verificationFailure.addSuppressed(rollbackFailure);
+            }
+            throw verificationFailure;
+        }
+    }
+
+    static String maintenanceLockSql(boolean shared) {
+        return shared
+            ? "SELECT pg_catalog.pg_try_advisory_lock_shared(?)"
+            : "SELECT pg_catalog.pg_try_advisory_lock(?)";
+    }
+
+    static String maintenanceUnlockSql(boolean shared) {
+        return shared
+            ? "SELECT pg_catalog.pg_advisory_unlock_shared(?)"
+            : "SELECT pg_catalog.pg_advisory_unlock(?)";
+    }
+
+    private MaintenanceSession acquireMaintenanceSession(boolean shared) throws SQLException {
+        Connection connection = openMaintenanceConnection();
+        boolean acquired = false;
+        try {
+            try (PreparedStatement statement = connection.prepareStatement(maintenanceLockSql(shared))) {
+                statement.setLong(1, DATA_TRANSFER_LOCK_KEY);
+                try (ResultSet result = statement.executeQuery()) {
+                    acquired = result.next() && result.getBoolean(1);
+                }
+            }
+            if (!acquired) {
+                throw new ApiException(
+                    HttpStatus.CONFLICT,
+                    "DATA_DATABASE_MAINTENANCE_IN_PROGRESS",
+                    "Another PostgreSQL backup or restore operation is in progress"
+                );
+            }
+            return new MaintenanceSession(connection, shared);
+        } finally {
+            if (!acquired) {
+                connection.close();
             }
         }
-        tables.sort(String::compareToIgnoreCase);
-        return tables;
     }
 
-    private String toSqlLiteral(Object value, int sqlType) throws SQLException {
-        if (value == null) {
-            return "NULL";
+    private Connection openMaintenanceConnection() throws SQLException {
+        Properties properties = new Properties();
+        properties.setProperty("user", username);
+        properties.setProperty("password", password);
+        properties.setProperty("connectTimeout", "10");
+        properties.setProperty(
+            "socketTimeout",
+            Long.toString(Math.max(1, Math.min(Integer.MAX_VALUE, processTimeout.toSeconds())))
+        );
+        Connection connection = DriverManager.getConnection(database.jdbcUrl(), properties);
+        try {
+            connection.setAutoCommit(true);
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("SET ROLE " + POSTGRES_OWNER_ROLE);
+            }
+            return connection;
+        } catch (SQLException exception) {
+            try {
+                connection.close();
+            } catch (SQLException closeFailure) {
+                exception.addSuppressed(closeFailure);
+            }
+            throw exception;
         }
-        if (value instanceof byte[] bytes || isBinaryType(sqlType)) {
-            byte[] binary = value instanceof byte[] bytesValue ? bytesValue : value.toString().getBytes(StandardCharsets.UTF_8);
-            return "X'" + bytesToHex(binary) + "'";
+    }
+
+    private void ensureRuntimeConnectionsAllowed(MaintenanceSession maintenance) throws SQLException {
+        try {
+            maintenance.allowRuntimeConnections();
+            return;
+        } catch (SQLException primaryFailure) {
+            try (Connection recovery = openMaintenanceConnection(); Statement statement = recovery.createStatement()) {
+                statement.executeUpdate(
+                    "GRANT CONNECT ON DATABASE " + POSTGRES_DATABASE + " TO " + POSTGRES_RUNTIME_ROLE
+                );
+                maintenance.runtimeConnectRevoked = false;
+                return;
+            } catch (SQLException recoveryFailure) {
+                primaryFailure.addSuppressed(recoveryFailure);
+                throw primaryFailure;
+            }
         }
-        if (value instanceof Boolean bool) {
-            return bool ? "1" : "0";
+    }
+
+    Map<String, String> databaseToolEnvironment() {
+        Map<String, String> environment = new LinkedHashMap<>(database.libpqEnvironment());
+        environment.put("PGCONNECT_TIMEOUT", "10");
+        environment.put("PGPASSWORD", password);
+        return Map.copyOf(environment);
+    }
+
+    private void runDatabaseTool(List<String> command) throws IOException {
+        executeProcess(command, databaseToolEnvironment(), processTimeout);
+    }
+
+    private ProcessOutput runDatabaseToolForOutput(List<String> command, int outputLimit) throws IOException {
+        return executeProcess(command, databaseToolEnvironment(), processTimeout, outputLimit);
+    }
+
+    static String executeProcess(List<String> command, Map<String, String> environment, Duration timeout) throws IOException {
+        return executeProcess(command, environment, timeout, MAX_PROCESS_OUTPUT_BYTES).text();
+    }
+
+    private static ProcessOutput executeProcess(
+        List<String> command,
+        Map<String, String> environment,
+        Duration timeout,
+        int outputLimit
+    ) throws IOException {
+        ProcessBuilder processBuilder = new ProcessBuilder(command);
+        processBuilder.redirectErrorStream(true);
+        Map<String, String> processEnvironment = processBuilder.environment();
+        processEnvironment.keySet().removeIf(key -> key.startsWith("PG"));
+        processEnvironment.putAll(environment);
+
+        Process process;
+        try {
+            process = processBuilder.start();
+        } catch (IOException exception) {
+            throw new IOException("Could not start PostgreSQL utility " + command.getFirst(), exception);
         }
-        if (value instanceof Number number && !(number instanceof BigDecimal && requiresQuotedDecimal(sqlType))) {
-            return number.toString();
+
+        BoundedProcessOutput output = new BoundedProcessOutput(outputLimit);
+        Thread outputReader = Thread.ofVirtual()
+            .name("postgresql-utility-output")
+            .start(() -> output.readFrom(process.getInputStream()));
+
+        boolean finished;
+        try {
+            finished = process.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException exception) {
+            terminateProcess(process);
+            joinOutputReader(outputReader);
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while running PostgreSQL utility " + command.getFirst(), exception);
         }
-        return quoteString(value.toString());
-    }
 
-    private boolean requiresQuotedDecimal(int sqlType) {
-        return sqlType == Types.VARCHAR || sqlType == Types.CHAR || sqlType == Types.LONGVARCHAR;
-    }
-
-    private boolean isBinaryType(int sqlType) {
-        return sqlType == Types.BINARY
-            || sqlType == Types.VARBINARY
-            || sqlType == Types.LONGVARBINARY
-            || sqlType == Types.BLOB;
-    }
-
-    private String quoteString(String value) {
-        return "'" + value
-            .replace("\\", "\\\\")
-            .replace("\0", "\\0")
-            .replace("\n", "\\n")
-            .replace("\r", "\\r")
-            .replace("\b", "\\b")
-            .replace("\t", "\\t")
-            .replace("\u001A", "\\Z")
-            .replace("'", "\\'") + "'";
-    }
-
-    private String quoteIdentifier(String identifier) {
-        return "`" + identifier.replace("`", "``") + "`";
-    }
-
-    private String bytesToHex(byte[] bytes) {
-        StringBuilder hex = new StringBuilder(bytes.length * 2);
-        for (byte b : bytes) {
-            hex.append(String.format("%02x", b));
+        if (!finished) {
+            terminateProcess(process);
+            joinOutputReader(outputReader);
+            throw new IOException("PostgreSQL utility " + command.getFirst() + " timed out after " + timeout);
         }
-        return hex.toString();
+
+        joinOutputReader(outputReader);
+        if (process.exitValue() != 0) {
+            String details = output.text().strip();
+            String suffix = details.isEmpty() ? "" : ": " + details;
+            throw new IOException(
+                "PostgreSQL utility " + command.getFirst() + " exited with code " + process.exitValue() + suffix
+            );
+        }
+        return new ProcessOutput(output.text(), output.truncated());
     }
 
-    private String extractSqlFromZip(byte[] zipBytes) throws IOException {
-        try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(zipBytes), StandardCharsets.UTF_8)) {
+    private static void terminateProcess(Process process) {
+        process.destroy();
+        try {
+            if (!process.waitFor(PROCESS_TERMINATION_GRACE.toMillis(), TimeUnit.MILLISECONDS)) {
+                process.destroyForcibly();
+                process.waitFor(PROCESS_TERMINATION_GRACE.toMillis(), TimeUnit.MILLISECONDS);
+            }
+        } catch (InterruptedException exception) {
+            process.destroyForcibly();
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private static void joinOutputReader(Thread outputReader) throws IOException {
+        try {
+            if (!outputReader.join(PROCESS_TERMINATION_GRACE)) {
+                outputReader.interrupt();
+                throw new IOException("Timed out while collecting PostgreSQL utility output");
+            }
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while collecting PostgreSQL utility output", exception);
+        }
+    }
+
+    private Path extractDumpFromZip(Path zipFile) throws IOException {
+        return extractDumpFromZip(zipFile, maxImportBytes);
+    }
+
+    private Path extractDumpFromZip(Path zipFile, long extractedSizeLimit) throws IOException {
+        Path extracted = Files.createTempFile("starry-api-restore-", DUMP_EXTENSION);
+        boolean found = false;
+        int entryCount = 0;
+        try (ZipInputStream zip = new ZipInputStream(Files.newInputStream(zipFile), StandardCharsets.UTF_8)) {
             ZipEntry entry;
             while ((entry = zip.getNextEntry()) != null) {
-                if (entry.isDirectory()) {
+                entryCount++;
+                if (entryCount > MAX_ZIP_ENTRIES) {
+                    throw new ApiException(
+                        HttpStatus.BAD_REQUEST,
+                        "DATA_IMPORT_TOO_MANY_ZIP_ENTRIES",
+                        "PostgreSQL backup package contains too many entries"
+                    );
+                }
+                if (entry.isDirectory() || !DATABASE_DUMP_ENTRY.equals(entry.getName())) {
                     continue;
                 }
-                String name = entry.getName().toLowerCase(Locale.ROOT);
-                if (!"database.sql".equals(name) && !name.endsWith(SQL_EXTENSION)) {
-                    continue;
+                if (found) {
+                    throw new ApiException(
+                        HttpStatus.BAD_REQUEST,
+                        "DATA_IMPORT_DUPLICATE_DUMP",
+                        "PostgreSQL backup package contains duplicate database.dump entries"
+                    );
                 }
-                ByteArrayOutputStream sql = new ByteArrayOutputStream();
-                byte[] buffer = new byte[8192];
-                long total = 0;
-                int read;
-                while ((read = zip.read(buffer)) >= 0) {
-                    total += read;
-                    if (total > maxImportBytes) {
-                        throw new ApiException(
-                            HttpStatus.PAYLOAD_TOO_LARGE,
-                            "DATA_IMPORT_FILE_TOO_LARGE",
-                            "SQL inside the backup exceeds the configured limit"
-                        );
-                    }
-                    sql.write(buffer, 0, read);
+                copyWithLimit(zip, extracted, extractedSizeLimit);
+                found = true;
+            }
+        } catch (Exception exception) {
+            deleteTempFile(extracted);
+            throw exception;
+        }
+        if (!found) {
+            deleteTempFile(extracted);
+            throw new ApiException(
+                HttpStatus.BAD_REQUEST,
+                "DATA_IMPORT_DUMP_NOT_FOUND",
+                "PostgreSQL backup package does not contain database.dump"
+            );
+        }
+        return extracted;
+    }
+
+    private void copyWithLimit(InputStream input, Path target, long limit) throws IOException {
+        byte[] buffer = new byte[COPY_BUFFER_BYTES];
+        long total = 0;
+        try (var output = Files.newOutputStream(target, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE)) {
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                total += read;
+                if (total > limit) {
+                    throw new ApiException(
+                        HttpStatus.PAYLOAD_TOO_LARGE,
+                        "DATA_IMPORT_FILE_TOO_LARGE",
+                        "PostgreSQL dump inside the backup exceeds the configured limit"
+                    );
                 }
-                return sql.toString(StandardCharsets.UTF_8);
+                output.write(buffer, 0, read);
             }
         }
-        throw new ApiException(
-            HttpStatus.BAD_REQUEST,
-            "DATA_IMPORT_SQL_NOT_FOUND",
-            "Backup package does not contain database.sql"
-        );
+    }
+
+    private void validateImportSize(Path file, String message) throws IOException {
+        if (Files.size(file) > maxImportBytes) {
+            throw new ApiException(HttpStatus.PAYLOAD_TOO_LARGE, "DATA_IMPORT_FILE_TOO_LARGE", message);
+        }
+    }
+
+    private void putZipFileEntry(ZipOutputStream zip, String name, Path source) throws IOException {
+        zip.putNextEntry(new ZipEntry(name));
+        Files.copy(source, zip);
+        zip.closeEntry();
     }
 
     private void putZipEntry(ZipOutputStream zip, String name, byte[] bytes) throws IOException {
@@ -489,6 +947,7 @@ public class DataTransferService {
         try (var stream = Files.list(dir)) {
             return stream
                 .filter(Files::isRegularFile)
+                .filter(path -> !Files.isSymbolicLink(path))
                 .filter(path -> path.getFileName().toString().endsWith(BACKUP_EXTENSION))
                 .sorted(Comparator.comparing((Path path) -> path.getFileName().toString()).reversed())
                 .map(this::toBackupFileUnchecked)
@@ -503,7 +962,7 @@ public class DataTransferService {
             throw new ApiException(
                 HttpStatus.INTERNAL_SERVER_ERROR,
                 "DATA_BACKUP_READ_FAILED",
-                "Could not read backup file metadata"
+                "Could not read PostgreSQL backup file metadata"
             );
         }
     }
@@ -519,8 +978,8 @@ public class DataTransferService {
     private Path resolveBackupFile(String fileName) throws IOException {
         String safeName = sanitizeBackupName(fileName);
         Path path = ensureBackupDir().resolve(safeName).normalize();
-        if (!path.startsWith(backupDir) || !Files.isRegularFile(path)) {
-            throw new ApiException(HttpStatus.NOT_FOUND, "DATA_BACKUP_NOT_FOUND", "Backup file not found");
+        if (!path.startsWith(backupDir) || Files.isSymbolicLink(path) || !Files.isRegularFile(path)) {
+            throw new ApiException(HttpStatus.NOT_FOUND, "DATA_BACKUP_NOT_FOUND", "PostgreSQL backup file not found");
         }
         return path;
     }
@@ -530,7 +989,7 @@ public class DataTransferService {
         return backupDir;
     }
 
-    private String sanitizeBackupName(String fileName) {
+    String sanitizeBackupName(String fileName) {
         String name = sanitizeUploadName(fileName);
         if (!name.endsWith(BACKUP_EXTENSION)) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "DATA_BACKUP_INVALID_NAME", "Invalid backup file name");
@@ -538,38 +997,357 @@ public class DataTransferService {
         return name;
     }
 
-    private String sanitizeUploadName(String fileName) {
-        String name = fileName == null || fileName.isBlank() ? "upload" : Paths.get(fileName).getFileName().toString();
-        if (name.contains("/") || name.contains("\\") || name.startsWith(".")) {
+    String sanitizeUploadName(String fileName) {
+        String name = fileName == null || fileName.isBlank() ? "upload" : fileName;
+        if (
+            name.length() > 255
+                || name.startsWith(".")
+                || name.contains("/")
+                || name.contains("\\")
+                || containsControlCharacter(name)
+        ) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "DATA_FILE_INVALID_NAME", "Invalid file name");
         }
         return name;
     }
 
-    private Connection openConnection() throws SQLException {
-        return DriverManager.getConnection(jdbcUrl, username, password);
+    private static boolean containsControlCharacter(String value) {
+        return value.codePoints().anyMatch(Character::isISOControl);
     }
 
-    private String databaseName() {
-        int marker = jdbcUrl.indexOf("://");
-        int pathStart = marker >= 0 ? jdbcUrl.indexOf('/', marker + 3) : -1;
-        if (pathStart < 0 || pathStart + 1 >= jdbcUrl.length()) {
-            return "";
+    private static PostgresConnection parsePostgresJdbcUrl(String jdbcUrl) {
+        if (jdbcUrl == null || !jdbcUrl.startsWith("jdbc:postgresql://")) {
+            throw new IllegalArgumentException("Data transfer supports only a PostgreSQL JDBC URL");
         }
-        int queryStart = jdbcUrl.indexOf('?', pathStart);
-        String database = queryStart >= 0 ? jdbcUrl.substring(pathStart + 1, queryStart) : jdbcUrl.substring(pathStart + 1);
-        int semicolon = database.indexOf(';');
-        return semicolon >= 0 ? database.substring(0, semicolon) : database;
+        try {
+            URI uri = new URI(jdbcUrl.substring("jdbc:".length()));
+            String host = requireSafeValue(uri.getHost(), "PostgreSQL host");
+            int port = uri.getPort() < 0 ? 5432 : uri.getPort();
+            if (port <= 0 || port > 65535) {
+                throw new IllegalArgumentException("PostgreSQL port must be between 1 and 65535");
+            }
+            String path = uri.getPath();
+            if (path == null || path.length() <= 1 || path.indexOf('/', 1) >= 0) {
+                throw new IllegalArgumentException("PostgreSQL JDBC URL must contain exactly one database name");
+            }
+            String database = requireSafeValue(path.substring(1), "PostgreSQL database name");
+            if (!POSTGRES_DATABASE.equals(database)) {
+                throw new IllegalArgumentException("Data transfer requires PostgreSQL database starry_api");
+            }
+            return new PostgresConnection(
+                host,
+                port,
+                database,
+                jdbcUrl,
+                parseLibpqEnvironment(uri.getRawQuery())
+            );
+        } catch (URISyntaxException exception) {
+            throw new IllegalArgumentException("Invalid PostgreSQL JDBC URL", exception);
+        }
     }
 
-    private void deleteTempFile(Path path) {
+    private static String requireSafeValue(String value, String label) {
+        if (value == null || value.isBlank() || containsControlCharacter(value)) {
+            throw new IllegalArgumentException(label + " must not be blank or contain control characters");
+        }
+        return value;
+    }
+
+    private static Map<String, String> parseLibpqEnvironment(String rawQuery) {
+        if (rawQuery == null || rawQuery.isBlank()) {
+            return Map.of();
+        }
+        Map<String, String> environment = new LinkedHashMap<>();
+        for (String parameter : rawQuery.split("&")) {
+            int separator = parameter.indexOf('=');
+            String rawName = separator < 0 ? parameter : parameter.substring(0, separator);
+            String rawValue = separator < 0 ? "" : parameter.substring(separator + 1);
+            String name = URLDecoder.decode(rawName, StandardCharsets.UTF_8).toLowerCase(Locale.ROOT);
+            String value = URLDecoder.decode(rawValue, StandardCharsets.UTF_8);
+            if ("user".equals(name) || "password".equals(name)) {
+                throw new IllegalArgumentException(
+                    "PostgreSQL credentials must be configured separately from the JDBC URL"
+                );
+            }
+            String environmentName = switch (name) {
+                case "sslmode" -> "PGSSLMODE";
+                case "sslrootcert" -> "PGSSLROOTCERT";
+                case "sslcert" -> "PGSSLCERT";
+                case "sslkey" -> "PGSSLKEY";
+                case "sslcrl" -> "PGSSLCRL";
+                case "sslpassword" -> "PGSSLPASSWORD";
+                default -> null;
+            };
+            if (environmentName == null) {
+                continue;
+            }
+            value = requireSafeValue(value, "PostgreSQL " + name);
+            if ("PGSSLMODE".equals(environmentName)) {
+                value = value.toLowerCase(Locale.ROOT);
+                if (!SUPPORTED_SSL_MODES.contains(value)) {
+                    throw new IllegalArgumentException("Unsupported PostgreSQL sslmode: " + value);
+                }
+            }
+            if (environment.putIfAbsent(environmentName, value) != null) {
+                throw new IllegalArgumentException("Duplicate PostgreSQL connection parameter: " + name);
+            }
+        }
+        return Map.copyOf(environment);
+    }
+
+    private static void moveAtomically(Path source, Path target) throws IOException {
+        try {
+            Files.move(source, target, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException exception) {
+            Files.move(source, target);
+        }
+    }
+
+    private <T> T withBackupLock(CheckedSupplier<T> supplier) throws Exception {
+        Lock backupLock = maintenanceLock.readLock();
+        backupLock.lockInterruptibly();
+        try (MaintenanceSession ignored = acquireMaintenanceSession(true)) {
+            return supplier.get();
+        } finally {
+            backupLock.unlock();
+        }
+    }
+
+    private static void deleteTempFile(Path path) {
+        if (path == null) {
+            return;
+        }
         try {
             Files.deleteIfExists(path);
         } catch (IOException ignored) {
-            // Best-effort cleanup.
+            // Best-effort cleanup after response completion or a failed operation.
         }
     }
 
-    public record ExportFile(String fileName, byte[] bytes) {
+    private record PostgresConnection(
+        String host,
+        int port,
+        String database,
+        String jdbcUrl,
+        Map<String, String> libpqEnvironment
+    ) {
+    }
+
+    private record TocObject(String type, String namespace, String details) {
+    }
+
+    private record Identifier(String value, String remaining) {
+    }
+
+    @FunctionalInterface
+    private interface CheckedSupplier<T> {
+        T get() throws Exception;
+    }
+
+    @FunctionalInterface
+    interface CheckedRunnable {
+        void run() throws Exception;
+    }
+
+    private final class MaintenanceSession implements AutoCloseable {
+
+        private final Connection connection;
+        private final boolean shared;
+        private boolean runtimeConnectRevoked;
+
+        private MaintenanceSession(Connection connection, boolean shared) {
+            this.connection = connection;
+            this.shared = shared;
+        }
+
+        private void suspendRuntimeConnections() throws SQLException {
+            if (shared) {
+                throw new IllegalStateException("A shared backup lock cannot suspend runtime connections");
+            }
+            try (Statement statement = connection.createStatement()) {
+                statement.executeUpdate(
+                    "REVOKE CONNECT ON DATABASE " + POSTGRES_DATABASE + " FROM " + POSTGRES_RUNTIME_ROLE
+                );
+                runtimeConnectRevoked = true;
+            }
+
+            String sql = """
+                SELECT activity.pid,
+                       pg_catalog.pg_terminate_backend(activity.pid, 10000) AS terminated
+                FROM pg_catalog.pg_stat_activity activity
+                WHERE activity.datname = ?
+                  AND activity.usename = ?
+                  AND activity.pid <> pg_catalog.pg_backend_pid()
+                """;
+            try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                statement.setString(1, POSTGRES_DATABASE);
+                statement.setString(2, POSTGRES_RUNTIME_LOGIN);
+                try (ResultSet result = statement.executeQuery()) {
+                    while (result.next()) {
+                        if (!result.getBoolean("terminated")) {
+                            throw new SQLException(
+                                "Could not terminate PostgreSQL runtime backend " + result.getInt("pid")
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        private void allowRuntimeConnections() throws SQLException {
+            if (!runtimeConnectRevoked) {
+                return;
+            }
+            try (Statement statement = connection.createStatement()) {
+                statement.executeUpdate(
+                    "GRANT CONNECT ON DATABASE " + POSTGRES_DATABASE + " TO " + POSTGRES_RUNTIME_ROLE
+                );
+                runtimeConnectRevoked = false;
+            }
+        }
+
+        private void verifyRestoredDatabase() throws SQLException {
+            try (PreparedStatement statement = connection.prepareStatement(
+                "SELECT pg_catalog.to_regnamespace(?) IS NOT NULL"
+            )) {
+                statement.setString(1, POSTGRES_SCHEMA);
+                if (!singleBoolean(statement)) {
+                    throw new SQLException("PostgreSQL restore did not recreate schema " + POSTGRES_SCHEMA);
+                }
+            }
+
+            for (String table : REQUIRED_RESTORE_TABLES) {
+                try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT pg_catalog.to_regclass(?) IS NOT NULL"
+                )) {
+                    statement.setString(1, POSTGRES_SCHEMA + "." + table);
+                    if (!singleBoolean(statement)) {
+                        throw new SQLException("PostgreSQL restore did not recreate required table " + table);
+                    }
+                }
+            }
+
+            try (Statement statement = connection.createStatement(); ResultSet result = statement.executeQuery("""
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM starry_api.flyway_schema_history
+                    WHERE version = '1'
+                      AND success
+                )
+                """)) {
+                if (!result.next() || !result.getBoolean(1)) {
+                    throw new SQLException("PostgreSQL restore does not contain a successful Flyway V1 baseline");
+                }
+            }
+        }
+
+        private void verifyAndAnalyzeRestoredDatabase() throws SQLException {
+            verifyRestoredDatabase();
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("ANALYZE");
+            }
+        }
+
+        private boolean singleBoolean(PreparedStatement statement) throws SQLException {
+            try (ResultSet result = statement.executeQuery()) {
+                return result.next() && result.getBoolean(1);
+            }
+        }
+
+        @Override
+        public void close() throws SQLException {
+            SQLException failure = null;
+            if (runtimeConnectRevoked) {
+                try {
+                    ensureRuntimeConnectionsAllowed(this);
+                } catch (SQLException exception) {
+                    failure = exception;
+                }
+            }
+            try (PreparedStatement statement = connection.prepareStatement(maintenanceUnlockSql(shared))) {
+                statement.setLong(1, DATA_TRANSFER_LOCK_KEY);
+                statement.executeQuery().close();
+            } catch (SQLException exception) {
+                if (failure == null) {
+                    failure = exception;
+                } else {
+                    failure.addSuppressed(exception);
+                }
+            }
+            try {
+                connection.close();
+            } catch (SQLException exception) {
+                if (failure == null) {
+                    failure = exception;
+                } else {
+                    failure.addSuppressed(exception);
+                }
+            }
+            if (failure != null) {
+                throw failure;
+            }
+        }
+    }
+
+    private static final class BoundedProcessOutput {
+
+        private final int limit;
+        private final ByteArrayOutputStream bytes;
+        private volatile boolean truncated;
+
+        private BoundedProcessOutput(int limit) {
+            this.limit = limit;
+            this.bytes = new ByteArrayOutputStream(limit);
+        }
+
+        private void readFrom(InputStream input) {
+            byte[] buffer = new byte[8192];
+            try (input) {
+                int read;
+                while ((read = input.read(buffer)) != -1) {
+                    int remaining = limit - bytes.size();
+                    if (remaining > 0) {
+                        bytes.write(buffer, 0, Math.min(read, remaining));
+                    }
+                    if (read > remaining) {
+                        truncated = true;
+                    }
+                }
+            } catch (IOException ignored) {
+                // Process termination can close the stream while the reader is draining it.
+            }
+        }
+
+        private String text() {
+            String text = bytes.toString(StandardCharsets.UTF_8);
+            if (truncated) {
+                return text + "\n[output truncated]";
+            }
+            return text;
+        }
+
+        private boolean truncated() {
+            return truncated;
+        }
+    }
+
+    private record ProcessOutput(String text, boolean truncated) {
+    }
+
+    public record ExportFile(String fileName, Path path, long sizeBytes, boolean deleteAfterTransfer) {
+
+        private static ExportFile temporary(String fileName, Path path) throws IOException {
+            return new ExportFile(fileName, path, Files.size(path), true);
+        }
+
+        private static ExportFile stored(Path path) throws IOException {
+            return new ExportFile(path.getFileName().toString(), path, Files.size(path), false);
+        }
+
+        public void cleanup() {
+            if (deleteAfterTransfer) {
+                deleteTempFile(path);
+            }
+        }
     }
 }

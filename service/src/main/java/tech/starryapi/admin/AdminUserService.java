@@ -4,11 +4,14 @@ import java.math.BigDecimal;
 import java.security.SecureRandom;
 import java.time.Instant;
 import org.springframework.dao.DuplicateKeyException;
+import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
 import org.springframework.http.HttpStatus;
+import org.springframework.r2dbc.core.DatabaseClient.GenericExecuteSpec;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.common.Hashing;
 
@@ -27,8 +30,9 @@ public class AdminUserService {
     private final AdminSessionService sessionService;
     private final RegistrationSettingsService registrationSettingsService;
     private final EmailVerificationService emailVerificationService;
-    private final InviteCodeService inviteCodeService;
+    private final RegistrationPersistenceService registrationPersistenceService;
     private final TurnstileVerificationService turnstileVerificationService;
+    private final R2dbcEntityTemplate template;
     private final SecureRandom random = new SecureRandom();
 
     public AdminUserService(
@@ -37,16 +41,18 @@ public class AdminUserService {
         AdminSessionService sessionService,
         RegistrationSettingsService registrationSettingsService,
         EmailVerificationService emailVerificationService,
-        InviteCodeService inviteCodeService,
-        TurnstileVerificationService turnstileVerificationService
+        RegistrationPersistenceService registrationPersistenceService,
+        TurnstileVerificationService turnstileVerificationService,
+        R2dbcEntityTemplate template
     ) {
         this.repository = repository;
         this.passwordHasher = passwordHasher;
         this.sessionService = sessionService;
         this.registrationSettingsService = registrationSettingsService;
         this.emailVerificationService = emailVerificationService;
-        this.inviteCodeService = inviteCodeService;
+        this.registrationPersistenceService = registrationPersistenceService;
         this.turnstileVerificationService = turnstileVerificationService;
+        this.template = template;
     }
 
     public Mono<BootstrapAdmin> ensureDefaultAdmin() {
@@ -87,22 +93,27 @@ public class AdminUserService {
             });
     }
 
+    @Transactional
     public Mono<AdminDtos.AdminUserCreatedResponse> create(AdminDtos.CreateAdminUserRequest request) {
         String password = request.password() == null || request.password().isBlank()
             ? passwordHasher.randomPassword()
             : request.password();
+        BigDecimal initialBalance = normalizeBalance(request.balance());
         AdminUserEntity entity = new AdminUserEntity();
         entity.setUserId(Hashing.shortUuid());
         entity.setUsername(normalizeUsername(request.username()));
         entity.setEmail(RegistrationEmailPolicy.normalizeEmail(request.email()));
         entity.setDisplayName(request.displayName());
         entity.setRole(normalizeRole(request.role(), DEFAULT_USER_ROLE));
-        entity.setBalance(normalizeBalance(request.balance()));
+        entity.setBalance(BigDecimal.ZERO);
         entity.setEnabled(true);
         entity.setFirstLogin(true);
         assignAffiliateCode(entity);
         applyPassword(entity, password);
         return repository.save(entity)
+            .flatMap(saved -> initialBalance.signum() == 0
+                ? Mono.just(saved)
+                : setInitialBalance(saved.getUserId(), initialBalance))
             .map(saved -> new AdminDtos.AdminUserCreatedResponse(AdminUserMapper.toResponse(saved), password))
             .onErrorMap(
                 DuplicateKeyException.class,
@@ -110,28 +121,15 @@ public class AdminUserService {
             );
     }
 
-    @Transactional
     public Mono<AdminDtos.LoginResponse> register(AdminDtos.RegisterRequest request) {
         return register(request, null);
     }
 
-    @Transactional
     public Mono<AdminDtos.LoginResponse> register(AdminDtos.RegisterRequest request, String remoteIp) {
         String username = normalizeUsername(request.username());
         String email = RegistrationEmailPolicy.normalizeEmail(request.email());
         String inviteCode = normalizeInviteCode(request.inviteCode());
         String affiliateCode = normalizeAffiliateCode(request.affiliateCode());
-        AdminUserEntity entity = new AdminUserEntity();
-        entity.setUserId(Hashing.shortUuid());
-        entity.setUsername(username);
-        entity.setEmail(email);
-        entity.setDisplayName(firstNonBlank(request.displayName(), username));
-        entity.setRole(DEFAULT_USER_ROLE);
-        entity.setBalance(BigDecimal.ZERO);
-        entity.setEnabled(true);
-        entity.setFirstLogin(false);
-        assignAffiliateCode(entity);
-        applyPassword(entity, request.password());
 
         return registrationSettingsService.registrationPolicy()
             .flatMap(policy -> registrationGuard(
@@ -143,15 +141,19 @@ public class AdminUserService {
                     remoteIp,
                     policy
                 )
-                .then(resolveAffiliateInvite(affiliateCode))
-                .flatMap(invite -> {
-                    if (invite.present()) {
-                        entity.setInvitedByUserId(invite.inviterUserId());
-                        entity.setInviteSourceCode(invite.affiliateCode());
-                    }
-                    return repository.save(entity);
-                })
-                .flatMap(saved -> consumeInviteCodeIfNeeded(saved, inviteCode, policy))
+                .flatMap(verifiedEmailTokenHash -> Mono.fromCallable(() -> registrationUser(
+                        request,
+                        username,
+                        email
+                    ))
+                    .subscribeOn(Schedulers.boundedElastic())
+                    .flatMap(entity -> registrationPersistenceService.register(
+                        entity,
+                        inviteCode,
+                        affiliateCode,
+                        policy,
+                        verifiedEmailTokenHash
+                    )))
             )
             .map(this::loginResponse)
             .onErrorMap(
@@ -161,32 +163,146 @@ public class AdminUserService {
     }
 
     public Mono<AdminUserEntity> update(String userId, AdminDtos.UpdateAdminUserRequest request) {
-        return repository.findByUserId(userId)
+        boolean setEmail = request.email() != null;
+        boolean setDisplayName = request.displayName() != null;
+        boolean setRole = request.role() != null;
+        boolean setBalance = request.balance() != null;
+        boolean setEnabled = request.enabled() != null;
+        BigDecimal balance = setBalance ? normalizeBalance(request.balance()) : BigDecimal.ZERO;
+        String transactionId = Hashing.shortUuid();
+        String sql = """
+            WITH candidate AS MATERIALIZED (
+                SELECT user_id, balance AS balance_before
+                FROM admin_users
+                WHERE user_id = :userId
+                FOR UPDATE
+            ), ledger_entry AS (
+                INSERT INTO balance_ledger (
+                    transaction_id, user_id, entry_type, amount, balance_before, balance_after,
+                    reference_type, reference_id, idempotency_key, metadata
+                )
+                SELECT :transactionId,
+                       candidate.user_id,
+                       'ADMIN_ADJUSTMENT',
+                       :balance - candidate.balance_before,
+                       candidate.balance_before,
+                       :balance,
+                       'ADMIN_USER',
+                       candidate.user_id,
+                       :idempotencyKey,
+                       '{"source":"admin"}'::jsonb
+                FROM candidate
+                WHERE :setBalance
+                  AND :balance <> candidate.balance_before
+                ON CONFLICT (idempotency_key) DO NOTHING
+                RETURNING user_id
+            )
+            UPDATE admin_users AS u
+            SET email = CASE WHEN :setEmail THEN :email ELSE u.email END,
+                display_name = CASE WHEN :setDisplayName THEN :displayName ELSE u.display_name END,
+                role = CASE WHEN :setRole THEN :role ELSE u.role END,
+                balance = CASE WHEN :setBalance THEN :balance ELSE u.balance END,
+                enabled = CASE WHEN :setEnabled THEN :enabled ELSE u.enabled END,
+                updated_at = CURRENT_TIMESTAMP
+            FROM candidate
+            LEFT JOIN ledger_entry ON ledger_entry.user_id = candidate.user_id
+            WHERE u.user_id = candidate.user_id
+            RETURNING u.*
+            """;
+        GenericExecuteSpec spec = template.getDatabaseClient().sql(sql)
+            .bind("userId", userId)
+            .bind("transactionId", transactionId)
+            .bind("idempotencyKey", "admin-adjustment:" + transactionId)
+            .bind("setEmail", setEmail)
+            .bind("setDisplayName", setDisplayName)
+            .bind("setRole", setRole)
+            .bind("setBalance", setBalance)
+            .bind("balance", balance)
+            .bind("setEnabled", setEnabled)
+            .bind("enabled", Boolean.TRUE.equals(request.enabled()));
+        spec = bindNullable(spec, "email", setEmail ? RegistrationEmailPolicy.normalizeEmail(request.email()) : null);
+        spec = bindNullable(spec, "displayName", request.displayName());
+        spec = bindNullable(spec, "role", setRole ? normalizeRole(request.role(), DEFAULT_USER_ROLE) : null);
+        return spec
+            .map((row, metadata) -> template.getConverter().read(AdminUserEntity.class, row, metadata))
+            .one()
             .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ADMIN_USER_NOT_FOUND", "Admin user not found")))
-            .flatMap(entity -> {
-                if (request.email() != null) entity.setEmail(RegistrationEmailPolicy.normalizeEmail(request.email()));
-                if (request.displayName() != null) entity.setDisplayName(request.displayName());
-                if (request.role() != null) entity.setRole(normalizeRole(request.role(), entity.getRole()));
-                if (request.balance() != null) entity.setBalance(normalizeBalance(request.balance()));
-                if (request.enabled() != null) entity.setEnabled(request.enabled());
-                return repository.save(entity);
-            })
             .onErrorMap(
                 DuplicateKeyException.class,
                 error -> new ApiException(HttpStatus.CONFLICT, "ADMIN_USER_EXISTS", "Username or email already exists")
             );
     }
 
+    private Mono<AdminUserEntity> setInitialBalance(String userId, BigDecimal balance) {
+        String sql = """
+            WITH candidate AS MATERIALIZED (
+                SELECT user_id, balance AS balance_before
+                FROM admin_users
+                WHERE user_id = :userId
+                FOR UPDATE
+            ), ledger_entry AS (
+                INSERT INTO balance_ledger (
+                    transaction_id, user_id, entry_type, amount, balance_before, balance_after,
+                    reference_type, reference_id, idempotency_key, metadata
+                )
+                SELECT :transactionId,
+                       candidate.user_id,
+                       'INITIAL_BALANCE',
+                       :balance - candidate.balance_before,
+                       candidate.balance_before,
+                       :balance,
+                       'ADMIN_USER',
+                       candidate.user_id,
+                       'initial-balance:' || candidate.user_id,
+                       '{"source":"admin"}'::jsonb
+                FROM candidate
+                WHERE :balance <> candidate.balance_before
+                ON CONFLICT (idempotency_key) DO NOTHING
+                RETURNING user_id, balance_after
+            )
+            UPDATE admin_users AS u
+            SET balance = ledger_entry.balance_after,
+                updated_at = CURRENT_TIMESTAMP
+            FROM ledger_entry
+            WHERE u.user_id = ledger_entry.user_id
+            RETURNING u.*
+            """;
+        return template.getDatabaseClient().sql(sql)
+            .bind("userId", userId)
+            .bind("transactionId", Hashing.shortUuid())
+            .bind("balance", balance)
+            .map((row, metadata) -> template.getConverter().read(AdminUserEntity.class, row, metadata))
+            .one();
+    }
+
+    private static GenericExecuteSpec bindNullable(GenericExecuteSpec spec, String name, String value) {
+        return value == null ? spec.bindNull(name, String.class) : spec.bind(name, value);
+    }
+
     public Mono<AdminDtos.ResetPasswordResponse> resetPassword(String userId) {
-        return repository.findByUserId(userId)
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ADMIN_USER_NOT_FOUND", "Admin user not found")))
-            .flatMap(entity -> {
-                String password = passwordHasher.randomPassword();
-                applyPassword(entity, password);
-                entity.setFirstLogin(true);
-                return repository.save(entity)
-                    .map(saved -> new AdminDtos.ResetPasswordResponse(saved.getUserId(), saved.getUsername(), password));
-            });
+        String password = passwordHasher.randomPassword();
+        AdminUserEntity credentials = new AdminUserEntity();
+        applyPassword(credentials, password);
+        String sql = """
+            UPDATE admin_users
+            SET password_hash = :passwordHash,
+                password_salt = :passwordSalt,
+                first_login = TRUE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE user_id = :userId
+            RETURNING user_id, username
+            """;
+        return template.getDatabaseClient().sql(sql)
+            .bind("passwordHash", credentials.getPasswordHash())
+            .bind("passwordSalt", credentials.getPasswordSalt())
+            .bind("userId", userId)
+            .map((row, metadata) -> new AdminDtos.ResetPasswordResponse(
+                row.get("user_id", String.class),
+                row.get("username", String.class),
+                password
+            ))
+            .one()
+            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ADMIN_USER_NOT_FOUND", "Admin user not found")));
     }
 
     public Mono<AdminDtos.LoginResponse> login(AdminDtos.LoginRequest request) {
@@ -197,8 +313,21 @@ public class AdminUserService {
                     || !passwordHasher.matches(request.password(), entity.getPasswordSalt(), entity.getPasswordHash())) {
                     return Mono.error(new ApiException(HttpStatus.UNAUTHORIZED, "LOGIN_FAILED", "Invalid username or password"));
                 }
-                entity.setLastLoginAt(Instant.now());
-                return repository.save(entity).map(this::loginResponse);
+                String sql = """
+                    UPDATE admin_users
+                    SET last_login_at = :now,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = :userId
+                      AND enabled = TRUE
+                    RETURNING *
+                    """;
+                return template.getDatabaseClient().sql(sql)
+                    .bind("now", Instant.now())
+                    .bind("userId", entity.getUserId())
+                    .map((row, metadata) -> template.getConverter().read(AdminUserEntity.class, row, metadata))
+                    .one()
+                    .switchIfEmpty(Mono.error(new ApiException(HttpStatus.UNAUTHORIZED, "LOGIN_FAILED", "Invalid username or password")))
+                    .map(this::loginResponse);
             });
     }
 
@@ -210,9 +339,21 @@ public class AdminUserService {
                     return Mono.error(new ApiException(HttpStatus.BAD_REQUEST, "OLD_PASSWORD_INVALID", "Old password is invalid"));
                 }
                 applyPassword(entity, request.newPassword());
-                entity.setFirstLogin(false);
-                return repository.save(entity)
-                    .doOnSuccess(saved -> sessionService.clearFirstLogin(saved.getUserId()))
+                String sql = """
+                    UPDATE admin_users
+                    SET password_hash = :passwordHash,
+                        password_salt = :passwordSalt,
+                        first_login = FALSE,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = :userId
+                    """;
+                return template.getDatabaseClient().sql(sql)
+                    .bind("passwordHash", entity.getPasswordHash())
+                    .bind("passwordSalt", entity.getPasswordSalt())
+                    .bind("userId", entity.getUserId())
+                    .fetch()
+                    .rowsUpdated()
+                    .doOnSuccess(rows -> sessionService.clearFirstLogin(entity.getUserId()))
                     .then();
             });
     }
@@ -255,11 +396,30 @@ public class AdminUserService {
         );
     }
 
+    private AdminUserEntity registrationUser(
+        AdminDtos.RegisterRequest request,
+        String username,
+        String email
+    ) {
+        AdminUserEntity entity = new AdminUserEntity();
+        entity.setUserId(Hashing.shortUuid());
+        entity.setUsername(username);
+        entity.setEmail(email);
+        entity.setDisplayName(firstNonBlank(request.displayName(), username));
+        entity.setRole(DEFAULT_USER_ROLE);
+        entity.setBalance(BigDecimal.ZERO);
+        entity.setEnabled(true);
+        entity.setFirstLogin(false);
+        assignAffiliateCode(entity);
+        applyPassword(entity, request.password());
+        return entity;
+    }
+
     private String normalizeUsername(String username) {
         return username == null ? "" : username.trim();
     }
 
-    private Mono<Void> registrationGuard(
+    private Mono<String> registrationGuard(
         String email,
         String verificationToken,
         String inviteCode,
@@ -268,65 +428,18 @@ public class AdminUserService {
         String remoteIp,
         RegistrationSettingsService.RegistrationPolicy policy
     ) {
-        boolean hasInviteCode = !inviteCode.isBlank();
-        if (hasInviteCode) {
-            if (!policy.inviteCodeEnabled()) {
-                return Mono.error(new ApiException(
-                    HttpStatus.FORBIDDEN,
-                    "INVITE_REGISTRATION_DISABLED",
-                    "Invite code registration is disabled"
-                ));
-            }
-            return turnstileVerificationService.verifyIfRequired(turnstileToken, remoteIp);
+        RegistrationPolicyGuard.VerificationRequirement requirement = RegistrationPolicyGuard.validate(
+            email,
+            inviteCode,
+            affiliateCode,
+            policy
+        );
+        if (requirement == RegistrationPolicyGuard.VerificationRequirement.EMAIL) {
+            return emailVerificationService.verifiedRegistrationTokenHash(email, verificationToken);
         }
-        if (!policy.registrationEnabled()) {
-            if (!affiliateCode.isBlank() && policy.inviteCodeEnabled()) {
-                return turnstileVerificationService.verifyIfRequired(turnstileToken, remoteIp);
-            }
-            return Mono.error(new ApiException(
-                HttpStatus.FORBIDDEN,
-                "REGISTRATION_DISABLED",
-                "User registration is disabled"
-            ));
-        }
-        RegistrationEmailPolicy.validateEmailAllowed(email, policy.registrationEmailSuffixWhitelist());
-        if (policy.emailVerifyEnabled()) {
-            return emailVerificationService.verifyRegistrationToken(email, verificationToken);
-        }
-        return turnstileVerificationService.verifyIfRequired(turnstileToken, remoteIp);
-    }
-
-    private Mono<AffiliateInvite> resolveAffiliateInvite(String affiliateCode) {
-        if (affiliateCode.isBlank()) {
-            return Mono.just(AffiliateInvite.none());
-        }
-        return repository.findByAffiliateCode(affiliateCode)
-            .switchIfEmpty(Mono.error(new ApiException(
-                HttpStatus.BAD_REQUEST,
-                "INVALID_AFFILIATE_CODE",
-                "Affiliate code is invalid"
-            )))
-            .flatMap(inviter -> {
-                if (Boolean.FALSE.equals(inviter.getEnabled())) {
-                    return Mono.error(new ApiException(
-                        HttpStatus.BAD_REQUEST,
-                        "INVALID_AFFILIATE_CODE",
-                        "Affiliate code is invalid"
-                    ));
-                }
-                return Mono.just(new AffiliateInvite(inviter.getUserId(), inviter.getAffiliateCode(), true));
-            });
-    }
-
-    private Mono<AdminUserEntity> consumeInviteCodeIfNeeded(
-        AdminUserEntity user,
-        String inviteCode,
-        RegistrationSettingsService.RegistrationPolicy policy
-    ) {
-        if (inviteCode.isBlank() || !policy.inviteCodeEnabled()) {
-            return Mono.just(user);
-        }
-        return inviteCodeService.consume(inviteCode, user.getUserId()).thenReturn(user);
+        return policy.turnstileEnabled()
+            ? turnstileVerificationService.verifyRequired(turnstileToken, remoteIp).thenReturn("")
+            : Mono.just("");
     }
 
     private String normalizeInviteCode(String inviteCode) {
@@ -380,9 +493,4 @@ public class AdminUserService {
         }
     }
 
-    private record AffiliateInvite(String inviterUserId, String affiliateCode, boolean present) {
-        static AffiliateInvite none() {
-            return new AffiliateInvite(null, null, false);
-        }
-    }
 }

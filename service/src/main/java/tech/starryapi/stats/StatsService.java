@@ -1,7 +1,6 @@
 package tech.starryapi.stats;
 
 import java.math.BigDecimal;
-import java.time.Instant;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
@@ -18,6 +17,7 @@ public class StatsService {
         RequestLogEntity entity = new RequestLogEntity();
         entity.setRequestId(event.requestId());
         entity.setApiKeyId(event.apiKeyId());
+        entity.setUserId(event.userId());
         entity.setAccountId(event.accountId());
         entity.setPath(event.path());
         entity.setModel(event.model());
@@ -28,7 +28,6 @@ public class StatsService {
         entity.setCredits(event.credits() == null ? BigDecimal.ZERO : event.credits());
         entity.setLatencyMs(event.latencyMs());
         entity.setErrorMessage(sanitize(event.errorMessage()));
-        entity.setCreatedAt(Instant.now());
         return repository.save(entity).then();
     }
 
@@ -44,6 +43,7 @@ public class StatsService {
     public record RequestLog(
         String requestId,
         String apiKeyId,
+        String userId,
         String accountId,
         String path,
         String model,

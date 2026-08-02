@@ -27,6 +27,7 @@ BUNDLE_CHECKSUM_URL="${BUNDLE_CHECKSUM_URL:-${BUNDLE_URL}.sha256}"
 ARTIFACT_URL="${ARTIFACT_URL:-${REPO_RAW_BASE%/}/artifacts/starry-api.jar}"
 CHECKSUM_URL="${CHECKSUM_URL:-${REPO_RAW_BASE%/}/artifacts/starry-api.jar.sha256}"
 BUILD_INFO_URL="${BUILD_INFO_URL:-${REPO_RAW_BASE%/}/artifacts/build-info.json}"
+POSTGRES_INIT_URL="${POSTGRES_INIT_URL:-${REPO_RAW_BASE%/}/docker/postgresql/init/001-starry-api-roles.sh}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/starry-api}"
 GITHUB_TOKEN_FILE="${GITHUB_TOKEN_FILE:-${INSTALL_DIR}/.github-token}"
 HOST_BIND_ADDR="${HOST_BIND_ADDR:-0.0.0.0}"
@@ -36,7 +37,17 @@ HEALTH_WAIT_SECONDS="${HEALTH_WAIT_SECONDS:-300}"
 PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}"
 FORCE_ENV="${FORCE_ENV:-false}"
 INSTALL_DOCKER="${INSTALL_DOCKER:-true}"
-MYSQL_IMAGE="${MYSQL_IMAGE:-mysql:8.0.37-oraclelinux8}"
+ARTIFACT_UPDATED=false
+ARTIFACT_ROLLBACK_AVAILABLE=false
+COMPOSE_ROLLBACK_AVAILABLE=false
+POSTGRES_INIT_ROLLBACK_AVAILABLE=false
+ENV_ROLLBACK_AVAILABLE=false
+ENV_UPDATED=false
+STACK_MUTATION_STARTED=false
+DEPLOYMENT_COMMITTED=false
+ROLLBACK_COMPLETED=false
+ROLLBACK_ATTEMPTED=false
+INSTALLED_ARTIFACT_CHECKSUM=""
 
 log() {
   printf '[%s] %s\n' "$APP_NAME" "$*"
@@ -93,12 +104,22 @@ install_base_packages() {
 }
 
 ensure_docker() {
+  local install_script
   if command -v docker >/dev/null 2>&1; then
     log "Docker is already installed."
   elif [[ "$INSTALL_DOCKER" == "true" ]]; then
     log "Installing Docker from the official convenience script..."
-    curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
-    root_cmd sh /tmp/get-docker.sh
+    install_script="$(mktemp "${TMPDIR:-/tmp}/starry-api-get-docker.XXXXXX")"
+    chmod 0600 "$install_script"
+    if ! curl -fsSL https://get.docker.com -o "$install_script"; then
+      rm -f -- "$install_script"
+      fail "Could not download the Docker installation script."
+    fi
+    if ! root_cmd sh "$install_script"; then
+      rm -f -- "$install_script"
+      fail "Docker installation failed."
+    fi
+    rm -f -- "$install_script"
   else
     fail "Docker is not installed. Install Docker first or run with INSTALL_DOCKER=true."
   fi
@@ -148,12 +169,199 @@ ensure_compose() {
   fi
 }
 
+require_compose_inline_dockerfile() {
+  local version major minor
+  version="$(root_cmd "${COMPOSE_CMD[@]}" version --short 2>/dev/null || true)"
+  version="${version#v}"
+  version="${version%%-*}"
+  IFS=. read -r major minor _ <<< "$version"
+  if [[ ! "${major:-}" =~ ^[0-9]+$ || ! "${minor:-}" =~ ^[0-9]+$ ]] \
+    || (( major < 2 || (major == 2 && minor < 17) )); then
+    fail "Docker Compose 2.17 or newer is required for the PostgreSQL client runtime build. Found: ${version:-unknown}"
+  fi
+  log "Docker Compose ${version} supports the inline runtime build."
+}
+
 sha256_file() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | awk '{print $1}'
   else
     shasum -a 256 "$1" | awk '{print $1}'
   fi
+}
+
+atomic_install_file() {
+  local source="$1"
+  local destination="$2"
+  local mode="${3:-0644}"
+  local temporary
+
+  if ! temporary="$(mktemp "${destination}.incoming.XXXXXX")"; then
+    return 1
+  fi
+  if ! cp -- "$source" "$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  if ! chmod "$mode" "$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  if ! mv -f -- "$temporary" "$destination"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+}
+
+backup_current_artifact() {
+  local current="${INSTALL_DIR}/app/starry-api.jar"
+  local previous="${INSTALL_DIR}/app/starry-api.jar.previous"
+  local previous_checksum="${INSTALL_DIR}/app/starry-api.jar.previous.sha256"
+  local current_compose="${INSTALL_DIR}/docker-compose.artifact.yml"
+  local previous_compose="${INSTALL_DIR}/docker-compose.artifact.yml.previous"
+  local current_init="${INSTALL_DIR}/postgres-init/001-starry-api-roles.sh"
+  local previous_init="${INSTALL_DIR}/postgres-init/001-starry-api-roles.sh.previous"
+  local current_env="${INSTALL_DIR}/.env"
+  local previous_env="${INSTALL_DIR}/.env.previous"
+  local checksum checksum_tmp
+
+  if [[ ! -f "$current" || "$ARTIFACT_ROLLBACK_AVAILABLE" == "true" ]]; then
+    return
+  fi
+
+  atomic_install_file "$current" "$previous" 0644 \
+    || fail "Could not preserve the current application jar for rollback."
+  checksum="$(sha256_file "$previous")"
+  checksum_tmp="$(mktemp "${previous_checksum}.incoming.XXXXXX")" \
+    || fail "Could not prepare the rollback checksum."
+  printf '%s  %s\n' "$checksum" "starry-api.jar" > "$checksum_tmp" \
+    || fail "Could not write the rollback checksum."
+  chmod 0644 "$checksum_tmp" \
+    || fail "Could not secure the rollback checksum."
+  mv -f -- "$checksum_tmp" "$previous_checksum" \
+    || fail "Could not activate the rollback checksum."
+
+  if [[ -f "$current_compose" ]]; then
+    atomic_install_file "$current_compose" "$previous_compose" 0644 \
+      || fail "Could not preserve the current Docker Compose configuration for rollback."
+    COMPOSE_ROLLBACK_AVAILABLE=true
+  else
+    rm -f -- "$previous_compose"
+  fi
+  if [[ -f "$current_init" ]]; then
+    atomic_install_file "$current_init" "$previous_init" 0755 \
+      || fail "Could not preserve the current PostgreSQL bootstrap for rollback."
+    POSTGRES_INIT_ROLLBACK_AVAILABLE=true
+  else
+    rm -f -- "$previous_init"
+  fi
+  if [[ -f "$current_env" ]]; then
+    atomic_install_file "$current_env" "$previous_env" 0600 \
+      || fail "Could not preserve the current environment file for rollback."
+    ENV_ROLLBACK_AVAILABLE=true
+  else
+    rm -f -- "$previous_env"
+  fi
+  ARTIFACT_ROLLBACK_AVAILABLE=true
+}
+
+install_verified_artifact() {
+  local source="$1"
+  local checksum_file="$2"
+  local expected actual
+
+  expected="$(awk '{print $1}' "$checksum_file" | head -n 1)"
+  actual="$(sha256_file "$source")"
+  [[ -n "$expected" ]] || fail "Artifact checksum file is empty."
+  [[ "$expected" == "$actual" ]] \
+    || fail "Artifact checksum mismatch. expected=${expected} actual=${actual}"
+
+  backup_current_artifact
+  atomic_install_file "$checksum_file" "${INSTALL_DIR}/app/starry-api.jar.sha256" 0644 \
+    || fail "Could not install the artifact checksum atomically."
+  atomic_install_file "$source" "${INSTALL_DIR}/app/starry-api.jar" 0644 \
+    || fail "Could not install the application jar atomically."
+  ARTIFACT_UPDATED=true
+  INSTALLED_ARTIFACT_CHECKSUM="$actual"
+}
+
+rollback_installed_artifact() {
+  local previous="${INSTALL_DIR}/app/starry-api.jar.previous"
+  local previous_checksum="${INSTALL_DIR}/app/starry-api.jar.previous.sha256"
+  local current_compose="${INSTALL_DIR}/docker-compose.artifact.yml"
+  local previous_compose="${INSTALL_DIR}/docker-compose.artifact.yml.previous"
+  local current_init="${INSTALL_DIR}/postgres-init/001-starry-api-roles.sh"
+  local previous_init="${INSTALL_DIR}/postgres-init/001-starry-api-roles.sh.previous"
+  local current_env="${INSTALL_DIR}/.env"
+  local previous_env="${INSTALL_DIR}/.env.previous"
+  local retry_env="${INSTALL_DIR}/.env.postgresql-retry"
+  local expected actual
+
+  if [[ "$ARTIFACT_ROLLBACK_AVAILABLE" != "true" ]]; then
+    return 1
+  fi
+  [[ -f "$previous" && -f "$previous_checksum" ]] || return 1
+
+  expected="$(awk '{print $1}' "$previous_checksum" | head -n 1)"
+  actual="$(sha256_file "$previous")"
+  [[ -n "$expected" && "$expected" == "$actual" ]] || return 1
+  [[ "$COMPOSE_ROLLBACK_AVAILABLE" == "true" && -f "$previous_compose" ]] || return 1
+
+  atomic_install_file "$previous_compose" "$current_compose" 0644 || return 1
+  if [[ "$POSTGRES_INIT_ROLLBACK_AVAILABLE" == "true" ]]; then
+    [[ -f "$previous_init" ]] || return 1
+    atomic_install_file "$previous_init" "$current_init" 0755 || return 1
+  else
+    rm -f -- "$current_init" || return 1
+  fi
+  if [[ "$ENV_ROLLBACK_AVAILABLE" == "true" ]]; then
+    [[ -f "$previous_env" ]] || return 1
+    if [[ "$ENV_UPDATED" == "true" ]] && postgres_cluster_initialized; then
+      atomic_install_file "$current_env" "$retry_env" 0600 || return 1
+      log "Retained the initialized PostgreSQL cluster credentials in ${retry_env} for a safe retry."
+    fi
+    atomic_install_file "$previous_env" "$current_env" 0600 || return 1
+  elif [[ "$ENV_UPDATED" == "true" ]]; then
+    rm -f -- "$current_env" || return 1
+  fi
+  atomic_install_file "$previous_checksum" "${INSTALL_DIR}/app/starry-api.jar.sha256" 0644 || return 1
+  atomic_install_file "$previous" "${INSTALL_DIR}/app/starry-api.jar" 0644 || return 1
+  ARTIFACT_UPDATED=false
+  ENV_UPDATED=false
+  log "Restored the previous environment, application jar, Compose configuration, and PostgreSQL bootstrap after the failed deployment."
+}
+
+deployment_exit_handler() {
+  local status="$1"
+  trap - EXIT
+  if [[ "$status" -eq 0 || "$DEPLOYMENT_COMMITTED" == "true" || "$ROLLBACK_COMPLETED" == "true" ]]; then
+    exit "$status"
+  fi
+  if [[ "$ROLLBACK_ATTEMPTED" == "true" ]]; then
+    log "Automatic rollback was already attempted; inspect ${INSTALL_DIR} before retrying."
+    exit "$status"
+  fi
+  if [[ "$ARTIFACT_ROLLBACK_AVAILABLE" != "true" ]]; then
+    exit "$status"
+  fi
+
+  ROLLBACK_ATTEMPTED=true
+  log "Deployment failed before commit; restoring the previous deployment unit..."
+  if ! rollback_installed_artifact; then
+    log "Automatic deployment-file rollback failed. Inspect ${INSTALL_DIR} before retrying."
+    exit "$status"
+  fi
+  if [[ "$STACK_MUTATION_STARTED" == "true" ]]; then
+    cd "$INSTALL_DIR" || exit "$status"
+    if root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml up -d --build --force-recreate --remove-orphans \
+      && wait_for_health; then
+      ROLLBACK_COMPLETED=true
+      log "The previous deployment unit is healthy after automatic rollback."
+    else
+      log "The previous deployment files were restored, but the old stack did not recover automatically."
+    fi
+  fi
+  exit "$status"
 }
 
 download_file() {
@@ -228,7 +436,33 @@ webui_url() {
 prepare_install_dir() {
   log "Preparing ${INSTALL_DIR}..."
   log "Using prebuilt artifact base ${REPO_RAW_BASE}."
-  root_cmd mkdir -p "$INSTALL_DIR/app" "$INSTALL_DIR/data/mysql" "$INSTALL_DIR/data/backups"
+  root_cmd mkdir -p "$INSTALL_DIR/app" "$INSTALL_DIR/data/postgresql" "$INSTALL_DIR/data/backups" "$INSTALL_DIR/postgres-init"
+}
+
+postgres_cluster_initialized() {
+  [[ -s "${INSTALL_DIR}/data/postgresql/PG_VERSION" ]]
+}
+
+env_file_value() {
+  local env_file="$1"
+  local name="$2"
+  grep -E "^${name}=" "$env_file" | tail -n 1 | cut -d= -f2- || true
+}
+
+validate_database_secrets() {
+  local env_file="$1"
+  local bootstrap migration application
+
+  bootstrap="$(env_file_value "$env_file" POSTGRES_BOOTSTRAP_PASSWORD)"
+  migration="$(env_file_value "$env_file" POSTGRES_MIGRATION_PASSWORD)"
+  application="$(env_file_value "$env_file" POSTGRES_PASSWORD)"
+
+  [[ -n "$bootstrap" && -n "$migration" && -n "$application" ]] \
+    || fail "Existing .env must contain non-empty bootstrap, migration, and application PostgreSQL passwords."
+  [[ "$bootstrap" != change-me-* && "$migration" != change-me-* && "$application" != change-me-* ]] \
+    || fail "Refusing to deploy with default PostgreSQL passwords in .env."
+  [[ "$bootstrap" != "$migration" && "$bootstrap" != "$application" && "$migration" != "$application" ]] \
+    || fail "PostgreSQL bootstrap, migration, and application passwords must be distinct."
 }
 
 load_github_token() {
@@ -252,35 +486,132 @@ load_github_token() {
 
 write_env_file() {
   local env_file="${INSTALL_DIR}/.env"
+  local retry_env_file="${INSTALL_DIR}/.env.postgresql-retry"
+  local env_tmp bootstrap_password migration_password application_password
+
+  if [[ "$FORCE_ENV" != "true" && "$FORCE_ENV" != "false" ]]; then
+    fail "FORCE_ENV must be true or false."
+  fi
+
   if [[ -f "$env_file" && "$FORCE_ENV" != "true" ]]; then
+    validate_database_secrets "$env_file"
     log "Keeping existing .env. Set FORCE_ENV=true to regenerate it."
     return
   fi
 
+  if postgres_cluster_initialized; then
+    if [[ -f "$retry_env_file" ]]; then
+      validate_database_secrets "$retry_env_file"
+      if [[ -f "$env_file" ]]; then
+        atomic_install_file "$env_file" "${INSTALL_DIR}/.env.previous" 0600 \
+          || fail "Could not preserve the existing .env file."
+      fi
+      atomic_install_file "$retry_env_file" "$env_file" 0600 \
+        || fail "Could not restore the PostgreSQL retry environment."
+      ENV_UPDATED=true
+      log "Reusing PostgreSQL credentials retained from the previous failed deployment."
+      return
+    fi
+    fail "Refusing to generate new database passwords for an initialized PostgreSQL cluster. Restore the matching .env, or rotate the roles in PostgreSQL and update .env manually."
+  fi
+
+  if [[ -f "$env_file" ]]; then
+    atomic_install_file "$env_file" "${INSTALL_DIR}/.env.previous" 0600 \
+      || fail "Could not preserve the existing .env file."
+  fi
+
+  bootstrap_password="$(random_secret)"
+  migration_password="$(random_secret)"
+  application_password="$(random_secret)"
+  env_tmp="$(mktemp "${env_file}.incoming.XXXXXX")" \
+    || fail "Could not prepare the new .env file."
+  chmod 0600 "$env_tmp" || fail "Could not secure the new .env file."
+
   log "Writing ${env_file} with generated database passwords..."
-  cat > "$env_file" <<EOF
+  cat > "$env_tmp" <<EOF
 HOST_BIND_ADDR=${HOST_BIND_ADDR}
 SERVER_PORT=${SERVER_PORT}
 HOST_HTTP_PORT=${HOST_HTTP_PORT}
 
-MYSQL_ROOT_PASSWORD=$(random_secret)
-MYSQL_IMAGE=${MYSQL_IMAGE}
-MYSQL_DATABASE=kiro_proxy
-MYSQL_USERNAME=kiro_proxy
-MYSQL_PASSWORD=$(random_secret)
+POSTGRES_BOOTSTRAP_PASSWORD=${bootstrap_password}
+POSTGRES_MIGRATION_PASSWORD=${migration_password}
+POSTGRES_PASSWORD=${application_password}
+POSTGRES_SSL_MODE=disable
+POSTGRES_SHM_SIZE=256mb
+POSTGRES_MAX_CONNECTIONS=100
+POSTGRES_SHARED_BUFFERS=256MB
+POSTGRES_EFFECTIVE_CACHE_SIZE=768MB
+POSTGRES_WORK_MEM=4MB
+POSTGRES_MAINTENANCE_WORK_MEM=64MB
+POSTGRES_AUTOVACUUM_WORK_MEM=64MB
+POSTGRES_AUTOVACUUM_MAX_WORKERS=4
+POSTGRES_AUTOVACUUM_NAPTIME=30s
+POSTGRES_DEFAULT_STATISTICS_TARGET=200
+POSTGRES_WAL_COMPRESSION=on
+POSTGRES_MIN_WAL_SIZE=512MB
+POSTGRES_MAX_WAL_SIZE=2GB
+POSTGRES_CHECKPOINT_COMPLETION_TARGET=0.9
+POSTGRES_TRACK_IO_TIMING=on
+POSTGRES_IDLE_IN_TRANSACTION_SESSION_TIMEOUT=5min
+POSTGRES_POOL_INITIAL_SIZE=4
+POSTGRES_POOL_MAX_SIZE=20
+POSTGRES_POOL_MAX_ACQUIRE_TIME=5s
+POSTGRES_POOL_MAX_CREATE_CONNECTION_TIME=5s
+POSTGRES_POOL_MAX_LIFE_TIME=2h
+POSTGRES_PREPARED_STATEMENT_CACHE_QUERIES=256
+POSTGRES_STATEMENT_TIMEOUT=PT2M
+POSTGRES_LOCK_WAIT_TIMEOUT=PT5S
+FLYWAY_ENABLED=true
+FLYWAY_CONNECT_RETRIES=10
+SPRING_CODEC_MAX_IN_MEMORY_SIZE=16MB
+
+STARRY_MAX_IMPORT_BYTES=268435456
+STARRY_DATA_TRANSFER_PROCESS_TIMEOUT=30m
+STARRY_PAYMENT_RECONCILIATION_INTERVAL=PT30S
+STARRY_PAYMENT_RECONCILIATION_INITIAL_DELAY=PT30S
+STARRY_PAYMENT_PROVIDER_RECONCILIATION_INTERVAL=PT30S
+STARRY_PAYMENT_PROVIDER_RECONCILIATION_INITIAL_DELAY=PT45S
+STARRY_STATS_AGGREGATION_ENABLED=true
+STARRY_STATS_AGGREGATION_INTERVAL=PT1M
+STARRY_STATS_AGGREGATION_INITIAL_DELAY=PT30S
+STARRY_STATS_AGGREGATION_MAX_ADVANCE_HOURS=1
+STARRY_STATS_AGGREGATION_LOOKBACK_HOURS=6
+STARRY_STATS_AGGREGATION_MAX_BATCHES_PER_RUN=6
+STARRY_STATS_MAINTENANCE_CRON="0 25 3 * * *"
+STARRY_STATS_PARTITION_MONTHS_AHEAD=12
+STARRY_STATS_RAW_RETENTION_MONTHS=4
+STARRY_STATS_RAW_DEFAULT_DELETE_BATCH_SIZE=10000
+STARRY_STATS_RAW_DEFAULT_DELETE_MAX_BATCHES=20
+STARRY_STATS_HOURLY_RETENTION_DAYS=90
+STARRY_STATS_HOURLY_DELETE_BATCH_SIZE=10000
+STARRY_STATS_HOURLY_DELETE_MAX_BATCHES=20
+STARRY_STATS_USAGE_EVENT_RETENTION_DAYS=400
+STARRY_STATS_USAGE_EVENT_DELETE_BATCH_SIZE=10000
+STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES=20
 
 # Runtime variables still use KIRO_* for compatibility with the current Kiro/AWS upstream adapter.
 KIRO_ALLOW_ANONYMOUS_PROXY=false
 KIRO_ADMIN_SESSION_TTL=12h
 KIRO_RATE_LIMIT_PER_MINUTE=120
 KIRO_ACCOUNT_SELECTION_STRATEGY=round_robin
+KIRO_REQUEST_TIMEOUT=90s
+KIRO_MAX_RETRIES=2
+KIRO_BASE_COOLDOWN=60s
+KIRO_QUOTA_RESET=1h
+KIRO_PROBABILISTIC_RETRY=0.1
+KIRO_MAX_REQUEST_BODY_BYTES=10485760
+KIRO_SESSION_AFFINITY_ENABLED=true
+KIRO_SESSION_AFFINITY_TTL=10m
+KIRO_SESSION_AFFINITY_MAXIMUM_SIZE=100000
 KIRO_WEBUI_URL=$(webui_url)
 KIRO_TOKEN_REFRESH_INTERVAL_MS=3600000
 KIRO_TOKEN_REFRESH_INITIAL_DELAY_MS=60000
+KIRO_PREFERRED_ENDPOINT=codewhisperer
 
 JAVA_OPTS=-XX:MaxRAMPercentage=75.0
 EOF
-  chmod 600 "$env_file"
+  mv -f -- "$env_tmp" "$env_file" || fail "Could not activate the new .env file."
+  ENV_UPDATED=true
 }
 
 load_runtime_env() {
@@ -302,53 +633,153 @@ load_runtime_env() {
 write_compose_file() {
   cat > "${INSTALL_DIR}/docker-compose.artifact.yml" <<'EOF'
 services:
-  mysql:
-    image: ${MYSQL_IMAGE:-mysql:8.0.37-oraclelinux8}
-    container_name: starryapi-mysql
+  postgres:
+    image: postgres:17-bookworm
+    container_name: starryapi-postgres
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-kiro_proxy}
-      MYSQL_USER: ${MYSQL_USERNAME:-kiro_proxy}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      POSTGRES_DB: starry_api
+      POSTGRES_USER: starry_api_bootstrap
+      POSTGRES_PASSWORD: ${POSTGRES_BOOTSTRAP_PASSWORD}
+      STARRY_POSTGRES_MIGRATION_PASSWORD: ${POSTGRES_MIGRATION_PASSWORD}
+      STARRY_POSTGRES_APP_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C.UTF-8 --data-checksums
       TZ: Asia/Shanghai
-    command:
-      - --character-set-server=utf8mb4
-      - --collation-server=utf8mb4_unicode_ci
     volumes:
-      - ./data/mysql:/var/lib/mysql
+      - ./data/postgresql:/var/lib/postgresql/data
+      - ./postgres-init/001-starry-api-roles.sh:/docker-entrypoint-initdb.d/001-starry-api-roles.sh:ro
+    command:
+      - postgres
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-100}
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-768MB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-4MB}
+      - -c
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}
+      - -c
+      - autovacuum_work_mem=${POSTGRES_AUTOVACUUM_WORK_MEM:-64MB}
+      - -c
+      - autovacuum_max_workers=${POSTGRES_AUTOVACUUM_MAX_WORKERS:-4}
+      - -c
+      - autovacuum_naptime=${POSTGRES_AUTOVACUUM_NAPTIME:-30s}
+      - -c
+      - default_statistics_target=${POSTGRES_DEFAULT_STATISTICS_TARGET:-200}
+      - -c
+      - wal_compression=${POSTGRES_WAL_COMPRESSION:-on}
+      - -c
+      - min_wal_size=${POSTGRES_MIN_WAL_SIZE:-512MB}
+      - -c
+      - max_wal_size=${POSTGRES_MAX_WAL_SIZE:-2GB}
+      - -c
+      - checkpoint_completion_target=${POSTGRES_CHECKPOINT_COMPLETION_TARGET:-0.9}
+      - -c
+      - track_io_timing=${POSTGRES_TRACK_IO_TIMING:-on}
+      - -c
+      - idle_in_transaction_session_timeout=${POSTGRES_IDLE_IN_TRANSACTION_SESSION_TIMEOUT:-5min}
+    shm_size: ${POSTGRES_SHM_SIZE:-256mb}
+    stop_grace_period: 1m
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u\"$${MYSQL_USER}\" -p\"$${MYSQL_PASSWORD}\" --silent"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 10s
       timeout: 5s
       retries: 20
-      start_period: 30s
+      start_period: 20s
     networks:
       - starryapi
 
   service:
-    image: eclipse-temurin:25-jre
+    build:
+      context: ./postgres-init
+      dockerfile_inline: |
+        FROM eclipse-temurin:25-jre-noble
+        RUN set -eux; \
+            apt-get update; \
+            apt-get install -y --no-install-recommends ca-certificates curl; \
+            install -d -m 0755 /usr/share/postgresql-common/pgdg; \
+            curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc; \
+            . /etc/os-release; \
+            echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list; \
+            apt-get update; \
+            apt-get install -y --no-install-recommends postgresql-client-17; \
+            rm -rf /var/lib/apt/lists/*
+    image: starryapi-runtime:java25-pg17
     container_name: starryapi-service
     restart: unless-stopped
     depends_on:
-      mysql:
+      postgres:
         condition: service_healthy
     working_dir: /app
     volumes:
       - ./app/starry-api.jar:/app/app.jar:ro
+      - ./data/backups:/app/backups
     environment:
       SERVER_PORT: ${SERVER_PORT:-8080}
-      MYSQL_HOST: mysql
-      MYSQL_PORT: 3306
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-kiro_proxy}
-      MYSQL_USERNAME: ${MYSQL_USERNAME:-kiro_proxy}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      SERVER_ADDRESS: 0.0.0.0
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DATABASE: starry_api
+      POSTGRES_USERNAME: starry_api
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_MIGRATION_USERNAME: starry_api_migration
+      POSTGRES_MIGRATION_PASSWORD: ${POSTGRES_MIGRATION_PASSWORD}
+      POSTGRES_SSL_MODE: ${POSTGRES_SSL_MODE:-disable}
+      POSTGRES_POOL_INITIAL_SIZE: ${POSTGRES_POOL_INITIAL_SIZE:-4}
+      POSTGRES_POOL_MAX_SIZE: ${POSTGRES_POOL_MAX_SIZE:-20}
+      POSTGRES_POOL_MAX_ACQUIRE_TIME: ${POSTGRES_POOL_MAX_ACQUIRE_TIME:-5s}
+      POSTGRES_POOL_MAX_CREATE_CONNECTION_TIME: ${POSTGRES_POOL_MAX_CREATE_CONNECTION_TIME:-5s}
+      POSTGRES_POOL_MAX_LIFE_TIME: ${POSTGRES_POOL_MAX_LIFE_TIME:-2h}
+      POSTGRES_PREPARED_STATEMENT_CACHE_QUERIES: ${POSTGRES_PREPARED_STATEMENT_CACHE_QUERIES:-256}
+      POSTGRES_STATEMENT_TIMEOUT: ${POSTGRES_STATEMENT_TIMEOUT:-PT2M}
+      POSTGRES_LOCK_WAIT_TIMEOUT: ${POSTGRES_LOCK_WAIT_TIMEOUT:-PT5S}
+      FLYWAY_ENABLED: ${FLYWAY_ENABLED:-true}
+      FLYWAY_CONNECT_RETRIES: ${FLYWAY_CONNECT_RETRIES:-10}
+      SPRING_CODEC_MAX_IN_MEMORY_SIZE: ${SPRING_CODEC_MAX_IN_MEMORY_SIZE:-16MB}
       KIRO_ALLOW_ANONYMOUS_PROXY: ${KIRO_ALLOW_ANONYMOUS_PROXY:-false}
       KIRO_ADMIN_SESSION_TTL: ${KIRO_ADMIN_SESSION_TTL:-12h}
       KIRO_RATE_LIMIT_PER_MINUTE: ${KIRO_RATE_LIMIT_PER_MINUTE:-120}
       KIRO_ACCOUNT_SELECTION_STRATEGY: ${KIRO_ACCOUNT_SELECTION_STRATEGY:-round_robin}
+      KIRO_REQUEST_TIMEOUT: ${KIRO_REQUEST_TIMEOUT:-90s}
+      KIRO_MAX_RETRIES: ${KIRO_MAX_RETRIES:-2}
+      KIRO_BASE_COOLDOWN: ${KIRO_BASE_COOLDOWN:-60s}
+      KIRO_QUOTA_RESET: ${KIRO_QUOTA_RESET:-1h}
+      KIRO_PROBABILISTIC_RETRY: ${KIRO_PROBABILISTIC_RETRY:-0.1}
+      KIRO_MAX_REQUEST_BODY_BYTES: ${KIRO_MAX_REQUEST_BODY_BYTES:-10485760}
+      KIRO_SESSION_AFFINITY_ENABLED: ${KIRO_SESSION_AFFINITY_ENABLED:-true}
+      KIRO_SESSION_AFFINITY_TTL: ${KIRO_SESSION_AFFINITY_TTL:-10m}
+      KIRO_SESSION_AFFINITY_MAXIMUM_SIZE: ${KIRO_SESSION_AFFINITY_MAXIMUM_SIZE:-100000}
       KIRO_WEBUI_URL: ${KIRO_WEBUI_URL:-}
       KIRO_ADMIN_TOKEN: ${KIRO_ADMIN_TOKEN:-}
+      KIRO_TOKEN_REFRESH_INTERVAL_MS: ${KIRO_TOKEN_REFRESH_INTERVAL_MS:-3600000}
+      KIRO_TOKEN_REFRESH_INITIAL_DELAY_MS: ${KIRO_TOKEN_REFRESH_INITIAL_DELAY_MS:-60000}
+      KIRO_PREFERRED_ENDPOINT: ${KIRO_PREFERRED_ENDPOINT:-codewhisperer}
+      STARRY_BACKUP_DIR: /app/backups
+      STARRY_MAX_IMPORT_BYTES: ${STARRY_MAX_IMPORT_BYTES:-268435456}
+      STARRY_DATA_TRANSFER_PROCESS_TIMEOUT: ${STARRY_DATA_TRANSFER_PROCESS_TIMEOUT:-30m}
+      STARRY_PAYMENT_RECONCILIATION_INTERVAL: ${STARRY_PAYMENT_RECONCILIATION_INTERVAL:-PT30S}
+      STARRY_PAYMENT_RECONCILIATION_INITIAL_DELAY: ${STARRY_PAYMENT_RECONCILIATION_INITIAL_DELAY:-PT30S}
+      STARRY_PAYMENT_PROVIDER_RECONCILIATION_INTERVAL: ${STARRY_PAYMENT_PROVIDER_RECONCILIATION_INTERVAL:-PT30S}
+      STARRY_PAYMENT_PROVIDER_RECONCILIATION_INITIAL_DELAY: ${STARRY_PAYMENT_PROVIDER_RECONCILIATION_INITIAL_DELAY:-PT45S}
+      STARRY_STATS_AGGREGATION_ENABLED: ${STARRY_STATS_AGGREGATION_ENABLED:-true}
+      STARRY_STATS_AGGREGATION_INTERVAL: ${STARRY_STATS_AGGREGATION_INTERVAL:-PT1M}
+      STARRY_STATS_AGGREGATION_INITIAL_DELAY: ${STARRY_STATS_AGGREGATION_INITIAL_DELAY:-PT30S}
+      STARRY_STATS_AGGREGATION_MAX_ADVANCE_HOURS: ${STARRY_STATS_AGGREGATION_MAX_ADVANCE_HOURS:-1}
+      STARRY_STATS_AGGREGATION_LOOKBACK_HOURS: ${STARRY_STATS_AGGREGATION_LOOKBACK_HOURS:-6}
+      STARRY_STATS_AGGREGATION_MAX_BATCHES_PER_RUN: ${STARRY_STATS_AGGREGATION_MAX_BATCHES_PER_RUN:-6}
+      STARRY_STATS_MAINTENANCE_CRON: "${STARRY_STATS_MAINTENANCE_CRON:-0 25 3 * * *}"
+      STARRY_STATS_PARTITION_MONTHS_AHEAD: ${STARRY_STATS_PARTITION_MONTHS_AHEAD:-12}
+      STARRY_STATS_RAW_RETENTION_MONTHS: ${STARRY_STATS_RAW_RETENTION_MONTHS:-4}
+      STARRY_STATS_RAW_DEFAULT_DELETE_BATCH_SIZE: ${STARRY_STATS_RAW_DEFAULT_DELETE_BATCH_SIZE:-10000}
+      STARRY_STATS_RAW_DEFAULT_DELETE_MAX_BATCHES: ${STARRY_STATS_RAW_DEFAULT_DELETE_MAX_BATCHES:-20}
+      STARRY_STATS_HOURLY_RETENTION_DAYS: ${STARRY_STATS_HOURLY_RETENTION_DAYS:-90}
+      STARRY_STATS_HOURLY_DELETE_BATCH_SIZE: ${STARRY_STATS_HOURLY_DELETE_BATCH_SIZE:-10000}
+      STARRY_STATS_HOURLY_DELETE_MAX_BATCHES: ${STARRY_STATS_HOURLY_DELETE_MAX_BATCHES:-20}
+      STARRY_STATS_USAGE_EVENT_RETENTION_DAYS: ${STARRY_STATS_USAGE_EVENT_RETENTION_DAYS:-400}
+      STARRY_STATS_USAGE_EVENT_DELETE_BATCH_SIZE: ${STARRY_STATS_USAGE_EVENT_DELETE_BATCH_SIZE:-10000}
+      STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES: ${STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES:-20}
       JAVA_OPTS: ${JAVA_OPTS:-}
     ports:
       - "${HOST_BIND_ADDR:-127.0.0.1}:${HOST_HTTP_PORT:-18080}:${SERVER_PORT:-8080}"
@@ -363,7 +794,7 @@ EOF
 }
 
 download_artifact() {
-  local tmp_dir tmp_jar tmp_sha tmp_info expected actual
+  local tmp_dir tmp_jar tmp_sha tmp_info actual
   tmp_dir="$(mktemp -d)"
   tmp_jar="${tmp_dir}/starry-api.jar"
   tmp_sha="${tmp_dir}/starry-api.jar.sha256"
@@ -373,25 +804,18 @@ download_artifact() {
   download_required_file "artifact checksum" "$CHECKSUM_URL" "$tmp_sha"
   download_file "$BUILD_INFO_URL" "$tmp_info" || true
 
-  expected="$(awk '{print $1}' "$tmp_sha" | head -n 1)"
-  actual="$(sha256_file "$tmp_jar")"
-  [[ -n "$expected" ]] || fail "Checksum file is empty."
-  [[ "$expected" == "$actual" ]] || fail "Artifact checksum mismatch. expected=${expected} actual=${actual}"
-
-  if [[ -f "${INSTALL_DIR}/app/starry-api.jar" ]]; then
-    cp "${INSTALL_DIR}/app/starry-api.jar" "${INSTALL_DIR}/app/starry-api.jar.previous"
-  fi
-  mv "$tmp_jar" "${INSTALL_DIR}/app/starry-api.jar"
-  cp "$tmp_sha" "${INSTALL_DIR}/app/starry-api.jar.sha256"
+  install_verified_artifact "$tmp_jar" "$tmp_sha"
+  actual="$INSTALLED_ARTIFACT_CHECKSUM"
   if [[ -s "$tmp_info" ]]; then
-    cp "$tmp_info" "${INSTALL_DIR}/app/build-info.json"
+    atomic_install_file "$tmp_info" "${INSTALL_DIR}/app/build-info.json" 0644 \
+      || fail "Could not install build metadata atomically."
   fi
   rm -rf "$tmp_dir"
   log "Installed artifact with SHA256 ${actual}"
 }
 
 download_bundle() {
-  local tmp_dir tmp_bundle tmp_sha extract_dir expected actual
+  local tmp_dir tmp_bundle tmp_sha extract_dir expected actual artifact_actual
   tmp_dir="$(mktemp -d)"
   tmp_bundle="${tmp_dir}/starry-api-bundle.tar.gz"
   tmp_sha="${tmp_dir}/starry-api-bundle.tar.gz.sha256"
@@ -420,21 +844,52 @@ download_bundle() {
 
   tar -xzf "$tmp_bundle" -C "$extract_dir"
   [[ -f "${extract_dir}/app/starry-api.jar" ]] || fail "Bundle does not contain app/starry-api.jar."
+  [[ -f "${extract_dir}/app/starry-api.jar.sha256" ]] || fail "Bundle does not contain the jar checksum."
   [[ -f "${extract_dir}/docker-compose.artifact.yml" ]] || fail "Bundle does not contain docker-compose.artifact.yml."
+  [[ -f "${extract_dir}/postgres-init/001-starry-api-roles.sh" ]] \
+    || fail "Bundle does not contain the PostgreSQL role bootstrap script."
 
-  if [[ -f "${INSTALL_DIR}/app/starry-api.jar" ]]; then
-    cp "${INSTALL_DIR}/app/starry-api.jar" "${INSTALL_DIR}/app/starry-api.jar.previous"
-  fi
-  cp "${extract_dir}/app/starry-api.jar" "${INSTALL_DIR}/app/starry-api.jar"
-  cp "${extract_dir}/app/starry-api.jar.sha256" "${INSTALL_DIR}/app/starry-api.jar.sha256"
-  cp "${extract_dir}/docker-compose.artifact.yml" "${INSTALL_DIR}/docker-compose.artifact.yml"
-  [[ -f "${extract_dir}/build-info.json" ]] && cp "${extract_dir}/build-info.json" "${INSTALL_DIR}/app/build-info.json"
-  [[ -f "${extract_dir}/sha256sums.txt" ]] && cp "${extract_dir}/sha256sums.txt" "${INSTALL_DIR}/app/sha256sums.txt"
-  [[ -f "${extract_dir}/starry-api-webui.tar.gz" ]] && cp "${extract_dir}/starry-api-webui.tar.gz" "${INSTALL_DIR}/app/starry-api-webui.tar.gz"
-  [[ -f "${extract_dir}/starry-api-webui.tar.gz.sha256" ]] && cp "${extract_dir}/starry-api-webui.tar.gz.sha256" "${INSTALL_DIR}/app/starry-api-webui.tar.gz.sha256"
+  expected="$(awk '{print $1}' "${extract_dir}/app/starry-api.jar.sha256" | head -n 1)"
+  artifact_actual="$(sha256_file "${extract_dir}/app/starry-api.jar")"
+  [[ -n "$expected" && "$expected" == "$artifact_actual" ]] \
+    || fail "Bundle jar checksum mismatch. expected=${expected:-missing} actual=${artifact_actual}"
+
+  atomic_install_file "${extract_dir}/docker-compose.artifact.yml" "${INSTALL_DIR}/docker-compose.artifact.yml" 0644 \
+    || fail "Could not install Docker Compose configuration atomically."
+  atomic_install_file "${extract_dir}/postgres-init/001-starry-api-roles.sh" "${INSTALL_DIR}/postgres-init/001-starry-api-roles.sh" 0755 \
+    || fail "Could not install the PostgreSQL bootstrap atomically."
+  [[ ! -f "${extract_dir}/build-info.json" ]] \
+    || atomic_install_file "${extract_dir}/build-info.json" "${INSTALL_DIR}/app/build-info.json" 0644 \
+    || fail "Could not install build metadata atomically."
+  [[ ! -f "${extract_dir}/sha256sums.txt" ]] \
+    || atomic_install_file "${extract_dir}/sha256sums.txt" "${INSTALL_DIR}/app/sha256sums.txt" 0644 \
+    || fail "Could not install the bundle checksum manifest atomically."
+  [[ ! -f "${extract_dir}/starry-api-webui.tar.gz" ]] \
+    || atomic_install_file "${extract_dir}/starry-api-webui.tar.gz" "${INSTALL_DIR}/app/starry-api-webui.tar.gz" 0644 \
+    || fail "Could not install the WebUI archive atomically."
+  [[ ! -f "${extract_dir}/starry-api-webui.tar.gz.sha256" ]] \
+    || atomic_install_file "${extract_dir}/starry-api-webui.tar.gz.sha256" "${INSTALL_DIR}/app/starry-api-webui.tar.gz.sha256" 0644 \
+    || fail "Could not install the WebUI checksum atomically."
+  install_verified_artifact \
+    "${extract_dir}/app/starry-api.jar" \
+    "${extract_dir}/app/starry-api.jar.sha256" >/dev/null
 
   rm -rf "$tmp_dir"
   log "Installed deployment bundle with SHA256 ${actual}"
+}
+
+ensure_postgres_init_script() {
+  local target="${INSTALL_DIR}/postgres-init/001-starry-api-roles.sh"
+  if [[ ! -f "$target" ]]; then
+    local temporary
+    temporary="$(mktemp "${target}.download.XXXXXX")" \
+      || fail "Could not prepare the PostgreSQL bootstrap download."
+    download_required_file "PostgreSQL role bootstrap" "$POSTGRES_INIT_URL" "$temporary"
+    atomic_install_file "$temporary" "$target" 0755 \
+      || fail "Could not install the PostgreSQL bootstrap atomically."
+    rm -f -- "$temporary"
+  fi
+  chmod 0755 "$target"
 }
 
 wait_for_health() {
@@ -458,21 +913,50 @@ wait_for_health() {
   return 1
 }
 
+report_stack_failure() {
+  root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml ps || true
+  root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml logs --tail=120 postgres || true
+  root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml logs --tail=160 service || true
+}
+
+try_artifact_rollback() {
+  ROLLBACK_ATTEMPTED=true
+  rollback_installed_artifact || return 1
+  log "Recreating the stack with the previous deployment unit..."
+  root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml up -d --build --force-recreate --remove-orphans \
+    || return 1
+  wait_for_health || return 1
+  ROLLBACK_COMPLETED=true
+}
+
 deploy_stack() {
   cd "$INSTALL_DIR"
   log "Starting Docker Compose stack from prebuilt artifact..."
-  root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml pull mysql service || true
-  root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml up -d mysql
+  STACK_MUTATION_STARTED=true
+  root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml pull postgres || true
+  root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml up -d postgres
   log "Recreating service container so the new jar is loaded..."
-  root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml up -d --force-recreate service
-
-  if ! wait_for_health; then
-    root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml ps || true
-    root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml logs --tail=120 mysql || true
-    root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml logs --tail=160 service || true
-    fail "Service did not become healthy in time."
+  if ! root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml up -d --build --force-recreate service; then
+    report_stack_failure
+    if try_artifact_rollback; then
+      fail "The new service could not be started; the previous deployment unit was restored and is healthy."
+    fi
+    report_stack_failure
+    fail "The new service could not be started and automatic artifact rollback failed."
   fi
 
+  if ! wait_for_health; then
+    report_stack_failure
+    if try_artifact_rollback; then
+      fail "The new service did not become healthy; the previous deployment unit was restored and is healthy."
+    fi
+    report_stack_failure
+    fail "Service did not become healthy and automatic artifact rollback failed. Inspect the logs above."
+  fi
+
+  log "Removing containers left behind by the previous Compose definition..."
+  root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml up -d --remove-orphans postgres service
+  rm -f -- "${INSTALL_DIR}/.env.postgresql-retry"
   root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml logs --tail=120 service || true
 
   cat <<EOF
@@ -499,13 +983,20 @@ main() {
   install_base_packages
   ensure_docker
   ensure_compose
+  require_compose_inline_dockerfile
   prepare_install_dir
   load_github_token
+  backup_current_artifact
+  trap 'deployment_exit_handler $?' EXIT
   write_env_file
   load_runtime_env
   write_compose_file
   download_bundle || download_artifact
+  ensure_postgres_init_script
   deploy_stack
+  DEPLOYMENT_COMMITTED=true
 }
 
-main "$@"
+if [[ "${STARRY_INSTALL_SERVER_LIBRARY_ONLY:-false}" != "true" ]]; then
+  main "$@"
+fi

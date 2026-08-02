@@ -1,6 +1,7 @@
 package tech.starryapi.admin;
 
 import org.springframework.http.ResponseEntity;
+import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.http.codec.multipart.FilePart;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -10,6 +11,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.server.ServerWebExchange;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import tech.starryapi.common.ApiResponse;
 
@@ -19,11 +21,11 @@ public interface DataTransferApi {
     @GetMapping("/status")
     Mono<ApiResponse<DataTransferDtos.DataTransferStatusResponse>> status(ServerWebExchange exchange);
 
-    @GetMapping("/database.sql")
-    Mono<ResponseEntity<byte[]>> exportDatabase(ServerWebExchange exchange);
+    @GetMapping("/database.dump")
+    Mono<ResponseEntity<Flux<DataBuffer>>> exportDatabase(ServerWebExchange exchange);
 
     @GetMapping("/backup.zip")
-    Mono<ResponseEntity<byte[]>> exportBackup(ServerWebExchange exchange);
+    Mono<ResponseEntity<Flux<DataBuffer>>> exportBackup(ServerWebExchange exchange);
 
     @GetMapping("/backups")
     Mono<ApiResponse<DataTransferDtos.BackupListResponse>> backups(ServerWebExchange exchange);
@@ -32,7 +34,7 @@ public interface DataTransferApi {
     Mono<ApiResponse<DataTransferDtos.BackupCreateResponse>> createBackup(ServerWebExchange exchange);
 
     @GetMapping("/backups/{fileName:.+}")
-    Mono<ResponseEntity<byte[]>> downloadBackup(ServerWebExchange exchange, @PathVariable String fileName);
+    Mono<ResponseEntity<Flux<DataBuffer>>> downloadBackup(ServerWebExchange exchange, @PathVariable String fileName);
 
     @DeleteMapping("/backups/{fileName:.+}")
     Mono<ApiResponse<DataTransferDtos.DeleteBackupResponse>> deleteBackup(ServerWebExchange exchange, @PathVariable String fileName);

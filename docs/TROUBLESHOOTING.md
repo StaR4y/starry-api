@@ -4,95 +4,119 @@
 
 Cause:
 
-`spring.r2dbc.url` used `r2dbc:pool:mysql://...` while `spring.r2dbc.pool.*` was also configured.
+`spring.r2dbc.url` used the `r2dbc:pool:` protocol while `spring.r2dbc.pool.*` was also configured.
 
 Expected config:
 
 ```yaml
 spring:
   r2dbc:
-    url: r2dbc:mysql://127.0.0.1:3306/kiro_proxy
+    url: r2dbc:postgresql://localhost:5432/starry_api?schema=starry_api
     pool:
-      initial-size: 8
-      max-size: 80
+      initial-size: 4
+      max-size: 20
 ```
 
-Do not use `r2dbc:pool:mysql://` when Spring Boot pool properties are enabled.
+Do not use `r2dbc:pool:postgresql://` when Spring Boot pool properties are enabled.
 
-## `Connection refused: /127.0.0.1:3306`
+## PostgreSQL connection attempts keep retrying
 
 Cause:
 
-MySQL is not running or is listening on a different host/port.
+PostgreSQL 17 is not running, is listening on a different host/port, or the JVM is routing the database socket through a system SOCKS proxy. On macOS, a proxy configured for `127.0.0.1` can intercept numeric loopback addresses even when `localhost` is in Java's non-proxy host list. Direct local runs therefore default to `localhost`.
 
 Check:
 
 ```bash
-nc -z 127.0.0.1 3306
-brew services list | grep mysql
+pg_isready -h localhost -p 5432 -d starry_api
+brew services list | grep postgresql
 ```
 
-Start Homebrew MySQL:
+If `pg_isready` succeeds but Flyway reports a nested `UnknownHostException` for `127.0.0.1`, remove an explicit `POSTGRES_HOST=127.0.0.1` override or set:
 
 ```bash
-brew services start mysql
+export POSTGRES_HOST=localhost
 ```
 
-Create database:
+Start Homebrew PostgreSQL 17:
 
 ```bash
-mysql -uroot -e "CREATE DATABASE IF NOT EXISTS kiro_proxy CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+brew services start postgresql@17
 ```
 
-## `Table 'kiro_proxy.model_mappings' doesn't exist`
+Create the database and least-privilege roles on a fresh local cluster:
+
+```bash
+export POSTGRES_USER=postgres
+export POSTGRES_DB=starry_api
+export STARRY_POSTGRES_MIGRATION_PASSWORD='<strong-local-migration-password>'
+export STARRY_POSTGRES_APP_PASSWORD='<strong-local-application-password>'
+createdb --username "$POSTGRES_USER" --encoding=UTF8 "$POSTGRES_DB"
+./docker/postgresql/init/001-starry-api-roles.sh
+```
+
+## `relation "model_mappings" does not exist`
 
 Possible causes:
 
 - Flyway has not run yet.
-- The database is not the one configured by `MYSQL_DATABASE`.
+- The database is not the one configured by `POSTGRES_DATABASE`.
+- The connection `search_path` does not include schema `starry_api`.
 - A previous failed startup left schema history inconsistent.
 
 Check tables:
 
 ```bash
-mysql -uroot -e "USE kiro_proxy; SHOW TABLES;"
+PGPASSWORD="$POSTGRES_PASSWORD" psql \
+  -h "${POSTGRES_HOST:-localhost}" -p "${POSTGRES_PORT:-5432}" \
+  -U "${POSTGRES_USERNAME:-starry_api}" -d starry_api \
+  -c '\dt starry_api.*'
 ```
 
 Check Flyway history:
 
 ```bash
-mysql -uroot -e "USE kiro_proxy; SELECT * FROM flyway_schema_history;"
+PGPASSWORD="$POSTGRES_PASSWORD" psql \
+  -h "${POSTGRES_HOST:-localhost}" -p "${POSTGRES_PORT:-5432}" \
+  -U "${POSTGRES_USERNAME:-starry_api}" -d starry_api \
+  -c 'SELECT installed_rank, version, description, success FROM starry_api.flyway_schema_history ORDER BY installed_rank'
 ```
 
 For a fresh local database, the simplest reset is:
 
 ```bash
-mysql -uroot -e "DROP DATABASE IF EXISTS kiro_proxy; CREATE DATABASE kiro_proxy CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+dropdb --if-exists starry_api
+createdb --owner=starry_api_owner --encoding=UTF8 starry_api
+psql --dbname=starry_api <<'SQL'
+REVOKE ALL ON DATABASE starry_api FROM PUBLIC;
+GRANT CONNECT ON DATABASE starry_api TO starry_api_migration, starry_api_runtime;
+CREATE SCHEMA starry_api AUTHORIZATION starry_api_owner;
+REVOKE ALL ON SCHEMA starry_api FROM PUBLIC;
+GRANT USAGE ON SCHEMA starry_api TO starry_api_runtime;
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+SQL
 ./gradlew :service:bootRun
 ```
 
 Do not drop a production database.
 
-## MySQL Container Logs `CPU does not support x86-64-v2`
+## PostgreSQL Container Is Unhealthy
 
 Cause:
 
-Some newer MySQL Docker tags are based on Oracle Linux 9, whose glibc requires the `x86-64-v2` CPU baseline. Older VPS CPUs cannot run those containers.
+The PostgreSQL process may still be initializing, the volume may be inaccessible, or the configured credentials may not match an existing data directory.
 
-Fix the compose deployment by rolling MySQL back to the Oracle Linux 8 image:
+Inspect the container and readiness probe:
 
 ```bash
 cd /opt/starry-api
-grep -q '^MYSQL_IMAGE=' .env \
-  && sed -i 's|^MYSQL_IMAGE=.*|MYSQL_IMAGE=mysql:8.0.37-oraclelinux8|' .env \
-  || echo 'MYSQL_IMAGE=mysql:8.0.37-oraclelinux8' >> .env
-docker compose -f docker-compose.artifact.yml pull mysql
-docker compose -f docker-compose.artifact.yml up -d --force-recreate mysql
-docker compose -f docker-compose.artifact.yml up -d service
-docker compose -f docker-compose.artifact.yml logs -f mysql
+docker compose -f docker-compose.artifact.yml ps postgres
+docker compose -f docker-compose.artifact.yml logs --tail=200 postgres
+docker compose -f docker-compose.artifact.yml exec postgres \
+  pg_isready -U starry_api -d starry_api
 ```
 
-The server installer writes `docker-compose.artifact.yml` and already uses this compatible MySQL 8.0 image by default.
+The checked-in Compose baseline uses `postgres:17-bookworm`, data checksums, and `./data/postgresql`. Changing `POSTGRES_PASSWORD` does not alter credentials in an already initialized cluster; update the role password explicitly or restore the prior `.env` value. Never remove a production volume as a troubleshooting shortcut.
 
 ## Tencent Exmail SMTP SSL Handshake Fails
 

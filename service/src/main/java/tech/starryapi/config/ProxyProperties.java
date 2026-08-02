@@ -18,6 +18,7 @@ public class ProxyProperties {
     private AccountSelectionStrategy accountSelectionStrategy = AccountSelectionStrategy.ROUND_ROBIN;
     private boolean sessionAffinityEnabled = true;
     private Duration sessionAffinityTtl = Duration.ofMinutes(10);
+    private long sessionAffinityMaximumSize = 100_000;
     private Duration baseCooldown = Duration.ofMinutes(1);
     private Duration quotaReset = Duration.ofHours(1);
     private double probabilisticRetryChance = 0.1;
@@ -107,6 +108,14 @@ public class ProxyProperties {
 
     public void setSessionAffinityTtl(Duration sessionAffinityTtl) {
         this.sessionAffinityTtl = sessionAffinityTtl;
+    }
+
+    public long getSessionAffinityMaximumSize() {
+        return sessionAffinityMaximumSize;
+    }
+
+    public void setSessionAffinityMaximumSize(long sessionAffinityMaximumSize) {
+        this.sessionAffinityMaximumSize = sessionAffinityMaximumSize;
     }
 
     public Duration getBaseCooldown() {

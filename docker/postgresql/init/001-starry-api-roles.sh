@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${POSTGRES_DB:?POSTGRES_DB is required}"
+: "${STARRY_POSTGRES_MIGRATION_PASSWORD:?STARRY_POSTGRES_MIGRATION_PASSWORD is required}"
+: "${STARRY_POSTGRES_APP_PASSWORD:?STARRY_POSTGRES_APP_PASSWORD is required}"
+
+if [[ "$POSTGRES_DB" != "starry_api" ]]; then
+  printf 'Starry API requires POSTGRES_DB=starry_api, got %s\n' "$POSTGRES_DB" >&2
+  exit 1
+fi
+
+psql \
+  --single-transaction \
+  --set=ON_ERROR_STOP=1 \
+  --username "$POSTGRES_USER" \
+  --dbname "$POSTGRES_DB" <<'SQL'
+\getenv migration_password STARRY_POSTGRES_MIGRATION_PASSWORD
+\getenv app_password STARRY_POSTGRES_APP_PASSWORD
+
+CREATE ROLE starry_api_owner
+    NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+
+CREATE ROLE starry_api_runtime
+    NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+
+CREATE ROLE starry_api_migration
+    LOGIN PASSWORD :'migration_password'
+    NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;
+
+CREATE ROLE starry_api
+    LOGIN PASSWORD :'app_password'
+    NOSUPERUSER NOCREATEDB NOCREATEROLE INHERIT NOREPLICATION NOBYPASSRLS;
+
+GRANT starry_api_owner TO starry_api_migration WITH INHERIT FALSE, SET TRUE, ADMIN FALSE;
+GRANT starry_api_runtime TO starry_api WITH INHERIT TRUE, SET FALSE, ADMIN FALSE;
+GRANT starry_api TO starry_api_owner WITH INHERIT TRUE, SET FALSE, ADMIN FALSE;
+
+ALTER DATABASE starry_api OWNER TO starry_api_owner;
+REVOKE ALL ON DATABASE starry_api FROM PUBLIC;
+GRANT CONNECT ON DATABASE starry_api TO starry_api_migration, starry_api_runtime;
+
+CREATE SCHEMA starry_api AUTHORIZATION starry_api_owner;
+REVOKE ALL ON SCHEMA starry_api FROM PUBLIC;
+GRANT USAGE ON SCHEMA starry_api TO starry_api_runtime;
+
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+SQL

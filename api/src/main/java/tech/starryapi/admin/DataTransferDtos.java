@@ -44,7 +44,6 @@ public final class DataTransferDtos {
     public record ImportResultResponse(
         String fileName,
         String sourceType,
-        int statements,
         String preRestoreBackupName,
         Instant importedAt
     ) {

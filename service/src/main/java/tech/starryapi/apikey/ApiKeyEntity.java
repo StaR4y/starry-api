@@ -18,6 +18,7 @@ public class ApiKeyEntity {
     private String keyPrefix;
     private Boolean enabled;
     private BigDecimal creditsLimit;
+    private BigDecimal billingMinimumCredits;
     private Long totalRequests;
     private BigDecimal totalCredits;
     private Long totalInputTokens;
@@ -96,6 +97,14 @@ public class ApiKeyEntity {
 
     public void setCreditsLimit(BigDecimal creditsLimit) {
         this.creditsLimit = creditsLimit;
+    }
+
+    public BigDecimal getBillingMinimumCredits() {
+        return billingMinimumCredits;
+    }
+
+    public void setBillingMinimumCredits(BigDecimal billingMinimumCredits) {
+        this.billingMinimumCredits = billingMinimumCredits;
     }
 
     public Long getTotalRequests() {

@@ -4,14 +4,18 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
 import tech.starryapi.admin.SystemSettingEntity;
 import tech.starryapi.admin.SystemSettingRepository;
 import tech.starryapi.common.ApiException;
@@ -102,8 +106,41 @@ class AccountSettingsServiceTest {
             });
     }
 
+    @Test
+    void gptFastModeHotPathReusesCachedValue() {
+        Map<String, String> store = new HashMap<>();
+        store.put(AccountSettingsService.GPT_FAST_MODE_ENABLED, "true");
+        SystemSettingRepository repository = mockRepository(store);
+        AccountSettingsService service = new AccountSettingsService(repository);
+
+        assertThat(service.gptFastModeEnabled().block()).isTrue();
+        assertThat(service.gptFastModeEnabled().block()).isTrue();
+
+        verify(repository, times(1)).findById(AccountSettingsService.GPT_FAST_MODE_ENABLED);
+    }
+
+    @Test
+    void invalidationPreventsAnOlderLoadFromRepopulatingTheCache() {
+        SystemSettingRepository repository = org.mockito.Mockito.mock(SystemSettingRepository.class);
+        Sinks.One<SystemSettingEntity> staleLoad = Sinks.one();
+        when(repository.findById(AccountSettingsService.GPT_FAST_MODE_ENABLED))
+            .thenReturn(staleLoad.asMono(), Mono.just(setting(AccountSettingsService.GPT_FAST_MODE_ENABLED, "true")));
+        AccountSettingsService service = new AccountSettingsService(repository);
+        AtomicReference<Boolean> staleResult = new AtomicReference<>();
+
+        service.gptFastModeEnabled().subscribe(staleResult::set);
+        service.invalidateAllCaches();
+        staleLoad.tryEmitValue(setting(AccountSettingsService.GPT_FAST_MODE_ENABLED, "false"));
+
+        assertThat(staleResult.get()).isFalse();
+        assertThat(service.gptFastModeEnabled().block()).isTrue();
+        assertThat(service.gptFastModeEnabled().block()).isTrue();
+        verify(repository, times(2)).findById(AccountSettingsService.GPT_FAST_MODE_ENABLED);
+    }
+
     private SystemSettingRepository mockRepository(Map<String, String> store) {
         SystemSettingRepository repository = org.mockito.Mockito.mock(SystemSettingRepository.class);
+        when(repository.acquireTransactionLock(anyString())).thenReturn(Mono.just(true));
         when(repository.findAllById(any(Iterable.class))).thenAnswer(invocation -> {
             Iterable<String> keys = invocation.getArgument(0);
             return Flux.fromIterable(keys)
@@ -124,6 +161,14 @@ class AccountSettingsServiceTest {
             String value = invocation.getArgument(1);
             store.put(key, value);
             return Mono.just(1);
+        });
+        when(repository.upsertSettings(any(String[].class), any(String[].class))).thenAnswer(invocation -> {
+            String[] keys = invocation.getArgument(0);
+            String[] values = invocation.getArgument(1);
+            for (int index = 0; index < keys.length; index++) {
+                store.put(keys[index], values[index]);
+            }
+            return Mono.just(keys.length);
         });
         return repository;
     }

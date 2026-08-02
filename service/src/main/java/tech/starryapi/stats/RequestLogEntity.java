@@ -12,6 +12,7 @@ public class RequestLogEntity {
     private Long id;
     private String requestId;
     private String apiKeyId;
+    private String userId;
     private String accountId;
     private String path;
     private String model;
@@ -46,6 +47,14 @@ public class RequestLogEntity {
 
     public void setApiKeyId(String apiKeyId) {
         this.apiKeyId = apiKeyId;
+    }
+
+    public String getUserId() {
+        return userId;
+    }
+
+    public void setUserId(String userId) {
+        this.userId = userId;
     }
 
     public String getAccountId() {

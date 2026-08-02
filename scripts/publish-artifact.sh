@@ -56,53 +56,153 @@ write_artifact_compose() {
   local output="$1"
   cat > "$output" <<'EOF'
 services:
-  mysql:
-    image: ${MYSQL_IMAGE:-mysql:8.0.37-oraclelinux8}
-    container_name: starryapi-mysql
+  postgres:
+    image: postgres:17-bookworm
+    container_name: starryapi-postgres
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-kiro_proxy}
-      MYSQL_USER: ${MYSQL_USERNAME:-kiro_proxy}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      POSTGRES_DB: starry_api
+      POSTGRES_USER: starry_api_bootstrap
+      POSTGRES_PASSWORD: ${POSTGRES_BOOTSTRAP_PASSWORD}
+      STARRY_POSTGRES_MIGRATION_PASSWORD: ${POSTGRES_MIGRATION_PASSWORD}
+      STARRY_POSTGRES_APP_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C.UTF-8 --data-checksums
       TZ: Asia/Shanghai
-    command:
-      - --character-set-server=utf8mb4
-      - --collation-server=utf8mb4_unicode_ci
     volumes:
-      - ./data/mysql:/var/lib/mysql
+      - ./data/postgresql:/var/lib/postgresql/data
+      - ./postgres-init/001-starry-api-roles.sh:/docker-entrypoint-initdb.d/001-starry-api-roles.sh:ro
+    command:
+      - postgres
+      - -c
+      - max_connections=${POSTGRES_MAX_CONNECTIONS:-100}
+      - -c
+      - shared_buffers=${POSTGRES_SHARED_BUFFERS:-256MB}
+      - -c
+      - effective_cache_size=${POSTGRES_EFFECTIVE_CACHE_SIZE:-768MB}
+      - -c
+      - work_mem=${POSTGRES_WORK_MEM:-4MB}
+      - -c
+      - maintenance_work_mem=${POSTGRES_MAINTENANCE_WORK_MEM:-64MB}
+      - -c
+      - autovacuum_work_mem=${POSTGRES_AUTOVACUUM_WORK_MEM:-64MB}
+      - -c
+      - autovacuum_max_workers=${POSTGRES_AUTOVACUUM_MAX_WORKERS:-4}
+      - -c
+      - autovacuum_naptime=${POSTGRES_AUTOVACUUM_NAPTIME:-30s}
+      - -c
+      - default_statistics_target=${POSTGRES_DEFAULT_STATISTICS_TARGET:-200}
+      - -c
+      - wal_compression=${POSTGRES_WAL_COMPRESSION:-on}
+      - -c
+      - min_wal_size=${POSTGRES_MIN_WAL_SIZE:-512MB}
+      - -c
+      - max_wal_size=${POSTGRES_MAX_WAL_SIZE:-2GB}
+      - -c
+      - checkpoint_completion_target=${POSTGRES_CHECKPOINT_COMPLETION_TARGET:-0.9}
+      - -c
+      - track_io_timing=${POSTGRES_TRACK_IO_TIMING:-on}
+      - -c
+      - idle_in_transaction_session_timeout=${POSTGRES_IDLE_IN_TRANSACTION_SESSION_TIMEOUT:-5min}
+    shm_size: ${POSTGRES_SHM_SIZE:-256mb}
+    stop_grace_period: 1m
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u\"$${MYSQL_USER}\" -p\"$${MYSQL_PASSWORD}\" --silent"]
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 10s
       timeout: 5s
       retries: 20
-      start_period: 30s
+      start_period: 20s
     networks:
       - starryapi
 
   service:
-    image: eclipse-temurin:25-jre
+    build:
+      context: ./postgres-init
+      dockerfile_inline: |
+        FROM eclipse-temurin:25-jre-noble
+        RUN set -eux; \
+            apt-get update; \
+            apt-get install -y --no-install-recommends ca-certificates curl; \
+            install -d -m 0755 /usr/share/postgresql-common/pgdg; \
+            curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc; \
+            . /etc/os-release; \
+            echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list; \
+            apt-get update; \
+            apt-get install -y --no-install-recommends postgresql-client-17; \
+            rm -rf /var/lib/apt/lists/*
+    image: starryapi-runtime:java25-pg17
     container_name: starryapi-service
     restart: unless-stopped
     depends_on:
-      mysql:
+      postgres:
         condition: service_healthy
     working_dir: /app
     volumes:
       - ./app/starry-api.jar:/app/app.jar:ro
+      - ./data/backups:/app/backups
     environment:
       SERVER_PORT: ${SERVER_PORT:-8080}
-      MYSQL_HOST: mysql
-      MYSQL_PORT: 3306
-      MYSQL_DATABASE: ${MYSQL_DATABASE:-kiro_proxy}
-      MYSQL_USERNAME: ${MYSQL_USERNAME:-kiro_proxy}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      SERVER_ADDRESS: 0.0.0.0
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DATABASE: starry_api
+      POSTGRES_USERNAME: starry_api
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_MIGRATION_USERNAME: starry_api_migration
+      POSTGRES_MIGRATION_PASSWORD: ${POSTGRES_MIGRATION_PASSWORD}
+      POSTGRES_SSL_MODE: ${POSTGRES_SSL_MODE:-disable}
+      POSTGRES_POOL_INITIAL_SIZE: ${POSTGRES_POOL_INITIAL_SIZE:-4}
+      POSTGRES_POOL_MAX_SIZE: ${POSTGRES_POOL_MAX_SIZE:-20}
+      POSTGRES_POOL_MAX_ACQUIRE_TIME: ${POSTGRES_POOL_MAX_ACQUIRE_TIME:-5s}
+      POSTGRES_POOL_MAX_CREATE_CONNECTION_TIME: ${POSTGRES_POOL_MAX_CREATE_CONNECTION_TIME:-5s}
+      POSTGRES_POOL_MAX_LIFE_TIME: ${POSTGRES_POOL_MAX_LIFE_TIME:-2h}
+      POSTGRES_PREPARED_STATEMENT_CACHE_QUERIES: ${POSTGRES_PREPARED_STATEMENT_CACHE_QUERIES:-256}
+      POSTGRES_STATEMENT_TIMEOUT: ${POSTGRES_STATEMENT_TIMEOUT:-PT2M}
+      POSTGRES_LOCK_WAIT_TIMEOUT: ${POSTGRES_LOCK_WAIT_TIMEOUT:-PT5S}
+      FLYWAY_ENABLED: ${FLYWAY_ENABLED:-true}
+      FLYWAY_CONNECT_RETRIES: ${FLYWAY_CONNECT_RETRIES:-10}
+      SPRING_CODEC_MAX_IN_MEMORY_SIZE: ${SPRING_CODEC_MAX_IN_MEMORY_SIZE:-16MB}
       KIRO_ALLOW_ANONYMOUS_PROXY: ${KIRO_ALLOW_ANONYMOUS_PROXY:-false}
       KIRO_ADMIN_SESSION_TTL: ${KIRO_ADMIN_SESSION_TTL:-12h}
       KIRO_RATE_LIMIT_PER_MINUTE: ${KIRO_RATE_LIMIT_PER_MINUTE:-120}
       KIRO_ACCOUNT_SELECTION_STRATEGY: ${KIRO_ACCOUNT_SELECTION_STRATEGY:-round_robin}
+      KIRO_REQUEST_TIMEOUT: ${KIRO_REQUEST_TIMEOUT:-90s}
+      KIRO_MAX_RETRIES: ${KIRO_MAX_RETRIES:-2}
+      KIRO_BASE_COOLDOWN: ${KIRO_BASE_COOLDOWN:-60s}
+      KIRO_QUOTA_RESET: ${KIRO_QUOTA_RESET:-1h}
+      KIRO_PROBABILISTIC_RETRY: ${KIRO_PROBABILISTIC_RETRY:-0.1}
+      KIRO_MAX_REQUEST_BODY_BYTES: ${KIRO_MAX_REQUEST_BODY_BYTES:-10485760}
+      KIRO_SESSION_AFFINITY_ENABLED: ${KIRO_SESSION_AFFINITY_ENABLED:-true}
+      KIRO_SESSION_AFFINITY_TTL: ${KIRO_SESSION_AFFINITY_TTL:-10m}
+      KIRO_SESSION_AFFINITY_MAXIMUM_SIZE: ${KIRO_SESSION_AFFINITY_MAXIMUM_SIZE:-100000}
       KIRO_WEBUI_URL: ${KIRO_WEBUI_URL:-}
       KIRO_ADMIN_TOKEN: ${KIRO_ADMIN_TOKEN:-}
+      KIRO_TOKEN_REFRESH_INTERVAL_MS: ${KIRO_TOKEN_REFRESH_INTERVAL_MS:-3600000}
+      KIRO_TOKEN_REFRESH_INITIAL_DELAY_MS: ${KIRO_TOKEN_REFRESH_INITIAL_DELAY_MS:-60000}
+      KIRO_PREFERRED_ENDPOINT: ${KIRO_PREFERRED_ENDPOINT:-codewhisperer}
+      STARRY_BACKUP_DIR: /app/backups
+      STARRY_MAX_IMPORT_BYTES: ${STARRY_MAX_IMPORT_BYTES:-268435456}
+      STARRY_DATA_TRANSFER_PROCESS_TIMEOUT: ${STARRY_DATA_TRANSFER_PROCESS_TIMEOUT:-30m}
+      STARRY_PAYMENT_RECONCILIATION_INTERVAL: ${STARRY_PAYMENT_RECONCILIATION_INTERVAL:-PT30S}
+      STARRY_PAYMENT_RECONCILIATION_INITIAL_DELAY: ${STARRY_PAYMENT_RECONCILIATION_INITIAL_DELAY:-PT30S}
+      STARRY_PAYMENT_PROVIDER_RECONCILIATION_INTERVAL: ${STARRY_PAYMENT_PROVIDER_RECONCILIATION_INTERVAL:-PT30S}
+      STARRY_PAYMENT_PROVIDER_RECONCILIATION_INITIAL_DELAY: ${STARRY_PAYMENT_PROVIDER_RECONCILIATION_INITIAL_DELAY:-PT45S}
+      STARRY_STATS_AGGREGATION_ENABLED: ${STARRY_STATS_AGGREGATION_ENABLED:-true}
+      STARRY_STATS_AGGREGATION_INTERVAL: ${STARRY_STATS_AGGREGATION_INTERVAL:-PT1M}
+      STARRY_STATS_AGGREGATION_INITIAL_DELAY: ${STARRY_STATS_AGGREGATION_INITIAL_DELAY:-PT30S}
+      STARRY_STATS_AGGREGATION_MAX_ADVANCE_HOURS: ${STARRY_STATS_AGGREGATION_MAX_ADVANCE_HOURS:-1}
+      STARRY_STATS_AGGREGATION_LOOKBACK_HOURS: ${STARRY_STATS_AGGREGATION_LOOKBACK_HOURS:-6}
+      STARRY_STATS_AGGREGATION_MAX_BATCHES_PER_RUN: ${STARRY_STATS_AGGREGATION_MAX_BATCHES_PER_RUN:-6}
+      STARRY_STATS_MAINTENANCE_CRON: "${STARRY_STATS_MAINTENANCE_CRON:-0 25 3 * * *}"
+      STARRY_STATS_PARTITION_MONTHS_AHEAD: ${STARRY_STATS_PARTITION_MONTHS_AHEAD:-12}
+      STARRY_STATS_RAW_RETENTION_MONTHS: ${STARRY_STATS_RAW_RETENTION_MONTHS:-4}
+      STARRY_STATS_RAW_DEFAULT_DELETE_BATCH_SIZE: ${STARRY_STATS_RAW_DEFAULT_DELETE_BATCH_SIZE:-10000}
+      STARRY_STATS_RAW_DEFAULT_DELETE_MAX_BATCHES: ${STARRY_STATS_RAW_DEFAULT_DELETE_MAX_BATCHES:-20}
+      STARRY_STATS_HOURLY_RETENTION_DAYS: ${STARRY_STATS_HOURLY_RETENTION_DAYS:-90}
+      STARRY_STATS_HOURLY_DELETE_BATCH_SIZE: ${STARRY_STATS_HOURLY_DELETE_BATCH_SIZE:-10000}
+      STARRY_STATS_HOURLY_DELETE_MAX_BATCHES: ${STARRY_STATS_HOURLY_DELETE_MAX_BATCHES:-20}
+      STARRY_STATS_USAGE_EVENT_RETENTION_DAYS: ${STARRY_STATS_USAGE_EVENT_RETENTION_DAYS:-400}
+      STARRY_STATS_USAGE_EVENT_DELETE_BATCH_SIZE: ${STARRY_STATS_USAGE_EVENT_DELETE_BATCH_SIZE:-10000}
+      STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES: ${STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES:-20}
       JAVA_OPTS: ${JAVA_OPTS:-}
     ports:
       - "${HOST_BIND_ADDR:-127.0.0.1}:${HOST_HTTP_PORT:-18080}:${SERVER_PORT:-8080}"
@@ -123,7 +223,8 @@ Starry API prebuilt deployment bundle.
 
 This package is generated by scripts/publish-artifact.sh and is intended for
 servers. It already contains the backend boot jar and the built WebUI assets.
-Do not run Gradle, npm, or Docker build on the server for this bundle.
+No Gradle or npm build runs on the server. Compose only builds the small runtime
+layer that adds the PostgreSQL 17 client tools required for backup and restore.
 
 Package layout:
 
@@ -131,6 +232,7 @@ Package layout:
 - app/starry-api.jar.sha256: jar checksum.
 - starry-api-webui.tar.gz: standalone WebUI dist archive for inspection or CDN use.
 - docker-compose.artifact.yml: compose file that runs the jar with a JRE image.
+- postgres-init/001-starry-api-roles.sh: first-start least-privilege role bootstrap.
 - build-info.json: source commit and artifact metadata.
 - sha256sums.txt: checksums for files inside the bundle.
 EOF
@@ -166,16 +268,31 @@ use_docker_build() {
 }
 
 source_tree_dirty() {
-  git status --porcelain --untracked-files=no -- . ":(exclude)${ARTIFACT_DIR}" | grep -q .
+  git status --porcelain --untracked-files=normal -- . ":(exclude)${ARTIFACT_DIR}" | grep -q .
+}
+
+select_boot_jar() {
+  local candidate selected count
+  selected=""
+  count=0
+  while IFS= read -r candidate; do
+    selected="$candidate"
+    count=$((count + 1))
+  done < <(find service/build/libs -maxdepth 1 -type f -name 'service-*.jar' ! -name '*-plain.jar' | sort)
+
+  if [[ "$count" -ne 1 ]]; then
+    fail "Expected exactly one boot jar in service/build/libs, found ${count}. Run a clean build before publishing."
+  fi
+  printf '%s\n' "$selected"
 }
 
 build_with_gradle() {
   if [[ "$RUN_TESTS" == "true" ]]; then
-    log "Running tests and building boot jar..."
-    ./gradlew test :service:bootJar
+    log "Running a clean test and boot-jar build..."
+    ./gradlew clean test :service:bootJar
   else
-    log "Building boot jar..."
-    ./gradlew :service:bootJar
+    log "Running a clean boot-jar build..."
+    ./gradlew clean :service:bootJar
   fi
 }
 
@@ -219,7 +336,7 @@ main() {
   log "Do not run it on the server. Servers should use scripts/install-server.sh."
 
   local version branch commit built_at java_version dirty jar_path artifact_path checksum size_bytes checksum_path info_path
-  local webui_dist_path webui_checksum webui_size compose_path compose_checksum checksums_path bundle_path bundle_checksum bundle_size tmp_dir stage_dir
+  local webui_dist_path webui_checksum webui_size compose_path compose_checksum init_path init_checksum checksums_path bundle_path bundle_checksum bundle_size tmp_dir stage_dir
   version="${VERSION:-$(project_version)}"
   version="${version:-0.1.0-SNAPSHOT}"
   branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'unknown')"
@@ -246,10 +363,9 @@ main() {
     build_with_gradle
   fi
 
-  jar_path="$(find service/build/libs -maxdepth 1 -type f -name 'service-*.jar' ! -name '*-plain.jar' | sort | tail -n 1)"
-  [[ -n "$jar_path" && -f "$jar_path" ]] || fail "Boot jar was not found in service/build/libs."
+  jar_path="$(select_boot_jar)"
 
-  mkdir -p "$ARTIFACT_DIR"
+  mkdir -p "$ARTIFACT_DIR/postgres-init"
   artifact_path="${ARTIFACT_DIR}/${ARTIFACT_NAME}"
   checksum_path="${artifact_path}.sha256"
   info_path="${ARTIFACT_DIR}/build-info.json"
@@ -273,6 +389,10 @@ main() {
   compose_path="${ARTIFACT_DIR}/${COMPOSE_NAME}"
   write_artifact_compose "$compose_path"
   compose_checksum="$(sha256_file "$compose_path")"
+  init_path="${ARTIFACT_DIR}/postgres-init/001-starry-api-roles.sh"
+  cp docker/postgresql/init/001-starry-api-roles.sh "$init_path"
+  chmod 0755 "$init_path"
+  init_checksum="$(sha256_file "$init_path")"
 
   cat > "$info_path" <<EOF
 {
@@ -300,18 +420,20 @@ EOF
     printf '%s  %s\n' "$checksum" "$ARTIFACT_NAME"
     printf '%s  %s\n' "$webui_checksum" "$WEBUI_DIST_NAME"
     printf '%s  %s\n' "$compose_checksum" "$COMPOSE_NAME"
+    printf '%s  %s\n' "$init_checksum" "postgres-init/001-starry-api-roles.sh"
     printf '%s  %s\n' "$(sha256_file "$info_path")" "build-info.json"
   } > "$checksums_path"
 
   bundle_path="${ARTIFACT_DIR}/${BUNDLE_NAME}"
   tmp_dir="$(mktemp -d)"
   stage_dir="${tmp_dir}/starry-api"
-  mkdir -p "$stage_dir/app"
+  mkdir -p "$stage_dir/app" "$stage_dir/postgres-init"
   cp "$artifact_path" "$stage_dir/app/starry-api.jar"
   cp "$checksum_path" "$stage_dir/app/starry-api.jar.sha256"
   cp "$webui_dist_path" "$stage_dir/${WEBUI_DIST_NAME}"
   cp "${webui_dist_path}.sha256" "$stage_dir/${WEBUI_DIST_NAME}.sha256"
   cp "$compose_path" "$stage_dir/docker-compose.artifact.yml"
+  cp "$init_path" "$stage_dir/postgres-init/001-starry-api-roles.sh"
   cp "$info_path" "$stage_dir/build-info.json"
   {
     printf '%s  %s\n' "$(sha256_file "$stage_dir/app/starry-api.jar")" "app/starry-api.jar"
@@ -319,6 +441,7 @@ EOF
     printf '%s  %s\n' "$(sha256_file "$stage_dir/${WEBUI_DIST_NAME}")" "$WEBUI_DIST_NAME"
     printf '%s  %s\n' "$(sha256_file "$stage_dir/${WEBUI_DIST_NAME}.sha256")" "${WEBUI_DIST_NAME}.sha256"
     printf '%s  %s\n' "$(sha256_file "$stage_dir/docker-compose.artifact.yml")" "docker-compose.artifact.yml"
+    printf '%s  %s\n' "$(sha256_file "$stage_dir/postgres-init/001-starry-api-roles.sh")" "postgres-init/001-starry-api-roles.sh"
     printf '%s  %s\n' "$(sha256_file "$stage_dir/build-info.json")" "build-info.json"
   } > "$stage_dir/sha256sums.txt"
   write_bundle_readme "$stage_dir/README.txt"

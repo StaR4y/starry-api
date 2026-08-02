@@ -21,13 +21,38 @@ fi
 if [[ ! -f .env ]]; then
   cp .env.example .env
   echo ".env was created from .env.example."
-  echo "Edit .env and replace MYSQL_ROOT_PASSWORD and MYSQL_PASSWORD, then run this script again."
+  echo "Edit .env and replace all PostgreSQL passwords, then run this script again."
   exit 1
 fi
 
-if grep -Eq '^(MYSQL_ROOT_PASSWORD|MYSQL_PASSWORD)=change-me-' .env; then
+env_value() {
+  local name="$1"
+  grep -E "^${name}=" .env | tail -n 1 | cut -d= -f2- || true
+}
+
+POSTGRES_BOOTSTRAP_PASSWORD_VALUE="$(env_value POSTGRES_BOOTSTRAP_PASSWORD)"
+POSTGRES_MIGRATION_PASSWORD_VALUE="$(env_value POSTGRES_MIGRATION_PASSWORD)"
+POSTGRES_PASSWORD_VALUE="$(env_value POSTGRES_PASSWORD)"
+
+if [[ -z "$POSTGRES_BOOTSTRAP_PASSWORD_VALUE" \
+  || -z "$POSTGRES_MIGRATION_PASSWORD_VALUE" \
+  || -z "$POSTGRES_PASSWORD_VALUE" ]]; then
+  echo "Refusing to deploy with missing or empty PostgreSQL passwords in .env." >&2
+  exit 1
+fi
+
+if [[ "$POSTGRES_BOOTSTRAP_PASSWORD_VALUE" == change-me-* \
+  || "$POSTGRES_MIGRATION_PASSWORD_VALUE" == change-me-* \
+  || "$POSTGRES_PASSWORD_VALUE" == change-me-* ]]; then
   echo "Refusing to deploy with default database passwords in .env." >&2
-  echo "Edit .env and set strong MYSQL_ROOT_PASSWORD and MYSQL_PASSWORD values." >&2
+  echo "Edit .env and set strong, distinct bootstrap, migration, and application passwords." >&2
+  exit 1
+fi
+
+if [[ "$POSTGRES_BOOTSTRAP_PASSWORD_VALUE" == "$POSTGRES_MIGRATION_PASSWORD_VALUE" \
+  || "$POSTGRES_BOOTSTRAP_PASSWORD_VALUE" == "$POSTGRES_PASSWORD_VALUE" \
+  || "$POSTGRES_MIGRATION_PASSWORD_VALUE" == "$POSTGRES_PASSWORD_VALUE" ]]; then
+  echo "Refusing to deploy with reused PostgreSQL passwords in .env." >&2
   exit 1
 fi
 
@@ -46,7 +71,7 @@ if [[ -z "$HOST_IP_VALUE" || "$HOST_IP_VALUE" == "SERVER_IP" ]] && command -v ho
 fi
 HOST_IP_VALUE="${HOST_IP_VALUE:-SERVER_IP}"
 
-"${COMPOSE[@]}" pull mysql
+"${COMPOSE[@]}" pull postgres
 "${COMPOSE[@]}" up -d --build
 "${COMPOSE[@]}" ps
 

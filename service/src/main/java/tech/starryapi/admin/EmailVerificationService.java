@@ -10,14 +10,15 @@ import java.time.DateTimeException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
-import java.util.Map;
 import java.util.Properties;
-import java.util.concurrent.ConcurrentHashMap;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.mail.javamail.JavaMailSenderImpl;
 import org.springframework.mail.javamail.MimeMessageHelper;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
@@ -27,8 +28,10 @@ import tech.starryapi.common.Hashing;
 @Service
 public class EmailVerificationService {
 
+    private static final Logger log = LoggerFactory.getLogger(EmailVerificationService.class);
     private static final Duration LINK_TTL = Duration.ofMinutes(10);
     private static final Duration SEND_COOLDOWN = Duration.ofSeconds(60);
+    private static final int CLEANUP_BATCH_SIZE = 10_000;
     private static final String SIGNING_SECRET_SETTING_KEY = "registration_email_link_signing_secret";
     private static final String SIGNED_TOKEN_VERSION = "v2";
     private static final Base64.Encoder BASE64_URL_ENCODER = Base64.getUrlEncoder().withoutPadding();
@@ -37,17 +40,18 @@ public class EmailVerificationService {
     private final RegistrationSettingsService registrationSettingsService;
     private final TurnstileVerificationService turnstileVerificationService;
     private final SystemSettingRepository systemSettingRepository;
-    private final Map<String, VerificationToken> tokensByEmail = new ConcurrentHashMap<>();
-    private final Map<String, VerificationToken> tokensByHash = new ConcurrentHashMap<>();
+    private final RegistrationEmailTokenRepository tokenRepository;
 
     public EmailVerificationService(
         RegistrationSettingsService registrationSettingsService,
         TurnstileVerificationService turnstileVerificationService,
-        SystemSettingRepository systemSettingRepository
+        SystemSettingRepository systemSettingRepository,
+        RegistrationEmailTokenRepository tokenRepository
     ) {
         this.registrationSettingsService = registrationSettingsService;
         this.turnstileVerificationService = turnstileVerificationService;
         this.systemSettingRepository = systemSettingRepository;
+        this.tokenRepository = tokenRepository;
     }
 
     public Mono<AdminDtos.SendVerifyCodeResponse> sendRegistrationLink(
@@ -72,44 +76,30 @@ public class EmailVerificationService {
                         "Email verification is disabled"
                     ));
                 }
-                VerificationToken existing = tokensByEmail.get(normalizedEmail);
                 Instant now = Instant.now();
-                if (existing != null && existing.nextSendAt().isAfter(now)) {
-                    long seconds = Math.max(1, Duration.between(now, existing.nextSendAt()).toSeconds());
-                    return Mono.error(new ApiException(
-                        HttpStatus.TOO_MANY_REQUESTS,
-                        "VERIFY_CODE_COOLDOWN",
-                        "Please wait " + seconds + " seconds before requesting another verification code"
-                    ));
-                }
                 Instant expiresAt = now.plus(LINK_TTL);
-                return registrationToken(normalizedEmail, expiresAt)
-                    .flatMap(rawToken -> registrationSettingsService.smtpConfig().flatMap(config -> {
-                        if (!config.configured()) {
-                            return Mono.error(new ApiException(
-                                HttpStatus.SERVICE_UNAVAILABLE,
-                                "SMTP_NOT_CONFIGURED",
-                                "SMTP settings are not configured"
-                            ));
-                        }
+                Instant nextSendAt = now.plus(SEND_COOLDOWN);
+                return registrationSettingsService.smtpConfig().flatMap(config -> {
+                    if (!config.configured()) {
+                        return Mono.error(new ApiException(
+                            HttpStatus.SERVICE_UNAVAILABLE,
+                            "SMTP_NOT_CONFIGURED",
+                            "SMTP settings are not configured"
+                        ));
+                    }
+                    return registrationToken(normalizedEmail, expiresAt).flatMap(rawToken -> {
                         String tokenHash = Hashing.sha256(rawToken);
-                        VerificationToken pending = new VerificationToken(
-                            tokenHash,
-                            normalizedEmail,
-                            expiresAt,
-                            now.plus(SEND_COOLDOWN)
-                        );
                         String link = registrationLink(registrationBaseUrl, rawToken, normalizedEmail, affiliateCode);
-                        return sendEmail(config, normalizedEmail, link)
-                            .doOnSuccess(ignored -> {
-                                VerificationToken previous = tokensByEmail.put(normalizedEmail, pending);
-                                if (previous != null) {
-                                    tokensByHash.remove(previous.tokenHash());
-                                }
-                                tokensByHash.put(tokenHash, pending);
-                            })
-                            .thenReturn(new AdminDtos.SendVerifyCodeResponse("Registration link sent", (int) SEND_COOLDOWN.toSeconds()));
-                    }));
+                        return tokenRepository.reserve(normalizedEmail, tokenHash, expiresAt, nextSendAt)
+                            .switchIfEmpty(cooldown(normalizedEmail))
+                            .flatMap(reservation -> sendEmail(config, normalizedEmail, link)
+                                .onErrorResume(error -> releaseReservation(reservation, error))
+                                .thenReturn(new AdminDtos.SendVerifyCodeResponse(
+                                    "Registration link sent",
+                                    (int) SEND_COOLDOWN.toSeconds()
+                                )));
+                    });
+                });
             });
     }
 
@@ -118,38 +108,33 @@ public class EmailVerificationService {
     }
 
     public Mono<Void> verifyRegistrationToken(String email, String token) {
+        return verifiedRegistrationTokenHash(email, token)
+            .flatMap(tokenHash -> consumeRegistrationToken(email, tokenHash));
+    }
+
+    Mono<String> verifiedRegistrationTokenHash(String email, String token) {
         String normalizedEmail = RegistrationEmailPolicy.normalizeEmail(email);
-        return registrationSettingsService.emailVerifyEnabled()
-            .flatMap(enabled -> {
-                if (!enabled) {
-                    return Mono.empty();
-                }
-                if (token == null || token.isBlank()) {
-                    return Mono.error(new ApiException(
-                        HttpStatus.BAD_REQUEST,
-                        "EMAIL_VERIFY_REQUIRED",
-                        "Email verification link token is required"
-                    ));
-                }
-                String normalizedToken = token.trim();
-                String tokenHash = Hashing.sha256(normalizedToken);
-                VerificationToken stored = tokensByHash.get(tokenHash);
-                if (stored != null) {
-                    if (stored.expiresAt().isBefore(Instant.now())) {
-                        removeToken(stored);
-                        return invalidVerificationLink();
-                    }
-                    if (normalizedEmail == null || !stored.email().equals(normalizedEmail)) {
-                        return invalidVerificationLink();
-                    }
-                    removeToken(stored);
-                    return Mono.empty();
-                }
-                if (normalizedEmail == null) {
-                    return invalidVerificationLink();
-                }
-                return verifySignedRegistrationToken(normalizedEmail, normalizedToken);
-            });
+        if (token == null || token.isBlank()) {
+            return Mono.error(new ApiException(
+                HttpStatus.BAD_REQUEST,
+                "EMAIL_VERIFY_REQUIRED",
+                "Email verification link token is required"
+            ));
+        }
+        String normalizedToken = token.trim();
+        if (normalizedEmail == null) {
+            return invalidVerificationLink();
+        }
+        return verifySignedRegistrationToken(normalizedEmail, normalizedToken);
+    }
+
+    Mono<Void> consumeRegistrationToken(String email, String tokenHash) {
+        String normalizedEmail = RegistrationEmailPolicy.normalizeEmail(email);
+        if (normalizedEmail == null || tokenHash == null || tokenHash.isBlank()) {
+            return invalidVerificationLink();
+        }
+        return tokenRepository.consume(normalizedEmail, tokenHash)
+            .flatMap(consumed -> Boolean.TRUE.equals(consumed) ? Mono.empty() : invalidVerificationLink());
     }
 
     public Mono<Void> verifyRegistrationCode(String email, String code) {
@@ -265,9 +250,10 @@ public class EmailVerificationService {
         return first == 198 && (second == 18 || second == 19);
     }
 
-    private void removeToken(VerificationToken token) {
-        tokensByHash.remove(token.tokenHash());
-        tokensByEmail.remove(token.email(), token);
+    @Scheduled(fixedDelay = 60_000, initialDelay = 60_000)
+    public void cleanupExpiredTokens() {
+        tokenRepository.pruneExpired(CLEANUP_BATCH_SIZE)
+            .subscribe(null, error -> log.warn("Failed to clean up expired registration email tokens", error));
     }
 
     Mono<String> registrationToken(String normalizedEmail, Instant expiresAt) {
@@ -275,14 +261,14 @@ public class EmailVerificationService {
             .map(secret -> signedRegistrationToken(normalizedEmail, expiresAt, Hashing.randomToken(16), secret));
     }
 
-    private Mono<Void> verifySignedRegistrationToken(String normalizedEmail, String token) {
+    private Mono<String> verifySignedRegistrationToken(String normalizedEmail, String token) {
         SignedRegistrationToken parsed = parseSignedRegistrationToken(token);
         if (parsed == null || parsed.expiresAt().isBefore(Instant.now()) || !parsed.email().equals(normalizedEmail)) {
             return invalidVerificationLink();
         }
         return signingSecret()
             .flatMap(secret -> constantEquals(signature(parsed.signingInput(), secret), parsed.signature())
-                ? Mono.empty()
+                ? Mono.just(Hashing.sha256(token))
                 : invalidVerificationLink());
     }
 
@@ -318,8 +304,49 @@ public class EmailVerificationService {
             .filter(value -> value != null && !value.isBlank())
             .switchIfEmpty(Mono.defer(() -> {
                 String secret = Hashing.randomToken(32);
-                return systemSettingRepository.upsertSetting(SIGNING_SECRET_SETTING_KEY, secret).thenReturn(secret);
+                return systemSettingRepository.getOrCreateSetting(SIGNING_SECRET_SETTING_KEY, secret);
             }));
+    }
+
+    private <T> Mono<T> cooldown(String email) {
+        return tokenRepository.cooldownSeconds(email)
+            .defaultIfEmpty(SEND_COOLDOWN.toSeconds())
+            .flatMap(seconds -> Mono.error(new ApiException(
+                HttpStatus.TOO_MANY_REQUESTS,
+                "VERIFY_CODE_COOLDOWN",
+                "Please wait " + seconds + " seconds before requesting another verification code"
+            )));
+    }
+
+    Mono<Void> releaseReservation(
+        RegistrationEmailTokenRepository.Reservation reservation,
+        Throwable sendFailure
+    ) {
+        Mono<Integer> compensation = reservation.replacesPreviousToken()
+            ? restorePreviousTokenOrRelease(reservation)
+            : tokenRepository.release(reservation.email(), reservation.reservedTokenHash());
+        return compensation
+            .onErrorResume(releaseFailure -> {
+                sendFailure.addSuppressed(releaseFailure);
+                return Mono.empty();
+            })
+            .then(Mono.error(sendFailure));
+    }
+
+    private Mono<Integer> restorePreviousTokenOrRelease(
+        RegistrationEmailTokenRepository.Reservation reservation
+    ) {
+        return tokenRepository.restoreIfUsable(
+                reservation.email(),
+                reservation.reservedTokenHash(),
+                reservation.previousTokenHash(),
+                reservation.previousExpiresAt(),
+                reservation.previousNextSendAt()
+            )
+            .defaultIfEmpty(0)
+            .flatMap(restored -> restored > 0
+                ? Mono.just(restored)
+                : tokenRepository.release(reservation.email(), reservation.reservedTokenHash()));
     }
 
     private String signature(String signingInput, String secret) {
@@ -343,7 +370,7 @@ public class EmailVerificationService {
         return BASE64_URL_ENCODER.encodeToString(value.getBytes(StandardCharsets.UTF_8));
     }
 
-    private Mono<Void> invalidVerificationLink() {
+    private <T> Mono<T> invalidVerificationLink() {
         return Mono.error(new ApiException(
             HttpStatus.BAD_REQUEST,
             "INVALID_VERIFY_CODE",
@@ -371,14 +398,6 @@ public class EmailVerificationService {
         NONE,
         SSL,
         STARTTLS
-    }
-
-    private record VerificationToken(
-        String tokenHash,
-        String email,
-        Instant expiresAt,
-        Instant nextSendAt
-    ) {
     }
 
     private record SignedRegistrationToken(

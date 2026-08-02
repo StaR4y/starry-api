@@ -123,6 +123,18 @@ public class AccountPoolPolicyService {
         }
     }
 
+    public void invalidateAllCaches() {
+        cachedSettings = settingsService.defaultPoolPolicySettings();
+        primaryDisabled = false;
+        lastEvaluatedAt = null;
+        lastRetestAt = null;
+        lastRetestFailureRatePercent = 0.0;
+        lastRetestRecoveryRatePercent = 0.0;
+        primaryRequests = 0;
+        primaryFailures = 0;
+        primaryFailureRatePercent = 0.0;
+    }
+
     private PoolEvaluation evaluate(AccountDtos.PoolPolicySettings settings, PoolMetrics metrics) {
         lastEvaluatedAt = Instant.now();
         primaryRequests = metrics.requests();
@@ -155,7 +167,7 @@ public class AccountPoolPolicyService {
         String sql = """
             SELECT
                 COUNT(*) AS requests,
-                COALESCE(SUM(CASE WHEN l.success THEN 0 ELSE 1 END), 0) AS failures
+                COUNT(*) FILTER (WHERE NOT l.success) AS failures
             FROM request_logs l
             INNER JOIN proxy_accounts a ON a.account_id = l.account_id
             WHERE l.created_at >= :since
@@ -173,23 +185,27 @@ public class AccountPoolPolicyService {
         AccountDtos.PoolPolicySettings settings
     ) {
         String sql = """
-            SELECT
-                a.account_id,
-                MAX(a.email) AS email,
-                MAX(a.provider) AS provider,
-                MAX(a.auth_method) AS auth_method,
-                MAX(COALESCE(NULLIF(a.pool_tier, ''), 'primary')) AS pool_tier,
-                COUNT(l.id) AS requests,
-                COALESCE(SUM(CASE WHEN l.success THEN 0 ELSE 1 END), 0) AS failures,
-                MAX(a.error_count) AS error_count,
-                MAX(a.pool_weight) AS pool_weight,
-                MAX(CASE WHEN l.success THEN NULL ELSE l.created_at END) AS last_failure_at
-            FROM proxy_accounts a
-            LEFT JOIN request_logs l ON l.account_id = a.account_id AND l.created_at >= :since
-            GROUP BY a.account_id
-            HAVING requests > 0 OR COALESCE(MAX(a.error_count), 0) > 0
+            WITH account_metrics AS (
+                SELECT
+                    a.account_id,
+                    MAX(a.email) AS email,
+                    MAX(a.provider) AS provider,
+                    MAX(a.auth_method) AS auth_method,
+                    MAX(COALESCE(NULLIF(a.pool_tier, ''), 'primary')) AS pool_tier,
+                    COUNT(l.id) AS requests,
+                    COUNT(l.id) FILTER (WHERE NOT l.success) AS failures,
+                    COALESCE(MAX(a.error_count), 0) AS error_count,
+                    MAX(a.pool_weight) AS pool_weight,
+                    MAX(l.created_at) FILTER (WHERE NOT l.success) AS last_failure_at
+                FROM proxy_accounts a
+                LEFT JOIN request_logs l ON l.account_id = a.account_id AND l.created_at >= :since
+                GROUP BY a.account_id
+            )
+            SELECT *
+            FROM account_metrics
+            WHERE requests > 0 OR error_count > 0
             ORDER BY
-                CASE WHEN requests = 0 THEN 0 ELSE failures / requests END DESC,
+                failures::numeric / NULLIF(requests, 0) DESC NULLS LAST,
                 failures DESC,
                 requests DESC
             LIMIT 20

@@ -15,45 +15,49 @@ The current runtime supports OpenAI-compatible, Anthropic-compatible, and Gemini
 - Platform-scoped frontend modules for provider registry, model grouping, and client setup scripts
 - Admin APIs for upstream accounts, API keys, model mappings, request logs, and local administrators
 - Account management supports Kiro accounts plus OpenAI API key and Codex token import/testing/routing, automatic health-test suspension after consecutive failures, and total/5h/7day quota progress.
-- WebFlux, R2DBC MySQL, Flyway migrations, API key accounting, rate limits, account failover, and session affinity
+- WebFlux, R2DBC PostgreSQL 17, Flyway migrations, API key accounting, rate limits, account failover, and session affinity
 - Vue/Vite management console embedded into the Spring Boot jar
 - OpenAPI UI at `/docs`
 
 ## Requirements
 
 - Java 25
-- MySQL reachable by JDBC and R2DBC
+- PostgreSQL 17 reachable by JDBC and R2DBC
 - Node.js/npm for WebUI builds
 - Gradle wrapper included in this repository
 
 ## Quick Start
 
-Create the database:
+For a fresh local PostgreSQL cluster, create the database and the same least-privilege roles used by Compose. Set `POSTGRES_USER` to a local PostgreSQL superuser; existing authentication can be supplied through the normal `PGHOST`, `PGPORT`, and `PGPASSWORD` variables:
 
-```sql
-CREATE DATABASE IF NOT EXISTS kiro_proxy
-  CHARACTER SET utf8mb4
-  COLLATE utf8mb4_unicode_ci;
+```bash
+export POSTGRES_USER=postgres
+export POSTGRES_DB=starry_api
+export STARRY_POSTGRES_MIGRATION_PASSWORD='<strong-local-migration-password>'
+export STARRY_POSTGRES_APP_PASSWORD='<strong-local-application-password>'
+
+createdb --username "$POSTGRES_USER" --encoding=UTF8 "$POSTGRES_DB"
+./docker/postgresql/init/001-starry-api-roles.sh
 ```
-
-`kiro_proxy` remains the default database name for migration compatibility. You can override it with `MYSQL_DATABASE`.
 
 Run the service:
 
 ```bash
-export MYSQL_HOST=127.0.0.1
-export MYSQL_PORT=3306
-export MYSQL_DATABASE=kiro_proxy
-export MYSQL_USERNAME=root
-export MYSQL_PASSWORD=
+export POSTGRES_HOST=localhost
+export POSTGRES_PORT=5432
+export POSTGRES_DATABASE=starry_api
+export POSTGRES_USERNAME=starry_api
+export POSTGRES_PASSWORD="$STARRY_POSTGRES_APP_PASSWORD"
+export POSTGRES_MIGRATION_USERNAME=starry_api_migration
+export POSTGRES_MIGRATION_PASSWORD="$STARRY_POSTGRES_MIGRATION_PASSWORD"
 
-./gradlew :service:bootRun
+./scripts/start-proxy.sh
 ```
 
-Or use the startup helper:
+For a containerized local deployment, copy `.env.example`, replace all three `change-me-...` PostgreSQL passwords with distinct strong values, and run:
 
 ```bash
-./scripts/start-proxy.sh
+./scripts/deploy-1panel.sh
 ```
 
 Check the service:

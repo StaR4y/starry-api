@@ -105,18 +105,18 @@ If you already have a local checkout on the server, you can run `sudo bash scrip
 The deploy script will:
 
 - install `curl`, `openssl`, Docker, and Docker Compose when missing
-- create `/opt/starry-api/.env` with generated MySQL credentials when missing
+- create `/opt/starry-api/.env` with generated PostgreSQL credentials when missing
 - download `artifacts/starry-api-bundle.tar.gz` and its checksum
 - verify and extract the bundle under `/opt/starry-api`
 - fall back to `artifacts/starry-api.jar` only when the bundle is not available
-- start MySQL and an `eclipse-temurin:25-jre` service container
+- start PostgreSQL 17 and the service runtime with PostgreSQL 17 client tools
 - wait for `/actuator/health`
 
 It does not clone the repo and does not run Gradle or npm on the server.
 
 ## Update Existing Server
 
-Rerun the same command. The script downloads the current bundle, keeps the previous jar as `app/starry-api.jar.previous`, and restarts the service container.
+Rerun the same command. The script downloads the current bundle and atomically preserves the previous jar, Compose file, and PostgreSQL bootstrap script. It recreates the service with the new deployment unit; a startup or health failure restores all three previous files and recreates the prior stack before reporting failure.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh | sudo bash
@@ -139,7 +139,7 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
 | `HOST_HTTP_PORT` | `18080` | Host port exposed by Compose. |
 | `SERVER_PORT` | `8080` | Internal Spring Boot port. |
 | `PUBLIC_BASE_URL` | empty | Public HTTPS URL used in startup logs. |
-| `FORCE_ENV` | `false` | Regenerate `.env` even if it already exists. |
+| `FORCE_ENV` | `false` | Regenerate `.env` only before PostgreSQL has initialized; initialized clusters require an in-database role-password rotation and a manual `.env` update. |
 | `INSTALL_DOCKER` | `true` | Install Docker when missing. |
 | `GITHUB_TOKEN` | empty | Optional token for private raw artifact downloads. |
 | `GITHUB_TOKEN_FILE` | `${INSTALL_DIR}/.github-token` | Optional local token file used when `GITHUB_TOKEN` is empty. |
@@ -160,4 +160,4 @@ docker compose -f docker-compose.artifact.yml restart service
 docker compose -f docker-compose.artifact.yml down
 ```
 
-Do not delete `./data/mysql` unless this is a disposable deployment.
+The generated environment uses database `starry_api`, role `starry_api`, and schema `starry_api`. It also installs a configurable PostgreSQL OLTP baseline for connections, memory, WAL/checkpoints, planner statistics, and autovacuum; the defaults assume at least 2 GiB available memory. PostgreSQL files persist under `./data/postgresql`; do not delete that directory unless this is a disposable deployment.

@@ -11,6 +11,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -41,6 +42,7 @@ public class KiroUpstreamClient {
     private final AwsEventStreamParser parser;
     private final AccountTokenRefreshService tokenRefreshService;
     private final Cache<String, List<KiroModel>> codeWhispererModelCache;
+    private final AtomicLong modelCacheGeneration = new AtomicLong();
 
     public KiroUpstreamClient(
         WebClient kiroWebClient,
@@ -65,6 +67,11 @@ public class KiroUpstreamClient {
                 .maxBackoff(Duration.ofSeconds(2))
                 .filter(error -> error instanceof UpstreamException upstream && upstream.isRecoverable())
                 .onRetryExhaustedThrow((spec, signal) -> signal.failure()));
+    }
+
+    public void invalidateAllCaches() {
+        modelCacheGeneration.incrementAndGet();
+        codeWhispererModelCache.invalidateAll();
     }
 
     private Mono<PlatformCompletionResult> callFirstEndpoint(ProxyAccountEntity account, ObjectNode payload, String model) {
@@ -256,10 +263,11 @@ public class KiroUpstreamClient {
 
         String cacheKey = modelCacheKey(account, profileArn);
         List<KiroModel> cached = codeWhispererModelCache.getIfPresent(cacheKey);
+        long generation = modelCacheGeneration.get();
         Mono<List<KiroModel>> models = cached == null
             ? fetchCodeWhispererModels(account, profileArn)
                 .doOnNext(list -> {
-                    if (!list.isEmpty()) {
+                    if (!list.isEmpty() && modelCacheGeneration.get() == generation) {
                         codeWhispererModelCache.put(cacheKey, list);
                     }
                 })

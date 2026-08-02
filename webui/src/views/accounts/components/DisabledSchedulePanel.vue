@@ -1,6 +1,7 @@
 <script setup lang="ts">
   import { ref, reactive, onMounted, computed } from 'vue';
   import { ElMessage, ElCollapseTransition } from 'element-plus';
+  import AppIcon from './AppIcon.vue';
   import { accountsApi } from '@/api';
   import { ApiError } from '@/utils/http';
   import type { DisabledAccountScheduledTestSettings, TestAccountsResult } from '@/types/api';
@@ -168,19 +169,7 @@
     <div class="card-header" @click="toggleExpand">
       <div class="header-left">
         <div class="header-icon-container">
-          <svg
-            class="header-icon"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-          >
-            <path
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"
-            />
-          </svg>
+          <AppIcon name="clipboard-check" class="header-icon" />
         </div>
         <div class="title-section">
           <div class="title-row">
@@ -201,16 +190,7 @@
           <el-switch v-model="form.enabled" inline-prompt @change="handleEnabledChange" />
         </div>
         <div class="expand-toggle-btn" @click="toggleExpand">
-          <svg
-            class="chevron-icon"
-            :class="{ rotated: isExpanded }"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2.5"
-          >
-            <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
-          </svg>
+          <AppIcon name="chevron-down" class="chevron-icon" :class="{ rotated: isExpanded }" />
         </div>
       </div>
     </div>
@@ -224,16 +204,7 @@
             <!-- Group 1: Time & Schedule -->
             <div class="form-group-section">
               <div class="group-header">
-                <svg
-                  class="group-icon"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                >
-                  <circle cx="12" cy="12" r="10" />
-                  <polyline points="12 6 12 12 16 14" />
-                </svg>
+                <AppIcon name="clock" class="group-icon" />
                 <span>调度触发</span>
               </div>
               <div class="group-content">
@@ -244,7 +215,7 @@
                       { label: '固定间隔', value: 'interval' },
                       { label: 'Cron', value: 'cron' },
                     ]"
-                    style="width: 100%"
+                    class="w-full"
                   />
                 </el-form-item>
 
@@ -255,7 +226,7 @@
                       :min="1"
                       :max="10080"
                       controls-position="right"
-                      style="width: 100%"
+                      class="w-full"
                     />
                     <span class="unit-label">分钟</span>
                   </div>
@@ -274,17 +245,7 @@
             <!-- Group 2: Concurrency & Restrictions -->
             <div class="form-group-section">
               <div class="group-header">
-                <svg
-                  class="group-icon"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                >
-                  <rect x="2" y="3" width="20" height="14" rx="2" ry="2" />
-                  <line x1="8" y1="21" x2="16" y2="21" />
-                  <line x1="12" y1="17" x2="12" y2="21" />
-                </svg>
+                <AppIcon name="monitor" class="group-icon" />
                 <span>运行限制</span>
               </div>
               <div class="group-content">
@@ -299,7 +260,7 @@
                       :min="1"
                       :max="16"
                       controls-position="right"
-                      style="width: 100%"
+                      class="w-full"
                     />
                   </el-form-item>
                   <el-form-item label="定时单批额度">
@@ -308,7 +269,7 @@
                       :min="1"
                       :max="1000"
                       controls-position="right"
-                      style="width: 100%"
+                      class="w-full"
                     />
                   </el-form-item>
                 </div>
@@ -320,7 +281,7 @@
                       :min="0"
                       :max="1440"
                       controls-position="right"
-                      style="width: 100%"
+                      class="w-full"
                     />
                     <span class="unit-label">分钟</span>
                   </div>
@@ -344,7 +305,7 @@
                       :min="0"
                       :max="43200"
                       controls-position="right"
-                      style="width: 100%"
+                      class="w-full"
                     />
                     <span class="unit-label">分钟</span>
                   </div>
@@ -355,16 +316,7 @@
             <!-- Group 3: Scope & Recovery -->
             <div class="form-group-section">
               <div class="group-header">
-                <svg
-                  class="group-icon"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2"
-                >
-                  <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-                  <polyline points="22 4 12 14.01 9 11.01" />
-                </svg>
+                <AppIcon name="check-circle" class="group-icon" />
                 <span>范围与策略</span>
               </div>
               <div class="group-content checks-container">
@@ -429,7 +381,7 @@
                 allow-create
                 default-first-option
                 placeholder="留空表示全部平台"
-                style="width: 100%"
+                class="w-full"
               >
                 <el-option
                   v-for="item in providerOptions"
@@ -453,16 +405,7 @@
           <!-- Action Buttons -->
           <div class="form-actions">
             <el-button :loading="running" class="action-btn run-btn" @click="runNow">
-              <svg
-                v-if="!running"
-                class="btn-icon"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2.5"
-              >
-                <polygon points="5 3 19 12 5 21 5 3" />
-              </svg>
+              <AppIcon v-if="!running" name="play" class="btn-icon" />
               立即测试全部账号
             </el-button>
 
@@ -472,18 +415,7 @@
               class="action-btn save-btn"
               @click="saveSettings(true)"
             >
-              <svg
-                v-if="!saving"
-                class="btn-icon"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2.5"
-              >
-                <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
-                <polyline points="17 21 17 13 7 13 7 21" />
-                <polyline points="7 3 7 8 15 8" />
-              </svg>
+              <AppIcon v-if="!saving" name="save" class="btn-icon" />
               保存策略配置
             </el-button>
           </div>
@@ -494,9 +426,13 @@
 </template>
 
 <style scoped lang="scss">
+  .w-full {
+    width: 100%;
+  }
+
   .disabled-schedule-card {
     transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
-    margin-bottom: 20px;
+    margin-bottom: 24px;
     overflow: hidden;
     position: relative;
     border: 1px solid rgba(255, 255, 255, 0.5);

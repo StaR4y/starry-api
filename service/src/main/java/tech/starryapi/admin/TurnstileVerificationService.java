@@ -35,23 +35,45 @@ public class TurnstileVerificationService {
                 if (!config.enabled()) {
                     return Mono.empty();
                 }
-                if (!config.configured()) {
-                    return Mono.error(new ApiException(
-                        HttpStatus.SERVICE_UNAVAILABLE,
-                        "TURNSTILE_NOT_CONFIGURED",
-                        "Cloudflare Turnstile is enabled but site key or secret key is missing"
-                    ));
-                }
-                String cleanedToken = clean(token);
-                if (cleanedToken.isBlank()) {
-                    return Mono.error(new ApiException(
-                        HttpStatus.BAD_REQUEST,
-                        "TURNSTILE_REQUIRED",
-                        "Cloudflare Turnstile verification is required"
-                    ));
-                }
-                return verify(config, cleanedToken, remoteIp);
+                return verifyEnabled(config, token, remoteIp);
             });
+    }
+
+    public Mono<Void> verifyRequired(String token, String remoteIp) {
+        return registrationSettingsService.turnstileConfig()
+            .flatMap(config -> {
+                if (!config.enabled()) {
+                    return Mono.error(new ApiException(
+                        HttpStatus.CONFLICT,
+                        "REGISTRATION_POLICY_CHANGED",
+                        "Registration policy changed during verification; restart registration"
+                    ));
+                }
+                return verifyEnabled(config, token, remoteIp);
+            });
+    }
+
+    private Mono<Void> verifyEnabled(
+        RegistrationSettingsService.TurnstileConfig config,
+        String token,
+        String remoteIp
+    ) {
+        if (!config.configured()) {
+            return Mono.error(new ApiException(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "TURNSTILE_NOT_CONFIGURED",
+                "Cloudflare Turnstile is enabled but site key or secret key is missing"
+            ));
+        }
+        String cleanedToken = clean(token);
+        if (cleanedToken.isBlank()) {
+            return Mono.error(new ApiException(
+                HttpStatus.BAD_REQUEST,
+                "TURNSTILE_REQUIRED",
+                "Cloudflare Turnstile verification is required"
+            ));
+        }
+        return verify(config, cleanedToken, remoteIp);
     }
 
     private Mono<Void> verify(

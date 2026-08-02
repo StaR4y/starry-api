@@ -1,6 +1,6 @@
 # Starry API WebUI
 
-Starry API 的 Web 控制台。提供管理员登录、上游账号池维护、API Key 下发、模型映射、平台模型目录和请求日志查看等能力。
+Starry API 的 Web 控制台。提供管理员登录、上游账号池维护、API Key 下发、模型映射、平台模型目录、请求日志和 PostgreSQL 数据备份管理等能力。
 
 ## 技术栈
 
@@ -32,6 +32,7 @@ webui/
 │   │   ├── apiKeys.ts
 │   │   ├── modelMappings.ts
 │   │   ├── logs.ts
+│   │   ├── dataTransfer.ts # PostgreSQL custom dump 导出、恢复与备份管理
 │   │   ├── system.ts      # 健康检查 / 模型清单
 │   │   └── index.ts       # 统一出口
 │   ├── assets/styles/     # 全局样式（含玻璃主题）
@@ -61,6 +62,7 @@ webui/
 │       ├── api-keys/
 │       ├── model-mappings/
 │       ├── logs/
+│       ├── data-transfer/ # PostgreSQL 数据导出、备份与恢复
 │       └── users/
 └── README.md
 ```
@@ -88,6 +90,10 @@ npm run dev
 默认在 `http://127.0.0.1:5173`，开发服务器会把 `/auth /admin /v1 /health /models /chat /responses /actuator` 这些后端路径代理到 `VITE_API_BASE`。
 
 > 第一次部署 Spring Boot 后，启动日志中会打印一次性的 admin 随机密码，使用 `admin` + 该密码登录。
+
+## 数据备份协议
+
+数据管理页与 PostgreSQL 17 后端协议保持一致：单库导出下载 custom-format `.dump`，完整 ZIP 包内使用 `database.dump`，恢复入口仅接受 `.dump` 和 `.zip`。数据库和应用 schema 均为 `starry_api`；WebUI 不解析归档内容，上传大小和恢复互斥由后端控制。
 
 ## 构建与部署
 

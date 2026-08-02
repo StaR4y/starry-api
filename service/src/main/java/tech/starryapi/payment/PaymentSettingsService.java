@@ -2,13 +2,16 @@ package tech.starryapi.payment;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
-import reactor.core.publisher.Flux;
+import org.springframework.transaction.annotation.Transactional;
 import reactor.core.publisher.Mono;
 import tech.starryapi.admin.SystemSettingEntity;
 import tech.starryapi.admin.SystemSettingRepository;
@@ -45,6 +48,7 @@ public class PaymentSettingsService {
     public static final BigDecimal DEFAULT_API_BILLING_MULTIPLIER = new BigDecimal("0.0000166666666667");
     public static final BigDecimal DEFAULT_INVITE_REBATE_RATE = new BigDecimal("0.10");
     public static final int DEFAULT_INVITE_REBATE_MAX_ORDERS = 10;
+    private static final Duration CONFIG_CACHE_TTL = Duration.ofSeconds(5);
 
     private static final List<String> SETTING_KEYS = List.of(
         PAYMENT_ENABLED,
@@ -73,13 +77,20 @@ public class PaymentSettingsService {
     );
 
     private final SystemSettingRepository repository;
+    private volatile CachedConfig cachedConfig;
+    private volatile Mono<PaymentConfig> configLoad;
+    private long configCacheGeneration;
 
     public PaymentSettingsService(SystemSettingRepository repository) {
         this.repository = repository;
     }
 
     public Mono<PaymentConfig> config() {
-        return settingValues().map(this::parseConfig);
+        CachedConfig current = cachedConfig;
+        if (current != null && !current.expired()) {
+            return Mono.just(current.config());
+        }
+        return loadConfig();
     }
 
     public Mono<PaymentSettingsResponse> publicSettings() {
@@ -90,8 +101,10 @@ public class PaymentSettingsService {
         return config().map(config -> toResponse(config, true));
     }
 
+    @Transactional
     public Mono<PaymentSettingsResponse> update(UpdatePaymentSettingsRequest request) {
-        return settingValues()
+        return repository.acquireTransactionLock("starry_api:system_settings:payment")
+            .then(settingValues())
             .flatMap(previous -> {
                 PaymentConfig current = parseConfig(previous);
                 PaymentConfig next = new PaymentConfig(
@@ -120,40 +133,71 @@ public class PaymentSettingsService {
                     request.inviteRebateEndAt()
                 );
                 validateRange(next);
-                return Mono.when(
-                    set(PAYMENT_ENABLED, Boolean.toString(next.enabled())),
-                    set(MIN_RECHARGE_AMOUNT, next.minAmount().toPlainString()),
-                    set(MAX_RECHARGE_AMOUNT, next.maxAmount().toPlainString()),
-                    set(DAILY_RECHARGE_LIMIT, next.dailyLimit().toPlainString()),
-                    set(ORDER_TIMEOUT_MINUTES, Integer.toString(next.orderTimeoutMinutes())),
-                    set(MAX_PENDING_ORDERS, Integer.toString(next.maxPendingOrders())),
-                    set(ENABLED_PAYMENT_TYPES, String.join(",", next.enabledTypes())),
-                    set(BALANCE_RECHARGE_MULTIPLIER, next.balanceRechargeMultiplier().toPlainString()),
-                    set(API_BILLING_MULTIPLIER, next.apiBillingMultiplier().toPlainString()),
-                    set(RECHARGE_FEE_RATE, next.rechargeFeeRate().toPlainString()),
-                    set(PRODUCT_NAME_PREFIX, next.productNamePrefix()),
-                    set(PRODUCT_NAME_SUFFIX, next.productNameSuffix()),
-                    set(PAYMENT_HELP_IMAGE_URL, next.helpImageUrl()),
-                    set(PAYMENT_HELP_TEXT, next.helpText()),
-                    set(EASYPAY_API_BASE, next.easypayApiBase()),
-                    set(EASYPAY_PID, next.easypayPid()),
-                    set(EASYPAY_PKEY, next.easypayPkey()),
-                    set(EASYPAY_PAYMENT_MODE, next.easypayPaymentMode()),
-                    set(INVITE_REBATE_ENABLED, Boolean.toString(next.inviteRebateEnabled())),
-                    set(INVITE_REBATE_RATE, next.inviteRebateRate().toPlainString()),
-                    set(INVITE_REBATE_MAX_ORDERS, Integer.toString(next.inviteRebateMaxOrders())),
-                    set(INVITE_REBATE_START_AT, instantValue(next.inviteRebateStartAt())),
-                    set(INVITE_REBATE_END_AT, instantValue(next.inviteRebateEndAt()))
-                )
-                .then(settingValues())
-                .map(saved -> toResponse(parseConfig(saved), true));
+                return saveSettings(next)
+                    .doOnSuccess(ignored -> invalidateConfigCache())
+                    .thenReturn(toResponse(next, true));
             });
     }
 
     private Mono<Map<String, String>> settingValues() {
-        return Flux.fromIterable(SETTING_KEYS)
-            .flatMap(key -> value(key, defaultValue(key)).map(value -> Map.entry(key, value)))
-            .collectMap(Map.Entry::getKey, Map.Entry::getValue);
+        return repository.findAllById(SETTING_KEYS)
+            .collectMap(SystemSettingEntity::getSettingKey, SystemSettingEntity::getSettingValue)
+            .map(stored -> {
+                Map<String, String> values = new LinkedHashMap<>();
+                SETTING_KEYS.forEach(key -> values.put(key, defaultValue(key)));
+                values.putAll(stored);
+                return values;
+            });
+    }
+
+    private synchronized Mono<PaymentConfig> loadConfig() {
+        CachedConfig current = cachedConfig;
+        if (current != null && !current.expired()) {
+            return Mono.just(current.config());
+        }
+        if (configLoad != null) {
+            return configLoad;
+        }
+        long generation = configCacheGeneration;
+        AtomicReference<Mono<PaymentConfig>> reference = new AtomicReference<>();
+        Mono<PaymentConfig> load = settingValues()
+            .map(this::parseConfig)
+            .doOnNext(config -> cacheConfig(config, generation))
+            .doFinally(signal -> clearConfigLoad(reference.get()))
+            .cache();
+        reference.set(load);
+        configLoad = load;
+        return load;
+    }
+
+    private synchronized void clearConfigLoad(Mono<PaymentConfig> load) {
+        if (configLoad == load) {
+            configLoad = null;
+        }
+    }
+
+    private synchronized void cacheConfig(PaymentConfig config, long generation) {
+        if (configCacheGeneration != generation) {
+            return;
+        }
+        cachedConfig = new CachedConfig(config, System.nanoTime() + CONFIG_CACHE_TTL.toNanos());
+    }
+
+    public synchronized void invalidateCacheForSetting(String settingKey) {
+        if (settingKey == null || !SETTING_KEYS.contains(settingKey)) {
+            return;
+        }
+        invalidateConfigCache();
+    }
+
+    public synchronized void invalidateAllCaches() {
+        invalidateConfigCache();
+    }
+
+    private synchronized void invalidateConfigCache() {
+        configCacheGeneration++;
+        cachedConfig = null;
+        configLoad = null;
     }
 
     private PaymentConfig parseConfig(Map<String, String> values) {
@@ -214,14 +258,36 @@ public class PaymentSettingsService {
         );
     }
 
-    private Mono<String> value(String key, String fallback) {
-        return repository.findById(key)
-            .map(SystemSettingEntity::getSettingValue)
-            .defaultIfEmpty(fallback);
-    }
-
-    private Mono<Void> set(String key, String value) {
-        return repository.upsertSetting(key, value == null ? "" : value).then();
+    private Mono<Void> saveSettings(PaymentConfig config) {
+        Map<String, String> settings = new LinkedHashMap<>();
+        settings.put(PAYMENT_ENABLED, Boolean.toString(config.enabled()));
+        settings.put(MIN_RECHARGE_AMOUNT, config.minAmount().toPlainString());
+        settings.put(MAX_RECHARGE_AMOUNT, config.maxAmount().toPlainString());
+        settings.put(DAILY_RECHARGE_LIMIT, config.dailyLimit().toPlainString());
+        settings.put(ORDER_TIMEOUT_MINUTES, Integer.toString(config.orderTimeoutMinutes()));
+        settings.put(MAX_PENDING_ORDERS, Integer.toString(config.maxPendingOrders()));
+        settings.put(ENABLED_PAYMENT_TYPES, String.join(",", config.enabledTypes()));
+        settings.put(BALANCE_RECHARGE_MULTIPLIER, config.balanceRechargeMultiplier().toPlainString());
+        settings.put(API_BILLING_MULTIPLIER, config.apiBillingMultiplier().toPlainString());
+        settings.put(RECHARGE_FEE_RATE, config.rechargeFeeRate().toPlainString());
+        settings.put(PRODUCT_NAME_PREFIX, config.productNamePrefix());
+        settings.put(PRODUCT_NAME_SUFFIX, config.productNameSuffix());
+        settings.put(PAYMENT_HELP_IMAGE_URL, config.helpImageUrl());
+        settings.put(PAYMENT_HELP_TEXT, config.helpText());
+        settings.put(EASYPAY_API_BASE, config.easypayApiBase());
+        settings.put(EASYPAY_PID, config.easypayPid());
+        settings.put(EASYPAY_PKEY, config.easypayPkey());
+        settings.put(EASYPAY_PAYMENT_MODE, config.easypayPaymentMode());
+        settings.put(INVITE_REBATE_ENABLED, Boolean.toString(config.inviteRebateEnabled()));
+        settings.put(INVITE_REBATE_RATE, config.inviteRebateRate().toPlainString());
+        settings.put(INVITE_REBATE_MAX_ORDERS, Integer.toString(config.inviteRebateMaxOrders()));
+        settings.put(INVITE_REBATE_START_AT, instantValue(config.inviteRebateStartAt()));
+        settings.put(INVITE_REBATE_END_AT, instantValue(config.inviteRebateEndAt()));
+        return repository.upsertSettings(
+                settings.keySet().toArray(String[]::new),
+                settings.values().toArray(String[]::new)
+            )
+            .then();
     }
 
     private String defaultValue(String key) {
@@ -425,6 +491,12 @@ public class PaymentSettingsService {
                 return false;
             }
             return inviteRebateEndAt == null || now.isBefore(inviteRebateEndAt);
+        }
+    }
+
+    private record CachedConfig(PaymentConfig config, long expiresAtNanos) {
+        boolean expired() {
+            return System.nanoTime() >= expiresAtNanos;
         }
     }
 }

@@ -1,10 +1,14 @@
 package tech.starryapi.account;
 
+import com.github.benmanes.caffeine.cache.Cache;
+import com.github.benmanes.caffeine.cache.Caffeine;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -13,6 +17,7 @@ import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.slf4j.Logger;
@@ -22,6 +27,7 @@ import org.springframework.context.event.EventListener;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
 import org.springframework.http.HttpStatus;
+import org.springframework.r2dbc.core.DatabaseClient.GenericExecuteSpec;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
@@ -34,14 +40,28 @@ import tech.starryapi.config.ProxyProperties;
 public class AccountPoolService {
 
     private static final Logger log = LoggerFactory.getLogger(AccountPoolService.class);
+    private static final Duration CACHE_MISS_REFRESH_INTERVAL = Duration.ofSeconds(5);
+    private static final int CACHE_UPDATE_SKIPPED = -1;
+    private static final int CACHE_CONTENT_CHANGED = 0;
+    private static final int CACHE_TOPOLOGY_CHANGED = 1;
+    private static final Comparator<ProxyAccountEntity> ACCOUNT_TOPOLOGY_ORDER = Comparator
+        .comparing(ProxyAccountEntity::getId, Comparator.nullsLast(Comparator.naturalOrder()))
+        .thenComparing(ProxyAccountEntity::getAccountId, Comparator.nullsLast(Comparator.naturalOrder()));
 
     private final ProxyAccountRepository repository;
     private final R2dbcEntityTemplate template;
     private final ProxyProperties properties;
     private final AccountPoolPolicyService poolPolicyService;
     private final AtomicInteger nextIndex = new AtomicInteger();
-    private final Map<String, AffinityEntry> affinity = new ConcurrentHashMap<>();
-    private volatile List<ProxyAccountEntity> cachedAccounts = List.of();
+    private final AtomicLong cacheVersion = new AtomicLong();
+    private final AtomicLong refreshGeneration = new AtomicLong();
+    private final ConcurrentHashMap<String, CachedAccountEntry> accountCache = new ConcurrentHashMap<>();
+    private final Cache<String, String> affinity;
+    private volatile List<String> cachedAccountIds = List.of();
+    private volatile Instant lastCacheRefreshAt = Instant.EPOCH;
+    private volatile long lastCacheClearVersion;
+    private volatile Mono<Void> inFlightCacheRefresh;
+    private long inFlightCacheRefreshGeneration;
 
     public AccountPoolService(
         ProxyAccountRepository repository,
@@ -62,6 +82,10 @@ public class AccountPoolService {
         this.template = template;
         this.properties = properties;
         this.poolPolicyService = poolPolicyService;
+        this.affinity = Caffeine.newBuilder()
+            .maximumSize(Math.max(1, properties.getSessionAffinityMaximumSize()))
+            .expireAfterAccess(positiveAffinityTtl(properties.getSessionAffinityTtl()))
+            .build();
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -79,9 +103,10 @@ public class AccountPoolService {
     }
 
     public Mono<ProxyAccountEntity> create(AccountDtos.CreateAccountRequest request) {
-        return ensureEmailAvailable(request.email(), null)
-            .then(Mono.defer(() -> saveNewAccountAllowingAccountIdCollision(request)))
-            .flatMap(saved -> refreshCache().thenReturn(saved));
+        return insertImportedAccount(request, false, 0)
+            .map(AccountWriteResult::account)
+            .switchIfEmpty(Mono.error(accountEmailExists()))
+            .doOnNext(this::updateCachedAccount);
     }
 
     public Mono<AccountDtos.ImportAccountsResponse> importAccounts(AccountDtos.ImportAccountsRequest request) {
@@ -93,65 +118,37 @@ public class AccountPoolService {
         return Flux.range(0, accounts.size())
             .concatMap(index -> importOne(index, accounts.get(index), upsert))
             .collectList()
-            .map(this::summarizeImport)
-            .flatMap(response -> refreshCache().thenReturn(response));
+            .map(this::summarizeImport);
     }
 
     public Mono<ProxyAccountEntity> update(String accountId, AccountDtos.UpdateAccountRequest request) {
         return repository.findByAccountId(accountId)
             .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND", "Account not found")))
-            .flatMap(entity -> ensureEmailAvailable(request.email(), entity).then(Mono.defer(() -> {
-                if (request.email() != null) entity.setEmail(normalizeEmail(request.email()));
-                if (request.accessToken() != null) entity.setAccessToken(request.accessToken());
-                if (request.refreshToken() != null) entity.setRefreshToken(request.refreshToken());
-                if (request.clientId() != null) entity.setClientId(request.clientId());
-                if (request.clientSecret() != null) entity.setClientSecret(request.clientSecret());
-                if (request.region() != null) entity.setRegion(request.region());
-                if (request.authMethod() != null || request.provider() != null) {
-                    String requestedProvider = request.provider() == null ? entity.getProvider() : request.provider();
-                    String requestedAuthMethod = request.authMethod() == null ? entity.getAuthMethod() : request.authMethod();
-                    String normalizedAuthMethod = AccountPlatforms.normalizeAuthMethod(requestedAuthMethod, requestedProvider);
-                    String normalizedProvider = AccountPlatforms.normalizeProvider(requestedProvider, normalizedAuthMethod);
-                    entity.setAuthMethod(normalizedAuthMethod);
-                    entity.setProvider(normalizedProvider);
-                    entity.setBaseUrl(AccountPlatforms.defaultBaseUrl(normalizedProvider, normalizedAuthMethod, entity.getBaseUrl()));
-                }
-                if (request.baseUrl() != null) {
-                    entity.setBaseUrl(AccountPlatforms.defaultBaseUrl(entity.getProvider(), entity.getAuthMethod(), request.baseUrl()));
-                }
-                if (request.upstreamAccountId() != null) entity.setUpstreamAccountId(request.upstreamAccountId());
-                if (request.idToken() != null) entity.setIdToken(request.idToken());
-                if (request.tokenExpiresAt() != null) entity.setTokenExpiresAt(request.tokenExpiresAt());
-                if (request.profileArn() != null) entity.setProfileArn(request.profileArn());
-                if (request.machineId() != null) entity.setMachineId(request.machineId());
-                if (request.proxyUrl() != null) entity.setProxyUrl(request.proxyUrl());
-                if (request.poolTier() != null) entity.setPoolTier(normalizePoolTier(request.poolTier()));
-                if (request.poolWeight() != null) entity.setPoolWeight(AccountPoolPolicyService.normalizeWeight(request.poolWeight()));
-                if (request.enabled() != null) entity.setEnabled(request.enabled());
-                if (request.quotaUsed() != null) entity.setQuotaUsed(request.quotaUsed());
-                if (request.quotaLimit() != null) entity.setQuotaLimit(request.quotaLimit());
-                if (request.quotaResetAt() != null) entity.setQuotaResetAt(request.quotaResetAt());
-                if (request.quota5hUsed() != null) entity.setQuota5hUsed(request.quota5hUsed());
-                if (request.quota5hLimit() != null) entity.setQuota5hLimit(request.quota5hLimit());
-                if (request.quota5hResetAt() != null) entity.setQuota5hResetAt(request.quota5hResetAt());
-                if (request.quota7dUsed() != null) entity.setQuota7dUsed(request.quota7dUsed());
-                if (request.quota7dLimit() != null) entity.setQuota7dLimit(request.quota7dLimit());
-                if (request.quota7dResetAt() != null) entity.setQuota7dResetAt(request.quota7dResetAt());
-                return repository.save(entity);
-            })))
-            .flatMap(saved -> refreshCache().thenReturn(saved));
+            .flatMap(entity -> updateManagedFields(entity, request))
+            .onErrorMap(DuplicateKeyException.class, error -> accountEmailExists())
+            .doOnNext(this::updateCachedAccount);
     }
 
     public Mono<Void> delete(String accountId) {
-        return repository.deleteByAccountId(accountId).then(refreshCache());
+        return repository.deleteByAccountId(accountId)
+            .doOnSuccess(ignored -> invalidateCachedAccount(accountId));
     }
 
     public Mono<AccountDtos.ClearAccountsResponse> clearAll() {
-        return repository.count()
-            .flatMap(count -> repository.deleteAll()
-                .doOnSuccess(ignored -> clearSelectionState())
-                .then(refreshCache())
-                .thenReturn(new AccountDtos.ClearAccountsResponse(count)));
+        String sql = """
+            WITH deleted_accounts AS (
+                DELETE FROM proxy_accounts
+                RETURNING account_id
+            )
+            SELECT COUNT(*)::bigint AS deleted_count
+            FROM deleted_accounts
+            """;
+        return template.getDatabaseClient().sql(sql)
+            .map((row, metadata) -> row.get("deleted_count", Long.class))
+            .one()
+            .defaultIfEmpty(0L)
+            .doOnNext(ignored -> clearSelectionState())
+            .map(AccountDtos.ClearAccountsResponse::new);
     }
 
     public Mono<ProxyAccountEntity> suspend(String accountId, String reason, String message) {
@@ -164,7 +161,7 @@ public class AccountPoolService {
                 entity.setEnabled(false);
                 return repository.save(entity);
             })
-            .flatMap(saved -> refreshCache().thenReturn(saved));
+            .doOnNext(this::updateCachedAccount);
     }
 
     public Mono<ProxyAccountEntity> resetState(String accountId) {
@@ -179,7 +176,7 @@ public class AccountPoolService {
                 entity.setSuspendMessage(null);
                 return repository.save(entity);
             })
-            .flatMap(saved -> refreshCache().thenReturn(saved));
+            .doOnNext(this::updateCachedAccount);
     }
 
     public Mono<ProxyAccountEntity> selectAccount(String sessionHint) {
@@ -239,10 +236,13 @@ public class AccountPoolService {
         Predicate<ProxyAccountEntity> filter,
         String unavailableMessage
     ) {
-        List<ProxyAccountEntity> accounts = applyTierPolicy(cachedAccounts.stream().filter(filter).toList());
+        List<ProxyAccountEntity> accounts = applyTierPolicy(cachedAccountsSnapshot(filter));
         if (accounts.isEmpty()) {
-            return refreshCache()
-                .then(Mono.defer(() -> Mono.justOrEmpty(selectFrom(applyTierPolicy(cachedAccounts.stream().filter(filter).toList()), sessionHint))))
+            return refreshCacheIfStale()
+                .then(Mono.defer(() -> Mono.justOrEmpty(selectFrom(
+                    applyTierPolicy(cachedAccountsSnapshot(filter)),
+                    sessionHint
+                ))))
                 .switchIfEmpty(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", unavailableMessage)));
         }
         return Mono.justOrEmpty(selectFrom(accounts, sessionHint))
@@ -264,45 +264,48 @@ public class AccountPoolService {
             SET request_count = request_count + 1,
                 error_count = 0,
                 quota_used = CASE
-                    WHEN quota_reset_at IS NOT NULL AND quota_reset_at <= CURRENT_TIMESTAMP(3)
+                    WHEN quota_reset_at IS NOT NULL AND quota_reset_at <= CURRENT_TIMESTAMP
                         THEN :tokens
                     ELSE COALESCE(quota_used, 0) + :tokens
                 END,
                 quota_reset_at = CASE
-                    WHEN quota_reset_at IS NOT NULL AND quota_reset_at <= CURRENT_TIMESTAMP(3)
+                    WHEN quota_reset_at IS NOT NULL AND quota_reset_at <= CURRENT_TIMESTAMP
                         THEN :totalQuotaResetAt
                     ELSE quota_reset_at
                 END,
                 quota_5h_used = CASE
-                    WHEN quota_5h_reset_at IS NULL OR quota_5h_reset_at <= CURRENT_TIMESTAMP(3)
+                    WHEN quota_5h_reset_at IS NULL OR quota_5h_reset_at <= CURRENT_TIMESTAMP
                         THEN :tokens
                     ELSE COALESCE(quota_5h_used, 0) + :tokens
                 END,
                 quota_5h_reset_at = CASE
-                    WHEN quota_5h_reset_at IS NULL OR quota_5h_reset_at <= CURRENT_TIMESTAMP(3)
-                        THEN DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 5 HOUR)
+                    WHEN quota_5h_reset_at IS NULL OR quota_5h_reset_at <= CURRENT_TIMESTAMP
+                        THEN CURRENT_TIMESTAMP + INTERVAL '5 hours'
                     ELSE quota_5h_reset_at
                 END,
                 quota_7d_used = CASE
-                    WHEN quota_7d_reset_at IS NULL OR quota_7d_reset_at <= CURRENT_TIMESTAMP(3)
+                    WHEN quota_7d_reset_at IS NULL OR quota_7d_reset_at <= CURRENT_TIMESTAMP
                         THEN :tokens
                     ELSE COALESCE(quota_7d_used, 0) + :tokens
                 END,
                 quota_7d_reset_at = CASE
-                    WHEN quota_7d_reset_at IS NULL OR quota_7d_reset_at <= CURRENT_TIMESTAMP(3)
-                        THEN DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 7 DAY)
+                    WHEN quota_7d_reset_at IS NULL OR quota_7d_reset_at <= CURRENT_TIMESTAMP
+                        THEN CURRENT_TIMESTAMP + INTERVAL '7 days'
                     ELSE quota_7d_reset_at
                 END,
-                last_used_at = CURRENT_TIMESTAMP(3)
+                last_used_at = CURRENT_TIMESTAMP,
+                updated_at = clock_timestamp()
             WHERE account_id = :accountId
+            RETURNING *
             """;
         return template.getDatabaseClient().sql(sql)
             .bind("tokens", safeTokens)
             .bind("totalQuotaResetAt", totalQuotaResetAt)
             .bind("accountId", accountId)
-            .fetch()
-            .rowsUpdated()
-            .then(refreshCache());
+            .map((row, metadata) -> template.getConverter().read(ProxyAccountEntity.class, row, metadata))
+            .one()
+            .doOnNext(this::updateCachedAccount)
+            .then();
     }
 
     public Mono<Void> recordTestSuccess(String accountId, long tokens, boolean updateStatus) {
@@ -316,33 +319,33 @@ public class AccountPoolService {
             SET request_count = request_count + 1,
                 error_count = 0,
                 quota_used = CASE
-                    WHEN quota_reset_at IS NOT NULL AND quota_reset_at <= CURRENT_TIMESTAMP(3)
+                    WHEN quota_reset_at IS NOT NULL AND quota_reset_at <= CURRENT_TIMESTAMP
                         THEN :tokens
                     ELSE COALESCE(quota_used, 0) + :tokens
                 END,
                 quota_reset_at = CASE
-                    WHEN quota_reset_at IS NOT NULL AND quota_reset_at <= CURRENT_TIMESTAMP(3)
+                    WHEN quota_reset_at IS NOT NULL AND quota_reset_at <= CURRENT_TIMESTAMP
                         THEN :totalQuotaResetAt
                     ELSE quota_reset_at
                 END,
                 quota_5h_used = CASE
-                    WHEN quota_5h_reset_at IS NULL OR quota_5h_reset_at <= CURRENT_TIMESTAMP(3)
+                    WHEN quota_5h_reset_at IS NULL OR quota_5h_reset_at <= CURRENT_TIMESTAMP
                         THEN :tokens
                     ELSE COALESCE(quota_5h_used, 0) + :tokens
                 END,
                 quota_5h_reset_at = CASE
-                    WHEN quota_5h_reset_at IS NULL OR quota_5h_reset_at <= CURRENT_TIMESTAMP(3)
-                        THEN DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 5 HOUR)
+                    WHEN quota_5h_reset_at IS NULL OR quota_5h_reset_at <= CURRENT_TIMESTAMP
+                        THEN CURRENT_TIMESTAMP + INTERVAL '5 hours'
                     ELSE quota_5h_reset_at
                 END,
                 quota_7d_used = CASE
-                    WHEN quota_7d_reset_at IS NULL OR quota_7d_reset_at <= CURRENT_TIMESTAMP(3)
+                    WHEN quota_7d_reset_at IS NULL OR quota_7d_reset_at <= CURRENT_TIMESTAMP
                         THEN :tokens
                     ELSE COALESCE(quota_7d_used, 0) + :tokens
                 END,
                 quota_7d_reset_at = CASE
-                    WHEN quota_7d_reset_at IS NULL OR quota_7d_reset_at <= CURRENT_TIMESTAMP(3)
-                        THEN DATE_ADD(CURRENT_TIMESTAMP(3), INTERVAL 7 DAY)
+                    WHEN quota_7d_reset_at IS NULL OR quota_7d_reset_at <= CURRENT_TIMESTAMP
+                        THEN CURRENT_TIMESTAMP + INTERVAL '7 days'
                     ELSE quota_7d_reset_at
                 END,
                 enabled = TRUE,
@@ -350,16 +353,19 @@ public class AccountPoolService {
                 suspended_at = NULL,
                 suspend_reason = NULL,
                 suspend_message = NULL,
-                last_used_at = CURRENT_TIMESTAMP(3)
+                last_used_at = CURRENT_TIMESTAMP,
+                updated_at = clock_timestamp()
             WHERE account_id = :accountId
+            RETURNING *
             """;
         return template.getDatabaseClient().sql(sql)
             .bind("tokens", safeTokens)
             .bind("totalQuotaResetAt", totalQuotaResetAt)
             .bind("accountId", accountId)
-            .fetch()
-            .rowsUpdated()
-            .then(refreshCache());
+            .map((row, metadata) -> template.getConverter().read(ProxyAccountEntity.class, row, metadata))
+            .one()
+            .doOnNext(this::updateCachedAccount)
+            .then();
     }
 
     public Mono<Void> recordError(String accountId, UpstreamErrorType type, Integer statusCode) {
@@ -368,18 +374,21 @@ public class AccountPoolService {
         }
         String sql = """
             UPDATE proxy_accounts
-            SET error_count = error_count + 1,
-                quota_exhausted_at = CASE WHEN :quotaError THEN CURRENT_TIMESTAMP(3) ELSE quota_exhausted_at END,
-                last_used_at = CURRENT_TIMESTAMP(3)
+            SET error_count = COALESCE(error_count, 0) + 1,
+                quota_exhausted_at = CASE WHEN :quotaError THEN CURRENT_TIMESTAMP ELSE quota_exhausted_at END,
+                last_used_at = CURRENT_TIMESTAMP,
+                updated_at = clock_timestamp()
             WHERE account_id = :accountId
+            RETURNING *
             """;
         boolean quotaError = statusCode != null && (statusCode == 402 || statusCode == 429);
         return template.getDatabaseClient().sql(sql)
             .bind("quotaError", quotaError)
             .bind("accountId", accountId)
-            .fetch()
-            .rowsUpdated()
-            .then(refreshCache());
+            .map((row, metadata) -> template.getConverter().read(ProxyAccountEntity.class, row, metadata))
+            .one()
+            .doOnNext(this::updateCachedAccount)
+            .then();
     }
 
     public Mono<RequestFailureRecord> recordRequestFailure(
@@ -389,23 +398,47 @@ public class AccountPoolService {
         String message
     ) {
         Instant now = Instant.now();
-        return repository.findByAccountId(accountId)
-            .flatMap(entity -> {
-                int errors = Optional.ofNullable(entity.getErrorCount()).orElse(0) + 1;
-                boolean suspended = isQuotaStatus(statusCode) || isAuthStatus(statusCode);
-                entity.setErrorCount(errors);
-                entity.setLastUsedAt(now);
-                if (isQuotaStatus(statusCode)) {
-                    entity.setQuotaExhaustedAt(now);
-                    suspendForFailure(entity, "QUOTA_EXHAUSTED", message, now);
-                } else if (isAuthStatus(statusCode)) {
-                    entity.setQuotaExhaustedAt(null);
-                    suspendForFailure(entity, "AUTH_FAILED", message, now);
-                }
-                return repository.save(entity)
-                    .map(saved -> new RequestFailureRecord(saved.getAccountId(), errors, statusCode, suspended));
-            })
-            .flatMap(record -> refreshCache().thenReturn(record));
+        boolean quotaFailure = isQuotaStatus(statusCode);
+        boolean authFailure = isAuthStatus(statusCode);
+        boolean suspended = quotaFailure || authFailure;
+        String sql = """
+            UPDATE proxy_accounts
+            SET error_count = COALESCE(error_count, 0) + 1,
+                last_used_at = :now,
+                enabled = CASE WHEN :suspended THEN FALSE ELSE enabled END,
+                quota_exhausted_at = CASE
+                    WHEN :quotaFailure THEN :now
+                    WHEN :authFailure THEN NULL
+                    ELSE quota_exhausted_at
+                END,
+                suspended_at = CASE WHEN :suspended THEN :now ELSE suspended_at END,
+                suspend_reason = CASE
+                    WHEN :quotaFailure THEN 'QUOTA_EXHAUSTED'
+                    WHEN :authFailure THEN 'AUTH_FAILED'
+                    ELSE suspend_reason
+                END,
+                suspend_message = CASE WHEN :suspended THEN :message ELSE suspend_message END,
+                updated_at = clock_timestamp()
+            WHERE account_id = :accountId
+            RETURNING *
+            """;
+        var spec = template.getDatabaseClient().sql(sql)
+            .bind("now", now)
+            .bind("suspended", suspended)
+            .bind("quotaFailure", quotaFailure)
+            .bind("authFailure", authFailure)
+            .bind("accountId", accountId);
+        spec = message == null ? spec.bindNull("message", String.class) : spec.bind("message", message);
+        return spec
+            .map((row, metadata) -> template.getConverter().read(ProxyAccountEntity.class, row, metadata))
+            .one()
+            .doOnNext(this::updateCachedAccount)
+            .map(updated -> new RequestFailureRecord(
+                updated.getAccountId(),
+                Optional.ofNullable(updated.getErrorCount()).orElse(0),
+                statusCode,
+                suspended
+            ));
     }
 
     public Mono<Void> recordTestFailure(
@@ -419,30 +452,33 @@ public class AccountPoolService {
             return recordError(accountId, type, statusCode);
         }
         Instant now = Instant.now();
-        return repository.findByAccountId(accountId)
-            .flatMap(entity -> {
-                entity.setErrorCount(Optional.ofNullable(entity.getErrorCount()).orElse(0) + 1);
-                entity.setLastUsedAt(now);
-                if (isQuotaStatus(statusCode)) {
-                    entity.setQuotaExhaustedAt(now);
-                    suspendForFailure(entity, "QUOTA_EXHAUSTED", message, now);
-                } else if (isAuthStatus(statusCode)) {
-                    suspendForFailure(entity, "AUTH_FAILED", message, now);
-                    entity.setQuotaExhaustedAt(null);
-                } else {
-                    suspendForFailure(entity, "ACCOUNT_TEST_FAILED", message, now);
-                    entity.setQuotaExhaustedAt(null);
-                }
-                return repository.save(entity);
-            })
-            .then(refreshCache());
-    }
-
-    private void suspendForFailure(ProxyAccountEntity entity, String reason, String message, Instant now) {
-        entity.setEnabled(false);
-        entity.setSuspendedAt(now);
-        entity.setSuspendReason(reason);
-        entity.setSuspendMessage(message);
+        boolean quotaFailure = isQuotaStatus(statusCode);
+        boolean authFailure = isAuthStatus(statusCode);
+        String reason = quotaFailure ? "QUOTA_EXHAUSTED" : authFailure ? "AUTH_FAILED" : "ACCOUNT_TEST_FAILED";
+        String sql = """
+            UPDATE proxy_accounts
+            SET error_count = COALESCE(error_count, 0) + 1,
+                last_used_at = :now,
+                enabled = FALSE,
+                quota_exhausted_at = CASE WHEN :quotaFailure THEN :now ELSE NULL END,
+                suspended_at = :now,
+                suspend_reason = :reason,
+                suspend_message = :message,
+                updated_at = clock_timestamp()
+            WHERE account_id = :accountId
+            RETURNING *
+            """;
+        var spec = template.getDatabaseClient().sql(sql)
+            .bind("now", now)
+            .bind("quotaFailure", quotaFailure)
+            .bind("reason", reason)
+            .bind("accountId", accountId);
+        spec = message == null ? spec.bindNull("message", String.class) : spec.bind("message", message);
+        return spec
+            .map((row, metadata) -> template.getConverter().read(ProxyAccountEntity.class, row, metadata))
+            .one()
+            .doOnNext(this::updateCachedAccount)
+            .then();
     }
 
     private boolean isQuotaStatus(Integer statusCode) {
@@ -454,26 +490,168 @@ public class AccountPoolService {
     }
 
     public Mono<Void> refreshCache() {
-        return repository.findAllByEnabledTrue()
-            .collectList()
-            .doOnNext(accounts -> cachedAccounts = List.copyOf(accounts))
-            .then();
+        return Mono.defer(this::singleFlightCacheRefresh);
+    }
+
+    public synchronized void invalidateAllCaches() {
+        refreshGeneration.incrementAndGet();
+        inFlightCacheRefresh = null;
+        lastCacheRefreshAt = Instant.EPOCH;
+        clearSelectionState();
+    }
+
+    private synchronized Mono<Void> singleFlightCacheRefresh() {
+        Mono<Void> current = inFlightCacheRefresh;
+        if (current != null) {
+            return current;
+        }
+        long generation = refreshGeneration.incrementAndGet();
+        Mono<Void> created = Mono.defer(() -> {
+            long refreshVersion = cacheVersion.incrementAndGet();
+            return repository.findAllByEnabledTrue()
+                .collectList()
+                .doOnNext(accounts -> mergeCacheSnapshot(accounts, refreshVersion))
+                .then()
+                .doOnSuccess(ignored -> lastCacheRefreshAt = Instant.now());
+        })
+            .doFinally(signal -> clearInFlightCacheRefresh(generation))
+            .cache();
+        inFlightCacheRefreshGeneration = generation;
+        inFlightCacheRefresh = created;
+        return created;
+    }
+
+    private Mono<Void> refreshCacheIfStale() {
+        return Mono.defer(() -> {
+            if (lastCacheRefreshAt.isAfter(Instant.now().minus(CACHE_MISS_REFRESH_INTERVAL))) {
+                return Mono.empty();
+            }
+            return refreshCache();
+        });
+    }
+
+    private synchronized void clearInFlightCacheRefresh(long generation) {
+        if (inFlightCacheRefreshGeneration == generation) {
+            inFlightCacheRefresh = null;
+        }
+    }
+
+    private synchronized void mergeCacheSnapshot(List<ProxyAccountEntity> accounts, long refreshVersion) {
+        if (refreshVersion < lastCacheClearVersion) {
+            return;
+        }
+
+        Map<String, ProxyAccountEntity> snapshot = new HashMap<>();
+        for (ProxyAccountEntity account : accounts) {
+            if (account == null || account.getAccountId() == null || !Boolean.TRUE.equals(account.getEnabled())) {
+                continue;
+            }
+            snapshot.merge(account.getAccountId(), account, AccountPoolService::newerAccount);
+        }
+
+        snapshot.forEach((accountId, account) -> accountCache.compute(accountId, (ignored, current) -> {
+            if (current != null && current.version() > refreshVersion) {
+                return current;
+            }
+            return CachedAccountEntry.active(account, refreshVersion);
+        }));
+        accountCache.forEach((accountId, ignored) -> {
+            if (snapshot.containsKey(accountId)) {
+                return;
+            }
+            accountCache.computeIfPresent(accountId, (key, current) ->
+                current.version() > refreshVersion ? current : null
+            );
+        });
+        rebuildAccountTopology();
+    }
+
+    private void updateCachedAccount(ProxyAccountEntity updated) {
+        if (updated == null || updated.getAccountId() == null) {
+            return;
+        }
+        String accountId = updated.getAccountId();
+        long version = cacheVersion.incrementAndGet();
+        boolean enabled = Boolean.TRUE.equals(updated.getEnabled());
+        int cacheChange = replaceCachedEntry(
+            accountId,
+            enabled ? CachedAccountEntry.active(updated, version) : CachedAccountEntry.tombstone(version)
+        );
+        if (cacheChange == CACHE_TOPOLOGY_CHANGED) {
+            rebuildAccountTopology();
+        }
+        if (cacheChange != CACHE_UPDATE_SKIPPED && !enabled) {
+            invalidateAffinityForAccount(accountId);
+        }
+    }
+
+    private void invalidateCachedAccount(String accountId) {
+        if (accountId == null) {
+            return;
+        }
+        long version = cacheVersion.incrementAndGet();
+        int cacheChange = replaceCachedEntry(accountId, CachedAccountEntry.tombstone(version));
+        if (cacheChange == CACHE_TOPOLOGY_CHANGED) {
+            rebuildAccountTopology();
+        }
+        if (cacheChange != CACHE_UPDATE_SKIPPED) {
+            invalidateAffinityForAccount(accountId);
+        }
+    }
+
+    private int replaceCachedEntry(String accountId, CachedAccountEntry replacement) {
+        while (true) {
+            CachedAccountEntry current = accountCache.get(accountId);
+            if (current != null && current.version() > replacement.version()) {
+                return CACHE_UPDATE_SKIPPED;
+            }
+            if (current == null) {
+                if (accountCache.putIfAbsent(accountId, replacement) == null) {
+                    return replacement.active() ? CACHE_TOPOLOGY_CHANGED : CACHE_CONTENT_CHANGED;
+                }
+                continue;
+            }
+            if (accountCache.replace(accountId, current, replacement)) {
+                return current.active() == replacement.active() ? CACHE_CONTENT_CHANGED : CACHE_TOPOLOGY_CHANGED;
+            }
+        }
+    }
+
+    private List<ProxyAccountEntity> cachedAccountsSnapshot(Predicate<ProxyAccountEntity> filter) {
+        List<String> accountIds = cachedAccountIds;
+        List<ProxyAccountEntity> accounts = new ArrayList<>(accountIds.size());
+        for (String accountId : accountIds) {
+            CachedAccountEntry entry = accountCache.get(accountId);
+            if (entry != null && entry.active() && filter.test(entry.account())) {
+                accounts.add(entry.account());
+            }
+        }
+        return accounts;
+    }
+
+    private synchronized void rebuildAccountTopology() {
+        cachedAccountIds = accountCache.values().stream()
+            .filter(CachedAccountEntry::active)
+            .map(CachedAccountEntry::account)
+            .sorted(ACCOUNT_TOPOLOGY_ORDER)
+            .map(ProxyAccountEntity::getAccountId)
+            .toList();
+    }
+
+    private void invalidateAffinityForAccount(String accountId) {
+        affinity.asMap().entrySet().removeIf(entry -> accountId.equals(entry.getValue()));
     }
 
     private ProxyAccountEntity selectFrom(List<ProxyAccountEntity> accounts, String sessionHint) {
-        cleanupAffinity();
-        if (accounts.size() == 1) {
-            return accounts.get(0);
-        }
         if (properties.isSessionAffinityEnabled() && sessionHint != null && !sessionHint.isBlank()) {
-            AffinityEntry entry = affinity.get(sessionHint);
-            if (entry != null && !entry.expired(properties.getSessionAffinityTtl())) {
+            String affinityAccountId = affinity.getIfPresent(sessionHint);
+            if (affinityAccountId != null) {
                 for (ProxyAccountEntity account : accounts) {
-                    if (entry.accountId().equals(account.getAccountId()) && isAvailable(account)) {
-                        entry.touch();
+                    if (affinityAccountId.equals(account.getAccountId()) && isAvailable(account)) {
                         return account;
                     }
                 }
+                affinity.invalidate(sessionHint);
             }
         }
 
@@ -499,7 +677,7 @@ public class AccountPoolService {
             selected = available.get(index);
         }
         if (properties.isSessionAffinityEnabled() && sessionHint != null && !sessionHint.isBlank()) {
-            affinity.put(sessionHint, new AffinityEntry(selected.getAccountId(), Instant.now()));
+            affinity.put(sessionHint, selected.getAccountId());
         }
         return selected;
     }
@@ -582,15 +760,37 @@ public class AccountPoolService {
         return Instant.now().plus(reset);
     }
 
-    private void cleanupAffinity() {
-        Duration ttl = properties.getSessionAffinityTtl();
-        affinity.entrySet().removeIf(entry -> entry.getValue().expired(ttl));
+    private synchronized void clearSelectionState() {
+        long clearVersion = cacheVersion.incrementAndGet();
+        lastCacheClearVersion = clearVersion;
+        accountCache.clear();
+        cachedAccountIds = List.of();
+        affinity.invalidateAll();
+        nextIndex.set(0);
     }
 
-    private void clearSelectionState() {
-        cachedAccounts = List.of();
-        affinity.clear();
-        nextIndex.set(0);
+    long affinityEntryCount() {
+        affinity.cleanUp();
+        return affinity.estimatedSize();
+    }
+
+    private static Duration positiveAffinityTtl(Duration configuredTtl) {
+        if (configuredTtl == null || configuredTtl.isZero() || configuredTtl.isNegative()) {
+            return Duration.ofMinutes(10);
+        }
+        return configuredTtl;
+    }
+
+    private static ProxyAccountEntity newerAccount(ProxyAccountEntity first, ProxyAccountEntity second) {
+        Instant firstUpdatedAt = first.getUpdatedAt();
+        Instant secondUpdatedAt = second.getUpdatedAt();
+        if (firstUpdatedAt == null) {
+            return second;
+        }
+        if (secondUpdatedAt == null) {
+            return first;
+        }
+        return secondUpdatedAt.isAfter(firstUpdatedAt) ? second : first;
     }
 
     private static String defaultString(String value, String fallback) {
@@ -609,37 +809,100 @@ public class AccountPoolService {
             return Mono.just(importFailure(index, request.accountId(), request.email(), "accessToken / apiKey / credentials.accessToken is required"));
         }
 
-        String normalizedEmail = normalizeEmail(request.email());
-        Mono<ProxyAccountEntity> existingByEmail = normalizedEmail == null
-            ? Mono.empty()
-            : repository.findFirstByEmailOrderByCreatedAtAsc(normalizedEmail);
-
-        return existingByEmail
-            .flatMap(existing -> {
-                if (!upsert) {
-                    return Mono.just(importSuccess(index, "SKIPPED", "Account email already exists", existing));
-                }
-                applyImportedFields(existing, request);
-                return repository.save(existing).map(saved -> importSuccess(index, "UPDATED", "Account updated", saved));
-            })
-            .switchIfEmpty(Mono.defer(() -> saveNewAccountAllowingAccountIdCollision(request)
-                .map(saved -> importSuccess(index, "CREATED", importCreatedMessage(request, saved), saved))))
+        return insertImportedAccount(request, upsert, 0)
+            .doOnNext(result -> updateCachedAccount(result.account()))
+            .map(result -> result.inserted()
+                ? importSuccess(index, "CREATED", importCreatedMessage(request, result.account()), result.account())
+                : importSuccess(index, "UPDATED", "Account updated", result.account()))
+            .switchIfEmpty(Mono.defer(() -> findImportedEmail(request)
+                .map(existing -> importSuccess(index, "SKIPPED", "Account email already exists", existing))
+                .switchIfEmpty(Mono.error(new ApiException(
+                    HttpStatus.CONFLICT,
+                    "ACCOUNT_EMAIL_EXISTS",
+                    "Account email already exists"
+                )))))
             .onErrorResume(error -> Mono.just(importFailure(index, request.accountId(), request.email(), error.getMessage())));
     }
 
-    private Mono<ProxyAccountEntity> saveNewAccountAllowingAccountIdCollision(AccountDtos.CreateAccountRequest request) {
-        return saveNewAccountAllowingAccountIdCollision(request, 0);
-    }
-
-    private Mono<ProxyAccountEntity> saveNewAccountAllowingAccountIdCollision(
+    private Mono<AccountWriteResult> insertImportedAccount(
         AccountDtos.CreateAccountRequest request,
+        boolean upsert,
         int attempt
     ) {
         ProxyAccountEntity entity = newAccount(request);
         if (attempt > 0) {
             entity.setAccountId(Hashing.shortUuid());
         }
-        return repository.save(entity)
+        String conflictAction = upsert
+            ? """
+                DO UPDATE SET
+                    email = EXCLUDED.email,
+                    access_token = EXCLUDED.access_token,
+                    refresh_token = EXCLUDED.refresh_token,
+                    client_id = EXCLUDED.client_id,
+                    client_secret = EXCLUDED.client_secret,
+                    region = EXCLUDED.region,
+                    auth_method = EXCLUDED.auth_method,
+                    provider = EXCLUDED.provider,
+                    base_url = EXCLUDED.base_url,
+                    upstream_account_id = EXCLUDED.upstream_account_id,
+                    id_token = EXCLUDED.id_token,
+                    token_expires_at = EXCLUDED.token_expires_at,
+                    profile_arn = EXCLUDED.profile_arn,
+                    machine_id = EXCLUDED.machine_id,
+                    proxy_url = EXCLUDED.proxy_url,
+                    pool_tier = EXCLUDED.pool_tier,
+                    pool_weight = EXCLUDED.pool_weight,
+                    quota_limit = EXCLUDED.quota_limit,
+                    quota_5h_limit = EXCLUDED.quota_5h_limit,
+                    quota_7d_limit = EXCLUDED.quota_7d_limit,
+                    updated_at = clock_timestamp()
+                """
+            : "DO NOTHING";
+        String sql = """
+            INSERT INTO proxy_accounts AS target (
+                account_id, email, access_token, refresh_token, client_id, client_secret,
+                region, auth_method, provider, base_url, upstream_account_id, id_token,
+                token_expires_at, profile_arn, machine_id, proxy_url, pool_tier, pool_weight,
+                quota_limit, quota_5h_limit, quota_7d_limit
+            ) VALUES (
+                :accountId, :email, :accessToken, :refreshToken, :clientId, :clientSecret,
+                :region, :authMethod, :provider, :baseUrl, :upstreamAccountId, :idToken,
+                :tokenExpiresAt, :profileArn, :machineId, :proxyUrl, :poolTier, :poolWeight,
+                :quotaLimit, :quota5hLimit, :quota7dLimit
+            )
+            ON CONFLICT (lower(email)) WHERE email IS NOT NULL
+            """ + conflictAction + """
+            RETURNING target.*, (target.xmax = 0) AS inserted
+            """;
+        GenericExecuteSpec spec = template.getDatabaseClient().sql(sql)
+            .bind("accountId", entity.getAccountId())
+            .bind("accessToken", entity.getAccessToken())
+            .bind("poolTier", entity.getPoolTier())
+            .bind("poolWeight", entity.getPoolWeight());
+        spec = bindNullable(spec, "email", entity.getEmail(), String.class);
+        spec = bindNullable(spec, "refreshToken", entity.getRefreshToken(), String.class);
+        spec = bindNullable(spec, "clientId", entity.getClientId(), String.class);
+        spec = bindNullable(spec, "clientSecret", entity.getClientSecret(), String.class);
+        spec = bindNullable(spec, "region", entity.getRegion(), String.class);
+        spec = bindNullable(spec, "authMethod", entity.getAuthMethod(), String.class);
+        spec = bindNullable(spec, "provider", entity.getProvider(), String.class);
+        spec = bindNullable(spec, "baseUrl", entity.getBaseUrl(), String.class);
+        spec = bindNullable(spec, "upstreamAccountId", entity.getUpstreamAccountId(), String.class);
+        spec = bindNullable(spec, "idToken", entity.getIdToken(), String.class);
+        spec = bindNullable(spec, "tokenExpiresAt", entity.getTokenExpiresAt(), Instant.class);
+        spec = bindNullable(spec, "profileArn", entity.getProfileArn(), String.class);
+        spec = bindNullable(spec, "machineId", entity.getMachineId(), String.class);
+        spec = bindNullable(spec, "proxyUrl", entity.getProxyUrl(), String.class);
+        spec = bindNullable(spec, "quotaLimit", entity.getQuotaLimit(), Long.class);
+        spec = bindNullable(spec, "quota5hLimit", entity.getQuota5hLimit(), Long.class);
+        spec = bindNullable(spec, "quota7dLimit", entity.getQuota7dLimit(), Long.class);
+        return spec
+            .map((row, metadata) -> new AccountWriteResult(
+                template.getConverter().read(ProxyAccountEntity.class, row, metadata),
+                Boolean.TRUE.equals(row.get("inserted", Boolean.class))
+            ))
+            .one()
             .onErrorResume(DuplicateKeyException.class, error -> {
                 if (attempt >= 5) {
                     return Mono.error(new ApiException(
@@ -648,8 +911,15 @@ public class AccountPoolService {
                         "Unable to allocate a unique account ID"
                     ));
                 }
-                return saveNewAccountAllowingAccountIdCollision(request, attempt + 1);
+                return insertImportedAccount(request, upsert, attempt + 1);
             });
+    }
+
+    private Mono<ProxyAccountEntity> findImportedEmail(AccountDtos.CreateAccountRequest request) {
+        String normalizedEmail = normalizeEmail(request.email());
+        return normalizedEmail == null
+            ? Mono.empty()
+            : repository.findFirstByEmailOrderByCreatedAtAsc(normalizedEmail);
     }
 
     private ProxyAccountEntity newAccount(AccountDtos.CreateAccountRequest request) {
@@ -693,29 +963,108 @@ public class AccountPoolService {
         entity.setQuota7dLimit(request.quota7dLimit());
     }
 
-    private Mono<Void> ensureEmailAvailable(String email, ProxyAccountEntity currentAccount) {
-        String normalizedEmail = normalizeEmail(email);
-        if (normalizedEmail == null) {
-            return Mono.empty();
+    private Mono<ProxyAccountEntity> updateManagedFields(
+        ProxyAccountEntity current,
+        AccountDtos.UpdateAccountRequest request
+    ) {
+        Map<String, SqlValue> updates = new LinkedHashMap<>();
+        putIfPresent(updates, "email", request.email(), normalizeEmail(request.email()), String.class);
+        putIfPresent(updates, "access_token", request.accessToken(), request.accessToken(), String.class);
+        putIfPresent(updates, "refresh_token", request.refreshToken(), request.refreshToken(), String.class);
+        putIfPresent(updates, "client_id", request.clientId(), request.clientId(), String.class);
+        putIfPresent(updates, "client_secret", request.clientSecret(), request.clientSecret(), String.class);
+        putIfPresent(updates, "region", request.region(), request.region(), String.class);
+
+        String provider = current.getProvider();
+        String authMethod = current.getAuthMethod();
+        String baseUrl = current.getBaseUrl();
+        if (request.authMethod() != null || request.provider() != null) {
+            String requestedProvider = request.provider() == null ? provider : request.provider();
+            String requestedAuthMethod = request.authMethod() == null ? authMethod : request.authMethod();
+            authMethod = AccountPlatforms.normalizeAuthMethod(requestedAuthMethod, requestedProvider);
+            provider = AccountPlatforms.normalizeProvider(requestedProvider, authMethod);
+            baseUrl = AccountPlatforms.defaultBaseUrl(provider, authMethod, baseUrl);
+            updates.put("auth_method", new SqlValue(authMethod, String.class));
+            updates.put("provider", new SqlValue(provider, String.class));
+            updates.put("base_url", new SqlValue(baseUrl, String.class));
         }
-        return repository.findFirstByEmailOrderByCreatedAtAsc(normalizedEmail)
-            .filter(existing -> currentAccount == null || !samePersistedAccount(existing, currentAccount))
-            .flatMap(existing -> Mono.<Void>error(new ApiException(
-                HttpStatus.CONFLICT,
-                "ACCOUNT_EMAIL_EXISTS",
-                "Account email already exists"
-            )))
-            .then();
+        if (request.baseUrl() != null) {
+            updates.put("base_url", new SqlValue(
+                AccountPlatforms.defaultBaseUrl(provider, authMethod, request.baseUrl()),
+                String.class
+            ));
+        }
+
+        putIfPresent(updates, "upstream_account_id", request.upstreamAccountId(), request.upstreamAccountId(), String.class);
+        putIfPresent(updates, "id_token", request.idToken(), request.idToken(), String.class);
+        putIfPresent(updates, "token_expires_at", request.tokenExpiresAt(), request.tokenExpiresAt(), Instant.class);
+        putIfPresent(updates, "profile_arn", request.profileArn(), request.profileArn(), String.class);
+        putIfPresent(updates, "machine_id", request.machineId(), request.machineId(), String.class);
+        putIfPresent(updates, "proxy_url", request.proxyUrl(), request.proxyUrl(), String.class);
+        putIfPresent(updates, "pool_tier", request.poolTier(), normalizePoolTier(request.poolTier()), String.class);
+        putIfPresent(
+            updates,
+            "pool_weight",
+            request.poolWeight(),
+            AccountPoolPolicyService.normalizeWeight(request.poolWeight()),
+            Integer.class
+        );
+        putIfPresent(updates, "enabled", request.enabled(), request.enabled(), Boolean.class);
+        putIfPresent(updates, "quota_used", request.quotaUsed(), request.quotaUsed(), Long.class);
+        putIfPresent(updates, "quota_limit", request.quotaLimit(), request.quotaLimit(), Long.class);
+        putIfPresent(updates, "quota_reset_at", request.quotaResetAt(), request.quotaResetAt(), Instant.class);
+        putIfPresent(updates, "quota_5h_used", request.quota5hUsed(), request.quota5hUsed(), Long.class);
+        putIfPresent(updates, "quota_5h_limit", request.quota5hLimit(), request.quota5hLimit(), Long.class);
+        putIfPresent(updates, "quota_5h_reset_at", request.quota5hResetAt(), request.quota5hResetAt(), Instant.class);
+        putIfPresent(updates, "quota_7d_used", request.quota7dUsed(), request.quota7dUsed(), Long.class);
+        putIfPresent(updates, "quota_7d_limit", request.quota7dLimit(), request.quota7dLimit(), Long.class);
+        putIfPresent(updates, "quota_7d_reset_at", request.quota7dResetAt(), request.quota7dResetAt(), Instant.class);
+
+        List<Map.Entry<String, SqlValue>> entries = List.copyOf(updates.entrySet());
+        List<String> assignments = new ArrayList<>(entries.size() + 1);
+        for (int index = 0; index < entries.size(); index++) {
+            assignments.add(entries.get(index).getKey() + " = :value" + index);
+        }
+        assignments.add("updated_at = clock_timestamp()");
+        String sql = "UPDATE proxy_accounts SET " + String.join(", ", assignments)
+            + " WHERE account_id = :accountId RETURNING *";
+        GenericExecuteSpec spec = template.getDatabaseClient().sql(sql)
+            .bind("accountId", current.getAccountId());
+        for (int index = 0; index < entries.size(); index++) {
+            SqlValue value = entries.get(index).getValue();
+            spec = value.value() == null
+                ? spec.bindNull("value" + index, value.type())
+                : spec.bind("value" + index, value.value());
+        }
+        return spec
+            .map((row, metadata) -> template.getConverter().read(ProxyAccountEntity.class, row, metadata))
+            .one()
+            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND", "Account not found")));
     }
 
-    private boolean samePersistedAccount(ProxyAccountEntity left, ProxyAccountEntity right) {
-        if (left == null || right == null) {
-            return false;
+    private static void putIfPresent(
+        Map<String, SqlValue> updates,
+        String column,
+        Object requestedValue,
+        Object persistedValue,
+        Class<?> type
+    ) {
+        if (requestedValue != null) {
+            updates.put(column, new SqlValue(persistedValue, type));
         }
-        if (left.getId() != null && right.getId() != null) {
-            return Objects.equals(left.getId(), right.getId());
-        }
-        return left.getAccountId() != null && Objects.equals(left.getAccountId(), right.getAccountId());
+    }
+
+    private static <T> GenericExecuteSpec bindNullable(
+        GenericExecuteSpec spec,
+        String name,
+        T value,
+        Class<T> type
+    ) {
+        return value == null ? spec.bindNull(name, type) : spec.bind(name, value);
+    }
+
+    private ApiException accountEmailExists() {
+        return new ApiException(HttpStatus.CONFLICT, "ACCOUNT_EMAIL_EXISTS", "Account email already exists");
     }
 
     private String normalizeEmail(String email) {
@@ -785,13 +1134,23 @@ public class AccountPoolService {
     ) {
     }
 
-    private record AffinityEntry(String accountId, Instant lastSeenAt) {
-        boolean expired(Duration ttl) {
-            return lastSeenAt.plus(ttl).isBefore(Instant.now());
+    static record AccountWriteResult(ProxyAccountEntity account, boolean inserted) {
+    }
+
+    private record SqlValue(Object value, Class<?> type) {
+    }
+
+    private record CachedAccountEntry(ProxyAccountEntity account, long version) {
+        static CachedAccountEntry active(ProxyAccountEntity account, long version) {
+            return new CachedAccountEntry(account, version);
         }
 
-        void touch() {
-            // Records are immutable; replacement is not needed for read-heavy affinity.
+        static CachedAccountEntry tombstone(long version) {
+            return new CachedAccountEntry(null, version);
+        }
+
+        boolean active() {
+            return account != null;
         }
     }
 }

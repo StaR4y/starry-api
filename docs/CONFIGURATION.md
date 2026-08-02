@@ -8,32 +8,84 @@ The service is being refactored from a Kiro-only proxy into Starry API. Some run
 
 | Variable | Default | Description |
 | --- | --- | --- |
+| `SERVER_ADDRESS` | `127.0.0.1` | HTTP listen address for direct runs. Container images override this with `0.0.0.0`; host exposure remains controlled by `HOST_BIND_ADDR`. |
 | `SERVER_PORT` | `8080` | HTTP port. |
 | `SPRING_CODEC_MAX_IN_MEMORY_SIZE` | `16MB` | Max in-memory body size for WebFlux codecs. |
 | `JAVA_OPTS` | empty | Optional JVM flags used by container/scripts. |
 
-## MySQL
+## PostgreSQL 17
 
-The service uses JDBC for Flyway migration and R2DBC for application queries.
+PostgreSQL 17 is the production baseline. The service uses JDBC for Flyway and R2DBC for application queries. The database and application schema are both `starry_api`.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `MYSQL_HOST` | `127.0.0.1` | MySQL host. |
-| `MYSQL_PORT` | `3306` | MySQL port. |
-| `MYSQL_DATABASE` | `kiro_proxy` | Database name. Kept for migration compatibility. |
-| `MYSQL_USERNAME` | `root` | MySQL username. |
-| `MYSQL_PASSWORD` | empty | MySQL password. |
-| `MYSQL_POOL_INITIAL_SIZE` | `8` | R2DBC pool initial size. |
-| `MYSQL_POOL_MAX_SIZE` | `80` | R2DBC pool max size. |
+| `POSTGRES_HOST` | `localhost` | PostgreSQL host for direct local runs. Compose overrides this with the `postgres` service name. |
+| `POSTGRES_PORT` | `5432` | PostgreSQL port. |
+| `POSTGRES_DATABASE` | `starry_api` | PostgreSQL database name. |
+| `POSTGRES_USERNAME` | `starry_api` | Application database role. |
+| `POSTGRES_PASSWORD` | empty | Application database password; required outside trusted local development. |
+| `POSTGRES_MIGRATION_USERNAME` | `starry_api_migration` | Dedicated Flyway and maintenance role. |
+| `POSTGRES_MIGRATION_PASSWORD` | empty | Migration-role password; required outside trusted local development. |
+| `POSTGRES_POOL_INITIAL_SIZE` | `4` | R2DBC pool initial size. |
+| `POSTGRES_POOL_MAX_SIZE` | `20` | R2DBC pool maximum size; size this against the server connection budget. |
+| `POSTGRES_POOL_MAX_ACQUIRE_TIME` | `5s` | Maximum wait for a pooled connection. |
+| `POSTGRES_POOL_MAX_CREATE_CONNECTION_TIME` | `5s` | Maximum connection establishment time. |
+| `POSTGRES_POOL_MAX_LIFE_TIME` | `2h` | Maximum pooled connection lifetime. |
+| `POSTGRES_PREPARED_STATEMENT_CACHE_QUERIES` | `256` | Per-connection prepared-statement cache bound. |
+| `POSTGRES_STATEMENT_TIMEOUT` | `PT2M` | Maximum runtime for an application SQL statement. |
+| `POSTGRES_LOCK_WAIT_TIMEOUT` | `PT5S` | Maximum time an application statement waits for a database lock. |
+| `POSTGRES_SHM_SIZE` | `256mb` | Shared-memory allocation for the PostgreSQL container. |
+| `POSTGRES_MAX_CONNECTIONS` | `100` | Server connection ceiling; reserve capacity for migrations, maintenance, and monitoring. |
+| `POSTGRES_SHARED_BUFFERS` | `256MB` | PostgreSQL shared buffer cache. |
+| `POSTGRES_EFFECTIVE_CACHE_SIZE` | `768MB` | Planner estimate of memory available to PostgreSQL and the OS page cache; this does not allocate memory. |
+| `POSTGRES_WORK_MEM` | `4MB` | Per sort/hash operation memory limit; one query can use this more than once. |
+| `POSTGRES_MAINTENANCE_WORK_MEM` | `64MB` | Memory available to maintenance operations. |
+| `POSTGRES_AUTOVACUUM_WORK_MEM` | `64MB` | Per autovacuum worker memory limit. |
+| `POSTGRES_AUTOVACUUM_MAX_WORKERS` | `4` | Maximum concurrent autovacuum workers. |
+| `POSTGRES_AUTOVACUUM_NAPTIME` | `30s` | Delay between autovacuum launcher rounds. |
+| `POSTGRES_DEFAULT_STATISTICS_TARGET` | `200` | Default planner statistics detail. |
+| `POSTGRES_WAL_COMPRESSION` | `on` | Compress full-page images in WAL to reduce write volume. |
+| `POSTGRES_MIN_WAL_SIZE` | `512MB` | WAL retained below normal checkpoint pressure. |
+| `POSTGRES_MAX_WAL_SIZE` | `2GB` | Soft WAL growth limit between checkpoints. |
+| `POSTGRES_CHECKPOINT_COMPLETION_TARGET` | `0.9` | Spread checkpoint writes across most of the interval. |
+| `POSTGRES_TRACK_IO_TIMING` | `on` | Collect I/O timing for production diagnosis. |
+| `POSTGRES_IDLE_IN_TRANSACTION_SESSION_TIMEOUT` | `5min` | Terminate sessions left idle while holding an open transaction. |
 | `FLYWAY_ENABLED` | `true` | Run schema migration on startup. |
+| `FLYWAY_CONNECT_RETRIES` | `10` | Number of Flyway connection retries during startup. |
 
-Create the default local database:
+Create the local database and least-privilege roles on a fresh PostgreSQL cluster:
 
-```sql
-CREATE DATABASE IF NOT EXISTS kiro_proxy
-  CHARACTER SET utf8mb4
-  COLLATE utf8mb4_unicode_ci;
+```bash
+export POSTGRES_USER=postgres
+export POSTGRES_DB=starry_api
+export STARRY_POSTGRES_MIGRATION_PASSWORD='<strong-local-migration-password>'
+export STARRY_POSTGRES_APP_PASSWORD='<strong-local-application-password>'
+
+createdb --username "$POSTGRES_USER" --encoding=UTF8 "$POSTGRES_DB"
+./docker/postgresql/init/001-starry-api-roles.sh
 ```
+
+The R2DBC and Flyway URLs set `starry_api` as the current/default schema. Do not place application tables in `public`.
+
+The Compose defaults are a conservative OLTP baseline for a node with at least 2 GiB available memory and SSD-backed storage. Recalculate buffer, cache, WAL, and connection settings from measured workload and host limits before scaling replicas. Across all service replicas, keep the sum of R2DBC pool maxima below `POSTGRES_MAX_CONNECTIONS` with headroom for Flyway, backup/restore, and operator sessions.
+
+The bootstrap grants `starry_api_owner` inherited privileges from the concrete `starry_api` login role without allowing `SET ROLE starry_api`. This narrowly permits the owner used by data-transfer maintenance to terminate only Starry API application backends during a restore; it is intentionally not granted the cluster-wide `pg_signal_backend` role.
+
+## Database Backup and Restore
+
+The data-transfer API uses PostgreSQL 17 `pg_dump`/`pg_restore` custom-format archives. Container runtimes already include matching client tools.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `STARRY_BACKUP_DIR` | `${user.home}/.starry-api/backups` | Server-side `.zip` backup directory. Each package contains `database.dump` and metadata. Compose maps this to `./data/backups`. |
+| `STARRY_MAX_IMPORT_BYTES` | `268435456` | Maximum uploaded `.dump` or `.zip` size in bytes. |
+| `STARRY_DATA_TRANSFER_PROCESS_TIMEOUT` | `30m` | Timeout for each `pg_dump` or `pg_restore` process. |
+
+ZIP exports and imports use `database.dump` as the archive entry. Database backups take a PostgreSQL session-level shared advisory lock, while restores take the matching exclusive lock, so the contract also applies across application instances. A conflicting cross-instance maintenance operation is rejected instead of allowing backup and restore snapshots to overlap.
+
+Imports accept only PostgreSQL 17 custom archives whose TOC identifies database and schema `starry_api`, contains `flyway_schema_history` and the required core tables, and contains no objects from another schema. `pg_restore --clean --single-transaction` then replaces the schema. This matches the pinned PostgreSQL 17 client and is deliberately stricter than accepting an arbitrary PostgreSQL custom archive.
+
+During restore, the migration connection revokes `CONNECT` from `starry_api_runtime`, terminates existing `starry_api` backends, creates the rollback backup from the quiesced database, and keeps runtime connections disabled until restore finishes. Before reopening access, the same owner session verifies the restored schema, every required core relation, and a successful Flyway V1 baseline, then runs `ANALYZE` so newly restored tables do not serve traffic with empty planner statistics. If the incoming `pg_restore` committed but this postcondition fails, the service automatically restores the pre-restore dump and validates and analyzes it again; rollback failures are retained as suppressed diagnostics. `CONNECT` is restored in a `finally` path, including failed restores. The local instance clears all database-derived caches and sessions whenever it entered the restore isolation window; other instances do the same when their PostgreSQL notification listener reconnects. Cache generations prevent an older in-flight refresh from repopulating state after invalidation. Administrators and users should expect in-flight requests to fail and administrator sessions to require a new login after a restore.
 
 ## Runtime and Upstream Adapter
 
@@ -49,6 +101,7 @@ CREATE DATABASE IF NOT EXISTS kiro_proxy
 | `KIRO_ACCOUNT_SELECTION_STRATEGY` | `round_robin` | `round_robin` or `sticky`. |
 | `KIRO_SESSION_AFFINITY_ENABLED` | `true` | Route same session hint to same upstream account when possible. |
 | `KIRO_SESSION_AFFINITY_TTL` | `10m` | Session affinity TTL. |
+| `KIRO_SESSION_AFFINITY_MAXIMUM_SIZE` | `100000` | Maximum in-memory session-affinity entries per application instance. |
 | `KIRO_BASE_COOLDOWN` | `60s` | Base cooldown for recoverable account errors. |
 | `KIRO_QUOTA_RESET` | `1h` | Planned quota reset duration. |
 | `KIRO_PROBABILISTIC_RETRY` | `0.1` | Chance to probe a cooling account early. |
@@ -89,7 +142,16 @@ For Tencent Exmail, configure `smtp.exmail.qq.com:465` with `smtp_security=ssl`,
 
 ## Payment Settings
 
-Online balance recharge is configured from the admin console, not environment variables:
+Online balance recharge business rules are configured from the admin console. The reconciliation workers have separate deployment-level scheduling controls:
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `STARRY_PAYMENT_RECONCILIATION_INTERVAL` | `PT30S` | Delay between local pending-order reconciliation runs. |
+| `STARRY_PAYMENT_RECONCILIATION_INITIAL_DELAY` | `PT30S` | Delay before the first local pending-order reconciliation run. |
+| `STARRY_PAYMENT_PROVIDER_RECONCILIATION_INTERVAL` | `PT30S` | Delay between payment-provider reconciliation runs. |
+| `STARRY_PAYMENT_PROVIDER_RECONCILIATION_INITIAL_DELAY` | `PT45S` | Delay before the first payment-provider reconciliation run. |
+
+Business settings:
 
 - Admin path: `支付设置`
 - User path: `余额充值`
@@ -126,19 +188,48 @@ The service records performance samples into `performance_metrics` every 30 seco
 - system memory
 - Linux network receive/transmit counters and per-second rates
 
-The admin dashboard reads `GET /admin/performance` and displays the latest 120 samples. Samples older than 7 days are purged by the scheduled sampler.
+The admin dashboard reads `GET /admin/performance` and displays the latest 120 samples. Samples older than 7 days are purged daily at 03:15 UTC.
+
+## Request Analytics and Retention
+
+Completed request-log hours are incrementally rolled into hourly and daily tables. A PostgreSQL advisory lock and `aggregation_watermarks` prevent overlapping workers. Each batch advances a bounded number of hours in its own short transaction and rebuilds a configurable lookback window to absorb delayed commits.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `STARRY_STATS_AGGREGATION_ENABLED` | `true` | Enable request-usage aggregation and partition maintenance. |
+| `STARRY_STATS_AGGREGATION_INTERVAL` | `PT1M` | Delay between incremental aggregation runs. |
+| `STARRY_STATS_AGGREGATION_INITIAL_DELAY` | `PT30S` | Delay before the first aggregation run after startup. |
+| `STARRY_STATS_AGGREGATION_MAX_ADVANCE_HOURS` | `1` | Maximum new hours advanced per transaction; accepted range is 1-168. |
+| `STARRY_STATS_AGGREGATION_LOOKBACK_HOURS` | `6` | Completed hours rebuilt on every advancing batch to absorb late commits; accepted range is 1-168. |
+| `STARRY_STATS_AGGREGATION_MAX_BATCHES_PER_RUN` | `6` | Maximum sequential short transactions per scheduled run; accepted range is 1-100. |
+| `STARRY_STATS_MAINTENANCE_CRON` | `0 25 3 * * *` | UTC cron for partition/retention maintenance. |
+| `STARRY_STATS_PARTITION_MONTHS_AHEAD` | `12` | Monthly `request_logs` partitions to pre-create; accepted range is 1-60. |
+| `STARRY_STATS_RAW_RETENTION_MONTHS` | `4` | Raw monthly partitions to retain; the enforced minimum of four calendar months guarantees at least 90 days. |
+| `STARRY_STATS_RAW_DEFAULT_DELETE_BATCH_SIZE` | `10000` | Expired rows removed from the raw default partition per short transaction; accepted range is 100-100000. |
+| `STARRY_STATS_RAW_DEFAULT_DELETE_MAX_BATCHES` | `20` | Maximum raw default-partition cleanup transactions per maintenance run; accepted range is 1-100. |
+| `STARRY_STATS_HOURLY_RETENTION_DAYS` | `90` | Hourly aggregate retention; accepted range is 7-3650 days. Daily aggregates remain available for long-range analytics. |
+| `STARRY_STATS_HOURLY_DELETE_BATCH_SIZE` | `10000` | Expired hourly aggregates removed per short transaction; accepted range is 100-100000. |
+| `STARRY_STATS_HOURLY_DELETE_MAX_BATCHES` | `20` | Maximum hourly aggregate cleanup transactions per maintenance run; accepted range is 1-100. |
+| `STARRY_STATS_USAGE_EVENT_RETENTION_DAYS` | `400` | Billing-idempotency event retention; accepted range is 30-3650 days. The immutable balance ledger is not pruned. |
+| `STARRY_STATS_USAGE_EVENT_DELETE_BATCH_SIZE` | `10000` | Rows removed per short retention transaction; accepted range is 100-100000. |
+| `STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES` | `20` | Maximum retention transactions per maintenance run; accepted range is 1-100. |
+
+Keep aggregation enabled in production. Disabling it also disables automatic partition creation and retention maintenance. Raw request-log partitions are never dropped while the aggregation watermark still has backlog, so recovery after a long outage favors complete rollups over immediate space reclamation.
 
 ## Recommended Local Environment
 
 ```bash
+export SERVER_ADDRESS=127.0.0.1
 export SERVER_PORT=8080
-export MYSQL_HOST=127.0.0.1
-export MYSQL_PORT=3306
-export MYSQL_DATABASE=kiro_proxy
-export MYSQL_USERNAME=root
-export MYSQL_PASSWORD=
-export MYSQL_POOL_INITIAL_SIZE=8
-export MYSQL_POOL_MAX_SIZE=80
+export POSTGRES_HOST=localhost
+export POSTGRES_PORT=5432
+export POSTGRES_DATABASE=starry_api
+export POSTGRES_USERNAME=starry_api
+export POSTGRES_PASSWORD="$STARRY_POSTGRES_APP_PASSWORD"
+export POSTGRES_MIGRATION_USERNAME=starry_api_migration
+export POSTGRES_MIGRATION_PASSWORD="$STARRY_POSTGRES_MIGRATION_PASSWORD"
+export POSTGRES_POOL_INITIAL_SIZE=4
+export POSTGRES_POOL_MAX_SIZE=20
 export KIRO_WEBUI_URL=http://127.0.0.1:5173/#/login
 export KIRO_ADMIN_SESSION_TTL=12h
 export KIRO_ALLOW_ANONYMOUS_PROXY=false
@@ -168,7 +259,8 @@ Session affinity is applied before normal selection when a session hint is prese
 - Set `KIRO_ADMIN_TOKEN` only for emergency or automation paths.
 - Keep `KIRO_ALLOW_ANONYMOUS_PROXY=false`.
 - Put the service behind TLS.
-- Use a dedicated MySQL user.
+- Keep the dedicated `starry_api` runtime role and `starry_api_migration` Flyway role separate; do not grant DDL privileges to the runtime role.
+- Keep the `starry_api` schema first in `search_path` and monitor connection saturation, slow queries, autovacuum, and replication/backup health.
 - Monitor `/actuator/health` and `/actuator/prometheus`.
 - Disable Swagger/OpenAPI in public production environments if needed:
 

@@ -50,7 +50,7 @@ export const dataTransferApi = {
     );
   },
   exportDatabase() {
-    return download('/admin/data-transfer/database.sql', 'starry-api-database.sql');
+    return download('/admin/data-transfer/database.dump', 'starry-api-database.dump');
   },
   exportBackup() {
     return download('/admin/data-transfer/backup.zip', 'starry-api-backup.zip');

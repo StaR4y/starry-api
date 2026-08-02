@@ -4,11 +4,18 @@ This service becomes a reverse proxy as soon as the `service` module starts. The
 
 ## Start the Reverse Proxy
 
-Create the database once:
+On a fresh PostgreSQL 17 cluster, create the database and least-privilege roles once:
 
 ```bash
-mysql -uroot -e "CREATE DATABASE IF NOT EXISTS kiro_proxy CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+export POSTGRES_USER=postgres
+export POSTGRES_DB=starry_api
+export STARRY_POSTGRES_MIGRATION_PASSWORD='<strong-local-migration-password>'
+export STARRY_POSTGRES_APP_PASSWORD='<strong-local-application-password>'
+createdb --username "$POSTGRES_USER" --encoding=UTF8 "$POSTGRES_DB"
+./docker/postgresql/init/001-starry-api-roles.sh
 ```
+
+Before starting outside Compose, set `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DATABASE=starry_api`, `POSTGRES_USERNAME=starry_api`, `POSTGRES_PASSWORD`, `POSTGRES_MIGRATION_USERNAME=starry_api_migration`, and `POSTGRES_MIGRATION_PASSWORD`.
 
 Start with Gradle:
 
@@ -234,10 +241,10 @@ Log in as an administrator and open `数据管理`.
 
 Available operations:
 
-- `导出 SQL`: downloads a full SQL dump with table structure and data.
-- `下载 ZIP`: downloads a portable backup package containing `database.sql`, `metadata.json`, and a README.
-- `创建备份`: writes a ZIP backup to the server backup directory.
-- `导入并恢复`: uploads a `.sql` or Starry API `.zip` backup and restores it into the current database.
+- `导出 DUMP`: downloads a PostgreSQL custom-format archive containing schema and data.
+- `下载 ZIP`: downloads a portable package containing `database.dump`, `metadata.json`, and a README.
+- `创建备份`: writes a `.zip` package containing `database.dump` and metadata to the server backup directory.
+- `导入并恢复`: uploads a PostgreSQL `.dump` or Starry API `.zip` package and restores it into the current database.
 
 Importing data is intentionally guarded. The WebUI asks you to type:
 
@@ -245,7 +252,39 @@ Importing data is intentionally guarded. The WebUI asks you to type:
 RESTORE_DATABASE
 ```
 
-Before every import, the service automatically creates a server-side rollback backup. The import endpoint is still destructive because the exported SQL includes `DROP TABLE IF EXISTS` statements, so keep an offline copy before migrating production data.
+Before every import, the service validates the custom archive with `pg_restore` and then checks the archive TOC. Only PostgreSQL 17 archives for database/schema `starry_api` are accepted; they must contain Flyway history and the core application tables and must not contain another schema. The runtime image includes PostgreSQL 17 client tools; hosts running the jar directly must provide PostgreSQL 17 `pg_dump` and `pg_restore` commands in `PATH`.
+
+Backups use a PostgreSQL session shared advisory lock and restores use the matching exclusive lock. These locks coordinate all service instances, not only threads in one JVM. After acquiring the exclusive lock, restore performs this sequence:
+
+1. Revoke database `CONNECT` from `starry_api_runtime` and terminate existing `starry_api` backends.
+2. Create a server-side rollback backup from the quiesced database.
+3. Run `pg_restore --clean --if-exists --single-transaction --exit-on-error` for schema `starry_api`.
+4. Verify that schema `starry_api`, all required core tables, and the successful Flyway V1 record exist, then run `ANALYZE` while runtime access is still disabled. If validation or analysis fails after the incoming restore committed, automatically clean-restore the pre-restore dump and validate and analyze the rollback result before reopening access.
+5. Restore `CONNECT` in a `finally` path, then clear local sessions and database-derived caches even when restore failed after entering isolation.
+6. Let other instances reconnect their PostgreSQL notification listeners; every successful listener reconnect performs the same full local-state invalidation. Generation checks prevent pre-restore asynchronous cache loads from publishing stale state afterward.
+
+The restore window is intentionally disruptive. Route no new traffic to the deployment, expect in-flight API/database requests to fail, and expect administrators to sign in again afterward. Restore is destructive even though it is transactional, so retain an offline backup in addition to the automatically created rollback package.
+
+After either a successful or failed restore, verify runtime access and connection recovery with a migration/superuser session:
+
+```sql
+SELECT pg_catalog.has_database_privilege(
+    'starry_api_runtime',
+    'starry_api',
+    'CONNECT'
+) AS runtime_connect_restored;
+
+SELECT pid, usename, application_name, state
+FROM pg_catalog.pg_stat_activity
+WHERE datname = 'starry_api'
+ORDER BY pid;
+```
+
+`runtime_connect_restored` must be `true`. If both the primary and fallback `finally` connection failed during a database/network outage, restore access as the database owner or cluster administrator before restarting application instances:
+
+```sql
+GRANT CONNECT ON DATABASE starry_api TO starry_api_runtime;
+```
 
 Deployment notes:
 
@@ -256,7 +295,7 @@ Deployment notes:
 Admin API examples:
 
 ```bash
-curl -OJ http://127.0.0.1:8080/admin/data-transfer/database.sql \
+curl -OJ http://127.0.0.1:8080/admin/data-transfer/database.dump \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 
 curl -OJ http://127.0.0.1:8080/admin/data-transfer/backup.zip \
@@ -268,7 +307,28 @@ curl -X POST http://127.0.0.1:8080/admin/data-transfer/backups \
 curl -X POST 'http://127.0.0.1:8080/admin/data-transfer/import?confirm=RESTORE_DATABASE' \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -F "file=@/path/to/starry-api-backup.zip"
+
+curl -X POST 'http://127.0.0.1:8080/admin/data-transfer/import?confirm=RESTORE_DATABASE' \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -F "file=@/path/to/starry-api-database.dump"
 ```
+
+## Request Log Aggregation and Retention
+
+The service aggregates only completed UTC hours into `request_usage_hourly`, then applies the affected deltas to `request_usage_daily`. `aggregation_watermarks` records progress, a configurable lookback window is rebuilt for late commits, and a PostgreSQL advisory lock prevents concurrent workers from duplicating maintenance. Every batch commits separately so catch-up work does not hold one long transaction.
+
+By default:
+
+- incremental aggregation runs every minute after a 30-second startup delay, advances one new hour per transaction, and performs at most six transactions per run
+- maintenance runs daily at 03:25 UTC
+- 12 future monthly `request_logs` partitions are pre-created
+- four calendar months of raw partitions are retained, guaranteeing at least 90 days; exceptional old rows in the default partition are pruned in bounded transactions
+- hourly aggregates are retained for 90 days and pruned in bounded transactions; daily aggregates serve longer-range queries
+- API billing idempotency events are retained for 400 days and pruned in bounded batches; the immutable balance ledger is retained indefinitely
+
+Raw `request_logs` partitions are dropped only after the aggregation watermark is fully caught up. After a long outage, monitor the watermark and disk usage while the bounded batches recover; retention resumes automatically once the backlog reaches the latest completed hour.
+
+Configure these policies with `STARRY_STATS_AGGREGATION_ENABLED`, `STARRY_STATS_AGGREGATION_INTERVAL`, `STARRY_STATS_AGGREGATION_INITIAL_DELAY`, the `STARRY_STATS_AGGREGATION_*_HOURS` and `STARRY_STATS_AGGREGATION_MAX_BATCHES_PER_RUN` controls, `STARRY_STATS_MAINTENANCE_CRON`, `STARRY_STATS_PARTITION_MONTHS_AHEAD`, and the `STARRY_STATS_RAW_*`, `STARRY_STATS_HOURLY_*`, and `STARRY_STATS_USAGE_EVENT_*` variables. Keep aggregation enabled in production because the same worker owns partition creation and retention cleanup.
 
 ## Configure Online Recharge
 

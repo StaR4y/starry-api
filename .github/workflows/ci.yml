@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    name: Java 25, WebUI, PostgreSQL 17
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      TEST_POSTGRES_IMAGE: postgres:17-alpine
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: gradle
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+
+      - name: Verify Docker
+        run: docker info
+
+      - name: Test installer rollback paths
+        run: ./scripts/test-install-server.sh
+
+      - name: Run all tests and build WebUI
+        run: ./gradlew --no-daemon clean test :webui:npmBuild
+
+      - name: Verify PostgreSQL integration tests ran
+        run: |
+          report="service/build/test-results/test/TEST-tech.starryapi.postgresql.PostgreSqlBaselineIntegrationTest.xml"
+          test -f "$report"
+          grep -Eq 'tests="[1-9][0-9]*"' "$report"
+          grep -q 'skipped="0"' "$report"
+          grep -q 'failures="0"' "$report"
+          grep -q 'errors="0"' "$report"
+
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-17-test-reports
+          path: service/build/reports/tests/test
+          if-no-files-found: ignore
+
+  postgresql-18:
+    name: PostgreSQL 18 compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      TEST_POSTGRES_IMAGE: postgres:18-alpine
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: gradle
+
+      - name: Verify Docker
+        run: docker info
+
+      - name: Run PostgreSQL integration tests
+        run: ./gradlew --no-daemon :service:test --tests 'tech.starryapi.postgresql.*'
+
+      - name: Verify PostgreSQL integration tests ran
+        run: |
+          report="service/build/test-results/test/TEST-tech.starryapi.postgresql.PostgreSqlBaselineIntegrationTest.xml"
+          test -f "$report"
+          grep -Eq 'tests="[1-9][0-9]*"' "$report"
+          grep -q 'skipped="0"' "$report"
+          grep -q 'failures="0"' "$report"
+          grep -q 'errors="0"' "$report"
+
+      - name: Upload test reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-18-test-reports
+          path: service/build/reports/tests/test
+          if-no-files-found: ignore

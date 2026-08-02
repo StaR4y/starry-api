@@ -1,4 +1,5 @@
 server:
+  address: ${SERVER_ADDRESS:127.0.0.1}
   port: ${SERVER_PORT:8080}
   shutdown: graceful
   compression:
@@ -12,23 +13,39 @@ spring:
   lifecycle:
     timeout-per-shutdown-phase: 20s
   r2dbc:
-    url: r2dbc:mysql://${MYSQL_HOST:127.0.0.1}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:kiro_proxy}?useServerPrepareStatement=true&tcpKeepAlive=true
-    username: ${MYSQL_USERNAME:root}
-    password: ${MYSQL_PASSWORD:}
+    url: r2dbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DATABASE:starry_api}?schema=starry_api&sslMode=${POSTGRES_SSL_MODE:disable}&tcpKeepAlive=true&applicationName=starry-api&preparedStatementCacheQueries=${POSTGRES_PREPARED_STATEMENT_CACHE_QUERIES:256}&statementTimeout=${POSTGRES_STATEMENT_TIMEOUT:PT2M}&lockWaitTimeout=${POSTGRES_LOCK_WAIT_TIMEOUT:PT5S}
+    username: ${POSTGRES_USERNAME:starry_api}
+    password: ${POSTGRES_PASSWORD:}
     pool:
-      initial-size: ${MYSQL_POOL_INITIAL_SIZE:8}
-      max-size: ${MYSQL_POOL_MAX_SIZE:80}
+      initial-size: ${POSTGRES_POOL_INITIAL_SIZE:4}
+      max-size: ${POSTGRES_POOL_MAX_SIZE:20}
+      max-acquire-time: ${POSTGRES_POOL_MAX_ACQUIRE_TIME:5s}
+      max-create-connection-time: ${POSTGRES_POOL_MAX_CREATE_CONNECTION_TIME:5s}
       max-idle-time: 30m
-      validation-query: SELECT 1
+      max-life-time: ${POSTGRES_POOL_MAX_LIFE_TIME:2h}
+      validation-depth: local
   flyway:
     enabled: ${FLYWAY_ENABLED:true}
-    url: jdbc:mysql://${MYSQL_HOST:127.0.0.1}:${MYSQL_PORT:3306}/${MYSQL_DATABASE:kiro_proxy}?useUnicode=true&characterEncoding=utf8&serverTimezone=UTC
-    user: ${MYSQL_USERNAME:root}
-    password: ${MYSQL_PASSWORD:}
+    url: jdbc:postgresql://${POSTGRES_HOST:localhost}:${POSTGRES_PORT:5432}/${POSTGRES_DATABASE:starry_api}?currentSchema=starry_api&sslmode=${POSTGRES_SSL_MODE:disable}&tcpKeepAlive=true&ApplicationName=starry-api-flyway
+    user: ${POSTGRES_MIGRATION_USERNAME:starry_api_migration}
+    password: ${POSTGRES_MIGRATION_PASSWORD:}
+    default-schema: starry_api
+    schemas: starry_api
+    create-schemas: false
+    init-sqls:
+      - SET ROLE starry_api_owner
+    connect-retries: ${FLYWAY_CONNECT_RETRIES:10}
+    clean-disabled: true
   jackson:
     default-property-inclusion: non_null
   codec:
     max-in-memory-size: ${SPRING_CODEC_MAX_IN_MEMORY_SIZE:16MB}
+  webflux:
+    multipart:
+      max-in-memory-size: 256KB
+      max-headers-size: 16KB
+      max-disk-usage-per-part: ${STARRY_MAX_IMPORT_BYTES:268435456}B
+      max-parts: 2
 
 management:
   endpoints:
@@ -50,6 +67,30 @@ starry:
   data-transfer:
     backup-dir: ${STARRY_BACKUP_DIR:${user.home}/.starry-api/backups}
     max-import-bytes: ${STARRY_MAX_IMPORT_BYTES:268435456}
+    process-timeout: ${STARRY_DATA_TRANSFER_PROCESS_TIMEOUT:30m}
+  stats:
+    aggregation-enabled: ${STARRY_STATS_AGGREGATION_ENABLED:true}
+    aggregation-interval: ${STARRY_STATS_AGGREGATION_INTERVAL:PT1M}
+    aggregation-initial-delay: ${STARRY_STATS_AGGREGATION_INITIAL_DELAY:PT30S}
+    aggregation-max-advance-hours: ${STARRY_STATS_AGGREGATION_MAX_ADVANCE_HOURS:1}
+    aggregation-lookback-hours: ${STARRY_STATS_AGGREGATION_LOOKBACK_HOURS:6}
+    aggregation-max-batches-per-run: ${STARRY_STATS_AGGREGATION_MAX_BATCHES_PER_RUN:6}
+    maintenance-cron: ${STARRY_STATS_MAINTENANCE_CRON:0 25 3 * * *}
+    partition-months-ahead: ${STARRY_STATS_PARTITION_MONTHS_AHEAD:12}
+    raw-retention-months: ${STARRY_STATS_RAW_RETENTION_MONTHS:4}
+    raw-default-delete-batch-size: ${STARRY_STATS_RAW_DEFAULT_DELETE_BATCH_SIZE:10000}
+    raw-default-delete-max-batches: ${STARRY_STATS_RAW_DEFAULT_DELETE_MAX_BATCHES:20}
+    hourly-retention-days: ${STARRY_STATS_HOURLY_RETENTION_DAYS:90}
+    hourly-delete-batch-size: ${STARRY_STATS_HOURLY_DELETE_BATCH_SIZE:10000}
+    hourly-delete-max-batches: ${STARRY_STATS_HOURLY_DELETE_MAX_BATCHES:20}
+    usage-event-retention-days: ${STARRY_STATS_USAGE_EVENT_RETENTION_DAYS:400}
+    usage-event-delete-batch-size: ${STARRY_STATS_USAGE_EVENT_DELETE_BATCH_SIZE:10000}
+    usage-event-delete-max-batches: ${STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES:20}
+  payment:
+    reconciliation-interval: ${STARRY_PAYMENT_RECONCILIATION_INTERVAL:PT30S}
+    reconciliation-initial-delay: ${STARRY_PAYMENT_RECONCILIATION_INITIAL_DELAY:PT30S}
+    provider-reconciliation-interval: ${STARRY_PAYMENT_PROVIDER_RECONCILIATION_INTERVAL:PT30S}
+    provider-reconciliation-initial-delay: ${STARRY_PAYMENT_PROVIDER_RECONCILIATION_INITIAL_DELAY:PT45S}
 
 kiro:
   proxy:
@@ -63,6 +104,7 @@ kiro:
     account-selection-strategy: ${KIRO_ACCOUNT_SELECTION_STRATEGY:round_robin}
     session-affinity-enabled: ${KIRO_SESSION_AFFINITY_ENABLED:true}
     session-affinity-ttl: ${KIRO_SESSION_AFFINITY_TTL:10m}
+    session-affinity-maximum-size: ${KIRO_SESSION_AFFINITY_MAXIMUM_SIZE:100000}
     base-cooldown: ${KIRO_BASE_COOLDOWN:60s}
     quota-reset: ${KIRO_QUOTA_RESET:1h}
     probabilistic-retry-chance: ${KIRO_PROBABILISTIC_RETRY:0.1}

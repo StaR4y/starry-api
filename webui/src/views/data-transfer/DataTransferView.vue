@@ -38,7 +38,7 @@
     downloading.value = 'database';
     try {
       saveDownloadedFile(await dataTransferApi.exportDatabase());
-      ElMessage.success('数据库 SQL 已开始下载');
+      ElMessage.success('PostgreSQL 数据库归档已开始下载');
     } finally {
       downloading.value = '';
     }
@@ -76,12 +76,18 @@
 
   async function importData() {
     if (!selectedFile.value) {
-      ElMessage.warning('请先选择 .sql 或 .zip 备份文件');
+      ElMessage.warning('请先选择 .dump 或 .zip 备份文件');
+      return;
+    }
+
+    const lowerName = selectedFile.value.name.toLowerCase();
+    if (!lowerName.endsWith('.dump') && !lowerName.endsWith('.zip')) {
+      ElMessage.warning('仅支持 PostgreSQL .dump 或 Starry API .zip 备份文件');
       return;
     }
 
     const promptResult = await ElMessageBox.prompt(
-      '导入会执行备份中的 SQL 并覆盖当前数据库。系统会在导入前自动创建一份服务器备份。请输入 RESTORE_DATABASE 确认继续。',
+      '导入会用 PostgreSQL 归档覆盖当前数据库。系统会在导入前自动创建一份服务器备份。请输入 RESTORE_DATABASE 确认继续。',
       '确认导入数据库',
       {
         confirmButtonText: '开始导入',
@@ -97,9 +103,10 @@
     importing.value = true;
     try {
       const result = await dataTransferApi.importBackup(selectedFile.value);
-      ElMessage.success(
-        `导入完成，执行 ${formatNumber(result.statements)} 条语句，回滚备份：${result.preRestoreBackupName}`,
-      );
+      const rollbackBackup = result.preRestoreBackupName
+        ? `，回滚备份：${result.preRestoreBackupName}`
+        : '';
+      ElMessage.success(`PostgreSQL 数据库恢复完成${rollbackBackup}`);
       selectedFile.value = null;
       if (fileInput.value) fileInput.value.value = '';
       await load();
@@ -173,8 +180,8 @@
       <section class="action-grid">
         <article class="operation-card">
           <div>
-            <h3>导出数据库 SQL</h3>
-            <p>下载可直接恢复的 SQL 文件，包含表结构和数据。</p>
+            <h3>导出 PostgreSQL 归档</h3>
+            <p>下载 custom-format 数据库归档，包含表结构和数据。</p>
           </div>
           <el-button
             type="primary"
@@ -182,14 +189,14 @@
             :loading="downloading === 'database'"
             @click="exportDatabase"
           >
-            导出 SQL
+            导出 DUMP
           </el-button>
         </article>
 
         <article class="operation-card">
           <div>
             <h3>下载完整备份包</h3>
-            <p>打包 database.sql、备份元数据和说明文件，适合跨服务器迁移。</p>
+            <p>打包 database.dump、备份元数据和说明文件，适合跨服务器迁移。</p>
           </div>
           <el-button :icon="Download" :loading="downloading === 'backup'" @click="exportBackup">
             下载 ZIP
@@ -213,7 +220,7 @@
           <div>
             <strong>导入会修改当前数据库</strong>
             <p>
-              支持上传 .sql 或 Starry API .zip
+              支持上传 PostgreSQL .dump 或 Starry API .zip
               备份包。导入前会自动创建回滚备份，但仍建议先下载一份离线备份。
             </p>
           </div>
@@ -224,7 +231,7 @@
             ref="fileInput"
             class="import-panel__file"
             type="file"
-            accept=".sql,.zip,application/sql,application/zip"
+            accept=".dump,.zip"
             @change="handleFileChange"
           >
           <el-button :icon="Upload" @click="chooseFile">选择文件</el-button>

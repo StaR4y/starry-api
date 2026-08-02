@@ -7,6 +7,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -29,6 +30,7 @@ public class ModelMappingService {
 
     private final ModelMappingRepository repository;
     private final ObjectMapper objectMapper;
+    private final AtomicLong cacheGeneration = new AtomicLong();
     private volatile List<ModelMappingEntity> cachedRules = List.of();
 
     public ModelMappingService(ModelMappingRepository repository, ObjectMapper objectMapper) {
@@ -112,10 +114,22 @@ public class ModelMappingService {
     }
 
     public Mono<Void> refresh() {
-        return repository.findAllByEnabledTrueOrderByPriorityAsc()
-            .collectList()
-            .doOnNext(rules -> cachedRules = List.copyOf(rules))
-            .then();
+        return Mono.defer(() -> {
+            long generation = cacheGeneration.get();
+            return repository.findAllByEnabledTrueOrderByPriorityAsc()
+                .collectList()
+                .doOnNext(rules -> {
+                    if (cacheGeneration.get() == generation) {
+                        cachedRules = List.copyOf(rules);
+                    }
+                })
+                .then();
+        });
+    }
+
+    public void invalidateAllCaches() {
+        cacheGeneration.incrementAndGet();
+        cachedRules = List.of();
     }
 
     private boolean matchesApiKey(ModelMappingEntity rule, String apiKeyId) {

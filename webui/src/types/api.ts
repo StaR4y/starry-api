@@ -194,8 +194,7 @@ export interface DeleteBackupResponse {
 
 export interface ImportDataResult {
   fileName: string;
-  sourceType: 'SQL' | 'ZIP' | string;
-  statements: number;
+  sourceType: 'DUMP' | 'ZIP' | string;
   preRestoreBackupName: string | null;
   importedAt: string;
 }

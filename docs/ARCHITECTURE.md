@@ -137,7 +137,9 @@ OpenAI, Google/Gemini, and Anthropic catalog entries include both legacy short a
 
 ## Persistent State
 
-Flyway creates these tables:
+PostgreSQL 17 is the persistence baseline. The database and application schema are both named `starry_api`; Flyway installs a fresh baseline into that schema. Identifiers that users treat case-insensitively use functional `lower(...)` indexes, while tokens, hashes, and IDs remain case-sensitive.
+
+Flyway creates these primary tables:
 
 | Table | Purpose |
 | --- | --- |
@@ -145,8 +147,16 @@ Flyway creates these tables:
 | `api_keys` | Per-user API key owner, full key copy value for new keys, hashes, status, limits, and aggregate usage. |
 | `api_key_usage_daily` | Daily API key usage summary. |
 | `model_mappings` | Model alias/replacement/load-balancing rules. |
-| `request_logs` | Request history, status, token use, latency, errors. |
+| `request_logs` | Monthly range-partitioned request history with time, API key, account, and BRIN indexes. |
+| `request_usage_hourly` / `request_usage_daily` | Long-range request/token/cost aggregates for analytics. |
+| `aggregation_watermarks` | Incremental aggregation progress. |
+| `performance_metrics` | Runtime CPU, memory, and network samples. |
 | `admin_users` | Local admin users, password hashes, roles, first-login state. |
+| `system_settings` | Runtime registration, payment, and account-pool settings. |
+| `payment_orders` | Recharge order state and crediting status. |
+| `invite_codes` / `redemption_codes` | Registration invitation and balance redemption codes. |
+| `invite_rebate_records` | Idempotent invite rebate records. |
+| `balance_ledger` | Auditable, idempotent balance mutations. |
 | `flyway_schema_history` | Flyway migration history. |
 
 ## Account Pool Behavior

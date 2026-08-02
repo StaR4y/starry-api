@@ -32,9 +32,8 @@ public class AccountAutoSuspendService {
     }
 
     Mono<Void> testIfNeeded(AccountPoolService.RequestFailureRecord record) {
-        if (record == null || record.accountId() == null || record.accountId().isBlank()) {
-            return Mono.empty();
-        }
+        if (record == null || record.accountId() == null || record.accountId().isBlank()) return Mono.empty();
+
         if (record.consecutiveFailures() != FAILURE_THRESHOLD) {
             return Mono.empty();
         }

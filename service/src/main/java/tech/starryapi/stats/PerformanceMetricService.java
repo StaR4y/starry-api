@@ -43,9 +43,13 @@ public class PerformanceMetricService {
 
     @Scheduled(fixedDelay = 30_000, initialDelay = 30_000)
     public void scheduledSample() {
-        sample()
-            .then(repository.deleteBySampledAtBefore(Instant.now().minus(RETENTION)))
-            .subscribe(null, error -> log.warn("Failed to sample performance metrics", error));
+        sample().subscribe(null, error -> log.warn("Failed to sample performance metrics", error));
+    }
+
+    @Scheduled(cron = "0 15 3 * * *", zone = "UTC")
+    public void scheduledCleanup() {
+        repository.deleteBySampledAtBefore(Instant.now().minus(RETENTION))
+            .subscribe(null, error -> log.warn("Failed to clean up performance metrics", error));
     }
 
     public Mono<Void> sample() {

@@ -36,6 +36,16 @@
   const turnstileWidgetId = ref<string | null>(null);
   let turnstileScriptPromise: Promise<void> | null = null;
   const AFFILIATE_STORAGE_KEY = 'starry-api-pending-affiliate-code';
+  const REGISTRATION_POLICY_ERROR_CODES = new Set([
+    'REGISTRATION_POLICY_CHANGED',
+    'REGISTRATION_POLICY_INVALID',
+    'REGISTRATION_EMAIL_POLICY_INVALID',
+    'REGISTRATION_DISABLED',
+    'INVITE_REGISTRATION_DISABLED',
+    'EMAIL_SUFFIX_NOT_ALLOWED',
+    'TURNSTILE_INVALID',
+    'TURNSTILE_NOT_CONFIGURED',
+  ]);
 
   declare global {
     interface Window {
@@ -357,13 +367,26 @@
   }
 
   async function handleTurnstileError(err: unknown, fallback: string) {
-    if (err instanceof ApiError && err.code === 'TURNSTILE_REQUIRED') {
-      turnstileEnabled.value = true;
-      registerVisible.value = true;
-      await loadRegistrationSettings();
-      await renderTurnstileWhenReady();
-      ElMessage.warning('请先完成 Cloudflare Turnstile 人机验证');
-      return;
+    if (err instanceof ApiError) {
+      if (err.code === 'TURNSTILE_REQUIRED') {
+        turnstileEnabled.value = true;
+        registerVisible.value = true;
+        removeTurnstile();
+        await loadRegistrationSettings();
+        await renderTurnstileWhenReady();
+        ElMessage.warning('请先完成 Cloudflare Turnstile 人机验证');
+        return;
+      }
+      if (REGISTRATION_POLICY_ERROR_CODES.has(err.code)) {
+        removeTurnstile();
+        await loadRegistrationSettings();
+        if (!emailVerifyEnabled.value) {
+          registerForm.emailVerificationToken = '';
+        }
+        await renderTurnstileWhenReady();
+        ElMessage.error(err.message || fallback);
+        return;
+      }
     }
     ElMessage.error((err as Error).message || fallback);
   }

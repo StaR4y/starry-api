@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.UUID;
@@ -141,10 +142,15 @@ public class AccountTestService {
         if (ids.isEmpty()) {
             return repository.findAll().map(AccountTarget::found);
         }
-        return Flux.fromIterable(ids)
-            .flatMap(id -> repository.findByAccountId(id)
-                .map(AccountTarget::found)
-                .defaultIfEmpty(AccountTarget.missing(id)));
+        return repository.findAllByAccountIdIn(ids)
+            .collectMap(ProxyAccountEntity::getAccountId)
+            .flatMapMany(accountsById -> Flux.fromIterable(ids)
+                .map(id -> accountTarget(id, accountsById)));
+    }
+
+    private AccountTarget accountTarget(String accountId, Map<String, ProxyAccountEntity> accountsById) {
+        ProxyAccountEntity account = accountsById.get(accountId);
+        return account == null ? AccountTarget.missing(accountId) : AccountTarget.found(account);
     }
 
     private Mono<AccountDtos.TestAccountItemResponse> testTarget(AccountTarget target, AccountDtos.TestAccountsRequest request) {

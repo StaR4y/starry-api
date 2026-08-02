@@ -9,6 +9,7 @@ import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Sinks;
 import tech.starryapi.common.ApiException;
 
 class ModelMappingServiceTest {
@@ -66,5 +67,26 @@ class ModelMappingServiceTest {
         assertThatExceptionOfType(ApiException.class)
             .isThrownBy(() -> service.create(request).block())
             .withMessageContaining("sourceModel");
+    }
+
+    @Test
+    void invalidationPreventsInFlightRefreshFromPublishingPreRestoreRules() {
+        ModelMappingRepository repository = Mockito.mock(ModelMappingRepository.class);
+        Sinks.Many<ModelMappingEntity> staleQuery = Sinks.many().unicast().onBackpressureBuffer();
+        when(repository.findAllByEnabledTrueOrderByPriorityAsc()).thenReturn(staleQuery.asFlux());
+        ModelMappingEntity staleRule = new ModelMappingEntity();
+        staleRule.setEnabled(true);
+        staleRule.setMappingType("replace");
+        staleRule.setSourceModel("gpt-*");
+        staleRule.setTargetModels("[\"stale-target\"]");
+        staleRule.setPriority(1);
+        ModelMappingService service = new ModelMappingService(repository, new ObjectMapper());
+
+        service.refresh().subscribe();
+        service.invalidateAllCaches();
+        staleQuery.tryEmitNext(staleRule);
+        staleQuery.tryEmitComplete();
+
+        assertThat(service.apply("gpt-5", "key-1")).isEqualTo("gpt-5");
     }
 }

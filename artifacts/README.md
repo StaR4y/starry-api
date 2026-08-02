@@ -2,6 +2,8 @@
 
 This directory stores the latest checked-in deployable package for servers that should not build Gradle/npm sources.
 
+The deployment bundle targets PostgreSQL 17. Its Compose stack initializes database `starry_api`, while Flyway and R2DBC use schema `starry_api`; the service runtime includes PostgreSQL 17 client tools for custom-format backup and restore.
+
 Generated files:
 
 - `starry-api-bundle.tar.gz`: full server deployment bundle.
@@ -30,6 +32,8 @@ COMMIT_ARTIFACTS=true PUSH_ARTIFACTS=true ./scripts/publish-artifact.sh
 ```
 
 `publish-artifact.sh` is only for a developer machine or CI. Do not run it on the server.
+
+The generated Compose file persists PostgreSQL under `./data/postgresql` and application backups under `./data/backups`.
 
 Servers should only download and deploy the already checked-in bundle:
 

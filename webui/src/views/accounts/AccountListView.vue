@@ -7,22 +7,27 @@
    * - 启用/停用、挂起/恢复（reset）
    * - 批量 JSON 导入（支持 upsert）
    *
-   * 表单与对话框由本组件直接管理，避免拆分过细造成的目录爆炸。
-   * 后续表单复杂化时可再抽 AccountForm.vue。
+   * 各对话框已抽离至 ./components/（AccountFormDialog / ImportDialog /
+   * BatchTestResultDialog / TestDetailDialog），本组件只保留列表与调度逻辑。
    */
-  import { computed, onMounted, reactive, ref, watch } from 'vue';
-  import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus';
+  import { computed, onMounted, reactive, ref } from 'vue';
+  import { ElMessage, ElMessageBox } from 'element-plus';
   import PageSection from '@/components/PageSection.vue';
   import DisabledSchedulePanel from './components/DisabledSchedulePanel.vue';
+  import PoolPolicyPanel from './components/PoolPolicyPanel.vue';
+  import AppIcon from './components/AppIcon.vue';
+  import ProviderBadge from './components/ProviderBadge.vue';
+  import QuotaCell from './components/QuotaCell.vue';
+  import AccountTestPopover from './components/AccountTestPopover.vue';
+  import AccountFormDialog from './components/AccountFormDialog.vue';
+  import ImportDialog from './components/ImportDialog.vue';
+  import BatchTestResultDialog from './components/BatchTestResultDialog.vue';
+  import TestDetailDialog from './components/TestDetailDialog.vue';
   import { accountsApi } from '@/api';
   import { ApiError } from '@/utils/http';
   import type {
     Account,
-    AccountPoolStatus,
     AccountSettings,
-    CreateAccountRequest,
-    ImportAccountItem,
-    ImportAccountsResult,
     TestAccountItem,
     TestModelOption,
     TestModelOptionsResult,
@@ -30,6 +35,14 @@
     OpenAiQuotaResponse,
   } from '@/types/api';
   import { formatDateTime, formatNumber, shorten } from '@/utils/format';
+  import {
+    isCodexAccount,
+    normalized,
+    normalizedPoolTier,
+    poolTierLabel,
+    poolTierTagType,
+    statusOf,
+  } from './utils';
 
   /* ============= 列表 ============= */
 
@@ -69,13 +82,9 @@
       autoWeightEnabled: true,
     },
   });
-  const poolStatus = ref<AccountPoolStatus | null>(null);
+  // 熔断策略面板相关状态已迁移至 components/PoolPolicyPanel.vue
   const settingsSaving = ref(false);
-  const poolPolicySaving = ref(false);
   const clearingAccounts = ref(false);
-  const poolDragAccountId = ref<string | null>(null);
-  const poolDropTarget = ref<'primary' | 'secondary' | null>(null);
-  const poolUpdatingAccountIds = ref<Record<string, boolean>>({});
 
   const visibleAccounts = computed(() => {
     const q = keyword.value.trim().toLowerCase();
@@ -119,65 +128,15 @@
     };
   });
 
-  const primaryPoolAccounts = computed(() =>
-    visibleAccounts.value.filter((account) => normalizedPoolTier(account.poolTier) === 'primary'),
-  );
+  // primaryPoolAccounts / secondaryPoolAccounts 已迁移至 components/PoolPolicyPanel.vue
 
-  const secondaryPoolAccounts = computed(() =>
-    visibleAccounts.value.filter((account) => normalizedPoolTier(account.poolTier) === 'secondary'),
-  );
-
-  function statusOf(account: Account) {
-    if (!account.enabled) return { label: '已停用', tone: 'info' as const };
-    if (account.suspendedAt) return { label: '挂起', tone: 'danger' as const };
-    if (account.quotaExhaustedAt) return { label: '配额用尽', tone: 'warning' as const };
-    return { label: '可用', tone: 'success' as const };
-  }
-
-  function getQuotaInfo(row: Account) {
-    const used = Math.max(0, row.quotaUsed || 0);
-    const limit = row.quotaLimit;
-    const hasLimit = limit !== null && limit !== undefined && limit > 0;
-
-    if (!hasLimit) {
-      return {
-        hasLimit: false,
-        used,
-        percentage: 100,
-        remaining: 0,
-        status: 'success' as const,
-      };
-    }
-
-    const remaining = Math.max(0, limit - used);
-    const percentage = Math.round((remaining / limit) * 100);
-
-    let status: 'success' | 'warning' | 'exception' = 'success';
-    if (percentage <= 15) {
-      status = 'exception';
-    } else if (percentage <= 40) {
-      status = 'warning';
-    }
-
-    return {
-      hasLimit: true,
-      used,
-      limit,
-      remaining,
-      percentage,
-      status,
-    };
-  }
+  // statusOf 已收敛至 ./utils
 
   const openAiQuotas = ref<
     Record<string, { loading: boolean; error?: string; data?: OpenAiQuotaResponse }>
   >({});
 
-  function isCodexAccount(row: Account) {
-    const provider = (row.provider || '').trim().toLowerCase();
-    const authMethod = (row.authMethod || '').trim().toLowerCase();
-    return provider === 'codex' || authMethod === 'codex';
-  }
+  // isCodexAccount 已收敛至 ./utils
 
   async function fetchOpenAiQuota(accountId: string, force = false) {
     if (!force && openAiQuotas.value[accountId]?.data) return;
@@ -190,55 +149,6 @@
       const msg = err instanceof ApiError ? err.message : String(err);
       openAiQuotas.value[accountId] = { loading: false, error: msg };
     }
-  }
-
-  function getOpenAiQuotaInfo(data: OpenAiQuotaResponse | undefined) {
-    if (!data) {
-      return {
-        hasData: false,
-        percentage: 100,
-        status: 'success' as const,
-        label: '未知',
-        activeWindow: null,
-      };
-    }
-
-    const fiveHour = data.fiveHour;
-    const sevenDay = data.sevenDay;
-
-    let activeWindow = fiveHour || sevenDay;
-    if (fiveHour && sevenDay) {
-      activeWindow =
-        (fiveHour.remainingPercent ?? 100) < (sevenDay.remainingPercent ?? 100)
-          ? fiveHour
-          : sevenDay;
-    }
-
-    if (!activeWindow) {
-      return {
-        hasData: false,
-        percentage: 100,
-        status: 'success' as const,
-        label: '无限制',
-        activeWindow: null,
-      };
-    }
-
-    const percentage = Math.round(activeWindow.remainingPercent ?? 100);
-    let status: 'success' | 'warning' | 'exception' = 'success';
-    if (percentage <= 15) {
-      status = 'exception';
-    } else if (percentage <= 40) {
-      status = 'warning';
-    }
-
-    return {
-      hasData: true,
-      percentage,
-      status,
-      label: activeWindow.label || (activeWindow.key === '5h' ? '5小时' : '7天'),
-      activeWindow,
-    };
   }
 
   async function loadAccounts() {
@@ -263,34 +173,7 @@
     }
   }
 
-  async function loadPoolStatus() {
-    try {
-      poolStatus.value = await accountsApi.poolStatus();
-      if (poolStatus.value?.settings) {
-        accountSettings.value = {
-          ...accountSettings.value,
-          poolPolicy: poolStatus.value.settings,
-        };
-      }
-    } catch (err) {
-      if (err instanceof ApiError) ElMessage.warning(`账号池状态加载失败：${err.message}`);
-    }
-  }
-
-  async function savePoolPolicy() {
-    poolPolicySaving.value = true;
-    try {
-      accountSettings.value = await accountsApi.updateSettings({
-        poolPolicy: accountSettings.value.poolPolicy,
-      });
-      await loadPoolStatus();
-      ElMessage.success('账号池策略已保存');
-    } catch (err) {
-      if (err instanceof ApiError) ElMessage.error(err.message);
-    } finally {
-      poolPolicySaving.value = false;
-    }
-  }
+  // loadPoolStatus / savePoolPolicy 已迁移至 components/PoolPolicyPanel.vue
 
   async function toggleGptFastMode(value: string | number | boolean) {
     settingsSaving.value = true;
@@ -330,252 +213,22 @@
   }
 
   /* ============= 新建 / 编辑 ============= */
-
-  type FormMode = 'create' | 'edit';
-  const OPENAI_COMPATIBLE_PROVIDER = 'OpenAI-compatible';
-  const ANTHROPIC_PROVIDER = 'Anthropic';
+  // 表单、校验与提交逻辑已迁移至 components/AccountFormDialog.vue
 
   const formVisible = ref(false);
-  const formMode = ref<FormMode>('create');
-  const formRef = ref<FormInstance>();
-  const formSubmitting = ref(false);
-  const formAccountId = ref<string | null>(null);
-  const activeFormTab = ref('basic');
-
-  // 与后端 DTO 字段一致；可选字段使用空字符串占位，提交时再清洗
-  const form = reactive({
-    accountId: '',
-    email: '',
-    accessToken: '',
-    refreshToken: '',
-    clientId: '',
-    clientSecret: '',
-    region: 'us-east-1',
-    authMethod: 'idc',
-    provider: 'BuilderID',
-    baseUrl: '',
-    upstreamAccountId: '',
-    idToken: '',
-    profileArn: '',
-    machineId: '',
-    proxyUrl: '',
-    poolTier: 'primary',
-    poolWeight: 100,
-    quotaLimit: undefined as number | undefined,
-    enabled: true,
-  });
-
-  const isOpenAiCompatibleForm = computed(() => isOpenAiCompatibleProvider(form.provider));
-  const isOpenAiApiKeyForm = computed(
-    () => isOpenAiCompatibleForm.value || normalized(form.provider) === 'openai',
-  );
-  const isAnthropicApiKeyForm = computed(() => isAnthropicProvider(form.provider));
-  const isApiKeyForm = computed(() => isOpenAiApiKeyForm.value || isAnthropicApiKeyForm.value);
-  const accessTokenLabel = computed(() => {
-    const suffix = formMode.value === 'edit' ? '（留空则不修改）' : '';
-    return isApiKeyForm.value ? `API Key${suffix}` : `Access Token${suffix}`;
-  });
-  const accessTokenPlaceholder = computed(() => {
-    if (isAnthropicApiKeyForm.value) return '输入 Anthropic / Claude API Key，如 sk-ant-...';
-    return isOpenAiApiKeyForm.value ? '输入上游网站 API Key，如 sk-...' : '输入 Access Token';
-  });
-  const baseUrlLabel = computed(() => {
-    if (isOpenAiCompatibleForm.value) return '第三方 Base URL';
-    if (isAnthropicApiKeyForm.value) return 'Anthropic Base URL';
-    return 'Base URL';
-  });
-  const baseUrlPlaceholder = computed(() => {
-    if (isOpenAiCompatibleForm.value) {
-      return '例如 https://joystar.cc、https://api.deepseek.com 或 https://openrouter.ai/api/v1';
-    }
-    if (isAnthropicApiKeyForm.value) {
-      return '默认 https://api.anthropic.com/v1，也可填第三方 Anthropic 兼容地址';
-    }
-    return '默认 https://api.openai.com/v1';
-  });
-
-  const rules: FormRules = {
-    accessToken: [{ required: true, message: 'API Key / accessToken 必填', trigger: 'blur' }],
-    baseUrl: [
-      {
-        validator: (_rule, value, callback) => {
-          const text = typeof value === 'string' ? value.trim() : '';
-          if (isOpenAiCompatibleForm.value && !text) {
-            callback(new Error('第三方 API Key 账号必须填写 Base URL'));
-            return;
-          }
-          if (text && !/^https?:\/\//i.test(text)) {
-            callback(new Error('Base URL 必须以 http:// 或 https:// 开头'));
-            return;
-          }
-          callback();
-        },
-        trigger: 'blur',
-      },
-    ],
-  };
-
-  function resetForm() {
-    Object.assign(form, {
-      accountId: '',
-      email: '',
-      accessToken: '',
-      refreshToken: '',
-      clientId: '',
-      clientSecret: '',
-      region: 'us-east-1',
-      authMethod: 'idc',
-      provider: 'BuilderID',
-      baseUrl: '',
-      upstreamAccountId: '',
-      idToken: '',
-      profileArn: '',
-      machineId: '',
-      proxyUrl: '',
-      poolTier: 'primary',
-      poolWeight: 100,
-      quotaLimit: undefined,
-      enabled: true,
-    });
-  }
+  const formMode = ref<'create' | 'edit'>('create');
+  const editingAccount = ref<Account | null>(null);
 
   function openCreate() {
     formMode.value = 'create';
-    formAccountId.value = null;
-    resetForm();
-    activeFormTab.value = 'basic';
+    editingAccount.value = null;
     formVisible.value = true;
   }
 
   function openEdit(row: Account) {
     formMode.value = 'edit';
-    formAccountId.value = row.accountId;
-    resetForm();
-    activeFormTab.value = 'basic';
-    Object.assign(form, {
-      accountId: row.accountId,
-      email: row.email ?? '',
-      region: row.region ?? '',
-      authMethod: row.authMethod ?? '',
-      provider: row.provider ?? '',
-      baseUrl: row.baseUrl ?? '',
-      upstreamAccountId: row.upstreamAccountId ?? '',
-      idToken: '',
-      profileArn: row.profileArn ?? '',
-      machineId: row.machineId ?? '',
-      proxyUrl: row.proxyUrl ?? '',
-      poolTier: normalizedPoolTier(row.poolTier),
-      poolWeight: row.poolWeight ?? 100,
-      quotaLimit: row.quotaLimit ?? undefined,
-      enabled: row.enabled,
-    });
+    editingAccount.value = row;
     formVisible.value = true;
-  }
-
-  /** 把空串字段从 payload 中剔除，避免覆盖后端为空 */
-  function compact<T extends Record<string, unknown>>(obj: T): Partial<T> {
-    return Object.fromEntries(
-      Object.entries(obj).filter(([, v]) => v !== '' && v !== undefined && v !== null),
-    ) as Partial<T>;
-  }
-
-  const providerOptions = [
-    { label: 'BuilderID / Kiro', value: 'BuilderID' },
-    { label: 'OpenAI 官方 API Key', value: 'OpenAI' },
-    { label: '第三方 OpenAI 兼容 API Key', value: OPENAI_COMPATIBLE_PROVIDER },
-    { label: 'Anthropic / Claude API Key', value: ANTHROPIC_PROVIDER },
-  ];
-
-  const authMethodOptions = [
-    { label: 'idc', value: 'idc' },
-    { label: 'social', value: 'social' },
-    { label: 'api-key', value: 'api-key' },
-    { label: 'codex', value: 'codex' },
-  ];
-
-  function isOpenAiCompatibleProvider(provider: string | null | undefined) {
-    const value = normalized(provider);
-    return value === 'openai-compatible' || value === 'openaicompatibility';
-  }
-
-  function isAnthropicProvider(provider: string | null | undefined) {
-    const value = normalized(provider);
-    return value === 'anthropic' || value === 'claude';
-  }
-
-  function applyProviderDefaults(provider: string | null | undefined) {
-    const value = normalized(provider);
-    const auth = normalized(form.authMethod);
-    if (isOpenAiCompatibleProvider(provider)) {
-      form.authMethod = 'api-key';
-      form.region = '';
-      return;
-    }
-    if (isAnthropicProvider(provider)) {
-      form.authMethod = 'api-key';
-      form.region = '';
-      if (!form.baseUrl) form.baseUrl = 'https://api.anthropic.com/v1';
-      return;
-    }
-    if (value === 'openai') {
-      if (!auth || auth === 'idc' || auth === 'social') {
-        form.authMethod = 'api-key';
-      }
-      form.region = '';
-      return;
-    }
-    if (value === 'codex') {
-      form.authMethod = 'codex';
-      form.region = '';
-      if (!form.baseUrl) form.baseUrl = 'https://chatgpt.com/backend-api/codex';
-      return;
-    }
-    if (value.includes('builder') || value.includes('kiro')) {
-      if (
-        !auth ||
-        auth === 'api-key' ||
-        auth === 'apikey' ||
-        auth === 'openai-api-key' ||
-        auth === 'codex'
-      ) {
-        form.authMethod = 'idc';
-      }
-      if (!form.region) form.region = 'us-east-1';
-    }
-  }
-
-  watch(() => form.provider, applyProviderDefaults);
-
-  async function submitForm() {
-    if (!formRef.value) return;
-    const valid = await formRef.value.validate().catch(() => false);
-    if (!valid) return;
-
-    formSubmitting.value = true;
-    try {
-      if (formMode.value === 'create') {
-        const payload = compact({ ...form }) as CreateAccountRequest;
-        await accountsApi.create(payload);
-        ElMessage.success('账号已创建');
-      } else if (formAccountId.value) {
-        const { accessToken, refreshToken, clientId, clientSecret, idToken, ...rest } = form;
-        // 编辑模式下 access/refresh token 仅在有值时提交
-        const payload = compact({
-          ...rest,
-          accessToken: accessToken || undefined,
-          refreshToken: refreshToken || undefined,
-          clientId: clientId || undefined,
-          clientSecret: clientSecret || undefined,
-          idToken: idToken || undefined,
-        });
-        await accountsApi.update(formAccountId.value, payload);
-        ElMessage.success('账号已更新');
-      }
-      formVisible.value = false;
-      await loadAccounts();
-    } finally {
-      formSubmitting.value = false;
-    }
   }
 
   /* ============= 启停 / 挂起 / 重置 / 删除 ============= */
@@ -709,18 +362,7 @@
     updateStatus: true,
   });
 
-  const testDetailJson = computed(() =>
-    testDetail.value ? JSON.stringify(testDetail.value, null, 2) : '',
-  );
-  const batchTestJson = computed(() =>
-    batchTestResult.value ? JSON.stringify(batchTestResult.value, null, 2) : '',
-  );
-
-  function testStatusType(status: TestAccountItem['status']) {
-    if (status === 'SUCCESS') return 'success';
-    if (status === 'SKIPPED') return 'info';
-    return 'danger';
-  }
+  // testDetailJson / batchTestJson / testStatusType / copy 已随对话框迁移至 components/
 
   function latestTest(accountId: string) {
     return latestTestResults.value[accountId];
@@ -781,111 +423,9 @@
     return testModelByAccount[account.accountId] || 'auto';
   }
 
-  function normalized(value: string | null | undefined) {
-    return (value ?? '').trim().toLowerCase();
-  }
+  // normalized / normalizedPoolTier / poolTierLabel / poolTierTagType 已收敛至 ./utils
 
-  function normalizedPoolTier(value: string | null | undefined) {
-    return normalized(value) === 'secondary' ? 'secondary' : 'primary';
-  }
-
-  function poolTierLabel(value: string | null | undefined) {
-    return normalizedPoolTier(value) === 'secondary' ? '二级号池' : '一级号池';
-  }
-
-  function poolTierTagType(value: string | null | undefined) {
-    return normalizedPoolTier(value) === 'secondary' ? 'warning' : 'success';
-  }
-
-  function poolColumnDescription(tier: 'primary' | 'secondary') {
-    return tier === 'primary'
-      ? '主力账号池，正常情况下优先承接请求'
-      : '备用账号池，一级池熔断时自动接管请求';
-  }
-
-  function isPoolUpdating(accountId: string) {
-    return Boolean(poolUpdatingAccountIds.value[accountId]);
-  }
-
-  function setPoolUpdating(accountId: string, value: boolean) {
-    poolUpdatingAccountIds.value = {
-      ...poolUpdatingAccountIds.value,
-      [accountId]: value,
-    };
-  }
-
-  function onPoolDragStart(event: DragEvent, account: Account) {
-    poolDragAccountId.value = account.accountId;
-    event.dataTransfer?.setData('text/plain', account.accountId);
-    if (event.dataTransfer) {
-      event.dataTransfer.effectAllowed = 'move';
-    }
-  }
-
-  function onPoolDragEnd() {
-    poolDragAccountId.value = null;
-    poolDropTarget.value = null;
-  }
-
-  function onPoolDragOver(event: DragEvent, tier: 'primary' | 'secondary') {
-    event.preventDefault();
-    const account = draggedPoolAccount(event);
-    if (account && normalizedPoolTier(account.poolTier) !== tier) {
-      poolDropTarget.value = tier;
-      if (event.dataTransfer) {
-        event.dataTransfer.dropEffect = 'move';
-      }
-    }
-  }
-
-  function onPoolDragLeave(tier: 'primary' | 'secondary') {
-    if (poolDropTarget.value === tier) {
-      poolDropTarget.value = null;
-    }
-  }
-
-  async function onPoolDrop(event: DragEvent, tier: 'primary' | 'secondary') {
-    event.preventDefault();
-    const account = draggedPoolAccount(event);
-    poolDropTarget.value = null;
-    poolDragAccountId.value = null;
-    if (
-      !account ||
-      normalizedPoolTier(account.poolTier) === tier ||
-      isPoolUpdating(account.accountId)
-    ) {
-      return;
-    }
-    await moveAccountToPool(account, tier);
-  }
-
-  function draggedPoolAccount(event: DragEvent) {
-    const accountId = event.dataTransfer?.getData('text/plain') || poolDragAccountId.value;
-    if (!accountId) return null;
-    return accounts.value.find((account) => account.accountId === accountId) ?? null;
-  }
-
-  async function moveAccountToPool(account: Account, tier: 'primary' | 'secondary') {
-    const previousTier = normalizedPoolTier(account.poolTier);
-    setPoolUpdating(account.accountId, true);
-    accounts.value = accounts.value.map((item) =>
-      item.accountId === account.accountId ? { ...item, poolTier: tier } : item,
-    );
-    try {
-      await accountsApi.update(account.accountId, { poolTier: tier });
-      ElMessage.success(
-        `${account.email || shorten(account.accountId, 8, 4)} 已移动到${poolTierLabel(tier)}`,
-      );
-      await loadPoolStatus();
-    } catch (err) {
-      accounts.value = accounts.value.map((item) =>
-        item.accountId === account.accountId ? { ...item, poolTier: previousTier } : item,
-      );
-      if (err instanceof ApiError) ElMessage.error(err.message);
-    } finally {
-      setPoolUpdating(account.accountId, false);
-    }
-  }
+  // 号池拖拽与移动逻辑已迁移至 components/PoolPolicyPanel.vue
 
   function openTestDetail(row: Account) {
     const item = latestTest(row.accountId);
@@ -895,15 +435,6 @@
     }
     testDetail.value = item;
     testDetailVisible.value = true;
-  }
-
-  async function copy(text: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-      ElMessage.success('已复制');
-    } catch {
-      ElMessage.warning('请手动复制');
-    }
   }
 
   async function testAccount(row: Account) {
@@ -941,276 +472,20 @@
   }
 
   /* ============= 批量导入 ============= */
+  // 导入解析、提交与结果展示已迁移至 components/ImportDialog.vue
 
   const importVisible = ref(false);
-  const importContent = ref('');
-  const importUpsert = ref(false);
-  const importResult = ref<ImportAccountsResult | null>(null);
-  const importSubmitting = ref(false);
-  const importFileInput = ref<HTMLInputElement | null>(null);
-  const importFileNames = ref<string[]>([]);
-  const importFilePayloads = ref<Array<{ name: string; payload: unknown }>>([]);
-  const isDragover = ref(false);
 
   function openImport() {
-    importContent.value = '';
-    importResult.value = null;
-    importUpsert.value = false;
-    importFileNames.value = [];
-    importFilePayloads.value = [];
-    isDragover.value = false;
     importVisible.value = true;
   }
 
-  function chooseImportFiles() {
-    importFileInput.value?.click();
-  }
-
-  async function processFiles(files: File[]) {
-    try {
-      const parsed = await Promise.all(
-        files.map(async (file) => ({
-          name: file.name,
-          payload: JSON.parse(await file.text()) as unknown,
-        })),
-      );
-      const invalid = parsed.find((item) => !isImportPayload(item.payload));
-      if (invalid) {
-        throw new Error(`${invalid.name} 不是可识别的账号导入 JSON`);
-      }
-      const next = [...importFilePayloads.value, ...parsed];
-      importFilePayloads.value = next;
-      importFileNames.value = next.map((item) => item.name);
-      importContent.value = next.length === 1 ? JSON.stringify(next[0].payload, null, 2) : '';
-      importResult.value = null;
-      ElMessage.success(`已加入 ${files.length} 个 JSON 文件，待导入 ${next.length} 个`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      ElMessage.error(`JSON 文件解析失败：${message}`);
-    }
-  }
-
-  async function handleImportFiles(event: Event) {
-    const input = event.target as HTMLInputElement;
-    const files = Array.from(input.files ?? []);
-    input.value = '';
-    if (files.length === 0) return;
-    await processFiles(files);
-  }
-
-  function onDragOver() {
-    isDragover.value = true;
-  }
-  function onDragEnter() {
-    isDragover.value = true;
-  }
-  function onDragLeave() {
-    isDragover.value = false;
-  }
-  async function onDrop(event: DragEvent) {
-    isDragover.value = false;
-    const files = Array.from(event.dataTransfer?.files ?? []).filter(
-      (file) => file.type === 'application/json' || file.name.endsWith('.json'),
-    );
-    if (files.length === 0) {
-      ElMessage.warning('请拖拽有效的 JSON 配置文件');
-      return;
-    }
-    await processFiles(files);
-  }
-
-  function clearImportFiles() {
-    if (importFilePayloads.value.length === 0) return;
-    importFilePayloads.value = [];
-    importFileNames.value = [];
-  }
-
-  async function submitImport() {
-    if (importFilePayloads.value.length > 0) {
-      await submitImportFiles();
-      return;
-    }
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(importContent.value);
-    } catch {
-      ElMessage.error('JSON 格式错误');
-      return;
-    }
-    const payload = Array.isArray(parsed)
-      ? { accounts: parsed, upsert: importUpsert.value }
-      : parsed && typeof parsed === 'object'
-        ? { ...(parsed as Record<string, unknown>), upsert: importUpsert.value }
-        : null;
-    if (!isImportPayload(payload)) {
-      ElMessage.error('数据应为 Kiro / OpenAI Codex / OpenAI-API / Anthropic 导入 JSON');
-      return;
-    }
-
-    const importPayload = payload as Record<string, unknown>;
-    importSubmitting.value = true;
-    try {
-      importResult.value = await accountsApi.importBatch(importPayload);
-      ElMessage.success(
-        `导入完成：新建 ${importResult.value.created} / 更新 ${importResult.value.updated} / 跳过 ${importResult.value.skipped} / 失败 ${importResult.value.failed}`,
-      );
-      await loadAccounts();
-    } catch (err) {
-      if (err instanceof ApiError) ElMessage.error(err.message);
-    } finally {
-      importSubmitting.value = false;
-    }
-  }
-
-  async function submitImportFiles() {
-    const items: ImportAccountItem[] = [];
-    let created = 0;
-    let updated = 0;
-    let skipped = 0;
-    let failed = 0;
-
-    importSubmitting.value = true;
-    try {
-      for (const file of importFilePayloads.value) {
-        try {
-          const result = await accountsApi.importBatch(importPayloadForFile(file.payload));
-          created += result.created;
-          updated += result.updated;
-          skipped += result.skipped;
-          failed += result.failed;
-          for (const item of result.items) {
-            items.push({
-              ...item,
-              index: items.length,
-              message: `${file.name}: ${item.message ?? ''}`.trim(),
-            });
-          }
-        } catch (err) {
-          failed += 1;
-          items.push({
-            index: items.length,
-            accountId: null,
-            email: null,
-            status: 'FAILED',
-            message: `${file.name}: ${err instanceof ApiError ? err.message : String(err)}`,
-            account: null,
-          });
-        }
-      }
-
-      importResult.value = {
-        total: items.length,
-        created,
-        updated,
-        skipped,
-        failed,
-        items,
-      };
-      const message = `导入完成：新建 ${created} / 更新 ${updated} / 跳过 ${skipped} / 失败 ${failed}`;
-      if (failed > 0) {
-        ElMessage.warning(message);
-      } else {
-        ElMessage.success(message);
-      }
-      await loadAccounts();
-    } finally {
-      importSubmitting.value = false;
-    }
-  }
-
-  function importPayloadForFile(payload: unknown) {
-    if (Array.isArray(payload)) {
-      return { accounts: payload, upsert: importUpsert.value };
-    }
-    return {
-      ...(payload as Record<string, unknown>),
-      upsert: importUpsert.value,
-    };
-  }
-
-  function isImportPayload(payload: unknown) {
-    if (!payload || typeof payload !== 'object') return false;
-    if (Array.isArray(payload)) return payload.length > 0;
-    const record = payload as Record<string, unknown>;
-    if (Array.isArray(record.documents) && record.documents.length > 0) return true;
-    if (Array.isArray(record.imports) && record.imports.length > 0) return true;
-    if (Array.isArray(record.files) && record.files.length > 0) return true;
-    if (Array.isArray(record.accounts) && record.accounts.length > 0) return true;
-    const openAiCompatibility =
-      record['openai-compatibility'] ?? record.openaiCompatibility ?? record.openai_compatibility;
-    if (Array.isArray(openAiCompatibility) && openAiCompatibility.length > 0) return true;
-    if (openAiCompatibility && typeof openAiCompatibility === 'object') return true;
-    if (looksLikeOpenAiCompatibilityGroup(record)) return true;
-    return (
-      'credentials' in record ||
-      'accessToken' in record ||
-      'access_token' in record ||
-      'apiKey' in record ||
-      'api_key' in record ||
-      'api-key' in record ||
-      'type' in record ||
-      'provider' in record
-    );
-  }
-
-  function looksLikeOpenAiCompatibilityGroup(record: Record<string, unknown>) {
-    return (
-      'api-key-entries' in record ||
-      'apiKeyEntries' in record ||
-      'api_key_entries' in record ||
-      'keys' in record
-    );
-  }
-
-  function getProviderDisplayName(provider: string | null | undefined): string {
-    if (!provider) return 'Unknown';
-    const p = provider.trim().toLowerCase();
-    if (p === 'openai-compatible' || p === 'openaicompatibility') {
-      return 'OpenAI-API';
-    }
-    return provider;
-  }
-
-  function getProviderTagStyle(provider: string) {
-    const p = (provider || '').toUpperCase();
-    if (p === 'OPENAI' || p === 'OPENAI-COMPATIBLE') {
-      return {
-        background: 'rgba(16, 163, 127, 0.08)',
-        color: '#10a37f',
-        border: '1px solid rgba(16, 163, 127, 0.15)',
-      };
-    }
-    if (p === 'GEMINI' || p === 'GOOGLE') {
-      return {
-        background: 'rgba(66, 133, 244, 0.08)',
-        color: '#4285f4',
-        border: '1px solid rgba(66, 133, 244, 0.15)',
-      };
-    }
-    if (p === 'ANTHROPIC') {
-      return {
-        background: 'rgba(217, 119, 87, 0.08)',
-        color: '#d97757',
-        border: '1px solid rgba(217, 119, 87, 0.15)',
-      };
-    }
-    if (p.includes('BUILDERID') || p.includes('KIRO')) {
-      return {
-        background: 'rgba(124, 58, 237, 0.08)',
-        color: '#7c3aed',
-        border: '1px solid rgba(124, 58, 237, 0.15)',
-      };
-    }
-    return {
-      background: 'rgba(15, 23, 42, 0.05)',
-      color: 'var(--kp-text-secondary)',
-      border: '1px solid rgba(15, 23, 42, 0.1)',
-    };
-  }
+  // getProviderDisplayName 已迁移至 components/PoolPolicyPanel.vue
 
   function handleCommand(command: string, row: Account) {
-    if (command === 'suspend') {
+    if (command === 'toggle') {
+      toggleEnabled(row);
+    } else if (command === 'suspend') {
       suspend(row);
     } else if (command === 'reset') {
       resetAccount(row);
@@ -1221,7 +496,6 @@
 
   onMounted(() => {
     loadAccountSettings();
-    loadPoolStatus();
     loadTestModelOptions();
     loadAccounts();
   });
@@ -1243,22 +517,10 @@
         v-model="keyword"
         placeholder="搜索账号 ID / 邮箱 / 平台 / Base URL"
         clearable
-        style="width: 280px"
+        class="search-input"
       >
         <template #prefix>
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2.5"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            style="width: 14px; height: 14px; color: var(--kp-text-muted); margin-right: 4px"
-          >
-            <circle cx="11" cy="11" r="8" />
-            <line x1="21" y1="21" x2="16.65" y2="16.65" />
-          </svg>
+          <AppIcon name="search" class="search-input__icon" />
         </template>
       </el-input>
       <el-button type="primary" @click="openCreate">新建账号</el-button>
@@ -1281,452 +543,58 @@
           <span class="metric-dot dot-total" />
           <span class="metric-label">总账号数</span>
         </div>
-        <div class="metric-value">{{ summary.total }}</div>
+        <div class="metric-value mono">{{ summary.total }}</div>
       </div>
-
-      <div class="metric-divider" />
 
       <div class="metric-item">
         <div class="metric-item__header">
           <span class="metric-dot dot-active" />
           <span class="metric-label">正常运行</span>
         </div>
-        <div class="metric-value text-success">{{ summary.active }}</div>
+        <div class="metric-value mono text-success">{{ summary.active }}</div>
       </div>
-
-      <div class="metric-divider" />
 
       <div class="metric-item">
         <div class="metric-item__header">
           <span class="metric-dot dot-suspended" />
           <span class="metric-label">异常 / 停用</span>
         </div>
-        <div class="metric-value" :class="{ 'text-danger': summary.abnormal > 0 }">
+        <div class="metric-value mono" :class="{ 'text-danger': summary.abnormal > 0 }">
           {{ summary.abnormal }}
         </div>
       </div>
-
-      <div class="metric-divider" />
 
       <div class="metric-item">
         <div class="metric-item__header">
           <span class="metric-dot dot-requests" />
           <span class="metric-label">累计请求 / 错误</span>
         </div>
-        <div class="metric-value">
+        <div class="metric-value mono">
           {{ formatNumber(summary.totalRequests) }}
           <span class="metric-value__sub">/ {{ formatNumber(summary.totalErrors) }}</span>
         </div>
       </div>
-
-      <div class="metric-divider" />
 
       <div class="metric-item">
         <div class="metric-item__header">
           <span class="metric-dot dot-requests" />
           <span class="metric-label">一级 / 二级</span>
         </div>
-        <div class="metric-value">
+        <div class="metric-value mono">
           {{ summary.primary }}
           <span class="metric-value__sub">/ {{ summary.secondary }}</span>
         </div>
       </div>
     </div>
 
-    <div class="pool-policy-panel glass-panel">
-      <div class="pool-policy-panel__status">
-        <div class="panel-header-left">
-          <span class="brand-indicator" />
-          <div class="panel-title">账号池熔断策略</div>
-          <div class="panel-subtitle">
-            当前路由：
-            <el-tag
-              :type="poolStatus?.activeTier === 'secondary' ? 'warning' : 'success'"
-              effect="light"
-              round
-            >
-              {{
-                poolStatus?.activeTier === 'secondary'
-                  ? '二级号池'
-                  : poolStatus?.activeTier === 'all'
-                    ? '全部账号'
-                    : '一级号池'
-              }}
-            </el-tag>
-            <span class="pool-status-text">
-              一级池错误率 {{ poolStatus?.primaryFailureRatePercent ?? 0 }}% （{{
-                poolStatus?.primaryFailures ?? 0
-              }}/{{ poolStatus?.primaryRequests ?? 0 }}）
-            </span>
-            <span v-if="poolStatus?.lastRetestAt" class="pool-status-text">
-              最近复测成功率 {{ poolStatus?.lastRetestRecoveryRatePercent ?? 0 }}%
-            </span>
-            <span v-if="poolStatus?.retestRunning" class="pool-status-text is-running">
-              正在复测
-            </span>
-          </div>
-        </div>
-        <el-button size="small" @click="loadPoolStatus">
-          <template #icon>
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              style="margin-right: 4px"
-            >
-              <polyline points="23 4 23 10 17 10" />
-              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-            </svg>
-          </template>
-          刷新状态
-        </el-button>
-      </div>
-
-      <el-form class="pool-policy-form" label-position="top" size="small">
-        <el-row :gutter="16">
-          <el-col :xs="12" :sm="6" :md="3">
-            <el-form-item label="启用熔断">
-              <el-switch v-model="accountSettings.poolPolicy.enabled" />
-            </el-form-item>
-          </el-col>
-          <el-col :xs="12" :sm="6" :md="3">
-            <el-form-item label="自动权重">
-              <el-switch v-model="accountSettings.poolPolicy.autoWeightEnabled" />
-            </el-form-item>
-          </el-col>
-          <el-col :xs="12" :sm="6" :md="3">
-            <el-form-item label="窗口(分钟)">
-              <el-input-number
-                v-model="accountSettings.poolPolicy.windowMinutes"
-                :min="1"
-                :max="1440"
-                controls-position="right"
-              />
-            </el-form-item>
-          </el-col>
-          <el-col :xs="12" :sm="6" :md="3">
-            <el-form-item label="最小样本">
-              <el-input-number
-                v-model="accountSettings.poolPolicy.minSampleSize"
-                :min="1"
-                :max="100000"
-                controls-position="right"
-              />
-            </el-form-item>
-          </el-col>
-          <el-col :xs="12" :sm="6" :md="3">
-            <el-form-item label="复测阈值%">
-              <el-input-number
-                v-model="accountSettings.poolPolicy.retestThresholdPercent"
-                :min="0"
-                :max="100"
-                controls-position="right"
-              />
-            </el-form-item>
-          </el-col>
-          <el-col :xs="12" :sm="6" :md="3">
-            <el-form-item label="切二级%">
-              <el-input-number
-                v-model="accountSettings.poolPolicy.failoverThresholdPercent"
-                :min="0"
-                :max="100"
-                controls-position="right"
-              />
-            </el-form-item>
-          </el-col>
-          <el-col :xs="12" :sm="6" :md="3">
-            <el-form-item label="恢复成功率%">
-              <el-input-number
-                v-model="accountSettings.poolPolicy.recoveryThresholdPercent"
-                :min="0"
-                :max="100"
-                controls-position="right"
-              />
-            </el-form-item>
-          </el-col>
-          <el-col :xs="12" :sm="6" :md="3">
-            <el-form-item label="复测间隔">
-              <el-input-number
-                v-model="accountSettings.poolPolicy.retestIntervalMinutes"
-                :min="1"
-                :max="1440"
-                controls-position="right"
-              />
-            </el-form-item>
-          </el-col>
-        </el-row>
-        <div class="pool-policy-footer">
-          <div class="info-alert">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="14"
-              height="14"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2.5"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              class="info-alert-icon"
-            >
-              <circle cx="12" cy="12" r="10" />
-              <line x1="12" y1="16" x2="12" y2="12" />
-              <line x1="12" y1="8" x2="12.01" y2="8" />
-            </svg>
-            <span>
-              当一级池错误率达到复测阈值时会全量测试账号；达到切二级阈值时临时将请求转到二级号池，并持续复测所有账号，直到全账号复测成功率达到恢复成功率阈值。
-            </span>
-          </div>
-          <el-button type="primary" :loading="poolPolicySaving" @click="savePoolPolicy">
-            保存账号池策略
-          </el-button>
-        </div>
-      </el-form>
-
-      <div class="pool-drag-board">
-        <div
-          class="pool-drag-column"
-          :class="{
-            'is-drop-target': poolDropTarget === 'primary',
-            'is-active-route': poolStatus?.activeTier === 'primary',
-          }"
-          @dragover="(event) => onPoolDragOver(event, 'primary')"
-          @dragleave="onPoolDragLeave('primary')"
-          @drop="(event) => onPoolDrop(event, 'primary')"
-        >
-          <div class="pool-drag-column__head">
-            <div>
-              <div class="pool-drag-column__title">
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2.5"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  style="color: var(--kp-primary); margin-right: 4px"
-                >
-                  <polygon
-                    points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"
-                  />
-                </svg>
-                一级号池
-                <el-tag
-                  v-if="poolStatus?.activeTier === 'primary'"
-                  size="small"
-                  type="success"
-                  effect="light"
-                  round
-                >
-                  当前路由
-                </el-tag>
-              </div>
-              <div class="pool-drag-column__desc">{{ poolColumnDescription('primary') }}</div>
-            </div>
-            <strong>{{ primaryPoolAccounts.length }}</strong>
-          </div>
-
-          <div v-if="primaryPoolAccounts.length === 0" class="pool-drag-empty">
-            拖入账号作为一级号池
-          </div>
-          <div
-            v-for="account in primaryPoolAccounts"
-            :key="account.accountId"
-            class="pool-account-card"
-            :class="{
-              'is-dragging': poolDragAccountId === account.accountId,
-              'is-updating': isPoolUpdating(account.accountId),
-            }"
-            draggable="true"
-            @dragstart="(event) => onPoolDragStart(event, account)"
-            @dragend="onPoolDragEnd"
-          >
-            <div class="pool-account-card__drag-handle">
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="12"
-                height="12"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <circle cx="9" cy="5" r="1" />
-                <circle cx="9" cy="12" r="1" />
-                <circle cx="9" cy="19" r="1" />
-                <circle cx="15" cy="5" r="1" />
-                <circle cx="15" cy="12" r="1" />
-                <circle cx="15" cy="19" r="1" />
-              </svg>
-            </div>
-            <div class="pool-account-card__info-wrapper">
-              <div class="pool-account-card__main">
-                <span class="pool-account-card__name" :title="account.email || account.accountId">
-                  {{ account.email || shorten(account.accountId, 10, 6) }}
-                </span>
-                <span class="pool-account-card__id mono">{{
-                  shorten(account.accountId, 10, 4)
-                }}</span>
-              </div>
-              <div class="pool-account-card__meta">
-                <el-tag size="small" effect="plain">
-                  {{ getProviderDisplayName(account.provider) }}
-                </el-tag>
-                <el-tag size="small" :type="statusOf(account).tone" effect="light">
-                  {{ statusOf(account).label }}
-                </el-tag>
-                <span class="meta-item">权重: <strong>{{ account.poolWeight ?? 100 }}</strong></span>
-                <span class="meta-item">错误:
-                  <strong class="text-danger">{{ formatNumber(account.errorCount) }}</strong></span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div
-          class="pool-drag-column is-secondary"
-          :class="{
-            'is-drop-target': poolDropTarget === 'secondary',
-            'is-active-route': poolStatus?.activeTier === 'secondary',
-          }"
-          @dragover="(event) => onPoolDragOver(event, 'secondary')"
-          @dragleave="onPoolDragLeave('secondary')"
-          @drop="(event) => onPoolDrop(event, 'secondary')"
-        >
-          <div class="pool-drag-column__head">
-            <div>
-              <div class="pool-drag-column__title">
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2.5"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  style="color: var(--kp-warning); margin-right: 4px"
-                >
-                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-                  <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-                </svg>
-                二级号池
-                <el-tag
-                  v-if="poolStatus?.activeTier === 'secondary'"
-                  size="small"
-                  type="warning"
-                  effect="light"
-                  round
-                >
-                  当前接管
-                </el-tag>
-              </div>
-              <div class="pool-drag-column__desc">{{ poolColumnDescription('secondary') }}</div>
-            </div>
-            <strong>{{ secondaryPoolAccounts.length }}</strong>
-          </div>
-
-          <div v-if="secondaryPoolAccounts.length === 0" class="pool-drag-empty">
-            拖入账号作为熔断备用池
-          </div>
-          <div
-            v-for="account in secondaryPoolAccounts"
-            :key="account.accountId"
-            class="pool-account-card"
-            :class="{
-              'is-dragging': poolDragAccountId === account.accountId,
-              'is-updating': isPoolUpdating(account.accountId),
-            }"
-            draggable="true"
-            @dragstart="(event) => onPoolDragStart(event, account)"
-            @dragend="onPoolDragEnd"
-          >
-            <div class="pool-account-card__drag-handle">
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                width="12"
-                height="12"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <circle cx="9" cy="5" r="1" />
-                <circle cx="9" cy="12" r="1" />
-                <circle cx="9" cy="19" r="1" />
-                <circle cx="15" cy="5" r="1" />
-                <circle cx="15" cy="12" r="1" />
-                <circle cx="15" cy="19" r="1" />
-              </svg>
-            </div>
-            <div class="pool-account-card__info-wrapper">
-              <div class="pool-account-card__main">
-                <span class="pool-account-card__name" :title="account.email || account.accountId">
-                  {{ account.email || shorten(account.accountId, 10, 6) }}
-                </span>
-                <span class="pool-account-card__id mono">{{
-                  shorten(account.accountId, 10, 4)
-                }}</span>
-              </div>
-              <div class="pool-account-card__meta">
-                <el-tag size="small" effect="plain">
-                  {{ getProviderDisplayName(account.provider) }}
-                </el-tag>
-                <el-tag size="small" :type="statusOf(account).tone" effect="light">
-                  {{ statusOf(account).label }}
-                </el-tag>
-                <span class="meta-item">权重: <strong>{{ account.poolWeight ?? 100 }}</strong></span>
-                <span class="meta-item">错误:
-                  <strong class="text-danger">{{ formatNumber(account.errorCount) }}</strong></span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div v-if="poolStatus?.failureRanking?.length" class="failure-ranking">
-        <div class="failure-ranking__title">账号错误率排行</div>
-        <div class="failure-ranking__list">
-          <div
-            v-for="item in poolStatus.failureRanking.slice(0, 6)"
-            :key="item.accountId"
-            class="failure-ranking__item"
-          >
-            <div style="display: flex; align-items: center; gap: 8px">
-              <span class="item-id">{{ shorten(item.accountId, 8, 4) }}</span>
-              <el-tag :type="poolTierTagType(item.poolTier)" size="small" effect="light" round>
-                {{ poolTierLabel(item.poolTier) }}
-              </el-tag>
-            </div>
-            <div class="item-stats">
-              <span class="failure-pct" :class="{ 'is-zero': item.failureRatePercent === 0 }">
-                {{ item.failureRatePercent }}%
-              </span>
-              <span class="text-secondary" style="font-size: 11px">
-                ({{ item.failures }}/{{ item.requests }})
-              </span>
-              <span class="text-secondary" style="font-size: 11px; margin-left: 2px">
-                W:{{ item.effectiveWeight }}
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
+    <!-- 账号池熔断策略面板已抽离至 ./components/PoolPolicyPanel.vue -->
+    <PoolPolicyPanel
+      :accounts="accounts"
+      :visible-accounts="visibleAccounts"
+      :settings="accountSettings"
+      @settings-updated="accountSettings = $event"
+      @accounts-updated="accounts = $event"
+    />
 
     <!-- 2. Suspended Accounts Periodic Review Collapsible Module -->
     <DisabledSchedulePanel @test-completed="handleTestCompleted" />
@@ -1734,58 +602,10 @@
     <el-table v-loading="loading" :data="visibleAccounts" stripe>
       <el-table-column label="账号类型" width="160">
         <template #default="{ row }">
-          <span class="provider-badge" :style="getProviderTagStyle(row.provider)">
-            <!-- OpenAI Logo -->
-            <svg
-              v-if="['OPENAI', 'OPENAI-COMPATIBLE'].includes((row.provider || '').toUpperCase())"
-              class="provider-logo"
-              viewBox="0 0 24 24"
-              fill="currentColor"
-            >
-              <path
-                d="M22.2819 9.8211a5.9847 5.9847 0 0 0-.5157-4.9108 6.0462 6.0462 0 0 0-6.5098-2.9A6.0651 6.0651 0 0 0 4.9807 4.1818a5.9847 5.9847 0 0 0-3.9977 2.9 6.0462 6.0462 0 0 0 .7427 7.0966 5.98 5.98 0 0 0 .511 4.9107 6.051 6.051 0 0 0 6.5146 2.9001A5.9847 5.9847 0 0 0 13.2599 24a6.0557 6.0557 0 0 0 5.7718-4.2058 5.9894 5.9894 0 0 0 3.9977-2.9001 6.0557 6.0557 0 0 0-.7475-7.0729zm-9.022 12.6081a4.4755 4.4755 0 0 1-2.8764-1.0408l.1419-.0804 4.7783-2.7582a.7948.7948 0 0 0 .3927-.6813v-6.7369l2.02 1.1686a.071.071 0 0 1 .038.052v5.5826a4.504 4.504 0 0 1-4.4945 4.4944zm-9.6607-4.1254a4.4708 4.4708 0 0 1-.5346-3.0137l.142.0852 4.783 2.7582a.7712.7712 0 0 0 .7806 0l5.8428-3.3685v2.3324a.0804.0804 0 0 1-.0332.0615L9.74 19.9502a4.4992 4.4992 0 0 1-6.1408-1.6464zM2.3408 7.8956a4.485 4.485 0 0 1 2.3655-1.9728V11.6a.7664.7664 0 0 0 .3879.6765l5.8144 3.3543-2.0201 1.1685a.0757.0757 0 0 1-.071 0l-4.8303-2.7865A4.504 4.504 0 0 1 2.3408 7.872zm16.5963 3.8558L13.1038 8.364 15.1192 7.2a.0757.0757 0 0 1 .071 0l4.8303 2.7913a4.4944 4.4944 0 0 1-.6765 8.1042v-5.6772a.79.79 0 0 0-.407-.667zm2.0107-3.0231l-.142-.0852-4.7735-2.7818a.7759.7759 0 0 0-.7854 0L9.409 9.2297V6.8974a.0662.0662 0 0 1 .0284-.0615l4.8303-2.7866a4.4992 4.4992 0 0 1 6.6802 4.66zM8.3065 12.863l-2.02-1.1638a.0804.0804 0 0 1-.038-.0567V6.0742a4.4992 4.4992 0 0 1 7.3757-3.4537l-.142.0805L8.704 5.459a.7948.7948 0 0 0-.3927.6813zm1.0976-2.3654l2.602-1.4998 2.6069 1.4998v2.9994l-2.5974 1.4997-2.6067-1.4997Z"
-              />
-            </svg>
-            <!-- Gemini / Google Logo -->
-            <svg
-              v-else-if="['GEMINI', 'GOOGLE'].includes((row.provider || '').toUpperCase())"
-              class="provider-logo"
-              viewBox="0 0 24 24"
-              fill="currentColor"
-            >
-              <path
-                d="M12 2c0 5.5-4.5 10-10 10 5.5 0 10 4.5 10 10 0-5.5 4.5-10 10-10-5.5 0-10-4.5-10-10z"
-              />
-            </svg>
-            <!-- Anthropic Logo -->
-            <svg
-              v-else-if="(row.provider || '').toUpperCase() === 'ANTHROPIC'"
-              class="provider-logo"
-              viewBox="0 0 24 24"
-              fill="currentColor"
-            >
-              <path
-                d="M12.5 3L4.2 19h4l2.1-4.2h5.4l2.1 4.2h4L13.5 3h-1zM11.3 12l1.7-3.4 1.7 3.4h-3.4z"
-              />
-            </svg>
-            <!-- Other Shield Logo -->
-            <svg
-              v-else
-              class="provider-logo"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2.5"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-            </svg>
-            <span class="provider-name">{{ getProviderDisplayName(row.provider) }}</span>
-          </span>
+          <ProviderBadge :provider="row.provider" />
         </template>
       </el-table-column>
-      <el-table-column label="邮箱 / 账号 ID" min-width="180">
+      <el-table-column label="邮箱 / 账号 ID" min-width="160">
         <template #default="{ row }">
           <div class="email-id-cell">
             <span class="email-text" :title="row.email">{{ row.email || '—' }}</span>
@@ -1793,13 +613,13 @@
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="Base URL" min-width="180" show-overflow-tooltip>
+      <el-table-column label="Base URL" min-width="160" show-overflow-tooltip>
         <template #default="{ row }">
           <span class="mono">{{ row.baseUrl ? shorten(row.baseUrl, 24, 10) : '—' }}</span>
         </template>
       </el-table-column>
-      <el-table-column prop="region" label="区域" width="100" />
-      <el-table-column label="号池 / 权重" width="130">
+      <el-table-column prop="region" label="区域" width="80" />
+      <el-table-column label="号池 / 权重" width="110">
         <template #default="{ row }">
           <div class="pool-cell">
             <el-tag :type="poolTierTagType(row.poolTier)" effect="light" round>
@@ -1814,374 +634,57 @@
           <el-tag :type="statusOf(row).tone" effect="light" round>{{ statusOf(row).label }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="请求 / 错误" width="120">
+      <el-table-column label="请求 / 错误" width="100">
         <template #default="{ row }">
           {{ formatNumber(row.requestCount) }} / {{ formatNumber(row.errorCount) }}
         </template>
       </el-table-column>
       <el-table-column label="可用配额" width="180">
         <template #default="{ row }">
-          <div v-if="isCodexAccount(row)" class="quota-cell is-codex">
-            <template v-if="openAiQuotas[row.accountId]?.loading">
-              <div class="quota-meta">
-                <span class="quota-loading-text">
-                  <span class="quota-spinner" />
-                  正在获取官方配额...
-                </span>
-              </div>
-              <div class="quota-loading-bar" />
-            </template>
-            <template v-else-if="openAiQuotas[row.accountId]?.error">
-              <div class="quota-meta">
-                <el-tooltip
-                  :content="openAiQuotas[row.accountId].error"
-                  placement="top"
-                  effect="dark"
-                >
-                  <span class="quota-error-text">获取失败</span>
-                </el-tooltip>
-                <el-button
-                  link
-                  type="primary"
-                  size="small"
-                  class="quota-refresh-btn"
-                  @click.stop="fetchOpenAiQuota(row.accountId, true)"
-                >
-                  <svg
-                    class="icon-refresh"
-                    viewBox="0 0 24 24"
-                    width="10"
-                    height="10"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    style="margin-right: 2px"
-                  >
-                    <polyline points="23 4 23 10 17 10" />
-                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-                  </svg>
-                  重试
-                </el-button>
-              </div>
-              <el-progress
-                v-if="getQuotaInfo(row).hasLimit"
-                :percentage="getQuotaInfo(row).percentage"
-                :status="getQuotaInfo(row).status"
-                :stroke-width="6"
-                :show-text="false"
-                class="quota-progress"
-              />
-              <div v-else class="quota-unlimited-bar" />
-            </template>
-            <template v-else-if="openAiQuotas[row.accountId]?.data">
-              <el-tooltip placement="top" effect="dark">
-                <template #content>
-                  <div class="quota-tooltip-content">
-                    <div v-if="openAiQuotas[row.accountId]?.data?.fiveHour">
-                      <strong>5小时窗口:</strong>
-                      已用 {{ openAiQuotas[row.accountId]?.data?.fiveHour?.usedPercent }}%, 剩余
-                      {{ openAiQuotas[row.accountId]?.data?.fiveHour?.remainingPercent }}%
-                      <span v-if="openAiQuotas[row.accountId]?.data?.fiveHour?.resetAt">
-                        (重置:
-                        {{ formatDateTime(openAiQuotas[row.accountId]?.data?.fiveHour?.resetAt) }})
-                      </span>
-                    </div>
-                    <div v-if="openAiQuotas[row.accountId]?.data?.sevenDay" style="margin-top: 4px">
-                      <strong>7天窗口:</strong>
-                      已用 {{ openAiQuotas[row.accountId]?.data?.sevenDay?.usedPercent }}%, 剩余
-                      {{ openAiQuotas[row.accountId]?.data?.sevenDay?.remainingPercent }}%
-                      <span v-if="openAiQuotas[row.accountId]?.data?.sevenDay?.resetAt">
-                        (重置:
-                        {{ formatDateTime(openAiQuotas[row.accountId]?.data?.sevenDay?.resetAt) }})
-                      </span>
-                    </div>
-                    <div
-                      style="
-                        margin-top: 6px;
-                        font-size: 10px;
-                        opacity: 0.8;
-                        border-top: 1px solid rgba(255, 255, 255, 0.15);
-                        padding-top: 4px;
-                      "
-                    >
-                      数据源: {{ openAiQuotas[row.accountId]?.data?.source }}<br>
-                      更新时间: {{ formatDateTime(openAiQuotas[row.accountId]?.data?.checkedAt) }}
-                    </div>
-                  </div>
-                </template>
-                <div class="quota-wrapper-hoverable">
-                  <div class="quota-meta">
-                    <span
-                      class="quota-remaining"
-                      :class="'is-' + getOpenAiQuotaInfo(openAiQuotas[row.accountId]?.data).status"
-                    >
-                      {{ getOpenAiQuotaInfo(openAiQuotas[row.accountId]?.data).percentage }}% 剩余
-                      ({{ getOpenAiQuotaInfo(openAiQuotas[row.accountId]?.data).label }})
-                    </span>
-                    <el-button
-                      link
-                      type="primary"
-                      size="small"
-                      class="quota-refresh-btn-mini"
-                      @click.stop="fetchOpenAiQuota(row.accountId, true)"
-                    >
-                      <svg
-                        class="icon-refresh"
-                        viewBox="0 0 24 24"
-                        width="10"
-                        height="10"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                      >
-                        <polyline points="23 4 23 10 17 10" />
-                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-                      </svg>
-                    </el-button>
-                  </div>
-                  <el-progress
-                    :percentage="getOpenAiQuotaInfo(openAiQuotas[row.accountId].data).percentage"
-                    :status="getOpenAiQuotaInfo(openAiQuotas[row.accountId].data).status"
-                    :stroke-width="6"
-                    :show-text="false"
-                    class="quota-progress"
-                  />
-                </div>
-              </el-tooltip>
-            </template>
-            <template v-else>
-              <div class="quota-meta">
-                <span class="quota-fallback-label">未获取官方配额</span>
-                <el-button
-                  link
-                  type="primary"
-                  size="small"
-                  class="quota-refresh-btn"
-                  @click.stop="fetchOpenAiQuota(row.accountId, true)"
-                >
-                  <svg
-                    class="icon-refresh"
-                    viewBox="0 0 24 24"
-                    width="10"
-                    height="10"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                    style="margin-right: 2px"
-                  >
-                    <polyline points="23 4 23 10 17 10" />
-                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
-                  </svg>
-                  获取
-                </el-button>
-              </div>
-              <el-progress
-                v-if="getQuotaInfo(row).hasLimit"
-                :percentage="getQuotaInfo(row).percentage"
-                :status="getQuotaInfo(row).status"
-                :stroke-width="6"
-                :show-text="false"
-                class="quota-progress"
-              />
-              <div v-else class="quota-unlimited-bar" />
-            </template>
-          </div>
-
-          <div v-else class="quota-cell">
-            <template v-if="getQuotaInfo(row).hasLimit">
-              <div class="quota-meta">
-                <span class="quota-remaining" :class="'is-' + getQuotaInfo(row).status">
-                  {{ formatNumber(getQuotaInfo(row).remaining) }} 剩余
-                </span>
-                <span class="quota-divider">/</span>
-                <span class="quota-limit">{{ formatNumber(getQuotaInfo(row).limit) }}</span>
-              </div>
-              <el-progress
-                :percentage="getQuotaInfo(row).percentage"
-                :status="getQuotaInfo(row).status"
-                :stroke-width="6"
-                :show-text="false"
-                class="quota-progress"
-              />
-            </template>
-            <template v-else>
-              <div class="quota-meta">
-                <span class="quota-used">{{ formatNumber(getQuotaInfo(row).used) }} 已用</span>
-                <span class="quota-divider">/</span>
-                <span class="quota-limit-unlimited">无限制</span>
-              </div>
-              <div class="quota-unlimited-bar" />
-            </template>
-          </div>
+          <QuotaCell
+            :account="row"
+            :quota-state="openAiQuotas[row.accountId]"
+            @refresh="(accountId) => fetchOpenAiQuota(accountId, true)"
+          />
         </template>
       </el-table-column>
-      <el-table-column label="最近使用" width="160">
+      <el-table-column label="最近使用" width="150">
         <template #default="{ row }">{{ formatDateTime(row.lastUsedAt) }}</template>
       </el-table-column>
-      <el-table-column label="操作" width="230" fixed="right">
+      <el-table-column label="操作" width="160" fixed="right">
         <template #default="{ row }">
           <div class="actions-wrapper">
             <el-button link type="primary" @click="openEdit(row)">
               <template #icon>
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="12"
-                  height="12"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2.5"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  style="margin-right: 2px"
-                >
-                  <path d="M12 20h9" />
-                  <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
-                </svg>
+                <AppIcon name="edit" width="12" height="12" class="action-icon" />
               </template>
               编辑
             </el-button>
-            <el-popover
-              placement="bottom-end"
-              width="320"
-              trigger="click"
-              @show="ensureTestModel(row)"
-            >
-              <template #reference>
-                <el-button link type="primary">
-                  <template #icon>
-                    <svg
-                      xmlns="http://www.w3.org/2000/svg"
-                      width="12"
-                      height="12"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="2.5"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                      style="margin-right: 2px"
-                    >
-                      <polygon points="5 3 19 12 5 21 5 3" />
-                    </svg>
-                  </template>
-                  测试
-                </el-button>
-              </template>
-              <div class="row-test-panel">
-                <div class="row-test-panel__title">
-                  <span>账号测试</span>
-                  <el-tag
-                    v-if="latestTest(row.accountId)"
-                    :type="testStatusType(latestTest(row.accountId).status)"
-                    effect="light"
-                    round
-                  >
-                    {{ latestTest(row.accountId).status }}
-                  </el-tag>
-                </div>
-                <el-form label-position="top" size="small">
-                  <el-form-item label="模型">
-                    <el-select
-                      v-model="testModelByAccount[row.accountId]"
-                      filterable
-                      allow-create
-                      default-first-option
-                      placeholder="选择或输入模型 ID"
-                      style="width: 100%"
-                      @focus="ensureTestModel(row)"
-                    >
-                      <el-option
-                        v-for="item in testModelsFor(row)"
-                        :key="item.value"
-                        :label="item.label"
-                        :value="item.value"
-                      />
-                    </el-select>
-                  </el-form-item>
-                  <el-form-item label="提示词">
-                    <el-input v-model="testOptions.prompt" />
-                  </el-form-item>
-                  <div class="row-test-panel__checks">
-                    <el-checkbox v-model="testOptions.onlyEnabled">仅测试当前可用账号</el-checkbox>
-                    <el-checkbox v-model="testOptions.updateStatus">
-                      测试后自动更新账号状态
-                    </el-checkbox>
-                  </div>
-                </el-form>
-                <div class="row-test-panel__actions">
-                  <el-button
-                    size="small"
-                    type="primary"
-                    :loading="testingAccountId === row.accountId"
-                    @click="testAccount(row)"
-                  >
-                    自动测试
-                  </el-button>
-                  <el-button
-                    size="small"
-                    :disabled="!latestTest(row.accountId)"
-                    @click="openTestDetail(row)"
-                  >
-                    查看结果
-                  </el-button>
-                </div>
-              </div>
-            </el-popover>
-            <el-button link :type="row.enabled ? 'danger' : 'success'" @click="toggleEnabled(row)">
-              <template #icon>
-                <svg
-                  v-if="row.enabled"
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="12"
-                  height="12"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2.5"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  style="margin-right: 2px"
-                >
-                  <rect x="1" y="5" width="22" height="14" rx="7" ry="7" />
-                  <circle cx="16" cy="12" r="3" />
-                </svg>
-                <svg
-                  v-else
-                  xmlns="http://www.w3.org/2000/svg"
-                  width="12"
-                  height="12"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  stroke-width="2.5"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                  style="margin-right: 2px"
-                >
-                  <rect x="1" y="5" width="22" height="14" rx="7" ry="7" />
-                  <circle cx="8" cy="12" r="3" />
-                </svg>
-              </template>
-              {{ row.enabled ? '停用' : '启用' }}
-            </el-button>
-            <span class="action-divider">|</span>
+            <AccountTestPopover
+              v-model:model="testModelByAccount[row.accountId]"
+              v-model:prompt="testOptions.prompt"
+              v-model:only-enabled="testOptions.onlyEnabled"
+              v-model:update-status="testOptions.updateStatus"
+              :latest-test="latestTest(row.accountId)"
+              :testing="testingAccountId === row.accountId"
+              :model-options="testModelsFor(row)"
+              @ensure-model="ensureTestModel(row)"
+              @test="testAccount(row)"
+              @show-detail="openTestDetail(row)"
+            />
             <el-dropdown trigger="click" @command="(cmd: string) => handleCommand(cmd, row)">
               <el-button link type="primary" class="more-btn">
                 更多<span class="caret">▼</span>
               </el-button>
               <template #dropdown>
                 <el-dropdown-menu>
+                  <el-dropdown-item command="toggle">
+                    {{ row.enabled ? '停用' : '启用' }}
+                  </el-dropdown-item>
                   <el-dropdown-item command="suspend">挂起</el-dropdown-item>
                   <el-dropdown-item command="reset">重置</el-dropdown-item>
                   <el-dropdown-item command="remove" divided>
-                    <span style="color: var(--el-color-danger)">删除</span>
+                    <span class="dropdown-danger-text">删除</span>
                   </el-dropdown-item>
                 </el-dropdown-menu>
               </template>
@@ -2192,719 +695,36 @@
     </el-table>
   </PageSection>
 
-  <!-- 新建 / 编辑 -->
-  <el-dialog
-    v-model="formVisible"
-    :title="formMode === 'create' ? '新建账号' : '编辑账号'"
-    width="720px"
-    destroy-on-close
-  >
-    <el-form ref="formRef" :model="form" :rules="rules" label-position="top">
-      <el-alert
-        v-if="isOpenAiCompatibleForm"
-        class="account-form-alert"
-        type="info"
-        show-icon
-        :closable="false"
-        title="第三方 API Key 账号会按 OpenAI 兼容协议调用 Base URL；填写站点根地址时会自动使用 /v1。模型映射目标可写成 openai-compatible/真实模型ID，例如 openai-compatible/deepseek-chat。"
-      />
-      <el-alert
-        v-else-if="isAnthropicApiKeyForm"
-        class="account-form-alert"
-        type="info"
-        show-icon
-        :closable="false"
-        title="Anthropic API Key 账号会按原生 Messages API 调用 Base URL；模型映射目标建议写成 anthropic/真实模型ID，例如 anthropic/claude-sonnet-4.5。"
-      />
+  <!-- 新建 / 编辑对话框已抽离至 ./components/AccountFormDialog.vue -->
+  <AccountFormDialog
+    v-model:visible="formVisible"
+    :mode="formMode"
+    :account="editingAccount"
+    @saved="loadAccounts"
+  />
 
-      <el-tabs v-model="activeFormTab" class="account-form-tabs">
-        <!-- Tab 1: Basic Info -->
-        <el-tab-pane label="基本配置" name="basic">
-          <div class="tab-pane-content">
-            <el-row :gutter="20">
-              <el-col v-if="formMode === 'create'" :span="12">
-                <el-form-item label="账号 ID（可选）">
-                  <el-input v-model="form.accountId" placeholder="留空时自动生成" />
-                </el-form-item>
-              </el-col>
-              <el-col :span="formMode === 'create' ? 12 : 24">
-                <el-form-item label="邮箱">
-                  <el-input v-model="form.email" placeholder="如 email@example.com" />
-                </el-form-item>
-              </el-col>
+  <!-- 批量导入对话框已抽离至 ./components/ImportDialog.vue -->
+  <ImportDialog v-model:visible="importVisible" @imported="loadAccounts" />
 
-              <el-col :span="12">
-                <el-form-item label="Provider">
-                  <el-select v-model="form.provider" allow-create filterable style="width: 100%">
-                    <el-option
-                      v-for="item in providerOptions"
-                      :key="item.value"
-                      :label="item.label"
-                      :value="item.value"
-                    />
-                  </el-select>
-                </el-form-item>
-              </el-col>
-              <el-col :span="12">
-                <el-form-item label="认证方式">
-                  <el-select v-model="form.authMethod" allow-create filterable style="width: 100%">
-                    <el-option
-                      v-for="item in authMethodOptions"
-                      :key="item.value"
-                      :label="item.label"
-                      :value="item.value"
-                    />
-                  </el-select>
-                </el-form-item>
-              </el-col>
+  <!-- 批量复检结果对话框已抽离至 ./components/BatchTestResultDialog.vue -->
+  <BatchTestResultDialog
+    v-model:visible="batchTestVisible"
+    :result="batchTestResult"
+    @show-detail="openBatchTestDetail"
+  />
 
-              <el-col :span="12">
-                <el-form-item label="账号池级别">
-                  <el-radio-group v-model="form.poolTier">
-                    <el-radio-button label="primary">一级号池</el-radio-button>
-                    <el-radio-button label="secondary">二级号池</el-radio-button>
-                  </el-radio-group>
-                </el-form-item>
-              </el-col>
-              <el-col :span="12">
-                <el-form-item label="基础权重">
-                  <el-input-number
-                    v-model="form.poolWeight"
-                    :min="1"
-                    :max="10000"
-                    :step="10"
-                    style="width: 100%"
-                  />
-                  <p class="form-hint">自动权重开启时，连续错误越多，实际调度权重越低。</p>
-                </el-form-item>
-              </el-col>
-
-              <el-col :span="24">
-                <el-form-item label="出站代理 URL">
-                  <el-input v-model="form.proxyUrl" placeholder="http://user:pass@host:port" />
-                </el-form-item>
-              </el-col>
-            </el-row>
-          </div>
-        </el-tab-pane>
-
-        <!-- Tab 2: Credentials -->
-        <el-tab-pane label="凭证配置" name="credentials">
-          <div class="tab-pane-content">
-            <el-row :gutter="20">
-              <el-col :span="24">
-                <el-form-item :label="accessTokenLabel" prop="accessToken">
-                  <el-input
-                    v-model="form.accessToken"
-                    type="textarea"
-                    :rows="3"
-                    :placeholder="accessTokenPlaceholder"
-                  />
-                </el-form-item>
-              </el-col>
-
-              <el-col :span="24">
-                <el-form-item label="Refresh Token">
-                  <el-input v-model="form.refreshToken" placeholder="输入 Refresh Token，可选" />
-                </el-form-item>
-              </el-col>
-
-              <el-col :span="24">
-                <el-form-item label="ID Token">
-                  <el-input
-                    v-model="form.idToken"
-                    type="textarea"
-                    :rows="2"
-                    placeholder="Codex id_token，可选"
-                  />
-                </el-form-item>
-              </el-col>
-
-              <el-col :span="24">
-                <el-form-item label="Profile ARN">
-                  <el-input v-model="form.profileArn" placeholder="AWS Profile ARN，可选" />
-                </el-form-item>
-              </el-col>
-            </el-row>
-          </div>
-        </el-tab-pane>
-
-        <!-- Tab 3: Advanced & Routing -->
-        <el-tab-pane label="高级与路由" name="advanced">
-          <div class="tab-pane-content">
-            <el-row :gutter="20">
-              <el-col :span="24">
-                <el-form-item :label="baseUrlLabel" prop="baseUrl">
-                  <el-input v-model="form.baseUrl" :placeholder="baseUrlPlaceholder" />
-                  <p v-if="isOpenAiCompatibleForm" class="form-hint">
-                    填到兼容 OpenAI 的 API 根路径，通常以 /v1 结尾；服务会自动追加 /chat/completions
-                    或 /responses。
-                  </p>
-                  <p v-else-if="isAnthropicApiKeyForm" class="form-hint">
-                    填到 Anthropic Messages API 根路径，通常以 /v1 结尾；服务会自动追加 /messages。
-                  </p>
-                </el-form-item>
-              </el-col>
-
-              <el-col :span="12">
-                <el-form-item label="上游账号 ID">
-                  <el-input
-                    v-model="form.upstreamAccountId"
-                    placeholder="Codex ChatGPT Account ID，可选"
-                  />
-                </el-form-item>
-              </el-col>
-              <el-col :span="12">
-                <el-form-item label="Machine ID">
-                  <el-input v-model="form.machineId" placeholder="机器 ID，可选" />
-                </el-form-item>
-              </el-col>
-
-              <el-col :span="12">
-                <el-form-item label="区域">
-                  <el-input v-model="form.region" placeholder="如 us-east-1" />
-                </el-form-item>
-              </el-col>
-              <el-col :span="12">
-                <el-row :gutter="12">
-                  <el-col :span="formMode === 'edit' ? 16 : 24">
-                    <el-form-item label="配额上限">
-                      <el-input-number
-                        v-model="form.quotaLimit"
-                        :min="0"
-                        :step="1000"
-                        style="width: 100%"
-                      />
-                    </el-form-item>
-                  </el-col>
-                  <el-col v-if="formMode === 'edit'" :span="8">
-                    <el-form-item label="启用">
-                      <el-switch v-model="form.enabled" style="margin-top: 6px" />
-                    </el-form-item>
-                  </el-col>
-                </el-row>
-              </el-col>
-            </el-row>
-          </div>
-        </el-tab-pane>
-      </el-tabs>
-    </el-form>
-
-    <template #footer>
-      <el-button @click="formVisible = false">取消</el-button>
-      <el-button type="primary" :loading="formSubmitting" @click="submitForm">提交</el-button>
-    </template>
-  </el-dialog>
-
-  <!-- 批量导入 -->
-  <el-dialog v-model="importVisible" title="批量导入账号" width="720px">
-    <div class="text-secondary mt-8" style="margin-bottom: 8px">
-      上传或粘贴 Kiro Account Manager、OpenAI Codex token、OpenAI-compatible / Anthropic API Key
-      配置 JSON，或账号数组 /
-      <span class="mono">{ "accounts": [...] }</span>
-    </div>
-
-    <div
-      class="import-drop-zone"
-      :class="{ 'is-dragover': isDragover, 'has-files': importFileNames.length > 0 }"
-      @dragover.prevent="onDragOver"
-      @dragenter.prevent="onDragEnter"
-      @dragleave.prevent="onDragLeave"
-      @drop.prevent="onDrop"
-      @click="chooseImportFiles"
-    >
-      <input
-        ref="importFileInput"
-        class="import-file-row__input"
-        type="file"
-        accept=".json,application/json"
-        multiple
-        style="display: none"
-        @change="handleImportFiles"
-      >
-
-      <div v-if="importFileNames.length === 0" class="drop-zone-prompt">
-        <svg
-          xmlns="http://www.w3.org/2000/svg"
-          width="36"
-          height="36"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.5"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          class="drop-icon"
-        >
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-          <polyline points="17 8 12 3 7 8" />
-          <line x1="12" y1="3" x2="12" y2="15" />
-        </svg>
-        <div class="prompt-text">将 JSON 配置文件拖拽到此处，或<span>点击上传</span></div>
-        <div class="prompt-hint">支持单个或多个 .json 配置文件</div>
-      </div>
-      <div v-else class="drop-zone-files" @click.stop>
-        <div class="files-header">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="18"
-            height="18"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-            class="success-icon"
-          >
-            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-            <polyline points="22 4 12 14.01 9 11.01" />
-          </svg>
-          <span class="files-title">已选择 {{ importFileNames.length }} 个 JSON 文件</span>
-          <el-button size="small" type="danger" link @click="clearImportFiles">清除文件</el-button>
-        </div>
-        <div class="files-list">
-          <div v-for="name in importFileNames" :key="name" class="file-item">
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              width="13"
-              height="13"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              class="file-icon"
-            >
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-              <polyline points="14 2 14 8 20 8" />
-              <line x1="16" y1="13" x2="8" y2="13" />
-              <line x1="16" y1="17" x2="8" y2="17" />
-              <polyline points="10 9 9 9 8 9" />
-            </svg>
-            <span class="file-name" :title="name">{{ name }}</span>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="text-secondary mt-16" style="margin-bottom: 8px">
-      或者，在此直接粘贴 JSON 文本：
-    </div>
-    <el-input
-      v-model="importContent"
-      type="textarea"
-      :rows="8"
-      placeholder='{"type":"codex","access_token":"...","refresh_token":"...","id_token":"..."}'
-      @input="clearImportFiles"
-    />
-    <el-checkbox v-model="importUpsert" class="mt-16">
-      已存在邮箱时覆盖更新旧账号（谨慎开启）
-    </el-checkbox>
-
-    <div v-if="importResult" class="import-summary glass-panel mt-16">
-      <div class="flex gap-16">
-        <div>总计 {{ importResult.total }}</div>
-        <div>新建 {{ importResult.created }}</div>
-        <div>更新 {{ importResult.updated }}</div>
-        <div>跳过 {{ importResult.skipped }}</div>
-        <div>失败 {{ importResult.failed }}</div>
-      </div>
-      <el-table :data="importResult.items" size="small" class="mt-8" max-height="240">
-        <el-table-column prop="index" label="#" width="60" />
-        <el-table-column prop="accountId" label="账号 ID" min-width="180" />
-        <el-table-column prop="status" label="结果" width="100" />
-        <el-table-column prop="message" label="信息" />
-      </el-table>
-    </div>
-
-    <template #footer>
-      <el-button @click="importVisible = false">关闭</el-button>
-      <el-button type="primary" :loading="importSubmitting" @click="submitImport">
-        开始导入
-      </el-button>
-    </template>
-  </el-dialog>
-
-  <!-- 批量复检结果 -->
-  <el-dialog v-model="batchTestVisible" title="批量账号测试结果" width="1080px">
-    <div v-if="batchTestResult" class="batch-test-result">
-      <div class="batch-test-result__summary glass-panel">
-        <div class="batch-test-result__metric">
-          <span>总计</span>
-          <strong>{{ batchTestResult.total }}</strong>
-        </div>
-        <div class="batch-test-result__metric success">
-          <span>成功</span>
-          <strong>{{ batchTestResult.success }}</strong>
-        </div>
-        <div class="batch-test-result__metric danger">
-          <span>失败</span>
-          <strong>{{ batchTestResult.failed }}</strong>
-        </div>
-        <div class="batch-test-result__metric muted">
-          <span>跳过</span>
-          <strong>{{ batchTestResult.skipped }}</strong>
-        </div>
-        <div class="batch-test-result__time">
-          {{ formatDateTime(batchTestResult.startedAt) }} -
-          {{ formatDateTime(batchTestResult.finishedAt) }}
-        </div>
-        <el-button size="small" @click="copy(batchTestJson)">复制完整 JSON</el-button>
-      </div>
-
-      <el-table :data="batchTestResult.items" size="small" class="mt-16" max-height="460">
-        <el-table-column label="状态" width="105" fixed>
-          <template #default="{ row }">
-            <el-tag :type="testStatusType(row.status)" effect="light" round>
-              {{ row.status }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="账号 ID" min-width="220" show-overflow-tooltip>
-          <template #default="{ row }">
-            <span class="mono">{{ row.accountId }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="email" label="邮箱" min-width="180" show-overflow-tooltip />
-        <el-table-column prop="model" label="模型" min-width="150" show-overflow-tooltip />
-        <el-table-column label="HTTP" width="90" align="center">
-          <template #default="{ row }">{{ row.statusCode ?? '—' }}</template>
-        </el-table-column>
-        <el-table-column label="耗时" width="105" align="right">
-          <template #default="{ row }">
-            {{ row.latencyMs == null ? '—' : `${row.latencyMs}ms` }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="message" label="消息" min-width="260" show-overflow-tooltip />
-        <el-table-column label="操作" width="140" fixed="right" align="center">
-          <template #default="{ row }">
-            <el-button link type="primary" @click="openBatchTestDetail(row)">详情</el-button>
-            <el-button link @click="copy(row.detail || row.message || '')">复制</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-    </div>
-  </el-dialog>
-
-  <!-- 单账号测试结果 -->
-  <el-dialog v-model="testDetailVisible" title="账号测试结果" width="760px">
-    <div v-if="testDetail" class="test-detail">
-      <div class="test-detail__head">
-        <div class="test-detail__title">
-          <el-tag :type="testStatusType(testDetail.status)" effect="light" round>
-            {{ testDetail.status }}
-          </el-tag>
-          <span class="mono">{{ testDetail.accountId }}</span>
-        </div>
-        <div class="test-detail__actions">
-          <el-button size="small" @click="copy(testDetailJson)">复制完整结果</el-button>
-          <el-button
-            size="small"
-            type="primary"
-            @click="copy(testDetail.detail || testDetail.message || '')"
-          >
-            {{ testDetail.status === 'FAILED' ? '复制报错信息' : '复制返回信息' }}
-          </el-button>
-        </div>
-      </div>
-
-      <el-descriptions :column="2" border size="small">
-        <el-descriptions-item label="邮箱">{{ testDetail.email || '—' }}</el-descriptions-item>
-        <el-descriptions-item label="模型">{{ testDetail.model || '—' }}</el-descriptions-item>
-        <el-descriptions-item label="HTTP">{{ testDetail.statusCode ?? '—' }}</el-descriptions-item>
-        <el-descriptions-item label="耗时">
-          {{ testDetail.latencyMs == null ? '—' : `${testDetail.latencyMs}ms` }}
-        </el-descriptions-item>
-        <el-descriptions-item label="测试时间" :span="2">
-          {{ formatDateTime(testDetail.testedAt) }}
-        </el-descriptions-item>
-      </el-descriptions>
-
-      <div class="test-detail__section">
-        <div class="test-detail__section-head">
-          <span>{{ testDetail.status === 'FAILED' ? '完整报错信息' : '完整返回信息' }}</span>
-          <el-button
-            link
-            type="primary"
-            @click="copy(testDetail.detail || testDetail.message || '')"
-          >
-            复制
-          </el-button>
-        </div>
-        <pre class="test-detail__pre">{{ testDetail.detail || testDetail.message || '—' }}</pre>
-      </div>
-
-      <div class="test-detail__section">
-        <div class="test-detail__section-head">
-          <span>完整 JSON</span>
-          <el-button link type="primary" @click="copy(testDetailJson)">复制</el-button>
-        </div>
-        <pre class="test-detail__pre">{{ testDetailJson }}</pre>
-      </div>
-    </div>
-  </el-dialog>
+  <!-- 单账号测试结果对话框已抽离至 ./components/TestDetailDialog.vue -->
+  <TestDetailDialog v-model:visible="testDetailVisible" :detail="testDetail" />
 </template>
 
 <style scoped lang="scss">
   // Scheduled test panel styling moved to DisabledSchedulePanel.vue
+  // Row test popover styling moved to components/AccountTestPopover.vue
 
-  .row-test-panel {
-    display: grid;
-    gap: 10px;
-
-    &__title,
-    &__actions {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 8px;
-    }
-
-    &__title {
-      font-weight: 700;
-    }
-
-    &__checks {
-      display: grid;
-      gap: 4px;
-    }
-  }
-
-  .batch-test-result {
-    display: grid;
-    gap: 12px;
-
-    &__summary {
-      display: grid;
-      grid-template-columns: repeat(4, minmax(80px, 1fr)) minmax(220px, 2fr) auto;
-      align-items: center;
-      gap: 12px;
-      padding: 14px 16px;
-    }
-
-    &__metric {
-      display: grid;
-      gap: 4px;
-
-      span {
-        color: var(--kp-text-secondary);
-        font-size: 12px;
-      }
-
-      strong {
-        color: var(--kp-text-primary);
-        font-size: 22px;
-        line-height: 1;
-      }
-
-      &.success strong {
-        color: var(--kp-success);
-      }
-
-      &.danger strong {
-        color: var(--kp-danger);
-      }
-
-      &.muted strong {
-        color: var(--kp-text-secondary);
-      }
-    }
-
-    &__time {
-      color: var(--kp-text-secondary);
-      font-size: 13px;
-      text-align: right;
-    }
-  }
-
-  .test-detail {
-    display: grid;
-    gap: 14px;
-
-    &__head,
-    &__actions {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 12px;
-      flex-wrap: wrap;
-    }
-
-    &__title {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      min-width: 0;
-    }
-
-    &__section {
-      display: grid;
-      gap: 6px;
-    }
-
-    &__section-head {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      color: var(--kp-text-secondary);
-      font-weight: 700;
-    }
-
-    &__pre {
-      max-height: 220px;
-      overflow: auto;
-      margin: 0;
-      padding: 12px;
-      border: 1px solid rgba(15, 23, 42, 0.08);
-      border-radius: 10px;
-      background: rgba(15, 23, 42, 0.86);
-      color: #e5edff;
-      font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Consolas, monospace;
-      font-size: 12px;
-      line-height: 1.55;
-      white-space: pre-wrap;
-      word-break: break-word;
-    }
-  }
-
-  .import-summary {
-    padding: 12px 16px;
-  }
-
-  .account-form-alert {
-    margin-bottom: 16px;
-  }
-
-  .form-hint {
-    width: 100%;
-    margin: 6px 0 0;
-    color: var(--kp-text-muted);
-    font-size: 12px;
-    line-height: 1.45;
-  }
-
-  /* Import Drop Zone */
-  .import-drop-zone {
-    border: 2px dashed rgba(15, 23, 42, 0.12);
-    border-radius: var(--kp-radius-sm);
-    padding: 24px 20px;
-    text-align: center;
-    background: rgba(255, 255, 255, 0.45);
-    cursor: pointer;
-    transition: all 0.25s ease;
-    margin-top: 12px;
-    margin-bottom: 12px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    min-height: 120px;
-    user-select: none;
-
-    &:hover,
-    &.is-dragover {
-      border-color: var(--kp-primary);
-      background: rgba(91, 141, 239, 0.04);
-
-      .drop-icon {
-        color: var(--kp-primary);
-        transform: translateY(-2px);
-      }
-    }
-
-    &.has-files {
-      cursor: default;
-      border-style: solid;
-      background: rgba(255, 255, 255, 0.55);
-      align-items: stretch;
-      padding: 16px 20px;
-    }
-
-    .drop-icon {
-      color: var(--kp-text-muted);
-      margin-bottom: 8px;
-      transition: all 0.25s ease;
-    }
-
-    .prompt-text {
-      font-size: 13.5px;
-      font-weight: 600;
-      color: var(--kp-text);
-      margin-bottom: 4px;
-
-      span {
-        color: var(--kp-primary);
-        font-weight: 700;
-        text-decoration: underline;
-        margin-left: 4px;
-      }
-    }
-
-    .prompt-hint {
-      font-size: 11px;
-      color: var(--kp-text-muted);
-    }
-
-    .drop-zone-files {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      text-align: left;
-
-      .files-header {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        font-size: 13px;
-        font-weight: 700;
-        color: var(--kp-text);
-        border-bottom: 1px solid var(--kp-divider);
-        padding-bottom: 6px;
-
-        .success-icon {
-          color: #36c08a;
-        }
-
-        .files-title {
-          flex: 1;
-        }
-      }
-
-      .files-list {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 6px;
-        max-height: 100px;
-        overflow-y: auto;
-      }
-
-      .file-item {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-        padding: 3px 8px;
-        border-radius: 5px;
-        background: rgba(15, 23, 42, 0.03);
-        border: 1px solid var(--kp-divider);
-        font-size: 11.5px;
-        color: var(--kp-text-secondary);
-        max-width: 200px;
-
-        .file-icon {
-          flex-shrink: 0;
-          color: var(--kp-text-muted);
-        }
-
-        .file-name {
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
-        }
-      }
-    }
-  }
+  // 批量复检结果样式已迁移至 components/BatchTestResultDialog.vue
+  // 测试结果详情样式已迁移至 components/TestDetailDialog.vue
+  // 批量导入样式（.import-summary / .import-drop-zone）已迁移至 components/ImportDialog.vue
+  // 表单样式（.account-form-alert / .form-hint）已迁移至 components/AccountFormDialog.vue
 
   .caret {
     font-size: 10px;
@@ -2913,32 +733,7 @@
     display: inline-block;
   }
 
-  .provider-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 3px 10px;
-    border-radius: 6px;
-    font-size: 11px;
-    font-weight: 600;
-    white-space: nowrap;
-    vertical-align: middle;
-    max-width: 100%;
-    box-sizing: border-box;
-
-    .provider-logo {
-      width: 13px;
-      height: 13px;
-      flex-shrink: 0;
-    }
-
-    .provider-name {
-      line-height: 1;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-  }
+  // Provider badge styling moved to components/ProviderBadge.vue
 
   .email-id-cell {
     display: flex;
@@ -2962,20 +757,26 @@
     }
   }
 
-  /* Unified Metrics Panel */
+  /* Unified Metrics Panel：grid 5 列，分隔线用 border 实现，换行断点处隐藏 */
   .metrics-panel {
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    column-gap: 28px;
     align-items: center;
     padding: 20px 28px;
     margin-bottom: 24px;
     width: 100%;
 
     .metric-item {
-      flex: 1;
       display: flex;
       flex-direction: column;
       gap: 4px;
       min-width: 0;
+
+      & + .metric-item {
+        border-left: 1px solid var(--kp-divider);
+        padding-left: 28px;
+      }
 
       &__header {
         display: flex;
@@ -2994,15 +795,15 @@
           box-shadow: 0 0 6px rgba(91, 141, 239, 0.6);
         }
         &.dot-active {
-          background-color: #36c08a;
+          background-color: var(--kp-success);
           box-shadow: 0 0 6px rgba(54, 192, 138, 0.6);
         }
         &.dot-suspended {
-          background-color: #ef5b6b;
+          background-color: var(--kp-danger);
           box-shadow: 0 0 6px rgba(239, 91, 107, 0.6);
         }
         &.dot-requests {
-          background-color: #b387ff;
+          background-color: var(--kp-accent);
           box-shadow: 0 0 6px rgba(179, 135, 255, 0.6);
         }
       }
@@ -3018,395 +819,18 @@
         font-weight: 800;
         color: var(--kp-text);
         line-height: 1.15;
-        font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Consolas, monospace;
 
         &.text-success {
-          color: #36c08a;
+          color: var(--kp-success);
         }
         &.text-danger {
-          color: #ef5b6b;
+          color: var(--kp-danger);
         }
 
         &__sub {
           font-size: 13px;
           font-weight: 500;
           color: var(--kp-text-muted);
-        }
-      }
-
-      .metric-subtext {
-        font-size: 11px;
-        color: var(--kp-text-muted);
-        font-weight: 500;
-      }
-    }
-
-    .metric-divider {
-      width: 1px;
-      height: 40px;
-      background-color: var(--kp-divider);
-      margin: 0 28px;
-      align-self: center;
-      flex-shrink: 0;
-    }
-  }
-
-  .pool-policy-panel {
-    display: grid;
-    gap: 16px;
-    padding: 20px 24px;
-    margin-bottom: 24px;
-  }
-
-  .pool-policy-panel__status {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    flex-wrap: wrap;
-    padding-bottom: 12px;
-    border-bottom: 1px solid var(--kp-divider);
-  }
-
-  .panel-header-left {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    flex-wrap: wrap;
-
-    .brand-indicator {
-      width: 4px;
-      height: 16px;
-      border-radius: 99px;
-      background: var(--kp-primary);
-    }
-
-    .panel-title {
-      font-size: 15px;
-      font-weight: 800;
-      color: var(--kp-text);
-      line-height: 1;
-    }
-
-    .panel-subtitle {
-      margin-top: 0;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      color: var(--kp-text-secondary);
-      font-size: 12.5px;
-
-      .pool-status-text strong {
-        color: var(--kp-danger);
-      }
-
-      .is-running {
-        color: var(--el-color-warning);
-        font-weight: 700;
-        animation: pulse-warn 1.5s infinite;
-      }
-    }
-  }
-
-  @keyframes pulse-warn {
-    0% {
-      opacity: 0.6;
-    }
-    50% {
-      opacity: 1;
-    }
-    100% {
-      opacity: 0.6;
-    }
-  }
-
-  .pool-policy-form {
-    :deep(.el-form-item) {
-      margin-bottom: 8px;
-    }
-
-    :deep(.el-input-number) {
-      width: 100%;
-    }
-  }
-
-  .pool-policy-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    margin-top: 12px;
-    padding-top: 12px;
-    border-top: 1px dashed var(--kp-divider);
-
-    .info-alert {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex: 1;
-
-      &-icon {
-        color: var(--kp-primary);
-        flex-shrink: 0;
-      }
-
-      span {
-        font-size: 12px;
-        color: var(--kp-text-secondary);
-        line-height: 1.4;
-      }
-    }
-  }
-
-  .pool-drag-board {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 16px;
-  }
-
-  .pool-drag-column {
-    min-height: 240px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding: 16px;
-    border: 1px solid rgba(54, 192, 138, 0.18);
-    border-radius: var(--kp-radius-sm);
-    background: linear-gradient(180deg, rgba(54, 192, 138, 0.04), rgba(255, 255, 255, 0.6));
-    transition: all 0.25s ease;
-
-    &.is-secondary {
-      border-color: rgba(245, 158, 11, 0.2);
-      background: linear-gradient(180deg, rgba(245, 158, 11, 0.04), rgba(255, 255, 255, 0.6));
-    }
-
-    &.is-active-route {
-      border-color: rgba(91, 141, 239, 0.4);
-      box-shadow: 0 8px 24px rgba(91, 141, 239, 0.08);
-    }
-
-    &.is-drop-target {
-      border-color: var(--kp-primary);
-      box-shadow: 0 0 0 3px rgba(91, 141, 239, 0.12);
-      transform: translateY(-2px);
-    }
-  }
-
-  .pool-drag-column__head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 10px;
-    padding-bottom: 10px;
-    border-bottom: 1px solid var(--kp-divider);
-
-    strong {
-      min-width: 34px;
-      text-align: right;
-      color: var(--kp-text);
-      font-size: 24px;
-      line-height: 1;
-      font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Consolas, monospace;
-    }
-  }
-
-  .pool-drag-column__title {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--kp-text);
-    font-size: 14.5px;
-    font-weight: 800;
-  }
-
-  .pool-drag-column__desc {
-    margin-top: 4px;
-    color: var(--kp-text-secondary);
-    font-size: 12px;
-  }
-
-  .pool-drag-empty {
-    display: grid;
-    place-items: center;
-    min-height: 120px;
-    border: 2px dashed rgba(15, 23, 42, 0.12);
-    border-radius: var(--kp-radius-sm);
-    color: var(--kp-text-muted);
-    font-size: 12px;
-    background: rgba(255, 255, 255, 0.35);
-  }
-
-  .pool-account-card {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 12px;
-    border: 1px solid rgba(15, 23, 42, 0.08);
-    border-radius: 8px;
-    background: rgba(255, 255, 255, 0.75);
-    cursor: grab;
-    user-select: none;
-    transition: all 0.2s cubic-bezier(0.25, 0.8, 0.25, 1);
-
-    &__drag-handle {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: var(--kp-text-muted);
-      cursor: grab;
-      margin-top: 4px;
-      flex-shrink: 0;
-      opacity: 0.4;
-      transition: opacity 0.2s ease;
-    }
-
-    &:hover {
-      border-color: rgba(91, 141, 239, 0.36);
-      box-shadow: 0 6px 14px rgba(15, 23, 42, 0.06);
-      transform: translateY(-1.5px);
-      background: #ffffff;
-
-      .pool-account-card__drag-handle {
-        opacity: 0.8;
-        color: var(--kp-primary);
-      }
-    }
-
-    &:active {
-      cursor: grabbing;
-      .pool-account-card__drag-handle {
-        cursor: grabbing;
-      }
-    }
-
-    &.is-dragging {
-      opacity: 0.5;
-      border-style: dashed;
-    }
-
-    &.is-updating {
-      pointer-events: none;
-      opacity: 0.6;
-    }
-
-    &__info-wrapper {
-      flex: 1;
-      min-width: 0;
-      display: grid;
-      gap: 6px;
-    }
-
-    &__main {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      min-width: 0;
-    }
-
-    &__name {
-      min-width: 0;
-      overflow: hidden;
-      color: var(--kp-text);
-      font-size: 13px;
-      font-weight: 700;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    &__id {
-      flex: 0 0 auto;
-      color: var(--kp-text-muted);
-      font-size: 11px;
-    }
-
-    &__meta {
-      display: flex;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 6px;
-      color: var(--kp-text-secondary);
-      font-size: 11px;
-
-      .meta-item {
-        color: var(--kp-text-secondary);
-
-        strong {
-          color: var(--kp-text);
-        }
-        .text-danger {
-          color: var(--kp-danger) !important;
-        }
-      }
-    }
-  }
-
-  .failure-ranking {
-    display: grid;
-    gap: 10px;
-    padding-top: 16px;
-    border-top: 1px solid var(--kp-divider);
-
-    &__title {
-      color: var(--kp-text-secondary);
-      font-size: 12.5px;
-      font-weight: 700;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-
-      &::before {
-        content: '';
-        width: 3px;
-        height: 12px;
-        background-color: var(--kp-danger);
-        border-radius: 4px;
-      }
-    }
-
-    &__list {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-      gap: 10px;
-    }
-
-    &__item {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 8px 12px;
-      border: 1px solid var(--kp-divider);
-      border-radius: 8px;
-      background: rgba(255, 255, 255, 0.45);
-      font-size: 12px;
-      transition: all 0.2s ease;
-
-      &:hover {
-        background: #ffffff;
-        border-color: rgba(239, 91, 107, 0.24);
-        box-shadow: 0 4px 10px rgba(15, 23, 42, 0.04);
-        transform: translateY(-1px);
-      }
-
-      .item-id {
-        font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Consolas, monospace;
-        font-weight: 600;
-        color: var(--kp-text);
-      }
-
-      .item-stats {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        color: var(--kp-text-secondary);
-      }
-
-      .failure-pct {
-        font-weight: 700;
-        color: var(--kp-danger);
-
-        &.is-zero {
-          color: var(--kp-success);
         }
       }
     }
@@ -3422,20 +846,34 @@
   .actions-wrapper {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 4px;
 
     .el-button {
       margin: 0;
     }
 
-    .action-divider {
-      color: var(--el-border-color-lighter);
-      font-size: 12px;
-      user-select: none;
+    .action-icon {
+      margin-right: 2px;
     }
 
     .more-btn {
-      padding: 0 4px;
+      padding: 0 2px;
+    }
+  }
+
+  // 删除项渲染在 teleport 到 body 的下拉菜单里，选择器需置于顶层
+  .dropdown-danger-text {
+    color: var(--el-color-danger);
+  }
+
+  .search-input {
+    width: 280px;
+
+    &__icon {
+      width: 14px;
+      height: 14px;
+      color: var(--kp-text-muted);
+      margin-right: 4px;
     }
   }
 
@@ -3454,247 +892,28 @@
     white-space: nowrap;
   }
 
-  .quota-cell {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    width: 100%;
-    padding: 2px 0;
+  // Quota cell styling moved to components/QuotaCell.vue
 
-    .quota-meta {
-      display: flex;
-      align-items: center;
-      font-size: 11.5px;
-      line-height: 1.2;
-      color: var(--kp-text-secondary);
-      font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Consolas, monospace;
-
-      .quota-remaining {
-        font-weight: 600;
-
-        &.is-success {
-          color: var(--el-color-success);
-        }
-        &.is-warning {
-          color: var(--el-color-warning);
-        }
-        &.is-exception {
-          color: var(--el-color-danger);
-        }
-      }
-
-      .quota-used {
-        font-weight: 600;
-        color: var(--kp-text-secondary);
-      }
-
-      .quota-divider {
-        margin: 0 4px;
-        color: var(--kp-text-muted);
-      }
-
-      .quota-limit {
-        color: var(--kp-text-muted);
-      }
-
-      .quota-limit-unlimited {
-        color: var(--kp-text-muted);
-        font-style: italic;
-      }
-    }
-
-    .quota-progress {
-      margin: 0;
-      width: 100%;
-      :deep(.el-progress-bar__outer) {
-        background-color: rgba(15, 23, 42, 0.06) !important;
-      }
-    }
-
-    .quota-unlimited-bar {
-      height: 6px;
-      border-radius: 100px;
-      background: linear-gradient(90deg, rgba(66, 133, 244, 0.2) 0%, rgba(66, 133, 244, 0.05) 100%);
-      width: 100%;
-    }
-
-    &.is-codex {
-      .quota-loading-text {
-        display: inline-flex;
-        align-items: center;
-        font-size: 11px;
-        color: var(--kp-text-muted);
-      }
-
-      .quota-spinner {
-        display: inline-block;
-        width: 10px;
-        height: 10px;
-        border: 1.5px solid rgba(66, 133, 244, 0.2);
-        border-top-color: #4285f4;
-        border-radius: 50%;
-        animation: quota-spin 0.8s linear infinite;
-        margin-right: 6px;
-        flex-shrink: 0;
-      }
-
-      .quota-loading-bar {
-        height: 6px;
-        border-radius: 100px;
-        background: linear-gradient(
-          90deg,
-          rgba(66, 133, 244, 0.1) 25%,
-          rgba(66, 133, 244, 0.3) 50%,
-          rgba(66, 133, 244, 0.1) 75%
-        );
-        background-size: 200% 100%;
-        animation: quota-loading-sweep 1.5s infinite linear;
-        width: 100%;
-      }
-
-      .quota-error-text {
-        color: var(--el-color-danger);
-        font-weight: 600;
-        cursor: help;
-        text-decoration: underline dotted;
-      }
-
-      .quota-refresh-btn {
-        margin-left: auto;
-        padding: 0;
-        height: auto;
-        font-size: 11px;
-        display: inline-flex;
-        align-items: center;
-        gap: 2px;
-
-        .icon-refresh {
-          transition: transform 0.25s ease;
-        }
-
-        &:hover .icon-refresh {
-          transform: rotate(180deg);
-        }
-      }
-
-      .quota-refresh-btn-mini {
-        margin-left: 6px;
-        padding: 0;
-        height: auto;
-        font-size: 10px;
-        opacity: 0;
-        transition: opacity 0.2s ease;
-        display: inline-flex;
-        align-items: center;
-
-        .icon-refresh {
-          color: var(--kp-text-muted);
-          transition:
-            transform 0.25s ease,
-            color 0.2s ease;
-        }
-
-        &:hover .icon-refresh {
-          transform: rotate(180deg);
-          color: var(--kp-primary);
-        }
-      }
-
-      .quota-wrapper-hoverable {
-        cursor: pointer;
-        width: 100%;
-
-        &:hover {
-          .quota-refresh-btn-mini {
-            opacity: 1;
-          }
-        }
-      }
-
-      .quota-fallback-label {
-        font-size: 11px;
-        color: var(--kp-text-muted);
-      }
-    }
-  }
-
-  .quota-tooltip-content {
-    font-size: 12px;
-    line-height: 1.55;
-    padding: 2px 4px;
-    font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Consolas, monospace;
-
-    strong {
-      color: #93c5fd;
-    }
-  }
-
-  @keyframes quota-spin {
-    to {
-      transform: rotate(360deg);
-    }
-  }
-
-  @keyframes quota-loading-sweep {
-    0% {
-      background-position: 200% 0;
-    }
-    100% {
-      background-position: -200% 0;
-    }
-  }
-
-  .account-form-tabs {
-    margin-top: 10px;
-
-    :deep(.el-tabs__header) {
-      margin-bottom: 20px;
-    }
-
-    :deep(.el-tabs__item) {
-      font-weight: 600;
-      font-size: 14px;
-      padding: 0 20px;
-      color: var(--kp-text-secondary);
-
-      &:hover {
-        color: var(--kp-primary);
-      }
-      &.is-active {
-        color: var(--kp-primary);
-        font-weight: 700;
-      }
-    }
-
-    .tab-pane-content {
-      padding: 4px 2px;
-      max-height: 480px;
-      overflow-y: auto;
-    }
-  }
+  // 表单页签样式（.account-form-tabs）已迁移至 components/AccountFormDialog.vue
 
   @media (max-width: 1024px) {
     .metrics-panel {
+      grid-template-columns: repeat(3, 1fr);
+      row-gap: 16px;
       padding: 16px 20px;
 
-      .metric-divider {
-        margin: 0 20px;
+      // 换行后隐藏分隔线，避免出现孤立分隔线
+      .metric-item + .metric-item {
+        border-left: none;
+        padding-left: 0;
       }
     }
   }
 
-  @media (max-width: 768px) {
+  @media (max-width: 640px) {
     .metrics-panel {
-      flex-direction: column;
-      align-items: stretch;
-      gap: 16px;
+      grid-template-columns: repeat(2, 1fr);
       padding: 20px;
-
-      .metric-divider {
-        width: 100%;
-        height: 1px;
-        margin: 4px 0;
-      }
     }
   }
 </style>

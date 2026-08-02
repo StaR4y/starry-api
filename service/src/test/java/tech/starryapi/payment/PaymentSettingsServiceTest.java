@@ -2,7 +2,9 @@ package tech.starryapi.payment;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -10,8 +12,11 @@ import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Sinks;
 import tech.starryapi.admin.SystemSettingEntity;
 import tech.starryapi.admin.SystemSettingRepository;
 import tech.starryapi.payment.PaymentDtos.PaymentSettingsResponse;
@@ -65,11 +70,12 @@ class PaymentSettingsServiceTest {
         assertThat(response.inviteRebateEnabled()).isTrue();
         assertThat(response.inviteRebateRate()).isEqualByComparingTo("0.150000");
 
-        verify(repository).upsertSetting(PaymentSettingsService.PAYMENT_ENABLED, "true");
-        verify(repository).upsertSetting(PaymentSettingsService.MAX_RECHARGE_AMOUNT, "0.00");
-        verify(repository).upsertSetting(PaymentSettingsService.API_BILLING_MULTIPLIER, "0.0000200000000000");
-        verify(repository).upsertSetting(PaymentSettingsService.EASYPAY_PKEY, "secret");
-        verify(repository).upsertSetting(PaymentSettingsService.INVITE_REBATE_RATE, "0.150000");
+        assertThat(store.get(PaymentSettingsService.PAYMENT_ENABLED)).isEqualTo("true");
+        assertThat(store.get(PaymentSettingsService.MAX_RECHARGE_AMOUNT)).isEqualTo("0.00");
+        assertThat(store.get(PaymentSettingsService.API_BILLING_MULTIPLIER)).isEqualTo("0.0000200000000000");
+        assertThat(store.get(PaymentSettingsService.EASYPAY_PKEY)).isEqualTo("secret");
+        assertThat(store.get(PaymentSettingsService.INVITE_REBATE_RATE)).isEqualTo("0.150000");
+        verify(repository).upsertSettings(any(String[].class), any(String[].class));
     }
 
     @Test
@@ -83,16 +89,60 @@ class PaymentSettingsServiceTest {
         assertThat(response.apiBillingMultiplier()).isEqualByComparingTo("0.0000166666666667");
     }
 
+    @Test
+    void configLoadsSettingsInOneQueryAndReusesSnapshot() {
+        SystemSettingRepository repository = mockRepository(new ConcurrentHashMap<>());
+        PaymentSettingsService service = new PaymentSettingsService(repository);
+
+        service.config().block();
+        service.config().block();
+
+        verify(repository, times(1)).findAllById(any(Iterable.class));
+    }
+
+    @Test
+    void invalidationPreventsAnOlderLoadFromRepopulatingTheConfigCache() {
+        SystemSettingRepository repository = mock(SystemSettingRepository.class);
+        Sinks.Many<SystemSettingEntity> staleLoad = Sinks.many().unicast().onBackpressureBuffer();
+        when(repository.findAllById(any(Iterable.class))).thenReturn(
+            staleLoad.asFlux(),
+            Flux.just(setting(PaymentSettingsService.PAYMENT_ENABLED, "true"))
+        );
+        PaymentSettingsService service = new PaymentSettingsService(repository);
+        AtomicReference<PaymentSettingsService.PaymentConfig> staleResult = new AtomicReference<>();
+
+        service.config().subscribe(staleResult::set);
+        service.invalidateAllCaches();
+        staleLoad.tryEmitNext(setting(PaymentSettingsService.PAYMENT_ENABLED, "false"));
+        staleLoad.tryEmitComplete();
+
+        assertThat(staleResult.get()).isNotNull();
+        assertThat(staleResult.get().enabled()).isFalse();
+        assertThat(service.config().block()).isNotNull();
+        assertThat(service.config().block().enabled()).isTrue();
+        verify(repository, times(2)).findAllById(any(Iterable.class));
+    }
+
     private SystemSettingRepository mockRepository(Map<String, String> store) {
         SystemSettingRepository repository = mock(SystemSettingRepository.class);
-        when(repository.findById(anyString())).thenAnswer(invocation -> {
-            String key = invocation.getArgument(0);
-            String value = store.get(key);
-            return value == null ? Mono.empty() : Mono.just(setting(key, value));
+        when(repository.acquireTransactionLock(anyString())).thenReturn(Mono.just(true));
+        when(repository.findAllById(any(Iterable.class))).thenAnswer(invocation -> {
+            Iterable<String> keys = invocation.getArgument(0);
+            return Flux.fromIterable(keys)
+                .filter(store::containsKey)
+                .map(key -> setting(key, store.get(key)));
         });
         when(repository.upsertSetting(anyString(), anyString())).thenAnswer(invocation -> {
             store.put(invocation.getArgument(0), invocation.getArgument(1));
             return Mono.just(1);
+        });
+        when(repository.upsertSettings(any(String[].class), any(String[].class))).thenAnswer(invocation -> {
+            String[] keys = invocation.getArgument(0);
+            String[] values = invocation.getArgument(1);
+            for (int index = 0; index < keys.length; index++) {
+                store.put(keys[index], values[index]);
+            }
+            return Mono.just(keys.length);
         });
         return repository;
     }

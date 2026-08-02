@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -52,6 +53,28 @@ class InviteCodeServiceTest {
         assertThatThrownBy(() -> service.createBatch(new AdminDtos.CreateInviteCodeRequest(null, 101)).block())
             .isInstanceOf(ApiException.class)
             .hasMessage("Invite code count must be between 1 and 100");
+    }
+
+    @Test
+    void revokesWithPartialDatabaseUpdateInsteadOfSavingAStaleEntity() {
+        InviteCodeRepository repository = mock(InviteCodeRepository.class);
+        InviteCodeEntity revoked = new InviteCodeEntity();
+        revoked.setCodeId("invite-1");
+        revoked.setCode("INV-TEST-CODE");
+        revoked.setEnabled(false);
+        revoked.setUsed(true);
+        revoked.setUsedByUserId("registered-user");
+        when(repository.revokeByCodeId("invite-1")).thenReturn(Mono.just(revoked));
+        InviteCodeService service = service(repository);
+
+        AdminDtos.InviteCodeResponse response = service.revoke(" invite-1 ").block();
+
+        assertThat(response).isNotNull();
+        assertThat(response.enabled()).isFalse();
+        assertThat(response.used()).isTrue();
+        assertThat(response.usedByUserId()).isEqualTo("registered-user");
+        verify(repository).revokeByCodeId("invite-1");
+        verify(repository, never()).save(any(InviteCodeEntity.class));
     }
 
     private InviteCodeService service(InviteCodeRepository repository) {

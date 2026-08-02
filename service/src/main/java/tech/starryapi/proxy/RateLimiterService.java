@@ -38,6 +38,10 @@ public class RateLimiterService {
         return new RateLimitResult(false, limit, 0, retryAfter);
     }
 
+    public void invalidateAllBuckets() {
+        buckets.clear();
+    }
+
     @Scheduled(fixedDelay = 60_000)
     public void cleanup() {
         long now = Instant.now().toEpochMilli();

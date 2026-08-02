@@ -1,5 +1,7 @@
 package tech.starryapi.admin;
 
+import io.r2dbc.spi.Row;
+import io.r2dbc.spi.RowMetadata;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
@@ -10,8 +12,14 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiFunction;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
+import org.springframework.r2dbc.core.DatabaseClient;
+import org.springframework.r2dbc.core.RowsFetchSpec;
+import org.springframework.transaction.annotation.Transactional;
 import reactor.core.publisher.Mono;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.config.ProxyProperties;
@@ -19,6 +27,23 @@ import tech.starryapi.config.ProxyProperties;
 class AdminUserServiceTest {
 
     private final PasswordHasher passwordHasher = new PasswordHasher();
+
+    @Test
+    void keepsExternalRegistrationChecksOutsideThePersistenceTransaction() throws Exception {
+        assertThat(AdminUserService.class.getMethod(
+            "register",
+            AdminDtos.RegisterRequest.class,
+            String.class
+        ).isAnnotationPresent(Transactional.class)).isFalse();
+        assertThat(RegistrationPersistenceService.class.getMethod(
+            "register",
+            AdminUserEntity.class,
+            String.class,
+            String.class,
+            RegistrationSettingsService.RegistrationPolicy.class,
+            String.class
+        ).isAnnotationPresent(Transactional.class)).isTrue();
+    }
 
     @Test
     void registersUserWhenRegistrationPolicyAllowsEmail() {
@@ -63,7 +88,7 @@ class AdminUserServiceTest {
         inviter.setAffiliateCode("ffOabc");
 
         when(settingsService.registrationPolicy()).thenReturn(Mono.just(publicRegistrationPolicy()));
-        when(repository.findByAffiliateCode("ffOabc")).thenReturn(Mono.just(inviter));
+        when(repository.findEnabledByAffiliateCodeForShare("ffOabc")).thenReturn(Mono.just(inviter));
         when(repository.save(any(AdminUserEntity.class))).thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
 
         AdminDtos.LoginResponse response = service.register(new AdminDtos.RegisterRequest(
@@ -93,7 +118,11 @@ class AdminUserServiceTest {
     void createsAccountWithRoleAndBalance() {
         AdminUserRepository repository = mock(AdminUserRepository.class);
         RegistrationSettingsService settingsService = mock(RegistrationSettingsService.class);
-        AdminUserService service = service(repository, settingsService);
+        AdminUserEntity adjusted = user("created-user", "normal-user", "user@example.com", "secret123");
+        adjusted.setRole("USER");
+        adjusted.setBalance(new BigDecimal("25.500000"));
+        SqlTemplateHarness sql = sqlTemplateReturning(adjusted);
+        AdminUserService service = service(repository, settingsService, sql.template());
 
         when(repository.save(any(AdminUserEntity.class))).thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
 
@@ -112,7 +141,8 @@ class AdminUserServiceTest {
 
         ArgumentCaptor<AdminUserEntity> captor = ArgumentCaptor.forClass(AdminUserEntity.class);
         verify(repository).save(captor.capture());
-        assertThat(captor.getValue().getBalance()).isEqualByComparingTo("25.500000");
+        assertThat(captor.getValue().getBalance()).isEqualByComparingTo(BigDecimal.ZERO);
+        assertThat(sql.sql()).contains("'INITIAL_BALANCE'", "INSERT INTO balance_ledger");
     }
 
     @Test
@@ -155,7 +185,7 @@ class AdminUserServiceTest {
         );
 
         when(settingsService.registrationPolicy()).thenReturn(Mono.just(publicRegistrationPolicy()));
-        when(emailVerificationService.verifyRegistrationToken("user@example.com", "000000"))
+        when(emailVerificationService.verifiedRegistrationTokenHash("user@example.com", "000000"))
             .thenReturn(Mono.error(invalidCode));
 
         assertThatThrownBy(() -> service.register(new AdminDtos.RegisterRequest(
@@ -207,12 +237,12 @@ class AdminUserServiceTest {
     void loginAcceptsEmailCredential() {
         AdminUserRepository repository = mock(AdminUserRepository.class);
         RegistrationSettingsService settingsService = mock(RegistrationSettingsService.class);
-        AdminUserService service = service(repository, settingsService);
         AdminUserEntity user = user("u-1", "new-user", "user@example.com", "secret123");
+        SqlTemplateHarness sql = sqlTemplateReturning(user);
+        AdminUserService service = service(repository, settingsService, sql.template());
 
         when(repository.findByUsername("user@example.com")).thenReturn(Mono.empty());
         when(repository.findByEmail("user@example.com")).thenReturn(Mono.just(user));
-        when(repository.save(eq(user))).thenReturn(Mono.just(user));
 
         AdminDtos.LoginResponse response = service.login(new AdminDtos.LoginRequest("user@example.com", "secret123"))
             .block();
@@ -220,19 +250,19 @@ class AdminUserServiceTest {
         assertThat(response).isNotNull();
         assertThat(response.user().username()).isEqualTo("new-user");
         assertThat(response.user().email()).isEqualTo("user@example.com");
+        assertThat(sql.sql()).contains("SET last_login_at", "RETURNING *");
+        verify(repository, never()).save(any(AdminUserEntity.class));
     }
 
     @Test
     void updatesUserBalance() {
         AdminUserRepository repository = mock(AdminUserRepository.class);
         RegistrationSettingsService settingsService = mock(RegistrationSettingsService.class);
-        AdminUserService service = service(repository, settingsService);
         AdminUserEntity user = user("u-1", "normal-user", "user@example.com", "secret123");
         user.setRole("USER");
-        user.setBalance(BigDecimal.ZERO);
-
-        when(repository.findByUserId("u-1")).thenReturn(Mono.just(user));
-        when(repository.save(eq(user))).thenReturn(Mono.just(user));
+        user.setBalance(new BigDecimal("100.250000"));
+        SqlTemplateHarness sql = sqlTemplateReturning(user);
+        AdminUserService service = service(repository, settingsService, sql.template());
 
         AdminUserEntity response = service.update("u-1", new AdminDtos.UpdateAdminUserRequest(
             null,
@@ -244,7 +274,8 @@ class AdminUserServiceTest {
 
         assertThat(response).isNotNull();
         assertThat(response.getBalance()).isEqualByComparingTo("100.250000");
-        verify(repository).save(user);
+        assertThat(sql.sql()).contains("'ADMIN_ADJUSTMENT'", "INSERT INTO balance_ledger", "FOR UPDATE");
+        verify(repository, never()).save(any(AdminUserEntity.class));
     }
 
     @Test
@@ -279,7 +310,20 @@ class AdminUserServiceTest {
         when(emailVerificationService.verifyRegistrationToken(any(), any())).thenReturn(Mono.empty());
         InviteCodeService inviteCodeService = mock(InviteCodeService.class);
         when(inviteCodeService.consume(any(), any())).thenReturn(Mono.empty());
-        return service(repository, settingsService, emailVerificationService, inviteCodeService);
+        return service(repository, settingsService, emailVerificationService, inviteCodeService, mock(R2dbcEntityTemplate.class));
+    }
+
+    private AdminUserService service(
+        AdminUserRepository repository,
+        RegistrationSettingsService settingsService,
+        R2dbcEntityTemplate template
+    ) {
+        EmailVerificationService emailVerificationService = mock(EmailVerificationService.class);
+        when(emailVerificationService.verifyRegistrationCode(any(), any())).thenReturn(Mono.empty());
+        when(emailVerificationService.verifyRegistrationToken(any(), any())).thenReturn(Mono.empty());
+        InviteCodeService inviteCodeService = mock(InviteCodeService.class);
+        when(inviteCodeService.consume(any(), any())).thenReturn(Mono.empty());
+        return service(repository, settingsService, emailVerificationService, inviteCodeService, template);
     }
 
     private AdminUserService service(
@@ -289,7 +333,7 @@ class AdminUserServiceTest {
     ) {
         InviteCodeService inviteCodeService = mock(InviteCodeService.class);
         when(inviteCodeService.consume(any(), any())).thenReturn(Mono.empty());
-        return service(repository, settingsService, emailVerificationService, inviteCodeService);
+        return service(repository, settingsService, emailVerificationService, inviteCodeService, mock(R2dbcEntityTemplate.class));
     }
 
     private AdminUserService service(
@@ -298,17 +342,64 @@ class AdminUserServiceTest {
         EmailVerificationService emailVerificationService,
         InviteCodeService inviteCodeService
     ) {
+        return service(
+            repository,
+            settingsService,
+            emailVerificationService,
+            inviteCodeService,
+            mock(R2dbcEntityTemplate.class)
+        );
+    }
+
+    private AdminUserService service(
+        AdminUserRepository repository,
+        RegistrationSettingsService settingsService,
+        EmailVerificationService emailVerificationService,
+        InviteCodeService inviteCodeService,
+        R2dbcEntityTemplate template
+    ) {
         TurnstileVerificationService turnstileVerificationService = mock(TurnstileVerificationService.class);
         when(turnstileVerificationService.verifyIfRequired(any(), any())).thenReturn(Mono.empty());
+        when(turnstileVerificationService.verifyRequired(any(), any())).thenReturn(Mono.empty());
+        when(emailVerificationService.verifiedRegistrationTokenHash(any(), any())).thenReturn(Mono.just("verified-token-hash"));
+        when(emailVerificationService.consumeRegistrationToken(any(), any())).thenReturn(Mono.empty());
+        when(settingsService.lockedRegistrationPolicy()).thenAnswer(invocation -> settingsService.registrationPolicy());
         return new AdminUserService(
             repository,
             passwordHasher,
             new AdminSessionService(new ProxyProperties()),
             settingsService,
             emailVerificationService,
-            inviteCodeService,
-            turnstileVerificationService
+            new RegistrationPersistenceService(repository, inviteCodeService, settingsService, emailVerificationService),
+            turnstileVerificationService,
+            template
         );
+    }
+
+    @SuppressWarnings("unchecked")
+    private SqlTemplateHarness sqlTemplateReturning(AdminUserEntity returned) {
+        R2dbcEntityTemplate template = mock(R2dbcEntityTemplate.class);
+        DatabaseClient databaseClient = mock(DatabaseClient.class);
+        DatabaseClient.GenericExecuteSpec spec = mock(DatabaseClient.GenericExecuteSpec.class);
+        RowsFetchSpec<AdminUserEntity> fetch = mock(RowsFetchSpec.class);
+        AtomicReference<String> sql = new AtomicReference<>();
+        when(template.getDatabaseClient()).thenReturn(databaseClient);
+        when(databaseClient.sql(any(String.class))).thenAnswer(invocation -> {
+            sql.set(invocation.getArgument(0));
+            return spec;
+        });
+        when(spec.bind(any(String.class), any())).thenReturn(spec);
+        when(spec.bindNull(any(String.class), any())).thenReturn(spec);
+        when(spec.map(org.mockito.ArgumentMatchers.<BiFunction<Row, RowMetadata, AdminUserEntity>>any()))
+            .thenReturn(fetch);
+        when(fetch.one()).thenReturn(Mono.just(returned));
+        return new SqlTemplateHarness(template, sql);
+    }
+
+    private record SqlTemplateHarness(R2dbcEntityTemplate template, AtomicReference<String> capturedSql) {
+        String sql() {
+            return capturedSql.get();
+        }
     }
 
     private RegistrationSettingsService.RegistrationPolicy publicRegistrationPolicy() {

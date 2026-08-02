@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
 import tech.starryapi.admin.SystemSettingEntity;
 import tech.starryapi.admin.SystemSettingRepository;
 import tech.starryapi.payment.PaymentSettingsService;
@@ -169,6 +170,26 @@ class ModelPricingServiceTest {
         ).block();
 
         assertThat(cost).isEqualByComparingTo("100.000000");
+    }
+
+    @Test
+    void invalidationPreventsInFlightReadFromRepopulatingPreRestorePricing() {
+        SystemSettingRepository repository = mock(SystemSettingRepository.class);
+        Sinks.One<SystemSettingEntity> staleQuery = Sinks.one();
+        when(repository.findById(anyString())).thenReturn(staleQuery.asMono(), Mono.empty());
+        ModelPricingService service = new ModelPricingService(repository, objectMapper);
+        PlatformUsage usage = new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0);
+
+        service.cost("gpt-5", usage, false, BigDecimal.ONE).subscribe();
+        service.invalidateAllCaches();
+        staleQuery.tryEmitValue(setting(
+            ModelPricingService.MODEL_PRICING_RULES,
+            "[{\"ruleId\":\"stale\",\"enabled\":true,\"modelPattern\":\"*\","
+                + "\"totalMultiplier\":2,\"priority\":1}]"
+        ));
+
+        assertThat(service.cost("gpt-5", usage, false, BigDecimal.ONE).block())
+            .isEqualByComparingTo("2.000000");
     }
 
     private SystemSettingRepository mockRepository(Map<String, String> store) {

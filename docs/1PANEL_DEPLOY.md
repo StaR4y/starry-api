@@ -6,7 +6,7 @@ This deployment uses Docker Compose in 1Panel:
 1Panel reverse proxy / HTTPS
   -> server-ip:18080
   -> starry-api service container
-  -> mysql container
+  -> PostgreSQL 17 container
 ```
 
 Docker-based 1Panel/OpenResty cannot use the host's `127.0.0.1` as an upstream. The installer binds the service to `0.0.0.0:${HOST_HTTP_PORT}` by default and prints a reverse proxy target using the server IP. Restrict `${HOST_HTTP_PORT}` with your firewall/security group and expose the service publicly through the 1Panel HTTPS site.
@@ -44,7 +44,7 @@ After it finishes, create the 1Panel reverse proxy site with target:
 http://<server-ip>:18080
 ```
 
-Manual source-build deployment steps are kept below for existing servers or custom MySQL setups.
+Manual source-build deployment steps are kept below for servers that build from the repository.
 
 ## 1. Prepare Server Directory
 
@@ -82,17 +82,22 @@ cp .env.example .env
 nano .env
 ```
 
-Set strong database passwords:
+Set three distinct strong PostgreSQL passwords. The database and role names are fixed by the least-privilege bootstrap:
 
 ```dotenv
-MYSQL_ROOT_PASSWORD=replace-with-strong-root-password
-MYSQL_PASSWORD=replace-with-strong-db-password
+POSTGRES_BOOTSTRAP_PASSWORD=replace-with-strong-bootstrap-password
+POSTGRES_MIGRATION_PASSWORD=replace-with-strong-migration-password
+POSTGRES_PASSWORD=replace-with-strong-application-password
 ```
 
 Recommended defaults:
 
 ```dotenv
-MYSQL_IMAGE=mysql:8.0.37-oraclelinux8
+POSTGRES_MAX_CONNECTIONS=100
+POSTGRES_SHARED_BUFFERS=256MB
+POSTGRES_EFFECTIVE_CACHE_SIZE=768MB
+POSTGRES_POOL_INITIAL_SIZE=4
+POSTGRES_POOL_MAX_SIZE=20
 HOST_BIND_ADDR=0.0.0.0
 HOST_HTTP_PORT=18080
 KIRO_ALLOW_ANONYMOUS_PROXY=false
@@ -101,7 +106,7 @@ KIRO_RATE_LIMIT_PER_MINUTE=120
 KIRO_WEBUI_URL=https://your-domain.example/#/login
 ```
 
-`MYSQL_IMAGE=mysql:8.0.37-oraclelinux8` rolls MySQL back to an Oracle Linux 8 image and avoids `Fatal glibc error: CPU does not support x86-64-v2` on older VPS CPUs.
+The Compose stack initializes database `starry_api`; Flyway creates and uses schema `starry_api`. Database files are persisted under `./data/postgresql`. These database defaults assume at least 2 GiB available memory; keep the sum of application pool maxima below the server connection ceiling and retune from production metrics when the workload grows.
 
 Do not enable `KIRO_ALLOW_ANONYMOUS_PROXY=true` on a public service.
 
@@ -118,7 +123,7 @@ The script will:
 - verify Docker Compose is available
 - refuse default database passwords
 - build the Spring Boot service image
-- start MySQL and the service
+- start PostgreSQL 17 and the service
 - print recent service logs
 
 Manual equivalent:
@@ -299,4 +304,4 @@ Stop:
 docker compose down
 ```
 
-Do not delete `./data/mysql` unless this is a disposable deployment.
+Do not delete `./data/postgresql` unless this is a disposable deployment. Removing it permanently deletes the PostgreSQL cluster.

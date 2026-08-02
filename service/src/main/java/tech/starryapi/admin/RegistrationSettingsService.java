@@ -2,16 +2,23 @@ package tech.starryapi.admin;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import java.util.Map;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
-import reactor.core.publisher.Flux;
+import org.springframework.transaction.annotation.Transactional;
 import reactor.core.publisher.Mono;
 import tech.starryapi.common.ApiException;
+import tech.starryapi.common.Hashing;
 
 @Service
 public class RegistrationSettingsService {
+
+    private static final Logger log = LoggerFactory.getLogger(RegistrationSettingsService.class);
+    private static final String REGISTRATION_SETTINGS_LOCK = "starry_api:system_settings:registration";
 
     static final String REGISTRATION_ENABLED = "registration_enabled";
     static final String REGISTRATION_EMAIL_SUFFIX_WHITELIST = "registration_email_suffix_whitelist";
@@ -51,6 +58,15 @@ public class RegistrationSettingsService {
         TURNSTILE_SITE_KEY,
         TURNSTILE_SECRET_KEY
     );
+    private static final List<String> REGISTRATION_POLICY_KEYS = List.of(
+        REGISTRATION_ENABLED,
+        EMAIL_VERIFY_ENABLED,
+        INVITE_CODE_ENABLED,
+        REGISTRATION_EMAIL_SUFFIX_WHITELIST,
+        TURNSTILE_ENABLED,
+        TURNSTILE_SITE_KEY,
+        TURNSTILE_SECRET_KEY
+    );
 
     private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {
     };
@@ -65,9 +81,9 @@ public class RegistrationSettingsService {
 
     public Mono<AdminDtos.RegistrationSettingsResponse> publicSettings() {
         return settingValues().map(values -> new AdminDtos.RegistrationSettingsResponse(
-            bool(values, REGISTRATION_ENABLED, false),
-            bool(values, EMAIL_VERIFY_ENABLED, false),
-            bool(values, INVITE_CODE_ENABLED, false),
+            policyBool(values, REGISTRATION_ENABLED, false),
+            policyBool(values, EMAIL_VERIFY_ENABLED, false),
+            policyBool(values, INVITE_CODE_ENABLED, false),
             parseWhitelist(values.get(REGISTRATION_EMAIL_SUFFIX_WHITELIST)),
             null,
             null,
@@ -77,7 +93,7 @@ public class RegistrationSettingsService {
             null,
             null,
             null,
-            bool(values, TURNSTILE_ENABLED, false),
+            policyBool(values, TURNSTILE_ENABLED, false),
             clean(values.get(TURNSTILE_SITE_KEY)),
             null
         ));
@@ -87,17 +103,19 @@ public class RegistrationSettingsService {
         return settingValues().map(this::settingsResponse);
     }
 
+    @Transactional
     public Mono<AdminDtos.RegistrationSettingsResponse> update(AdminDtos.UpdateRegistrationSettingsRequest request) {
-        return settingValues()
+        return repository.acquireTransactionLock(REGISTRATION_SETTINGS_LOCK)
+            .then(settingValues())
             .flatMap(previous -> {
                 boolean enabled = request.registrationEnabled() == null
-                    ? bool(previous, REGISTRATION_ENABLED, false)
+                    ? policyBool(previous, REGISTRATION_ENABLED, false)
                     : Boolean.TRUE.equals(request.registrationEnabled());
                 boolean emailVerifyEnabled = request.emailVerifyEnabled() == null
-                    ? bool(previous, EMAIL_VERIFY_ENABLED, false)
+                    ? policyBool(previous, EMAIL_VERIFY_ENABLED, false)
                     : Boolean.TRUE.equals(request.emailVerifyEnabled());
                 boolean inviteCodeEnabled = request.inviteCodeEnabled() == null
-                    ? bool(previous, INVITE_CODE_ENABLED, false)
+                    ? policyBool(previous, INVITE_CODE_ENABLED, false)
                     : Boolean.TRUE.equals(request.inviteCodeEnabled());
                 List<String> whitelist = request.registrationEmailSuffixWhitelist() == null
                     ? parseWhitelist(previous.get(REGISTRATION_EMAIL_SUFFIX_WHITELIST))
@@ -126,31 +144,33 @@ public class RegistrationSettingsService {
                 );
                 boolean compatibleUseTls = !SMTP_SECURITY_NONE.equals(smtpSecurity);
                 boolean turnstileEnabled = request.turnstileEnabled() == null
-                    ? bool(previous, TURNSTILE_ENABLED, false)
+                    ? policyBool(previous, TURNSTILE_ENABLED, false)
                     : Boolean.TRUE.equals(request.turnstileEnabled());
                 String turnstileSiteKey = request.turnstileSiteKey() == null
                     ? clean(previous.get(TURNSTILE_SITE_KEY))
                     : clean(request.turnstileSiteKey());
 
-                return Mono.when(
-                    set(REGISTRATION_ENABLED, Boolean.toString(enabled)),
-                    set(EMAIL_VERIFY_ENABLED, Boolean.toString(emailVerifyEnabled)),
-                    set(INVITE_CODE_ENABLED, Boolean.toString(inviteCodeEnabled)),
-                    set(REGISTRATION_EMAIL_SUFFIX_WHITELIST, writeWhitelist(whitelist)),
-                    set(SMTP_HOST, smtpHost),
-                    set(SMTP_PORT, Integer.toString(smtpPort)),
-                    set(SMTP_USERNAME, smtpUsername),
-                    set(SMTP_PASSWORD, passwordValue(request.smtpPassword(), previous.get(SMTP_PASSWORD))),
-                    set(SMTP_FROM_EMAIL, smtpFromEmail),
-                    set(SMTP_FROM_NAME, smtpFromName),
-                    set(SMTP_USE_TLS, Boolean.toString(compatibleUseTls)),
-                    set(SMTP_SECURITY, smtpSecurity),
-                    set(TURNSTILE_ENABLED, Boolean.toString(turnstileEnabled)),
-                    set(TURNSTILE_SITE_KEY, turnstileSiteKey),
-                    set(TURNSTILE_SECRET_KEY, passwordValue(request.turnstileSecretKey(), previous.get(TURNSTILE_SECRET_KEY)))
-                )
-                .then(settingValues())
-                .map(this::settingsResponse);
+                Map<String, String> settings = new LinkedHashMap<>();
+                settings.put(REGISTRATION_ENABLED, Boolean.toString(enabled));
+                settings.put(EMAIL_VERIFY_ENABLED, Boolean.toString(emailVerifyEnabled));
+                settings.put(INVITE_CODE_ENABLED, Boolean.toString(inviteCodeEnabled));
+                settings.put(REGISTRATION_EMAIL_SUFFIX_WHITELIST, writeWhitelist(whitelist));
+                settings.put(SMTP_HOST, smtpHost);
+                settings.put(SMTP_PORT, Integer.toString(smtpPort));
+                settings.put(SMTP_USERNAME, smtpUsername);
+                settings.put(SMTP_PASSWORD, passwordValue(request.smtpPassword(), previous.get(SMTP_PASSWORD)));
+                settings.put(SMTP_FROM_EMAIL, smtpFromEmail);
+                settings.put(SMTP_FROM_NAME, smtpFromName);
+                settings.put(SMTP_USE_TLS, Boolean.toString(compatibleUseTls));
+                settings.put(SMTP_SECURITY, smtpSecurity);
+                settings.put(TURNSTILE_ENABLED, Boolean.toString(turnstileEnabled));
+                settings.put(TURNSTILE_SITE_KEY, turnstileSiteKey);
+                settings.put(TURNSTILE_SECRET_KEY, passwordValue(request.turnstileSecretKey(), previous.get(TURNSTILE_SECRET_KEY)));
+                return repository.upsertSettings(
+                        settings.keySet().toArray(String[]::new),
+                        settings.values().toArray(String[]::new)
+                    )
+                    .thenReturn(settingsResponse(settings));
             });
     }
 
@@ -169,17 +189,32 @@ public class RegistrationSettingsService {
     }
 
     public Mono<RegistrationPolicy> registrationPolicy() {
-        return settingValues().map(values -> new RegistrationPolicy(
-            bool(values, REGISTRATION_ENABLED, false),
-            bool(values, EMAIL_VERIFY_ENABLED, false),
-            bool(values, INVITE_CODE_ENABLED, false),
+        return settingValues(REGISTRATION_POLICY_KEYS).map(this::registrationPolicy);
+    }
+
+    Mono<RegistrationPolicy> lockedRegistrationPolicy() {
+        return repository.findAllByIdWithSharedTransactionLock(
+                REGISTRATION_SETTINGS_LOCK,
+                REGISTRATION_POLICY_KEYS.toArray(String[]::new)
+            )
+            .collectMap(SystemSettingEntity::getSettingKey, SystemSettingEntity::getSettingValue)
+            .map(stored -> registrationPolicy(withDefaults(REGISTRATION_POLICY_KEYS, stored)));
+    }
+
+    private RegistrationPolicy registrationPolicy(Map<String, String> values) {
+        boolean turnstileEnabled = policyBool(values, TURNSTILE_ENABLED, false);
+        return new RegistrationPolicy(
+            policyBool(values, REGISTRATION_ENABLED, false),
+            policyBool(values, EMAIL_VERIFY_ENABLED, false),
+            policyBool(values, INVITE_CODE_ENABLED, false),
             parseWhitelist(values.get(REGISTRATION_EMAIL_SUFFIX_WHITELIST)),
-            bool(values, TURNSTILE_ENABLED, false)
-        ));
+            turnstileEnabled,
+            turnstileFingerprint(values, turnstileEnabled)
+        );
     }
 
     public Mono<Boolean> emailVerifyEnabled() {
-        return value(EMAIL_VERIFY_ENABLED, "false").map(Boolean::parseBoolean);
+        return registrationPolicy().map(RegistrationPolicy::emailVerifyEnabled);
     }
 
     public Mono<SmtpConfig> smtpConfig() {
@@ -201,23 +236,34 @@ public class RegistrationSettingsService {
 
     public Mono<TurnstileConfig> turnstileConfig() {
         return settingValues().map(values -> new TurnstileConfig(
-            bool(values, TURNSTILE_ENABLED, false),
+            policyBool(values, TURNSTILE_ENABLED, false),
             clean(values.get(TURNSTILE_SITE_KEY)),
             clean(values.get(TURNSTILE_SECRET_KEY))
         ));
     }
 
     private Mono<Map<String, String>> settingValues() {
-        return Flux.fromIterable(SETTING_KEYS)
-            .flatMap(key -> value(key, defaultValue(key)).map(value -> Map.entry(key, value)))
-            .collectMap(Map.Entry::getKey, Map.Entry::getValue);
+        return settingValues(SETTING_KEYS);
+    }
+
+    private Mono<Map<String, String>> settingValues(List<String> keys) {
+        return repository.findAllById(keys)
+            .collectMap(SystemSettingEntity::getSettingKey, SystemSettingEntity::getSettingValue)
+            .map(stored -> withDefaults(keys, stored));
+    }
+
+    private Map<String, String> withDefaults(List<String> keys, Map<String, String> stored) {
+        Map<String, String> values = new LinkedHashMap<>();
+        keys.forEach(key -> values.put(key, defaultValue(key)));
+        values.putAll(stored);
+        return values;
     }
 
     private AdminDtos.RegistrationSettingsResponse settingsResponse(Map<String, String> values) {
         return new AdminDtos.RegistrationSettingsResponse(
-            bool(values, REGISTRATION_ENABLED, false),
-            bool(values, EMAIL_VERIFY_ENABLED, false),
-            bool(values, INVITE_CODE_ENABLED, false),
+            policyBool(values, REGISTRATION_ENABLED, false),
+            policyBool(values, EMAIL_VERIFY_ENABLED, false),
+            policyBool(values, INVITE_CODE_ENABLED, false),
             parseWhitelist(values.get(REGISTRATION_EMAIL_SUFFIX_WHITELIST)),
             values.getOrDefault(SMTP_HOST, ""),
             number(values, SMTP_PORT, 587),
@@ -231,7 +277,7 @@ public class RegistrationSettingsService {
                 bool(values, SMTP_USE_TLS, false),
                 normalizePort(number(values, SMTP_PORT, 587))
             ),
-            bool(values, TURNSTILE_ENABLED, false),
+            policyBool(values, TURNSTILE_ENABLED, false),
             values.getOrDefault(TURNSTILE_SITE_KEY, ""),
             !clean(values.get(TURNSTILE_SECRET_KEY)).isBlank()
         );
@@ -243,16 +289,23 @@ public class RegistrationSettingsService {
             .defaultIfEmpty(fallback);
     }
 
-    private Mono<Integer> set(String key, String value) {
-        return repository.upsertSetting(key, value == null ? "" : value);
-    }
-
     private List<String> parseWhitelist(String raw) {
-        try {
-            List<String> values = objectMapper.readValue(raw == null || raw.isBlank() ? "[]" : raw, STRING_LIST);
-            return RegistrationEmailPolicy.normalizeWhitelist(values, false);
-        } catch (Exception ignored) {
+        if (raw == null || raw.isBlank()) {
             return List.of();
+        }
+        try {
+            List<String> values = objectMapper.readValue(raw, STRING_LIST);
+            if (values == null || values.stream().anyMatch(value -> value == null || value.isBlank())) {
+                throw new IllegalArgumentException("Whitelist must be a JSON array of non-blank email suffixes");
+            }
+            return RegistrationEmailPolicy.normalizeWhitelist(values, true);
+        } catch (Exception error) {
+            log.error("Invalid registration email suffix whitelist configuration", error);
+            throw new ApiException(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "REGISTRATION_EMAIL_POLICY_INVALID",
+                "Registration email whitelist configuration is invalid"
+            );
         }
     }
 
@@ -277,6 +330,35 @@ public class RegistrationSettingsService {
     private boolean bool(Map<String, String> values, String key, boolean fallback) {
         String value = values.get(key);
         return value == null || value.isBlank() ? fallback : Boolean.parseBoolean(value);
+    }
+
+    private boolean policyBool(Map<String, String> values, String key, boolean fallback) {
+        String value = values.get(key);
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        String normalized = value.trim();
+        if ("true".equalsIgnoreCase(normalized)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(normalized)) {
+            return false;
+        }
+        log.error("Invalid boolean registration policy setting: {}", key);
+        throw new ApiException(
+            HttpStatus.SERVICE_UNAVAILABLE,
+            "REGISTRATION_POLICY_INVALID",
+            "Registration policy configuration is invalid"
+        );
+    }
+
+    private String turnstileFingerprint(Map<String, String> values, boolean enabled) {
+        if (!enabled) {
+            return "";
+        }
+        String siteKey = clean(values.get(TURNSTILE_SITE_KEY));
+        String secretKey = clean(values.get(TURNSTILE_SECRET_KEY));
+        return Hashing.sha256(siteKey.length() + ":" + siteKey + secretKey.length() + ":" + secretKey);
     }
 
     private int number(Map<String, String> values, String key, int fallback) {
@@ -352,7 +434,8 @@ public class RegistrationSettingsService {
         boolean emailVerifyEnabled,
         boolean inviteCodeEnabled,
         List<String> registrationEmailSuffixWhitelist,
-        boolean turnstileEnabled
+        boolean turnstileEnabled,
+        String turnstileConfigFingerprint
     ) {
         public RegistrationPolicy(
             boolean registrationEnabled,
@@ -360,13 +443,24 @@ public class RegistrationSettingsService {
             boolean inviteCodeEnabled,
             List<String> registrationEmailSuffixWhitelist
         ) {
-            this(registrationEnabled, emailVerifyEnabled, inviteCodeEnabled, registrationEmailSuffixWhitelist, false);
+            this(registrationEnabled, emailVerifyEnabled, inviteCodeEnabled, registrationEmailSuffixWhitelist, false, "");
+        }
+
+        public RegistrationPolicy(
+            boolean registrationEnabled,
+            boolean emailVerifyEnabled,
+            boolean inviteCodeEnabled,
+            List<String> registrationEmailSuffixWhitelist,
+            boolean turnstileEnabled
+        ) {
+            this(registrationEnabled, emailVerifyEnabled, inviteCodeEnabled, registrationEmailSuffixWhitelist, turnstileEnabled, "");
         }
 
         public RegistrationPolicy {
             registrationEmailSuffixWhitelist = registrationEmailSuffixWhitelist == null
                 ? List.of()
                 : List.copyOf(registrationEmailSuffixWhitelist);
+            turnstileConfigFingerprint = turnstileConfigFingerprint == null ? "" : turnstileConfigFingerprint;
         }
     }
 

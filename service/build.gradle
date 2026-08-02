@@ -6,6 +6,7 @@ def skipWebuiBuild = providers.gradleProperty('skipWebuiBuild')
     .map { it.toBoolean() }
     .orElse(false)
 def webuiDistDir = project(':webui').layout.projectDirectory.dir('dist')
+def webuiRuntimeResourcesDir = layout.buildDirectory.dir('generated/webui-resources')
 
 dependencies {
     implementation project(':api')
@@ -18,31 +19,47 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-webflux'
     implementation 'org.springdoc:springdoc-openapi-starter-webflux-ui:2.8.17'
     implementation 'com.github.ben-manes.caffeine:caffeine'
-    implementation 'io.asyncer:r2dbc-mysql:1.4.2'
+    implementation 'org.postgresql:r2dbc-postgresql'
     implementation 'io.micrometer:micrometer-registry-prometheus'
     implementation 'io.r2dbc:r2dbc-pool'
     implementation 'org.flywaydb:flyway-core'
-    implementation 'org.flywaydb:flyway-mysql'
+    implementation 'org.flywaydb:flyway-database-postgresql'
     runtimeOnly 'io.netty:netty-resolver-dns-native-macos:4.1.132.Final:osx-aarch_64'
-    runtimeOnly 'com.mysql:mysql-connector-j'
+    runtimeOnly 'org.postgresql:postgresql'
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.springframework.boot:spring-boot-testcontainers'
     testImplementation 'io.projectreactor:reactor-test'
+    testImplementation 'org.testcontainers:junit-jupiter'
+    testImplementation 'org.testcontainers:postgresql'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
-tasks.named('bootJar') {
+def prepareWebuiRuntimeResources = tasks.register('prepareWebuiRuntimeResources', Sync) {
     if (!skipWebuiBuild.get()) {
         dependsOn ':webui:npmBuild'
     }
 
     from(webuiDistDir) {
-        into 'BOOT-INF/classes/static'
+        into 'static'
     }
+    into webuiRuntimeResourcesDir
 
     doFirst {
         if (!webuiDistDir.asFile.exists()) {
             throw new GradleException("WebUI dist is missing. Run :webui:npmBuild or remove -PskipWebuiBuild=true.")
         }
+    }
+}
+
+tasks.named('bootRun') {
+    dependsOn prepareWebuiRuntimeResources
+    classpath webuiRuntimeResourcesDir
+}
+
+tasks.named('bootJar') {
+    dependsOn prepareWebuiRuntimeResources
+    from(webuiRuntimeResourcesDir) {
+        into 'BOOT-INF/classes'
     }
 }

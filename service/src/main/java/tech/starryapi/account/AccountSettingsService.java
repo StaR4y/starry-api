@@ -1,15 +1,18 @@
 package tech.starryapi.account;
 
+import java.time.Duration;
 import java.time.ZoneId;
 import java.time.zone.ZoneRulesException;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.support.CronExpression;
 import org.springframework.stereotype.Service;
-import reactor.core.publisher.Flux;
+import org.springframework.transaction.annotation.Transactional;
 import reactor.core.publisher.Mono;
 import tech.starryapi.admin.SystemSettingEntity;
 import tech.starryapi.admin.SystemSettingRepository;
@@ -17,6 +20,8 @@ import tech.starryapi.common.ApiException;
 
 @Service
 public class AccountSettingsService {
+
+    private static final Duration HOT_SETTING_CACHE_TTL = Duration.ofSeconds(5);
 
     static final String GPT_FAST_MODE_ENABLED = "gpt_fast_mode_enabled";
     static final String DISABLED_TEST_ENABLED = "disabled_account_scheduled_test_enabled";
@@ -77,6 +82,9 @@ public class AccountSettingsService {
     );
 
     private final SystemSettingRepository repository;
+    private volatile CachedBoolean cachedGptFastMode;
+    private volatile Mono<Boolean> gptFastModeLoad;
+    private long gptFastModeCacheGeneration;
 
     public AccountSettingsService(SystemSettingRepository repository) {
         this.repository = repository;
@@ -86,8 +94,10 @@ public class AccountSettingsService {
         return values().map(this::response);
     }
 
+    @Transactional
     public Mono<AccountDtos.AccountSettingsResponse> update(AccountDtos.UpdateAccountSettingsRequest request) {
-        return values()
+        return repository.acquireTransactionLock("starry_api:system_settings:account")
+            .then(values())
             .flatMap(currentValues -> {
                 AccountDtos.AccountSettingsResponse current = response(currentValues);
                 boolean gptFastMode = request == null || request.gptFastModeEnabled() == null
@@ -107,7 +117,11 @@ public class AccountSettingsService {
     }
 
     public Mono<Boolean> gptFastModeEnabled() {
-        return value(GPT_FAST_MODE_ENABLED, "false").map(Boolean::parseBoolean);
+        CachedBoolean current = cachedGptFastMode;
+        if (current != null && !current.expired()) {
+            return Mono.just(current.value());
+        }
+        return loadGptFastMode();
     }
 
     public Mono<AccountDtos.DisabledAccountScheduledTestSettings> disabledAccountScheduledTestSettings() {
@@ -129,6 +143,59 @@ public class AccountSettingsService {
         return repository.findById(key)
             .map(SystemSettingEntity::getSettingValue)
             .defaultIfEmpty(fallback);
+    }
+
+    private synchronized Mono<Boolean> loadGptFastMode() {
+        CachedBoolean current = cachedGptFastMode;
+        if (current != null && !current.expired()) {
+            return Mono.just(current.value());
+        }
+        if (gptFastModeLoad != null) {
+            return gptFastModeLoad;
+        }
+        long generation = gptFastModeCacheGeneration;
+        AtomicReference<Mono<Boolean>> reference = new AtomicReference<>();
+        Mono<Boolean> load = value(GPT_FAST_MODE_ENABLED, "false")
+            .map(Boolean::parseBoolean)
+            .doOnNext(enabled -> cacheGptFastMode(enabled, generation))
+            .doFinally(signal -> clearGptFastModeLoad(reference.get()))
+            .cache();
+        reference.set(load);
+        gptFastModeLoad = load;
+        return load;
+    }
+
+    private synchronized void clearGptFastModeLoad(Mono<Boolean> load) {
+        if (gptFastModeLoad == load) {
+            gptFastModeLoad = null;
+        }
+    }
+
+    private synchronized void cacheGptFastMode(boolean enabled, long generation) {
+        if (gptFastModeCacheGeneration != generation) {
+            return;
+        }
+        cachedGptFastMode = new CachedBoolean(
+            enabled,
+            System.nanoTime() + HOT_SETTING_CACHE_TTL.toNanos()
+        );
+    }
+
+    public synchronized void invalidateCacheForSetting(String settingKey) {
+        if (!GPT_FAST_MODE_ENABLED.equals(settingKey)) {
+            return;
+        }
+        invalidateGptFastModeCache();
+    }
+
+    public synchronized void invalidateAllCaches() {
+        invalidateGptFastModeCache();
+    }
+
+    private void invalidateGptFastModeCache() {
+        gptFastModeCacheGeneration++;
+        cachedGptFastMode = null;
+        gptFastModeLoad = null;
     }
 
     private Mono<Map<String, String>> values() {
@@ -282,39 +349,40 @@ public class AccountSettingsService {
         AccountDtos.DisabledAccountScheduledTestSettings disabledTest,
         AccountDtos.PoolPolicySettings poolPolicy
     ) {
-        return Flux.concat(
-            set(GPT_FAST_MODE_ENABLED, Boolean.toString(gptFastMode)),
-            set(DISABLED_TEST_ENABLED, Boolean.toString(Boolean.TRUE.equals(disabledTest.enabled()))),
-            set(DISABLED_TEST_SCHEDULE_MODE, disabledTest.scheduleMode()),
-            set(DISABLED_TEST_INTERVAL_MINUTES, Integer.toString(disabledTest.intervalMinutes())),
-            set(DISABLED_TEST_CRON_EXPRESSION, disabledTest.cronExpression()),
-            set(DISABLED_TEST_TIMEZONE, disabledTest.timezone()),
-            set(DISABLED_TEST_INITIAL_DELAY_MINUTES, Integer.toString(disabledTest.initialDelayMinutes())),
-            set(DISABLED_TEST_MAX_CONCURRENCY, Integer.toString(disabledTest.maxConcurrency())),
-            set(DISABLED_TEST_MAX_ACCOUNTS_PER_RUN, Integer.toString(disabledTest.maxAccountsPerRun())),
-            set(DISABLED_TEST_MODEL, disabledTest.model()),
-            set(DISABLED_TEST_PROMPT, disabledTest.prompt() == null ? "" : disabledTest.prompt()),
-            set(DISABLED_TEST_UPDATE_STATUS, Boolean.toString(Boolean.TRUE.equals(disabledTest.updateStatus()))),
-            set(DISABLED_TEST_AUTO_RUN_WHEN_NO_AVAILABLE, Boolean.toString(Boolean.TRUE.equals(disabledTest.autoRunWhenNoAvailableAccounts()))),
-            set(DISABLED_TEST_INCLUDE_DISABLED, Boolean.toString(Boolean.TRUE.equals(disabledTest.includeDisabled()))),
-            set(DISABLED_TEST_INCLUDE_SUSPENDED, Boolean.toString(Boolean.TRUE.equals(disabledTest.includeSuspended()))),
-            set(DISABLED_TEST_INCLUDE_QUOTA_EXHAUSTED, Boolean.toString(Boolean.TRUE.equals(disabledTest.includeQuotaExhausted()))),
-            set(DISABLED_TEST_MIN_AGE_MINUTES, Integer.toString(disabledTest.minAgeMinutes())),
-            set(DISABLED_TEST_PROVIDERS, String.join(",", disabledTest.providers())),
-            set(POOL_POLICY_ENABLED, Boolean.toString(Boolean.TRUE.equals(poolPolicy.enabled()))),
-            set(POOL_POLICY_WINDOW_MINUTES, Integer.toString(poolPolicy.windowMinutes())),
-            set(POOL_POLICY_MIN_SAMPLE_SIZE, Integer.toString(poolPolicy.minSampleSize())),
-            set(POOL_POLICY_RETEST_THRESHOLD_PERCENT, Double.toString(poolPolicy.retestThresholdPercent())),
-            set(POOL_POLICY_FAILOVER_THRESHOLD_PERCENT, Double.toString(poolPolicy.failoverThresholdPercent())),
-            set(POOL_POLICY_RECOVERY_THRESHOLD_PERCENT, Double.toString(poolPolicy.recoveryThresholdPercent())),
-            set(POOL_POLICY_RETEST_INTERVAL_MINUTES, Integer.toString(poolPolicy.retestIntervalMinutes())),
-            set(POOL_POLICY_RETEST_MAX_CONCURRENCY, Integer.toString(poolPolicy.retestMaxConcurrency())),
-            set(POOL_POLICY_AUTO_WEIGHT_ENABLED, Boolean.toString(Boolean.TRUE.equals(poolPolicy.autoWeightEnabled())))
-        ).then();
-    }
-
-    private Mono<Integer> set(String key, String value) {
-        return repository.upsertSetting(key, value == null ? "" : value);
+        Map<String, String> settings = new LinkedHashMap<>();
+        settings.put(GPT_FAST_MODE_ENABLED, Boolean.toString(gptFastMode));
+        settings.put(DISABLED_TEST_ENABLED, Boolean.toString(Boolean.TRUE.equals(disabledTest.enabled())));
+        settings.put(DISABLED_TEST_SCHEDULE_MODE, disabledTest.scheduleMode());
+        settings.put(DISABLED_TEST_INTERVAL_MINUTES, Integer.toString(disabledTest.intervalMinutes()));
+        settings.put(DISABLED_TEST_CRON_EXPRESSION, disabledTest.cronExpression());
+        settings.put(DISABLED_TEST_TIMEZONE, disabledTest.timezone());
+        settings.put(DISABLED_TEST_INITIAL_DELAY_MINUTES, Integer.toString(disabledTest.initialDelayMinutes()));
+        settings.put(DISABLED_TEST_MAX_CONCURRENCY, Integer.toString(disabledTest.maxConcurrency()));
+        settings.put(DISABLED_TEST_MAX_ACCOUNTS_PER_RUN, Integer.toString(disabledTest.maxAccountsPerRun()));
+        settings.put(DISABLED_TEST_MODEL, disabledTest.model());
+        settings.put(DISABLED_TEST_PROMPT, disabledTest.prompt() == null ? "" : disabledTest.prompt());
+        settings.put(DISABLED_TEST_UPDATE_STATUS, Boolean.toString(Boolean.TRUE.equals(disabledTest.updateStatus())));
+        settings.put(DISABLED_TEST_AUTO_RUN_WHEN_NO_AVAILABLE, Boolean.toString(Boolean.TRUE.equals(disabledTest.autoRunWhenNoAvailableAccounts())));
+        settings.put(DISABLED_TEST_INCLUDE_DISABLED, Boolean.toString(Boolean.TRUE.equals(disabledTest.includeDisabled())));
+        settings.put(DISABLED_TEST_INCLUDE_SUSPENDED, Boolean.toString(Boolean.TRUE.equals(disabledTest.includeSuspended())));
+        settings.put(DISABLED_TEST_INCLUDE_QUOTA_EXHAUSTED, Boolean.toString(Boolean.TRUE.equals(disabledTest.includeQuotaExhausted())));
+        settings.put(DISABLED_TEST_MIN_AGE_MINUTES, Integer.toString(disabledTest.minAgeMinutes()));
+        settings.put(DISABLED_TEST_PROVIDERS, String.join(",", disabledTest.providers()));
+        settings.put(POOL_POLICY_ENABLED, Boolean.toString(Boolean.TRUE.equals(poolPolicy.enabled())));
+        settings.put(POOL_POLICY_WINDOW_MINUTES, Integer.toString(poolPolicy.windowMinutes()));
+        settings.put(POOL_POLICY_MIN_SAMPLE_SIZE, Integer.toString(poolPolicy.minSampleSize()));
+        settings.put(POOL_POLICY_RETEST_THRESHOLD_PERCENT, Double.toString(poolPolicy.retestThresholdPercent()));
+        settings.put(POOL_POLICY_FAILOVER_THRESHOLD_PERCENT, Double.toString(poolPolicy.failoverThresholdPercent()));
+        settings.put(POOL_POLICY_RECOVERY_THRESHOLD_PERCENT, Double.toString(poolPolicy.recoveryThresholdPercent()));
+        settings.put(POOL_POLICY_RETEST_INTERVAL_MINUTES, Integer.toString(poolPolicy.retestIntervalMinutes()));
+        settings.put(POOL_POLICY_RETEST_MAX_CONCURRENCY, Integer.toString(poolPolicy.retestMaxConcurrency()));
+        settings.put(POOL_POLICY_AUTO_WEIGHT_ENABLED, Boolean.toString(Boolean.TRUE.equals(poolPolicy.autoWeightEnabled())));
+        return repository.upsertSettings(
+                settings.keySet().toArray(String[]::new),
+                settings.values().toArray(String[]::new)
+            )
+            .doOnSuccess(ignored -> invalidateCacheForSetting(GPT_FAST_MODE_ENABLED))
+            .then();
     }
 
     private boolean bool(Map<String, String> values, String key, boolean fallback) {
@@ -376,5 +444,11 @@ public class AccountSettingsService {
 
     private <T> T firstNonNull(T value, T fallback) {
         return value == null ? fallback : value;
+    }
+
+    private record CachedBoolean(boolean value, long expiresAtNanos) {
+        boolean expired() {
+            return System.nanoTime() >= expiresAtNanos;
+        }
     }
 }

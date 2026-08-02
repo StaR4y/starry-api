@@ -1,6 +1,8 @@
 package tech.starryapi.admin;
 
 import java.nio.charset.StandardCharsets;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.ContentDisposition;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -11,6 +13,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestPart;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ServerWebExchange;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import tech.starryapi.common.AdminAuth;
 import tech.starryapi.common.ApiResponse;
@@ -18,7 +21,7 @@ import tech.starryapi.common.ApiResponse;
 @RestController
 public class DataTransferController implements DataTransferApi {
 
-    private static final MediaType SQL_MEDIA_TYPE = new MediaType("application", "sql", StandardCharsets.UTF_8);
+    private static final MediaType DUMP_MEDIA_TYPE = MediaType.APPLICATION_OCTET_STREAM;
     private static final MediaType ZIP_MEDIA_TYPE = MediaType.valueOf("application/zip");
 
     private final AdminAuth adminAuth;
@@ -36,15 +39,15 @@ public class DataTransferController implements DataTransferApi {
     }
 
     @Override
-    public Mono<ResponseEntity<byte[]>> exportDatabase(ServerWebExchange exchange) {
+    public Mono<ResponseEntity<Flux<DataBuffer>>> exportDatabase(ServerWebExchange exchange) {
         adminAuth.verifyAdmin(exchange);
-        return service.exportDatabase().map(file -> download(file, SQL_MEDIA_TYPE));
+        return service.exportDatabase().map(file -> download(exchange, file, DUMP_MEDIA_TYPE));
     }
 
     @Override
-    public Mono<ResponseEntity<byte[]>> exportBackup(ServerWebExchange exchange) {
+    public Mono<ResponseEntity<Flux<DataBuffer>>> exportBackup(ServerWebExchange exchange) {
         adminAuth.verifyAdmin(exchange);
-        return service.exportBackup().map(file -> download(file, ZIP_MEDIA_TYPE));
+        return service.exportBackup().map(file -> download(exchange, file, ZIP_MEDIA_TYPE));
     }
 
     @Override
@@ -60,9 +63,9 @@ public class DataTransferController implements DataTransferApi {
     }
 
     @Override
-    public Mono<ResponseEntity<byte[]>> downloadBackup(ServerWebExchange exchange, @PathVariable String fileName) {
+    public Mono<ResponseEntity<Flux<DataBuffer>>> downloadBackup(ServerWebExchange exchange, @PathVariable String fileName) {
         adminAuth.verifyAdmin(exchange);
-        return service.downloadBackup(fileName).map(file -> download(file, ZIP_MEDIA_TYPE));
+        return service.downloadBackup(fileName).map(file -> download(exchange, file, ZIP_MEDIA_TYPE));
     }
 
     @Override
@@ -84,14 +87,21 @@ public class DataTransferController implements DataTransferApi {
         return service.importBackup(file, confirm).map(ApiResponse::ok);
     }
 
-    private ResponseEntity<byte[]> download(DataTransferService.ExportFile file, MediaType mediaType) {
+    private ResponseEntity<Flux<DataBuffer>> download(
+        ServerWebExchange exchange,
+        DataTransferService.ExportFile file,
+        MediaType mediaType
+    ) {
+        Flux<DataBuffer> body = DataBufferUtils
+            .read(file.path(), exchange.getResponse().bufferFactory(), 64 * 1024)
+            .doFinally(signal -> file.cleanup());
         return ResponseEntity.ok()
             .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment()
                 .filename(file.fileName(), StandardCharsets.UTF_8)
                 .build()
                 .toString())
-            .contentLength(file.bytes().length)
+            .contentLength(file.sizeBytes())
             .contentType(mediaType)
-            .body(file.bytes());
+            .body(body);
     }
 }

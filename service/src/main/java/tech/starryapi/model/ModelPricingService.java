@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import java.util.concurrent.atomic.AtomicLong;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -49,6 +50,7 @@ public class ModelPricingService {
 
     private final SystemSettingRepository repository;
     private final ObjectMapper objectMapper;
+    private final AtomicLong cacheGeneration = new AtomicLong();
     private volatile List<ModelPricingRule> cachedRules = List.of();
     private volatile boolean cacheLoaded = false;
 
@@ -68,12 +70,14 @@ public class ModelPricingService {
     }
 
     public Mono<ModelDtos.ModelPricingResponse> settings() {
+        long generation = cacheGeneration.get();
         return readRules()
-            .doOnNext(this::replaceCache)
+            .doOnNext(rules -> replaceCache(rules, generation))
             .map(this::toResponse);
     }
 
     public Mono<ModelDtos.ModelPricingResponse> update(ModelDtos.UpdateModelPricingRequest request) {
+        long generation = cacheGeneration.get();
         List<ModelDtos.UpdateModelPricingRuleRequest> requestedRules = request == null ? List.of() : request.rules();
         if (requestedRules.size() > MAX_RULES) {
             return Mono.error(new ApiException(
@@ -93,7 +97,7 @@ public class ModelPricingService {
                     .toList();
                 String json = toJson(next);
                 return repository.upsertSetting(MODEL_PRICING_RULES, json)
-                    .then(Mono.fromRunnable(() -> replaceCache(next)))
+                    .then(Mono.fromRunnable(() -> replaceCache(next, generation)))
                     .thenReturn(toResponse(next));
             });
     }
@@ -107,8 +111,9 @@ public class ModelPricingService {
         if (cacheLoaded) {
             return Mono.just(cost(cachedRules, model, usage, fastMode, fallbackMultiplier));
         }
+        long generation = cacheGeneration.get();
         return readRules()
-            .doOnNext(this::replaceCache)
+            .doOnNext(rules -> replaceCache(rules, generation))
             .map(rules -> cost(rules, model, usage, fastMode, fallbackMultiplier));
     }
 
@@ -122,15 +127,31 @@ public class ModelPricingService {
         if (cacheLoaded) {
             return Mono.just(applyPublicPricing(safeResponse, cachedRules, fallbackMultiplier));
         }
+        long generation = cacheGeneration.get();
         return readRules()
-            .doOnNext(this::replaceCache)
+            .doOnNext(rules -> replaceCache(rules, generation))
             .map(rules -> applyPublicPricing(safeResponse, rules, fallbackMultiplier));
     }
 
-    Mono<Void> refresh() {
-        return readRules()
-            .doOnNext(this::replaceCache)
-            .then();
+    public Mono<Void> refresh() {
+        return Mono.defer(() -> {
+            long generation = cacheGeneration.get();
+            return readRules()
+                .doOnNext(rules -> replaceCache(rules, generation))
+                .then();
+        });
+    }
+
+    public void invalidateAllCaches() {
+        cacheGeneration.incrementAndGet();
+        cachedRules = List.of();
+        cacheLoaded = false;
+    }
+
+    public void invalidateCacheForSetting(String settingKey) {
+        if (MODEL_PRICING_RULES.equals(settingKey)) {
+            invalidateAllCaches();
+        }
     }
 
     BigDecimal cost(
@@ -418,7 +439,10 @@ public class ModelPricingService {
         );
     }
 
-    private void replaceCache(List<ModelPricingRule> rules) {
+    private void replaceCache(List<ModelPricingRule> rules, long generation) {
+        if (cacheGeneration.get() != generation) {
+            return;
+        }
         cachedRules = List.copyOf(rules == null ? List.of() : rules);
         cacheLoaded = true;
     }

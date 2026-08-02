@@ -58,13 +58,22 @@ public class RedemptionCodeService {
     }
 
     public Mono<RedemptionCodeResponse> revoke(String codeId) {
-        return repository.findByCodeId(clean(codeId))
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "REDEMPTION_CODE_NOT_FOUND", "Redemption code not found")))
-            .flatMap(entity -> {
-                entity.setEnabled(false);
-                entity.setUpdatedAt(Instant.now());
-                return repository.save(entity);
-            })
+        String sql = """
+            UPDATE redemption_codes
+            SET enabled = FALSE,
+                updated_at = clock_timestamp()
+            WHERE code_id = :codeId
+            RETURNING *
+            """;
+        return template.getDatabaseClient().sql(sql)
+            .bind("codeId", clean(codeId))
+            .map((row, metadata) -> template.getConverter().read(RedemptionCodeEntity.class, row, metadata))
+            .one()
+            .switchIfEmpty(Mono.error(new ApiException(
+                HttpStatus.NOT_FOUND,
+                "REDEMPTION_CODE_NOT_FOUND",
+                "Redemption code not found"
+            )))
             .map(RedemptionCodeMapper::toResponse);
     }
 
@@ -77,11 +86,12 @@ public class RedemptionCodeService {
             return Mono.error(new ApiException(HttpStatus.BAD_REQUEST, "REDEMPTION_CODE_REQUIRED", "Redemption code is required"));
         }
         Instant now = Instant.now();
-        return redeemAtomically(principal.userId(), code, now)
-            .flatMap(rows -> rows > 0
-                ? redeemedResult(principal.userId(), code, now)
-                : Mono.error(new ApiException(HttpStatus.BAD_REQUEST, "INVALID_REDEMPTION_CODE", "Redemption code is invalid, expired, or already used"))
-            );
+        return redeemOnce(principal.userId(), code, now)
+            .switchIfEmpty(Mono.error(new ApiException(
+                HttpStatus.BAD_REQUEST,
+                "INVALID_REDEMPTION_CODE",
+                "Redemption code is invalid, expired, or already used"
+            )));
     }
 
     private Mono<RedemptionCodeResponse> saveNewCode(AdminPrincipal principal, BigDecimal balance, Instant expiresAt) {
@@ -105,55 +115,81 @@ public class RedemptionCodeService {
         return entity;
     }
 
-    private Mono<Long> redeemAtomically(String userId, String code, Instant now) {
+    private Mono<RedeemCodeResponse> redeemOnce(String userId, String code, Instant now) {
+        String transactionId = Hashing.shortUuid();
         String sql = """
-            UPDATE admin_users AS u
-            JOIN redemption_codes AS r ON r.code = :code
-            SET u.balance = u.balance + r.balance,
-                u.updated_at = :now,
-                r.enabled = FALSE,
-                r.used = TRUE,
-                r.used_by_user_id = u.user_id,
-                r.used_by_username = u.username,
-                r.used_at = :now,
-                r.updated_at = :now
-            WHERE u.user_id = :userId
-              AND u.role = :userRole
-              AND u.enabled = TRUE
+            WITH candidate AS MATERIALIZED (
+                SELECT r.id,
+                       r.code_id,
+                       r.balance AS redeemed_balance,
+                       u.user_id,
+                       u.username,
+                       u.balance AS balance_before,
+                       u.balance + r.balance AS balance_after
+                FROM redemption_codes AS r
+                INNER JOIN admin_users AS u ON u.user_id = :userId
+                WHERE r.code = :code
+                  AND r.enabled = TRUE
+                  AND r.used = FALSE
+                  AND (r.expires_at IS NULL OR r.expires_at > :now)
+                  AND u.role = :userRole
+                  AND u.enabled = TRUE
+                FOR UPDATE OF r, u
+            ), ledger_entry AS (
+                INSERT INTO balance_ledger (
+                    transaction_id, user_id, entry_type, amount, balance_before, balance_after,
+                    reference_type, reference_id, idempotency_key, metadata
+                )
+                SELECT :transactionId,
+                       candidate.user_id,
+                       'REDEMPTION_CREDIT',
+                       candidate.redeemed_balance,
+                       candidate.balance_before,
+                       candidate.balance_after,
+                       'REDEMPTION_CODE',
+                       candidate.code_id,
+                       'redemption-code:' || candidate.code_id,
+                       '{}'::jsonb
+                FROM candidate
+                ON CONFLICT (idempotency_key) DO NOTHING
+                RETURNING user_id, reference_id, amount, balance_after
+            ), credited_user AS (
+                UPDATE admin_users AS u
+                SET balance = ledger_entry.balance_after,
+                    updated_at = :now
+                FROM ledger_entry
+                WHERE u.user_id = ledger_entry.user_id
+                RETURNING ledger_entry.reference_id,
+                          ledger_entry.amount AS redeemed_balance,
+                          u.balance AS current_balance
+            )
+            UPDATE redemption_codes AS r
+            SET enabled = FALSE,
+                used = TRUE,
+                used_by_user_id = candidate.user_id,
+                used_by_username = candidate.username,
+                used_at = :now,
+                updated_at = :now
+            FROM credited_user
+            INNER JOIN candidate ON candidate.code_id = credited_user.reference_id
+            WHERE r.id = candidate.id
               AND r.enabled = TRUE
               AND r.used = FALSE
-              AND (r.expires_at IS NULL OR r.expires_at > :now)
+            RETURNING r.code_id, r.balance AS redeemed_balance, credited_user.current_balance
             """;
         return template.getDatabaseClient().sql(sql)
+            .bind("transactionId", transactionId)
             .bind("code", code)
             .bind("now", now)
             .bind("userId", clean(userId))
             .bind("userRole", USER_ROLE)
-            .fetch()
-            .rowsUpdated();
-    }
-
-    private Mono<RedeemCodeResponse> redeemedResult(String userId, String code, Instant redeemedAt) {
-        String sql = """
-            SELECT r.code_id AS code_id,
-                   r.balance AS redeemed_balance,
-                   u.balance AS current_balance
-            FROM admin_users AS u
-            JOIN redemption_codes AS r ON r.used_by_user_id = u.user_id
-            WHERE u.user_id = :userId
-              AND r.code = :code
-            """;
-        return template.getDatabaseClient().sql(sql)
-            .bind("userId", clean(userId))
-            .bind("code", code)
             .map((row, metadata) -> new RedeemCodeResponse(
                 row.get("code_id", String.class),
                 row.get("redeemed_balance", BigDecimal.class),
                 row.get("current_balance", BigDecimal.class),
-                redeemedAt
+                now
             ))
-            .one()
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "REDEMPTION_CODE_RESULT_MISSING", "Redemption succeeded but result could not be loaded")));
+            .one();
     }
 
     private BigDecimal validateBalance(BigDecimal value) {

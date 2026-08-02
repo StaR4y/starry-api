@@ -54,6 +54,10 @@ public class AdminSessionService {
         return principal;
     }
 
+    public void invalidateAllSessions() {
+        sessions.clear();
+    }
+
     @Scheduled(fixedDelay = 60_000)
     public void cleanup() {
         Instant now = Instant.now();

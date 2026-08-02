@@ -489,6 +489,23 @@ DELETE /admin/model-mappings/{mappingId}
 
 `sourceModel` supports exact match and `*` wildcards. Matching is bounded to 256 characters.
 
+### PostgreSQL Data Transfer
+
+These endpoints require an `ADMIN` session and operate on the PostgreSQL 17 database/schema `starry_api`:
+
+```http
+GET    /admin/data-transfer/status
+GET    /admin/data-transfer/database.dump
+GET    /admin/data-transfer/backup.zip
+GET    /admin/data-transfer/backups
+POST   /admin/data-transfer/backups
+GET    /admin/data-transfer/backups/{fileName}
+DELETE /admin/data-transfer/backups/{fileName}
+POST   /admin/data-transfer/import?confirm=RESTORE_DATABASE
+```
+
+`database.dump` is a PostgreSQL custom-format archive. `backup.zip` and stored backup files are ZIP packages containing `database.dump`, metadata, and restore notes. The import endpoint accepts only a `.dump` archive or a Starry API `.zip` package as multipart field `file`; it validates the archive, serializes maintenance operations, and creates a rollback backup before restore.
+
 ### Logs and Login Accounts
 
 ```http

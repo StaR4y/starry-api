@@ -219,40 +219,44 @@ public class ProxyFacade {
         AtomicBoolean autoRetestAttempted
     ) {
         return selectAccountWithAutoRetest(route, sessionHint, attemptedAccountIds, false, autoRetestAttempted)
-            .flatMap(account -> callWithAccount(route, account, upstreamRequest, mappedModel, sessionHint)
-                .flatMap(result -> {
+            .flatMap(account -> captureUpstreamCall(Mono.defer(
+                () -> callWithAccount(route, account, upstreamRequest, mappedModel, sessionHint)
+            )).flatMap(outcome -> {
+                if (outcome.failure() == null) {
+                    PlatformCompletionResult result = outcome.result();
                     Mono<Void> accounting = recordSuccess(requestId, principal, account, path, requestedModel, result, route, fastMode, start);
                     ResponseEntity<?> response = stream
                         ? streamResponse(responseMode, responseRequest, mappedModel, result)
                         : jsonResponse(responseMode, responseRequest, mappedModel, result);
                     return accounting.then(Mono.<ResponseEntity<?>>just(response));
-                })
-                .onErrorResume(error -> {
-                    List<String> nextAttempted = attemptedWith(account, attemptedAccountIds);
-                    Mono<Void> failureRecord = recordFailure(requestId, principal, account, path, requestedModel, error, start);
-                    if (!shouldRetryWithAnotherAccount(error, attemptedAccountIds, nextAttempted)) {
-                        return failureRecord.then(Mono.<ResponseEntity<?>>error(mapError(error)));
-                    }
-                    return failureRecord.then(attemptChat(
-                        upstreamRequest,
-                        responseRequest,
-                        principal,
-                        path,
-                        responseMode,
-                        requestedModel,
-                        mappedModel,
-                        sessionHint,
-                        stream,
-                        route,
-                        fastMode,
-                        requestId,
-                        start,
-                        nextAttempted,
-                        autoRetestAttempted
-                    ).onErrorResume(retryError -> isNoAvailableAccount(retryError)
-                        ? Mono.<ResponseEntity<?>>error(mapError(error))
-                        : Mono.<ResponseEntity<?>>error(retryError)));
-                }));
+                }
+
+                Throwable error = outcome.failure();
+                List<String> nextAttempted = attemptedWith(account, attemptedAccountIds);
+                Mono<Void> failureRecord = recordFailure(requestId, principal, account, path, requestedModel, error, start);
+                if (!shouldRetryWithAnotherAccount(error, attemptedAccountIds, nextAttempted)) {
+                    return failureRecord.then(Mono.<ResponseEntity<?>>error(mapError(error)));
+                }
+                return failureRecord.then(attemptChat(
+                    upstreamRequest,
+                    responseRequest,
+                    principal,
+                    path,
+                    responseMode,
+                    requestedModel,
+                    mappedModel,
+                    sessionHint,
+                    stream,
+                    route,
+                    fastMode,
+                    requestId,
+                    start,
+                    nextAttempted,
+                    autoRetestAttempted
+                ).onErrorResume(retryError -> isNoAvailableAccount(retryError)
+                    ? Mono.<ResponseEntity<?>>error(mapError(error))
+                    : Mono.<ResponseEntity<?>>error(retryError)));
+            }));
     }
 
     private Mono<ResponseEntity<?>> invokeResponses(
@@ -321,40 +325,44 @@ public class ProxyFacade {
         AtomicBoolean autoRetestAttempted
     ) {
         return selectAccountWithAutoRetest(route, sessionHint, attemptedAccountIds, preferCodexAccounts, autoRetestAttempted)
-            .flatMap(account -> callResponsesWithAccount(route, account, upstreamRequest, mappedModel, sessionHint)
-                .flatMap(result -> {
+            .flatMap(account -> captureUpstreamCall(Mono.defer(
+                () -> callResponsesWithAccount(route, account, upstreamRequest, mappedModel, sessionHint)
+            )).flatMap(outcome -> {
+                if (outcome.failure() == null) {
+                    PlatformCompletionResult result = outcome.result();
                     Mono<Void> accounting = recordSuccess(requestId, principal, account, path, requestedModel, result, route, fastMode, start);
                     ResponseEntity<?> response = stream
                         ? responsesStreamResponse(responseRequest, upstreamRequest, mappedModel, result)
                         : responsesJsonResponse(responseRequest, upstreamRequest, mappedModel, result);
                     return accounting.then(Mono.<ResponseEntity<?>>just(response));
-                })
-                .onErrorResume(error -> {
-                    List<String> nextAttempted = attemptedWith(account, attemptedAccountIds);
-                    Mono<Void> failureRecord = recordFailure(requestId, principal, account, path, requestedModel, error, start);
-                    if (!shouldRetryWithAnotherAccount(error, attemptedAccountIds, nextAttempted)) {
-                        return failureRecord.then(Mono.<ResponseEntity<?>>error(mapError(error)));
-                    }
-                    return failureRecord.then(attemptResponses(
-                        upstreamRequest,
-                        responseRequest,
-                        principal,
-                        path,
-                        requestedModel,
-                        mappedModel,
-                        sessionHint,
-                        stream,
-                        route,
-                        fastMode,
-                        preferCodexAccounts,
-                        requestId,
-                        start,
-                        nextAttempted,
-                        autoRetestAttempted
-                    ).onErrorResume(retryError -> isNoAvailableAccount(retryError)
-                        ? Mono.<ResponseEntity<?>>error(mapError(error))
-                        : Mono.<ResponseEntity<?>>error(retryError)));
-                }));
+                }
+
+                Throwable error = outcome.failure();
+                List<String> nextAttempted = attemptedWith(account, attemptedAccountIds);
+                Mono<Void> failureRecord = recordFailure(requestId, principal, account, path, requestedModel, error, start);
+                if (!shouldRetryWithAnotherAccount(error, attemptedAccountIds, nextAttempted)) {
+                    return failureRecord.then(Mono.<ResponseEntity<?>>error(mapError(error)));
+                }
+                return failureRecord.then(attemptResponses(
+                    upstreamRequest,
+                    responseRequest,
+                    principal,
+                    path,
+                    requestedModel,
+                    mappedModel,
+                    sessionHint,
+                    stream,
+                    route,
+                    fastMode,
+                    preferCodexAccounts,
+                    requestId,
+                    start,
+                    nextAttempted,
+                    autoRetestAttempted
+                ).onErrorResume(retryError -> isNoAvailableAccount(retryError)
+                    ? Mono.<ResponseEntity<?>>error(mapError(error))
+                    : Mono.<ResponseEntity<?>>error(retryError)));
+            }));
     }
 
     private Mono<ProxyAccountEntity> selectAccount(UpstreamRoute route, String sessionHint) {
@@ -482,6 +490,12 @@ public class ProxyFacade {
         String kiroModel = route == UpstreamRoute.ANTHROPIC ? stripAnthropicPrefix(mappedModel) : mappedModel;
         ObjectNode payload = payloadFactory.fromOpenAiChat(chat, account, kiroModel, "AI_EDITOR", sessionHint);
         return upstreamClient.complete(account, payload, kiroModel);
+    }
+
+    private Mono<UpstreamCallOutcome> captureUpstreamCall(Mono<PlatformCompletionResult> upstreamCall) {
+        return upstreamCall
+            .map(result -> new UpstreamCallOutcome(result, null))
+            .onErrorResume(error -> Mono.just(new UpstreamCallOutcome(null, error)));
     }
 
     private UpstreamRoute routeFor(String model, ResponseMode responseMode) {
@@ -640,30 +654,92 @@ public class ProxyFacade {
         Instant start
     ) {
         PlatformUsage usage = result.usage();
-        Mono<Void> accountStats = accountPoolService.recordSuccess(account.getAccountId(), usage.totalTokens());
         return paymentSettingsService.config()
             .flatMap(config -> modelPricingService.cost(model, usage, fastMode, config.apiBillingMultiplier()))
             .flatMap(credits -> {
-                Mono<Void> keyStats = apiKeyService.recordUsage(principal.keyId(), credits, usage.inputTokens(), usage.outputTokens());
-                Mono<Void> balanceUsage = principal.requiresBalance()
-                    ? apiKeyService.consumeBalance(principal, credits)
-                    : Mono.empty();
-                Mono<Void> log = statsService.log(new StatsService.RequestLog(
+                Mono<Void> keyAccounting = apiKeyService.accountUsage(
+                    principal,
                     requestId,
-                    principal.keyId(),
-                    account.getAccountId(),
-                    path,
-                    model,
-                    200,
-                    true,
-                    usage.inputTokens(),
-                    usage.outputTokens(),
                     credits,
-                    Duration.between(start, Instant.now()).toMillis(),
-                    null
-                ));
-                return Mono.whenDelayError(accountStats, keyStats, balanceUsage, log).then();
+                    usage.inputTokens(),
+                    usage.outputTokens()
+                );
+                return keyAccounting
+                    .onErrorResume(error -> recordAccountingFailure(
+                        requestId,
+                        principal,
+                        account,
+                        path,
+                        model,
+                        usage,
+                        credits,
+                        error,
+                        start
+                    ).then(Mono.error(error)))
+                    .then(Mono.whenDelayError(
+                        bestEffort("record upstream account success", Mono.defer(
+                            () -> accountPoolService.recordSuccess(account.getAccountId(), usage.totalTokens())
+                        )),
+                        bestEffort("write successful request log", Mono.defer(() -> statsService.log(
+                            new StatsService.RequestLog(
+                                requestId,
+                                principal.keyId(),
+                                principal.userId(),
+                                account.getAccountId(),
+                                path,
+                                model,
+                                200,
+                                true,
+                                usage.inputTokens(),
+                                usage.outputTokens(),
+                                credits,
+                                Duration.between(start, Instant.now()).toMillis(),
+                                null
+                            )
+                        )))
+                    ).then());
             });
+    }
+
+    private Mono<Void> recordAccountingFailure(
+        String requestId,
+        ApiKeyPrincipal principal,
+        ProxyAccountEntity account,
+        String path,
+        String model,
+        PlatformUsage usage,
+        BigDecimal credits,
+        Throwable error,
+        Instant start
+    ) {
+        Throwable failure = rootFailure(error);
+        int statusCode = failure instanceof ApiException api
+            ? api.getStatus().value()
+            : HttpStatus.INTERNAL_SERVER_ERROR.value();
+        return bestEffort("write rejected usage settlement log", Mono.defer(() -> statsService.log(
+            new StatsService.RequestLog(
+                requestId,
+                principal.keyId(),
+                principal.userId(),
+                account.getAccountId(),
+                path,
+                model,
+                statusCode,
+                false,
+                usage.inputTokens(),
+                usage.outputTokens(),
+                credits,
+                Duration.between(start, Instant.now()).toMillis(),
+                safeFailureMessage(failure)
+            )
+        )));
+    }
+
+    private Mono<Void> bestEffort(String operation, Mono<Void> task) {
+        return task.onErrorResume(error -> {
+            log.warn("Could not {} after proxy completion", operation, error);
+            return Mono.empty();
+        });
     }
 
     private Mono<Void> recordFailure(
@@ -698,6 +774,7 @@ public class ProxyFacade {
         Mono<Void> log = statsService.log(new StatsService.RequestLog(
             requestId,
             principal.keyId(),
+            principal.userId(),
             account.getAccountId(),
             path,
             model,
@@ -919,5 +996,8 @@ public class ProxyFacade {
             }
         }
         return null;
+    }
+
+    private record UpstreamCallOutcome(PlatformCompletionResult result, Throwable failure) {
     }
 }
