@@ -6,31 +6,54 @@
    * - 顶栏放置面包屑 / 用户操作。
    * - 内容区使用 router-view 承载子路由。
    */
-  import { computed, onMounted } from 'vue';
+  import { computed, onMounted, type Component } from 'vue';
   import { useRoute, useRouter } from 'vue-router';
   import { useAuthStore } from '@/stores/auth';
   import { ElMessageBox } from 'element-plus';
+  import {
+    DataAnalysis,
+    Odometer,
+    CreditCard,
+    Key,
+    Wallet,
+    Connection,
+    PriceTag,
+    Cpu,
+    Document,
+    User,
+    Setting,
+    Present,
+    FolderOpened,
+  } from '@element-plus/icons-vue';
   import { formatNumber } from '@/utils/format';
 
   const route = useRoute();
   const router = useRouter();
   const auth = useAuthStore();
 
+  interface MenuItem {
+    name: string;
+    label: string;
+    icon: Component;
+    adminOnly?: boolean;
+    userOnly?: boolean;
+  }
+
   /** 主菜单：分组在此集中维护，便于二次开发新增模块 */
-  const rawMenus = [
-    { name: 'welcome', label: '数据统计', icon: '', userOnly: true },
-    { name: 'dashboard', label: '仪表盘', icon: '', adminOnly: true },
-    { name: 'accounts', label: '账号管理', icon: '', adminOnly: true },
-    { name: 'api-keys', label: 'API Key', icon: '' },
-    { name: 'payment', label: '余额充值', icon: '', userOnly: true },
-    { name: 'model-mappings', label: '模型映射', icon: '', adminOnly: true },
-    { name: 'model-pricing', label: '模型价格', icon: '', adminOnly: true },
-    { name: 'models', label: '模型 ID', icon: '' },
-    { name: 'logs', label: '请求日志', icon: '', adminOnly: true },
-    { name: 'users', label: '用户管理', icon: '', adminOnly: true },
-    { name: 'payment-settings', label: '支付设置', icon: '', adminOnly: true },
-    { name: 'redemption-codes', label: '兑换码', icon: '', adminOnly: true },
-    { name: 'data-transfer', label: '数据管理', icon: '', adminOnly: true },
+  const rawMenus: MenuItem[] = [
+    { name: 'welcome', label: '数据统计', icon: DataAnalysis, userOnly: true },
+    { name: 'dashboard', label: '仪表盘', icon: Odometer, adminOnly: true },
+    { name: 'accounts', label: '账号管理', icon: CreditCard, adminOnly: true },
+    { name: 'api-keys', label: 'API Key', icon: Key },
+    { name: 'payment', label: '余额充值', icon: Wallet, userOnly: true },
+    { name: 'model-mappings', label: '模型映射', icon: Connection, adminOnly: true },
+    { name: 'model-pricing', label: '模型价格', icon: PriceTag, adminOnly: true },
+    { name: 'models', label: '模型 ID', icon: Cpu },
+    { name: 'logs', label: '请求日志', icon: Document, adminOnly: true },
+    { name: 'users', label: '用户管理', icon: User, adminOnly: true },
+    { name: 'payment-settings', label: '支付设置', icon: Setting, adminOnly: true },
+    { name: 'redemption-codes', label: '兑换码', icon: Present, adminOnly: true },
+    { name: 'data-transfer', label: '数据管理', icon: FolderOpened, adminOnly: true },
   ];
 
   const menus = computed(() =>
@@ -83,7 +106,9 @@
           :class="{ 'is-active': activeMenu === item.name }"
           @click="handleSelect(item.name)"
         >
-          <span class="layout__menu-icon">{{ item.icon }}</span>
+          <el-icon class="layout__menu-icon" :size="16">
+            <component :is="item.icon" />
+          </el-icon>
           <span>{{ item.label }}</span>
         </button>
       </nav>
@@ -119,7 +144,11 @@
       </header>
 
       <section class="layout__content">
-        <router-view />
+        <router-view v-slot="{ Component: View, route: childRoute }">
+          <transition name="kp-page" mode="out-in">
+            <component :is="View" :key="childRoute.fullPath" />
+          </transition>
+        </router-view>
       </section>
 
       <footer class="layout__main-footer text-muted">
@@ -157,6 +186,13 @@
       font-size: 18px;
     }
 
+    &__brand-text {
+      background: linear-gradient(135deg, var(--kp-primary), var(--kp-accent));
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+
     &__brand-logo {
       width: 34px;
       height: 34px;
@@ -183,9 +219,11 @@
       font-size: 14px;
       color: var(--kp-text-secondary);
       text-align: left;
+      position: relative;
       transition:
         background 0.15s ease,
-        color 0.15s ease;
+        color 0.15s ease,
+        box-shadow 0.15s ease;
 
       &:hover {
         background: rgba(91, 141, 239, 0.08);
@@ -196,12 +234,25 @@
         background: linear-gradient(135deg, rgba(91, 141, 239, 0.18), rgba(179, 135, 255, 0.18));
         color: var(--kp-primary);
         font-weight: 600;
+        box-shadow: 0 4px 12px rgba(91, 141, 239, 0.12);
+
+        &::before {
+          content: '';
+          position: absolute;
+          left: -8px;
+          top: 50%;
+          transform: translateY(-50%);
+          width: 3px;
+          height: 16px;
+          border-radius: 2px;
+          background: linear-gradient(180deg, var(--kp-primary), var(--kp-accent));
+        }
       }
     }
 
     &__menu-icon {
       width: 22px;
-      text-align: center;
+      justify-content: center;
     }
 
     &__footer {
@@ -280,6 +331,21 @@
       justify-content: center;
       align-items: center;
     }
+  }
+
+  // 内容区页面切换过渡：轻微淡入上移
+  .kp-page-enter-active,
+  .kp-page-leave-active {
+    transition:
+      opacity 0.18s ease,
+      transform 0.18s ease;
+  }
+  .kp-page-enter-from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  .kp-page-leave-to {
+    opacity: 0;
   }
 
   // 窄屏基础降级：缩小留白、收窄侧边栏，菜单样式保持不变

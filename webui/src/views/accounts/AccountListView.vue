@@ -599,7 +599,27 @@
     <!-- 2. Suspended Accounts Periodic Review Collapsible Module -->
     <DisabledSchedulePanel @test-completed="handleTestCompleted" />
 
+    <!-- 3. 列表工具条：数量统计 + 手动刷新 -->
+    <div class="table-toolbar">
+      <span class="table-toolbar__count text-secondary">
+        共 {{ accounts.length }} 个账号
+        <template v-if="keyword.trim()">，筛选出 {{ visibleAccounts.length }} 个</template>
+      </span>
+      <el-button :loading="loading" @click="loadAccounts">
+        <template #icon>
+          <AppIcon name="refresh" width="13" height="13" />
+        </template>
+        刷新
+      </el-button>
+    </div>
+
     <el-table v-loading="loading" :data="visibleAccounts" stripe>
+      <template #empty>
+        <el-empty
+          :image-size="90"
+          :description="keyword.trim() ? '没有匹配的账号，换个关键词试试' : '暂无账号，点击右上角「新建账号」或「批量导入」'"
+        />
+      </template>
       <el-table-column label="账号类型" width="160">
         <template #default="{ row }">
           <ProviderBadge :provider="row.provider" />
@@ -629,9 +649,12 @@
           </div>
         </template>
       </el-table-column>
-      <el-table-column label="状态" width="100">
+      <el-table-column label="状态" width="110">
         <template #default="{ row }">
-          <el-tag :type="statusOf(row).tone" effect="light" round>{{ statusOf(row).label }}</el-tag>
+          <el-tag :type="statusOf(row).tone" effect="light" round>
+            <span class="status-dot" :class="`status-dot--${statusOf(row).tone}`" />
+            {{ statusOf(row).label }}
+          </el-tag>
         </template>
       </el-table-column>
       <el-table-column label="请求 / 错误" width="100">
@@ -674,7 +697,8 @@
             />
             <el-dropdown trigger="click" @command="(cmd: string) => handleCommand(cmd, row)">
               <el-button link type="primary" class="more-btn">
-                更多<span class="caret">▼</span>
+                更多
+                <AppIcon name="chevron-down" width="10" height="10" class="caret" />
               </el-button>
               <template #dropdown>
                 <el-dropdown-menu>
@@ -727,10 +751,48 @@
   // 表单样式（.account-form-alert / .form-hint）已迁移至 components/AccountFormDialog.vue
 
   .caret {
-    font-size: 10px;
     margin-left: 3px;
     vertical-align: middle;
     display: inline-block;
+  }
+
+  /* 状态标签内的语义色圆点，提升列表扫读效率 */
+  .status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 5px;
+    vertical-align: 1px;
+
+    &--success {
+      background: var(--kp-success);
+      box-shadow: 0 0 4px rgba(54, 192, 138, 0.6);
+    }
+    &--warning {
+      background: var(--kp-warning);
+      box-shadow: 0 0 4px rgba(240, 168, 77, 0.6);
+    }
+    &--danger {
+      background: var(--kp-danger);
+      box-shadow: 0 0 4px rgba(239, 91, 107, 0.6);
+    }
+    &--info {
+      background: var(--kp-text-muted);
+    }
+  }
+
+  /* 列表工具条 */
+  .table-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+
+    &__count {
+      font-size: 13px;
+    }
   }
 
   // Provider badge styling moved to components/ProviderBadge.vue
@@ -772,10 +834,21 @@
       flex-direction: column;
       gap: 4px;
       min-width: 0;
+      padding: 8px 12px;
+      border-radius: 12px;
+      transition:
+        background 0.2s ease,
+        transform 0.2s ease;
+
+      &:hover {
+        background: rgba(255, 255, 255, 0.45);
+        transform: translateY(-2px);
+      }
 
       & + .metric-item {
         border-left: 1px solid var(--kp-divider);
         padding-left: 28px;
+        border-radius: 0 12px 12px 0;
       }
 
       &__header {
@@ -905,7 +978,8 @@
       // 换行后隐藏分隔线，避免出现孤立分隔线
       .metric-item + .metric-item {
         border-left: none;
-        padding-left: 0;
+        padding-left: 12px;
+        border-radius: 12px;
       }
     }
   }

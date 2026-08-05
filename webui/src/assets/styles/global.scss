@@ -101,6 +101,10 @@ body {
   box-shadow: var(--kp-shadow-lg) !important;
 }
 
+.el-table {
+  --el-table-border-color: var(--kp-divider);
+}
+
 .el-table,
 .el-table tr,
 .el-table th.el-table__cell,
@@ -112,6 +116,8 @@ body {
   background-color: rgba(255, 255, 255, 0.55) !important;
   color: var(--kp-text-secondary);
   font-weight: 600;
+  font-size: 12.5px;
+  letter-spacing: 0.4px;
 }
 
 .el-table--enable-row-hover .el-table__body tr:hover > td.el-table__cell {
@@ -307,11 +313,32 @@ body {
   }
 }
 
+/* 标签：保留胶囊外形，按语义色区分状态 */
 .el-tag {
   border: none;
   border-radius: 999px;
-  background: rgba(91, 141, 239, 0.12);
-  color: var(--kp-primary);
+  font-weight: 600;
+
+  &.el-tag--primary,
+  &.el-tag--info {
+    background: rgba(91, 141, 239, 0.12);
+    color: var(--kp-primary);
+  }
+
+  &.el-tag--success {
+    background: rgba(54, 192, 138, 0.14);
+    color: #1e9e70;
+  }
+
+  &.el-tag--warning {
+    background: rgba(240, 168, 77, 0.16);
+    color: #c47a1d;
+  }
+
+  &.el-tag--danger {
+    background: rgba(239, 91, 107, 0.13);
+    color: var(--kp-danger);
+  }
 }
 
 /* 工具类 */
@@ -355,4 +382,82 @@ body {
 
 .mono {
   font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Consolas, monospace;
+}
+
+/* 全局细节打磨 */
+
+/* 选中文本 */
+::selection {
+  background: rgba(91, 141, 239, 0.24);
+}
+
+/* 细滚动条，贴合玻璃质感 */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(31, 45, 80, 0.18);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(31, 45, 80, 0.32);
+}
+
+/* 键盘焦点可见性 */
+:focus-visible {
+  outline: 2px solid rgba(91, 141, 239, 0.45);
+  outline-offset: 2px;
+}
+
+/* 输入占位符 */
+.el-input__inner::placeholder,
+.el-textarea__inner::placeholder {
+  color: var(--kp-text-muted);
+}
+
+/* 弹窗遮罩：轻微模糊，呼应玻璃面板 */
+.el-overlay {
+  background-color: rgba(31, 45, 80, 0.28);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+/* 弹窗标题加粗 */
+.el-dialog__title,
+.el-drawer__title,
+.el-message-box__title {
+  font-weight: 600;
+  color: var(--kp-text);
+}
+
+/* 全局消息条也采用玻璃质感 */
+.el-message {
+  background: var(--kp-surface-strong);
+  backdrop-filter: blur(var(--kp-blur)) saturate(160%);
+  -webkit-backdrop-filter: blur(var(--kp-blur)) saturate(160%);
+  border: 1px solid var(--kp-border);
+  border-radius: 12px;
+  box-shadow: var(--kp-shadow);
+}
+
+/* 分页按钮贴合面板 */
+.el-pagination {
+  --el-pagination-bg-color: rgba(255, 255, 255, 0.6);
+  --el-pagination-button-disabled-bg-color: rgba(255, 255, 255, 0.3);
+  --el-pagination-hover-color: var(--kp-primary);
+
+  .btn-prev,
+  .btn-next,
+  .el-pager li {
+    border-radius: 8px;
+  }
+}
+
+/* 空状态描述颜色 */
+.el-empty__description p {
+  color: var(--kp-text-muted);
 }
