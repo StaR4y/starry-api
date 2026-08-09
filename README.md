@@ -2,7 +2,7 @@
 
 Starry API is a Spring Boot + Vue management service for routing multiple LLM client protocols through a unified model and account layer.
 
-The current runtime supports OpenAI-compatible, Anthropic-compatible, and Gemini-compatible inbound APIs. GPT/OpenAI model requests can use OpenAI API key or Codex token accounts directly, while Claude/Kiro-compatible requests use the Kiro/AWS CodeWhisperer upstream path isolated under `platform/kiro`. Provider-neutral response data lives in `platform/core`, so inbound protocol modules format a common completion result instead of depending on Kiro-specific records.
+The current runtime supports OpenAI-compatible, Anthropic-compatible, and Gemini-compatible inbound APIs. GPT/OpenAI model requests can use OpenAI API key or Codex token accounts directly, official DeepSeek V4 requests use an isolated DeepSeek API-key account pool, and Claude/Kiro-compatible requests use the Kiro/AWS CodeWhisperer upstream path isolated under `platform/kiro`. Provider-neutral response data lives in `platform/core`, so inbound protocol modules format a common completion result instead of depending on provider-specific records.
 
 ## Features
 
@@ -11,10 +11,11 @@ The current runtime supports OpenAI-compatible, Anthropic-compatible, and Gemini
 - OpenAI Responses-style `POST /v1/responses`
 - Anthropic Messages-style `POST /v1/messages`
 - Gemini GenerateContent-style `POST /v1beta/models/{model}:generateContent`
-- Platform-scoped backend modules for OpenAI, Anthropic, Gemini, Kiro upstream, shared core records, and shared model catalog
+- Official DeepSeek V4 Flash and Pro model IDs, isolated account routing, and built-in official default token prices
+- Platform-scoped backend modules for OpenAI, DeepSeek, Anthropic, Gemini, Kiro upstream, shared core records, and shared model catalog
 - Platform-scoped frontend modules for provider registry, model grouping, and client setup scripts
 - Admin APIs for upstream accounts, API keys, model mappings, request logs, and local administrators
-- Account management supports Kiro accounts plus OpenAI API key and Codex token import/testing/routing, automatic health-test suspension after consecutive failures, and total/5h/7day quota progress.
+- Account management supports Kiro, official DeepSeek, OpenAI API key, and Codex token import/testing/routing, automatic health testing after consecutive failures, and total/5h/7day quota progress.
 - WebFlux, R2DBC PostgreSQL 17, Flyway migrations, API key accounting, rate limits, account failover, and session affinity
 - Vue/Vite management console embedded into the Spring Boot jar
 - OpenAPI UI at `/docs`
@@ -167,6 +168,22 @@ curl -X POST http://127.0.0.1:8080/admin/accounts \
   }'
 ```
 
+Add an official DeepSeek account:
+
+```bash
+curl -X POST http://127.0.0.1:8080/admin/accounts \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -d '{
+    "email": "deepseek@example.com",
+    "accessToken": "sk-...",
+    "authMethod": "api-key",
+    "provider": "DeepSeek"
+  }'
+```
+
+When `baseUrl` is omitted, DeepSeek uses `https://api.deepseek.com/v1`. Prefer the bare model IDs `deepseek-v4-flash` and `deepseek-v4-pro`; `starry/` and `deepseek/` prefixes are also accepted for official routing, while `openai-compatible/` remains the explicit route to a generic third-party account. Both DeepSeek models support Chat Completions, while the Responses API currently supports only `deepseek-v4-flash`. DeepSeek requests stay within the DeepSeek account pool and never fall back to OpenAI or Codex accounts.
+
 Call through OpenAI-compatible Chat Completions:
 
 ```bash
@@ -208,6 +225,7 @@ service
   platform/core             Provider-neutral completion result, usage, tool-use records
   platform/catalog          Unified model catalog
   platform/openai           OpenAI request/response/catalog module
+  platform/deepseek         DeepSeek model, pricing, and capability policy
   platform/anthropic        Anthropic request/response/catalog module
   platform/gemini           Gemini request/response/catalog module
   platform/kiro             Kiro/AWS upstream adapter module
@@ -216,7 +234,7 @@ service
 webui
   src/api                   Typed admin/proxy API clients
   src/platforms             Provider registry and platform-scoped setup modules
-    openai / anthropic / gemini / opencode
+    openai / deepseek / anthropic / gemini / opencode
   src/views                 Management pages
   src/stores                Pinia auth state
 ```
@@ -283,6 +301,7 @@ sudo bash /tmp/install-server.sh
 ## Current Boundaries
 
 - OpenAI/GPT requests route to OpenAI API key or Codex token accounts.
+- DeepSeek V4 requests route only to official DeepSeek accounts; no cross-provider fallback is attempted.
 - Claude/Kiro-compatible requests route to the Kiro/AWS upstream adapter.
 - Anthropic and Gemini are currently inbound compatibility modules unless mapped to a supported upstream route.
 - Inbound protocol response factories consume `PlatformCompletionResult`; they should not import Kiro result records.

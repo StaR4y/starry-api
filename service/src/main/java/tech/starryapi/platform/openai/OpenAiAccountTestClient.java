@@ -344,8 +344,16 @@ public class OpenAiAccountTestClient {
         }
         long inputTokens = usage.path(inputField).asLong(0);
         long outputTokens = usage.path(outputField).asLong(0);
-        long cacheReadTokens = usage.path(inputField + "_details").path("cached_tokens").asLong(0);
-        long reasoningTokens = usage.path(outputField + "_details").path("reasoning_tokens").asLong(0);
+        long cacheReadTokens = usage.has("prompt_cache_hit_tokens")
+            ? usage.path("prompt_cache_hit_tokens").asLong(0)
+            : usage.path(inputField + "_details").path("cached_tokens").asLong(0);
+        long cacheMissTokens = usage.path("prompt_cache_miss_tokens").asLong(0);
+        if (inputTokens <= 0 && (cacheReadTokens > 0 || cacheMissTokens > 0)) {
+            inputTokens = cacheReadTokens + cacheMissTokens;
+        }
+        long reasoningTokens = usage.has("reasoning_tokens")
+            ? usage.path("reasoning_tokens").asLong(0)
+            : usage.path(outputField + "_details").path("reasoning_tokens").asLong(0);
         return new PlatformUsage(inputTokens, outputTokens, BigDecimal.ZERO, cacheReadTokens, 0, reasoningTokens);
     }
 

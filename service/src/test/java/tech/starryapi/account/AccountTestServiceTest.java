@@ -150,6 +150,130 @@ class AccountTestServiceTest {
     }
 
     @Test
+    void testsDeepSeekAccountsWithOfficialDefaultModel() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        KiroUpstreamClient upstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiAccountTestClient openAiAccountTestClient = mock(OpenAiAccountTestClient.class);
+        ProxyAccountEntity account = deepSeekAccount("deepseek-main", "sk-deepseek-test");
+
+        when(repository.findAll()).thenReturn(Flux.just(account));
+        when(openAiAccountTestClient.test(eq(account), eq("deepseek-v4-flash"), eq("ping")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", PlatformUsage.zero())));
+        when(accountPoolService.recordTestSuccess(eq("deepseek-main"), eq(0L), eq(false))).thenReturn(Mono.empty());
+
+        AccountTestService service = new AccountTestService(
+            objectMapper,
+            repository,
+            accountPoolService,
+            new KiroPayloadFactory(objectMapper, modelCatalog),
+            upstreamClient,
+            openAiAccountTestClient,
+            mock(AnthropicUpstreamClient.class)
+        );
+
+        AccountDtos.TestAccountsResponse response = service
+            .test(new AccountDtos.TestAccountsRequest(null, true, "auto", "ping", 1, false))
+            .block();
+
+        assertThat(response).isNotNull();
+        assertThat(response.success()).isEqualTo(1);
+        assertThat(response.items()).singleElement()
+            .satisfies(item -> assertThat(item.model()).isEqualTo("deepseek-v4-flash"));
+        verify(openAiAccountTestClient).test(eq(account), eq("deepseek-v4-flash"), eq("ping"));
+        verifyNoInteractions(upstreamClient);
+    }
+
+    @Test
+    void testsDeepSeekAccountsWithCanonicalStarryModel() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        KiroUpstreamClient upstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiAccountTestClient openAiAccountTestClient = mock(OpenAiAccountTestClient.class);
+        ProxyAccountEntity account = deepSeekAccount("deepseek-main", "sk-deepseek-test");
+
+        when(repository.findAll()).thenReturn(Flux.just(account));
+        when(openAiAccountTestClient.test(eq(account), eq("deepseek-v4-pro"), eq("ping")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", PlatformUsage.zero())));
+        when(accountPoolService.recordTestSuccess(eq("deepseek-main"), eq(0L), eq(false))).thenReturn(Mono.empty());
+
+        AccountTestService service = new AccountTestService(
+            objectMapper,
+            repository,
+            accountPoolService,
+            new KiroPayloadFactory(objectMapper, modelCatalog),
+            upstreamClient,
+            openAiAccountTestClient,
+            mock(AnthropicUpstreamClient.class)
+        );
+
+        AccountDtos.TestAccountsResponse response = service
+            .test(new AccountDtos.TestAccountsRequest(
+                null,
+                true,
+                "starry/deepseek-v4-pro",
+                "ping",
+                1,
+                false
+            ))
+            .block();
+
+        assertThat(response).isNotNull();
+        assertThat(response.success()).isEqualTo(1);
+        assertThat(response.items()).singleElement()
+            .satisfies(item -> assertThat(item.model()).isEqualTo("deepseek-v4-pro"));
+        verify(openAiAccountTestClient).test(eq(account), eq("deepseek-v4-pro"), eq("ping"));
+        verifyNoInteractions(upstreamClient);
+    }
+
+    @Test
+    void deepSeekRateLimitDoesNotMarkAccountQuotaExhausted() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        KiroUpstreamClient upstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiAccountTestClient openAiAccountTestClient = mock(OpenAiAccountTestClient.class);
+        ProxyAccountEntity account = deepSeekAccount("deepseek-main", "sk-deepseek-test");
+
+        when(repository.findAll()).thenReturn(Flux.just(account));
+        when(openAiAccountTestClient.test(eq(account), eq("deepseek-v4-flash"), eq("ping")))
+            .thenReturn(Mono.error(new UpstreamException(429, "rate limited", true)));
+        when(accountPoolService.recordTestFailure(
+            eq("deepseek-main"),
+            eq(AccountPoolService.UpstreamErrorType.RECOVERABLE),
+            eq(429),
+            eq("rate limited"),
+            eq(true),
+            eq(false)
+        )).thenReturn(Mono.empty());
+
+        AccountTestService service = new AccountTestService(
+            objectMapper,
+            repository,
+            accountPoolService,
+            new KiroPayloadFactory(objectMapper, modelCatalog),
+            upstreamClient,
+            openAiAccountTestClient,
+            mock(AnthropicUpstreamClient.class)
+        );
+
+        AccountDtos.TestAccountsResponse response = service
+            .test(new AccountDtos.TestAccountsRequest(null, true, "auto", "ping", 1, true))
+            .block();
+
+        assertThat(response).isNotNull();
+        assertThat(response.failed()).isEqualTo(1);
+        verify(accountPoolService).recordTestFailure(
+            eq("deepseek-main"),
+            eq(AccountPoolService.UpstreamErrorType.RECOVERABLE),
+            eq(429),
+            eq("rate limited"),
+            eq(true),
+            eq(false)
+        );
+        verifyNoInteractions(upstreamClient);
+    }
+
+    @Test
     void testsAnthropicApiKeyAccountsWithAnthropicClient() {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         AccountPoolService accountPoolService = mock(AccountPoolService.class);
@@ -441,6 +565,8 @@ class AccountTestServiceTest {
                 "gpt-4o",
                 "gpt-4o-mini"
             );
+        assertThat(options.deepSeek()).extracting(AccountDtos.TestModelOption::value)
+            .containsExactly("auto", "deepseek-v4-flash", "deepseek-v4-pro");
     }
 
     @Test
@@ -633,6 +759,13 @@ class AccountTestServiceTest {
         account.setAuthMethod(AccountPlatforms.OPENAI_API_KEY_AUTH);
         account.setProvider(AccountPlatforms.ANTHROPIC_PROVIDER);
         account.setBaseUrl(AccountPlatforms.DEFAULT_ANTHROPIC_BASE_URL);
+        return account;
+    }
+
+    private ProxyAccountEntity deepSeekAccount(String accountId, String accessToken) {
+        ProxyAccountEntity account = openAiAccount(accountId, accessToken);
+        account.setProvider(AccountPlatforms.DEEPSEEK_PROVIDER);
+        account.setBaseUrl(AccountPlatforms.DEFAULT_DEEPSEEK_BASE_URL);
         return account;
     }
 }

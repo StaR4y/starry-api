@@ -9,6 +9,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -162,6 +163,125 @@ class ProxyFacadeRoutingTest {
         verify(accountPoolService, never()).selectKiroAccount(any());
         verify(openAiUpstreamClient).complete(eq(account), eq(request), eq("openai-compatible/deepseek-chat"));
         verify(kiroUpstreamClient, never()).complete(any(), any(), any());
+    }
+
+    @Test
+    void deepSeekModelsUseDedicatedAccountPoolAndUpstream() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity account = deepSeekAccount();
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "deepseek-v4-flash",
+              "service_tier": "priority",
+              "serviceTier": "fast",
+              "fast": true,
+              "fast_mode": true,
+              "messages": [{"role": "user", "content": "hi"}]
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/chat/completions")
+        );
+
+        when(apiKeyService.authenticate(exchange))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("deepseek-v4-flash", "key-1")).thenReturn("deepseek-v4-flash");
+        when(accountPoolService.selectDeepSeekOpenAiAccount("key-1")).thenReturn(Mono.just(account));
+        when(openAiUpstreamClient.complete(eq(account), any(JsonNode.class), eq("deepseek-v4-flash")))
+            .thenReturn(Mono.just(new PlatformCompletionResult(
+                "OK",
+                new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0)
+            )));
+        when(accountPoolService.recordSuccess("deepseek-main", 2L)).thenReturn(Mono.empty());
+        when(apiKeyService.accountUsage(
+            any(ApiKeyPrincipal.class),
+            anyString(),
+            eq(credits("2")),
+            eq(1L),
+            eq(1L)
+        )).thenReturn(Mono.empty());
+        when(statsService.log(any())).thenReturn(Mono.empty());
+
+        proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService
+        ).chat(request, exchange).block();
+
+        verify(accountPoolService).selectDeepSeekOpenAiAccount("key-1");
+        verify(accountPoolService, never()).selectOpenAiAccount(anyString());
+        verify(accountPoolService, never()).selectKiroAccount(any());
+        ArgumentCaptor<JsonNode> requestCaptor = ArgumentCaptor.forClass(JsonNode.class);
+        verify(openAiUpstreamClient).complete(eq(account), requestCaptor.capture(), eq("deepseek-v4-flash"));
+        assertThat(requestCaptor.getValue().has("service_tier")).isFalse();
+        assertThat(requestCaptor.getValue().has("serviceTier")).isFalse();
+        assertThat(requestCaptor.getValue().has("fast")).isFalse();
+        assertThat(requestCaptor.getValue().has("fast_mode")).isFalse();
+        assertThat(request.has("service_tier")).isTrue();
+        verify(kiroUpstreamClient, never()).complete(any(), any(), any());
+    }
+
+    @Test
+    void deepSeekProResponsesFailsBeforeAccountSelection() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "deepseek-v4-pro",
+              "input": "hi"
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/responses")
+        );
+
+        when(apiKeyService.authenticate(exchange))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("deepseek-v4-pro", "key-1")).thenReturn("deepseek-v4-pro");
+
+        assertThatThrownBy(() -> proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService
+        ).responses(request, exchange).block())
+            .isInstanceOfSatisfying(ApiException.class, error -> {
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                assertThat(error.getCode()).isEqualTo("UNSUPPORTED_MODEL_OPERATION");
+                assertThat(error.getMessage()).contains("deepseek-v4-flash");
+            });
+
+        verify(accountPoolService, never()).selectDeepSeekOpenAiAccount(anyString());
+        verify(accountPoolService, never()).selectDeepSeekOpenAiAccount(anyString(), any());
+        verify(accountPoolService, never()).recordRequestFailure(anyString(), any(), any(), anyString());
+        verify(accountPoolService, never()).recordRequestFailure(anyString(), any(), any(), anyString(), anyBoolean());
+        verifyNoInteractions(openAiUpstreamClient);
     }
 
     @Test
@@ -1590,6 +1710,13 @@ class ProxyFacadeRoutingTest {
     private ProxyAccountEntity codexAccount(String accountId) {
         ProxyAccountEntity account = openAiAccount(accountId);
         account.setAuthMethod(AccountPlatforms.OPENAI_CODEX_AUTH);
+        return account;
+    }
+
+    private ProxyAccountEntity deepSeekAccount() {
+        ProxyAccountEntity account = openAiAccount("deepseek-main");
+        account.setProvider(AccountPlatforms.DEEPSEEK_PROVIDER);
+        account.setBaseUrl(AccountPlatforms.DEFAULT_DEEPSEEK_BASE_URL);
         return account;
     }
 

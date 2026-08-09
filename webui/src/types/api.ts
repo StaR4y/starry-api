@@ -396,6 +396,7 @@ export interface TestModelOptionsResult {
   google: TestModelOption[];
   anthropic: TestModelOption[];
   codex: TestModelOption[];
+  deepSeek: TestModelOption[];
 }
 
 export interface TestAccountsResult {

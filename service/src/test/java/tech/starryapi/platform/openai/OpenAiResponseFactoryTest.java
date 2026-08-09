@@ -68,6 +68,69 @@ class OpenAiResponseFactoryTest {
     }
 
     @Test
+    void chatCompletionPreservesDeepSeekReasoningAlongsideToolCalls() throws Exception {
+        PlatformCompletionResult result = new PlatformCompletionResult(
+            "",
+            "checked the request",
+            List.of(new PlatformToolUse(
+                "call_lookup",
+                "lookup",
+                objectMapper.readTree("{\"query\":\"stars\"}")
+            )),
+            new PlatformUsage(110, 20, java.math.BigDecimal.ZERO, 100, 0, 10)
+        );
+
+        JsonNode response = factory.chatCompletion("deepseek-v4-flash", result);
+
+        JsonNode choice = response.path("choices").get(0);
+        JsonNode message = choice.path("message");
+        assertThat(message.path("reasoning_content").asText()).isEqualTo("checked the request");
+        assertThat(message.path("content").isNull()).isTrue();
+        assertThat(message.path("tool_calls")).hasSize(1);
+        JsonNode toolCall = message.path("tool_calls").get(0);
+        assertThat(toolCall.path("id").asText()).isEqualTo("call_lookup");
+        assertThat(toolCall.path("function").path("name").asText()).isEqualTo("lookup");
+        assertThat(toolCall.path("function").path("arguments").asText())
+            .isEqualTo("{\"query\":\"stars\"}");
+        assertThat(choice.path("finish_reason").asText()).isEqualTo("tool_calls");
+    }
+
+    @Test
+    void chatStreamPreservesDeepSeekReasoningAlongsideToolCallDeltas() throws Exception {
+        PlatformCompletionResult result = new PlatformCompletionResult(
+            "",
+            "checked the request",
+            List.of(new PlatformToolUse(
+                "call_lookup",
+                "lookup",
+                objectMapper.readTree("{\"query\":\"stars\"}")
+            )),
+            new PlatformUsage(110, 20, java.math.BigDecimal.ZERO, 100, 0, 10)
+        );
+
+        List<String> events = factory.chatStreamEvents("deepseek-v4-flash", result)
+            .map(ServerSentEvent::data)
+            .collectList()
+            .block();
+
+        assertThat(events).hasSize(4);
+        JsonNode reasoningChunk = objectMapper.readTree(events.get(0));
+        JsonNode reasoningDelta = reasoningChunk.path("choices").get(0).path("delta");
+        assertThat(reasoningDelta.path("reasoning_content").asText()).isEqualTo("checked the request");
+
+        JsonNode toolChunk = objectMapper.readTree(events.get(1));
+        JsonNode toolCall = toolChunk.path("choices").get(0).path("delta").path("tool_calls").get(0);
+        assertThat(toolCall.path("id").asText()).isEqualTo("call_lookup");
+        assertThat(toolCall.path("function").path("name").asText()).isEqualTo("lookup");
+        assertThat(toolCall.path("function").path("arguments").asText())
+            .isEqualTo("{\"query\":\"stars\"}");
+
+        JsonNode stopChunk = objectMapper.readTree(events.get(2));
+        assertThat(stopChunk.path("choices").get(0).path("finish_reason").asText()).isEqualTo("tool_calls");
+        assertThat(events.get(3)).isEqualTo("[DONE]");
+    }
+
+    @Test
     void responsesApiStreamReturnsResponsesEvents() {
         PlatformCompletionResult result = new PlatformCompletionResult(
             "OK",
@@ -96,6 +159,81 @@ class OpenAiResponseFactoryTest {
         assertThat(completed.path("response").path("object").asText()).isEqualTo("response");
         assertThat(completed.path("response").path("status").asText()).isEqualTo("completed");
         assertThat(completed.path("response").path("previous_response_id").asText()).isEqualTo("resp_prev");
+    }
+
+    @Test
+    void responsesApiPreservesReasoningItemAndReasoningStreamEvents() throws Exception {
+        PlatformCompletionResult result = new PlatformCompletionResult(
+            "OK",
+            "checked the response",
+            List.of(new PlatformToolUse(
+                "call_lookup",
+                "lookup",
+                objectMapper.readTree("{\"query\":\"stars\"}")
+            )),
+            new PlatformUsage(110, 20, java.math.BigDecimal.ZERO, 100, 0, 10)
+        );
+
+        JsonNode response = factory.responses("deepseek-v4-flash", result, null);
+
+        assertThat(response.path("output"))
+            .extracting(item -> item.path("type").asText())
+            .containsExactly("reasoning", "message", "function_call");
+        JsonNode reasoningItem = response.path("output").get(0);
+        assertThat(reasoningItem.path("id").asText()).startsWith("rs_");
+        assertThat(reasoningItem.path("status").asText()).isEqualTo("completed");
+        assertThat(reasoningItem.path("summary")).isEmpty();
+        assertThat(reasoningItem.path("content").get(0).path("type").asText()).isEqualTo("reasoning_text");
+        assertThat(reasoningItem.path("content").get(0).path("text").asText()).isEqualTo("checked the response");
+
+        List<ServerSentEvent<String>> events = factory
+            .responsesStreamEvents((com.fasterxml.jackson.databind.node.ObjectNode) response)
+            .collectList()
+            .block();
+
+        assertThat(events).isNotNull();
+        List<JsonNode> jsonEvents = jsonEvents(events);
+        assertThat(jsonEvents)
+            .extracting(event -> event.path("type").asText())
+            .containsSubsequence(
+                "response.output_item.added",
+                "response.reasoning_text.delta",
+                "response.reasoning_text.done",
+                "response.output_item.done"
+            )
+            .contains(
+                "response.output_text.delta",
+                "response.function_call_arguments.done",
+                "response.completed"
+            );
+
+        JsonNode reasoningAdded = jsonEvents.stream()
+            .filter(event -> "response.output_item.added".equals(event.path("type").asText()))
+            .filter(event -> "reasoning".equals(event.path("item").path("type").asText()))
+            .findFirst()
+            .orElseThrow();
+        assertThat(reasoningAdded.path("item").path("content").get(0).path("text").asText()).isEmpty();
+
+        JsonNode reasoningDelta = jsonEvents.stream()
+            .filter(event -> "response.reasoning_text.delta".equals(event.path("type").asText()))
+            .findFirst()
+            .orElseThrow();
+        assertThat(reasoningDelta.path("delta").asText()).isEqualTo("checked the response");
+
+        JsonNode reasoningDone = jsonEvents.stream()
+            .filter(event -> "response.reasoning_text.done".equals(event.path("type").asText()))
+            .findFirst()
+            .orElseThrow();
+        assertThat(reasoningDone.path("text").asText()).isEqualTo("checked the response");
+
+        JsonNode completed = jsonEvents.stream()
+            .filter(event -> "response.completed".equals(event.path("type").asText()))
+            .findFirst()
+            .orElseThrow();
+        assertThat(completed.path("response").path("output").get(0).path("type").asText())
+            .isEqualTo("reasoning");
+        assertThat(completed.path("response").path("output").get(2).path("type").asText())
+            .isEqualTo("function_call");
     }
 
     @Test

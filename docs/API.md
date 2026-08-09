@@ -174,7 +174,7 @@ GET /v1/models
 GET /models
 ```
 
-The model list is OpenAI-compatible and includes platform metadata. It keeps legacy short aliases and also exposes OpenRouter-sourced complete IDs for OpenAI, Google/Gemini, and Anthropic models, such as `openai/gpt-5`, `google/gemini-2.5-pro`, and `anthropic/claude-sonnet-4.5`.
+The model list is OpenAI-compatible and includes platform metadata. It keeps legacy short aliases, exposes OpenRouter-sourced complete IDs for OpenAI, Google/Gemini, and Anthropic models, and includes the official DeepSeek V4 IDs `deepseek-v4-flash` and `deepseek-v4-pro`.
 
 ```json
 {
@@ -208,6 +208,15 @@ The model list is OpenAI-compatible and includes platform metadata. It keeps leg
 
 When model-specific pricing is configured, public model entries expose user-facing token capacity per 100 balance. Administrators configure total model pricing in `模型价格` as an equivalent multiplier (`x`) against the current billing baseline, or configure split input/output/cache prices as balance per 1M tokens in the sub2api/LiteLLM style; ordinary users only see token capacity. The admin preset action uses a sub2api-style wildcard catalog, so pricing can be reset in one operation without creating one rule for every discovered model ID.
 
+DeepSeek models use these built-in [official defaults](https://api-docs.deepseek.com/quick_start/pricing/) when no enabled pricing rule matches. Values are charged as balance per 1M tokens (`余额/MTok`):
+
+| Model | Input/cache miss | Cache hit | Output |
+| --- | ---: | ---: | ---: |
+| `deepseek-v4-flash` | 0.14 | 0.0028 | 0.28 |
+| `deepseek-v4-pro` | 0.435 | 0.003625 | 0.87 |
+
+Cache writes use the normal input/cache-miss price. For pricing lookup, `starry/`, `openai-compatible/`, and `deepseek/` prefixes on these two IDs are canonicalized to the bare DeepSeek ID. Pricing resolution is deterministic: the first enabled explicit rule matching either form wins, including wildcard rules such as `*`; only an unmatched DeepSeek model uses the built-in table, and only other unmatched models use the global fallback multiplier. This lets administrators override the defaults immediately when official prices change.
+
 Current provider groups:
 
 | Provider | Families |
@@ -215,6 +224,7 @@ Current provider groups:
 | Anthropic | Routing Preset, Claude 4, Claude 3, CodeWhisperer Internal |
 | OpenAI | GPT-5, GPT-4, GPT-3.5, OpenAI Reasoning |
 | Gemini | Gemini 2.5, Gemini 2.0, Gemini 1.5 |
+| DeepSeek | DeepSeek V4 |
 
 ### OpenAI Chat Completions
 
@@ -250,6 +260,8 @@ Supported fields:
 | `tools` | Basic OpenAI function tool schema conversion. |
 | `thinking` | Forwarded as additional upstream model request fields. |
 
+Both `deepseek-v4-flash` and `deepseek-v4-pro` support Chat Completions. Prefer the bare IDs for official routing; `starry/` and `deepseek/` prefixes are accepted and removed before the request is sent. `openai-compatible/` deliberately selects the generic third-party OpenAI-compatible pool instead.
+
 ### OpenAI Responses
 
 ```http
@@ -269,7 +281,7 @@ POST /responses
 }
 ```
 
-`platform/openai/OpenAiRequestAdapter` converts Responses input, function calls, and function outputs into the internal chat shape before routing.
+`platform/openai/OpenAiRequestAdapter` converts Responses input, function calls, and function outputs into the internal chat shape before routing. For DeepSeek, Responses currently supports only `deepseek-v4-flash`; requesting `deepseek-v4-pro` through this endpoint returns `400`, so Pro callers must use Chat Completions.
 
 ### Anthropic Messages
 
@@ -403,7 +415,7 @@ Only `accessToken` is required for a basic Kiro upstream account. For official O
 }
 ```
 
-For third-party OpenAI-compatible API key accounts, use `provider=OpenAI-compatible`, `authMethod=api-key`, the upstream site API key as `accessToken`, and the upstream API root as `baseUrl`:
+For an official DeepSeek API key account, use `provider=DeepSeek`. The provider normalizes `authMethod` to `api-key`, and omitting `baseUrl` selects `https://api.deepseek.com/v1`:
 
 ```json
 {
@@ -411,14 +423,28 @@ For third-party OpenAI-compatible API key accounts, use `provider=OpenAI-compati
   "email": "deepseek@example.com",
   "accessToken": "sk-...",
   "authMethod": "api-key",
-  "provider": "OpenAI-compatible",
-  "baseUrl": "https://api.deepseek.com/v1"
+  "provider": "DeepSeek"
 }
 ```
 
-`baseUrl` may be either the site origin, such as `https://joystar.cc`, or a versioned API base, such as `https://api.deepseek.com/v1` or `https://openrouter.ai/api/v1`. When the path does not already end in an API version segment, Starry API calls `/v1/chat/completions` and `/v1/responses` by default.
+Accounts whose `baseUrl` host is `api.deepseek.com` are also recognized as DeepSeek for compatibility with records previously labeled `OpenAI-compatible`. Official DeepSeek model requests select only this DeepSeek pool; ordinary OpenAI/Codex selection excludes it, and DeepSeek never falls back across providers when its own pool is unavailable.
 
-Route third-party model IDs through model mappings by targeting `openai-compatible/<actual-model-id>`. For example, map public model `deepseek-chat` to `openai-compatible/deepseek-chat`; Starry API uses the prefix to select OpenAI-compatible accounts and sends `deepseek-chat` to the upstream site.
+For other third-party OpenAI-compatible API key accounts, use `provider=OpenAI-compatible`, `authMethod=api-key`, the upstream site API key as `accessToken`, and the upstream API root as `baseUrl`:
+
+```json
+{
+  "accountId": "openrouter-main",
+  "email": "openrouter@example.com",
+  "accessToken": "sk-or-...",
+  "authMethod": "api-key",
+  "provider": "OpenAI-compatible",
+  "baseUrl": "https://openrouter.ai/api/v1"
+}
+```
+
+For a generic OpenAI-compatible account, `baseUrl` may be either the site origin, such as `https://joystar.cc`, or a versioned API base, such as `https://openrouter.ai/api/v1`. When the path does not already end in an API version segment, Starry API calls `/v1/chat/completions` and `/v1/responses` by default.
+
+Route third-party model IDs through model mappings by targeting `openai-compatible/<actual-model-id>`. For example, map public model `llama-3.3-70b` to `openai-compatible/meta-llama/llama-3.3-70b-instruct`; Starry API uses the prefix to select generic OpenAI-compatible accounts and sends the unprefixed model ID to that upstream site.
 
 For Codex OAuth token accounts, use `authMethod=codex`, `provider=OpenAI`, `accessToken`, optional `refreshToken`, optional `idToken`, and optional `upstreamAccountId`. If `baseUrl` is omitted, Codex defaults to `https://chatgpt.com/backend-api/codex`.
 
@@ -436,12 +462,12 @@ The management console can upload multiple `.json` files, parse them in the brow
 
 Account quota tracking supports a total quota plus 5-hour and 7-day rolling windows. `quotaUsed`, `quota5hUsed`, and `quota7dUsed` are incremented from successful upstream token usage; `quota5hResetAt` and `quota7dResetAt` advance when each rolling window starts over. The management console renders all three as remaining-quota progress bars.
 
-`POST /admin/accounts/test` tests Kiro accounts through the Kiro upstream client, OpenAI API key accounts through `/chat/completions`, and Codex accounts through `/responses`.
-`updateStatus` defaults to `true`; set it to `false` only when a test should not change account state. Successful tests re-enable the account and clear suspended/quota state. Failed tests disable and suspend the account so it becomes unavailable. `402` and `429` also mark the account quota exhausted, while `401` and `403` use the auth failure suspend reason.
+`POST /admin/accounts/test` tests Kiro accounts through the Kiro upstream client, OpenAI and DeepSeek API key accounts through `/chat/completions`, and Codex accounts through `/responses`.
+`updateStatus` defaults to `true`; set it to `false` only when a test should not change account state. Successful tests re-enable the account and clear suspended/quota state. Failed tests normally disable and suspend the account so it becomes unavailable. `402` and non-DeepSeek `429` responses mark quota exhausted, while `401` and `403` use the auth failure suspend reason. A DeepSeek `429` is treated as a transient concurrency/rate-limit signal: the test increments `errorCount` but does not set `quotaExhaustedAt`, disable, or suspend the account.
 
-During normal proxy traffic, upstream request failures increment the account's consecutive `errorCount`. When an account reaches two consecutive request failures, the service schedules one background account test with status updates enabled. If that test fails, the existing test-failure path marks the account unavailable; if it succeeds, the account is re-enabled and `errorCount` is reset.
+During normal proxy traffic, upstream request failures increment the account's consecutive `errorCount`. When an account reaches two consecutive request failures, the service schedules one background account test with status updates enabled. If that test fails, the existing test-failure path normally marks the account unavailable; if it succeeds, the account is re-enabled and `errorCount` is reset. DeepSeek `429` responses remain eligible for same-provider account retry and exponential cooldown without being interpreted as exhausted quota.
 
-`GET /admin/accounts/test-models` returns provider-specific test model groups for Kiro, OpenAI API key, Google/Gemini, Anthropic, and Codex accounts. OpenAI, Google, and Anthropic test model IDs are synchronized from `https://openrouter.ai/api/v1/models` and keep the OpenRouter provider prefix, for example `openai/gpt-5`, `google/gemini-2.5-pro`, and `anthropic/claude-sonnet-4.5`. Codex OAuth account tests use ChatGPT-account-compatible GPT-5 series model IDs by default; legacy Codex-only slugs such as `gpt-5-codex` are normalized before testing to avoid unsupported-model failures. The management console uses this endpoint to show the correct model list for each account row.
+`GET /admin/accounts/test-models` returns provider-specific test model groups for Kiro, OpenAI API key, Google/Gemini, Anthropic, DeepSeek, and Codex accounts. The DeepSeek group contains `deepseek-v4-flash` and `deepseek-v4-pro`. OpenAI, Google, and Anthropic test model IDs are synchronized from `https://openrouter.ai/api/v1/models` and keep the OpenRouter provider prefix, for example `openai/gpt-5`, `google/gemini-2.5-pro`, and `anthropic/claude-sonnet-4.5`. Codex OAuth account tests use ChatGPT-account-compatible GPT-5 series model IDs by default; legacy Codex-only slugs such as `gpt-5-codex` are normalized before testing to avoid unsupported-model failures. The management console uses this endpoint to show the correct model list for each account row.
 
 ### API Keys
 
@@ -570,6 +596,6 @@ Public self-registration and invite-code registration create `USER` accounts wit
 | `401` | Missing or invalid API/admin key. |
 | `403` | First-login password change required or forbidden admin request. |
 | `413` | Request body exceeds configured max request size. |
-| `429` | API key rate limit, credits limit, or upstream quota/rate limit. |
+| `429` | API key rate limit, credits limit, or upstream quota/rate limit. Official DeepSeek `429` is a transient concurrency/rate-limit signal and does not mark its account quota exhausted. |
 | `502` | Upstream returned an unrecoverable error. |
 | `503` | No available upstream account. |

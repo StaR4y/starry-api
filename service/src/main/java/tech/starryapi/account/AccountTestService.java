@@ -18,6 +18,7 @@ import tech.starryapi.platform.anthropic.AnthropicModelCatalog;
 import tech.starryapi.platform.catalog.OpenRouterModelIds;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.anthropic.AnthropicUpstreamClient;
+import tech.starryapi.platform.deepseek.DeepSeekModelCatalog;
 import tech.starryapi.platform.kiro.KiroPayloadFactory;
 import tech.starryapi.platform.kiro.KiroUpstreamClient;
 import tech.starryapi.platform.openai.OpenAiAccountTestClient;
@@ -31,6 +32,7 @@ public class AccountTestService {
     private static final String DEFAULT_MODEL = "auto";
     private static final String DEFAULT_PROMPT = "Reply OK in one short sentence.";
     private static final String DEFAULT_OPENAI_API_KEY_TEST_MODEL = OpenAiAccountTestClient.DEFAULT_CODEX_TEST_MODEL;
+    private static final String DEFAULT_DEEPSEEK_TEST_MODEL = DeepSeekModelCatalog.DEFAULT_MODEL_ID;
     private static final String DEFAULT_ANTHROPIC_API_KEY_TEST_MODEL = "claude-sonnet-4-5-20250929";
     private static final List<String> CLAUDE_CODE_TEST_MODEL_IDS = List.of(
         "claude-sonnet-4-5-20250929",
@@ -85,6 +87,11 @@ public class AccountTestService {
         option("auto (" + OpenAiAccountTestClient.DEFAULT_CODEX_TEST_MODEL + ")", DEFAULT_MODEL),
         OPENAI_STYLE_TEST_MODEL_IDS
     );
+    private static final List<AccountDtos.TestModelOption> DEEPSEEK_TEST_MODELS = List.of(
+        option("auto (" + DEFAULT_DEEPSEEK_TEST_MODEL + ")", DEFAULT_MODEL),
+        option("deepseek-v4-flash", "deepseek-v4-flash"),
+        option("deepseek-v4-pro", "deepseek-v4-pro")
+    );
 
     private final ObjectMapper objectMapper;
     private final ProxyAccountRepository repository;
@@ -131,7 +138,8 @@ public class AccountTestService {
             OPENAI_TEST_MODELS,
             GOOGLE_TEST_MODELS,
             ANTHROPIC_TEST_MODELS,
-            CODEX_TEST_MODELS
+            CODEX_TEST_MODELS,
+            DEEPSEEK_TEST_MODELS
         );
     }
 
@@ -190,7 +198,24 @@ public class AccountTestService {
                 AccountPoolService.UpstreamErrorType type = recoverableStatus(statusCode)
                     ? AccountPoolService.UpstreamErrorType.RECOVERABLE
                     : AccountPoolService.UpstreamErrorType.FATAL;
-                return accountPoolService.recordTestFailure(account.getAccountId(), type, statusCode == 0 ? null : statusCode, detail, updateStatus)
+                Integer upstreamStatus = statusCode == 0 ? null : statusCode;
+                Mono<Void> failureUpdate = AccountPlatforms.isDeepSeek(account)
+                    ? accountPoolService.recordTestFailure(
+                        account.getAccountId(),
+                        type,
+                        upstreamStatus,
+                        detail,
+                        updateStatus,
+                        false
+                    )
+                    : accountPoolService.recordTestFailure(
+                        account.getAccountId(),
+                        type,
+                        upstreamStatus,
+                        detail,
+                        updateStatus
+                    );
+                return failureUpdate
                     .thenReturn(item(
                         account.getAccountId(),
                         account.getEmail(),
@@ -227,7 +252,7 @@ public class AccountTestService {
         String model,
         String prompt
     ) {
-        if (AccountPlatforms.isOpenAi(account)) {
+        if (AccountPlatforms.isDeepSeek(account) || AccountPlatforms.isOpenAi(account)) {
             return openAiAccountTestClient.test(account, model, prompt);
         }
         if (AccountPlatforms.isAnthropicApiKey(account)) {
@@ -346,7 +371,7 @@ public class AccountTestService {
     }
 
     private String testModel(String requestedModel, ProxyAccountEntity account) {
-        if (AccountPlatforms.isOpenAi(account)) {
+        if (AccountPlatforms.isDeepSeek(account) || AccountPlatforms.isOpenAi(account)) {
             return openAiModel(requestedModel, account);
         }
         if (AccountPlatforms.isAnthropicApiKey(account)) {
@@ -398,6 +423,9 @@ public class AccountTestService {
 
     private String openAiModel(String requestedModel, ProxyAccountEntity account) {
         String model = firstNonBlank(requestedModel, DEFAULT_MODEL);
+        if (AccountPlatforms.isDeepSeek(account)) {
+            return deepSeekModel(model);
+        }
         String normalized = model.toLowerCase(Locale.ROOT);
         if ("auto".equals(normalized)
             || "simple-task".equals(normalized)
@@ -427,6 +455,18 @@ public class AccountTestService {
             return OpenAiAccountTestClient.DEFAULT_CODEX_TEST_MODEL;
         }
         return cleaned;
+    }
+
+    private String deepSeekModel(String requestedModel) {
+        String model = firstNonBlank(requestedModel, DEFAULT_MODEL);
+        String normalized = model.toLowerCase(Locale.ROOT);
+        String routeModel = normalized.startsWith("starry/")
+            ? normalized.substring("starry/".length())
+            : normalized;
+        if (routeModel.startsWith("deepseek-") || routeModel.startsWith("deepseek/")) {
+            return DeepSeekModelCatalog.canonicalModelId(model);
+        }
+        return DEFAULT_DEEPSEEK_TEST_MODEL;
     }
 
     private boolean isOfficialOpenAiBaseUrl(ProxyAccountEntity account) {

@@ -2,7 +2,7 @@
   /**
    * 账号列表「账号类型」列的平台徽章。
    *
-   * 从 AccountListView.vue 原样抽出：4 套平台 Logo + 名称，
+   * 从 AccountListView.vue 原样抽出：平台 Logo + 名称，
    * 颜色风格由 provider 决定。
    */
   import { computed } from 'vue';
@@ -14,6 +14,13 @@
 
   function getProviderTagStyle(provider: string | null | undefined) {
     const p = (provider || '').toUpperCase();
+    if (p === 'DEEPSEEK') {
+      return {
+        background: 'rgba(77, 107, 254, 0.08)',
+        color: '#4d6bfe',
+        border: '1px solid rgba(77, 107, 254, 0.18)',
+      };
+    }
     if (p === 'OPENAI' || p === 'OPENAI-COMPATIBLE') {
       return {
         background: 'rgba(16, 163, 127, 0.08)',
@@ -52,9 +59,10 @@
 
 <template>
   <span class="provider-badge" :style="getProviderTagStyle(provider)">
+    <span v-if="upperProvider === 'DEEPSEEK'" class="provider-logo provider-logo--deepseek">D</span>
     <!-- OpenAI Logo -->
     <svg
-      v-if="['OPENAI', 'OPENAI-COMPATIBLE'].includes(upperProvider)"
+      v-else-if="['OPENAI', 'OPENAI-COMPATIBLE'].includes(upperProvider)"
       class="provider-logo"
       viewBox="0 0 24 24"
       fill="currentColor"
@@ -120,6 +128,17 @@
       width: 13px;
       height: 13px;
       flex-shrink: 0;
+
+      &--deepseek {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border: 1px solid currentColor;
+        border-radius: 4px;
+        font-size: 9px;
+        font-weight: 800;
+        line-height: 1;
+      }
     }
 
     .provider-name {

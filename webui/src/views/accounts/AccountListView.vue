@@ -354,6 +354,11 @@
       { label: 'claude-opus-4.5', value: 'claude-opus-4.5' },
     ],
     codex: fallbackOpenAiStyleTestModels,
+    deepSeek: [
+      { label: 'auto (deepseek-v4-flash)', value: 'auto' },
+      { label: 'deepseek-v4-flash', value: 'deepseek-v4-flash' },
+      { label: 'deepseek-v4-pro', value: 'deepseek-v4-pro' },
+    ],
   };
   const testModelOptions = ref<TestModelOptionsResult>(fallbackTestModelOptions);
   const testOptions = reactive({
@@ -373,12 +378,24 @@
     testDetailVisible.value = true;
   }
 
-  type TestModelGroup = 'kiro' | 'openAi' | 'google' | 'anthropic' | 'codex';
+  type TestModelGroup = 'kiro' | 'openAi' | 'google' | 'anthropic' | 'codex' | 'deepSeek';
+
+  function isOfficialDeepSeekAccount(account: Account) {
+    const provider = normalized(account.provider);
+    if (provider === 'deepseek') return true;
+    if (provider !== 'openai-compatible' && provider !== 'openaicompatibility') return false;
+    try {
+      return new URL(account.baseUrl ?? '').hostname.toLowerCase() === 'api.deepseek.com';
+    } catch {
+      return false;
+    }
+  }
 
   function accountTestModelGroup(account: Account): TestModelGroup {
     const provider = normalized(account.provider);
     const authMethod = normalized(account.authMethod);
     if (provider === 'codex' || authMethod === 'codex') return 'codex';
+    if (isOfficialDeepSeekAccount(account)) return 'deepSeek';
     if (
       provider === 'google' ||
       provider === 'gemini' ||

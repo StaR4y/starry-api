@@ -35,6 +35,9 @@ public class OpenAiResponseFactory {
         choice.put("index", 0);
         ObjectNode message = choice.putObject("message");
         message.put("role", "assistant");
+        if (!result.reasoningContent().isBlank()) {
+            message.put("reasoning_content", result.reasoningContent());
+        }
         if (result.toolUses().isEmpty()) {
             message.put("content", result.content());
             choice.put("finish_reason", "stop");
@@ -68,6 +71,9 @@ public class OpenAiResponseFactory {
             root.put("previous_response_id", previousResponseId);
         }
         ArrayNode output = root.putArray("output");
+        if (!result.reasoningContent().isBlank()) {
+            output.add(responseReasoningItem(result.reasoningContent()));
+        }
         if (result.toolUses().isEmpty()) {
             ObjectNode item = output.addObject();
             item.put("type", "message");
@@ -108,13 +114,21 @@ public class OpenAiResponseFactory {
     }
 
     public Flux<ServerSentEvent<String>> chatStreamEvents(String model, PlatformCompletionResult result) {
-        if (!result.toolUses().isEmpty()) {
-            return chatToolStreamEvents(model, result);
-        }
-        return Flux.just(
+        Flux<ServerSentEvent<String>> completionEvents = !result.toolUses().isEmpty()
+            ? chatToolStreamEvents(model, result)
+            : Flux.just(
             ServerSentEvent.builder(chatStreamChunkBody(model, result.content()).toString()).build(),
             ServerSentEvent.builder(chatStreamStopBody(model).toString()).build(),
             ServerSentEvent.builder("[DONE]").build()
+        );
+        if (result.reasoningContent().isBlank()) {
+            return completionEvents;
+        }
+        return Flux.concat(
+            Flux.just(ServerSentEvent.builder(
+                chatReasoningStreamChunkBody(model, result.reasoningContent()).toString()
+            ).build()),
+            completionEvents
         );
     }
 
@@ -151,6 +165,9 @@ public class OpenAiResponseFactory {
             if ("message".equals(item.path("type").asText())) {
                 appendMessageStreamEvents(events, responseId, item, outputIndex, sequence);
                 sequence += messageEventCount(item);
+            } else if ("reasoning".equals(item.path("type").asText())) {
+                appendReasoningStreamEvents(events, responseId, item, outputIndex, sequence);
+                sequence += reasoningEventCount(item);
             } else if ("function_call".equals(item.path("type").asText())) {
                 appendFunctionCallStreamEvents(events, responseId, item, outputIndex, sequence);
                 sequence += functionCallEventCount(item);
@@ -180,6 +197,21 @@ public class OpenAiResponseFactory {
         ObjectNode delta = choice.putObject("delta");
         delta.put("role", "assistant");
         delta.put("content", content);
+        choice.putNull("finish_reason");
+        return root;
+    }
+
+    private ObjectNode chatReasoningStreamChunkBody(String model, String reasoningContent) {
+        ObjectNode root = objectMapper.createObjectNode();
+        root.put("id", "chatcmpl-" + UUID.randomUUID());
+        root.put("object", "chat.completion.chunk");
+        root.put("created", Instant.now().getEpochSecond());
+        root.put("model", model);
+        ObjectNode choice = root.putArray("choices").addObject();
+        choice.put("index", 0);
+        ObjectNode delta = choice.putObject("delta");
+        delta.put("role", "assistant");
+        delta.put("reasoning_content", reasoningContent);
         choice.putNull("finish_reason");
         return root;
     }
@@ -239,6 +271,40 @@ public class OpenAiResponseFactory {
             count += part.path("text").asText("").isEmpty() ? 3 : 4;
         }
         return count;
+    }
+
+    private void appendReasoningStreamEvents(
+        List<ServerSentEvent<String>> events,
+        String responseId,
+        JsonNode item,
+        int outputIndex,
+        int sequence
+    ) {
+        String text = responseReasoningItemText(item);
+        if (!text.isEmpty()) {
+            events.add(responseSse(reasoningTextEvent(
+                "response.reasoning_text.delta",
+                responseId,
+                item,
+                outputIndex,
+                "delta",
+                text,
+                sequence++
+            )));
+        }
+        events.add(responseSse(reasoningTextEvent(
+            "response.reasoning_text.done",
+            responseId,
+            item,
+            outputIndex,
+            "text",
+            text,
+            sequence
+        )));
+    }
+
+    private int reasoningEventCount(JsonNode item) {
+        return responseReasoningItemText(item).isEmpty() ? 1 : 2;
     }
 
     private void appendFunctionCallStreamEvents(
@@ -310,6 +376,12 @@ public class OpenAiResponseFactory {
             copy.put("arguments", "");
         } else if ("custom_tool_call".equals(type)) {
             copy.put("input", "");
+        } else if ("reasoning".equals(type) && copy.path("content").isArray()) {
+            for (JsonNode part : copy.path("content")) {
+                if (part.isObject() && "reasoning_text".equals(part.path("type").asText())) {
+                    ((ObjectNode) part).put("text", "");
+                }
+            }
         }
         return copy;
     }
@@ -363,6 +435,24 @@ public class OpenAiResponseFactory {
         event.put("output_index", outputIndex);
         event.put("content_index", contentIndex);
         event.put("text", text);
+        return event;
+    }
+
+    private ObjectNode reasoningTextEvent(
+        String type,
+        String responseId,
+        JsonNode item,
+        int outputIndex,
+        String valueName,
+        String text,
+        int sequence
+    ) {
+        ObjectNode event = responseEvent(type, sequence);
+        event.put("response_id", responseId);
+        event.put("item_id", item.path("id").asText());
+        event.put("output_index", outputIndex);
+        event.put("content_index", 0);
+        event.put(valueName, text);
         return event;
     }
 
@@ -454,6 +544,39 @@ public class OpenAiResponseFactory {
             putIfBlank(call, "status", "completed");
         }
         return call;
+    }
+
+    private ObjectNode responseReasoningItem(String reasoningContent) {
+        ObjectNode item = objectMapper.createObjectNode();
+        item.put("type", "reasoning");
+        item.put("id", generatedId("rs_"));
+        item.put("status", "completed");
+        item.putArray("summary");
+        ObjectNode text = item.putArray("content").addObject();
+        text.put("type", "reasoning_text");
+        text.put("text", reasoningContent);
+        return item;
+    }
+
+    private String responseReasoningItemText(JsonNode item) {
+        JsonNode content = item.path("content");
+        if (!content.isArray()) {
+            return "";
+        }
+        StringBuilder builder = new StringBuilder();
+        for (JsonNode part : content) {
+            if (!"reasoning_text".equals(part.path("type").asText())) {
+                continue;
+            }
+            String text = part.path("text").asText("");
+            if (!text.isBlank()) {
+                if (builder.length() > 0) {
+                    builder.append('\n');
+                }
+                builder.append(text);
+            }
+        }
+        return builder.toString();
     }
 
     private void appendCustomToolCallStreamEvents(

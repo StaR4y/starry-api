@@ -4,7 +4,7 @@ Starry API is organized around three separate concerns:
 
 - inbound platform protocols: OpenAI, Anthropic, Gemini
 - provider-neutral platform core records and model catalog metadata
-- upstream execution adapters: currently Kiro/AWS CodeWhisperer
+- upstream execution adapters: Kiro/AWS CodeWhisperer, official OpenAI/Codex, Anthropic API key, and official DeepSeek through the shared OpenAI HTTP transport
 
 The core proxy layer should not contain platform-specific request conversion, response formatting, or model catalog data.
 
@@ -34,6 +34,7 @@ service/src/main/java/xyz/star4y/api
     ├── core           Provider-neutral completion result, usage, and tool-use records
     ├── catalog        Unified model catalog and model metadata record
     ├── openai         OpenAI Chat/Responses request and response module
+    ├── deepseek       DeepSeek model, default pricing, and endpoint capability policy
     ├── anthropic     Anthropic Messages request and response module
     ├── gemini        Gemini GenerateContent request and response module
     ├── kiro          Kiro/AWS payload factory, upstream client, event-stream parser
@@ -43,8 +44,9 @@ service/src/main/java/xyz/star4y/api
 Package rules:
 
 - `proxy` may depend on `platform/*`.
-- `platform/openai`, `platform/anthropic`, and `platform/gemini` convert only inbound/outbound protocol shapes.
+- `platform/openai`, `platform/anthropic`, and `platform/gemini` own inbound/outbound protocol shapes; `platform/openai` also provides the shared OpenAI-compatible HTTP transport.
 - `platform/openai`, `platform/anthropic`, and `platform/gemini` may depend on `platform/core` and `platform/catalog`, but must not import each other or `platform/kiro`.
+- `platform/deepseek` owns the official model IDs, built-in per-token prices, model normalization, and Chat/Responses capability policy. It reuses `platform/openai.OpenAiUpstreamClient` for HTTP transport instead of duplicating a client.
 - `platform/core` contains provider-neutral records such as `PlatformCompletionResult`, `PlatformUsage`, and `PlatformToolUse`.
 - `api/model` contains the public model catalog REST contract, model DTOs, and `ModelCatalogProvider`. `platform/catalog` is a service-side aggregation detail used only by the provider implementation.
 - `platform/kiro` owns Kiro/AWS payloads, headers, upstream endpoint selection, model ID mapping, and AWS event-stream parsing.
@@ -60,6 +62,7 @@ webui/src
 ├── layouts      Authenticated shell
 ├── platforms    Frontend platform registry and platform-scoped setup modules
 │   ├── openai
+│   ├── deepseek
 │   ├── anthropic
 │   ├── gemini
 │   ├── opencode
@@ -79,7 +82,7 @@ Frontend package rules:
 - `platforms/<provider>/index.ts` owns provider display metadata and model ID inference.
 - `platforms/<provider>/setup.ts` owns provider-specific environment variable blocks.
 - `platforms/registry.ts` owns provider/family ordering and unified inference.
-- `platforms/clientSetup.ts` aggregates OpenAI, Anthropic, Gemini, and OpenCode setup fragments.
+- `platforms/clientSetup.ts` aggregates OpenAI, Anthropic, Gemini, and OpenCode setup fragments. DeepSeek models use the same Starry API OpenAI-compatible client connection, so they do not require a separate client setup fragment.
 - View components should not hard-code provider order or client environment variable blocks.
 
 ## Request Flow
@@ -87,7 +90,7 @@ Frontend package rules:
 ```text
 Client
   |
-  | OpenAI / Anthropic / Gemini endpoint
+  | OpenAI (including DeepSeek models) / Anthropic / Gemini endpoint
   v
 ProxyController
   |
@@ -101,9 +104,10 @@ ProxyFacade
   +-- ModelMappingService.apply()
   +-- AccountPoolService.selectAccount()
   |
-  +-- platform/kiro.KiroPayloadFactory
-  +-- platform/kiro.KiroUpstreamClient
-  +-- platform/kiro.AwsEventStreamParser
+  +-- upstream route
+  |   +-- platform/kiro.KiroPayloadFactory / KiroUpstreamClient / AwsEventStreamParser
+  |   +-- platform/openai.OpenAiUpstreamClient (OpenAI, Codex, DeepSeek)
+  |   +-- platform/anthropic.AnthropicUpstreamClient
   |       returns platform/core.PlatformCompletionResult
   |
   +-- platform/<client>.ResponseFactory
@@ -123,6 +127,7 @@ Client-compatible response
 1. Anthropic
 2. OpenAI
 3. Gemini
+4. DeepSeek
 
 Each model record exposes:
 
@@ -133,7 +138,7 @@ Each model record exposes:
 - `targetModelId`: upstream model ID after alias mapping
 - token and input capability metadata
 
-OpenAI, Google/Gemini, and Anthropic catalog entries include both legacy short aliases and OpenRouter-sourced complete IDs with provider prefixes. GPT/OpenAI IDs are routed to OpenAI API key or Codex token accounts; `openai-compatible/<model>` is a routing prefix for third-party OpenAI-compatible API-key accounts and is stripped before the upstream request is sent. Claude/Kiro-compatible IDs continue to use `ModelCatalogProvider.resolveTargetModel` for Kiro upstream model aliases. Shared default capabilities and current default routing targets are defined by the `api/model` contract, not in a provider-specific catalog.
+OpenAI, Google/Gemini, and Anthropic catalog entries include both legacy short aliases and OpenRouter-sourced complete IDs with provider prefixes. GPT/OpenAI IDs are routed to OpenAI API key or Codex token accounts; `openai-compatible/<model>` is a routing prefix for third-party OpenAI-compatible API-key accounts and is stripped before the upstream request is sent. DeepSeek contributes the first-class `deepseek-v4-flash` and `deepseek-v4-pro` entries. Official routing also recognizes `starry/` and `deepseek/` forms, while pricing canonicalization additionally recognizes `openai-compatible/` so equivalent IDs share pricing rules and defaults without changing that prefix's third-party routing meaning. Claude/Kiro-compatible IDs continue to use `ModelCatalogProvider.resolveTargetModel` for Kiro upstream model aliases. Shared default capabilities and current default routing targets are defined by the `api/model` contract, not in a provider-specific catalog.
 
 ## Persistent State
 
@@ -170,6 +175,8 @@ An account is skipped when:
 
 After two consecutive upstream request failures, the service schedules a background account test. A failed automatic test updates status through the same path as manual account testing and disables the account.
 
+Account selection is provider-isolated in both directions. DeepSeek model requests select only accounts whose provider is `DeepSeek` or whose official host is `api.deepseek.com`; ordinary OpenAI/Codex pools explicitly exclude those accounts. A depleted DeepSeek pool therefore returns no available account rather than falling back to another provider. Retries caused by a recoverable DeepSeek error remain inside the DeepSeek pool.
+
 Recoverable upstream status codes:
 
 - `401`
@@ -177,6 +184,8 @@ Recoverable upstream status codes:
 - `403`
 - `429`
 - `5xx`
+
+For most providers, `429` participates in the existing quota-exhaustion semantics. For DeepSeek, `429` is treated as transient concurrency/rate limiting: it increments `errorCount` and participates in same-provider retry and exponential cooldown, but does not set `quotaExhaustedAt`, disable, or suspend the account. Account tests preserve the same exception.
 
 ## Session Affinity
 
@@ -196,7 +205,7 @@ It also recognizes these request fields:
 
 The affinity key is prefixed by API key ID, so different API keys do not share routing affinity.
 
-## Current Upstream Adapter
+## Current Upstream Adapters
 
 `platform/kiro` sends a Kiro/AWS-compatible payload to the configured upstream endpoint with:
 
@@ -213,3 +222,10 @@ The affinity key is prefixed by API key ID, so different API keys do not share r
 - output tokens
 - cache read/write tokens
 - metering credits
+
+`platform/openai.OpenAiUpstreamClient` sends Bearer-authenticated JSON requests for OpenAI-compatible API-key accounts. DeepSeek reuses this transport with the account's official base URL, while routing and policy remain owned by `platform/deepseek`:
+
+- Chat Completions accepts both `deepseek-v4-flash` and `deepseek-v4-pro`.
+- Responses accepts only `deepseek-v4-flash`; Pro is rejected with `400` before an unsupported upstream call.
+- DeepSeek requests do not enable the GPT fast/priority mode.
+- Both response shapes are parsed into `PlatformCompletionResult` for the inbound response factory.

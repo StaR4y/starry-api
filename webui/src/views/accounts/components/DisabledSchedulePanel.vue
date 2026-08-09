@@ -47,6 +47,7 @@
     { label: 'OpenAI-compatible', value: 'OpenAI-compatible' },
     { label: 'Anthropic', value: 'Anthropic' },
     { label: 'Google / Gemini', value: 'Google' },
+    { label: 'DeepSeek', value: 'DeepSeek' },
     { label: 'Codex', value: 'codex' },
   ];
 

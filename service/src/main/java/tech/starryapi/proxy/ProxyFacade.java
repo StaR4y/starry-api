@@ -37,6 +37,7 @@ import tech.starryapi.platform.anthropic.AnthropicResponseFactory;
 import tech.starryapi.platform.anthropic.AnthropicUpstreamClient;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.core.PlatformUsage;
+import tech.starryapi.platform.deepseek.DeepSeekModelCatalog;
 import tech.starryapi.platform.gemini.GeminiRequestAdapter;
 import tech.starryapi.platform.gemini.GeminiResponseFactory;
 import tech.starryapi.platform.kiro.KiroPayloadFactory;
@@ -179,8 +180,11 @@ public class ProxyFacade {
         String sessionHint = sessionHint(exchange, request, principal.keyId());
         boolean stream = responseMode != ResponseMode.GEMINI_GENERATE_CONTENT && request.path("stream").asBoolean(false);
         UpstreamRoute route = routeFor(upstreamModel, responseMode);
-        boolean fastMode = requestedFastMode && route == UpstreamRoute.OPENAI;
-        JsonNode upstreamRequest = fastMode ? openAiFastRequest(request) : request;
+        boolean preferDeepSeekAccounts = isDeepSeekRouteModel(route, upstreamModel);
+        boolean fastMode = requestedFastMode && route == UpstreamRoute.OPENAI && !preferDeepSeekAccounts;
+        JsonNode upstreamRequest = preferDeepSeekAccounts
+            ? deepSeekRequest(request)
+            : fastMode ? openAiFastRequest(request) : request;
 
         return requireFastModeAllowed(fastMode).then(Mono.defer(() -> attemptChat(
             upstreamRequest,
@@ -194,6 +198,7 @@ public class ProxyFacade {
             stream,
             route,
             fastMode,
+            preferDeepSeekAccounts,
             requestId,
             start,
             List.of(),
@@ -213,12 +218,13 @@ public class ProxyFacade {
         boolean stream,
         UpstreamRoute route,
         boolean fastMode,
+        boolean preferDeepSeekAccounts,
         String requestId,
         Instant start,
         List<String> attemptedAccountIds,
         AtomicBoolean autoRetestAttempted
     ) {
-        return selectAccountWithAutoRetest(route, sessionHint, attemptedAccountIds, false, autoRetestAttempted)
+        return selectAccountWithAutoRetest(route, sessionHint, attemptedAccountIds, false, preferDeepSeekAccounts, autoRetestAttempted)
             .flatMap(account -> captureUpstreamCall(Mono.defer(
                 () -> callWithAccount(route, account, upstreamRequest, mappedModel, sessionHint)
             )).flatMap(outcome -> {
@@ -249,6 +255,7 @@ public class ProxyFacade {
                     stream,
                     route,
                     fastMode,
+                    preferDeepSeekAccounts,
                     requestId,
                     start,
                     nextAttempted,
@@ -275,36 +282,53 @@ public class ProxyFacade {
         String sessionHint = sessionHint(exchange, request, principal.keyId());
         boolean stream = request.path("stream").asBoolean(false);
         UpstreamRoute route = routeFor(upstreamModel, ResponseMode.OPENAI_RESPONSES);
-        boolean fastMode = requestedFastMode && route == UpstreamRoute.OPENAI;
+        boolean preferDeepSeekAccounts = isDeepSeekRouteModel(route, upstreamModel);
+        boolean fastMode = requestedFastMode && route == UpstreamRoute.OPENAI && !preferDeepSeekAccounts;
         boolean codexOnlyResponsesModel = isCodexOnlyResponsesModel(requestedModel)
             || isCodexOnlyResponsesModel(mappedModel)
             || isCodexOnlyResponsesModel(upstreamModel);
         boolean preferCodexAccounts = route == UpstreamRoute.OPENAI
             && (isCodexResponsesClient(exchange) || codexOnlyResponsesModel);
         JsonNode expandedRequest = openAiResponseStateStore.expand(request);
-        JsonNode upstreamRequest = fastMode ? openAiFastRequest(expandedRequest) : expandedRequest;
+        JsonNode upstreamRequest = preferDeepSeekAccounts
+            ? deepSeekRequest(expandedRequest)
+            : fastMode ? openAiFastRequest(expandedRequest) : expandedRequest;
 
-        return requireFastModeAllowed(fastMode).then(Mono.defer(() -> attemptResponses(
-            upstreamRequest,
-            request,
-            principal,
-            path,
-            requestedModel,
-            upstreamModel,
-            sessionHint,
-            stream,
-            route,
-            fastMode,
-            preferCodexAccounts,
-            requestId,
-            start,
-            List.of(),
-            new AtomicBoolean(false)
-        )));
+        return requireDeepSeekResponsesSupported(preferDeepSeekAccounts, upstreamModel)
+            .then(requireFastModeAllowed(fastMode))
+            .then(Mono.defer(() -> attemptResponses(
+                upstreamRequest,
+                request,
+                principal,
+                path,
+                requestedModel,
+                upstreamModel,
+                sessionHint,
+                stream,
+                route,
+                fastMode,
+                preferCodexAccounts,
+                preferDeepSeekAccounts,
+                requestId,
+                start,
+                List.of(),
+                new AtomicBoolean(false)
+            )));
     }
 
     private Mono<Void> requireFastModeAllowed(boolean fastMode) {
         return fastMode ? accountSettingsService.ensureGptFastModeAllowed() : Mono.empty();
+    }
+
+    private Mono<Void> requireDeepSeekResponsesSupported(boolean deepSeekRoute, String model) {
+        if (!deepSeekRoute || DeepSeekModelCatalog.supportsResponses(model)) {
+            return Mono.empty();
+        }
+        return Mono.error(new ApiException(
+            HttpStatus.BAD_REQUEST,
+            "UNSUPPORTED_MODEL_OPERATION",
+            "DeepSeek Responses API currently supports only " + DeepSeekModelCatalog.FLASH_MODEL_ID
+        ));
     }
 
     private Mono<ResponseEntity<?>> attemptResponses(
@@ -319,12 +343,13 @@ public class ProxyFacade {
         UpstreamRoute route,
         boolean fastMode,
         boolean preferCodexAccounts,
+        boolean preferDeepSeekAccounts,
         String requestId,
         Instant start,
         List<String> attemptedAccountIds,
         AtomicBoolean autoRetestAttempted
     ) {
-        return selectAccountWithAutoRetest(route, sessionHint, attemptedAccountIds, preferCodexAccounts, autoRetestAttempted)
+        return selectAccountWithAutoRetest(route, sessionHint, attemptedAccountIds, preferCodexAccounts, preferDeepSeekAccounts, autoRetestAttempted)
             .flatMap(account -> captureUpstreamCall(Mono.defer(
                 () -> callResponsesWithAccount(route, account, upstreamRequest, mappedModel, sessionHint)
             )).flatMap(outcome -> {
@@ -355,6 +380,7 @@ public class ProxyFacade {
                     route,
                     fastMode,
                     preferCodexAccounts,
+                    preferDeepSeekAccounts,
                     requestId,
                     start,
                     nextAttempted,
@@ -394,10 +420,16 @@ public class ProxyFacade {
         UpstreamRoute route,
         String sessionHint,
         List<String> attemptedAccountIds,
-        boolean preferCodexAccounts
+        boolean preferCodexAccounts,
+        boolean preferDeepSeekAccounts
     ) {
-        if (route != UpstreamRoute.OPENAI || !preferCodexAccounts) {
+        if (route != UpstreamRoute.OPENAI || (!preferCodexAccounts && !preferDeepSeekAccounts)) {
             return selectAccount(route, sessionHint, attemptedAccountIds);
+        }
+        if (preferDeepSeekAccounts) {
+            return attemptedAccountIds == null || attemptedAccountIds.isEmpty()
+                ? accountPoolService.selectDeepSeekOpenAiAccount(sessionHint)
+                : accountPoolService.selectDeepSeekOpenAiAccount(sessionHint, attemptedAccountIds);
         }
         Mono<ProxyAccountEntity> codexSelection = attemptedAccountIds == null || attemptedAccountIds.isEmpty()
             ? accountPoolService.selectCodexOpenAiAccount(sessionHint)
@@ -412,14 +444,17 @@ public class ProxyFacade {
         String sessionHint,
         List<String> attemptedAccountIds,
         boolean preferCodexAccounts,
+        boolean preferDeepSeekAccounts,
         AtomicBoolean autoRetestAttempted
     ) {
-        return selectAccount(route, sessionHint, attemptedAccountIds, preferCodexAccounts)
+        return selectAccount(route, sessionHint, attemptedAccountIds, preferCodexAccounts, preferDeepSeekAccounts)
             .onErrorResume(error -> {
                 if (!shouldAutoRetestUnavailableAccounts(error, autoRetestAttempted)) {
                     return Mono.error(error);
                 }
-                return disabledAccountScheduledTestService.runWhenNoAvailableAccounts(accountFilterFor(route))
+                return disabledAccountScheduledTestService.runWhenNoAvailableAccounts(
+                    accountFilterFor(route, preferDeepSeekAccounts)
+                )
                     .doOnNext(response -> log.info(
                         "Auto disabled account retest after no available account completed: route={}, total={}, success={}, failed={}, skipped={}",
                         route,
@@ -429,7 +464,7 @@ public class ProxyFacade {
                         response.skipped()
                     ))
                     .filter(response -> response.success() != null && response.success() > 0)
-                    .flatMap(response -> selectAccount(route, sessionHint, List.of(), preferCodexAccounts))
+                    .flatMap(response -> selectAccount(route, sessionHint, List.of(), preferCodexAccounts, preferDeepSeekAccounts))
                     .switchIfEmpty(Mono.error(error))
                     .onErrorResume(retestError -> {
                         if (!isNoAvailableAccount(retestError)) {
@@ -446,7 +481,13 @@ public class ProxyFacade {
             && autoRetestAttempted.compareAndSet(false, true);
     }
 
-    private java.util.function.Predicate<ProxyAccountEntity> accountFilterFor(UpstreamRoute route) {
+    private java.util.function.Predicate<ProxyAccountEntity> accountFilterFor(
+        UpstreamRoute route,
+        boolean preferDeepSeekAccounts
+    ) {
+        if (route == UpstreamRoute.OPENAI && preferDeepSeekAccounts) {
+            return AccountPlatforms::isDeepSeek;
+        }
         return switch (route) {
             case OPENAI -> AccountPlatforms::isOpenAi;
             case ANTHROPIC -> account -> AccountPlatforms.isAnthropicApiKey(account)
@@ -508,12 +549,20 @@ public class ProxyFacade {
         }
         if (normalized.startsWith("openai/")
             || normalized.startsWith("openai-compatible/")
+            || normalized.startsWith("deepseek")
             || normalized.startsWith("gpt")
             || normalized.startsWith("chatgpt")
             || normalized.matches("o\\d.*")) {
             return UpstreamRoute.OPENAI;
         }
         return UpstreamRoute.KIRO;
+    }
+
+    private boolean isDeepSeekRouteModel(UpstreamRoute route, String model) {
+        String normalized = routeModel(model);
+        return route == UpstreamRoute.OPENAI
+            && !normalized.startsWith("openai-compatible/")
+            && DeepSeekModelCatalog.canonicalModelId(normalized).startsWith("deepseek-");
     }
 
     private String stripAnthropicPrefix(String model) {
@@ -623,6 +672,15 @@ public class ProxyFacade {
             copy.remove("serviceTier");
             copy.remove("fast");
             copy.remove("fast_mode");
+            return copy;
+        }
+        return request;
+    }
+
+    private JsonNode deepSeekRequest(JsonNode request) {
+        if (request instanceof ObjectNode object) {
+            ObjectNode copy = object.deepCopy();
+            copy.remove(List.of("service_tier", "serviceTier", "fast", "fast_mode"));
             return copy;
         }
         return request;
@@ -768,7 +826,10 @@ public class ProxyFacade {
             statusCode,
             failureMessage
         );
-        Mono<Void> accountStats = accountPoolService.recordRequestFailure(account.getAccountId(), type, statusCode, failureMessage)
+        Mono<AccountPoolService.RequestFailureRecord> failureUpdate = AccountPlatforms.isDeepSeek(account)
+            ? accountPoolService.recordRequestFailure(account.getAccountId(), type, statusCode, failureMessage, false)
+            : accountPoolService.recordRequestFailure(account.getAccountId(), type, statusCode, failureMessage);
+        Mono<Void> accountStats = failureUpdate
             .doOnNext(accountAutoSuspendService::scheduleIfNeeded)
             .then();
         Mono<Void> log = statsService.log(new StatsService.RequestLog(

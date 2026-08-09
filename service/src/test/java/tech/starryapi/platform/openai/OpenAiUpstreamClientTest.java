@@ -1,6 +1,7 @@
 package tech.starryapi.platform.openai;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -1000,6 +1001,218 @@ class OpenAiUpstreamClientTest {
     }
 
     @Test
+    void deepSeekAccountSendsOfficialModelIdAndParsesCacheUsage() throws Exception {
+        AtomicReference<String> requestBody = new AtomicReference<>();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/chat/completions", exchange -> {
+            requestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            byte[] response = """
+                {
+                  "choices":[{"message":{
+                    "content":"OK",
+                    "reasoning_content":"checked the request",
+                    "tool_calls":[{
+                      "id":"call_lookup",
+                      "type":"function",
+                      "function":{"name":"lookup","arguments":"{\\"query\\":\\"stars\\"}"}
+                    }]
+                  }}],
+                  "usage":{
+                    "prompt_tokens":110,
+                    "completion_tokens":20,
+                    "prompt_cache_hit_tokens":100,
+                    "prompt_cache_miss_tokens":10
+                  }
+                }
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "application/json");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = deepSeekAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {
+                  "model": "starry/deepseek-v4-flash",
+                  "messages": [{"role": "user", "content": "hi"}]
+                }
+                """);
+
+            PlatformCompletionResult result = client.complete(account, request, "deepseek/deepseek-v4-flash").block();
+
+            assertThat(result).isNotNull();
+            assertThat(result.content()).isEqualTo("OK");
+            JsonNode body = objectMapper.readTree(requestBody.get());
+            assertThat(body.path("model").asText()).isEqualTo("deepseek-v4-flash");
+            assertThat(result.usage().inputTokens()).isEqualTo(110);
+            assertThat(result.usage().cacheReadTokens()).isEqualTo(100);
+            assertThat(result.usage().outputTokens()).isEqualTo(20);
+            assertThat(result.reasoningContent()).isEqualTo("checked the request");
+            assertThat(result.toolUses()).singleElement().satisfies(toolUse -> {
+                assertThat(toolUse.id()).isEqualTo("call_lookup");
+                assertThat(toolUse.name()).isEqualTo("lookup");
+                assertThat(toolUse.input().path("query").asText()).isEqualTo("stars");
+            });
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void deepSeekResponsesJsonPreservesReasoningTextAndToolCalls() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/responses", exchange -> {
+            byte[] response = """
+                {
+                  "output": [
+                    {
+                      "type": "reasoning",
+                      "id": "rs_1",
+                      "status": "completed",
+                      "content": [{"type": "reasoning_text", "text": "checked the JSON response"}]
+                    },
+                    {
+                      "type": "message",
+                      "id": "msg_1",
+                      "role": "assistant",
+                      "status": "completed",
+                      "content": [{"type": "output_text", "text": "OK"}]
+                    },
+                    {
+                      "type": "function_call",
+                      "id": "fc_1",
+                      "call_id": "call_lookup",
+                      "name": "lookup",
+                      "arguments": "{\\"query\\":\\"stars\\"}",
+                      "status": "completed"
+                    }
+                  ],
+                  "usage": {"input_tokens": 110, "output_tokens": 20}
+                }
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "application/json");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = deepSeekAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {"model":"deepseek-v4-flash","input":"hi"}
+                """);
+
+            PlatformCompletionResult result = client
+                .completeResponses(account, request, "deepseek-v4-flash")
+                .block();
+
+            assertThat(result).isNotNull();
+            assertThat(result.content()).isEqualTo("OK");
+            assertThat(result.reasoningContent()).isEqualTo("checked the JSON response");
+            assertThat(result.toolUses()).singleElement().satisfies(toolUse -> {
+                assertThat(toolUse.id()).isEqualTo("call_lookup");
+                assertThat(toolUse.name()).isEqualTo("lookup");
+                assertThat(toolUse.input().path("query").asText()).isEqualTo("stars");
+            });
+            assertThat(result.usage().inputTokens()).isEqualTo(110);
+            assertThat(result.usage().outputTokens()).isEqualTo(20);
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void deepSeekResponsesStreamAggregatesReasoningTextDeltas() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/responses", exchange -> {
+            byte[] response = """
+                event: response.output_item.added
+                data: {"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs_1","content":[]}}
+
+                event: response.reasoning_text.delta
+                data: {"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":0,"delta":"checked "}
+
+                event: response.reasoning_text.delta
+                data: {"type":"response.reasoning_text.delta","item_id":"rs_1","output_index":0,"content_index":0,"delta":"the stream"}
+
+                event: response.reasoning_text.done
+                data: {"type":"response.reasoning_text.done","item_id":"rs_1","output_index":0,"content_index":0,"text":"checked the stream"}
+
+                event: response.output_text.delta
+                data: {"type":"response.output_text.delta","delta":"OK"}
+
+                event: response.completed
+                data: {"type":"response.completed","response":{"output":[{"type":"reasoning","id":"rs_1","content":[{"type":"reasoning_text","text":"checked the stream"}]}],"usage":{"input_tokens":12,"output_tokens":3}}}
+
+                data: [DONE]
+
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "text/event-stream");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                WebClient.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+            ProxyAccountEntity account = deepSeekAccount("http://127.0.0.1:" + server.getAddress().getPort());
+            JsonNode request = objectMapper.readTree("""
+                {"model":"deepseek-v4-flash","input":"hi","stream":true}
+                """);
+
+            PlatformCompletionResult result = client
+                .completeResponses(account, request, "deepseek-v4-flash")
+                .block();
+
+            assertThat(result).isNotNull();
+            assertThat(result.content()).isEqualTo("OK");
+            assertThat(result.reasoningContent()).isEqualTo("checked the stream");
+            assertThat(result.usage().inputTokens()).isEqualTo(12);
+            assertThat(result.usage().outputTokens()).isEqualTo(3);
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void deepSeekProRejectsUnsupportedResponsesApiBeforeNetworkCall() throws Exception {
+        OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+            objectMapper,
+            WebClient.builder().build(),
+            mock(AccountTokenRefreshService.class)
+        );
+        ProxyAccountEntity account = deepSeekAccount("http://127.0.0.1:1");
+        JsonNode request = objectMapper.readTree("""
+            {"model":"deepseek-v4-pro","input":"hi"}
+            """);
+
+        assertThatThrownBy(() -> client.completeResponses(account, request, "deepseek-v4-pro").block())
+            .isInstanceOfSatisfying(tech.starryapi.platform.upstream.UpstreamException.class, error -> {
+                assertThat(error.getStatusCode()).isEqualTo(400);
+                assertThat(error.getMessage()).contains("deepseek-v4-flash");
+            });
+    }
+
+    @Test
     void openAiCompatibleChatForcesNonStreamingUpstreamRequest() throws Exception {
         AtomicReference<String> requestBody = new AtomicReference<>();
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -1177,6 +1390,12 @@ class OpenAiUpstreamClientTest {
     private ProxyAccountEntity openAiCompatibleAccount(String baseUrl) {
         ProxyAccountEntity account = openAiAccount(baseUrl);
         account.setProvider(AccountPlatforms.OPENAI_COMPATIBLE_PROVIDER);
+        return account;
+    }
+
+    private ProxyAccountEntity deepSeekAccount(String baseUrl) {
+        ProxyAccountEntity account = openAiAccount(baseUrl);
+        account.setProvider(AccountPlatforms.DEEPSEEK_PROVIDER);
         return account;
     }
 }

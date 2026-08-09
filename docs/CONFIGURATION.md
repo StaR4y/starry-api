@@ -89,6 +89,8 @@ During restore, the migration connection revokes `CONNECT` from `starry_api_runt
 
 ## Runtime and Upstream Adapter
 
+OpenAI, Codex, Anthropic, and DeepSeek credentials are managed as upstream account records in PostgreSQL, not as deployment environment variables. A DeepSeek account with `provider=DeepSeek` defaults to `authMethod=api-key` and `baseUrl=https://api.deepseek.com/v1`, so enabling the official provider does not require a new server-side secret or URL variable.
+
 | Variable | Default | Description |
 | --- | --- | --- |
 | `KIRO_ADMIN_TOKEN` | empty | Optional legacy static admin token. Prefer local admin login. |
@@ -174,7 +176,16 @@ The settings follow the sub2api-style keys stored in `system_settings`:
 | `EASYPAY_API_BASE`, `EASYPAY_PID`, `EASYPAY_PKEY` | EasyPay gateway URL and merchant credentials. |
 | `EASYPAY_PAYMENT_MODE` | `popup` for submit-page redirect, `qrcode` for `mapi.php`. |
 
-Model-specific pricing is managed from `模型价格`. The admin form has two modes: total pricing is entered as an equivalent multiplier (`x`) against the current `API_BILLING_MULTIPLIER` baseline, while split pricing follows the sub2api/LiteLLM style with input, output, cache-write, and cache-read prices entered as balance per 1M tokens (`余额/MTok`). The one-click preset action replaces the current rule list with a compact wildcard catalog for OpenAI, Anthropic, Gemini/Google, and a global fallback. Runtime billing either applies the total multiplier to all billable tokens or itemizes those token classes before deducting balance.
+Model-specific pricing is managed from `模型价格`. The admin form has two modes: total pricing is entered as an equivalent multiplier (`x`) against the current `API_BILLING_MULTIPLIER` baseline, while split pricing follows the sub2api/LiteLLM style with input, output, cache-write, and cache-read prices entered as balance per 1M tokens (`余额/MTok`). The one-click preset action replaces the current rule list with a compact wildcard catalog for OpenAI, Anthropic, Gemini/Google, DeepSeek, and a global fallback. Runtime billing either applies the total multiplier to all billable tokens or itemizes those token classes before deducting balance.
+
+When no enabled rule matches, the runtime has these official DeepSeek defaults:
+
+| Model | Input/cache miss | Cache hit | Output |
+| --- | ---: | ---: | ---: |
+| `deepseek-v4-flash` | 0.14 | 0.0028 | 0.28 |
+| `deepseek-v4-pro` | 0.435 | 0.003625 | 0.87 |
+
+Values are balance per 1M tokens, and cache writes use the input/cache-miss value. The first enabled matching explicit rule, including `*` or another wildcard, overrides the built-in DeepSeek price. If official pricing changes, add or update an exact DeepSeek rule instead of waiting for a release. The global `*` preset is itself an explicit override; the built-in DeepSeek table applies only when no enabled rule matches.
 
 `EASYPAY_PKEY` is only accepted from the admin update API and is never returned to the WebUI; the admin page only shows whether it has already been configured.
 

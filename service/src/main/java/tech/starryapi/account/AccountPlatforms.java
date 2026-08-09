@@ -1,5 +1,6 @@
 package tech.starryapi.account;
 
+import java.net.URI;
 import java.util.Locale;
 
 public final class AccountPlatforms {
@@ -8,24 +9,28 @@ public final class AccountPlatforms {
     public static final String OPENAI_COMPATIBLE_PROVIDER = "OpenAI-compatible";
     public static final String GOOGLE_PROVIDER = "Google";
     public static final String ANTHROPIC_PROVIDER = "Anthropic";
+    public static final String DEEPSEEK_PROVIDER = "DeepSeek";
     public static final String OPENAI_API_KEY_AUTH = "api-key";
     public static final String OPENAI_CODEX_AUTH = "codex";
     public static final String DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
     public static final String DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex";
     public static final String DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
+    public static final String DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1";
     public static final String DEFAULT_KIRO_REGION = "us-east-1";
 
     private AccountPlatforms() {
     }
 
     public static boolean isOpenAi(ProxyAccountEntity account) {
-        return account != null && isOpenAi(account.getProvider(), account.getAuthMethod());
+        return account != null
+            && !isDeepSeek(account)
+            && isOpenAi(account.getProvider(), account.getAuthMethod());
     }
 
     public static boolean isOpenAi(String provider, String authMethod) {
         String providerKey = key(provider);
         String authKey = key(authMethod);
-        if (isGoogleProvider(providerKey) || isAnthropicProvider(providerKey)) {
+        if (isGoogleProvider(providerKey) || isAnthropicProvider(providerKey) || "deepseek".equals(providerKey)) {
             return false;
         }
         return "openai".equals(providerKey)
@@ -38,6 +43,23 @@ public final class AccountPlatforms {
             || OPENAI_CODEX_AUTH.equals(authKey);
     }
 
+    public static boolean isDeepSeek(ProxyAccountEntity account) {
+        if (account == null) {
+            return false;
+        }
+        if (isDeepSeek(account.getProvider())) {
+            return true;
+        }
+        String providerKey = key(account.getProvider());
+        boolean legacyCompatibleProvider = "openai-compatible".equals(providerKey)
+            || "openaicompatibility".equals(providerKey);
+        return legacyCompatibleProvider && isOfficialDeepSeekBaseUrl(account.getBaseUrl());
+    }
+
+    public static boolean isDeepSeek(String provider) {
+        return "deepseek".equals(key(provider));
+    }
+
     public static boolean isCodex(ProxyAccountEntity account) {
         return account != null && isCodex(account.getProvider(), account.getAuthMethod());
     }
@@ -47,7 +69,11 @@ public final class AccountPlatforms {
     }
 
     public static boolean isKiroCompatible(ProxyAccountEntity account) {
-        return account != null && !isOpenAi(account) && !isGoogleApiKey(account) && !isAnthropicApiKey(account);
+        return account != null
+            && !isOpenAi(account)
+            && !isDeepSeek(account)
+            && !isGoogleApiKey(account)
+            && !isAnthropicApiKey(account);
     }
 
     public static boolean isGoogleApiKey(ProxyAccountEntity account) {
@@ -78,6 +104,9 @@ public final class AccountPlatforms {
         if ("openai-compatible".equals(providerKey) || "openaicompatibility".equals(providerKey)) {
             return OPENAI_COMPATIBLE_PROVIDER;
         }
+        if ("deepseek".equals(providerKey)) {
+            return DEEPSEEK_PROVIDER;
+        }
         if (isOpenAi(cleaned, authMethod)) {
             return OPENAI_PROVIDER;
         }
@@ -92,6 +121,9 @@ public final class AccountPlatforms {
 
     public static String normalizeAuthMethod(String authMethod, String provider) {
         String cleaned = clean(authMethod);
+        if (isDeepSeek(provider)) {
+            return OPENAI_API_KEY_AUTH;
+        }
         if (isCodex(provider, cleaned)) {
             return OPENAI_CODEX_AUTH;
         }
@@ -125,6 +157,9 @@ public final class AccountPlatforms {
         if (isCodex(provider, authMethod)) {
             return DEFAULT_CODEX_BASE_URL;
         }
+        if (isDeepSeek(provider)) {
+            return DEFAULT_DEEPSEEK_BASE_URL;
+        }
         if (isOpenAi(provider, authMethod)) {
             return DEFAULT_OPENAI_BASE_URL;
         }
@@ -150,6 +185,18 @@ public final class AccountPlatforms {
     private static boolean isApiKey(String authMethod) {
         String authKey = key(authMethod);
         return OPENAI_API_KEY_AUTH.equals(authKey) || "apikey".equals(authKey);
+    }
+
+    private static boolean isOfficialDeepSeekBaseUrl(String baseUrl) {
+        String cleaned = clean(baseUrl);
+        if (cleaned == null) {
+            return false;
+        }
+        try {
+            return "api.deepseek.com".equalsIgnoreCase(URI.create(cleaned).getHost());
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        }
     }
 
     public static String clean(String value) {

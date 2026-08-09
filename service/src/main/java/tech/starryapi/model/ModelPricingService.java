@@ -28,6 +28,7 @@ import tech.starryapi.common.ApiException;
 import tech.starryapi.common.Hashing;
 import tech.starryapi.payment.PaymentSettingsService;
 import tech.starryapi.platform.core.PlatformUsage;
+import tech.starryapi.platform.deepseek.DeepSeekModelCatalog;
 
 @Service
 public class ModelPricingService {
@@ -162,12 +163,13 @@ public class ModelPricingService {
         BigDecimal fallbackMultiplier
     ) {
         PlatformUsage safeUsage = usage == null ? PlatformUsage.zero() : usage;
+        String canonicalModel = canonicalPricingModel(model);
         return rules.stream()
             .filter(rule -> rule.enabled() == null || rule.enabled())
-            .filter(rule -> matchesModel(rule.modelPattern(), model))
+            .filter(rule -> matchesPricingModel(rule.modelPattern(), model, canonicalModel))
             .findFirst()
             .map(rule -> ruleCost(rule, safeUsage, fastMode, fallbackMultiplier))
-            .orElseGet(() -> totalCost(safeUsage, fastMode, fallbackMultiplier));
+            .orElseGet(() -> defaultModelCost(canonicalModel, safeUsage, fastMode, fallbackMultiplier));
     }
 
     ModelDtos.ModelPublicPricing publicPricing(
@@ -175,11 +177,17 @@ public class ModelPricingService {
         String model,
         BigDecimal fallbackMultiplier
     ) {
+        String canonicalModel = canonicalPricingModel(model);
         ModelPricingRule matchedRule = rules.stream()
             .filter(rule -> rule.enabled() == null || rule.enabled())
-            .filter(rule -> matchesModel(rule.modelPattern(), model))
+            .filter(rule -> matchesPricingModel(rule.modelPattern(), model, canonicalModel))
             .findFirst()
             .orElse(null);
+        if (matchedRule == null) {
+            return DeepSeekModelCatalog.defaultPricing(canonicalModel)
+                .map(this::defaultPublicPricing)
+                .orElseGet(() -> totalPublicPricing(fallbackMultiplier));
+        }
         if (matchedRule != null && positive(matchedRule.totalMultiplier())) {
             return totalPublicPricing(matchedRule.totalMultiplier());
         }
@@ -219,10 +227,49 @@ public class ModelPricingService {
         if (billableTokenUnits(usage).signum() <= 0) {
             return totalCost(usage, fastMode, fallbackMultiplier);
         }
-        BigDecimal inputCost = tokenCost(usage.inputTokens(), rule.inputMultiplier());
-        BigDecimal outputCost = tokenCost(usage.outputTokens(), rule.outputMultiplier());
-        BigDecimal cacheWriteCost = tokenCost(usage.cacheWriteTokens(), effectiveCacheWriteMultiplier(rule));
-        BigDecimal cacheReadCost = tokenCost(usage.cacheReadTokens(), effectiveCacheReadMultiplier(rule));
+        return itemizedCost(
+            usage,
+            rule.inputMultiplier(),
+            rule.outputMultiplier(),
+            effectiveCacheWriteMultiplier(rule),
+            effectiveCacheReadMultiplier(rule),
+            fastMode
+        );
+    }
+
+    private BigDecimal defaultModelCost(
+        String model,
+        PlatformUsage usage,
+        boolean fastMode,
+        BigDecimal fallbackMultiplier
+    ) {
+        return DeepSeekModelCatalog.defaultPricing(model)
+            .map(pricing -> itemizedCost(
+                usage,
+                perTokenMultiplier(pricing.inputPricePerMillionTokens()),
+                perTokenMultiplier(pricing.outputPricePerMillionTokens()),
+                perTokenMultiplier(pricing.cacheWritePricePerMillionTokens()),
+                perTokenMultiplier(pricing.cacheReadPricePerMillionTokens()),
+                fastMode
+            ))
+            .orElseGet(() -> totalCost(usage, fastMode, fallbackMultiplier));
+    }
+
+    private BigDecimal itemizedCost(
+        PlatformUsage usage,
+        BigDecimal inputMultiplier,
+        BigDecimal outputMultiplier,
+        BigDecimal cacheWriteMultiplier,
+        BigDecimal cacheReadMultiplier,
+        boolean fastMode
+    ) {
+        long cacheReadTokens = Math.max(0, usage.cacheReadTokens());
+        long cacheWriteTokens = Math.max(0, usage.cacheWriteTokens());
+        long uncachedInputTokens = Math.max(0, usage.inputTokens() - cacheReadTokens - cacheWriteTokens);
+        BigDecimal inputCost = tokenCost(uncachedInputTokens, inputMultiplier);
+        BigDecimal outputCost = tokenCost(usage.outputTokens(), outputMultiplier);
+        BigDecimal cacheWriteCost = tokenCost(cacheWriteTokens, cacheWriteMultiplier);
+        BigDecimal cacheReadCost = tokenCost(cacheReadTokens, cacheReadMultiplier);
         BigDecimal cost = inputCost.add(outputCost).add(cacheWriteCost).add(cacheReadCost);
         if (fastMode) {
             cost = cost.multiply(FAST_MODE_MULTIPLIER);
@@ -255,10 +302,23 @@ public class ModelPricingService {
             return BigDecimal.ZERO;
         }
         long units = Math.max(0, usage.inputTokens())
-            + Math.max(0, usage.outputTokens())
-            + Math.max(0, usage.cacheWriteTokens())
-            + Math.max(0, usage.cacheReadTokens());
+            + Math.max(0, usage.outputTokens());
         return BigDecimal.valueOf(units);
+    }
+
+    private BigDecimal perTokenMultiplier(BigDecimal pricePerMillionTokens) {
+        return pricePerMillionTokens.divide(TOKENS_PER_MILLION, MULTIPLIER_SCALE, RoundingMode.HALF_UP);
+    }
+
+    private ModelDtos.ModelPublicPricing defaultPublicPricing(DeepSeekModelCatalog.DefaultPricing pricing) {
+        return new ModelDtos.ModelPublicPricing(
+            BILLING_MODE_INPUT_OUTPUT,
+            null,
+            tokensPer100Balance(perTokenMultiplier(pricing.inputPricePerMillionTokens())),
+            tokensPer100Balance(perTokenMultiplier(pricing.outputPricePerMillionTokens())),
+            tokensPer100Balance(perTokenMultiplier(pricing.cacheWritePricePerMillionTokens())),
+            tokensPer100Balance(perTokenMultiplier(pricing.cacheReadPricePerMillionTokens()))
+        );
     }
 
     private BigDecimal effectiveCacheWriteMultiplier(ModelPricingRule rule) {
@@ -467,6 +527,16 @@ public class ModelPricingService {
             return safePattern.equalsIgnoreCase(safeModel);
         }
         return wildcardMatches(safePattern.toLowerCase(Locale.ROOT), safeModel.toLowerCase(Locale.ROOT));
+    }
+
+    private boolean matchesPricingModel(String pattern, String model, String canonicalModel) {
+        return matchesModel(pattern, model)
+            || (!clean(model).equalsIgnoreCase(clean(canonicalModel)) && matchesModel(pattern, canonicalModel));
+    }
+
+    private String canonicalPricingModel(String model) {
+        String canonicalModel = DeepSeekModelCatalog.canonicalModelId(model);
+        return DeepSeekModelCatalog.defaultPricing(canonicalModel).isPresent() ? canonicalModel : model;
     }
 
     private boolean wildcardMatches(String pattern, String model) {

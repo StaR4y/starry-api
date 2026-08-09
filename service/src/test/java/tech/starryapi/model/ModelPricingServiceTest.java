@@ -94,12 +94,84 @@ class ModelPricingServiceTest {
 
         BigDecimal cost = service.cost(
             "gpt-5.4",
-            new PlatformUsage(1_000_000, 1_000_000, BigDecimal.ZERO, 1_000_000, 1_000_000, 0),
+            new PlatformUsage(3_000_000, 1_000_000, BigDecimal.ZERO, 1_000_000, 1_000_000, 0),
             false,
             BigDecimal.ONE
         ).block();
 
         assertThat(cost).isEqualByComparingTo("20.250000");
+    }
+
+    @Test
+    void usesDeepSeekOfficialDefaultPriceWithoutDoubleChargingCachedInput() {
+        ModelPricingService service = new ModelPricingService(
+            mockRepository(new ConcurrentHashMap<>()),
+            objectMapper
+        );
+
+        BigDecimal cost = service.cost(
+            "deepseek-v4-flash",
+            new PlatformUsage(1_000_000, 1_000_000, BigDecimal.ZERO, 900_000, 0, 0),
+            false,
+            BigDecimal.ONE
+        ).block();
+
+        assertThat(cost).isEqualByComparingTo("0.296520");
+    }
+
+    @Test
+    void matchesDeepSeekExactPriceRuleForSupportedModelPrefixesBeforeGlobalFallback() {
+        ModelPricingService service = new ModelPricingService(
+            mockRepository(new ConcurrentHashMap<>()),
+            objectMapper
+        );
+        service.update(new ModelDtos.UpdateModelPricingRequest(List.of(
+            new ModelDtos.UpdateModelPricingRuleRequest(
+                null,
+                true,
+                "deepseek-v4-flash",
+                null,
+                null,
+                null,
+                null,
+                null,
+                new BigDecimal("0.14"),
+                new BigDecimal("0.28"),
+                new BigDecimal("0.14"),
+                new BigDecimal("0.0028"),
+                null,
+                20
+            ),
+            new ModelDtos.UpdateModelPricingRuleRequest(
+                null,
+                true,
+                "*",
+                null,
+                null,
+                new BigDecimal("16.6666666667"),
+                null,
+                null,
+                null,
+                1_000
+            )
+        ))).block();
+        PlatformUsage usage = new PlatformUsage(1_000_000, 1_000_000, BigDecimal.ZERO, 900_000, 0, 0);
+
+        BigDecimal providerPrefixedCost = service.cost(
+            "deepseek/deepseek-v4-flash",
+            usage,
+            false,
+            BigDecimal.ONE
+        ).block();
+        BigDecimal proxyPrefixedCost = service.cost(
+            "starry/deepseek-v4-flash",
+            usage,
+            false,
+            BigDecimal.ONE
+        ).block();
+
+        assertThat(providerPrefixedCost).isEqualByComparingTo("0.296520");
+        assertThat(proxyPrefixedCost).isEqualByComparingTo("0.296520");
     }
 
     @Test

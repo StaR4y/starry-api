@@ -50,6 +50,39 @@ class AccountPlatformsTest {
         assertThat(AccountPlatforms.isAnthropicApiKey(provider, authMethod)).isTrue();
     }
 
+    @Test
+    void deepSeekProviderDefaultsToApiKeyAndOfficialBaseUrl() {
+        String authMethod = AccountPlatforms.normalizeAuthMethod(null, " deepseek ");
+        String provider = AccountPlatforms.normalizeProvider(" deepseek ", authMethod);
+        ProxyAccountEntity account = account(provider, authMethod);
+
+        assertThat(provider).isEqualTo(AccountPlatforms.DEEPSEEK_PROVIDER);
+        assertThat(authMethod).isEqualTo(AccountPlatforms.OPENAI_API_KEY_AUTH);
+        assertThat(AccountPlatforms.defaultBaseUrl(provider, authMethod, null))
+            .isEqualTo(AccountPlatforms.DEFAULT_DEEPSEEK_BASE_URL);
+        assertThat(AccountPlatforms.isDeepSeek(account)).isTrue();
+        assertThat(AccountPlatforms.isOpenAi(account)).isFalse();
+        assertThat(AccountPlatforms.isKiroCompatible(account)).isFalse();
+    }
+
+    @Test
+    void onlyLegacyOpenAiCompatibleAccountsUseHostBasedDeepSeekDetection() {
+        ProxyAccountEntity legacy = account(
+            AccountPlatforms.OPENAI_COMPATIBLE_PROVIDER,
+            AccountPlatforms.OPENAI_API_KEY_AUTH
+        );
+        legacy.setBaseUrl("https://api.deepseek.com/v1/");
+        ProxyAccountEntity anthropic = account(
+            AccountPlatforms.ANTHROPIC_PROVIDER,
+            AccountPlatforms.OPENAI_API_KEY_AUTH
+        );
+        anthropic.setBaseUrl("https://api.deepseek.com/v1");
+
+        assertThat(AccountPlatforms.isDeepSeek(legacy)).isTrue();
+        assertThat(AccountPlatforms.isOpenAi(legacy)).isFalse();
+        assertThat(AccountPlatforms.isDeepSeek(anthropic)).isFalse();
+    }
+
     private ProxyAccountEntity account(String provider, String authMethod) {
         ProxyAccountEntity account = new ProxyAccountEntity();
         account.setProvider(provider);

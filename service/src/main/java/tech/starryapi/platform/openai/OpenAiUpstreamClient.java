@@ -24,6 +24,7 @@ import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.core.PlatformToolUse;
 import tech.starryapi.platform.core.PlatformUsage;
 import tech.starryapi.platform.core.ToolSchemaSanitizer;
+import tech.starryapi.platform.deepseek.DeepSeekModelCatalog;
 import tech.starryapi.platform.upstream.UpstreamException;
 
 @Component
@@ -62,6 +63,13 @@ public class OpenAiUpstreamClient {
             return completeCodex(account, request, openAiModel(model, account));
         }
         String upstreamModel = openAiModel(model, account);
+        if (AccountPlatforms.isDeepSeek(account) && !DeepSeekModelCatalog.supportsResponses(upstreamModel)) {
+            return Mono.error(new UpstreamException(
+                400,
+                "DeepSeek Responses API currently supports only " + DeepSeekModelCatalog.FLASH_MODEL_ID,
+                false
+            ));
+        }
         return completeResponsesApi(account, request, upstreamModel)
             .onErrorResume(error -> retryWithUnprefixedOpenAiModel(error, account, upstreamModel)
                 .flatMap(retryModel -> completeResponsesApi(account, request, retryModel)));
@@ -198,8 +206,39 @@ public class OpenAiUpstreamClient {
 
     private PlatformCompletionResult parseChatCompletions(String rawBody) throws Exception {
         JsonNode body = readJson(rawBody);
-        String content = body.path("choices").path(0).path("message").path("content").asText("");
-        return new PlatformCompletionResult(content, usage(body.path("usage"), "prompt_tokens", "completion_tokens"));
+        JsonNode message = body.path("choices").path(0).path("message");
+        return new PlatformCompletionResult(
+            message.path("content").asText(""),
+            message.path("reasoning_content").asText(""),
+            chatToolUses(message.path("tool_calls")),
+            usage(body.path("usage"), "prompt_tokens", "completion_tokens")
+        );
+    }
+
+    private List<PlatformToolUse> chatToolUses(JsonNode toolCalls) {
+        if (!toolCalls.isArray()) {
+            return List.of();
+        }
+        List<PlatformToolUse> result = new ArrayList<>();
+        int index = 0;
+        for (JsonNode toolCall : toolCalls) {
+            JsonNode function = toolCall.path("function");
+            String name = function.path("name").asText("");
+            if (name.isBlank()) {
+                continue;
+            }
+            String rawInput = jsonText(function.path("arguments"), "{}");
+            String id = firstNonBlank(toolCall.path("id").asText(null), "call_" + index++);
+            result.add(new PlatformToolUse(
+                id,
+                name,
+                parseToolArguments(rawInput),
+                "function_call",
+                rawInput,
+                toolCall.deepCopy()
+            ));
+        }
+        return List.copyOf(result);
     }
 
     private PlatformCompletionResult parseResponses(String rawBody) throws Exception {
@@ -234,6 +273,10 @@ public class OpenAiUpstreamClient {
         }
         return new PlatformCompletionResult(
             content,
+            firstNonBlank(
+                body.path("reasoning_text").asText(""),
+                responseReasoningText(body.path("output"))
+            ),
             responseToolUses(body.path("output")),
             usage(body.path("usage"), "input_tokens", "output_tokens")
         );
@@ -241,7 +284,9 @@ public class OpenAiUpstreamClient {
 
     private PlatformCompletionResult parseResponsesStream(String rawBody) throws Exception {
         StringBuilder content = new StringBuilder();
+        StringBuilder reasoningContent = new StringBuilder();
         String fallbackContent = "";
+        String fallbackReasoningContent = "";
         List<PlatformToolUse> toolUses = new ArrayList<>();
         Map<String, PendingResponseToolUse> pendingToolUses = new LinkedHashMap<>();
         JsonNode usage = null;
@@ -256,8 +301,21 @@ public class OpenAiUpstreamClient {
                 content.append(event.path("delta").asText(""));
             } else if ("response.output_text.done".equals(type)) {
                 fallbackContent = firstNonBlank(fallbackContent, event.path("text").asText(""));
+            } else if ("response.reasoning_text.delta".equals(type)) {
+                reasoningContent.append(event.path("delta").asText(""));
+            } else if ("response.reasoning_text.done".equals(type)) {
+                fallbackReasoningContent = firstNonBlank(
+                    fallbackReasoningContent,
+                    event.path("text").asText(""),
+                    event.path("reasoning_text").asText("")
+                );
             } else if ("response.content_part.done".equals(type)) {
-                fallbackContent = firstNonBlank(fallbackContent, contentPartText(event.path("part")));
+                JsonNode part = event.path("part");
+                fallbackContent = firstNonBlank(fallbackContent, contentPartText(part));
+                fallbackReasoningContent = firstNonBlank(
+                    fallbackReasoningContent,
+                    reasoningContentPartText(part)
+                );
             } else if ("response.output_item.added".equals(type)) {
                 rememberResponseToolUse(pendingToolUses, event.path("item"));
             } else if ("response.function_call_arguments.delta".equals(type)
@@ -269,6 +327,10 @@ public class OpenAiUpstreamClient {
             } else if ("response.output_item.done".equals(type)) {
                 JsonNode item = event.path("item");
                 fallbackContent = firstNonBlank(fallbackContent, responseOutputItemText(item));
+                fallbackReasoningContent = firstNonBlank(
+                    fallbackReasoningContent,
+                    responseReasoningItemText(item)
+                );
                 rememberResponseToolUse(pendingToolUses, item);
             } else if ("response.completed".equals(type)) {
                 JsonNode response = event.path("response");
@@ -276,6 +338,11 @@ public class OpenAiUpstreamClient {
                     fallbackContent,
                     response.path("output_text").asText(""),
                     responseOutputText(response.path("output"))
+                );
+                fallbackReasoningContent = firstNonBlank(
+                    fallbackReasoningContent,
+                    response.path("reasoning_text").asText(""),
+                    responseReasoningText(response.path("output"))
                 );
                 rememberResponseToolUses(pendingToolUses, response.path("output"));
                 usage = presentNode(response.path("usage"), usage);
@@ -285,6 +352,7 @@ public class OpenAiUpstreamClient {
         appendPendingResponseToolUses(toolUses, pendingToolUses);
         return new PlatformCompletionResult(
             content.length() > 0 ? content.toString() : fallbackContent,
+            reasoningContent.length() > 0 ? reasoningContent.toString() : fallbackReasoningContent,
             toolUses,
             usage(usage, "input_tokens", "output_tokens")
         );
@@ -730,6 +798,9 @@ public class OpenAiUpstreamClient {
     private String openAiModel(String model, ProxyAccountEntity account) {
         String cleaned = clean(model);
         if (cleaned == null) {
+            if (AccountPlatforms.isDeepSeek(account)) {
+                return DeepSeekModelCatalog.DEFAULT_MODEL_ID;
+            }
             return AccountPlatforms.isCodex(account)
                 ? OpenAiAccountTestClient.DEFAULT_CODEX_TEST_MODEL
                 : OpenAiAccountTestClient.DEFAULT_OPENAI_TEST_MODEL;
@@ -737,6 +808,9 @@ public class OpenAiUpstreamClient {
         String lower = cleaned.toLowerCase(Locale.ROOT);
         if (lower.startsWith("openai-compatible/")) {
             return cleaned.substring("openai-compatible/".length());
+        }
+        if (AccountPlatforms.isDeepSeek(account)) {
+            return DeepSeekModelCatalog.canonicalModelId(cleaned);
         }
         String unprefixed = lower.startsWith("openai/") ? lower.substring("openai/".length()) : lower;
         if (AccountPlatforms.isCodex(account) || isOfficialOpenAiBaseUrl(account)) {
@@ -762,7 +836,10 @@ public class OpenAiUpstreamClient {
         ProxyAccountEntity account,
         String upstreamModel
     ) {
-        if (AccountPlatforms.isCodex(account) || isOfficialOpenAiBaseUrl(account) || !isModelNotFound(error)) {
+        if (AccountPlatforms.isCodex(account)
+            || AccountPlatforms.isDeepSeek(account)
+            || isOfficialOpenAiBaseUrl(account)
+            || !isModelNotFound(error)) {
             return Mono.error(error);
         }
         String normalized = clean(upstreamModel);
@@ -828,6 +905,23 @@ public class OpenAiUpstreamClient {
         StringBuilder builder = new StringBuilder();
         for (JsonNode item : output) {
             String text = responseOutputItemText(item);
+            if (!text.isBlank()) {
+                if (builder.length() > 0) {
+                    builder.append('\n');
+                }
+                builder.append(text);
+            }
+        }
+        return builder.toString();
+    }
+
+    private String responseReasoningText(JsonNode output) {
+        if (!output.isArray()) {
+            return "";
+        }
+        StringBuilder builder = new StringBuilder();
+        for (JsonNode item : output) {
+            String text = responseReasoningItemText(item);
             if (!text.isBlank()) {
                 if (builder.length() > 0) {
                     builder.append('\n');
@@ -1145,9 +1239,37 @@ public class OpenAiUpstreamClient {
         return builder.toString();
     }
 
+    private String responseReasoningItemText(JsonNode item) {
+        String directText = firstNonBlank(
+            item.path("reasoning_text").asText(""),
+            item.path("reasoning_content").asText("")
+        );
+        JsonNode content = item.path("content");
+        if (!content.isArray()) {
+            return directText;
+        }
+        StringBuilder builder = new StringBuilder();
+        for (JsonNode part : content) {
+            String text = reasoningContentPartText(part);
+            if (!text.isBlank()) {
+                if (builder.length() > 0) {
+                    builder.append('\n');
+                }
+                builder.append(text);
+            }
+        }
+        return builder.length() > 0 ? builder.toString() : directText;
+    }
+
     private String contentPartText(JsonNode part) {
         String type = part.path("type").asText("");
         return "output_text".equals(type) || "text".equals(type) ? part.path("text").asText("") : "";
+    }
+
+    private String reasoningContentPartText(JsonNode part) {
+        return "reasoning_text".equals(part.path("type").asText(""))
+            ? part.path("text").asText("")
+            : "";
     }
 
     private String jsonText(JsonNode value, String fallback) {
@@ -1194,8 +1316,16 @@ public class OpenAiUpstreamClient {
         }
         long inputTokens = usage.path(inputField).asLong(0);
         long outputTokens = usage.path(outputField).asLong(0);
-        long cacheReadTokens = usage.path(inputField + "_details").path("cached_tokens").asLong(0);
-        long reasoningTokens = usage.path(outputField + "_details").path("reasoning_tokens").asLong(0);
+        long cacheReadTokens = usage.has("prompt_cache_hit_tokens")
+            ? usage.path("prompt_cache_hit_tokens").asLong(0)
+            : usage.path(inputField + "_details").path("cached_tokens").asLong(0);
+        long cacheMissTokens = usage.path("prompt_cache_miss_tokens").asLong(0);
+        if (inputTokens <= 0 && (cacheReadTokens > 0 || cacheMissTokens > 0)) {
+            inputTokens = cacheReadTokens + cacheMissTokens;
+        }
+        long reasoningTokens = usage.has("reasoning_tokens")
+            ? usage.path("reasoning_tokens").asLong(0)
+            : usage.path(outputField + "_details").path("reasoning_tokens").asLong(0);
         return new PlatformUsage(inputTokens, outputTokens, BigDecimal.ZERO, cacheReadTokens, 0, reasoningTokens);
     }
 

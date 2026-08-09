@@ -200,6 +200,55 @@ class AccountPoolServiceTest {
     }
 
     @Test
+    void openAiAndDeepSeekAccountPoolsRemainIsolated() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity openAi = openAiPoolAccount("openai-main");
+        ProxyAccountEntity deepSeek = deepSeekPoolAccount("deepseek-main");
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(deepSeek, openAi));
+
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+        service.refreshCache().block();
+
+        assertThat(service.selectOpenAiAccount("session-1").block())
+            .extracting(ProxyAccountEntity::getAccountId)
+            .isEqualTo("openai-main");
+        assertThat(service.selectDeepSeekOpenAiAccount("session-1").block())
+            .extracting(ProxyAccountEntity::getAccountId)
+            .isEqualTo("deepseek-main");
+    }
+
+    @Test
+    void deepSeekAccountSelectionDoesNotFallBackToOpenAi() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(openAiPoolAccount("openai-main")));
+
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+        service.refreshCache().block();
+
+        assertThatThrownBy(() -> service.selectDeepSeekOpenAiAccount("session-1").block())
+            .isInstanceOf(ApiException.class)
+            .hasMessage("No available DeepSeek upstream account");
+    }
+
+    @Test
+    void deepSeekAccountSelectionRespectsRateLimitCooldown() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity deepSeek = deepSeekPoolAccount("deepseek-main");
+        deepSeek.setErrorCount(1);
+        deepSeek.setLastUsedAt(Instant.now());
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(deepSeek));
+        ProxyProperties properties = new ProxyProperties();
+        properties.setBaseCooldown(java.time.Duration.ofHours(1));
+        properties.setProbabilisticRetryChance(0);
+        AccountPoolService service = new AccountPoolService(repository, null, properties);
+        service.refreshCache().block();
+
+        assertThatThrownBy(() -> service.selectDeepSeekOpenAiAccount("session-1").block())
+            .isInstanceOf(ApiException.class)
+            .hasMessage("No available DeepSeek upstream account");
+    }
+
+    @Test
     void singleQuotaExhaustedAccountIsNotSelected() {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         ProxyAccountEntity exhausted = account("acc-exhausted");
@@ -269,6 +318,36 @@ class AccountPoolServiceTest {
         assertThat(result.getRequestCount()).isEqualTo(91L);
         assertThat(result.getQuotaUsed()).isEqualTo(77L);
         verify(repository, never()).save(any(ProxyAccountEntity.class));
+    }
+
+    @Test
+    void changingProviderResetsImplicitBaseUrlToNewProviderDefault() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity current = deepSeekPoolAccount("acc-1");
+        current.setBaseUrl(AccountPlatforms.DEFAULT_DEEPSEEK_BASE_URL);
+        when(repository.findByAccountId("acc-1")).thenReturn(Mono.just(current));
+        SqlAccountPoolHarness harness = sqlService(repository, openAiPoolAccount("acc-1"));
+
+        harness.service().update("acc-1", updateProvider(AccountPlatforms.OPENAI_PROVIDER)).block();
+
+        verify(harness.spec()).bind("value0", AccountPlatforms.OPENAI_API_KEY_AUTH);
+        verify(harness.spec()).bind("value1", AccountPlatforms.OPENAI_PROVIDER);
+        verify(harness.spec()).bind("value2", AccountPlatforms.DEFAULT_OPENAI_BASE_URL);
+    }
+
+    @Test
+    void changingProviderToDeepSeekResetsImplicitBaseUrlToOfficialDefault() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity current = openAiPoolAccount("acc-1");
+        current.setBaseUrl(AccountPlatforms.DEFAULT_OPENAI_BASE_URL);
+        when(repository.findByAccountId("acc-1")).thenReturn(Mono.just(current));
+        SqlAccountPoolHarness harness = sqlService(repository, deepSeekPoolAccount("acc-1"));
+
+        harness.service().update("acc-1", updateProvider(AccountPlatforms.DEEPSEEK_PROVIDER)).block();
+
+        verify(harness.spec()).bind("value0", AccountPlatforms.OPENAI_API_KEY_AUTH);
+        verify(harness.spec()).bind("value1", AccountPlatforms.DEEPSEEK_PROVIDER);
+        verify(harness.spec()).bind("value2", AccountPlatforms.DEFAULT_DEEPSEEK_BASE_URL);
     }
 
     @Test
@@ -596,6 +675,38 @@ class AccountPoolServiceTest {
         );
     }
 
+    private AccountDtos.UpdateAccountRequest updateProvider(String provider) {
+        return new AccountDtos.UpdateAccountRequest(
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            provider,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+        );
+    }
+
     private ProxyAccountEntity account(String accountId) {
         ProxyAccountEntity account = new ProxyAccountEntity();
         account.setAccountId(accountId);
@@ -607,6 +718,13 @@ class AccountPoolServiceTest {
     private ProxyAccountEntity openAiPoolAccount(String accountId) {
         ProxyAccountEntity account = account(accountId);
         account.setProvider(AccountPlatforms.OPENAI_PROVIDER);
+        account.setAuthMethod(AccountPlatforms.OPENAI_API_KEY_AUTH);
+        return account;
+    }
+
+    private ProxyAccountEntity deepSeekPoolAccount(String accountId) {
+        ProxyAccountEntity account = account(accountId);
+        account.setProvider(AccountPlatforms.DEEPSEEK_PROVIDER);
         account.setAuthMethod(AccountPlatforms.OPENAI_API_KEY_AUTH);
         return account;
     }

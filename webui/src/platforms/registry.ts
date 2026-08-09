@@ -1,10 +1,11 @@
 import type { ModelInfo } from '@/types/api';
 import { anthropicPlatform } from './anthropic';
+import { deepSeekPlatform } from './deepseek';
 import { geminiPlatform } from './gemini';
 import { openAiPlatform } from './openai';
 import { otherPlatform } from './other';
 
-const providerPlatforms = [openAiPlatform, anthropicPlatform, geminiPlatform];
+const providerPlatforms = [openAiPlatform, anthropicPlatform, geminiPlatform, deepSeekPlatform];
 
 export const platformDefinitions = [...providerPlatforms, otherPlatform];
 

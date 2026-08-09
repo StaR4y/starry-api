@@ -90,6 +90,7 @@
       openAi: items.filter((item) => item.provider === 'OpenAI').length,
       anthropic: items.filter((item) => item.provider === 'Anthropic').length,
       gemini: items.filter((item) => item.provider === 'Gemini').length,
+      deepSeek: items.filter((item) => item.provider === 'DeepSeek').length,
       internalIds: items.filter((item) => item.family === 'CodeWhisperer Internal').length,
       textOnly: items.filter(
         (item) => item.supportedInputTypes?.length === 1 && item.supportedInputTypes[0] === 'TEXT',
@@ -389,6 +390,17 @@
 
       <div class="metric-item">
         <div class="metric-item__header">
+          <span class="metric-dot dot-deepseek" />
+          <span class="metric-label">DeepSeek</span>
+        </div>
+        <div class="metric-value text-deepseek">{{ summary.deepSeek }}</div>
+        <div class="metric-subtext">DeepSeek V4 系列</div>
+      </div>
+
+      <div class="metric-divider" />
+
+      <div class="metric-item">
+        <div class="metric-item__header">
           <span class="metric-dot dot-internal" />
           <span class="metric-label">内部 ID</span>
         </div>
@@ -501,6 +513,10 @@
               v-else-if="group.provider === 'Gemini'"
               class="provider-logo-fallback provider-logo-fallback--gemini"
             >G</span>
+            <span
+              v-else-if="group.provider === 'DeepSeek'"
+              class="provider-logo-fallback provider-logo-fallback--deepseek"
+            >D</span>
             <span v-else class="provider-logo-fallback">{{ group.provider.slice(0, 1) }}</span>
           </span>
           <div class="provider-tab-card__info">
@@ -727,6 +743,10 @@
           background-color: #4285f4;
           box-shadow: 0 0 6px rgba(66, 133, 244, 0.6);
         }
+        &.dot-deepseek {
+          background-color: #4d6bfe;
+          box-shadow: 0 0 6px rgba(77, 107, 254, 0.6);
+        }
         &.dot-internal {
           background-color: var(--kp-accent);
           box-shadow: 0 0 6px rgba(179, 135, 255, 0.6);
@@ -758,6 +778,9 @@
         }
         &.text-gemini {
           color: #4285f4;
+        }
+        &.text-deepseek {
+          color: #4d6bfe;
         }
         &.text-internal {
           color: var(--kp-accent);
@@ -943,6 +966,17 @@
       }
     }
 
+    &--deepseek.is-active {
+      border-color: #4d6bfe;
+      box-shadow: 0 8px 24px rgba(77, 107, 254, 0.08);
+      .provider-tab-card__arrow .arrow-icon {
+        color: #4d6bfe;
+      }
+      .provider-tab-card__title {
+        color: #4d6bfe;
+      }
+    }
+
     &--other.is-active {
       border-color: var(--kp-primary);
       box-shadow: 0 8px 24px rgba(91, 141, 239, 0.08);
@@ -990,6 +1024,12 @@
       border-color: rgba(66, 133, 244, 0.18);
     }
 
+    &--deepseek {
+      color: #4d6bfe;
+      background: rgba(77, 107, 254, 0.08);
+      border-color: rgba(77, 107, 254, 0.18);
+    }
+
     &--other {
       color: var(--kp-primary);
       background: rgba(91, 141, 239, 0.08);
@@ -1001,6 +1041,10 @@
 
       &--gemini {
         color: #4285f4;
+      }
+
+      &--deepseek {
+        color: #4d6bfe;
       }
     }
   }
@@ -1073,6 +1117,12 @@
         background-color: #4285f4;
       }
     }
+    &--deepseek {
+      border-top: 4px solid #4d6bfe;
+      .brand-indicator {
+        background-color: #4d6bfe;
+      }
+    }
     &--other {
       border-top: 4px solid var(--kp-primary);
       .brand-indicator {
@@ -1135,6 +1185,9 @@
   }
   .active-provider-content--gemini .bullet-dot {
     background-color: #4285f4;
+  }
+  .active-provider-content--deepseek .bullet-dot {
+    background-color: #4d6bfe;
   }
   .active-provider-content--other .bullet-dot {
     background-color: var(--kp-primary);

@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.stream.Stream;
 import tech.starryapi.model.ModelDtos.ModelSpec;
 import tech.starryapi.platform.anthropic.AnthropicModelCatalog;
+import tech.starryapi.platform.deepseek.DeepSeekModelCatalog;
 import tech.starryapi.platform.gemini.GeminiModelCatalog;
 import tech.starryapi.platform.openai.OpenAiModelCatalog;
 
@@ -22,7 +23,8 @@ public final class ProxyModelCatalog {
         return Stream.of(
             AnthropicModelCatalog.models(),
             OpenAiModelCatalog.models(),
-            GeminiModelCatalog.models()
+            GeminiModelCatalog.models(),
+            DeepSeekModelCatalog.models()
         ).flatMap(List::stream).toList();
     }
 }

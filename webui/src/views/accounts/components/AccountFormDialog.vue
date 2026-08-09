@@ -29,6 +29,8 @@
 
   const OPENAI_COMPATIBLE_PROVIDER = 'OpenAI-compatible';
   const ANTHROPIC_PROVIDER = 'Anthropic';
+  const DEEPSEEK_PROVIDER = 'DeepSeek';
+  const DEEPSEEK_DEFAULT_BASE_URL = 'https://api.deepseek.com/v1';
 
   const formRef = ref<FormInstance>();
   const formSubmitting = ref(false);
@@ -62,21 +64,27 @@
     () => isOpenAiCompatibleForm.value || normalized(form.provider) === 'openai',
   );
   const isAnthropicApiKeyForm = computed(() => isAnthropicProvider(form.provider));
-  const isApiKeyForm = computed(() => isOpenAiApiKeyForm.value || isAnthropicApiKeyForm.value);
+  const isDeepSeekApiKeyForm = computed(() => isDeepSeekProvider(form.provider));
+  const isApiKeyForm = computed(
+    () => isOpenAiApiKeyForm.value || isAnthropicApiKeyForm.value || isDeepSeekApiKeyForm.value,
+  );
   const accessTokenLabel = computed(() => {
     const suffix = props.mode === 'edit' ? '（留空则不修改）' : '';
     return isApiKeyForm.value ? `API Key${suffix}` : `Access Token${suffix}`;
   });
   const accessTokenPlaceholder = computed(() => {
+    if (isDeepSeekApiKeyForm.value) return '输入 DeepSeek API Key，如 sk-...';
     if (isAnthropicApiKeyForm.value) return '输入 Anthropic / Claude API Key，如 sk-ant-...';
     return isOpenAiApiKeyForm.value ? '输入上游网站 API Key，如 sk-...' : '输入 Access Token';
   });
   const baseUrlLabel = computed(() => {
+    if (isDeepSeekApiKeyForm.value) return 'DeepSeek API Base URL';
     if (isOpenAiCompatibleForm.value) return '第三方 Base URL';
     if (isAnthropicApiKeyForm.value) return 'Anthropic Base URL';
     return 'Base URL';
   });
   const baseUrlPlaceholder = computed(() => {
+    if (isDeepSeekApiKeyForm.value) return `默认 ${DEEPSEEK_DEFAULT_BASE_URL}`;
     if (isOpenAiCompatibleForm.value) {
       return '例如 https://joystar.cc、https://api.deepseek.com 或 https://openrouter.ai/api/v1';
     }
@@ -87,7 +95,19 @@
   });
 
   const rules: FormRules = {
-    accessToken: [{ required: true, message: 'API Key / accessToken 必填', trigger: 'blur' }],
+    accessToken: [
+      {
+        validator: (_rule, value, callback) => {
+          const text = typeof value === 'string' ? value.trim() : '';
+          if (props.mode === 'create' && !text) {
+            callback(new Error('API Key / accessToken 必填'));
+            return;
+          }
+          callback();
+        },
+        trigger: 'blur',
+      },
+    ],
     baseUrl: [
       {
         validator: (_rule, value, callback) => {
@@ -143,6 +163,7 @@
     { label: 'OpenAI 官方 API Key', value: 'OpenAI' },
     { label: '第三方 OpenAI 兼容 API Key', value: OPENAI_COMPATIBLE_PROVIDER },
     { label: 'Anthropic / Claude API Key', value: ANTHROPIC_PROVIDER },
+    { label: 'DeepSeek 官方 API Key', value: DEEPSEEK_PROVIDER },
   ];
 
   const authMethodOptions = [
@@ -164,6 +185,10 @@
     return value === 'anthropic' || value === 'claude';
   }
 
+  function isDeepSeekProvider(provider: string | null | undefined) {
+    return normalized(provider) === 'deepseek';
+  }
+
   function applyProviderDefaults(provider: string | null | undefined) {
     const value = normalized(provider);
     const auth = normalized(form.authMethod);
@@ -176,6 +201,12 @@
       form.authMethod = 'api-key';
       form.region = '';
       if (!form.baseUrl) form.baseUrl = 'https://api.anthropic.com/v1';
+      return;
+    }
+    if (isDeepSeekProvider(provider)) {
+      form.authMethod = 'api-key';
+      form.region = '';
+      if (!form.baseUrl) form.baseUrl = DEEPSEEK_DEFAULT_BASE_URL;
       return;
     }
     if (value === 'openai') {
@@ -203,6 +234,15 @@
       }
       if (!form.region) form.region = 'us-east-1';
     }
+  }
+
+  function handleProviderChange(provider: string) {
+    if (isDeepSeekProvider(provider)) {
+      form.baseUrl = DEEPSEEK_DEFAULT_BASE_URL;
+    } else if (form.baseUrl.trim() === DEEPSEEK_DEFAULT_BASE_URL) {
+      form.baseUrl = '';
+    }
+    applyProviderDefaults(provider);
   }
 
   watch(() => form.provider, applyProviderDefaults);
@@ -274,7 +314,7 @@
   <el-dialog
     v-model="visibleValue"
     :title="mode === 'create' ? '新建账号' : '编辑账号'"
-    width="720px"
+    width="min(720px, calc(100vw - 32px))"
     destroy-on-close
   >
     <el-form ref="formRef" :model="form" :rules="rules" label-position="top">
@@ -285,6 +325,14 @@
         show-icon
         :closable="false"
         title="第三方 API Key 账号会按 OpenAI 兼容协议调用 Base URL；填写站点根地址时会自动使用 /v1。模型映射目标可写成 openai-compatible/真实模型ID，例如 openai-compatible/deepseek-chat。"
+      />
+      <el-alert
+        v-else-if="isDeepSeekApiKeyForm"
+        class="account-form-alert"
+        type="info"
+        show-icon
+        :closable="false"
+        title="DeepSeek API Key 账号使用官方 OpenAI 兼容接口；系统已配置 https://api.deepseek.com/v1，无需手动填写 Base URL。可直接使用 deepseek-v4-flash 或 deepseek-v4-pro 模型 ID。"
       />
       <el-alert
         v-else-if="isAnthropicApiKeyForm"
@@ -300,20 +348,26 @@
         <el-tab-pane label="基本配置" name="basic">
           <div class="tab-pane-content">
             <el-row :gutter="20">
-              <el-col v-if="mode === 'create'" :span="12">
+              <el-col v-if="mode === 'create'" :span="12" :xs="24">
                 <el-form-item label="账号 ID（可选）">
                   <el-input v-model="form.accountId" placeholder="留空时自动生成" />
                 </el-form-item>
               </el-col>
-              <el-col :span="mode === 'create' ? 12 : 24">
+              <el-col :span="mode === 'create' ? 12 : 24" :xs="24">
                 <el-form-item label="邮箱">
                   <el-input v-model="form.email" placeholder="如 email@example.com" />
                 </el-form-item>
               </el-col>
 
-              <el-col :span="12">
+              <el-col :span="12" :xs="24">
                 <el-form-item label="Provider">
-                  <el-select v-model="form.provider" allow-create filterable class="w-full">
+                  <el-select
+                    v-model="form.provider"
+                    allow-create
+                    filterable
+                    class="w-full"
+                    @change="handleProviderChange"
+                  >
                     <el-option
                       v-for="item in providerOptions"
                       :key="item.value"
@@ -323,7 +377,7 @@
                   </el-select>
                 </el-form-item>
               </el-col>
-              <el-col :span="12">
+              <el-col :span="12" :xs="24">
                 <el-form-item label="认证方式">
                   <el-select v-model="form.authMethod" allow-create filterable class="w-full">
                     <el-option
@@ -336,7 +390,7 @@
                 </el-form-item>
               </el-col>
 
-              <el-col :span="12">
+              <el-col :span="12" :xs="24">
                 <el-form-item label="账号池级别">
                   <el-radio-group v-model="form.poolTier">
                     <el-radio-button label="primary">一级号池</el-radio-button>
@@ -344,7 +398,7 @@
                   </el-radio-group>
                 </el-form-item>
               </el-col>
-              <el-col :span="12">
+              <el-col :span="12" :xs="24">
                 <el-form-item label="基础权重">
                   <el-input-number
                     v-model="form.poolWeight"
@@ -418,13 +472,16 @@
                     填到兼容 OpenAI 的 API 根路径，通常以 /v1 结尾；服务会自动追加 /chat/completions
                     或 /responses。
                   </p>
+                  <p v-else-if="isDeepSeekApiKeyForm" class="form-hint">
+                    已自动使用 DeepSeek 官方 API 地址；仅在接入兼容网关时需要修改。
+                  </p>
                   <p v-else-if="isAnthropicApiKeyForm" class="form-hint">
                     填到 Anthropic Messages API 根路径，通常以 /v1 结尾；服务会自动追加 /messages。
                   </p>
                 </el-form-item>
               </el-col>
 
-              <el-col :span="12">
+              <el-col :span="12" :xs="24">
                 <el-form-item label="上游账号 ID">
                   <el-input
                     v-model="form.upstreamAccountId"
@@ -432,20 +489,20 @@
                   />
                 </el-form-item>
               </el-col>
-              <el-col :span="12">
+              <el-col :span="12" :xs="24">
                 <el-form-item label="Machine ID">
                   <el-input v-model="form.machineId" placeholder="机器 ID，可选" />
                 </el-form-item>
               </el-col>
 
-              <el-col :span="12">
+              <el-col :span="12" :xs="24">
                 <el-form-item label="区域">
                   <el-input v-model="form.region" placeholder="如 us-east-1" />
                 </el-form-item>
               </el-col>
-              <el-col :span="12">
+              <el-col :span="12" :xs="24">
                 <el-row :gutter="12">
-                  <el-col :span="mode === 'edit' ? 16 : 24">
+                  <el-col :span="mode === 'edit' ? 16 : 24" :xs="24">
                     <el-form-item label="配额上限">
                       <el-input-number
                         v-model="form.quotaLimit"
@@ -455,7 +512,7 @@
                       />
                     </el-form-item>
                   </el-col>
-                  <el-col v-if="mode === 'edit'" :span="8">
+                  <el-col v-if="mode === 'edit'" :span="8" :xs="24">
                     <el-form-item label="启用">
                       <el-switch v-model="form.enabled" class="switch-offset" />
                     </el-form-item>

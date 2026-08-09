@@ -231,21 +231,49 @@ public class AccountPoolService {
         );
     }
 
+    public Mono<ProxyAccountEntity> selectDeepSeekOpenAiAccount(String sessionHint) {
+        return selectAccount(
+            sessionHint,
+            AccountPlatforms::isDeepSeek,
+            "No available DeepSeek upstream account",
+            false
+        );
+    }
+
+    public Mono<ProxyAccountEntity> selectDeepSeekOpenAiAccount(String sessionHint, Collection<String> excludedAccountIds) {
+        return selectAccount(
+            sessionHint,
+            account -> AccountPlatforms.isDeepSeek(account) && !isExcluded(account, excludedAccountIds),
+            "No available DeepSeek upstream account",
+            false
+        );
+    }
+
     private Mono<ProxyAccountEntity> selectAccount(
         String sessionHint,
         Predicate<ProxyAccountEntity> filter,
         String unavailableMessage
+    ) {
+        return selectAccount(sessionHint, filter, unavailableMessage, true);
+    }
+
+    private Mono<ProxyAccountEntity> selectAccount(
+        String sessionHint,
+        Predicate<ProxyAccountEntity> filter,
+        String unavailableMessage,
+        boolean allowCooldownFallback
     ) {
         List<ProxyAccountEntity> accounts = applyTierPolicy(cachedAccountsSnapshot(filter));
         if (accounts.isEmpty()) {
             return refreshCacheIfStale()
                 .then(Mono.defer(() -> Mono.justOrEmpty(selectFrom(
                     applyTierPolicy(cachedAccountsSnapshot(filter)),
-                    sessionHint
+                    sessionHint,
+                    allowCooldownFallback
                 ))))
                 .switchIfEmpty(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", unavailableMessage)));
         }
-        return Mono.justOrEmpty(selectFrom(accounts, sessionHint))
+        return Mono.justOrEmpty(selectFrom(accounts, sessionHint, allowCooldownFallback))
             .switchIfEmpty(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", unavailableMessage)));
     }
 
@@ -369,6 +397,15 @@ public class AccountPoolService {
     }
 
     public Mono<Void> recordError(String accountId, UpstreamErrorType type, Integer statusCode) {
+        return recordError(accountId, type, statusCode, true);
+    }
+
+    public Mono<Void> recordError(
+        String accountId,
+        UpstreamErrorType type,
+        Integer statusCode,
+        boolean rateLimitIsQuota
+    ) {
         if (type == UpstreamErrorType.FATAL) {
             return Mono.empty();
         }
@@ -381,7 +418,7 @@ public class AccountPoolService {
             WHERE account_id = :accountId
             RETURNING *
             """;
-        boolean quotaError = statusCode != null && (statusCode == 402 || statusCode == 429);
+        boolean quotaError = isQuotaStatus(statusCode, rateLimitIsQuota);
         return template.getDatabaseClient().sql(sql)
             .bind("quotaError", quotaError)
             .bind("accountId", accountId)
@@ -397,8 +434,18 @@ public class AccountPoolService {
         Integer statusCode,
         String message
     ) {
+        return recordRequestFailure(accountId, type, statusCode, message, true);
+    }
+
+    public Mono<RequestFailureRecord> recordRequestFailure(
+        String accountId,
+        UpstreamErrorType type,
+        Integer statusCode,
+        String message,
+        boolean rateLimitIsQuota
+    ) {
         Instant now = Instant.now();
-        boolean quotaFailure = isQuotaStatus(statusCode);
+        boolean quotaFailure = isQuotaStatus(statusCode, rateLimitIsQuota);
         boolean authFailure = isAuthStatus(statusCode);
         boolean suspended = quotaFailure || authFailure;
         String sql = """
@@ -448,11 +495,22 @@ public class AccountPoolService {
         String message,
         boolean updateStatus
     ) {
-        if (!updateStatus) {
-            return recordError(accountId, type, statusCode);
+        return recordTestFailure(accountId, type, statusCode, message, updateStatus, true);
+    }
+
+    public Mono<Void> recordTestFailure(
+        String accountId,
+        UpstreamErrorType type,
+        Integer statusCode,
+        String message,
+        boolean updateStatus,
+        boolean rateLimitIsQuota
+    ) {
+        if (!updateStatus || (Integer.valueOf(429).equals(statusCode) && !rateLimitIsQuota)) {
+            return recordError(accountId, type, statusCode, rateLimitIsQuota);
         }
         Instant now = Instant.now();
-        boolean quotaFailure = isQuotaStatus(statusCode);
+        boolean quotaFailure = isQuotaStatus(statusCode, rateLimitIsQuota);
         boolean authFailure = isAuthStatus(statusCode);
         String reason = quotaFailure ? "QUOTA_EXHAUSTED" : authFailure ? "AUTH_FAILED" : "ACCOUNT_TEST_FAILED";
         String sql = """
@@ -481,8 +539,8 @@ public class AccountPoolService {
             .then();
     }
 
-    private boolean isQuotaStatus(Integer statusCode) {
-        return statusCode != null && (statusCode == 402 || statusCode == 429);
+    private boolean isQuotaStatus(Integer statusCode, boolean rateLimitIsQuota) {
+        return statusCode != null && (statusCode == 402 || (statusCode == 429 && rateLimitIsQuota));
     }
 
     private boolean isAuthStatus(Integer statusCode) {
@@ -642,7 +700,11 @@ public class AccountPoolService {
         affinity.asMap().entrySet().removeIf(entry -> accountId.equals(entry.getValue()));
     }
 
-    private ProxyAccountEntity selectFrom(List<ProxyAccountEntity> accounts, String sessionHint) {
+    private ProxyAccountEntity selectFrom(
+        List<ProxyAccountEntity> accounts,
+        String sessionHint,
+        boolean allowCooldownFallback
+    ) {
         if (properties.isSessionAffinityEnabled() && sessionHint != null && !sessionHint.isBlank()) {
             String affinityAccountId = affinity.getIfPresent(sessionHint);
             if (affinityAccountId != null) {
@@ -656,7 +718,7 @@ public class AccountPoolService {
         }
 
         List<ProxyAccountEntity> available = new ArrayList<>(accounts.stream().filter(this::isAvailable).toList());
-        if (available.isEmpty()) {
+        if (available.isEmpty() && allowCooldownFallback) {
             available = accounts.stream()
                 .filter(account -> !isQuotaExhausted(account))
                 .min(Comparator.comparing(account -> Optional.ofNullable(account.getLastUsedAt()).orElse(Instant.EPOCH)))
@@ -944,6 +1006,7 @@ public class AccountPoolService {
         entity.setClientId(request.clientId());
         entity.setClientSecret(request.clientSecret());
         boolean regionlessApiKey = AccountPlatforms.isOpenAi(normalizedProvider, normalizedAuthMethod)
+            || AccountPlatforms.isDeepSeek(normalizedProvider)
             || AccountPlatforms.isGoogleApiKey(normalizedProvider, normalizedAuthMethod)
             || AccountPlatforms.isAnthropicApiKey(normalizedProvider, normalizedAuthMethod);
         entity.setRegion(defaultString(request.region(), regionlessApiKey ? null : AccountPlatforms.DEFAULT_KIRO_REGION));
@@ -979,11 +1042,20 @@ public class AccountPoolService {
         String authMethod = current.getAuthMethod();
         String baseUrl = current.getBaseUrl();
         if (request.authMethod() != null || request.provider() != null) {
+            String currentAuthMethod = AccountPlatforms.normalizeAuthMethod(authMethod, provider);
+            String currentProvider = AccountPlatforms.normalizeProvider(provider, currentAuthMethod);
             String requestedProvider = request.provider() == null ? provider : request.provider();
             String requestedAuthMethod = request.authMethod() == null ? authMethod : request.authMethod();
             authMethod = AccountPlatforms.normalizeAuthMethod(requestedAuthMethod, requestedProvider);
             provider = AccountPlatforms.normalizeProvider(requestedProvider, authMethod);
-            baseUrl = AccountPlatforms.defaultBaseUrl(provider, authMethod, baseUrl);
+            boolean providerChanged = !AccountPlatforms.key(currentProvider).equals(AccountPlatforms.key(provider));
+            boolean endpointFamilyChanged = !Objects.equals(
+                AccountPlatforms.defaultBaseUrl(currentProvider, currentAuthMethod, null),
+                AccountPlatforms.defaultBaseUrl(provider, authMethod, null)
+            );
+            baseUrl = request.baseUrl() == null && (providerChanged || endpointFamilyChanged)
+                ? AccountPlatforms.defaultBaseUrl(provider, authMethod, null)
+                : AccountPlatforms.defaultBaseUrl(provider, authMethod, baseUrl);
             updates.put("auth_method", new SqlValue(authMethod, String.class));
             updates.put("provider", new SqlValue(provider, String.class));
             updates.put("base_url", new SqlValue(baseUrl, String.class));

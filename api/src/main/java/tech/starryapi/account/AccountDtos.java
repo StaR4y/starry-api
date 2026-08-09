@@ -94,7 +94,8 @@ public final class AccountDtos {
         List<TestModelOption> openAi,
         List<TestModelOption> google,
         List<TestModelOption> anthropic,
-        List<TestModelOption> codex
+        List<TestModelOption> codex,
+        List<TestModelOption> deepSeek
     ) {
         public TestModelOptionsResponse {
             kiro = kiro == null ? List.of() : List.copyOf(kiro);
@@ -102,6 +103,7 @@ public final class AccountDtos {
             google = google == null ? List.of() : List.copyOf(google);
             anthropic = anthropic == null ? List.of() : List.copyOf(anthropic);
             codex = codex == null ? List.of() : List.copyOf(codex);
+            deepSeek = deepSeek == null ? List.of() : List.copyOf(deepSeek);
         }
     }
 

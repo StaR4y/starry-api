@@ -73,7 +73,7 @@ curl -X POST http://127.0.0.1:8080/admin/accounts \
 
 Only `accessToken` is required. `region` defaults to `us-east-1`.
 
-To add an API key from another OpenAI-compatible website, create an account with `provider=OpenAI-compatible`, `authMethod=api-key`, the site API key as `accessToken`, and the site API root as `baseUrl`:
+To add an official DeepSeek account, set `provider=DeepSeek`. The service normalizes the authentication method to `api-key`, and a missing `baseUrl` defaults to `https://api.deepseek.com/v1`:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/admin/accounts \
@@ -81,16 +81,32 @@ curl -X POST http://127.0.0.1:8080/admin/accounts \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d '{
     "email":"deepseek@example.com",
-    "provider":"OpenAI-compatible",
+    "provider":"DeepSeek",
     "authMethod":"api-key",
-    "baseUrl":"https://api.deepseek.com/v1",
     "accessToken":"sk-..."
   }'
 ```
 
-Then map public model IDs to `openai-compatible/<actual-model-id>`, for example `deepseek-chat -> openai-compatible/deepseek-chat`. Starry API strips the `openai-compatible/` routing prefix before sending the request upstream.
+Use the bare `deepseek-v4-flash` or `deepseek-v4-pro` ID for official routing. `starry/` and `deepseek/` forms are also accepted; `openai-compatible/` is reserved for the generic third-party pool. Both DeepSeek models support Chat Completions. Responses currently supports only `deepseek-v4-flash`, and requests for Pro on that endpoint return `400`.
 
-For OpenAI-compatible API key accounts, `baseUrl` can be the site origin (`https://joystar.cc`) or a versioned API base (`https://api.deepseek.com/v1`, `https://openrouter.ai/api/v1`). If the path does not already end in a version segment, the runtime and account tester automatically use `/v1/chat/completions` for chat-completion checks.
+DeepSeek requests are isolated to DeepSeek accounts and do not fall back to OpenAI or Codex. For compatibility, an existing account whose `baseUrl` host is `api.deepseek.com` is recognized as DeepSeek even if its stored provider is `OpenAI-compatible`; ordinary OpenAI/Codex selection excludes it.
+
+To add an API key from another OpenAI-compatible website, use `provider=OpenAI-compatible`, the site API key as `accessToken`, and the site API root as `baseUrl`:
+
+```bash
+curl -X POST http://127.0.0.1:8080/admin/accounts \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -d '{
+    "email":"openrouter@example.com",
+    "provider":"OpenAI-compatible",
+    "authMethod":"api-key",
+    "baseUrl":"https://openrouter.ai/api/v1",
+    "accessToken":"sk-or-..."
+  }'
+```
+
+Map third-party public model IDs to `openai-compatible/<actual-model-id>`, for example `llama-3.3-70b -> openai-compatible/meta-llama/llama-3.3-70b-instruct`. Starry API strips the routing prefix before sending the request upstream. For generic OpenAI-compatible accounts, `baseUrl` can be the site origin (`https://joystar.cc`) or a versioned API base (`https://openrouter.ai/api/v1`). If the path does not already end in a version segment, the runtime and account tester automatically use `/v1/chat/completions` for chat-completion checks.
 
 ## Batch Import Accounts
 
@@ -177,6 +193,8 @@ Add `accountIds` to test specific accounts only:
   "onlyEnabled": true
 }
 ```
+
+DeepSeek account tests default to `deepseek-v4-flash`; the account row can also be tested with `deepseek-v4-pro`. A DeepSeek `429` means transient concurrency or rate limiting, not exhausted quota. The service increments `errorCount` and applies same-provider retry/cooldown without setting `quotaExhaustedAt`, disabling, or suspending the account. This exception also applies to manual and scheduled account tests; other providers retain the existing `429` quota semantics.
 
 ## Create a Proxy API Key
 
@@ -350,6 +368,15 @@ https://<your-domain>/payment/webhook/easypay
 When the webhook signature is valid and the upstream trade status is successful, the service marks the order as completed and increments the user's balance. Duplicate successful callbacks are ignored after the first completion.
 
 Proxy API calls deduct balance by billable token count. The default admin setting `API计费倍率` is `0.0000166666666667`, which means 100 balance covers about 6,000,000 tokens; administrators can adjust it from `支付设置`. Model-specific rules in `模型价格` support a total equivalent multiplier (`x`) mode for direct whole-model pricing, and a sub2api/LiteLLM itemized mode where input, output, cache write, and cache read are configured as balance per 1M tokens, priced separately, summed, and then charged against the user's balance. The admin one-click preset action saves a compact wildcard catalog instead of generating one rule per discovered model.
+
+Without a matching enabled rule, DeepSeek uses these built-in official defaults in balance per 1M tokens:
+
+| Model | Input/cache miss | Cache hit | Output |
+| --- | ---: | ---: | ---: |
+| `deepseek-v4-flash` | 0.14 | 0.0028 | 0.28 |
+| `deepseek-v4-pro` | 0.435 | 0.003625 | 0.87 |
+
+Cache writes use the input/cache-miss price. The first enabled matching explicit rule wins, so exact model rules and wildcards such as `*` override these built-in values. Only an unmatched DeepSeek model uses the table; other unmatched models continue to use the global fallback multiplier. Update an explicit pricing rule when official pricing changes and an immediate override is required.
 
 Use the WebUI API Key page to generate per-key client configuration. The current setup is API-key based and no longer writes shell profiles automatically.
 
