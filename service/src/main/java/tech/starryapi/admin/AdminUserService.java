@@ -21,6 +21,8 @@ public class AdminUserService {
     private static final String DEFAULT_ADMIN_USERNAME = "admin";
     private static final String DEFAULT_ADMIN_ROLE = "ADMIN";
     private static final String DEFAULT_USER_ROLE = "USER";
+    private static final int MIN_PASSWORD_LENGTH = 12;
+    private static final int MAX_PASSWORD_LENGTH = 128;
     private static final char[] AFFILIATE_ALPHABET =
         "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789".toCharArray();
     private static final int AFFILIATE_CODE_LENGTH = 8;
@@ -55,27 +57,58 @@ public class AdminUserService {
         this.template = template;
     }
 
+    @Transactional
     public Mono<BootstrapAdmin> ensureDefaultAdmin() {
-        return repository.count()
-            .flatMap(count -> {
-                if (count > 0) {
-                    return existingBootstrap();
-                }
-                String password = passwordHasher.randomPassword();
-                AdminUserEntity entity = new AdminUserEntity();
-                entity.setUserId(Hashing.shortUuid());
-                entity.setUsername(DEFAULT_ADMIN_USERNAME);
-                entity.setDisplayName("Default Administrator");
-                entity.setRole(DEFAULT_ADMIN_ROLE);
-                entity.setBalance(BigDecimal.ZERO);
-                entity.setEnabled(true);
-                entity.setFirstLogin(true);
-                assignAffiliateCode(entity);
-                applyPassword(entity, password);
-                return repository.save(entity)
-                    .map(saved -> BootstrapAdmin.created(saved.getUsername(), password))
-                    .onErrorResume(DuplicateKeyException.class, error -> existingBootstrap());
-            });
+        return repository.findApplicationRootUserIdWithLock()
+            .switchIfEmpty(Mono.error(new IllegalStateException(
+                "The application Root identity marker is missing; Flyway V6 must be applied"
+            )))
+            .flatMap(rootUserId -> rootUserId == null || rootUserId.isBlank()
+                ? bootstrapUnassignedRoot()
+                : existingBootstrap(rootUserId.trim()));
+    }
+
+    private Mono<BootstrapAdmin> bootstrapUnassignedRoot() {
+        return repository.findDefaultAdminCandidate()
+            .flatMap(candidate -> assignExistingRoot(candidate)
+                .thenReturn(existingRootBootstrap(candidate)))
+            .switchIfEmpty(Mono.defer(() -> repository.count()
+                .flatMap(count -> count == 0
+                    ? createAndAssignRoot()
+                    : Mono.error(new IllegalStateException(
+                        "The application Root identity is missing while other accounts already exist"
+                    )))));
+    }
+
+    private Mono<BootstrapAdmin> createAndAssignRoot() {
+        String password = passwordHasher.randomPassword();
+        AdminUserEntity entity = new AdminUserEntity();
+        entity.setUserId(Hashing.shortUuid());
+        entity.setUsername(DEFAULT_ADMIN_USERNAME);
+        entity.setDisplayName("Default Administrator");
+        entity.setRole(DEFAULT_ADMIN_ROLE);
+        entity.setBalance(BigDecimal.ZERO);
+        entity.setEnabled(true);
+        entity.setFirstLogin(true);
+        assignAffiliateCode(entity);
+        applyPassword(entity, password);
+        return repository.save(entity)
+            .flatMap(saved -> assignExistingRoot(saved)
+                .thenReturn(BootstrapAdmin.created(saved.getUsername(), password)))
+            .onErrorMap(DuplicateKeyException.class, error -> new IllegalStateException(
+                "The application Root account could not be created atomically",
+                error
+            ));
+    }
+
+    private Mono<Void> assignExistingRoot(AdminUserEntity candidate) {
+        existingRootBootstrap(candidate);
+        return repository.assignApplicationRoot(candidate.getUserId())
+            .filter(updated -> updated == 1)
+            .switchIfEmpty(Mono.error(new IllegalStateException(
+                "The application Root identity marker could not be assigned"
+            )))
+            .then();
     }
 
     public Flux<AdminUserEntity> list() {
@@ -93,15 +126,30 @@ public class AdminUserService {
             });
     }
 
+    public Mono<AdminDtos.AdminPermissions> permissions(AdminPrincipal principal) {
+        if (principal == null || !"ADMIN".equals(principal.role()) || principal.firstLogin()
+            || "env-admin".equals(principal.userId())) {
+            return Mono.just(new AdminDtos.AdminPermissions(false));
+        }
+        return repository.findApplicationRoot()
+            .map(root -> new AdminDtos.AdminPermissions(
+                root.getUserId() != null && root.getUserId().equals(principal.userId())
+                    && "ADMIN".equals(root.getRole()) && Boolean.TRUE.equals(root.getEnabled())
+                    && !Boolean.TRUE.equals(root.getFirstLogin())))
+            .defaultIfEmpty(new AdminDtos.AdminPermissions(false));
+    }
+
     @Transactional
     public Mono<AdminDtos.AdminUserCreatedResponse> create(AdminDtos.CreateAdminUserRequest request) {
+        String username = normalizeUsername(request.username());
+        rejectReservedRootUsername(username);
         String password = request.password() == null || request.password().isBlank()
             ? passwordHasher.randomPassword()
-            : request.password();
+            : validateNewPassword(request.password());
         BigDecimal initialBalance = normalizeBalance(request.balance());
         AdminUserEntity entity = new AdminUserEntity();
         entity.setUserId(Hashing.shortUuid());
-        entity.setUsername(normalizeUsername(request.username()));
+        entity.setUsername(username);
         entity.setEmail(RegistrationEmailPolicy.normalizeEmail(request.email()));
         entity.setDisplayName(request.displayName());
         entity.setRole(normalizeRole(request.role(), DEFAULT_USER_ROLE));
@@ -127,6 +175,8 @@ public class AdminUserService {
 
     public Mono<AdminDtos.LoginResponse> register(AdminDtos.RegisterRequest request, String remoteIp) {
         String username = normalizeUsername(request.username());
+        rejectReservedRootUsername(username);
+        validateNewPassword(request.password());
         String email = RegistrationEmailPolicy.normalizeEmail(request.email());
         String inviteCode = normalizeInviteCode(request.inviteCode());
         String affiliateCode = normalizeAffiliateCode(request.affiliateCode());
@@ -162,10 +212,26 @@ public class AdminUserService {
             );
     }
 
-    public Mono<AdminUserEntity> update(String userId, AdminDtos.UpdateAdminUserRequest request) {
+    public Mono<AdminUserEntity> update(
+        AdminPrincipal principal,
+        String userId,
+        AdminDtos.UpdateAdminUserRequest request
+    ) {
+        return Mono.defer(() -> {
+            String normalizedRole = normalizeOptionalUpdateRole(request.role());
+            return authorizeRootUpdate(principal, userId, request, normalizedRole)
+                .then(Mono.defer(() -> updateAuthorized(userId, request, normalizedRole)));
+        });
+    }
+
+    private Mono<AdminUserEntity> updateAuthorized(
+        String userId,
+        AdminDtos.UpdateAdminUserRequest request,
+        String normalizedRole
+    ) {
         boolean setEmail = request.email() != null;
         boolean setDisplayName = request.displayName() != null;
-        boolean setRole = request.role() != null;
+        boolean setRole = normalizedRole != null;
         boolean setBalance = request.balance() != null;
         boolean setEnabled = request.enabled() != null;
         BigDecimal balance = setBalance ? normalizeBalance(request.balance()) : BigDecimal.ZERO;
@@ -222,7 +288,7 @@ public class AdminUserService {
             .bind("enabled", Boolean.TRUE.equals(request.enabled()));
         spec = bindNullable(spec, "email", setEmail ? RegistrationEmailPolicy.normalizeEmail(request.email()) : null);
         spec = bindNullable(spec, "displayName", request.displayName());
-        spec = bindNullable(spec, "role", setRole ? normalizeRole(request.role(), DEFAULT_USER_ROLE) : null);
+        spec = bindNullable(spec, "role", normalizedRole);
         return spec
             .map((row, metadata) -> template.getConverter().read(AdminUserEntity.class, row, metadata))
             .one()
@@ -230,7 +296,12 @@ public class AdminUserService {
             .onErrorMap(
                 DuplicateKeyException.class,
                 error -> new ApiException(HttpStatus.CONFLICT, "ADMIN_USER_EXISTS", "Username or email already exists")
-            );
+            )
+            .doOnNext(updated -> {
+                if (setRole || setEnabled) {
+                    sessionService.invalidateUserSessions(userId);
+                }
+            });
     }
 
     private Mono<AdminUserEntity> setInitialBalance(String userId, BigDecimal balance) {
@@ -279,7 +350,12 @@ public class AdminUserService {
         return value == null ? spec.bindNull(name, String.class) : spec.bind(name, value);
     }
 
-    public Mono<AdminDtos.ResetPasswordResponse> resetPassword(String userId) {
+    public Mono<AdminDtos.ResetPasswordResponse> resetPassword(AdminPrincipal principal, String userId) {
+        return authorizeRootAccess(principal, userId)
+            .then(Mono.defer(() -> resetPasswordAuthorized(userId)));
+    }
+
+    private Mono<AdminDtos.ResetPasswordResponse> resetPasswordAuthorized(String userId) {
         String password = passwordHasher.randomPassword();
         AdminUserEntity credentials = new AdminUserEntity();
         applyPassword(credentials, password);
@@ -302,7 +378,62 @@ public class AdminUserService {
                 password
             ))
             .one()
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ADMIN_USER_NOT_FOUND", "Admin user not found")));
+            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ADMIN_USER_NOT_FOUND", "Admin user not found")))
+            .doOnNext(response -> sessionService.invalidateUserSessions(response.userId()));
+    }
+
+    private Mono<Void> authorizeRootUpdate(
+        AdminPrincipal principal,
+        String targetUserId,
+        AdminDtos.UpdateAdminUserRequest request,
+        String normalizedRole
+    ) {
+        return repository.findApplicationRoot()
+            .flatMap(root -> {
+                if (!sameUser(root.getUserId(), targetUserId)) {
+                    return Mono.empty();
+                }
+                if (!sameUser(root.getUserId(), principal == null ? null : principal.userId())) {
+                    return rootProtected();
+                }
+                if (normalizedRole != null && !DEFAULT_ADMIN_ROLE.equals(normalizedRole)) {
+                    return Mono.error(new ApiException(
+                        HttpStatus.FORBIDDEN,
+                        "APPLICATION_ROOT_INVARIANT",
+                        "The system Root account must retain the ADMIN role"
+                    ));
+                }
+                if (Boolean.FALSE.equals(request.enabled())) {
+                    return Mono.error(new ApiException(
+                        HttpStatus.FORBIDDEN,
+                        "APPLICATION_ROOT_INVARIANT",
+                        "The system Root account cannot be disabled"
+                    ));
+                }
+                return Mono.empty();
+            })
+            .then();
+    }
+
+    private Mono<Void> authorizeRootAccess(AdminPrincipal principal, String targetUserId) {
+        return repository.findApplicationRoot()
+            .flatMap(root -> sameUser(root.getUserId(), targetUserId)
+                && !sameUser(root.getUserId(), principal == null ? null : principal.userId())
+                ? rootProtected()
+                : Mono.empty())
+            .then();
+    }
+
+    private Mono<Void> rootProtected() {
+        return Mono.error(new ApiException(
+            HttpStatus.FORBIDDEN,
+            "APPLICATION_ROOT_PROTECTED",
+            "Only the system Root account can modify or reset the system Root account"
+        ));
+    }
+
+    private boolean sameUser(String left, String right) {
+        return left != null && left.equals(right);
     }
 
     public Mono<AdminDtos.LoginResponse> login(AdminDtos.LoginRequest request) {
@@ -332,6 +463,7 @@ public class AdminUserService {
     }
 
     public Mono<Void> changePassword(AdminPrincipal principal, AdminDtos.ChangePasswordRequest request) {
+        validateNewPassword(request.newPassword());
         return repository.findByUserId(principal.userId())
             .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ADMIN_USER_NOT_FOUND", "Admin user not found")))
             .flatMap(entity -> {
@@ -353,21 +485,52 @@ public class AdminUserService {
                     .bind("userId", entity.getUserId())
                     .fetch()
                     .rowsUpdated()
-                    .doOnSuccess(rows -> sessionService.clearFirstLogin(entity.getUserId()))
+                    .filter(rows -> rows > 0)
+                    .switchIfEmpty(Mono.error(new ApiException(
+                        HttpStatus.NOT_FOUND,
+                        "ADMIN_USER_NOT_FOUND",
+                        "Admin user not found"
+                    )))
+                    .doOnNext(rows -> sessionService.invalidateUserSessions(entity.getUserId()))
                     .then();
             });
     }
 
-    private Mono<BootstrapAdmin> existingBootstrap() {
-        return repository.findByUsername(DEFAULT_ADMIN_USERNAME)
-            .map(entity -> BootstrapAdmin.existing(entity.getUsername(), Boolean.TRUE.equals(entity.getFirstLogin())))
-            .defaultIfEmpty(BootstrapAdmin.existing(null, false));
+    private Mono<BootstrapAdmin> existingBootstrap(String rootUserId) {
+        return repository.findByUserId(rootUserId)
+            .map(this::existingRootBootstrap)
+            .switchIfEmpty(Mono.error(new IllegalStateException(
+                "The application Root identity marker references a missing account"
+            )));
+    }
+
+    private BootstrapAdmin existingRootBootstrap(AdminUserEntity entity) {
+        if (entity == null
+            || !DEFAULT_ADMIN_USERNAME.equalsIgnoreCase(entity.getUsername())
+            || !DEFAULT_ADMIN_ROLE.equalsIgnoreCase(entity.getRole())
+            || !Boolean.TRUE.equals(entity.getEnabled())) {
+            throw new IllegalStateException("The application Root account violates its required identity state");
+        }
+        return BootstrapAdmin.existing(entity.getUsername(), Boolean.TRUE.equals(entity.getFirstLogin()));
     }
 
     private void applyPassword(AdminUserEntity entity, String password) {
         String salt = passwordHasher.newSalt();
         entity.setPasswordSalt(salt);
         entity.setPasswordHash(passwordHasher.hash(password, salt));
+    }
+
+    private String validateNewPassword(String password) {
+        if (password == null
+            || password.length() < MIN_PASSWORD_LENGTH
+            || password.length() > MAX_PASSWORD_LENGTH) {
+            throw new ApiException(
+                HttpStatus.BAD_REQUEST,
+                "PASSWORD_POLICY_VIOLATION",
+                "New passwords must contain 12 to 128 characters"
+            );
+        }
+        return password;
     }
 
     private void assignAffiliateCode(AdminUserEntity entity) {
@@ -417,6 +580,16 @@ public class AdminUserService {
 
     private String normalizeUsername(String username) {
         return username == null ? "" : username.trim();
+    }
+
+    private void rejectReservedRootUsername(String username) {
+        if (DEFAULT_ADMIN_USERNAME.equalsIgnoreCase(username)) {
+            throw new ApiException(
+                HttpStatus.CONFLICT,
+                "APPLICATION_ROOT_USERNAME_RESERVED",
+                "The default administrator username is reserved for the system Root account"
+            );
+        }
     }
 
     private Mono<String> registrationGuard(
@@ -471,6 +644,16 @@ public class AdminUserService {
             return normalized;
         }
         throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_ADMIN_ROLE", "Account role must be ADMIN or USER");
+    }
+
+    private String normalizeOptionalUpdateRole(String role) {
+        if (role == null) {
+            return null;
+        }
+        if (role.isBlank()) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_ADMIN_ROLE", "Account role must be ADMIN or USER");
+        }
+        return normalizeRole(role, null);
     }
 
     private BigDecimal normalizeBalance(BigDecimal balance) {

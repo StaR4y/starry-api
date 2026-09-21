@@ -4,11 +4,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
+import tech.starryapi.admin.SystemMaintenanceTaskGate;
 
 @Service
 public class RequestUsageAggregationService {
@@ -30,6 +32,8 @@ public class RequestUsageAggregationService {
     private final int usageEventRetentionDays;
     private final int usageEventDeleteBatchSize;
     private final int usageEventDeleteMaxBatches;
+    private SystemMaintenanceTaskGate maintenanceTaskGate =
+        SystemMaintenanceTaskGate.alwaysOperationalForDirectConstruction();
     private final AtomicBoolean running = new AtomicBoolean();
 
     public RequestUsageAggregationService(
@@ -66,20 +70,31 @@ public class RequestUsageAggregationService {
         this.usageEventDeleteMaxBatches = clamp(usageEventDeleteMaxBatches, 1, 100);
     }
 
+    @Autowired
+    void setMaintenanceTaskGate(SystemMaintenanceTaskGate maintenanceTaskGate) {
+        this.maintenanceTaskGate = maintenanceTaskGate;
+    }
+
     @Scheduled(
         fixedDelayString = "${starry.stats.aggregation-interval:PT1M}",
         initialDelayString = "${starry.stats.aggregation-initial-delay:PT30S}"
     )
     public void scheduledAggregate() {
         if (enabled) {
-            run("request usage aggregation", this::refresh);
+            run(
+                "request usage aggregation",
+                () -> maintenanceTaskGate.whenOperational(this::refresh)
+            );
         }
     }
 
     @Scheduled(cron = "${starry.stats.maintenance-cron:0 25 3 * * *}", zone = "UTC")
     public void scheduledMaintenance() {
         if (enabled) {
-            run("request log maintenance", this::maintain);
+            run(
+                "request log maintenance",
+                () -> maintenanceTaskGate.whenOperational(this::maintain)
+            );
         }
     }
 

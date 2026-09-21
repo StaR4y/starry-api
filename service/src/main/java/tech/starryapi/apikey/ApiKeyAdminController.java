@@ -50,7 +50,7 @@ public class ApiKeyAdminController implements ApiKeyAdminApi {
     public Mono<ApiResponse<ApiKeyDtos.ApiKeyResponse>> update(
         ServerWebExchange exchange,
         @PathVariable String keyId,
-        @RequestBody ApiKeyDtos.UpdateApiKeyRequest request
+        @Valid @RequestBody ApiKeyDtos.UpdateApiKeyRequest request
     ) {
         AdminPrincipal principal = adminAuth.verify(exchange);
         return service.update(principal, keyId, request)

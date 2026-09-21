@@ -2,6 +2,7 @@ package tech.starryapi.admin;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -35,6 +36,19 @@ public class RegistrationSettingsService {
     static final String TURNSTILE_ENABLED = "turnstile_enabled";
     static final String TURNSTILE_SITE_KEY = "turnstile_site_key";
     static final String TURNSTILE_SECRET_KEY = "turnstile_secret_key";
+    static final String SMTP_VERIFY_ENABLED = "smtp_verify_enabled";
+    static final String SMTP_VERIFIED = "smtp_verified";
+    static final String SMTP_VERIFY_FINGERPRINT = "smtp_verify_fingerprint";
+    static final String SMTP_VERIFY_TOKEN_HASH = "smtp_verify_token_hash";
+    static final String SMTP_VERIFY_EXPIRES_AT = "smtp_verify_expires_at";
+    static final String SMTP_VERIFY_NEXT_SEND_AT = "smtp_verify_next_send_at";
+    static final String SMTP_VERIFY_SENT_TO = "smtp_verify_sent_to";
+    static final String SMTP_VERIFY_LAST_ERROR = "smtp_verify_last_error";
+    static final String SMTP_VERIFY_STATUS_UNCONFIGURED = "UNCONFIGURED";
+    static final String SMTP_VERIFY_STATUS_PENDING = "PENDING";
+    static final String SMTP_VERIFY_STATUS_VERIFIED = "VERIFIED";
+    static final String SMTP_VERIFY_STATUS_SKIPPED = "SKIPPED";
+    static final String SMTP_VERIFY_STATUS_FAILED = "FAILED";
 
     static final String SMTP_SECURITY_AUTO = "auto";
     static final String SMTP_SECURITY_NONE = "none";
@@ -56,7 +70,15 @@ public class RegistrationSettingsService {
         SMTP_SECURITY,
         TURNSTILE_ENABLED,
         TURNSTILE_SITE_KEY,
-        TURNSTILE_SECRET_KEY
+        TURNSTILE_SECRET_KEY,
+        SMTP_VERIFY_ENABLED,
+        SMTP_VERIFIED,
+        SMTP_VERIFY_FINGERPRINT,
+        SMTP_VERIFY_TOKEN_HASH,
+        SMTP_VERIFY_EXPIRES_AT,
+        SMTP_VERIFY_NEXT_SEND_AT,
+        SMTP_VERIFY_SENT_TO,
+        SMTP_VERIFY_LAST_ERROR
     );
     private static final List<String> REGISTRATION_POLICY_KEYS = List.of(
         REGISTRATION_ENABLED,
@@ -166,6 +188,39 @@ public class RegistrationSettingsService {
                 settings.put(TURNSTILE_ENABLED, Boolean.toString(turnstileEnabled));
                 settings.put(TURNSTILE_SITE_KEY, turnstileSiteKey);
                 settings.put(TURNSTILE_SECRET_KEY, passwordValue(request.turnstileSecretKey(), previous.get(TURNSTILE_SECRET_KEY)));
+
+                String smtpPassword = settings.get(SMTP_PASSWORD);
+                String fingerprint = smtpFingerprint(smtpHost, smtpPort, smtpUsername, smtpPassword, smtpFromEmail);
+                boolean configured = !smtpHost.isBlank() && !smtpFromEmail.isBlank();
+                boolean verifyEnabled = request.smtpVerifyEnabled() == null
+                    ? bool(previous, SMTP_VERIFY_ENABLED, true)
+                    : Boolean.TRUE.equals(request.smtpVerifyEnabled());
+                boolean fingerprintChanged = !fingerprint.equals(clean(previous.get(SMTP_VERIFY_FINGERPRINT)));
+                boolean verified = configured
+                    && !fingerprintChanged
+                    && bool(previous, SMTP_VERIFIED, false);
+                settings.put(SMTP_VERIFY_ENABLED, Boolean.toString(verifyEnabled));
+                settings.put(SMTP_VERIFIED, Boolean.toString(verified));
+                settings.put(SMTP_VERIFY_FINGERPRINT, fingerprint);
+                if (!configured || fingerprintChanged) {
+                    settings.put(SMTP_VERIFY_TOKEN_HASH, "");
+                    settings.put(SMTP_VERIFY_EXPIRES_AT, "");
+                    settings.put(SMTP_VERIFY_NEXT_SEND_AT, "");
+                    settings.put(SMTP_VERIFY_SENT_TO, "");
+                    settings.put(SMTP_VERIFY_LAST_ERROR, "");
+                } else if (verified) {
+                    settings.put(SMTP_VERIFY_TOKEN_HASH, "");
+                    settings.put(SMTP_VERIFY_EXPIRES_AT, "");
+                    settings.put(SMTP_VERIFY_NEXT_SEND_AT, clean(previous.get(SMTP_VERIFY_NEXT_SEND_AT)));
+                    settings.put(SMTP_VERIFY_SENT_TO, clean(previous.get(SMTP_VERIFY_SENT_TO)));
+                    settings.put(SMTP_VERIFY_LAST_ERROR, "");
+                } else {
+                    settings.put(SMTP_VERIFY_TOKEN_HASH, clean(previous.get(SMTP_VERIFY_TOKEN_HASH)));
+                    settings.put(SMTP_VERIFY_EXPIRES_AT, clean(previous.get(SMTP_VERIFY_EXPIRES_AT)));
+                    settings.put(SMTP_VERIFY_NEXT_SEND_AT, clean(previous.get(SMTP_VERIFY_NEXT_SEND_AT)));
+                    settings.put(SMTP_VERIFY_SENT_TO, clean(previous.get(SMTP_VERIFY_SENT_TO)));
+                    settings.put(SMTP_VERIFY_LAST_ERROR, clean(previous.get(SMTP_VERIFY_LAST_ERROR)));
+                }
                 return repository.upsertSettings(
                         settings.keySet().toArray(String[]::new),
                         settings.values().toArray(String[]::new)
@@ -215,6 +270,78 @@ public class RegistrationSettingsService {
 
     public Mono<Boolean> emailVerifyEnabled() {
         return registrationPolicy().map(RegistrationPolicy::emailVerifyEnabled);
+    }
+
+    public Mono<AdminDtos.RegistrationSettingsResponse> recordSmtpChallenge(
+        String email,
+        String tokenHash,
+        Instant expiresAt,
+        Instant nextSendAt
+    ) {
+        Map<String, String> values = new LinkedHashMap<>();
+        values.put(SMTP_VERIFIED, "false");
+        values.put(SMTP_VERIFY_TOKEN_HASH, clean(tokenHash));
+        values.put(SMTP_VERIFY_EXPIRES_AT, expiresAt == null ? "" : expiresAt.toString());
+        values.put(SMTP_VERIFY_NEXT_SEND_AT, nextSendAt == null ? "" : nextSendAt.toString());
+        values.put(SMTP_VERIFY_SENT_TO, clean(email));
+        values.put(SMTP_VERIFY_LAST_ERROR, "");
+        return upsertAndRespond(values);
+    }
+
+    public Mono<AdminDtos.RegistrationSettingsResponse> recordSmtpChallengeFailure(String error) {
+        Map<String, String> values = new LinkedHashMap<>();
+        values.put(SMTP_VERIFIED, "false");
+        values.put(SMTP_VERIFY_TOKEN_HASH, "");
+        values.put(SMTP_VERIFY_EXPIRES_AT, "");
+        values.put(SMTP_VERIFY_LAST_ERROR, clean(error));
+        return upsertAndRespond(values);
+    }
+
+    public Mono<AdminDtos.RegistrationSettingsResponse> markSmtpVerified(String tokenHash) {
+        String expected = clean(tokenHash);
+        if (expected.isBlank()) {
+            return Mono.error(new ApiException(
+                HttpStatus.BAD_REQUEST,
+                "INVALID_SMTP_VERIFY_TOKEN",
+                "SMTP verification link is invalid or expired"
+            ));
+        }
+        return settingValues().flatMap(values -> {
+            if (!bool(values, SMTP_VERIFY_ENABLED, true)) {
+                return Mono.just(settingsResponse(values));
+            }
+            if (bool(values, SMTP_VERIFIED, false)) {
+                return Mono.just(settingsResponse(values));
+            }
+            Instant expiresAt = parseInstant(values.get(SMTP_VERIFY_EXPIRES_AT));
+            if (!expected.equals(clean(values.get(SMTP_VERIFY_TOKEN_HASH)))
+                || expiresAt == null
+                || expiresAt.isBefore(Instant.now())) {
+                return Mono.error(new ApiException(
+                    HttpStatus.BAD_REQUEST,
+                    "INVALID_SMTP_VERIFY_TOKEN",
+                    "SMTP verification link is invalid or expired"
+                ));
+            }
+            Map<String, String> updates = new LinkedHashMap<>();
+            updates.put(SMTP_VERIFIED, "true");
+            updates.put(SMTP_VERIFY_TOKEN_HASH, "");
+            updates.put(SMTP_VERIFY_EXPIRES_AT, "");
+            updates.put(SMTP_VERIFY_LAST_ERROR, "");
+            return upsertAndRespond(updates);
+        });
+    }
+
+    Instant smtpNextSendAt(Map<String, String> values) {
+        return parseInstant(values.get(SMTP_VERIFY_NEXT_SEND_AT));
+    }
+
+    private Mono<AdminDtos.RegistrationSettingsResponse> upsertAndRespond(Map<String, String> updates) {
+        return repository.upsertSettings(
+                updates.keySet().toArray(String[]::new),
+                updates.values().toArray(String[]::new)
+            )
+            .then(settings());
     }
 
     public Mono<SmtpConfig> smtpConfig() {
@@ -279,8 +406,66 @@ public class RegistrationSettingsService {
             ),
             policyBool(values, TURNSTILE_ENABLED, false),
             values.getOrDefault(TURNSTILE_SITE_KEY, ""),
-            !clean(values.get(TURNSTILE_SECRET_KEY)).isBlank()
+            !clean(values.get(TURNSTILE_SECRET_KEY)).isBlank(),
+            bool(values, SMTP_VERIFY_ENABLED, true),
+            smtpVerifyStatus(values),
+            clean(values.get(SMTP_VERIFY_SENT_TO)),
+            parseInstant(values.get(SMTP_VERIFY_EXPIRES_AT)),
+            clean(values.get(SMTP_VERIFY_LAST_ERROR))
         );
+    }
+
+    String smtpVerifyStatus(Map<String, String> values) {
+        SmtpConfig config = new SmtpConfig(
+            clean(values.get(SMTP_HOST)),
+            normalizePort(number(values, SMTP_PORT, 587)),
+            clean(values.get(SMTP_USERNAME)),
+            clean(values.get(SMTP_PASSWORD)),
+            clean(values.get(SMTP_FROM_EMAIL)),
+            clean(values.get(SMTP_FROM_NAME)),
+            bool(values, SMTP_USE_TLS, false),
+            legacySmtpSecurity(
+                values.get(SMTP_SECURITY),
+                bool(values, SMTP_USE_TLS, false),
+                normalizePort(number(values, SMTP_PORT, 587))
+            )
+        );
+        if (!config.configured()) {
+            return SMTP_VERIFY_STATUS_UNCONFIGURED;
+        }
+        if (!bool(values, SMTP_VERIFY_ENABLED, true)) {
+            return SMTP_VERIFY_STATUS_SKIPPED;
+        }
+        if (bool(values, SMTP_VERIFIED, false)) {
+            return SMTP_VERIFY_STATUS_VERIFIED;
+        }
+        if (!clean(values.get(SMTP_VERIFY_LAST_ERROR)).isBlank()
+            && clean(values.get(SMTP_VERIFY_TOKEN_HASH)).isBlank()) {
+            return SMTP_VERIFY_STATUS_FAILED;
+        }
+        return SMTP_VERIFY_STATUS_PENDING;
+    }
+
+    static String smtpFingerprint(String host, int port, String username, String password, String fromEmail) {
+        return Hashing.sha256(
+            cleanStatic(host) + '\n'
+                + port + '\n'
+                + cleanStatic(username) + '\n'
+                + cleanStatic(password) + '\n'
+                + cleanStatic(fromEmail)
+        );
+    }
+
+    Instant parseInstant(String value) {
+        String cleaned = clean(value);
+        if (cleaned.isBlank()) {
+            return null;
+        }
+        try {
+            return Instant.parse(cleaned);
+        } catch (Exception ignored) {
+            return null;
+        }
     }
 
     private Mono<String> value(String key, String fallback) {
@@ -319,7 +504,8 @@ public class RegistrationSettingsService {
 
     private String defaultValue(String key) {
         return switch (key) {
-            case REGISTRATION_ENABLED, EMAIL_VERIFY_ENABLED, INVITE_CODE_ENABLED, SMTP_USE_TLS, TURNSTILE_ENABLED -> "false";
+            case REGISTRATION_ENABLED, EMAIL_VERIFY_ENABLED, INVITE_CODE_ENABLED, SMTP_USE_TLS, TURNSTILE_ENABLED, SMTP_VERIFIED -> "false";
+            case SMTP_VERIFY_ENABLED -> "true";
             case REGISTRATION_EMAIL_SUFFIX_WHITELIST -> "[]";
             case SMTP_PORT -> "587";
             case SMTP_SECURITY -> SMTP_SECURITY_AUTO;

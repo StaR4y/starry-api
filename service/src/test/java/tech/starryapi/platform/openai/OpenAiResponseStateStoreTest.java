@@ -66,6 +66,21 @@ class OpenAiResponseStateStoreTest {
     }
 
     @Test
+    void remembersTheAccountThatProducedAResponse() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+            {"model":"gpt-5.5","input":"hello"}
+            """);
+        ObjectNode response = (ObjectNode) objectMapper.readTree("""
+            {"id":"resp_owner","output":[]}
+            """);
+
+        store.remember(response, request, "openai-account-1");
+
+        assertThat(store.ownerAccountId("resp_owner")).isEqualTo("openai-account-1");
+        assertThat(store.canExpand("resp_owner")).isTrue();
+    }
+
+    @Test
     void leavesUnknownPreviousResponseIdUntouched() throws Exception {
         ObjectNode request = (ObjectNode) objectMapper.readTree("""
             {

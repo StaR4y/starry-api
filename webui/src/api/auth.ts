@@ -9,6 +9,7 @@ import type {
   RegistrationSettings,
   SendVerifyCodeRequest,
   SendVerifyCodeResult,
+  SmtpVerifyResult,
   ApiResponse,
 } from '@/types/api';
 
@@ -18,6 +19,11 @@ export const authApi = {
   },
   me() {
     return unwrap<AdminUser>(http.get<ApiResponse<AdminUser>>('/auth/me'));
+  },
+  permissions() {
+    return unwrap<{ root: boolean }>(
+      http.get<ApiResponse<{ root: boolean }>>('/auth/permissions', { timeout: 5_000 }),
+    );
   },
   register(payload: RegisterRequest) {
     return unwrap<LoginResponse>(http.post<ApiResponse<LoginResponse>>('/auth/register', payload));
@@ -34,5 +40,10 @@ export const authApi = {
   },
   changePassword(payload: ChangePasswordRequest) {
     return unwrap<void>(http.post<ApiResponse<void>>('/auth/password', payload));
+  },
+  verifySmtp(token: string) {
+    return unwrap<SmtpVerifyResult>(
+      http.post<ApiResponse<SmtpVerifyResult>>('/auth/smtp-verify', { token }),
+    );
   },
 };

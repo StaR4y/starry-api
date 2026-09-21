@@ -10,6 +10,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.time.Instant;
@@ -19,6 +20,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
 import org.springframework.r2dbc.core.DatabaseClient;
@@ -26,10 +29,30 @@ import org.springframework.r2dbc.core.RowsFetchSpec;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
+import tech.starryapi.admin.DataManagementSecurityService;
+import tech.starryapi.admin.SystemMaintenanceTaskGate;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.config.ProxyProperties;
 
 class AccountPoolServiceTest {
+
+    @Test
+    void scheduledRefreshSkipsRepositoryDuringMaintenance() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        DataManagementSecurityService securityService = mock(DataManagementSecurityService.class);
+        when(securityService.isLocked()).thenReturn(Mono.just(true));
+        AccountPoolService service = new AccountPoolService(
+            repository,
+            null,
+            new ProxyProperties(),
+            null,
+            new SystemMaintenanceTaskGate(securityService)
+        );
+
+        service.scheduledRefresh();
+
+        verifyNoInteractions(repository);
+    }
 
     @Test
     void importAccountsInsertsEveryAccountWithPostgreSqlReturning() {
@@ -58,9 +81,29 @@ class AccountPoolServiceTest {
         assertThat(harness.sql()).contains(
             "INSERT INTO proxy_accounts AS target",
             "ON CONFLICT (lower(email)) WHERE email IS NOT NULL",
-            "DO UPDATE SET",
-            "RETURNING target.*"
+            "DO UPDATE SET"
         );
+        assertThat(harness.sql()).containsPattern("updated_at = clock_timestamp\\(\\)\\s+RETURNING target\\.\\*");
+        verify(repository, never()).save(any(ProxyAccountEntity.class));
+    }
+
+    @Test
+    void createSeparatesDoNothingFromPostgreSqlReturning() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity inserted = account("new-account");
+        inserted.setEmail("new-account@example.com");
+        AccountInsertHarness harness = accountInsertService(
+            repository,
+            List.of(Mono.just(new AccountPoolService.AccountWriteResult(inserted, true)))
+        );
+
+        ProxyAccountEntity saved = harness.service()
+            .create(create("new-account", "new-account@example.com", "token"))
+            .block();
+
+        assertThat(saved).isSameAs(inserted);
+        assertThat(harness.sql()).containsPattern("DO NOTHING\\s+RETURNING target\\.\\*");
+        assertThat(harness.sql()).doesNotContain("DO NOTHINGRETURNING");
         verify(repository, never()).save(any(ProxyAccountEntity.class));
     }
 
@@ -218,6 +261,130 @@ class AccountPoolServiceTest {
     }
 
     @Test
+    void selectOpenAiApiKeyAccountSkipsCodexTokens() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity apiKey = openAiPoolAccount("openai-key");
+        ProxyAccountEntity codex = codexPoolAccount("codex-token");
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(codex, apiKey));
+
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+        service.refreshCache().block();
+
+        assertThat(service.selectOpenAiApiKeyAccountForPool("session-1", null).block())
+            .extracting(ProxyAccountEntity::getAccountId)
+            .isEqualTo("openai-key");
+        assertThat(service.selectCodexOpenAiAccount("session-1").block())
+            .extracting(ProxyAccountEntity::getAccountId)
+            .isEqualTo("codex-token");
+    }
+
+    @Test
+    void officialCompatibleCodexAndDeepSeekPoolsRemainDistinct() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity official = openAiPoolAccount("openai-official");
+        ProxyAccountEntity compatible = openAiPoolAccount("openai-compatible");
+        compatible.setProvider(AccountPlatforms.OPENAI_COMPATIBLE_PROVIDER);
+        compatible.setBaseUrl("https://gateway.example/v1");
+        ProxyAccountEntity codex = codexPoolAccount("codex-token");
+        ProxyAccountEntity deepSeek = deepSeekPoolAccount("deepseek-key");
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(
+            compatible,
+            codex,
+            deepSeek,
+            official
+        ));
+
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+        service.refreshCache().block();
+
+        assertThat(service.selectOpenAiApiKeyAccountForPool("session-1", null).block())
+            .extracting(ProxyAccountEntity::getAccountId)
+            .isEqualTo("openai-official");
+        assertThat(service.selectOpenAiCompatibleAccountForPool("session-1", null).block())
+            .extracting(ProxyAccountEntity::getAccountId)
+            .isEqualTo("openai-compatible");
+        assertThat(service.selectCodexOpenAiAccountForPool("session-1", null).block())
+            .extracting(ProxyAccountEntity::getAccountId)
+            .isEqualTo("codex-token");
+        assertThat(service.selectDeepSeekOpenAiAccountForPool("session-1", null).block())
+            .extracting(ProxyAccountEntity::getAccountId)
+            .isEqualTo("deepseek-key");
+    }
+
+    @Test
+    void customCatalogVendorJoinsOpenAiCompatiblePool() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity official = openAiPoolAccount("openai-official");
+        ProxyAccountEntity vendor = openAiPoolAccount("openrouter-key");
+        vendor.setProvider("OpenRouter");
+        vendor.setBaseUrl("https://openrouter.ai/api/v1");
+        vendor.setBadgeColor("#4D6BFE");
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(official, vendor));
+
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+        service.refreshCache().block();
+
+        assertThat(service.selectOpenAiApiKeyAccountForPool("session-1", null).block())
+            .extracting(ProxyAccountEntity::getAccountId)
+            .isEqualTo("openai-official");
+        assertThat(service.selectOpenAiCompatibleAccountForPool("session-1", null).block())
+            .extracting(ProxyAccountEntity::getAccountId)
+            .isEqualTo("openrouter-key");
+    }
+
+    @Test
+    void contextScopedAffinityUsesTheSameKeyForCommitAndReadWithoutOscillation() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity first = openAiPoolAccount("openai-main");
+        first.setId(1L);
+        ProxyAccountEntity second = openAiPoolAccount("openai-backup");
+        second.setId(2L);
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(first, second));
+        AccountPoolPolicyService policyService = mock(AccountPoolPolicyService.class);
+        AccountPoolRequestContext context = requestContext("request-affinity");
+        when(policyService.affinityKey(context, "key-1:conversation-1"))
+            .thenReturn("openai:gpt-5:key-1:conversation-1");
+        when(policyService.applyTierPolicy(any(), org.mockito.ArgumentMatchers.eq(context)))
+            .thenAnswer(invocation -> invocation.getArgument(0));
+        ProxyProperties properties = new ProxyProperties();
+        properties.setSessionAffinityEnabled(true);
+        AccountPoolService service = new AccountPoolService(repository, null, properties, policyService);
+        service.refreshCache().block();
+
+        service.commitSessionAffinity(context, "key-1:conversation-1", "openai-backup", false);
+        service.commitSessionAffinity(context, "key-1:conversation-1", "openai-main", false);
+
+        assertThat(service.selectOpenAiAccountForPool("key-1:conversation-1", context).block())
+            .extracting(ProxyAccountEntity::getAccountId)
+            .isEqualTo("openai-backup");
+        verify(policyService, times(3)).affinityKey(context, "key-1:conversation-1");
+    }
+
+    @Test
+    void commitSessionAffinityCanBindBareApiKey() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity first = openAiPoolAccount("openai-main");
+        first.setId(1L);
+        ProxyAccountEntity second = openAiPoolAccount("openai-backup");
+        second.setId(2L);
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(first, second));
+        ProxyProperties properties = new ProxyProperties();
+        properties.setSessionAffinityEnabled(true);
+        AccountPoolService service = new AccountPoolService(repository, null, properties);
+        service.refreshCache().block();
+
+        service.commitSessionAffinity("key-1", "openai-backup", false);
+        assertThat(service.selectOpenAiAccount("key-1").block())
+            .extracting(ProxyAccountEntity::getAccountId)
+            .isEqualTo("openai-main");
+
+        service.commitSessionAffinity("key-1", "openai-backup", true);
+        assertThat(service.selectOpenAiAccount("key-1").block())
+            .extracting(ProxyAccountEntity::getAccountId)
+            .isEqualTo("openai-backup");
+    }
+
+    @Test
     void deepSeekAccountSelectionDoesNotFallBackToOpenAi() {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(openAiPoolAccount("openai-main")));
@@ -281,6 +448,61 @@ class AccountPoolServiceTest {
         verify(repository, never()).deleteAll();
         verify(repository, never()).count();
         verify(repository, never()).findAllByEnabledTrue();
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void poolStatusInventoryUsesOneCredentialFreeAggregationQuery() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        R2dbcEntityTemplate template = mock(R2dbcEntityTemplate.class);
+        DatabaseClient databaseClient = mock(DatabaseClient.class);
+        DatabaseClient.GenericExecuteSpec spec = mock(DatabaseClient.GenericExecuteSpec.class);
+        RowsFetchSpec<Object> fetch = mock(RowsFetchSpec.class);
+        RowMetadata metadata = mock(RowMetadata.class);
+        Row openAiPrimary = inventoryRow(6L, 3L, "OpenAI", "api-key", "https://api.openai.com/v1", "primary", 2L);
+        Row deepSeekSecondary = inventoryRow(6L, 3L, "DeepSeek", "api-key", "https://api.deepseek.com/v1", "secondary", 1L);
+        AtomicReference<String> sql = new AtomicReference<>();
+        AtomicReference<BiFunction<Row, RowMetadata, Object>> mapper = new AtomicReference<>();
+        when(template.getDatabaseClient()).thenReturn(databaseClient);
+        when(databaseClient.sql(anyString())).thenAnswer(invocation -> {
+            sql.set(invocation.getArgument(0));
+            return spec;
+        });
+        when(spec.map(org.mockito.ArgumentMatchers.<BiFunction<Row, RowMetadata, Object>>any()))
+            .thenAnswer(invocation -> {
+                mapper.set(invocation.getArgument(0));
+                return fetch;
+            });
+        when(fetch.all()).thenAnswer(invocation -> Flux.just(
+            mapper.get().apply(openAiPrimary, metadata),
+            mapper.get().apply(deepSeekSecondary, metadata)
+        ));
+        AccountPoolService service = new AccountPoolService(repository, template, new ProxyProperties());
+
+        AccountPoolService.PoolAccountInventory inventory = service.poolAccountInventory().block();
+
+        assertThat(inventory).isNotNull();
+        assertThat(inventory.accountCount()).isEqualTo(6);
+        assertThat(inventory.availableAccountCount()).isEqualTo(3);
+        assertThat(inventory.groups())
+            .containsExactly(
+                new AccountPoolService.PoolAccountGroup(
+                    "OpenAI", "api-key", "https://api.openai.com/v1", "primary", 2
+                ),
+                new AccountPoolService.PoolAccountGroup(
+                    "DeepSeek", "api-key", "https://api.deepseek.com/v1", "secondary", 1
+                )
+            );
+        assertThat(sql.get())
+            .contains("WITH account_inventory AS MATERIALIZED", "COUNT(*) FILTER (WHERE available)")
+            .doesNotContain(
+                "access_token",
+                "refresh_token",
+                "id_token",
+                "client_secret",
+                "proxy_url"
+            );
+        verify(repository, never()).findAll();
     }
 
     @Test
@@ -380,7 +602,7 @@ class AccountPoolServiceTest {
         CompletableFuture<Void> refresh = harness.service().refreshCache().toFuture();
 
         harness.service()
-            .recordTestFailure("acc-1", AccountPoolService.UpstreamErrorType.FATAL, 401, "revoked", true)
+            .recordTestFailure("acc-1", AccountPoolService.UpstreamErrorType.FATAL, 401, "token revoked", true)
             .block();
         ProxyAccountEntity staleEnabled = openAiPoolAccount("acc-1");
         staleEnabled.setUpdatedAt(Instant.parse("2026-01-01T00:00:00Z"));
@@ -440,7 +662,24 @@ class AccountPoolServiceTest {
     }
 
     @Test
-    void recordTestFailureDisablesAccountWhenUpdatingStatus() {
+    void disabledCircuitDoesNotEmitCircuitLogDimensions() {
+        AccountPoolPolicyService policyService = mock(AccountPoolPolicyService.class);
+        when(policyService.isEnabled()).thenReturn(false);
+        AccountPoolService service = new AccountPoolService(
+            mock(ProxyAccountRepository.class),
+            null,
+            new ProxyProperties(),
+            policyService
+        );
+
+        assertThat(service.circuitKey(requestContext("request-disabled"))).isNull();
+        assertThat(service.circuitTier(openAiPoolAccount("acc-1"))).isNull();
+
+        verify(policyService, never()).poolKey(any());
+    }
+
+    @Test
+    void recordTestFailureKeepsAccountEnabledForTransientFailure() {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         ProxyAccountEntity updated = failedAccount("ACCOUNT_TEST_FAILED", "upstream failed", false);
         SqlAccountPoolHarness harness = sqlService(repository, updated);
@@ -448,13 +687,15 @@ class AccountPoolServiceTest {
         harness.service().recordTestFailure("acc-1", AccountPoolService.UpstreamErrorType.RECOVERABLE, 503, "upstream failed", true)
             .block();
 
-        assertThat(harness.sql()).contains("error_count = COALESCE(error_count, 0) + 1", "RETURNING *");
-        verify(harness.spec()).bind("reason", "ACCOUNT_TEST_FAILED");
+        assertThat(harness.sql())
+            .contains("error_count = COALESCE(error_count, 0) + 1", "RETURNING *")
+            .doesNotContain("enabled = FALSE");
+        verify(harness.spec()).bind("permanentCredentialFailure", false);
         verify(repository, never()).save(any(ProxyAccountEntity.class));
     }
 
     @Test
-    void recordTestFailureMarksQuotaAndDisablesAccountWhenUpdatingStatus() {
+    void recordTestRateLimitDoesNotMarkQuotaOrDisableAccountByDefault() {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         ProxyAccountEntity updated = failedAccount("QUOTA_EXHAUSTED", "quota", true);
         SqlAccountPoolHarness harness = sqlService(repository, updated);
@@ -462,13 +703,12 @@ class AccountPoolServiceTest {
         harness.service().recordTestFailure("acc-1", AccountPoolService.UpstreamErrorType.RECOVERABLE, 429, "quota", true)
             .block();
 
-        verify(harness.spec()).bind("quotaFailure", true);
-        verify(harness.spec()).bind("reason", "QUOTA_EXHAUSTED");
-        assertThat(harness.sql()).contains("enabled = FALSE", "RETURNING *");
+        verify(harness.spec()).bind("quotaError", false);
+        assertThat(harness.sql()).doesNotContain("enabled = FALSE");
     }
 
     @Test
-    void recordRequestFailureMarksQuotaAndDisablesAccount() {
+    void recordRequestRateLimitDoesNotDisableAccountWithoutConfirmedQuotaEvidence() {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         ProxyAccountEntity updated = failedAccount("QUOTA_EXHAUSTED", "quota exhausted", true);
         SqlAccountPoolHarness harness = sqlService(repository, updated);
@@ -479,8 +719,8 @@ class AccountPoolServiceTest {
 
         assertThat(record).isNotNull();
         assertThat(record.consecutiveFailures()).isEqualTo(2);
-        assertThat(record.suspended()).isTrue();
-        verify(harness.spec()).bind("quotaFailure", true);
+        assertThat(record.suspended()).isFalse();
+        verify(harness.spec()).bind("quotaFailure", false);
         assertThat(harness.sql()).contains("enabled = CASE WHEN :suspended THEN FALSE", "RETURNING *");
     }
 
@@ -499,6 +739,187 @@ class AccountPoolServiceTest {
         assertThat(record.suspended()).isTrue();
         verify(harness.spec()).bind("authFailure", true);
         assertThat(harness.sql()).contains("WHEN :authFailure THEN NULL", "RETURNING *");
+    }
+
+    @Test
+    void enabledCircuitScopesServerFailureToModelPoolWithoutIncrementingAccountErrors() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity updated = account("acc-1");
+        updated.setPoolTier(AccountPoolPolicyService.PRIMARY_TIER);
+        AccountPoolPolicyService policyService = mock(AccountPoolPolicyService.class);
+        when(policyService.isEnabled()).thenReturn(true);
+        SqlAccountPoolHarness harness = sqlService(repository, updated, policyService);
+        AccountPoolRequestContext context = requestContext("request-1");
+        when(policyService.isActive(context)).thenReturn(true);
+
+        AccountPoolService.RequestFailureRecord record = harness.service()
+            .recordRequestFailure(
+                "acc-1",
+                AccountPoolService.UpstreamErrorType.RECOVERABLE,
+                503,
+                "upstream unavailable",
+                context
+            )
+            .block();
+
+        assertThat(record).isNotNull();
+        assertThat(record.consecutiveFailures()).isEqualTo(1);
+        verify(harness.spec()).bind("circuitScopedFailure", true);
+        assertThat(harness.sql()).contains(
+            "WHEN :circuitScopedFailure",
+            "LOWER(COALESCE(pool_tier, 'primary')) NOT IN ('secondary', '2', 'level2')",
+            "THEN COALESCE(error_count, 0)",
+            "ELSE COALESCE(error_count, 0) + 1"
+        );
+        verify(policyService, never()).recordFailure(any(), any());
+
+        harness.service().recordCircuitFailure(context, updated);
+
+        verify(policyService).recordFailure(context, updated);
+    }
+
+    @Test
+    void enabledCircuitStillPenalizesFailingSecondaryAccounts() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity updated = account("secondary-1");
+        updated.setPoolTier(AccountPoolPolicyService.SECONDARY_TIER);
+        updated.setErrorCount(2);
+        AccountPoolPolicyService policyService = mock(AccountPoolPolicyService.class);
+        when(policyService.isEnabled()).thenReturn(true);
+        SqlAccountPoolHarness harness = sqlService(repository, updated, policyService);
+        AccountPoolRequestContext context = requestContext("secondary-failure");
+        when(policyService.isActive(context)).thenReturn(true);
+
+        AccountPoolService.RequestFailureRecord record = harness.service()
+            .recordRequestFailure(
+                "secondary-1",
+                AccountPoolService.UpstreamErrorType.RECOVERABLE,
+                503,
+                "secondary unavailable",
+                context
+            )
+            .block();
+
+        assertThat(record).isNotNull();
+        assertThat(record.consecutiveFailures()).isEqualTo(2);
+        assertThat(harness.sql()).contains(
+            "LOWER(COALESCE(pool_tier, 'primary')) NOT IN ('secondary', '2', 'level2')",
+            "ELSE COALESCE(error_count, 0) + 1"
+        );
+        verify(policyService, never()).recordFailure(any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {401, 402, 403, 429})
+    void transientAuthenticationQuotaAndRateLimitFailuresDoNotDisableAccounts(int statusCode) {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity updated = failedAccount(
+            "UPSTREAM_ACCOUNT_FAILURE",
+            "account failure",
+            statusCode == 402 || statusCode == 429
+        );
+        AccountPoolPolicyService policyService = mock(AccountPoolPolicyService.class);
+        when(policyService.isEnabled()).thenReturn(true);
+        SqlAccountPoolHarness harness = sqlService(repository, updated, policyService);
+        AccountPoolRequestContext context = requestContext("request-" + statusCode);
+        when(policyService.isActive(context)).thenReturn(true);
+
+        AccountPoolService.RequestFailureRecord record = harness.service()
+            .recordRequestFailure(
+                "acc-1",
+                AccountPoolService.UpstreamErrorType.RECOVERABLE,
+                statusCode,
+                "account failure",
+                context
+            )
+            .block();
+
+        assertThat(record).isNotNull();
+        assertThat(record.consecutiveFailures()).isEqualTo(2);
+        assertThat(record.suspended()).isFalse();
+        verify(harness.spec()).bind("circuitScopedFailure", false);
+        assertThat(harness.sql()).contains("ELSE COALESCE(error_count, 0) + 1");
+        verify(policyService, never()).recordFailure(any(), any());
+        verify(policyService, never()).cancelSelection(any());
+    }
+
+    @Test
+    void accountFailurePersistenceDoesNotOwnHalfOpenProbeLifecycle() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity updated = account("acc-1");
+        AccountPoolPolicyService policyService = mock(AccountPoolPolicyService.class);
+        when(policyService.isEnabled()).thenReturn(true);
+        SqlAccountPoolHarness harness = sqlService(repository, updated, policyService);
+        AccountPoolRequestContext context = requestContext("invalid-response");
+        when(policyService.isActive(context)).thenReturn(true);
+        harness.service().recordRequestFailure(
+            "acc-1",
+            AccountPoolService.UpstreamErrorType.FATAL,
+            502,
+            "invalid upstream response",
+            context
+        ).block();
+
+        verify(harness.spec()).bind("circuitScopedFailure", false);
+        verify(policyService, never()).recordFailure(any(), any());
+        verify(policyService, never()).cancelSelection(any());
+    }
+
+    @Test
+    void circuitFailureClassificationIncludesTransportAndAnthropicConcurrencyFailuresOnlyWhenRecoverable() {
+        assertThat(AccountPoolService.isCircuitBreakerFailure(
+            AccountPoolService.UpstreamErrorType.RECOVERABLE,
+            null
+        )).isTrue();
+        assertThat(AccountPoolService.isCircuitBreakerFailure(
+            AccountPoolService.UpstreamErrorType.RECOVERABLE,
+            408
+        )).isTrue();
+        assertThat(AccountPoolService.isCircuitBreakerFailure(
+            AccountPoolService.UpstreamErrorType.RECOVERABLE,
+            409
+        )).isTrue();
+        assertThat(AccountPoolService.isCircuitBreakerFailure(
+            AccountPoolService.UpstreamErrorType.RECOVERABLE,
+            503
+        )).isTrue();
+        assertThat(AccountPoolService.isCircuitBreakerFailure(
+            AccountPoolService.UpstreamErrorType.RECOVERABLE,
+            429
+        )).isFalse();
+        assertThat(AccountPoolService.isCircuitBreakerFailure(
+            AccountPoolService.UpstreamErrorType.FATAL,
+            502
+        )).isFalse();
+    }
+
+    @Test
+    void disabledCircuitKeepsServerFailureAccountScoped() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity updated = account("acc-1");
+        updated.setErrorCount(2);
+        AccountPoolPolicyService policyService = mock(AccountPoolPolicyService.class);
+        when(policyService.isEnabled()).thenReturn(false);
+        SqlAccountPoolHarness harness = sqlService(repository, updated, policyService);
+        AccountPoolRequestContext context = requestContext("request-disabled");
+
+        AccountPoolService.RequestFailureRecord record = harness.service()
+            .recordRequestFailure(
+                "acc-1",
+                AccountPoolService.UpstreamErrorType.RECOVERABLE,
+                503,
+                "upstream unavailable",
+                context
+            )
+            .block();
+
+        assertThat(record).isNotNull();
+        assertThat(record.consecutiveFailures()).isEqualTo(2);
+        assertThat(record.suspended()).isFalse();
+        verify(harness.spec()).bind("circuitScopedFailure", false);
+        assertThat(harness.sql()).contains("ELSE COALESCE(error_count, 0) + 1");
+        verify(policyService, never()).recordFailure(any(), any());
+        verify(policyService, never()).cancelSelection(any());
     }
 
     @SuppressWarnings("unchecked")
@@ -548,6 +969,15 @@ class AccountPoolServiceTest {
 
     @SuppressWarnings("unchecked")
     private SqlAccountPoolHarness sqlService(ProxyAccountRepository repository, ProxyAccountEntity returned) {
+        return sqlService(repository, returned, null);
+    }
+
+    @SuppressWarnings("unchecked")
+    private SqlAccountPoolHarness sqlService(
+        ProxyAccountRepository repository,
+        ProxyAccountEntity returned,
+        AccountPoolPolicyService policyService
+    ) {
         R2dbcEntityTemplate template = mock(R2dbcEntityTemplate.class);
         DatabaseClient databaseClient = mock(DatabaseClient.class);
         DatabaseClient.GenericExecuteSpec spec = mock(DatabaseClient.GenericExecuteSpec.class);
@@ -564,11 +994,40 @@ class AccountPoolServiceTest {
             .thenReturn(fetch);
         when(fetch.one()).thenReturn(Mono.just(returned));
         return new SqlAccountPoolHarness(
-            new AccountPoolService(repository, template, new ProxyProperties()),
+            new AccountPoolService(repository, template, new ProxyProperties(), policyService),
             template,
             spec,
             sql
         );
+    }
+
+    private AccountPoolRequestContext requestContext(String requestToken) {
+        return new AccountPoolRequestContext(
+            requestToken,
+            "gpt-5",
+            "gpt-5",
+            AccountPlatforms.OPENAI_PROVIDER
+        );
+    }
+
+    private Row inventoryRow(
+        long accountCount,
+        long availableAccountCount,
+        String provider,
+        String authMethod,
+        String baseUrl,
+        String poolTier,
+        long groupCount
+    ) {
+        Row row = mock(Row.class);
+        when(row.get("account_count")).thenReturn(accountCount);
+        when(row.get("available_account_count")).thenReturn(availableAccountCount);
+        when(row.get("provider")).thenReturn(provider);
+        when(row.get("auth_method")).thenReturn(authMethod);
+        when(row.get("base_url")).thenReturn(baseUrl);
+        when(row.get("pool_tier")).thenReturn(poolTier);
+        when(row.get("group_count")).thenReturn(groupCount);
+        return row;
     }
 
     private ProxyAccountEntity failedAccount(String reason, String message, boolean quotaFailure) {
@@ -719,6 +1178,13 @@ class AccountPoolServiceTest {
         ProxyAccountEntity account = account(accountId);
         account.setProvider(AccountPlatforms.OPENAI_PROVIDER);
         account.setAuthMethod(AccountPlatforms.OPENAI_API_KEY_AUTH);
+        return account;
+    }
+
+    private ProxyAccountEntity codexPoolAccount(String accountId) {
+        ProxyAccountEntity account = account(accountId);
+        account.setProvider(AccountPlatforms.OPENAI_PROVIDER);
+        account.setAuthMethod(AccountPlatforms.OPENAI_CODEX_AUTH);
         return account;
     }
 

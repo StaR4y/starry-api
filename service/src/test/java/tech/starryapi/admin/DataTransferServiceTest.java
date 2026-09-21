@@ -1,6 +1,7 @@
 package tech.starryapi.admin;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 
@@ -8,7 +9,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.sql.SQLException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
@@ -82,6 +85,11 @@ class DataTransferServiceTest {
             "--list",
             dump.toAbsolutePath().toString()
         );
+        Path tocList = tempDir.resolve("restore.toc");
+        assertThat(service.pgRestoreCommand(dump, tocList)).containsSubsequence(
+            "--use-list",
+            tocList.toAbsolutePath().toString()
+        );
         assertThat(DataTransferService.maintenanceLockSql(true))
             .isEqualTo("SELECT pg_catalog.pg_try_advisory_lock_shared(?)");
         assertThat(DataTransferService.maintenanceLockSql(false))
@@ -90,6 +98,28 @@ class DataTransferServiceTest {
             .isEqualTo("SELECT pg_catalog.pg_advisory_unlock_shared(?)");
         assertThat(DataTransferService.maintenanceUnlockSql(false))
             .isEqualTo("SELECT pg_catalog.pg_advisory_unlock(?)");
+    }
+
+    @Test
+    void filtersInheritedPartitionConstraintsAndIndexAttachmentsFromRestoreToc() {
+        String toc = """
+            ; PostgreSQL database dump
+            1; 2615 1 SCHEMA - starry_api starry_api_owner
+            2; 1259 2 TABLE starry_api request_logs starry_api_owner
+            3; 1259 3 TABLE starry_api request_logs_y2027m08 starry_api_owner
+            4; 0 0 TABLE ATTACH starry_api request_logs_y2027m08 starry_api_owner
+            5; 2606 5 CONSTRAINT starry_api request_logs request_logs_pkey starry_api_owner
+            6; 2606 6 CONSTRAINT starry_api request_logs_y2027m08 request_logs_y2027m08_pkey starry_api_owner
+            7; 0 0 INDEX ATTACH starry_api request_logs_y2027m08_pkey starry_api_owner
+            8; 0 0 TABLE DATA starry_api request_logs_y2027m08 starry_api_owner
+            """;
+
+        assertThat(DataTransferService.filterInheritedPartitionObjects(toc))
+            .contains("TABLE ATTACH starry_api request_logs_y2027m08")
+            .contains("TABLE DATA starry_api request_logs_y2027m08")
+            .contains("CONSTRAINT starry_api request_logs request_logs_pkey")
+            .doesNotContain("CONSTRAINT starry_api request_logs_y2027m08 request_logs_y2027m08_pkey")
+            .doesNotContain("INDEX ATTACH starry_api request_logs_y2027m08_pkey");
     }
 
     @Test
@@ -115,7 +145,7 @@ class DataTransferServiceTest {
     }
 
     @Test
-    void rejectsArchiveMissingFlywayHistoryOrUsingUnsupportedPostgres() {
+    void rejectsArchiveMissingCoreSchemaObjectsOrUsingUnsupportedPostgres() {
         String withoutFlyway = validToc("17.6", "17.6", "")
             .replace("20; 1259 20 TABLE starry_api flyway_schema_history starry_api_owner\n", "");
 
@@ -166,6 +196,44 @@ class DataTransferServiceTest {
             .isSameAs(verificationFailure)
             .satisfies(error -> assertThat(error.getSuppressed()).containsExactly(rollbackFailure));
         assertThat(rollbackAttempted).isTrue();
+    }
+
+    @Test
+    void requiresExactFlywayV19HistoryAndMatchingChecksumsForRestore() {
+        List<DataTransferService.FlywayMigration> current = currentMigrationHistory();
+
+        assertThatCode(() -> DataTransferService.validateMigrationHistory(current)).doesNotThrowAnyException();
+        assertThatCode(() -> DataTransferService.verifyRestoreMigrationHistory(current, current))
+            .doesNotThrowAnyException();
+
+        assertThatThrownBy(() -> DataTransferService.validateMigrationHistory(current.subList(0, 9)))
+            .isInstanceOf(SQLException.class)
+            .hasMessageContaining("V1-V19");
+
+        List<DataTransferService.FlywayMigration> future = new ArrayList<>(current);
+        future.add(new DataTransferService.FlywayMigration(
+            "20",
+            "V20__unknown_future.sql",
+            "SQL",
+            8008,
+            true
+        ));
+        assertThatThrownBy(() -> DataTransferService.validateMigrationHistory(future))
+            .isInstanceOf(SQLException.class)
+            .hasMessageContaining("V1-V19");
+
+        List<DataTransferService.FlywayMigration> changedChecksum = new ArrayList<>(current);
+        DataTransferService.FlywayMigration v5 = changedChecksum.get(4);
+        changedChecksum.set(4, new DataTransferService.FlywayMigration(
+            v5.version(),
+            v5.script(),
+            v5.type(),
+            v5.checksum() + 1,
+            true
+        ));
+        assertThatThrownBy(() -> DataTransferService.verifyRestoreMigrationHistory(current, changedChecksum))
+            .isInstanceOf(SQLException.class)
+            .hasMessageContaining("checksums");
     }
 
     @Test
@@ -272,6 +340,96 @@ class DataTransferServiceTest {
             26; 1259 26 TABLE starry_api payment_orders starry_api_owner
             27; 1259 27 TABLE starry_api balance_ledger starry_api_owner
             28; 0 0 TABLE DATA starry_api admin_users starry_api_owner
+            29; 1259 29 TABLE starry_api coding_plans starry_api_owner
+            30; 1259 30 TABLE starry_api coding_plan_versions starry_api_owner
+            31; 1259 31 TABLE starry_api coding_plan_subscriptions starry_api_owner
+            32; 1259 32 TABLE starry_api subscription_ledger starry_api_owner
+            33; 1259 33 TABLE starry_api billing_reservations starry_api_owner
+            34; 1259 34 TABLE starry_api billing_reservation_allocations starry_api_owner
+            35; 1259 35 TABLE starry_api billing_review_actions starry_api_owner
+            36; 1259 36 TABLE starry_api support_tickets starry_api_owner
+            37; 1259 37 TABLE starry_api support_ticket_messages starry_api_owner
+            38; 1259 38 TABLE starry_api support_ticket_attachments starry_api_owner
+            39; 1259 39 TABLE starry_api announcements starry_api_owner
+            40; 1259 40 TABLE starry_api announcement_recipients starry_api_owner
             %s""".formatted(databaseVersion, dumpVersion, extraEntry);
+    }
+
+    private List<DataTransferService.FlywayMigration> currentMigrationHistory() {
+        return List.of(
+            new DataTransferService.FlywayMigration("1", "V1__postgresql_baseline.sql", "SQL", 1001, true),
+            new DataTransferService.FlywayMigration(
+                "2",
+                "V2__model_family_account_pool_circuits.sql",
+                "SQL",
+                2002,
+                true
+            ),
+            new DataTransferService.FlywayMigration(
+                "3",
+                "V3__data_management_security_audit.sql",
+                "SQL",
+                3003,
+                true
+            ),
+            new DataTransferService.FlywayMigration(
+                "4",
+                "V4__data_management_security_outbox.sql",
+                "SQL",
+                4004,
+                true
+            ),
+            new DataTransferService.FlywayMigration(
+                "5",
+                "V5__account_pool_circuit_epochs.sql",
+                "SQL",
+                5005,
+                true
+            ),
+            new DataTransferService.FlywayMigration(
+                "6",
+                "V6__application_root_identity.sql",
+                "SQL",
+                6006,
+                true
+            ),
+            new DataTransferService.FlywayMigration(
+                "7",
+                "V7__api_key_model_provider.sql",
+                "SQL",
+                7007,
+                true
+            ),
+            new DataTransferService.FlywayMigration(
+                "8",
+                "V8__account_allocation_admission.sql",
+                "SQL",
+                8008,
+                true
+            ),
+            new DataTransferService.FlywayMigration(
+                "9",
+                "V9__account_allocation_consistency_fixes.sql",
+                "SQL",
+                9009,
+                true
+            ),
+            new DataTransferService.FlywayMigration(
+                "10",
+                "V10__account_scoped_cooldowns_and_retention.sql",
+                "SQL",
+                1010,
+                true
+            ),
+            new DataTransferService.FlywayMigration("11", "V11__account_badge_color.sql", "SQL", 1011, true),
+            new DataTransferService.FlywayMigration("12", "V12__coding_plan_subscriptions.sql", "SQL", 1012, true),
+            new DataTransferService.FlywayMigration("13", "V13__coding_plan_versions.sql", "SQL", 1013, true),
+            new DataTransferService.FlywayMigration("14", "V14__explicit_billing_reservations.sql", "SQL", 1014, true),
+            new DataTransferService.FlywayMigration("15", "V15__billing_boundary_consistency.sql", "SQL", 1015, true),
+            new DataTransferService.FlywayMigration("16", "V16__plugin_developer_mode.sql", "SQL", 1016, true),
+            new DataTransferService.FlywayMigration("17", "V17__announcements.sql", "SQL", 1691840228, true),
+            new DataTransferService.FlywayMigration("18", "V18__announcement_runtime_grants.sql", "SQL", 1273926045, true),
+            new DataTransferService.FlywayMigration("19", "V19__support_tickets.sql", "SQL", 1950034466, true)
+        );
     }
 }

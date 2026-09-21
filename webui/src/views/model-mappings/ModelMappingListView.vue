@@ -11,6 +11,7 @@
    */
   import { onMounted, reactive, ref } from 'vue';
   import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus';
+  import { Connection, Plus } from '@element-plus/icons-vue';
   import PageSection from '@/components/PageSection.vue';
   import { modelMappingsApi } from '@/api';
   import type {
@@ -170,12 +171,13 @@
 </script>
 
 <template>
-  <PageSection title="模型映射" subtitle="将客户端模型 ID 映射到真实上游模型，并支持按权重分流">
+  <div class="model-mapping-view">
+  <PageSection title="模型映射" subtitle="路由规则" :icon="Connection">
     <template #actions>
-      <el-button type="primary" @click="openCreate">新建映射</el-button>
+      <el-button type="primary" :icon="Plus" @click="openCreate">新建映射</el-button>
     </template>
 
-    <el-table v-loading="loading" :data="mappings" stripe>
+    <el-table v-loading="loading" :data="mappings">
       <el-table-column prop="name" label="名称" min-width="160" />
       <el-table-column label="类型" width="120">
         <template #default="{ row }">
@@ -290,6 +292,7 @@
       <el-button type="primary" :loading="formSubmitting" @click="submitForm">提交</el-button>
     </template>
   </el-dialog>
+  </div>
 </template>
 
 <style scoped lang="scss">

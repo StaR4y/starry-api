@@ -19,7 +19,7 @@ FROM eclipse-temurin:25-jre-noble
 
 RUN set -eux; \
     apt-get update; \
-    apt-get install -y --no-install-recommends ca-certificates curl; \
+    apt-get install -y --no-install-recommends ca-certificates curl jq; \
     install -d -m 0755 /usr/share/postgresql-common/pgdg; \
     curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
         -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc; \
@@ -32,6 +32,7 @@ RUN set -eux; \
 
 WORKDIR /app
 COPY --from=build /workspace/service/build/libs/service-0.1.0-SNAPSHOT.jar /app/app.jar
+COPY --chmod=0555 scripts/recover-data-management.sh /app/bin/recover-data-management
 
 ENV SERVER_PORT=8080
 ENV SERVER_ADDRESS=0.0.0.0

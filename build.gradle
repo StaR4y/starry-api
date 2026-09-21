@@ -12,7 +12,7 @@ allprojects {
     }
 }
 
-configure(subprojects.findAll { it.name in ['api', 'service'] }) {
+configure(subprojects.findAll { it.name in ['service-api', 'service', 'plugin-api', 'plugin-example', 'plugin-usage-maid', 'plugin-whale-widget', 'plugin-dynamic-island'] }) {
     apply plugin: 'java'
     apply plugin: 'io.spring.dependency-management'
 

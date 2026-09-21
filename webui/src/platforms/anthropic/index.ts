@@ -5,7 +5,7 @@ export const anthropicPlatform: PlatformDefinition = {
   provider: 'Anthropic',
   className: 'anthropic',
   color: '#d97757',
-  families: ['Claude 4', 'Claude 3', 'Routing Preset', 'CodeWhisperer Internal'],
+  families: ['Claude 5', 'Claude 4', 'Claude 3', 'Routing Preset', 'CodeWhisperer Internal'],
   matches: isAnthropicModel,
   familyOf: anthropicModelFamily,
 };
@@ -28,7 +28,15 @@ export function anthropicModelFamily(model: ModelInfo) {
   const localId = anthropicLocalId(lowerId);
   if (model.id.startsWith('CLAUDE_')) return 'CodeWhisperer Internal';
   if (lowerId === 'auto' || lowerId === 'simple-task') return 'Routing Preset';
-  if (localId.includes('3.')) return 'Claude 3';
+  if (localId.includes('3.') || localId.includes('claude-3')) return 'Claude 3';
+  if (
+    localId.includes('claude-5') ||
+    localId.includes('fable-5') ||
+    localId.includes('mythos-5') ||
+    (localId.endsWith('-5') && !localId.includes('4-5') && !localId.includes('4.5'))
+  ) {
+    return 'Claude 5';
+  }
   if (localId.startsWith('claude')) return 'Claude 4';
   return null;
 }

@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
@@ -18,6 +19,24 @@ import reactor.core.publisher.Mono;
 import tech.starryapi.common.ApiException;
 
 class EmailVerificationServiceTest {
+
+    @Test
+    void scheduledTokenCleanupSkipsRepositoryDuringMaintenance() {
+        RegistrationEmailTokenRepository tokenRepository = mock(RegistrationEmailTokenRepository.class);
+        DataManagementSecurityService securityService = mock(DataManagementSecurityService.class);
+        when(securityService.isLocked()).thenReturn(Mono.just(true));
+        EmailVerificationService service = new EmailVerificationService(
+            mock(RegistrationSettingsService.class),
+            mock(TurnstileVerificationService.class),
+            mock(SystemSettingRepository.class),
+            tokenRepository,
+            new SystemMaintenanceTaskGate(securityService)
+        );
+
+        service.cleanupExpiredTokens();
+
+        verifyNoInteractions(tokenRepository);
+    }
 
     @Test
     void autoSecurityUsesImplicitSslForPort465WithoutStartTls() {
@@ -55,6 +74,45 @@ class EmailVerificationServiceTest {
         assertThat(RegistrationSettingsService.legacySmtpSecurity("", true, 587)).isEqualTo("starttls");
         assertThat(RegistrationSettingsService.legacySmtpSecurity("", false, 25)).isEqualTo("auto");
         assertThat(RegistrationSettingsService.legacySmtpSecurity("none", true, 465)).isEqualTo("none");
+    }
+
+    @Test
+    void exmailUsesSmtpUsernameAsMailFromWhenAddressesDiffer() {
+        RegistrationSettingsService.SmtpConfig config = new RegistrationSettingsService.SmtpConfig(
+            "smtp.exmail.qq.com",
+            465,
+            "admin@company.com",
+            "secret",
+            "noreply@company.com",
+            "Starry API",
+            true,
+            "ssl"
+        );
+
+        assertThat(EmailVerificationService.mailFromAddress(config)).isEqualTo("admin@company.com");
+    }
+
+    @Test
+    void mapsExmailMailFromMismatchWithoutFakeIpHint() {
+        RegistrationSettingsService.SmtpConfig config = new RegistrationSettingsService.SmtpConfig(
+            "smtp.exmail.qq.com",
+            465,
+            "admin@company.com",
+            "secret",
+            "noreply@company.com",
+            "Starry API",
+            true,
+            "ssl"
+        );
+        RuntimeException error = new RuntimeException(
+            "Failed messages: 501 mail from address must be same as authorization user"
+        );
+
+        String message = EmailVerificationService.smtpSendFailureMessage(config, error);
+
+        assertThat(message).contains("发件邮箱必须与 SMTP 登录账号相同");
+        assertThat(message).contains("admin@company.com");
+        assertThat(message).doesNotContain("fake-IP");
     }
 
     @Test

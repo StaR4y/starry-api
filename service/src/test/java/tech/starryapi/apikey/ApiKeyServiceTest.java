@@ -3,6 +3,7 @@ package tech.starryapi.apikey;
 import io.r2dbc.spi.Row;
 import io.r2dbc.spi.RowMetadata;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -20,6 +21,7 @@ import java.util.function.BiFunction;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
+import org.springframework.http.HttpStatus;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.r2dbc.core.FetchSpec;
 import org.springframework.r2dbc.core.RowsFetchSpec;
@@ -28,6 +30,7 @@ import tech.starryapi.admin.AdminPrincipal;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.common.Hashing;
 import tech.starryapi.config.ProxyProperties;
+import tech.starryapi.model.DefaultModelCatalogProvider;
 
 class ApiKeyServiceTest {
 
@@ -47,7 +50,7 @@ class ApiKeyServiceTest {
         ApiKeyService service = service(repository);
 
         ApiKeyDtos.CreatedApiKeyResponse response = service
-            .create(USER, new ApiKeyDtos.CreateApiKeyRequest("default", BigDecimal.TEN))
+            .create(USER, new ApiKeyDtos.CreateApiKeyRequest("default", BigDecimal.TEN, " openai "))
             .block();
 
         assertThat(response).isNotNull();
@@ -63,6 +66,34 @@ class ApiKeyServiceTest {
         assertThat(captor.getValue().getKeyValue()).isEqualTo(response.key());
         assertThat(captor.getValue().getKeyHash()).isNotEqualTo(response.key());
         assertThat(captor.getValue().getBillingMinimumCredits()).isEqualByComparingTo(BigDecimal.ZERO);
+        assertThat(captor.getValue().getModelProvider()).isEqualTo("OpenAI");
+    }
+
+    @Test
+    void rejectsMissingLegacyOrUnknownProviderWhenCreatingKey() {
+        ApiKeyRepository repository = mock(ApiKeyRepository.class);
+        ApiKeyService service = service(repository);
+
+        assertThatThrownBy(() -> service.create(
+            USER,
+            new ApiKeyDtos.CreateApiKeyRequest("missing", null, " ")
+        ).block()).isInstanceOfSatisfying(ApiException.class, error ->
+            assertThat(error.getCode()).isEqualTo("API_KEY_MODEL_PROVIDER_REQUIRED")
+        );
+        assertThatThrownBy(() -> service.create(
+            USER,
+            new ApiKeyDtos.CreateApiKeyRequest("legacy", null, "*")
+        ).block()).isInstanceOfSatisfying(ApiException.class, error ->
+            assertThat(error.getCode()).isEqualTo("API_KEY_MODEL_PROVIDER_REQUIRED")
+        );
+        assertThatThrownBy(() -> service.create(
+            USER,
+            new ApiKeyDtos.CreateApiKeyRequest("unknown", null, "Unknown Provider")
+        ).block()).isInstanceOfSatisfying(ApiException.class, error ->
+            assertThat(error.getCode()).isEqualTo("API_KEY_MODEL_PROVIDER_INVALID")
+        );
+
+        verify(repository, never()).save(any(ApiKeyEntity.class));
     }
 
     @Test
@@ -72,7 +103,7 @@ class ApiKeyServiceTest {
         assertThatThrownBy(() -> harness.service().update(
             USER,
             "key-other",
-            new ApiKeyDtos.UpdateApiKeyRequest("new-name", true, BigDecimal.ONE)
+            new ApiKeyDtos.UpdateApiKeyRequest("new-name", true, BigDecimal.ONE, "Anthropic")
         ).block())
             .isInstanceOf(ApiException.class)
             .hasMessage("API key not found");
@@ -96,18 +127,20 @@ class ApiKeyServiceTest {
         ApiKeyEntity result = harness.service().update(
             USER,
             "key-1",
-            new ApiKeyDtos.UpdateApiKeyRequest("renamed", null, null)
+            new ApiKeyDtos.UpdateApiKeyRequest("renamed", null, null, "OpenAI")
         ).block();
 
         assertThat(result).isSameAs(updated);
         String setClause = harness.sql().substring(harness.sql().indexOf("SET"), harness.sql().indexOf("WHERE"));
         assertThat(setClause)
-            .contains("name =", "enabled =", "credits_limit =", "updated_at =")
+            .contains("name =", "enabled =", "credits_limit =", "model_provider =", "updated_at =")
             .doesNotContain("total_requests", "total_credits", "total_input_tokens", "total_output_tokens", "last_used_at");
         assertThat(harness.sql()).contains("AND (:isAdmin OR user_id = :userId)", "RETURNING *");
         verify(harness.spec()).bind("setName", true);
         verify(harness.spec()).bind("setEnabled", false);
         verify(harness.spec()).bind("setCreditsLimit", false);
+        verify(harness.spec()).bind("setModelProvider", true);
+        verify(harness.spec()).bind("modelProvider", "OpenAI");
         verify(harness.repository(), never()).save(any(ApiKeyEntity.class));
     }
 
@@ -127,21 +160,8 @@ class ApiKeyServiceTest {
         harness.service().accountUsage(principal, "request-123", new BigDecimal("0.25"), 2, 3).block();
 
         assertThat(harness.sql()).contains(
-            "locked_key AS MATERIALIZED",
-            "locked_billing AS MATERIALIZED",
-            "FOR UPDATE OF api_key",
-            "FOR UPDATE OF owner",
-            "total_credits + :credits > credits_limit",
-            "balance < :credits",
-            "billing_minimum_credits = GREATEST",
-            "INSERT INTO api_usage_events",
-            "ON CONFLICT (request_hash) DO NOTHING",
-            "INSERT INTO balance_ledger",
-            "UPDATE api_keys AS api_key",
-            "INSERT INTO api_key_usage_daily",
-            "ON CONFLICT (key_id, usage_date) DO UPDATE",
-            "SELECT accounting_status",
-            "CURRENT_TIMESTAMP AT TIME ZONE 'UTC'"
+            "starry_api.settle_api_usage",
+            ":requestHash", ":credits", ":inputTokens", ":outputTokens"
         ).doesNotContain(":userId", ":chargeBalance", "GREATEST(user_account.balance -");
         assertThat(harness.requestHash()).isEqualTo(Hashing.sha256("5:key-1request-123"));
         assertThat(harness.requestHash()).isNotEqualTo(Hashing.sha256("request-123"));
@@ -174,11 +194,53 @@ class ApiKeyServiceTest {
             });
     }
 
+    @Test
+    void balancePrecheckDefersCodingPlanEligibilityToReservation() {
+        ApiKeyService service = service(mock(ApiKeyRepository.class));
+        ApiKeyPrincipal principal = new ApiKeyPrincipal(
+            "key-1",
+            "user-1",
+            "USER",
+            "default",
+            null,
+            BigDecimal.ZERO,
+            BigDecimal.ZERO,
+            "OpenAI",
+            true,
+            "CODING_PLAN"
+        );
+
+        assertThatCode(() -> service.ensureBalanceAvailable(principal).block()).doesNotThrowAnyException();
+    }
+
+    @Test
+    void balancePrecheckRejectsZeroBalanceWithoutSubscription() {
+        ApiKeyService service = service(mock(ApiKeyRepository.class));
+        ApiKeyPrincipal principal = new ApiKeyPrincipal(
+            "key-1",
+            "user-1",
+            "USER",
+            "default",
+            null,
+            BigDecimal.ZERO,
+            BigDecimal.ZERO,
+            "OpenAI",
+            false
+        );
+
+        assertThatThrownBy(() -> service.ensureBalanceAvailable(principal).block())
+            .isInstanceOfSatisfying(ApiException.class, error -> {
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.PAYMENT_REQUIRED);
+                assertThat(error.getCode()).isEqualTo("INSUFFICIENT_BALANCE");
+            });
+    }
+
     private ApiKeyService service(ApiKeyRepository repository) {
         return new ApiKeyService(
             repository,
             mock(R2dbcEntityTemplate.class),
-            new ProxyProperties()
+            new ProxyProperties(),
+            new DefaultModelCatalogProvider()
         );
     }
 
@@ -201,7 +263,12 @@ class ApiKeyServiceTest {
             .thenReturn(fetch);
         when(fetch.one()).thenReturn(result);
         return new ApiKeyUpdateHarness(
-            new ApiKeyService(repository, template, new ProxyProperties()),
+            new ApiKeyService(
+                repository,
+                template,
+                new ProxyProperties(),
+                new DefaultModelCatalogProvider()
+            ),
             repository,
             spec,
             sql
@@ -232,10 +299,16 @@ class ApiKeyServiceTest {
             }
             return spec;
         });
+        when(spec.bindNull(anyString(), any())).thenReturn(spec);
         when(fetch.one()).thenReturn(Mono.just(Map.of("accounting_status", accountingStatus)));
         when(spec.fetch()).thenReturn(fetch);
         return new SqlUsageHarness(
-            new ApiKeyService(mock(ApiKeyRepository.class), template, new ProxyProperties()),
+            new ApiKeyService(
+                mock(ApiKeyRepository.class),
+                template,
+                new ProxyProperties(),
+                new DefaultModelCatalogProvider()
+            ),
             databaseClient,
             sql,
             requestHash

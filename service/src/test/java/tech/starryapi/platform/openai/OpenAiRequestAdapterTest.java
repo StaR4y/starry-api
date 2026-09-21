@@ -16,7 +16,7 @@ class OpenAiRequestAdapterTest {
     void responsesFunctionCallOutputArrayKeepsTextContent() throws Exception {
         JsonNode request = objectMapper.readTree("""
             {
-              "model": "gpt-5.4-mini",
+              "model": "gpt-5.5",
               "input": [
                 {
                   "type": "function_call_output",
@@ -42,7 +42,7 @@ class OpenAiRequestAdapterTest {
     void responsesAssistantRefusalKeepsTextContent() throws Exception {
         JsonNode request = objectMapper.readTree("""
             {
-              "model": "gpt-5.4-mini",
+              "model": "gpt-5.5",
               "input": [
                 {
                   "type": "message",
@@ -67,7 +67,7 @@ class OpenAiRequestAdapterTest {
     void responsesRequestKeepsPreviousResponseId() throws Exception {
         JsonNode request = objectMapper.readTree("""
             {
-              "model": "gpt-5.4-mini",
+              "model": "gpt-5.5",
               "previous_response_id": "resp_123",
               "input": "continue"
             }
@@ -82,7 +82,7 @@ class OpenAiRequestAdapterTest {
     void responsesMultimodalContentConvertsToChatParts() throws Exception {
         JsonNode request = objectMapper.readTree("""
             {
-              "model": "gpt-5.4-mini",
+              "model": "gpt-5.5",
               "input": [
                 {
                   "type": "message",

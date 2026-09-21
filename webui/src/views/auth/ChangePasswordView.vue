@@ -6,19 +6,25 @@
    * 1. 首次登录强制改密
    * 2. 普通用户主动改密
    *
-   * 改密成功后清空 firstLogin 标记并跳回当前角色默认首页。
+   * 改密成功后撤销全部会话并返回登录页。
    */
-  import { reactive, ref } from 'vue';
+  import { computed, reactive, ref } from 'vue';
   import { useRouter } from 'vue-router';
   import { ElMessage, type FormInstance, type FormRules } from 'element-plus';
   import { authApi } from '@/api';
   import { useAuthStore } from '@/stores/auth';
+  import { useAppearanceStore } from '@/stores/appearance';
+  import SiteBrandLogo from '@/components/SiteBrandLogo.vue';
 
   const router = useRouter();
   const auth = useAuthStore();
+  const appearance = useAppearanceStore();
 
   const formRef = ref<FormInstance>();
   const loading = ref(false);
+  const isApplicationRoot = computed(
+    () => auth.user?.username?.trim().toLowerCase() === 'admin',
+  );
 
   const form = reactive({
     oldPassword: '',
@@ -30,7 +36,7 @@
     oldPassword: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
     newPassword: [
       { required: true, message: '请输入新密码', trigger: 'blur' },
-      { min: 8, message: '至少 8 位', trigger: 'blur' },
+      { min: 12, max: 128, message: '密码长度须为 12–128 位', trigger: 'blur' },
     ],
     confirm: [
       { required: true, message: '请再次输入新密码', trigger: 'blur' },
@@ -53,9 +59,9 @@
         oldPassword: form.oldPassword,
         newPassword: form.newPassword,
       });
-      auth.markPasswordChanged();
-      ElMessage.success('密码修改成功');
-      router.replace({ name: auth.defaultRouteName });
+      auth.logout();
+      ElMessage.success('密码修改成功，所有后台会话已撤销，请重新登录');
+      router.replace({ name: 'login' });
     } catch (err) {
       ElMessage.error((err as Error).message || '修改失败');
     } finally {
@@ -77,7 +83,19 @@
 <template>
   <div class="change">
     <div class="change__panel glass-panel glass-panel--strong">
-      <h1 class="change__title">修改密码</h1>
+      <SiteBrandLogo class="change__logo" />
+      <h1 class="change__title">{{ appearance.siteName }}</h1>
+      <p class="change__subtitle">修改密码</p>
+
+      <el-alert
+        v-if="isApplicationRoot"
+        class="change__root-warning"
+        title="系统 Root 凭据"
+        description="默认管理员拥有全站最高权限。密码或有效会话一旦泄漏，应按整套服务已失陷处置；请使用唯一强密码并仅保存在受控密码管理器中。"
+        type="warning"
+        show-icon
+        :closable="false"
+      />
 
       <el-form
         ref="formRef"
@@ -88,13 +106,19 @@
         @submit.prevent="submit"
       >
         <el-form-item label="当前密码" prop="oldPassword">
-          <el-input v-model="form.oldPassword" type="password" show-password />
+          <el-input v-model="form.oldPassword" type="password" maxlength="128" show-password />
         </el-form-item>
         <el-form-item label="新密码" prop="newPassword">
-          <el-input v-model="form.newPassword" type="password" show-password />
+          <el-input v-model="form.newPassword" type="password" maxlength="128" show-password />
         </el-form-item>
         <el-form-item label="确认新密码" prop="confirm">
-          <el-input v-model="form.confirm" type="password" show-password @keyup.enter="submit" />
+          <el-input
+            v-model="form.confirm"
+            type="password"
+            maxlength="128"
+            show-password
+            @keyup.enter="submit"
+          />
         </el-form-item>
 
         <div class="change__actions">
@@ -120,14 +144,35 @@
       padding: 36px 32px;
     }
 
+    &__logo {
+      width: 56px;
+      height: 56px;
+      display: block;
+      margin: 0 auto 12px;
+      object-fit: contain;
+    }
+
     &__title {
       margin: 0 0 6px;
       font-size: 22px;
+      text-align: center;
+    }
+
+    &__subtitle {
+      margin: 0 0 18px;
+      color: var(--kp-text-secondary);
+      font-size: 13px;
+      text-align: center;
     }
 
     &__hint {
       margin: 0 0 20px;
       font-size: 13px;
+    }
+
+    &__root-warning {
+      margin: 16px 0 20px;
+      align-items: flex-start;
     }
 
     &__actions {

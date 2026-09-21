@@ -9,6 +9,7 @@ BUNDLE_NAME="${BUNDLE_NAME:-starry-api-bundle.tar.gz}"
 WEBUI_DIST_NAME="${WEBUI_DIST_NAME:-starry-api-webui.tar.gz}"
 COMPOSE_NAME="${COMPOSE_NAME:-docker-compose.artifact.yml}"
 CHECKSUMS_NAME="${CHECKSUMS_NAME:-sha256sums.txt}"
+RECOVERY_TOOL_NAME="${RECOVERY_TOOL_NAME:-recover-data-management.sh}"
 RUN_TESTS="${RUN_TESTS:-true}"
 SKIP_BUILD="${SKIP_BUILD:-false}"
 COMMIT_ARTIFACTS="${COMMIT_ARTIFACTS:-false}"
@@ -31,6 +32,24 @@ sha256_file() {
   else
     shasum -a 256 "$1" | awk '{print $1}'
   fi
+}
+
+atomic_copy_file() {
+  local source="$1"
+  local destination="$2"
+  local mode="$3"
+  local temporary
+
+  temporary="$(mktemp "${destination}.incoming.XXXXXX")" || return 1
+  if ! cp "$source" "$temporary" || ! chmod "$mode" "$temporary"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  if ! mv -f "$temporary" "$destination"; then
+    rm -f "$temporary"
+    return 1
+  fi
+  return 0
 }
 
 json_escape() {
@@ -116,12 +135,12 @@ services:
 
   service:
     build:
-      context: ./postgres-init
+      context: ./runtime
       dockerfile_inline: |
         FROM eclipse-temurin:25-jre-noble
         RUN set -eux; \
             apt-get update; \
-            apt-get install -y --no-install-recommends ca-certificates curl; \
+            apt-get install -y --no-install-recommends ca-certificates curl jq; \
             install -d -m 0755 /usr/share/postgresql-common/pgdg; \
             curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc; \
             . /etc/os-release; \
@@ -129,6 +148,7 @@ services:
             apt-get update; \
             apt-get install -y --no-install-recommends postgresql-client-17; \
             rm -rf /var/lib/apt/lists/*
+        COPY --chmod=0555 recover-data-management.sh /app/bin/recover-data-management
     image: starryapi-runtime:java25-pg17
     container_name: starryapi-service
     restart: unless-stopped
@@ -139,6 +159,8 @@ services:
     volumes:
       - ./app/starry-api.jar:/app/app.jar:ro
       - ./data/backups:/app/backups
+      - ./data/security:/app/security
+      - ./data/plugins:/app/plugins
     environment:
       SERVER_PORT: ${SERVER_PORT:-8080}
       SERVER_ADDRESS: 0.0.0.0
@@ -179,9 +201,14 @@ services:
       KIRO_TOKEN_REFRESH_INTERVAL_MS: ${KIRO_TOKEN_REFRESH_INTERVAL_MS:-3600000}
       KIRO_TOKEN_REFRESH_INITIAL_DELAY_MS: ${KIRO_TOKEN_REFRESH_INITIAL_DELAY_MS:-60000}
       KIRO_PREFERRED_ENDPOINT: ${KIRO_PREFERRED_ENDPOINT:-codewhisperer}
+      STARRY_PLUGINS_DISABLED: ${STARRY_PLUGINS_DISABLED:-false}
+      STARRY_PLUGIN_DIR: /app/plugins
       STARRY_BACKUP_DIR: /app/backups
       STARRY_MAX_IMPORT_BYTES: ${STARRY_MAX_IMPORT_BYTES:-268435456}
       STARRY_DATA_TRANSFER_PROCESS_TIMEOUT: ${STARRY_DATA_TRANSFER_PROCESS_TIMEOUT:-30m}
+      STARRY_DATA_MANAGEMENT_SECURITY_FILE: /app/security/data-management.json
+      STARRY_DATA_MANAGEMENT_RECOVERY_KEY_FILE: /app/security/recovery.key
+      STARRY_DATA_MANAGEMENT_REQUIRE_INITIALIZED: ${STARRY_DATA_MANAGEMENT_REQUIRE_INITIALIZED:-false}
       STARRY_PAYMENT_RECONCILIATION_INTERVAL: ${STARRY_PAYMENT_RECONCILIATION_INTERVAL:-PT30S}
       STARRY_PAYMENT_RECONCILIATION_INITIAL_DELAY: ${STARRY_PAYMENT_RECONCILIATION_INITIAL_DELAY:-PT30S}
       STARRY_PAYMENT_PROVIDER_RECONCILIATION_INTERVAL: ${STARRY_PAYMENT_PROVIDER_RECONCILIATION_INTERVAL:-PT30S}
@@ -203,6 +230,12 @@ services:
       STARRY_STATS_USAGE_EVENT_RETENTION_DAYS: ${STARRY_STATS_USAGE_EVENT_RETENTION_DAYS:-400}
       STARRY_STATS_USAGE_EVENT_DELETE_BATCH_SIZE: ${STARRY_STATS_USAGE_EVENT_DELETE_BATCH_SIZE:-10000}
       STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES: ${STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES:-20}
+      STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_ENABLED: ${STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_ENABLED:-true}
+      STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_CRON: "${STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_CRON:-0 35 3 * * *}"
+      STARRY_ACCOUNT_ALLOCATION_LEASE_RETENTION_DAYS: ${STARRY_ACCOUNT_ALLOCATION_LEASE_RETENTION_DAYS:-7}
+      STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS: ${STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS:-90}
+      STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE: ${STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE:-10000}
+      STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES: ${STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES:-20}
       JAVA_OPTS: ${JAVA_OPTS:-}
     ports:
       - "${HOST_BIND_ADDR:-127.0.0.1}:${HOST_HTTP_PORT:-18080}:${SERVER_PORT:-8080}"
@@ -233,6 +266,8 @@ Package layout:
 - starry-api-webui.tar.gz: standalone WebUI dist archive for inspection or CDN use.
 - docker-compose.artifact.yml: compose file that runs the jar with a JRE image.
 - postgres-init/001-starry-api-roles.sh: first-start least-privilege role bootstrap.
+- runtime/recover-data-management.sh: interactive container recovery tool.
+- runtime/recover-data-management.sh.sha256: recovery tool checksum.
 - build-info.json: source commit and artifact metadata.
 - sha256sums.txt: checksums for files inside the bundle.
 EOF
@@ -268,7 +303,18 @@ use_docker_build() {
 }
 
 source_tree_dirty() {
-  git status --porcelain --untracked-files=normal -- . ":(exclude)${ARTIFACT_DIR}" | grep -q .
+  local artifact_exclude="$ARTIFACT_DIR"
+  if [[ "$artifact_exclude" == "$ROOT_DIR"/* ]]; then
+    artifact_exclude="${artifact_exclude#"$ROOT_DIR"/}"
+  elif [[ "$artifact_exclude" == /* ]]; then
+    artifact_exclude=""
+  fi
+
+  if [[ -n "$artifact_exclude" ]]; then
+    git status --porcelain --untracked-files=normal -- . ":(exclude)${artifact_exclude}" | grep -q .
+  else
+    git status --porcelain --untracked-files=normal -- . | grep -q .
+  fi
 }
 
 select_boot_jar() {
@@ -336,7 +382,8 @@ main() {
   log "Do not run it on the server. Servers should use scripts/install-server.sh."
 
   local version branch commit built_at java_version dirty jar_path artifact_path checksum size_bytes checksum_path info_path
-  local webui_dist_path webui_checksum webui_size compose_path compose_checksum init_path init_checksum checksums_path bundle_path bundle_checksum bundle_size tmp_dir stage_dir
+  local webui_dist_path webui_checksum webui_size compose_path compose_checksum init_path init_checksum
+  local recovery_path recovery_checksum recovery_checksum_path checksums_path bundle_path bundle_checksum bundle_size tmp_dir stage_dir
   version="${VERSION:-$(project_version)}"
   version="${version:-0.1.0-SNAPSHOT}"
   branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'unknown')"
@@ -365,7 +412,7 @@ main() {
 
   jar_path="$(select_boot_jar)"
 
-  mkdir -p "$ARTIFACT_DIR/postgres-init"
+  mkdir -p "$ARTIFACT_DIR/postgres-init" "$ARTIFACT_DIR/runtime"
   artifact_path="${ARTIFACT_DIR}/${ARTIFACT_NAME}"
   checksum_path="${artifact_path}.sha256"
   info_path="${ARTIFACT_DIR}/build-info.json"
@@ -393,6 +440,12 @@ main() {
   cp docker/postgresql/init/001-starry-api-roles.sh "$init_path"
   chmod 0755 "$init_path"
   init_checksum="$(sha256_file "$init_path")"
+  recovery_path="${ARTIFACT_DIR}/runtime/${RECOVERY_TOOL_NAME}"
+  recovery_checksum_path="${recovery_path}.sha256"
+  atomic_copy_file scripts/recover-data-management.sh "$recovery_path" 0555 \
+    || fail "Could not publish the data-management recovery tool atomically."
+  recovery_checksum="$(sha256_file "$recovery_path")"
+  printf '%s  %s\n' "$recovery_checksum" "$RECOVERY_TOOL_NAME" > "$recovery_checksum_path"
 
   cat > "$info_path" <<EOF
 {
@@ -400,6 +453,7 @@ main() {
   "bundle": "$(json_escape "$BUNDLE_NAME")",
   "webuiDist": "$(json_escape "$WEBUI_DIST_NAME")",
   "compose": "$(json_escape "$COMPOSE_NAME")",
+  "recoveryTool": "runtime/$(json_escape "$RECOVERY_TOOL_NAME")",
   "version": "$(json_escape "$version")",
   "branch": "$(json_escape "$branch")",
   "commit": "$(json_escape "$commit")",
@@ -411,6 +465,7 @@ main() {
   "sha256": "$(json_escape "$checksum")",
   "webuiSha256": "$(json_escape "$webui_checksum")",
   "composeSha256": "$(json_escape "$compose_checksum")",
+  "recoveryToolSha256": "$(json_escape "$recovery_checksum")",
   "java": "$(json_escape "$java_version")"
 }
 EOF
@@ -421,19 +476,23 @@ EOF
     printf '%s  %s\n' "$webui_checksum" "$WEBUI_DIST_NAME"
     printf '%s  %s\n' "$compose_checksum" "$COMPOSE_NAME"
     printf '%s  %s\n' "$init_checksum" "postgres-init/001-starry-api-roles.sh"
+    printf '%s  %s\n' "$recovery_checksum" "runtime/${RECOVERY_TOOL_NAME}"
+    printf '%s  %s\n' "$(sha256_file "$recovery_checksum_path")" "runtime/${RECOVERY_TOOL_NAME}.sha256"
     printf '%s  %s\n' "$(sha256_file "$info_path")" "build-info.json"
   } > "$checksums_path"
 
   bundle_path="${ARTIFACT_DIR}/${BUNDLE_NAME}"
   tmp_dir="$(mktemp -d)"
   stage_dir="${tmp_dir}/starry-api"
-  mkdir -p "$stage_dir/app" "$stage_dir/postgres-init"
+  mkdir -p "$stage_dir/app" "$stage_dir/postgres-init" "$stage_dir/runtime"
   cp "$artifact_path" "$stage_dir/app/starry-api.jar"
   cp "$checksum_path" "$stage_dir/app/starry-api.jar.sha256"
   cp "$webui_dist_path" "$stage_dir/${WEBUI_DIST_NAME}"
   cp "${webui_dist_path}.sha256" "$stage_dir/${WEBUI_DIST_NAME}.sha256"
   cp "$compose_path" "$stage_dir/docker-compose.artifact.yml"
   cp "$init_path" "$stage_dir/postgres-init/001-starry-api-roles.sh"
+  cp "$recovery_path" "$stage_dir/runtime/${RECOVERY_TOOL_NAME}"
+  cp "$recovery_checksum_path" "$stage_dir/runtime/${RECOVERY_TOOL_NAME}.sha256"
   cp "$info_path" "$stage_dir/build-info.json"
   {
     printf '%s  %s\n' "$(sha256_file "$stage_dir/app/starry-api.jar")" "app/starry-api.jar"
@@ -442,6 +501,8 @@ EOF
     printf '%s  %s\n' "$(sha256_file "$stage_dir/${WEBUI_DIST_NAME}.sha256")" "${WEBUI_DIST_NAME}.sha256"
     printf '%s  %s\n' "$(sha256_file "$stage_dir/docker-compose.artifact.yml")" "docker-compose.artifact.yml"
     printf '%s  %s\n' "$(sha256_file "$stage_dir/postgres-init/001-starry-api-roles.sh")" "postgres-init/001-starry-api-roles.sh"
+    printf '%s  %s\n' "$(sha256_file "$stage_dir/runtime/${RECOVERY_TOOL_NAME}")" "runtime/${RECOVERY_TOOL_NAME}"
+    printf '%s  %s\n' "$(sha256_file "$stage_dir/runtime/${RECOVERY_TOOL_NAME}.sha256")" "runtime/${RECOVERY_TOOL_NAME}.sha256"
     printf '%s  %s\n' "$(sha256_file "$stage_dir/build-info.json")" "build-info.json"
   } > "$stage_dir/sha256sums.txt"
   write_bundle_readme "$stage_dir/README.txt"

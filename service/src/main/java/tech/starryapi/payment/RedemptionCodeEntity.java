@@ -13,6 +13,7 @@ public class RedemptionCodeEntity {
     private String codeId;
     private String code;
     private BigDecimal balance;
+    private String planId;
     private Boolean enabled;
     private Boolean used;
     private String usedByUserId;
@@ -53,6 +54,14 @@ public class RedemptionCodeEntity {
 
     public void setBalance(BigDecimal balance) {
         this.balance = balance;
+    }
+
+    public String getPlanId() {
+        return planId;
+    }
+
+    public void setPlanId(String planId) {
+        this.planId = planId;
     }
 
     public Boolean getEnabled() {

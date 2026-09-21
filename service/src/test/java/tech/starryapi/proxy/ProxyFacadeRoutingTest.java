@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -26,10 +27,12 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
 import org.springframework.mock.web.server.MockServerWebExchange;
+import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import tech.starryapi.account.AccountAutoSuspendService;
 import tech.starryapi.account.AccountDtos;
+import tech.starryapi.account.AccountPoolRequestContext;
 import tech.starryapi.account.AccountPoolService;
 import tech.starryapi.account.AccountPlatforms;
 import tech.starryapi.account.AccountSettingsService;
@@ -90,10 +93,17 @@ class ProxyFacadeRoutingTest {
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
         when(modelMappingService.apply("GPT-5.5", "key-1")).thenReturn("GPT-5.5");
-        when(accountPoolService.selectOpenAiAccount("key-1")).thenReturn(Mono.just(account));
-        when(openAiUpstreamClient.complete(eq(account), eq(request), eq("GPT-5.5")))
+        when(accountPoolService.selectOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(account));
+        when(openAiUpstreamClient.complete(eq(account), eq(billingRequest(request, false)), eq("GPT-5.5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
-        when(accountPoolService.recordSuccess("openai-main", 2L)).thenReturn(Mono.empty());
+        when(accountPoolService.recordSuccess(
+            eq("openai-main"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
         when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
@@ -108,9 +118,19 @@ class ProxyFacadeRoutingTest {
             statsService
         ).chat(request, exchange).block();
 
-        verify(accountPoolService).selectOpenAiAccount("key-1");
-        verify(accountPoolService, never()).selectKiroAccount(any());
-        verify(openAiUpstreamClient).complete(eq(account), eq(request), eq("GPT-5.5"));
+        ArgumentCaptor<AccountPoolRequestContext> poolContext = ArgumentCaptor.forClass(
+            AccountPoolRequestContext.class
+        );
+        verify(accountPoolService).selectOpenAiAccountForPool(eq("key-1"), poolContext.capture());
+        assertThat(poolContext.getValue().requestToken()).isNotBlank();
+        assertThat(poolContext.getValue().requestedModel()).isEqualTo("GPT-5.5");
+        assertThat(poolContext.getValue().upstreamModel()).isEqualTo("GPT-5.5");
+        assertThat(poolContext.getValue().providerHint()).isEqualTo(AccountPlatforms.OPENAI_PROVIDER);
+        verify(accountPoolService, never()).selectKiroAccountForPool(
+            anyString(),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(openAiUpstreamClient).complete(eq(account), eq(billingRequest(request, false)), eq("GPT-5.5"));
         verify(kiroUpstreamClient, never()).complete(any(), any(), any());
     }
 
@@ -141,10 +161,17 @@ class ProxyFacadeRoutingTest {
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
         when(modelMappingService.apply("deepseek", "key-1")).thenReturn("openai-compatible/deepseek-chat");
-        when(accountPoolService.selectOpenAiAccount("key-1")).thenReturn(Mono.just(account));
-        when(openAiUpstreamClient.complete(eq(account), eq(request), eq("openai-compatible/deepseek-chat")))
+        when(accountPoolService.selectOpenAiCompatibleAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(account));
+        when(openAiUpstreamClient.complete(eq(account), eq(billingRequest(request, false)), eq("openai-compatible/deepseek-chat")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
-        when(accountPoolService.recordSuccess("openai-main", 2L)).thenReturn(Mono.empty());
+        when(accountPoolService.recordSuccess(
+            eq("openai-main"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
         when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
@@ -159,9 +186,104 @@ class ProxyFacadeRoutingTest {
             statsService
         ).chat(request, exchange).block();
 
-        verify(accountPoolService).selectOpenAiAccount("key-1");
-        verify(accountPoolService, never()).selectKiroAccount(any());
-        verify(openAiUpstreamClient).complete(eq(account), eq(request), eq("openai-compatible/deepseek-chat"));
+        ArgumentCaptor<AccountPoolRequestContext> poolContext = ArgumentCaptor.forClass(
+            AccountPoolRequestContext.class
+        );
+        verify(accountPoolService).selectOpenAiCompatibleAccountForPool(
+            eq("key-1"),
+            poolContext.capture()
+        );
+        assertThat(poolContext.getValue().requestedModel()).isEqualTo("deepseek");
+        assertThat(poolContext.getValue().upstreamModel()).isEqualTo("openai-compatible/deepseek-chat");
+        assertThat(poolContext.getValue().providerHint()).isEqualTo(AccountPlatforms.OPENAI_COMPATIBLE_PROVIDER);
+        verify(accountPoolService, never()).selectOpenAiAccountForPool(
+            anyString(),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService, never()).selectKiroAccountForPool(
+            anyString(),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(openAiUpstreamClient).complete(eq(account), eq(billingRequest(request, false)), eq("openai-compatible/deepseek-chat"));
+        verify(kiroUpstreamClient, never()).complete(any(), any(), any());
+    }
+
+    @Test
+    void glmCatalogModelsUseOpenAiCompatiblePoolInsteadOfKiro() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        modelCatalog.applyCustomizations(List.of(new tech.starryapi.model.ModelCatalogCustomization(
+            "glm5.3",
+            "GLM 5.3",
+            null,
+            "GLM",
+            "GLM 5",
+            "glm5.3",
+            "OPENAI_CHAT_COMPLETIONS",
+            "/v1/chat/completions",
+            128000,
+            "GLM",
+            true,
+            null
+        )));
+        ProxyAccountEntity account = openAiAccount();
+        account.setProvider("GLM");
+        account.setBaseUrl("https://open.bigmodel.cn/api/paas/v4");
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "glm5.3",
+              "messages": [{"role": "user", "content": "hi"}]
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/chat/completions")
+        );
+
+        when(apiKeyService.authenticate(exchange))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("glm5.3", "key-1")).thenReturn("glm5.3");
+        when(accountPoolService.selectOpenAiCompatibleAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(account));
+        when(openAiUpstreamClient.complete(eq(account), eq(billingRequest(request, false)), eq("glm5.3")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
+        when(accountPoolService.recordSuccess(
+            eq("openai-main"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
+        when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
+        when(statsService.log(any())).thenReturn(Mono.empty());
+
+        proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService
+        ).chat(request, exchange).block();
+
+        verify(accountPoolService).selectOpenAiCompatibleAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService, never()).selectKiroAccountForPool(
+            anyString(),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(openAiUpstreamClient).complete(eq(account), eq(billingRequest(request, false)), eq("glm5.3"));
         verify(kiroUpstreamClient, never()).complete(any(), any(), any());
     }
 
@@ -195,13 +317,20 @@ class ProxyFacadeRoutingTest {
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
         when(modelMappingService.apply("deepseek-v4-flash", "key-1")).thenReturn("deepseek-v4-flash");
-        when(accountPoolService.selectDeepSeekOpenAiAccount("key-1")).thenReturn(Mono.just(account));
+        when(accountPoolService.selectDeepSeekOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(account));
         when(openAiUpstreamClient.complete(eq(account), any(JsonNode.class), eq("deepseek-v4-flash")))
             .thenReturn(Mono.just(new PlatformCompletionResult(
                 "OK",
                 new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0)
             )));
-        when(accountPoolService.recordSuccess("deepseek-main", 2L)).thenReturn(Mono.empty());
+        when(accountPoolService.recordSuccess(
+            eq("deepseek-main"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
         when(apiKeyService.accountUsage(
             any(ApiKeyPrincipal.class),
             anyString(),
@@ -209,6 +338,10 @@ class ProxyFacadeRoutingTest {
             eq(1L),
             eq(1L)
         )).thenReturn(Mono.empty());
+        when(accountPoolService.circuitKey(any(AccountPoolRequestContext.class)))
+            .thenReturn("deepseek:deepseek-v4");
+        when(accountPoolService.circuitTier(eq(account), any(AccountPoolRequestContext.class)))
+            .thenReturn("primary");
         when(statsService.log(any())).thenReturn(Mono.empty());
 
         proxyFacade(
@@ -222,9 +355,25 @@ class ProxyFacadeRoutingTest {
             statsService
         ).chat(request, exchange).block();
 
-        verify(accountPoolService).selectDeepSeekOpenAiAccount("key-1");
-        verify(accountPoolService, never()).selectOpenAiAccount(anyString());
-        verify(accountPoolService, never()).selectKiroAccount(any());
+        ArgumentCaptor<AccountPoolRequestContext> selectionContext = ArgumentCaptor.forClass(
+            AccountPoolRequestContext.class
+        );
+        verify(accountPoolService).selectDeepSeekOpenAiAccountForPool(
+            eq("key-1"),
+            selectionContext.capture()
+        );
+        assertThat(selectionContext.getValue().requestToken()).isNotBlank();
+        assertThat(selectionContext.getValue().requestedModel()).isEqualTo("deepseek-v4-flash");
+        assertThat(selectionContext.getValue().upstreamModel()).isEqualTo("deepseek-v4-flash");
+        assertThat(selectionContext.getValue().providerHint()).isEqualTo(AccountPlatforms.DEEPSEEK_PROVIDER);
+        verify(accountPoolService, never()).selectOpenAiAccountForPool(
+            anyString(),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService, never()).selectKiroAccountForPool(
+            anyString(),
+            any(AccountPoolRequestContext.class)
+        );
         ArgumentCaptor<JsonNode> requestCaptor = ArgumentCaptor.forClass(JsonNode.class);
         verify(openAiUpstreamClient).complete(eq(account), requestCaptor.capture(), eq("deepseek-v4-flash"));
         assertThat(requestCaptor.getValue().has("service_tier")).isFalse();
@@ -232,7 +381,220 @@ class ProxyFacadeRoutingTest {
         assertThat(requestCaptor.getValue().has("fast")).isFalse();
         assertThat(requestCaptor.getValue().has("fast_mode")).isFalse();
         assertThat(request.has("service_tier")).isTrue();
+        ArgumentCaptor<StatsService.RequestLog> requestLog = ArgumentCaptor.forClass(StatsService.RequestLog.class);
+        verify(statsService).log(requestLog.capture());
+        assertThat(requestLog.getValue().circuitKey()).isEqualTo("deepseek:deepseek-v4");
+        assertThat(requestLog.getValue().circuitTier()).isEqualTo("primary");
+        assertThat(requestLog.getValue().upstreamModel()).isEqualTo("deepseek-v4-flash");
+        assertThat(requestLog.getValue().upstreamSuccess()).isTrue();
         verify(kiroUpstreamClient, never()).complete(any(), any(), any());
+    }
+
+    @Test
+    void deepSeekRateLimitRetryKeepsContextAndDoesNotTreat429AsQuotaExhaustion() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        AccountAutoSuspendService accountAutoSuspendService = mock(AccountAutoSuspendService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity primary = deepSeekAccount("deepseek-main");
+        ProxyAccountEntity backup = deepSeekAccount("deepseek-backup");
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "deepseek-v4-flash",
+              "messages": [{"role": "user", "content": "hi"}]
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/chat/completions")
+        );
+
+        when(apiKeyService.authenticate(exchange))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("deepseek-v4-flash", "key-1")).thenReturn("deepseek-v4-flash");
+        when(accountPoolService.selectDeepSeekOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(primary));
+        when(accountPoolService.selectDeepSeekOpenAiAccountForPool(
+            eq("key-1"),
+            eq(List.of("deepseek-main")),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(backup));
+        when(openAiUpstreamClient.complete(eq(primary), any(JsonNode.class), eq("deepseek-v4-flash")))
+            .thenReturn(Mono.error(new UpstreamException(429, "rate limited", true)));
+        when(openAiUpstreamClient.complete(eq(backup), any(JsonNode.class), eq("deepseek-v4-flash")))
+            .thenReturn(Mono.just(new PlatformCompletionResult(
+                "OK",
+                new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0)
+            )));
+        when(accountPoolService.recordRequestFailure(
+            eq("deepseek-main"),
+            eq(AccountPoolService.UpstreamErrorType.RECOVERABLE),
+            eq(429),
+            eq("rate limited"),
+            eq(false),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(new AccountPoolService.RequestFailureRecord("deepseek-main", 1, 429, false)));
+        when(accountPoolService.recordSuccess(
+            eq("deepseek-backup"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
+        when(apiKeyService.accountUsage(
+            any(ApiKeyPrincipal.class),
+            anyString(),
+            eq(credits("2")),
+            eq(1L),
+            eq(1L)
+        )).thenReturn(Mono.empty());
+        when(accountPoolService.circuitKey(any(AccountPoolRequestContext.class)))
+            .thenReturn("deepseek:deepseek-v4");
+        when(accountPoolService.circuitTier(
+            any(ProxyAccountEntity.class),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn("primary");
+        when(statsService.log(any())).thenReturn(Mono.empty());
+
+        ResponseEntity<?> response = proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService
+        ).chat(request, exchange).block();
+
+        assertThat(response).isNotNull();
+        ArgumentCaptor<AccountPoolRequestContext> initialContext = ArgumentCaptor.forClass(
+            AccountPoolRequestContext.class
+        );
+        ArgumentCaptor<AccountPoolRequestContext> retryContext = ArgumentCaptor.forClass(
+            AccountPoolRequestContext.class
+        );
+        ArgumentCaptor<AccountPoolRequestContext> failureContext = ArgumentCaptor.forClass(
+            AccountPoolRequestContext.class
+        );
+        ArgumentCaptor<AccountPoolRequestContext> successContext = ArgumentCaptor.forClass(
+            AccountPoolRequestContext.class
+        );
+        verify(accountPoolService).selectDeepSeekOpenAiAccountForPool(
+            eq("key-1"),
+            initialContext.capture()
+        );
+        verify(accountPoolService).selectDeepSeekOpenAiAccountForPool(
+            eq("key-1"),
+            eq(List.of("deepseek-main")),
+            retryContext.capture()
+        );
+        verify(accountPoolService).recordRequestFailure(
+            eq("deepseek-main"),
+            eq(AccountPoolService.UpstreamErrorType.RECOVERABLE),
+            eq(429),
+            eq("rate limited"),
+            eq(false),
+            failureContext.capture()
+        );
+        verify(accountPoolService).recordSuccess(
+            eq("deepseek-backup"),
+            eq(2L),
+            successContext.capture()
+        );
+        AccountPoolRequestContext context = initialContext.getValue();
+        assertThat(retryContext.getValue()).isSameAs(context);
+        assertThat(failureContext.getValue()).isSameAs(context);
+        assertThat(successContext.getValue()).isSameAs(context);
+        assertThat(context.requestToken()).isNotBlank();
+        assertThat(context.requestedModel()).isEqualTo("deepseek-v4-flash");
+        assertThat(context.upstreamModel()).isEqualTo("deepseek-v4-flash");
+        assertThat(context.providerHint()).isEqualTo(AccountPlatforms.DEEPSEEK_PROVIDER);
+        verify(accountPoolService, never()).selectOpenAiAccountForPool(
+            anyString(),
+            any(AccountPoolRequestContext.class)
+        );
+        ArgumentCaptor<StatsService.RequestLog> logs = ArgumentCaptor.forClass(StatsService.RequestLog.class);
+        verify(statsService, org.mockito.Mockito.times(2)).log(logs.capture());
+        assertThat(logs.getAllValues())
+            .extracting(
+                StatsService.RequestLog::circuitKey,
+                StatsService.RequestLog::circuitTier,
+                StatsService.RequestLog::upstreamModel
+            )
+            .containsOnly(org.assertj.core.groups.Tuple.tuple(
+                "deepseek:deepseek-v4",
+                "primary",
+                "deepseek-v4-flash"
+            ));
+        assertThat(logs.getAllValues())
+            .extracting(StatsService.RequestLog::upstreamSuccess)
+            .containsExactlyInAnyOrder(null, true);
+    }
+
+    @Test
+    void clientCancellationReleasesTheModelFamilyProbe() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity account = openAiAccount("openai-probe");
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "gpt-5.5",
+              "messages": [{"role": "user", "content": "hi"}]
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/chat/completions")
+        );
+
+        when(apiKeyService.authenticate(exchange))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("gpt-5.5", "key-1")).thenReturn("gpt-5.5");
+        when(accountPoolService.selectOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(account));
+        when(openAiUpstreamClient.complete(eq(account), any(JsonNode.class), eq("gpt-5.5")))
+            .thenReturn(Mono.never());
+
+        Disposable requestSubscription = proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService
+        ).chat(request, exchange).subscribe();
+
+        ArgumentCaptor<AccountPoolRequestContext> selectedContext = ArgumentCaptor.forClass(
+            AccountPoolRequestContext.class
+        );
+        verify(accountPoolService).selectOpenAiAccountForPool(eq("key-1"), selectedContext.capture());
+
+        requestSubscription.dispose();
+
+        ArgumentCaptor<AccountPoolRequestContext> cancelledContext = ArgumentCaptor.forClass(
+            AccountPoolRequestContext.class
+        );
+        verify(accountPoolService).cancelCircuitProbe(cancelledContext.capture());
+        assertThat(cancelledContext.getValue()).isSameAs(selectedContext.getValue());
     }
 
     @Test
@@ -277,10 +639,30 @@ class ProxyFacadeRoutingTest {
                 assertThat(error.getMessage()).contains("deepseek-v4-flash");
             });
 
-        verify(accountPoolService, never()).selectDeepSeekOpenAiAccount(anyString());
-        verify(accountPoolService, never()).selectDeepSeekOpenAiAccount(anyString(), any());
-        verify(accountPoolService, never()).recordRequestFailure(anyString(), any(), any(), anyString());
-        verify(accountPoolService, never()).recordRequestFailure(anyString(), any(), any(), anyString(), anyBoolean());
+        verify(accountPoolService, never()).selectDeepSeekOpenAiAccountForPool(
+            anyString(),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService, never()).selectDeepSeekOpenAiAccountForPool(
+            anyString(),
+            anyCollection(),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService, never()).recordRequestFailure(
+            anyString(),
+            any(),
+            any(),
+            anyString(),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService, never()).recordRequestFailure(
+            anyString(),
+            any(),
+            any(),
+            anyString(),
+            anyBoolean(),
+            any(AccountPoolRequestContext.class)
+        );
         verifyNoInteractions(openAiUpstreamClient);
     }
 
@@ -313,7 +695,10 @@ class ProxyFacadeRoutingTest {
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
         when(modelMappingService.apply("gpt-5", "key-1")).thenReturn("gpt-5");
-        when(accountPoolService.selectOpenAiAccount("key-1"))
+        when(accountPoolService.selectOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        ))
             .thenReturn(
                 Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "No available OpenAI upstream account")),
                 Mono.just(account)
@@ -338,9 +723,13 @@ class ProxyFacadeRoutingTest {
                     "gpt-5"
                 ))
             )));
-        when(openAiUpstreamClient.complete(eq(account), eq(request), eq("gpt-5")))
+        when(openAiUpstreamClient.complete(eq(account), eq(billingRequest(request, false)), eq("gpt-5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
-        when(accountPoolService.recordSuccess("openai-main", 2L)).thenReturn(Mono.empty());
+        when(accountPoolService.recordSuccess(
+            eq("openai-main"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
         when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
@@ -362,8 +751,11 @@ class ProxyFacadeRoutingTest {
 
         assertThat(response).isNotNull();
         verify(disabledAccountScheduledTestService).runWhenNoAvailableAccounts(any());
-        verify(accountPoolService, org.mockito.Mockito.times(2)).selectOpenAiAccount("key-1");
-        verify(openAiUpstreamClient).complete(eq(account), eq(request), eq("gpt-5"));
+        verify(accountPoolService, org.mockito.Mockito.times(2)).selectOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(openAiUpstreamClient).complete(eq(account), eq(billingRequest(request, false)), eq("gpt-5"));
     }
 
     @Test
@@ -379,6 +771,7 @@ class ProxyFacadeRoutingTest {
         StatsService statsService = mock(StatsService.class);
         DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
         ProxyAccountEntity account = openAiAccount();
+        ProxyAccountEntity recovered = openAiAccount("openai-recovered");
         JsonNode request = objectMapper.readTree("""
             {
               "model": "gpt-5",
@@ -395,20 +788,30 @@ class ProxyFacadeRoutingTest {
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
         when(modelMappingService.apply("gpt-5", "key-1")).thenReturn("gpt-5");
-        when(accountPoolService.selectOpenAiAccount("key-1"))
-            .thenReturn(Mono.just(account), Mono.just(account));
-        when(accountPoolService.selectOpenAiAccount(eq("key-1"), eq(List.of("openai-main"))))
-            .thenReturn(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "No available OpenAI upstream account")));
-        when(openAiUpstreamClient.complete(eq(account), eq(request), eq("gpt-5")))
+        when(accountPoolService.selectOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        ))
+            .thenReturn(Mono.just(account));
+        when(accountPoolService.selectOpenAiAccountForPool(
+            eq("key-1"),
+            eq(List.of("openai-main")),
+            any(AccountPoolRequestContext.class)
+        ))
             .thenReturn(
-                Mono.error(new UpstreamException(429, "quota exhausted", true)),
-                Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0)))
+                Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "No available OpenAI upstream account")),
+                Mono.just(recovered)
             );
+        when(openAiUpstreamClient.complete(eq(account), eq(billingRequest(request, false)), eq("gpt-5")))
+            .thenReturn(Mono.error(new UpstreamException(429, "quota exhausted", true)));
+        when(openAiUpstreamClient.complete(eq(recovered), eq(billingRequest(request, false)), eq("gpt-5")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
         when(accountPoolService.recordRequestFailure(
-            "openai-main",
-            AccountPoolService.UpstreamErrorType.RECOVERABLE,
-            429,
-            "quota exhausted"
+            eq("openai-main"),
+            eq(AccountPoolService.UpstreamErrorType.RECOVERABLE),
+            eq(429),
+            eq("quota exhausted"),
+            any(AccountPoolRequestContext.class)
         )).thenReturn(Mono.just(new AccountPoolService.RequestFailureRecord("openai-main", 2, 429, true)));
         when(disabledAccountScheduledTestService.runWhenNoAvailableAccounts(any()))
             .thenReturn(Mono.just(new AccountDtos.TestAccountsResponse(
@@ -419,8 +822,8 @@ class ProxyFacadeRoutingTest {
                 now,
                 now,
                 List.of(new AccountDtos.TestAccountItemResponse(
-                    account.getAccountId(),
-                    account.getEmail(),
+                    recovered.getAccountId(),
+                    recovered.getEmail(),
                     "SUCCESS",
                     "OK",
                     "OK",
@@ -430,7 +833,11 @@ class ProxyFacadeRoutingTest {
                     "gpt-5"
                 ))
             )));
-        when(accountPoolService.recordSuccess("openai-main", 2L)).thenReturn(Mono.empty());
+        when(accountPoolService.recordSuccess(
+            eq("openai-recovered"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
         when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
@@ -451,11 +858,47 @@ class ProxyFacadeRoutingTest {
         ).chat(request, exchange).block();
 
         assertThat(response).isNotNull();
-        verify(accountPoolService, org.mockito.Mockito.times(2)).selectOpenAiAccount("key-1");
-        verify(accountPoolService).selectOpenAiAccount(eq("key-1"), eq(List.of("openai-main")));
+        ArgumentCaptor<AccountPoolRequestContext> initialSelections = ArgumentCaptor.forClass(
+            AccountPoolRequestContext.class
+        );
+        ArgumentCaptor<AccountPoolRequestContext> retrySelection = ArgumentCaptor.forClass(
+            AccountPoolRequestContext.class
+        );
+        ArgumentCaptor<AccountPoolRequestContext> failureContext = ArgumentCaptor.forClass(
+            AccountPoolRequestContext.class
+        );
+        ArgumentCaptor<AccountPoolRequestContext> successContext = ArgumentCaptor.forClass(
+            AccountPoolRequestContext.class
+        );
+        verify(accountPoolService).selectOpenAiAccountForPool(
+            eq("key-1"),
+            initialSelections.capture()
+        );
+        verify(accountPoolService, org.mockito.Mockito.times(2)).selectOpenAiAccountForPool(
+            eq("key-1"),
+            eq(List.of("openai-main")),
+            retrySelection.capture()
+        );
+        verify(accountPoolService).recordRequestFailure(
+            eq("openai-main"),
+            eq(AccountPoolService.UpstreamErrorType.RECOVERABLE),
+            eq(429),
+            eq("quota exhausted"),
+            failureContext.capture()
+        );
         verify(disabledAccountScheduledTestService).runWhenNoAvailableAccounts(any());
-        verify(openAiUpstreamClient, org.mockito.Mockito.times(2)).complete(eq(account), eq(request), eq("gpt-5"));
-        verify(accountPoolService).recordSuccess("openai-main", 2L);
+        verify(openAiUpstreamClient).complete(eq(account), eq(billingRequest(request, false)), eq("gpt-5"));
+        verify(openAiUpstreamClient).complete(eq(recovered), eq(billingRequest(request, false)), eq("gpt-5"));
+        verify(accountPoolService).recordSuccess(eq("openai-recovered"), eq(2L), successContext.capture());
+        AccountPoolRequestContext requestContext = initialSelections.getValue();
+        assertThat(retrySelection.getAllValues())
+            .allSatisfy(context -> assertThat(context).isSameAs(requestContext));
+        assertThat(failureContext.getValue()).isSameAs(requestContext);
+        assertThat(successContext.getValue()).isSameAs(requestContext);
+        assertThat(requestContext.requestToken()).isNotBlank();
+        assertThat(requestContext.requestedModel()).isEqualTo("gpt-5");
+        assertThat(requestContext.upstreamModel()).isEqualTo("gpt-5");
+        assertThat(requestContext.providerHint()).isEqualTo(AccountPlatforms.OPENAI_PROVIDER);
     }
 
     @Test
@@ -485,10 +928,17 @@ class ProxyFacadeRoutingTest {
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
         when(modelMappingService.apply("claude", "key-1")).thenReturn("anthropic/claude-sonnet-4.5");
-        when(accountPoolService.selectAnthropicAccount("key-1")).thenReturn(Mono.just(account));
-        when(anthropicUpstreamClient.complete(eq(account), eq(request), eq("anthropic/claude-sonnet-4.5")))
+        when(accountPoolService.selectAnthropicAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(account));
+        when(anthropicUpstreamClient.complete(eq(account), eq(billingRequest(request, false)), eq("anthropic/claude-sonnet-4.5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
-        when(accountPoolService.recordSuccess("anthropic-main", 2L)).thenReturn(Mono.empty());
+        when(accountPoolService.recordSuccess(
+            eq("anthropic-main"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
         when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
@@ -507,8 +957,11 @@ class ProxyFacadeRoutingTest {
             anthropicUpstreamClient
         ).chat(request, exchange).block();
 
-        verify(accountPoolService).selectAnthropicAccount("key-1");
-        verify(anthropicUpstreamClient).complete(eq(account), eq(request), eq("anthropic/claude-sonnet-4.5"));
+        verify(accountPoolService).selectAnthropicAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(anthropicUpstreamClient).complete(eq(account), eq(billingRequest(request, false)), eq("anthropic/claude-sonnet-4.5"));
         verify(openAiUpstreamClient, never()).complete(any(), any(), any());
         verify(kiroUpstreamClient, never()).complete(any(), any(), any());
     }
@@ -541,12 +994,22 @@ class ProxyFacadeRoutingTest {
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
         when(modelMappingService.apply("claude-sonnet-4.5", "key-1")).thenReturn("claude-sonnet-4.5");
-        when(accountPoolService.selectAnthropicAccount("key-1"))
+        when(accountPoolService.selectAnthropicAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        ))
             .thenReturn(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "No available Anthropic upstream account")));
-        when(accountPoolService.selectKiroAccount("key-1")).thenReturn(Mono.just(account));
+        when(accountPoolService.selectKiroAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(account));
         when(kiroUpstreamClient.complete(eq(account), any(ObjectNode.class), eq("claude-sonnet-4.5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
-        when(accountPoolService.recordSuccess("kiro-main", 2L)).thenReturn(Mono.empty());
+        when(accountPoolService.recordSuccess(
+            eq("kiro-main"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
         when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
@@ -565,8 +1028,92 @@ class ProxyFacadeRoutingTest {
             anthropicUpstreamClient
         ).messages(request, exchange).block();
 
-        verify(accountPoolService).selectAnthropicAccount("key-1");
-        verify(accountPoolService).selectKiroAccount("key-1");
+        verify(accountPoolService).selectAnthropicAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService).selectKiroAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(kiroUpstreamClient).complete(eq(account), any(ObjectNode.class), eq("claude-sonnet-4.5"));
+        verify(anthropicUpstreamClient, never()).complete(any(), any(), any());
+    }
+
+    @Test
+    void anthropicMessagesFallbackToKiroWhenAnthropicSubtypeCircuitIsOpen() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        AnthropicUpstreamClient anthropicUpstreamClient = mock(AnthropicUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity account = kiroAccount();
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "claude-sonnet-4.5",
+              "max_tokens": 64,
+              "messages": [{"role": "user", "content": "hi"}]
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/messages")
+        );
+
+        when(apiKeyService.authenticate(exchange))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("claude-sonnet-4.5", "key-1")).thenReturn("claude-sonnet-4.5");
+        when(accountPoolService.selectAnthropicAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.error(new ApiException(
+            HttpStatus.SERVICE_UNAVAILABLE,
+            "ACCOUNT_POOL_CIRCUIT_OPEN",
+            "Model-family account pool circuit is open and no Anthropic secondary account is available"
+        )));
+        when(accountPoolService.selectKiroAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(account));
+        when(kiroUpstreamClient.complete(eq(account), any(ObjectNode.class), eq("claude-sonnet-4.5")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
+        when(accountPoolService.recordSuccess(
+            eq("kiro-main"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
+        when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), eq(credits("2")), eq(1L), eq(1L)))
+            .thenReturn(Mono.empty());
+        when(statsService.log(any())).thenReturn(Mono.empty());
+
+        proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            mock(AccountAutoSuspendService.class),
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService,
+            mock(AccountSettingsService.class),
+            paymentSettingsService(BigDecimal.ONE),
+            anthropicUpstreamClient
+        ).messages(request, exchange).block();
+
+        verify(accountPoolService).selectAnthropicAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService).selectKiroAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        );
         verify(kiroUpstreamClient).complete(eq(account), any(ObjectNode.class), eq("claude-sonnet-4.5"));
         verify(anthropicUpstreamClient, never()).complete(any(), any(), any());
     }
@@ -606,10 +1153,17 @@ class ProxyFacadeRoutingTest {
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
         when(modelMappingService.apply("gpt-5", "key-1")).thenReturn("gpt-5");
-        when(accountPoolService.selectOpenAiAccount("key-1")).thenReturn(Mono.just(account));
-        when(openAiUpstreamClient.complete(eq(account), eq(request), eq("gpt-5")))
+        when(accountPoolService.selectOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(account));
+        when(openAiUpstreamClient.complete(eq(account), eq(billingRequest(request, false)), eq("gpt-5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(2, 3, BigDecimal.ZERO, 0, 0, 0))));
-        when(accountPoolService.recordSuccess("openai-main", 5L)).thenReturn(Mono.empty());
+        when(accountPoolService.recordSuccess(
+            eq("openai-main"),
+            eq(5L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
         when(apiKeyService.accountUsage(eq(principal), anyString(), eq(credits("5")), eq(2L), eq(3L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
@@ -629,7 +1183,7 @@ class ProxyFacadeRoutingTest {
     }
 
     @Test
-    void defaultApiBillingMultiplierMakesOneHundredBalanceCoverSixMillionTokens() throws Exception {
+    void defaultModelPriceBillingMultiplierIsOne() throws Exception {
         ApiKeyService apiKeyService = mock(ApiKeyService.class);
         AccountPoolService accountPoolService = mock(AccountPoolService.class);
         ModelMappingService modelMappingService = mock(ModelMappingService.class);
@@ -658,17 +1212,24 @@ class ProxyFacadeRoutingTest {
         MockServerWebExchange exchange = MockServerWebExchange.from(
             MockServerHttpRequest.post("/v1/chat/completions")
         );
-        BigDecimal expectedCredits = new BigDecimal("100.000000");
+        BigDecimal expectedCredits = new BigDecimal("6000000.000000");
 
         when(apiKeyService.authenticate(exchange)).thenReturn(Mono.just(principal));
         when(apiKeyService.ensureBalanceAvailable(principal)).thenReturn(Mono.empty());
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
         when(modelMappingService.apply("gpt-5", "key-1")).thenReturn("gpt-5");
-        when(accountPoolService.selectOpenAiAccount("key-1")).thenReturn(Mono.just(account));
-        when(openAiUpstreamClient.complete(eq(account), eq(request), eq("gpt-5")))
+        when(accountPoolService.selectOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(account));
+        when(openAiUpstreamClient.complete(eq(account), eq(billingRequest(request, false)), eq("gpt-5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(3_000_000, 3_000_000, BigDecimal.ZERO, 0, 0, 0))));
-        when(accountPoolService.recordSuccess("openai-main", 6_000_000L)).thenReturn(Mono.empty());
+        when(accountPoolService.recordSuccess(
+            eq("openai-main"),
+            eq(6_000_000L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
         when(apiKeyService.accountUsage(eq(principal), anyString(), eq(expectedCredits), eq(3_000_000L), eq(3_000_000L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
@@ -728,10 +1289,17 @@ class ProxyFacadeRoutingTest {
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
         when(modelMappingService.apply("claude-sonnet-4.5", "key-1")).thenReturn("claude-sonnet-4.5");
-        when(accountPoolService.selectKiroAccount("key-1")).thenReturn(Mono.just(account));
+        when(accountPoolService.selectKiroAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(account));
         when(kiroUpstreamClient.complete(eq(account), any(ObjectNode.class), eq("claude-sonnet-4.5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(4, 6, BigDecimal.ZERO, 0, 0, 0))));
-        when(accountPoolService.recordSuccess("kiro-main", 10L)).thenReturn(Mono.empty());
+        when(accountPoolService.recordSuccess(
+            eq("kiro-main"),
+            eq(10L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
         when(apiKeyService.accountUsage(eq(principal), anyString(), eq(credits("10")), eq(4L), eq(6L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
@@ -775,10 +1343,17 @@ class ProxyFacadeRoutingTest {
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
         when(modelMappingService.apply("starry/gpt-5-fast", "key-1")).thenReturn("starry/gpt-5-fast");
-        when(accountPoolService.selectOpenAiAccount("key-1")).thenReturn(Mono.just(account));
+        when(accountPoolService.selectOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(account));
         when(openAiUpstreamClient.complete(eq(account), any(JsonNode.class), eq("gpt-5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(3, 2, BigDecimal.ZERO, 0, 0, 0))));
-        when(accountPoolService.recordSuccess("openai-main", 5L)).thenReturn(Mono.empty());
+        when(accountPoolService.recordSuccess(
+            eq("openai-main"),
+            eq(5L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
         when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), eq(credits("10")), eq(3L), eq(2L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
@@ -850,13 +1425,16 @@ class ProxyFacadeRoutingTest {
             });
 
         verify(accountSettingsService).ensureGptFastModeAllowed();
-        verify(accountPoolService, never()).selectOpenAiAccount(any(String.class));
+        verify(accountPoolService, never()).selectOpenAiAccountForPool(
+            anyString(),
+            any(AccountPoolRequestContext.class)
+        );
         verify(openAiUpstreamClient, never()).complete(any(), any(), any());
         verify(kiroUpstreamClient, never()).complete(any(), any(), any());
     }
 
     @Test
-    void chatRetriesNextOpenAiAccountWhenSelectedAccountReturnsQuotaError() throws Exception {
+    void chatRetriesAfterQuotaFailureEvenWhenAccountAndRequestLogPersistenceAreUnavailable() throws Exception {
         ApiKeyService apiKeyService = mock(ApiKeyService.class);
         AccountPoolService accountPoolService = mock(AccountPoolService.class);
         AccountAutoSuspendService accountAutoSuspendService = mock(AccountAutoSuspendService.class);
@@ -883,22 +1461,38 @@ class ProxyFacadeRoutingTest {
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
         when(modelMappingService.apply("gpt-5", "key-1")).thenReturn("gpt-5");
-        when(accountPoolService.selectOpenAiAccount("key-1")).thenReturn(Mono.just(primary));
-        when(openAiUpstreamClient.complete(eq(primary), eq(request), eq("gpt-5")))
+        when(accountPoolService.selectOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(primary));
+        when(openAiUpstreamClient.complete(eq(primary), eq(billingRequest(request, false)), eq("gpt-5")))
             .thenReturn(Mono.error(new UpstreamException(429, "quota exhausted", true)));
         when(accountPoolService.recordRequestFailure(
-            "openai-main",
-            AccountPoolService.UpstreamErrorType.RECOVERABLE,
-            429,
-            "quota exhausted"
-        )).thenReturn(Mono.just(new AccountPoolService.RequestFailureRecord("openai-main", 2, 429, true)));
-        when(accountPoolService.selectOpenAiAccount(eq("key-1"), eq(List.of("openai-main"))))
+            eq("openai-main"),
+            eq(AccountPoolService.UpstreamErrorType.RECOVERABLE),
+            eq(429),
+            eq("quota exhausted"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.error(new IllegalStateException("database unavailable")));
+        when(accountPoolService.selectOpenAiAccountForPool(
+            eq("key-1"),
+            eq(List.of("openai-main")),
+            any(AccountPoolRequestContext.class)
+        ))
             .thenReturn(Mono.just(backup));
-        when(openAiUpstreamClient.complete(eq(backup), eq(request), eq("gpt-5")))
+        when(openAiUpstreamClient.complete(eq(backup), eq(billingRequest(request, false)), eq("gpt-5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
-        when(accountPoolService.recordSuccess("openai-backup", 2L)).thenReturn(Mono.empty());
+        when(accountPoolService.recordSuccess(
+            eq("openai-backup"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
+        when(accountPoolService.recordCircuitSuccess(
+            any(AccountPoolRequestContext.class),
+            eq(backup)
+        )).thenReturn(73L);
         when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
-        when(statsService.log(any())).thenReturn(Mono.empty());
+        when(statsService.log(any())).thenReturn(Mono.error(new IllegalStateException("request log unavailable")));
 
         ResponseEntity<?> response = proxyFacade(
             apiKeyService,
@@ -913,18 +1507,36 @@ class ProxyFacadeRoutingTest {
         ).chat(request, exchange).block();
 
         assertThat(response).isNotNull();
-        verify(accountPoolService).selectOpenAiAccount("key-1");
-        verify(accountPoolService).selectOpenAiAccount(eq("key-1"), eq(List.of("openai-main")));
-        verify(accountPoolService).recordRequestFailure(
-            "openai-main",
-            AccountPoolService.UpstreamErrorType.RECOVERABLE,
-            429,
-            "quota exhausted"
+        verify(accountPoolService).selectOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
         );
-        verify(accountAutoSuspendService).scheduleIfNeeded(new AccountPoolService.RequestFailureRecord("openai-main", 2, 429, true));
-        verify(accountPoolService).recordSuccess("openai-backup", 2L);
-        verify(openAiUpstreamClient).complete(eq(primary), eq(request), eq("gpt-5"));
-        verify(openAiUpstreamClient).complete(eq(backup), eq(request), eq("gpt-5"));
+        verify(accountPoolService).selectOpenAiAccountForPool(
+            eq("key-1"),
+            eq(List.of("openai-main")),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService).recordRequestFailure(
+            eq("openai-main"),
+            eq(AccountPoolService.UpstreamErrorType.RECOVERABLE),
+            eq(429),
+            eq("quota exhausted"),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService).cancelCircuitProbe(any(AccountPoolRequestContext.class));
+        verify(accountAutoSuspendService, never()).scheduleIfNeeded(any());
+        verify(accountPoolService).recordSuccess(
+            eq("openai-backup"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService).recordCircuitSuccess(any(AccountPoolRequestContext.class), eq(backup));
+        verify(accountPoolService).markCircuitOutcomePersistenceFailed(
+            any(AccountPoolRequestContext.class),
+            eq(73L)
+        );
+        verify(openAiUpstreamClient).complete(eq(primary), eq(billingRequest(request, false)), eq("gpt-5"));
+        verify(openAiUpstreamClient).complete(eq(backup), eq(billingRequest(request, false)), eq("gpt-5"));
     }
 
     @Test
@@ -959,8 +1571,11 @@ class ProxyFacadeRoutingTest {
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
         when(modelMappingService.apply("gpt-5", "key-1")).thenReturn("gpt-5");
-        when(accountPoolService.selectOpenAiAccount("key-1")).thenReturn(Mono.just(account));
-        when(openAiUpstreamClient.complete(eq(account), eq(request), eq("gpt-5")))
+        when(accountPoolService.selectOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(account));
+        when(openAiUpstreamClient.complete(eq(account), eq(billingRequest(request, false)), eq("gpt-5")))
             .thenReturn(Mono.just(new PlatformCompletionResult(
                 "OK",
                 new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0)
@@ -968,6 +1583,15 @@ class ProxyFacadeRoutingTest {
         when(apiKeyService.accountUsage(
             any(ApiKeyPrincipal.class), anyString(), eq(credits("2")), eq(1L), eq(1L)
         )).thenReturn(Mono.error(settlementError));
+        when(accountPoolService.recordSuccess(
+            eq("openai-main"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
+        when(accountPoolService.recordCircuitSuccess(
+            any(AccountPoolRequestContext.class),
+            eq(account)
+        )).thenReturn(74L);
         when(statsService.log(any())).thenReturn(Mono.empty());
 
         assertThatThrownBy(() -> proxyFacade(
@@ -983,14 +1607,30 @@ class ProxyFacadeRoutingTest {
         ).chat(request, exchange).block())
             .isSameAs(settlementError);
 
-        verify(openAiUpstreamClient).complete(eq(account), eq(request), eq("gpt-5"));
-        verify(accountPoolService, never()).recordSuccess(anyString(), any(Long.class));
+        verify(openAiUpstreamClient).complete(eq(account), eq(billingRequest(request, false)), eq("gpt-5"));
+        verify(accountPoolService).recordSuccess(
+            eq("openai-main"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService).recordCircuitSuccess(any(AccountPoolRequestContext.class), eq(account));
+        verify(accountPoolService).acknowledgeCircuitOutcome(
+            any(AccountPoolRequestContext.class),
+            eq(74L)
+        );
         verify(accountPoolService, never()).recordRequestFailure(
             anyString(),
             any(AccountPoolService.UpstreamErrorType.class),
             any(),
-            anyString()
+            anyString(),
+            any(AccountPoolRequestContext.class)
         );
+        ArgumentCaptor<StatsService.RequestLog> rejectedLog = ArgumentCaptor.forClass(StatsService.RequestLog.class);
+        verify(statsService).log(rejectedLog.capture());
+        assertThat(rejectedLog.getValue().statusCode()).isEqualTo(HttpStatus.PAYMENT_REQUIRED.value());
+        assertThat(rejectedLog.getValue().success()).isFalse();
+        assertThat(rejectedLog.getValue().upstreamSuccess()).isTrue();
+        assertThat(rejectedLog.getValue().upstreamModel()).isEqualTo("gpt-5");
         verify(accountAutoSuspendService, never()).scheduleIfNeeded(any());
     }
 
@@ -1007,7 +1647,7 @@ class ProxyFacadeRoutingTest {
         ProxyAccountEntity account = openAiAccount();
         JsonNode request = objectMapper.readTree("""
             {
-              "model": "gpt-5.4-mini",
+              "model": "gpt-5.4",
               "stream": true,
               "previous_response_id": "resp_prev",
               "input": "hi"
@@ -1021,11 +1661,18 @@ class ProxyFacadeRoutingTest {
             .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
-        when(modelMappingService.apply("gpt-5.4-mini", "key-1")).thenReturn("gpt-5.4-mini");
-        when(accountPoolService.selectOpenAiAccount("key-1")).thenReturn(Mono.just(account));
-        when(openAiUpstreamClient.completeResponses(eq(account), eq(request), eq("gpt-5.4-mini")))
+        when(modelMappingService.apply("gpt-5.4", "key-1")).thenReturn("gpt-5.4");
+        when(accountPoolService.selectOpenAiAccountForPool(
+            eq("key-1:resp_prev"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(account));
+        when(openAiUpstreamClient.completeResponses(eq(account), eq(billingRequest(request, true)), eq("gpt-5.4")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
-        when(accountPoolService.recordSuccess("openai-main", 2L)).thenReturn(Mono.empty());
+        when(accountPoolService.recordSuccess(
+            eq("openai-main"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
         when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
@@ -1063,7 +1710,7 @@ class ProxyFacadeRoutingTest {
             .orElseThrow();
         assertThat(completed.path("response").path("object").asText()).isEqualTo("response");
         assertThat(completed.path("response").path("previous_response_id").asText()).isEqualTo("resp_prev");
-        verify(openAiUpstreamClient).completeResponses(eq(account), eq(request), eq("gpt-5.4-mini"));
+        verify(openAiUpstreamClient).completeResponses(eq(account), eq(billingRequest(request, true)), eq("gpt-5.4"));
     }
 
     @Test
@@ -1094,10 +1741,17 @@ class ProxyFacadeRoutingTest {
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
         when(modelMappingService.apply("gpt-5.5", "key-1")).thenReturn("gpt-5.5");
-        when(accountPoolService.selectCodexOpenAiAccount("key-1")).thenReturn(Mono.just(codex));
+        when(accountPoolService.selectCodexOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(codex));
         when(openAiUpstreamClient.completeResponses(eq(codex), any(), eq("gpt-5.5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
-        when(accountPoolService.recordSuccess("codex-main", 2L)).thenReturn(Mono.empty());
+        when(accountPoolService.recordSuccess(
+            eq("codex-main"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
         when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
@@ -1113,9 +1767,89 @@ class ProxyFacadeRoutingTest {
         ).responses(request, exchange).block();
 
         assertThat(response).isNotNull();
-        verify(accountPoolService).selectCodexOpenAiAccount("key-1");
-        verify(accountPoolService, never()).selectOpenAiAccount(any(String.class));
+        verify(accountPoolService).selectCodexOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService, never()).selectOpenAiAccountForPool(
+            anyString(),
+            any(AccountPoolRequestContext.class)
+        );
         verify(openAiUpstreamClient).completeResponses(eq(codex), any(), eq("gpt-5.5"));
+    }
+
+    @Test
+    void codexResponsesClientFallsBackToOpenAiWhenCodexSubtypeCircuitIsOpen() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity backup = openAiAccount("openai-secondary");
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "gpt-5.5",
+              "stream": false,
+              "input": "hi"
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/responses")
+                .header("User-Agent", "codex_cli_rs/0.139.0")
+        );
+
+        when(apiKeyService.authenticate(exchange))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("gpt-5.5", "key-1")).thenReturn("gpt-5.5");
+        when(accountPoolService.selectCodexOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.error(new ApiException(
+            HttpStatus.SERVICE_UNAVAILABLE,
+            "ACCOUNT_POOL_CIRCUIT_OPEN",
+            "Model-family account pool circuit is open and no Codex secondary account is available"
+        )));
+        when(accountPoolService.selectOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(backup));
+        when(openAiUpstreamClient.completeResponses(eq(backup), any(), eq("gpt-5.5")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
+        when(accountPoolService.recordSuccess(
+            eq("openai-secondary"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
+        when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), eq(credits("2")), eq(1L), eq(1L)))
+            .thenReturn(Mono.empty());
+        when(statsService.log(any())).thenReturn(Mono.empty());
+
+        ResponseEntity<?> response = proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService
+        ).responses(request, exchange).block();
+
+        assertThat(response).isNotNull();
+        verify(accountPoolService).selectCodexOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService).selectOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(openAiUpstreamClient).completeResponses(eq(backup), any(), eq("gpt-5.5"));
     }
 
     @Test
@@ -1145,10 +1879,17 @@ class ProxyFacadeRoutingTest {
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
         when(modelMappingService.apply("gpt-5.5", "key-1")).thenReturn("gpt-5.5");
-        when(accountPoolService.selectCodexOpenAiAccount("key-1")).thenReturn(Mono.just(codex));
+        when(accountPoolService.selectCodexOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(codex));
         when(openAiUpstreamClient.completeResponses(eq(codex), any(), eq("gpt-5.5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
-        when(accountPoolService.recordSuccess("codex-main", 2L)).thenReturn(Mono.empty());
+        when(accountPoolService.recordSuccess(
+            eq("codex-main"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
         when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
@@ -1164,8 +1905,14 @@ class ProxyFacadeRoutingTest {
         ).responses(request, exchange).block();
 
         assertThat(response).isNotNull();
-        verify(accountPoolService).selectCodexOpenAiAccount("key-1");
-        verify(accountPoolService, never()).selectOpenAiAccount(any(String.class));
+        verify(accountPoolService).selectCodexOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService, never()).selectOpenAiAccountForPool(
+            anyString(),
+            any(AccountPoolRequestContext.class)
+        );
         verify(openAiUpstreamClient).completeResponses(eq(codex), any(), eq("gpt-5.5"));
     }
 
@@ -1199,22 +1946,42 @@ class ProxyFacadeRoutingTest {
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
         when(modelMappingService.apply("gpt-5.5", "key-1")).thenReturn("gpt-5.5");
-        when(accountPoolService.selectCodexOpenAiAccount("key-1")).thenReturn(Mono.just(codex));
+        when(accountPoolService.selectCodexOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(codex));
         when(openAiUpstreamClient.completeResponses(eq(codex), any(), eq("gpt-5.5")))
             .thenReturn(Mono.error(new UpstreamException(503, "OpenAI upstream error 503: Service temporarily unavailable", true)));
+        when(accountPoolService.recordCircuitFailure(
+            any(AccountPoolRequestContext.class),
+            eq(codex)
+        )).thenReturn(75L);
         when(accountPoolService.recordRequestFailure(
             eq("codex-main"),
             eq(AccountPoolService.UpstreamErrorType.RECOVERABLE),
             eq(503),
-            eq("OpenAI upstream error 503: Service temporarily unavailable")
+            eq("OpenAI upstream error 503: Service temporarily unavailable"),
+            any(AccountPoolRequestContext.class)
         )).thenReturn(Mono.just(new AccountPoolService.RequestFailureRecord("codex-main", 1, 503, false)));
-        when(accountPoolService.selectCodexOpenAiAccount(eq("key-1"), eq(List.of("codex-main"))))
+        when(accountPoolService.selectCodexOpenAiAccountForPool(
+            eq("key-1"),
+            eq(List.of("codex-main")),
+            any(AccountPoolRequestContext.class)
+        ))
             .thenReturn(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "No available Codex upstream account")));
-        when(accountPoolService.selectOpenAiAccount(eq("key-1"), eq(List.of("codex-main"))))
+        when(accountPoolService.selectOpenAiAccountForPool(
+            eq("key-1"),
+            eq(List.of("codex-main")),
+            any(AccountPoolRequestContext.class)
+        ))
             .thenReturn(Mono.just(backup));
         when(openAiUpstreamClient.completeResponses(eq(backup), any(), eq("gpt-5.5")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
-        when(accountPoolService.recordSuccess("openai-backup", 2L)).thenReturn(Mono.empty());
+        when(accountPoolService.recordSuccess(
+            eq("openai-backup"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
         when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
@@ -1231,11 +1998,30 @@ class ProxyFacadeRoutingTest {
         ).responses(request, exchange).block();
 
         assertThat(response).isNotNull();
-        verify(accountPoolService).selectCodexOpenAiAccount("key-1");
-        verify(accountPoolService).selectCodexOpenAiAccount(eq("key-1"), eq(List.of("codex-main")));
-        verify(accountPoolService).selectOpenAiAccount(eq("key-1"), eq(List.of("codex-main")));
+        verify(accountPoolService).selectCodexOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService).selectCodexOpenAiAccountForPool(
+            eq("key-1"),
+            eq(List.of("codex-main")),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService).selectOpenAiAccountForPool(
+            eq("key-1"),
+            eq(List.of("codex-main")),
+            any(AccountPoolRequestContext.class)
+        );
         verify(openAiUpstreamClient).completeResponses(eq(codex), any(), eq("gpt-5.5"));
         verify(openAiUpstreamClient).completeResponses(eq(backup), any(), eq("gpt-5.5"));
+        verify(accountPoolService).recordCircuitFailure(
+            any(AccountPoolRequestContext.class),
+            eq(codex)
+        );
+        verify(accountPoolService).acknowledgeCircuitOutcome(
+            any(AccountPoolRequestContext.class),
+            eq(75L)
+        );
     }
 
     @Test
@@ -1268,22 +2054,38 @@ class ProxyFacadeRoutingTest {
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
         when(modelMappingService.apply("gpt-4o-mini", "key-1")).thenReturn("gpt-4o-mini");
-        when(accountPoolService.selectCodexOpenAiAccount("key-1")).thenReturn(Mono.just(codex));
+        when(accountPoolService.selectCodexOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(codex));
         when(openAiUpstreamClient.completeResponses(eq(codex), any(), eq("gpt-4o-mini")))
             .thenReturn(Mono.error(new UpstreamException(503, "OpenAI upstream error 503: Service temporarily unavailable", true)));
         when(accountPoolService.recordRequestFailure(
             eq("codex-main"),
             eq(AccountPoolService.UpstreamErrorType.RECOVERABLE),
             eq(503),
-            eq("OpenAI upstream error 503: Service temporarily unavailable")
+            eq("OpenAI upstream error 503: Service temporarily unavailable"),
+            any(AccountPoolRequestContext.class)
         )).thenReturn(Mono.just(new AccountPoolService.RequestFailureRecord("codex-main", 1, 503, false)));
-        when(accountPoolService.selectCodexOpenAiAccount(eq("key-1"), eq(List.of("codex-main"))))
+        when(accountPoolService.selectCodexOpenAiAccountForPool(
+            eq("key-1"),
+            eq(List.of("codex-main")),
+            any(AccountPoolRequestContext.class)
+        ))
             .thenReturn(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "No available Codex upstream account")));
-        when(accountPoolService.selectOpenAiAccount(eq("key-1"), eq(List.of("codex-main"))))
+        when(accountPoolService.selectOpenAiAccountForPool(
+            eq("key-1"),
+            eq(List.of("codex-main")),
+            any(AccountPoolRequestContext.class)
+        ))
             .thenReturn(Mono.just(backup));
         when(openAiUpstreamClient.completeResponses(eq(backup), any(), eq("gpt-4o-mini")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
-        when(accountPoolService.recordSuccess("openai-backup", 2L)).thenReturn(Mono.empty());
+        when(accountPoolService.recordSuccess(
+            eq("openai-backup"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
         when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), eq(credits("2")), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
@@ -1300,11 +2102,156 @@ class ProxyFacadeRoutingTest {
         ).responses(request, exchange).block();
 
         assertThat(response).isNotNull();
-        verify(accountPoolService).selectCodexOpenAiAccount("key-1");
-        verify(accountPoolService).selectCodexOpenAiAccount(eq("key-1"), eq(List.of("codex-main")));
-        verify(accountPoolService).selectOpenAiAccount(eq("key-1"), eq(List.of("codex-main")));
+        verify(accountPoolService).selectCodexOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService).selectCodexOpenAiAccountForPool(
+            eq("key-1"),
+            eq(List.of("codex-main")),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService).selectOpenAiAccountForPool(
+            eq("key-1"),
+            eq(List.of("codex-main")),
+            any(AccountPoolRequestContext.class)
+        );
         verify(openAiUpstreamClient).completeResponses(eq(codex), any(), eq("gpt-4o-mini"));
         verify(openAiUpstreamClient).completeResponses(eq(backup), any(), eq("gpt-4o-mini"));
+    }
+
+    @Test
+    void gptChatUsesCodexPoolWhenGptUsesCodexAccountsEnabled() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity codex = codexAccount("codex-main");
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "gpt-4o",
+              "messages": [{"role": "user", "content": "hi"}]
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/chat/completions")
+        );
+
+        when(apiKeyService.authenticate(exchange))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("gpt-4o", "key-1")).thenReturn("gpt-4o");
+        when(accountPoolService.selectCodexOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(codex));
+        when(openAiUpstreamClient.complete(eq(codex), eq(billingRequest(request, false)), eq("gpt-4o")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
+        when(accountPoolService.recordSuccess(eq("codex-main"), eq(2L), any(AccountPoolRequestContext.class)))
+            .thenReturn(Mono.empty());
+        when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), eq(credits("2")), eq(1L), eq(1L)))
+            .thenReturn(Mono.empty());
+        when(statsService.log(any())).thenReturn(Mono.empty());
+
+        proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService,
+            stubbedAccountSettings(new AccountDtos.RoutingPolicySettings(
+                true, true, false, true, 1, 3, 3, 2, 2
+            ))
+        ).chat(request, exchange).block();
+
+        verify(accountPoolService).selectCodexOpenAiAccountForPool(eq("key-1"), any(AccountPoolRequestContext.class));
+        verify(accountPoolService, never()).selectOpenAiAccountForPool(anyString(), any(AccountPoolRequestContext.class));
+        verify(accountPoolService, never()).selectOpenAiApiKeyAccountForPool(anyString(), any(AccountPoolRequestContext.class));
+        verify(accountPoolService, org.mockito.Mockito.atLeastOnce())
+            .commitSessionAffinity(
+                any(AccountPoolRequestContext.class),
+                eq("key-1"),
+                eq("codex-main"),
+                eq(true)
+            );
+        verify(openAiUpstreamClient).complete(eq(codex), eq(billingRequest(request, false)), eq("gpt-4o"));
+    }
+
+    @Test
+    void isolatedCodexPoolDoesNotFallBackToOpenAiApiKeyAfterFailure() throws Exception {
+        ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        KiroUpstreamClient kiroUpstreamClient = mock(KiroUpstreamClient.class);
+        OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        StatsService statsService = mock(StatsService.class);
+        DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+        ProxyAccountEntity codex = codexAccount("codex-main");
+        JsonNode request = objectMapper.readTree("""
+            {
+              "model": "gpt-5.5",
+              "stream": false,
+              "input": "hi"
+            }
+            """);
+        MockServerWebExchange exchange = MockServerWebExchange.from(
+            MockServerHttpRequest.post("/v1/responses")
+                .header("User-Agent", "codex_cli_rs/0.139.0")
+        );
+
+        when(apiKeyService.authenticate(exchange))
+            .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+        when(rateLimiterService.check("key-1"))
+            .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+        when(modelMappingService.apply("gpt-5.5", "key-1")).thenReturn("gpt-5.5");
+        when(accountPoolService.selectCodexOpenAiAccountForPool(
+            eq("key-1"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(codex));
+        when(openAiUpstreamClient.completeResponses(eq(codex), any(), eq("gpt-5.5")))
+            .thenReturn(Mono.error(new UpstreamException(503, "OpenAI upstream error 503: unavailable", true)));
+        when(accountPoolService.recordRequestFailure(
+            eq("codex-main"),
+            eq(AccountPoolService.UpstreamErrorType.RECOVERABLE),
+            eq(503),
+            eq("OpenAI upstream error 503: unavailable"),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(new AccountPoolService.RequestFailureRecord("codex-main", 1, 503, false)));
+
+        assertThatThrownBy(() -> proxyFacade(
+            apiKeyService,
+            accountPoolService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            kiroUpstreamClient,
+            openAiUpstreamClient,
+            statsService,
+            stubbedAccountSettings(AccountDtos.RoutingPolicySettings.defaults())
+        ).responses(request, exchange).block())
+            .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("UPSTREAM_ERROR"));
+
+        verify(accountPoolService).selectCodexOpenAiAccountForPool(eq("key-1"), any(AccountPoolRequestContext.class));
+        verify(accountPoolService, never()).selectCodexOpenAiAccountForPool(
+            eq("key-1"),
+            eq(List.of("codex-main")),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(accountPoolService, never()).selectOpenAiAccountForPool(
+            anyString(),
+            anyCollection(),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(openAiUpstreamClient).completeResponses(eq(codex), any(), eq("gpt-5.5"));
     }
 
     @Test
@@ -1320,13 +2267,13 @@ class ProxyFacadeRoutingTest {
         ProxyAccountEntity account = openAiAccount();
         JsonNode firstRequest = objectMapper.readTree("""
             {
-              "model": "gpt-5.4-mini",
+              "model": "gpt-5.4",
               "input": "write a file"
             }
             """);
         ObjectNode secondRequest = (ObjectNode) objectMapper.readTree("""
             {
-              "model": "gpt-5.4-mini",
+              "model": "gpt-5.4",
               "previous_response_id": "resp_placeholder",
               "input": [
                 {
@@ -1349,9 +2296,12 @@ class ProxyFacadeRoutingTest {
             .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
         when(rateLimiterService.check("key-1"))
             .thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
-        when(modelMappingService.apply("gpt-5.4-mini", "key-1")).thenReturn("gpt-5.4-mini");
-        when(accountPoolService.selectOpenAiAccount("key-1")).thenReturn(Mono.just(account));
-        when(openAiUpstreamClient.completeResponses(eq(account), any(JsonNode.class), eq("gpt-5.4-mini")))
+        when(modelMappingService.apply("gpt-5.4", "key-1")).thenReturn("gpt-5.4");
+        when(accountPoolService.selectOpenAiAccountForPool(
+            anyString(),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(account));
+        when(openAiUpstreamClient.completeResponses(eq(account), any(JsonNode.class), eq("gpt-5.4")))
             .thenReturn(
                 Mono.just(new PlatformCompletionResult(
                     "",
@@ -1364,7 +2314,11 @@ class ProxyFacadeRoutingTest {
                 )),
                 Mono.just(new PlatformCompletionResult("done", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0)))
             );
-        when(accountPoolService.recordSuccess("openai-main", 2L)).thenReturn(Mono.empty());
+        when(accountPoolService.recordSuccess(
+            eq("openai-main"),
+            eq(2L),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.empty());
         when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), any(BigDecimal.class), eq(1L), eq(1L))).thenReturn(Mono.empty());
         when(statsService.log(any())).thenReturn(Mono.empty());
 
@@ -1389,7 +2343,7 @@ class ProxyFacadeRoutingTest {
 
         ArgumentCaptor<JsonNode> requestCaptor = ArgumentCaptor.forClass(JsonNode.class);
         verify(openAiUpstreamClient, org.mockito.Mockito.times(2))
-            .completeResponses(eq(account), requestCaptor.capture(), eq("gpt-5.4-mini"));
+            .completeResponses(eq(account), requestCaptor.capture(), eq("gpt-5.4"));
         JsonNode replayed = requestCaptor.getAllValues().get(1);
         assertThat(replayed.has("previous_response_id")).isFalse();
         assertThat(replayed.path("store").asBoolean(true)).isFalse();
@@ -1413,8 +2367,6 @@ class ProxyFacadeRoutingTest {
         StatsService statsService
     ) {
         AccountAutoSuspendService accountAutoSuspendService = mock(AccountAutoSuspendService.class);
-        AccountSettingsService accountSettingsService = mock(AccountSettingsService.class);
-        when(accountSettingsService.ensureGptFastModeAllowed()).thenReturn(Mono.empty());
         return proxyFacade(
             apiKeyService,
             accountPoolService,
@@ -1425,7 +2377,7 @@ class ProxyFacadeRoutingTest {
             kiroUpstreamClient,
             openAiUpstreamClient,
             statsService,
-            accountSettingsService,
+            stubbedAccountSettings(),
             paymentSettingsService(BigDecimal.ONE)
         );
     }
@@ -1441,8 +2393,6 @@ class ProxyFacadeRoutingTest {
         StatsService statsService,
         PaymentSettingsService paymentSettingsService
     ) {
-        AccountSettingsService accountSettingsService = mock(AccountSettingsService.class);
-        when(accountSettingsService.ensureGptFastModeAllowed()).thenReturn(Mono.empty());
         return proxyFacade(
             apiKeyService,
             accountPoolService,
@@ -1453,7 +2403,7 @@ class ProxyFacadeRoutingTest {
             kiroUpstreamClient,
             openAiUpstreamClient,
             statsService,
-            accountSettingsService,
+            stubbedAccountSettings(),
             paymentSettingsService
         );
     }
@@ -1469,8 +2419,6 @@ class ProxyFacadeRoutingTest {
         OpenAiUpstreamClient openAiUpstreamClient,
         StatsService statsService
     ) {
-        AccountSettingsService accountSettingsService = mock(AccountSettingsService.class);
-        when(accountSettingsService.ensureGptFastModeAllowed()).thenReturn(Mono.empty());
         return proxyFacade(
             apiKeyService,
             accountPoolService,
@@ -1481,7 +2429,7 @@ class ProxyFacadeRoutingTest {
             kiroUpstreamClient,
             openAiUpstreamClient,
             statsService,
-            accountSettingsService,
+            stubbedAccountSettings(),
             paymentSettingsService(BigDecimal.ONE)
         );
     }
@@ -1551,6 +2499,7 @@ class ProxyFacadeRoutingTest {
         AccountSettingsService accountSettingsService,
         PaymentSettingsService paymentSettingsService
     ) {
+        ensureRoutingPolicy(accountSettingsService);
         return proxyFacade(
             apiKeyService,
             accountPoolService,
@@ -1565,6 +2514,40 @@ class ProxyFacadeRoutingTest {
             paymentSettingsService,
             mock(AnthropicUpstreamClient.class)
         );
+    }
+
+    private AccountSettingsService stubbedAccountSettings() {
+        return stubbedAccountSettings(legacyRoutingPolicy());
+    }
+
+    private AccountSettingsService stubbedAccountSettings(AccountDtos.RoutingPolicySettings policy) {
+        AccountSettingsService accountSettingsService = mock(AccountSettingsService.class);
+        when(accountSettingsService.ensureGptFastModeAllowed()).thenReturn(Mono.empty());
+        stubRoutingPolicy(accountSettingsService, policy);
+        return accountSettingsService;
+    }
+
+    private void stubRoutingPolicy(
+        AccountSettingsService accountSettingsService,
+        AccountDtos.RoutingPolicySettings policy
+    ) {
+        when(accountSettingsService.routingPolicy()).thenReturn(Mono.just(policy));
+    }
+
+    private void ensureRoutingPolicy(AccountSettingsService accountSettingsService) {
+        try {
+            if (accountSettingsService.routingPolicy() != null) {
+                return;
+            }
+        } catch (RuntimeException ignored) {
+            // Unstubbed mocks can throw; fall through and install the legacy policy.
+        }
+        stubRoutingPolicy(accountSettingsService, legacyRoutingPolicy());
+    }
+
+    /** Existing facade tests keep mixed OpenAI/Codex selection and cross-pool fallback. */
+    private AccountDtos.RoutingPolicySettings legacyRoutingPolicy() {
+        return new AccountDtos.RoutingPolicySettings(false, false, true, true, 2, 3, 3, 2, 2);
     }
 
     private ProxyFacade proxyFacade(
@@ -1613,6 +2596,10 @@ class ProxyFacadeRoutingTest {
         AnthropicUpstreamClient anthropicUpstreamClient,
         DisabledAccountScheduledTestService disabledAccountScheduledTestService
     ) {
+        ensureRoutingPolicy(accountSettingsService);
+        when(apiKeyService.reserveUsage(any(), anyString(), any(), anyString())).thenReturn(Mono.empty());
+        when(apiKeyService.markUsageDispatched(any(), anyString())).thenReturn(Mono.empty());
+        when(apiKeyService.releaseUsage(any(), anyString(), anyBoolean(), anyString())).thenReturn(Mono.empty());
         return new ProxyFacade(
             apiKeyService,
             accountPoolService,
@@ -1671,6 +2658,14 @@ class ProxyFacadeRoutingTest {
 
     private ModelPricingService modelPricingService() {
         ModelPricingService service = mock(ModelPricingService.class);
+        when(service.billingQuote(anyString(), anyBoolean(), any())).thenAnswer(invocation -> {
+            boolean fastMode = invocation.getArgument(1);
+            BigDecimal multiplier = invocation.getArgument(2);
+            BigDecimal rate = multiplier == null || multiplier.signum() <= 0
+                ? PaymentSettingsService.DEFAULT_API_BILLING_MULTIPLIER : multiplier;
+            if (fastMode) rate = rate.multiply(BigDecimal.valueOf(2));
+            return Mono.just(new tech.starryapi.model.BillingQuote(rate, rate, rate, rate, rate));
+        });
         when(service.cost(any(), any(), anyBoolean(), any())).thenAnswer(invocation -> {
             PlatformUsage usage = invocation.getArgument(1);
             boolean fastMode = invocation.getArgument(2);
@@ -1691,6 +2686,12 @@ class ProxyFacadeRoutingTest {
 
     private BigDecimal credits(String value) {
         return new BigDecimal(value).setScale(6);
+    }
+
+    private JsonNode billingRequest(JsonNode request, boolean responses) {
+        var expected = ((com.fasterxml.jackson.databind.node.ObjectNode) request).deepCopy();
+        expected.put(responses ? "max_output_tokens" : "max_tokens", 4096L);
+        return expected;
     }
 
     private ProxyAccountEntity openAiAccount() {
@@ -1714,7 +2715,11 @@ class ProxyFacadeRoutingTest {
     }
 
     private ProxyAccountEntity deepSeekAccount() {
-        ProxyAccountEntity account = openAiAccount("deepseek-main");
+        return deepSeekAccount("deepseek-main");
+    }
+
+    private ProxyAccountEntity deepSeekAccount(String accountId) {
+        ProxyAccountEntity account = openAiAccount(accountId);
         account.setProvider(AccountPlatforms.DEEPSEEK_PROVIDER);
         account.setBaseUrl(AccountPlatforms.DEFAULT_DEEPSEEK_BASE_URL);
         return account;

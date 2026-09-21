@@ -147,7 +147,23 @@ Recommended settings:
 SMTP host: smtp.exmail.qq.com
 SMTP port: 465
 SMTP security: SSL / TLS
+SMTP username: the full Exmail address
+SMTP from email: the same address as the username
 ```
+
+## Tencent Exmail Rejects MAIL FROM
+
+Symptom:
+
+```text
+501 mail from address must be same as authorization user
+```
+
+Exmail requires the SMTP envelope From address to equal the login username.
+Set `smtpFromEmail` to the same mailbox as `smtpUsername` (for example both
+`admin@company.com`). A display name can still differ via `smtpFromName`.
+A `198.18.0.0/15` fake-IP in DNS is unrelated when the server already returned
+this 501; the session reached Exmail and was rejected for the From address.
 
 ## WebUI Does Not Change After Installer Update
 
@@ -182,9 +198,44 @@ SERVER_PORT=8081 ./gradlew :service:bootRun
 
 Or stop the process that owns the port.
 
+## APIs Return `503 SYSTEM_MAINTENANCE`
+
+Confirm that this is the fail-closed data-management hard lock rather than an ordinary upstream outage:
+
+```bash
+curl -fsS http://127.0.0.1:18080/system/status
+```
+
+If the response contains `"maintenance":true` and `"code":"SYSTEM_MAINTENANCE"`, do not delete the security state or restart repeatedly. Keep public traffic isolated, make sure exactly one `service` container is active, and use the utility already packaged in the image:
+
+```bash
+cd /opt/starry-api
+docker compose -f docker-compose.artifact.yml exec service \
+  /app/bin/recover-data-management --lang zh
+# Use --lang en for English prompts.
+docker compose -f docker-compose.artifact.yml restart service
+# Wait for startup, then verify:
+docker compose -f docker-compose.artifact.yml exec service \
+  curl -fsS http://127.0.0.1:8080/system/status
+docker compose -f docker-compose.artifact.yml exec service \
+  sh -c 'test ! -e /app/security/recovery.key && test ! -e /app/security/.recovery.key.consuming'
+```
+
+Run the utility from a real TTY without `exec -T`; it hides the original `dmsk-...` key and requires identical double entry. A normal matching attempt clears maintenance and consumes both recovery paths. A normal readable, valid-format but nonmatching attempt records `RECOVERY_FAILED`, consumes both paths, and leaves maintenance active, so run the utility and restart again with the correct key. Do not place the key in arguments, pipes, `.env`, or a downloaded `curl ... | sh` recovery script. Source Compose deployments omit `-f docker-compose.artifact.yml`; direct host/JAR recovery is documented in [Operations](OPERATIONS.md#recover-a-direct-hostjar-deployment).
+
+If maintenance remains active after a matching key, or either file still exists, cleanup was not confirmed and recovery is not complete. Do not rerun the utility or delete the files manually. Inspect the security volume and service log without reading the key contents:
+
+```bash
+docker compose -f docker-compose.artifact.yml exec service \
+  sh -c 'ls -ld /app/security; ls -l /app/security/recovery.key /app/security/.recovery.key.consuming 2>/dev/null || true'
+docker compose -f docker-compose.artifact.yml logs --tail=200 service
+```
+
+Repair the volume's ownership, permissions, free-space, or filesystem error and restart `service`. Startup retries staged cleanup; the service remains fail-closed until cleanup, deletion, and directory synchronization succeed. Escalate for audited operator recovery if the staged file cannot be cleared after repairing storage.
+
 ## Missing First Startup Admin Password
 
-The default local admin password is printed once in the startup guide logs when the `admin_users` table is empty:
+The application Root password is printed once when first-start bootstrap finds both an unassigned Root marker and an empty `admin_users` table:
 
 ```text
 Default admin user created. Save this password now.
@@ -192,14 +243,14 @@ Username: admin
 Password: ...
 ```
 
-If you lost it, use an existing admin session to reset the user password:
+If a non-Root account loses its password, an administrator can reset that account:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/admin/users/{userId}/reset-password \
   -H 'Authorization: Bearer adm-...'
 ```
 
-For a disposable local database only, you can drop and recreate the database to trigger first-start bootstrap again. Do not do this in production.
+Root is different: another administrator cannot reset or replace it. If a valid Root session still exists, Root can change or self-reset its password and all Root sessions will then be revoked. If both the Root password and every Root session are lost, the application deliberately does not create a replacement. For a disposable local database only, drop and recreate the entire database to trigger first-start bootstrap; never use that procedure on production data. Production recovery requires stopping traffic and performing an audited database-owner recovery or restoring a trusted backup.
 
 ## Admin APIs Return `403 FIRST_LOGIN_PASSWORD_CHANGE_REQUIRED`
 
@@ -216,7 +267,9 @@ curl -X POST http://127.0.0.1:8080/auth/password \
   -d '{"oldPassword":"<current-password>","newPassword":"<new-password>"}'
 ```
 
-The password is never printed again after the first bootstrap. If it is lost, another admin must reset it, or a disposable local database can be recreated.
+Password changes revoke all existing console sessions; sign in again with the new password.
+
+The Root password is never printed again after first bootstrap and cannot be reset by another administrator. New passwords must contain 12 to 128 characters.
 
 ## Admin APIs Return `401`
 
@@ -258,7 +311,7 @@ Create a key:
 curl -X POST http://127.0.0.1:8080/admin/api-keys \
   -H 'Content-Type: application/json' \
   -H 'Authorization: Bearer adm-...' \
-  -d '{"name":"default"}'
+  -d '{"name":"default","modelProvider":"OpenAI"}'
 ```
 
 Use returned `data.key`:

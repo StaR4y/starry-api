@@ -1,13 +1,13 @@
 # Package Guide
 
-Starry API is being moved from a Kiro-centered proxy into a multi-platform routing service. Package names must describe the platform boundary they own, not the first upstream adapter that happened to execute the call.
+Starry API has moved from a Kiro-centered proxy into a multi-platform routing service. Package names describe the platform boundary they own, not the first upstream adapter that happened to execute the call.
 
 ## Backend Rules
 
 Backend source is rooted at:
 
 ```text
-service/src/main/java/xyz/star4y/api
+service/src/main/java/tech/starryapi
 ```
 
 Use these package boundaries:
@@ -15,21 +15,21 @@ Use these package boundaries:
 | Package | Owns | May depend on |
 | --- | --- | --- |
 | `proxy` | Request orchestration, auth, rate limit, model mapping, account selection, accounting, logs. | `platform/*`, account/API key/model/stat services. |
-| `api/model` | Public model catalog API contract, model DTOs, and the backend-facing `ModelCatalogProvider` abstraction. | JDK, Jackson annotations, Spring Web annotations. |
+| `service-api/model` | Public model catalog API contract, model DTOs, and the backend-facing `ModelCatalogProvider` abstraction. | JDK, Jackson annotations, Spring Web annotations. |
 | `platform/core` | Provider-neutral completion result, usage, and tool-use records. | Jackson and JDK only. |
 | `platform/catalog` | Service implementation detail that aggregates provider catalog classes for `ModelCatalogProvider`. | Provider catalog classes. |
-| `platform/openai` | OpenAI-compatible request adapters, response factories, OpenAI model aliases, OpenAI account test client. | `platform/core`, `platform/catalog`, account DTO/entity types when testing accounts. |
-| `platform/anthropic` | Anthropic-compatible request adapters, response factories, Anthropic model aliases. | `platform/core`, `platform/catalog`. |
+| `platform/openai` | OpenAI-compatible request adapters, response factories, model aliases, OpenAI/Codex/DeepSeek HTTP transport, and OpenAI account tests. | `platform/core`, `platform/catalog`, `platform/upstream`, account types and token refresh. |
+| `platform/anthropic` | Anthropic-compatible request adapters, response factories, model aliases, and native Anthropic API-key transport. | `platform/core`, `platform/catalog`, `platform/upstream`, account types. |
 | `platform/gemini` | Gemini-compatible request adapters, response factories, Gemini model aliases. | `platform/core`, `platform/catalog`. |
 | `platform/kiro` | Kiro/AWS payload creation, endpoint dispatch, token-specific headers, model ID conversion, AWS event-stream parsing. | `platform/core`, `platform/catalog`, `platform/upstream`, account/config services. |
-| `platform/upstream` | Upstream-facing exception and later shared upstream adapter contracts. | JDK only where possible. |
+| `platform/upstream` | Shared upstream exception contract; a common execution-adapter interface has not been introduced yet. | JDK only where possible. |
 
 Hard rules:
 
 - OpenAI, Anthropic, and Gemini modules must not import each other.
 - Client protocol modules must not import `platform/kiro`; they format `PlatformCompletionResult`.
 - Kiro-specific names stay inside `platform/kiro`, Kiro account import/refresh code, deployment compatibility variables, or documentation that explicitly discusses migration.
-- Shared model capabilities, default target IDs, and model-list DTOs belong in `api/model`; service code must depend on `ModelCatalogProvider` instead of reading provider catalogs directly.
+- Shared model capabilities, default target IDs, and model-list DTOs belong in `service-api/model`; service code must depend on `ModelCatalogProvider` instead of reading provider catalogs directly.
 - New inbound protocol support gets a new `platform/<provider>` package with request adapter, response factory, model catalog, and package-aligned tests.
 - New upstream execution support gets a new `platform/<upstream>` package and should return `PlatformCompletionResult` until a richer upstream adapter interface is introduced.
 - Account management may store credentials for multiple providers in `account`, but request routing must select only accounts compatible with the active upstream adapter.

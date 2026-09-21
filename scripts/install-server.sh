@@ -28,6 +28,8 @@ ARTIFACT_URL="${ARTIFACT_URL:-${REPO_RAW_BASE%/}/artifacts/starry-api.jar}"
 CHECKSUM_URL="${CHECKSUM_URL:-${REPO_RAW_BASE%/}/artifacts/starry-api.jar.sha256}"
 BUILD_INFO_URL="${BUILD_INFO_URL:-${REPO_RAW_BASE%/}/artifacts/build-info.json}"
 POSTGRES_INIT_URL="${POSTGRES_INIT_URL:-${REPO_RAW_BASE%/}/docker/postgresql/init/001-starry-api-roles.sh}"
+RECOVERY_TOOL_URL="${RECOVERY_TOOL_URL:-${REPO_RAW_BASE%/}/artifacts/runtime/recover-data-management.sh}"
+RECOVERY_TOOL_CHECKSUM_URL="${RECOVERY_TOOL_CHECKSUM_URL:-${RECOVERY_TOOL_URL}.sha256}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/starry-api}"
 GITHUB_TOKEN_FILE="${GITHUB_TOKEN_FILE:-${INSTALL_DIR}/.github-token}"
 HOST_BIND_ADDR="${HOST_BIND_ADDR:-0.0.0.0}"
@@ -41,8 +43,10 @@ ARTIFACT_UPDATED=false
 ARTIFACT_ROLLBACK_AVAILABLE=false
 COMPOSE_ROLLBACK_AVAILABLE=false
 POSTGRES_INIT_ROLLBACK_AVAILABLE=false
+RECOVERY_TOOL_ROLLBACK_AVAILABLE=false
 ENV_ROLLBACK_AVAILABLE=false
 ENV_UPDATED=false
+RECOVERY_TOOL_UPDATED=false
 STACK_MUTATION_STARTED=false
 DEPLOYMENT_COMMITTED=false
 ROLLBACK_COMPLETED=false
@@ -221,9 +225,13 @@ backup_current_artifact() {
   local previous_compose="${INSTALL_DIR}/docker-compose.artifact.yml.previous"
   local current_init="${INSTALL_DIR}/postgres-init/001-starry-api-roles.sh"
   local previous_init="${INSTALL_DIR}/postgres-init/001-starry-api-roles.sh.previous"
+  local current_recovery="${INSTALL_DIR}/runtime/recover-data-management.sh"
+  local current_recovery_checksum="${INSTALL_DIR}/runtime/recover-data-management.sh.sha256"
+  local previous_recovery="${INSTALL_DIR}/runtime/recover-data-management.sh.previous"
+  local previous_recovery_checksum="${INSTALL_DIR}/runtime/recover-data-management.sh.previous.sha256"
   local current_env="${INSTALL_DIR}/.env"
   local previous_env="${INSTALL_DIR}/.env.previous"
-  local checksum checksum_tmp
+  local checksum checksum_tmp recovery_checksum recovery_checksum_tmp
 
   if [[ ! -f "$current" || "$ARTIFACT_ROLLBACK_AVAILABLE" == "true" ]]; then
     return
@@ -255,6 +263,22 @@ backup_current_artifact() {
   else
     rm -f -- "$previous_init"
   fi
+  if [[ -f "$current_recovery" ]]; then
+    atomic_install_file "$current_recovery" "$previous_recovery" 0555 \
+      || fail "Could not preserve the current data-management recovery tool for rollback."
+    recovery_checksum="$(sha256_file "$previous_recovery")"
+    recovery_checksum_tmp="$(mktemp "${previous_recovery_checksum}.incoming.XXXXXX")" \
+      || fail "Could not prepare the recovery-tool rollback checksum."
+    printf '%s  %s\n' "$recovery_checksum" "recover-data-management.sh" > "$recovery_checksum_tmp" \
+      || fail "Could not write the recovery-tool rollback checksum."
+    chmod 0644 "$recovery_checksum_tmp" \
+      || fail "Could not secure the recovery-tool rollback checksum."
+    mv -f -- "$recovery_checksum_tmp" "$previous_recovery_checksum" \
+      || fail "Could not activate the recovery-tool rollback checksum."
+    RECOVERY_TOOL_ROLLBACK_AVAILABLE=true
+  else
+    rm -f -- "$previous_recovery" "$previous_recovery_checksum" "$current_recovery_checksum"
+  fi
   if [[ -f "$current_env" ]]; then
     atomic_install_file "$current_env" "$previous_env" 0600 \
       || fail "Could not preserve the current environment file for rollback."
@@ -285,6 +309,25 @@ install_verified_artifact() {
   INSTALLED_ARTIFACT_CHECKSUM="$actual"
 }
 
+install_verified_recovery_tool() {
+  local source="$1"
+  local checksum_file="$2"
+  local expected actual
+
+  expected="$(awk '{print $1}' "$checksum_file" | head -n 1)"
+  actual="$(sha256_file "$source")"
+  [[ -n "$expected" ]] || fail "Recovery tool checksum file is empty."
+  [[ "$expected" == "$actual" ]] \
+    || fail "Recovery tool checksum mismatch. expected=${expected} actual=${actual}"
+
+  backup_current_artifact
+  RECOVERY_TOOL_UPDATED=true
+  atomic_install_file "$checksum_file" "${INSTALL_DIR}/runtime/recover-data-management.sh.sha256" 0644 \
+    || fail "Could not install the recovery tool checksum atomically."
+  atomic_install_file "$source" "${INSTALL_DIR}/runtime/recover-data-management.sh" 0555 \
+    || fail "Could not install the data-management recovery tool atomically."
+}
+
 rollback_installed_artifact() {
   local previous="${INSTALL_DIR}/app/starry-api.jar.previous"
   local previous_checksum="${INSTALL_DIR}/app/starry-api.jar.previous.sha256"
@@ -292,10 +335,14 @@ rollback_installed_artifact() {
   local previous_compose="${INSTALL_DIR}/docker-compose.artifact.yml.previous"
   local current_init="${INSTALL_DIR}/postgres-init/001-starry-api-roles.sh"
   local previous_init="${INSTALL_DIR}/postgres-init/001-starry-api-roles.sh.previous"
+  local current_recovery="${INSTALL_DIR}/runtime/recover-data-management.sh"
+  local current_recovery_checksum="${INSTALL_DIR}/runtime/recover-data-management.sh.sha256"
+  local previous_recovery="${INSTALL_DIR}/runtime/recover-data-management.sh.previous"
+  local previous_recovery_checksum="${INSTALL_DIR}/runtime/recover-data-management.sh.previous.sha256"
   local current_env="${INSTALL_DIR}/.env"
   local previous_env="${INSTALL_DIR}/.env.previous"
   local retry_env="${INSTALL_DIR}/.env.postgresql-retry"
-  local expected actual
+  local expected actual recovery_expected recovery_actual
 
   if [[ "$ARTIFACT_ROLLBACK_AVAILABLE" != "true" ]]; then
     return 1
@@ -306,6 +353,12 @@ rollback_installed_artifact() {
   actual="$(sha256_file "$previous")"
   [[ -n "$expected" && "$expected" == "$actual" ]] || return 1
   [[ "$COMPOSE_ROLLBACK_AVAILABLE" == "true" && -f "$previous_compose" ]] || return 1
+  if [[ "$RECOVERY_TOOL_ROLLBACK_AVAILABLE" == "true" ]]; then
+    [[ -f "$previous_recovery" && -f "$previous_recovery_checksum" ]] || return 1
+    recovery_expected="$(awk '{print $1}' "$previous_recovery_checksum" | head -n 1)"
+    recovery_actual="$(sha256_file "$previous_recovery")"
+    [[ -n "$recovery_expected" && "$recovery_expected" == "$recovery_actual" ]] || return 1
+  fi
 
   atomic_install_file "$previous_compose" "$current_compose" 0644 || return 1
   if [[ "$POSTGRES_INIT_ROLLBACK_AVAILABLE" == "true" ]]; then
@@ -313,6 +366,12 @@ rollback_installed_artifact() {
     atomic_install_file "$previous_init" "$current_init" 0755 || return 1
   else
     rm -f -- "$current_init" || return 1
+  fi
+  if [[ "$RECOVERY_TOOL_ROLLBACK_AVAILABLE" == "true" ]]; then
+    atomic_install_file "$previous_recovery_checksum" "$current_recovery_checksum" 0644 || return 1
+    atomic_install_file "$previous_recovery" "$current_recovery" 0555 || return 1
+  elif [[ "$RECOVERY_TOOL_UPDATED" == "true" ]]; then
+    rm -f -- "$current_recovery" "$current_recovery_checksum" || return 1
   fi
   if [[ "$ENV_ROLLBACK_AVAILABLE" == "true" ]]; then
     [[ -f "$previous_env" ]] || return 1
@@ -327,8 +386,9 @@ rollback_installed_artifact() {
   atomic_install_file "$previous_checksum" "${INSTALL_DIR}/app/starry-api.jar.sha256" 0644 || return 1
   atomic_install_file "$previous" "${INSTALL_DIR}/app/starry-api.jar" 0644 || return 1
   ARTIFACT_UPDATED=false
+  RECOVERY_TOOL_UPDATED=false
   ENV_UPDATED=false
-  log "Restored the previous environment, application jar, Compose configuration, and PostgreSQL bootstrap after the failed deployment."
+  log "Restored the previous environment, application jar, Compose configuration, PostgreSQL bootstrap, and recovery tool after the failed deployment."
 }
 
 deployment_exit_handler() {
@@ -436,7 +496,14 @@ webui_url() {
 prepare_install_dir() {
   log "Preparing ${INSTALL_DIR}..."
   log "Using prebuilt artifact base ${REPO_RAW_BASE}."
-  root_cmd mkdir -p "$INSTALL_DIR/app" "$INSTALL_DIR/data/postgresql" "$INSTALL_DIR/data/backups" "$INSTALL_DIR/postgres-init"
+  root_cmd mkdir -p \
+    "$INSTALL_DIR/app" \
+    "$INSTALL_DIR/data/postgresql" \
+    "$INSTALL_DIR/data/backups" \
+    "$INSTALL_DIR/data/security" \
+    "$INSTALL_DIR/postgres-init" \
+    "$INSTALL_DIR/runtime"
+  root_cmd chmod 0700 "$INSTALL_DIR/data/security"
 }
 
 postgres_cluster_initialized() {
@@ -567,6 +634,7 @@ SPRING_CODEC_MAX_IN_MEMORY_SIZE=16MB
 
 STARRY_MAX_IMPORT_BYTES=268435456
 STARRY_DATA_TRANSFER_PROCESS_TIMEOUT=30m
+STARRY_DATA_MANAGEMENT_REQUIRE_INITIALIZED=false
 STARRY_PAYMENT_RECONCILIATION_INTERVAL=PT30S
 STARRY_PAYMENT_RECONCILIATION_INITIAL_DELAY=PT30S
 STARRY_PAYMENT_PROVIDER_RECONCILIATION_INTERVAL=PT30S
@@ -588,6 +656,12 @@ STARRY_STATS_HOURLY_DELETE_MAX_BATCHES=20
 STARRY_STATS_USAGE_EVENT_RETENTION_DAYS=400
 STARRY_STATS_USAGE_EVENT_DELETE_BATCH_SIZE=10000
 STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES=20
+STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_ENABLED=true
+STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_CRON="0 35 3 * * *"
+STARRY_ACCOUNT_ALLOCATION_LEASE_RETENTION_DAYS=7
+STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS=90
+STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE=10000
+STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES=20
 
 # Runtime variables still use KIRO_* for compatibility with the current Kiro/AWS upstream adapter.
 KIRO_ALLOW_ANONYMOUS_PROXY=false
@@ -693,12 +767,12 @@ services:
 
   service:
     build:
-      context: ./postgres-init
+      context: ./runtime
       dockerfile_inline: |
         FROM eclipse-temurin:25-jre-noble
         RUN set -eux; \
             apt-get update; \
-            apt-get install -y --no-install-recommends ca-certificates curl; \
+            apt-get install -y --no-install-recommends ca-certificates curl jq; \
             install -d -m 0755 /usr/share/postgresql-common/pgdg; \
             curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc; \
             . /etc/os-release; \
@@ -706,6 +780,7 @@ services:
             apt-get update; \
             apt-get install -y --no-install-recommends postgresql-client-17; \
             rm -rf /var/lib/apt/lists/*
+        COPY --chmod=0555 recover-data-management.sh /app/bin/recover-data-management
     image: starryapi-runtime:java25-pg17
     container_name: starryapi-service
     restart: unless-stopped
@@ -716,6 +791,8 @@ services:
     volumes:
       - ./app/starry-api.jar:/app/app.jar:ro
       - ./data/backups:/app/backups
+      - ./data/security:/app/security
+      - ./data/plugins:/app/plugins
     environment:
       SERVER_PORT: ${SERVER_PORT:-8080}
       SERVER_ADDRESS: 0.0.0.0
@@ -756,9 +833,14 @@ services:
       KIRO_TOKEN_REFRESH_INTERVAL_MS: ${KIRO_TOKEN_REFRESH_INTERVAL_MS:-3600000}
       KIRO_TOKEN_REFRESH_INITIAL_DELAY_MS: ${KIRO_TOKEN_REFRESH_INITIAL_DELAY_MS:-60000}
       KIRO_PREFERRED_ENDPOINT: ${KIRO_PREFERRED_ENDPOINT:-codewhisperer}
+      STARRY_PLUGINS_DISABLED: ${STARRY_PLUGINS_DISABLED:-false}
+      STARRY_PLUGIN_DIR: /app/plugins
       STARRY_BACKUP_DIR: /app/backups
       STARRY_MAX_IMPORT_BYTES: ${STARRY_MAX_IMPORT_BYTES:-268435456}
       STARRY_DATA_TRANSFER_PROCESS_TIMEOUT: ${STARRY_DATA_TRANSFER_PROCESS_TIMEOUT:-30m}
+      STARRY_DATA_MANAGEMENT_SECURITY_FILE: /app/security/data-management.json
+      STARRY_DATA_MANAGEMENT_RECOVERY_KEY_FILE: /app/security/recovery.key
+      STARRY_DATA_MANAGEMENT_REQUIRE_INITIALIZED: ${STARRY_DATA_MANAGEMENT_REQUIRE_INITIALIZED:-false}
       STARRY_PAYMENT_RECONCILIATION_INTERVAL: ${STARRY_PAYMENT_RECONCILIATION_INTERVAL:-PT30S}
       STARRY_PAYMENT_RECONCILIATION_INITIAL_DELAY: ${STARRY_PAYMENT_RECONCILIATION_INITIAL_DELAY:-PT30S}
       STARRY_PAYMENT_PROVIDER_RECONCILIATION_INTERVAL: ${STARRY_PAYMENT_PROVIDER_RECONCILIATION_INTERVAL:-PT30S}
@@ -780,6 +862,12 @@ services:
       STARRY_STATS_USAGE_EVENT_RETENTION_DAYS: ${STARRY_STATS_USAGE_EVENT_RETENTION_DAYS:-400}
       STARRY_STATS_USAGE_EVENT_DELETE_BATCH_SIZE: ${STARRY_STATS_USAGE_EVENT_DELETE_BATCH_SIZE:-10000}
       STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES: ${STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES:-20}
+      STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_ENABLED: ${STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_ENABLED:-true}
+      STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_CRON: "${STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_CRON:-0 35 3 * * *}"
+      STARRY_ACCOUNT_ALLOCATION_LEASE_RETENTION_DAYS: ${STARRY_ACCOUNT_ALLOCATION_LEASE_RETENTION_DAYS:-7}
+      STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS: ${STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS:-90}
+      STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE: ${STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE:-10000}
+      STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES: ${STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES:-20}
       JAVA_OPTS: ${JAVA_OPTS:-}
     ports:
       - "${HOST_BIND_ADDR:-127.0.0.1}:${HOST_HTTP_PORT:-18080}:${SERVER_PORT:-8080}"
@@ -794,16 +882,21 @@ EOF
 }
 
 download_artifact() {
-  local tmp_dir tmp_jar tmp_sha tmp_info actual
+  local tmp_dir tmp_jar tmp_sha tmp_info tmp_recovery tmp_recovery_sha actual
   tmp_dir="$(mktemp -d)"
   tmp_jar="${tmp_dir}/starry-api.jar"
   tmp_sha="${tmp_dir}/starry-api.jar.sha256"
   tmp_info="${tmp_dir}/build-info.json"
+  tmp_recovery="${tmp_dir}/recover-data-management.sh"
+  tmp_recovery_sha="${tmp_dir}/recover-data-management.sh.sha256"
 
   download_required_file "artifact jar" "$ARTIFACT_URL" "$tmp_jar"
   download_required_file "artifact checksum" "$CHECKSUM_URL" "$tmp_sha"
+  download_required_file "data-management recovery tool" "$RECOVERY_TOOL_URL" "$tmp_recovery"
+  download_required_file "data-management recovery tool checksum" "$RECOVERY_TOOL_CHECKSUM_URL" "$tmp_recovery_sha"
   download_file "$BUILD_INFO_URL" "$tmp_info" || true
 
+  install_verified_recovery_tool "$tmp_recovery" "$tmp_recovery_sha"
   install_verified_artifact "$tmp_jar" "$tmp_sha"
   actual="$INSTALLED_ARTIFACT_CHECKSUM"
   if [[ -s "$tmp_info" ]]; then
@@ -814,8 +907,45 @@ download_artifact() {
   log "Installed artifact with SHA256 ${actual}"
 }
 
+validate_bundle_archive() {
+  local archive="$1"
+  local entry normalized listing entry_type
+
+  LC_ALL=C tar -Ptzf "$archive" >/dev/null \
+    || fail "Deployment bundle is not a readable gzip-compressed tar archive."
+
+  while IFS= read -r entry; do
+    case "$entry" in
+      /*)
+        fail "Deployment bundle contains an absolute path: ${entry}"
+        ;;
+    esac
+
+    normalized="$entry"
+    while [[ "$normalized" == ./* ]]; do
+      normalized="${normalized#./}"
+    done
+    case "/${normalized}/" in
+      */../*)
+        fail "Deployment bundle contains a parent-directory path: ${entry}"
+        ;;
+    esac
+  done < <(LC_ALL=C tar -Ptzf "$archive")
+
+  while IFS= read -r listing; do
+    [[ -n "$listing" ]] || continue
+    entry_type="${listing:0:1}"
+    case "$entry_type" in
+      -|d) ;;
+      *)
+        fail "Deployment bundle contains a link or special file; only regular files and directories are allowed."
+        ;;
+    esac
+  done < <(LC_ALL=C tar -Ptvzf "$archive")
+}
+
 download_bundle() {
-  local tmp_dir tmp_bundle tmp_sha extract_dir expected actual artifact_actual
+  local tmp_dir tmp_bundle tmp_sha extract_dir expected actual artifact_actual recovery_expected recovery_actual
   tmp_dir="$(mktemp -d)"
   tmp_bundle="${tmp_dir}/starry-api-bundle.tar.gz"
   tmp_sha="${tmp_dir}/starry-api-bundle.tar.gz.sha256"
@@ -842,17 +972,26 @@ download_bundle() {
   [[ -n "$expected" ]] || fail "Bundle checksum file is empty."
   [[ "$expected" == "$actual" ]] || fail "Bundle checksum mismatch. expected=${expected} actual=${actual}"
 
-  tar -xzf "$tmp_bundle" -C "$extract_dir"
+  validate_bundle_archive "$tmp_bundle"
+  tar --no-same-owner --no-same-permissions -xzf "$tmp_bundle" -C "$extract_dir"
   [[ -f "${extract_dir}/app/starry-api.jar" ]] || fail "Bundle does not contain app/starry-api.jar."
   [[ -f "${extract_dir}/app/starry-api.jar.sha256" ]] || fail "Bundle does not contain the jar checksum."
   [[ -f "${extract_dir}/docker-compose.artifact.yml" ]] || fail "Bundle does not contain docker-compose.artifact.yml."
   [[ -f "${extract_dir}/postgres-init/001-starry-api-roles.sh" ]] \
     || fail "Bundle does not contain the PostgreSQL role bootstrap script."
+  [[ -f "${extract_dir}/runtime/recover-data-management.sh" ]] \
+    || fail "Bundle does not contain the data-management recovery tool."
+  [[ -f "${extract_dir}/runtime/recover-data-management.sh.sha256" ]] \
+    || fail "Bundle does not contain the recovery tool checksum."
 
   expected="$(awk '{print $1}' "${extract_dir}/app/starry-api.jar.sha256" | head -n 1)"
   artifact_actual="$(sha256_file "${extract_dir}/app/starry-api.jar")"
   [[ -n "$expected" && "$expected" == "$artifact_actual" ]] \
     || fail "Bundle jar checksum mismatch. expected=${expected:-missing} actual=${artifact_actual}"
+  recovery_expected="$(awk '{print $1}' "${extract_dir}/runtime/recover-data-management.sh.sha256" | head -n 1)"
+  recovery_actual="$(sha256_file "${extract_dir}/runtime/recover-data-management.sh")"
+  [[ -n "$recovery_expected" && "$recovery_expected" == "$recovery_actual" ]] \
+    || fail "Bundle recovery tool checksum mismatch. expected=${recovery_expected:-missing} actual=${recovery_actual}"
 
   atomic_install_file "${extract_dir}/docker-compose.artifact.yml" "${INSTALL_DIR}/docker-compose.artifact.yml" 0644 \
     || fail "Could not install Docker Compose configuration atomically."
@@ -870,6 +1009,9 @@ download_bundle() {
   [[ ! -f "${extract_dir}/starry-api-webui.tar.gz.sha256" ]] \
     || atomic_install_file "${extract_dir}/starry-api-webui.tar.gz.sha256" "${INSTALL_DIR}/app/starry-api-webui.tar.gz.sha256" 0644 \
     || fail "Could not install the WebUI checksum atomically."
+  install_verified_recovery_tool \
+    "${extract_dir}/runtime/recover-data-management.sh" \
+    "${extract_dir}/runtime/recover-data-management.sh.sha256"
   install_verified_artifact \
     "${extract_dir}/app/starry-api.jar" \
     "${extract_dir}/app/starry-api.jar.sha256" >/dev/null

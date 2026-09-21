@@ -6,6 +6,7 @@ export const openAiPlatform: PlatformDefinition = {
   className: 'openai',
   color: '#10a37f',
   families: [
+    'GPT-6',
     'GPT-5',
     'GPT-4',
     'GPT-3.5',
@@ -33,6 +34,7 @@ export function isOpenAiModel(model: ModelInfo) {
 export function openAiModelFamily(model: ModelInfo) {
   const lowerId = model.id.toLowerCase();
   const localId = openAiLocalId(lowerId);
+  if (localId.startsWith('gpt-6')) return 'GPT-6';
   if (localId.startsWith('gpt-5')) return 'GPT-5';
   if (localId.startsWith('gpt-4') || localId.startsWith('chatgpt-4')) return 'GPT-4';
   if (localId.startsWith('gpt-3.5')) return 'GPT-3.5';

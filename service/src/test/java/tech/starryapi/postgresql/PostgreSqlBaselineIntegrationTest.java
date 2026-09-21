@@ -195,6 +195,85 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
     }
 
     @Test
+    void persistsAndProtectsTheApplicationRootIdentity() {
+        ApplicationRootIdentity root = databaseClient.sql("""
+                SELECT settings.setting_value AS marker_user_id,
+                       users.user_id,
+                       users.username,
+                       users.role,
+                       users.enabled,
+                       EXISTS (
+                           SELECT 1
+                           FROM starry_api.flyway_schema_history
+                           WHERE version = '6' AND success
+                       ) AS migration_applied,
+                       EXISTS (
+                           SELECT 1
+                           FROM pg_catalog.pg_trigger
+                           WHERE tgrelid = 'starry_api.system_settings'::pg_catalog.regclass
+                             AND tgname = 'trg_application_root_setting'
+                             AND NOT tgisinternal
+                       ) AS setting_trigger_enabled,
+                       EXISTS (
+                           SELECT 1
+                           FROM pg_catalog.pg_trigger
+                           WHERE tgrelid = 'starry_api.admin_users'::pg_catalog.regclass
+                             AND tgname = 'trg_application_root_user'
+                             AND NOT tgisinternal
+                       ) AS user_trigger_enabled
+                FROM starry_api.system_settings AS settings
+                JOIN starry_api.admin_users AS users
+                  ON users.user_id = settings.setting_value
+                WHERE settings.setting_key = 'application_root_user_id'
+                """)
+            .map((row, metadata) -> new ApplicationRootIdentity(
+                row.get("marker_user_id", String.class),
+                row.get("user_id", String.class),
+                row.get("username", String.class),
+                row.get("role", String.class),
+                Boolean.TRUE.equals(row.get("enabled", Boolean.class)),
+                Boolean.TRUE.equals(row.get("migration_applied", Boolean.class)),
+                Boolean.TRUE.equals(row.get("setting_trigger_enabled", Boolean.class)),
+                Boolean.TRUE.equals(row.get("user_trigger_enabled", Boolean.class))
+            ))
+            .one()
+            .block();
+
+        assertThat(root).isNotNull();
+        assertThat(root.markerUserId()).isEqualTo(root.userId());
+        assertThat(root.username()).isEqualTo("admin");
+        assertThat(root.role()).isEqualTo("ADMIN");
+        assertThat(root.enabled()).isTrue();
+        assertThat(root.migrationApplied()).isTrue();
+        assertThat(root.settingTriggerEnabled()).isTrue();
+        assertThat(root.userTriggerEnabled()).isTrue();
+        assertThat(adminUserRepository.findApplicationRoot().block())
+            .extracting(AdminUserEntity::getUserId)
+            .isEqualTo(root.userId());
+
+        assertThatThrownBy(() -> executeAsDatabaseOwner("""
+            UPDATE starry_api.admin_users
+            SET role = 'USER'
+            WHERE user_id = '%s'
+            """.formatted(root.userId())))
+            .hasRootCauseInstanceOf(SQLException.class)
+            .hasStackTraceContaining("the application Root identity, role, and enabled state are immutable");
+        assertThatThrownBy(() -> executeAsDatabaseOwner("""
+            DELETE FROM starry_api.admin_users
+            WHERE user_id = '%s'
+            """.formatted(root.userId())))
+            .hasRootCauseInstanceOf(SQLException.class)
+            .hasStackTraceContaining("the application Root account cannot be deleted");
+        assertThatThrownBy(() -> executeAsDatabaseOwner("""
+            UPDATE starry_api.system_settings
+            SET setting_value = 'replacement-root'
+            WHERE setting_key = 'application_root_user_id'
+            """))
+            .hasRootCauseInstanceOf(SQLException.class)
+            .hasStackTraceContaining("the application Root identity marker is immutable once assigned");
+    }
+
+    @Test
     void enforcesLeastPrivilegeRuntimeRoleAndOwnerBoundaries() {
         RoleSecurityState state = databaseClient.sql("""
                 SELECT current_user AS current_user_name,
@@ -951,6 +1030,238 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         assertThat(droppedPartitions).isGreaterThanOrEqualTo(2);
         assertThat(relationExists(oldestPartition)).isFalse();
         assertThat(relationExists("starry_api." + expectedCurrentPartition)).isTrue();
+    }
+
+    @Test
+    void appliesEpochIsolatedModelFamilyCircuitMigrationsAcrossRequestLogPartitions() {
+        Map<String, Object> state = databaseClient.sql("""
+                SELECT EXISTS (
+                           SELECT 1
+                           FROM starry_api.flyway_schema_history
+                           WHERE version = '2' AND success
+                       ) AS model_pool_migration_applied,
+                       EXISTS (
+                           SELECT 1
+                           FROM starry_api.flyway_schema_history
+                           WHERE version = '5' AND success
+                       ) AS epoch_migration_applied,
+                       (
+                           SELECT setting_value = 'false'
+                           FROM starry_api.system_settings
+                           WHERE setting_key = 'account_pool_policy_enabled'
+                       ) AS policy_disabled,
+                       (
+                           SELECT pg_catalog.format_type(atttypid, atttypmod) = 'character varying(128)'
+                           FROM pg_catalog.pg_attribute
+                           WHERE attrelid = 'starry_api.request_logs'::regclass
+                             AND attname = 'circuit_key'
+                             AND NOT attisdropped
+                       ) AS circuit_key_type,
+                       (
+                           SELECT pg_catalog.format_type(atttypid, atttypmod) = 'character varying(16)'
+                           FROM pg_catalog.pg_attribute
+                           WHERE attrelid = 'starry_api.request_logs'::regclass
+                             AND attname = 'circuit_tier'
+                             AND NOT attisdropped
+                       ) AS circuit_tier_type,
+                       (
+                           SELECT pg_catalog.format_type(atttypid, atttypmod) = 'character varying(256)'
+                           FROM pg_catalog.pg_attribute
+                           WHERE attrelid = 'starry_api.request_logs'::regclass
+                             AND attname = 'upstream_model'
+                             AND NOT attisdropped
+                       ) AS upstream_model_type,
+                       (
+                           SELECT pg_catalog.format_type(atttypid, atttypmod) = 'boolean'
+                           FROM pg_catalog.pg_attribute
+                           WHERE attrelid = 'starry_api.request_logs'::regclass
+                             AND attname = 'upstream_success'
+                             AND NOT attisdropped
+                       ) AS upstream_success_type,
+                       (
+                           SELECT pg_catalog.format_type(atttypid, atttypmod) = 'uuid'
+                           FROM pg_catalog.pg_attribute
+                           WHERE attrelid = 'starry_api.request_logs'::regclass
+                             AND attname = 'circuit_epoch'
+                             AND NOT attisdropped
+                       ) AS circuit_epoch_type,
+                       (
+                           SELECT COUNT(*) = 2
+                           FROM starry_api.system_settings
+                           WHERE (setting_key = 'account_pool_policy_epoch' AND setting_value = '')
+                              OR (
+                                  setting_key = 'account_pool_policy_activation_started_at'
+                                  AND setting_value = ''
+                              )
+                       ) AS epoch_settings_initialized,
+                       NOT EXISTS (
+                           SELECT 1
+                           FROM pg_catalog.pg_inherits table_partition
+                           CROSS JOIN (
+                               VALUES
+                                   ('circuit_key'),
+                                   ('circuit_tier'),
+                                   ('upstream_model'),
+                                   ('upstream_success'),
+                                   ('circuit_epoch')
+                           ) AS expected_column(column_name)
+                           WHERE table_partition.inhparent = 'starry_api.request_logs'::regclass
+                             AND NOT EXISTS (
+                                 SELECT 1
+                                 FROM pg_catalog.pg_attribute partition_column
+                                 WHERE partition_column.attrelid = table_partition.inhrelid
+                                   AND partition_column.attname = expected_column.column_name
+                                   AND NOT partition_column.attisdropped
+                             )
+                       ) AS all_partitions_have_columns,
+                       EXISTS (
+                           SELECT 1
+                           FROM pg_catalog.pg_constraint
+                           WHERE conrelid = 'starry_api.request_logs'::regclass
+                             AND conname = 'ck_request_logs_circuit_key'
+                             AND contype = 'c'
+                             AND convalidated
+                       ) AS circuit_key_constraint,
+                       EXISTS (
+                           SELECT 1
+                           FROM pg_catalog.pg_constraint
+                           WHERE conrelid = 'starry_api.request_logs'::regclass
+                             AND conname = 'ck_request_logs_circuit_tier'
+                             AND contype = 'c'
+                             AND convalidated
+                       ) AS circuit_tier_constraint,
+                       EXISTS (
+                           SELECT 1
+                           FROM pg_catalog.pg_index index_definition
+                           WHERE index_definition.indexrelid =
+                               'starry_api.idx_request_logs_circuit_window'::regclass
+                             AND index_definition.indrelid = 'starry_api.request_logs'::regclass
+                             AND index_definition.indisvalid
+                             AND index_definition.indisready
+                             AND index_definition.indnkeyatts = 3
+                             AND index_definition.indnatts = 5
+                             AND pg_catalog.pg_get_indexdef(index_definition.indexrelid, 1, TRUE)
+                                 = 'circuit_epoch'
+                             AND pg_catalog.pg_get_indexdef(index_definition.indexrelid, 2, TRUE)
+                                 = 'created_at'
+                             AND (
+                                 (index_definition.indoption::smallint[])[1] & 1
+                             ) = 1
+                             AND pg_catalog.pg_get_indexdef(index_definition.indexrelid, 3, TRUE)
+                                 = 'circuit_key'
+                             AND pg_catalog.pg_get_indexdef(index_definition.indexrelid, 4, TRUE)
+                                 = 'circuit_tier'
+                             AND pg_catalog.pg_get_indexdef(index_definition.indexrelid, 5, TRUE)
+                                 = 'upstream_success'
+                             AND pg_catalog.pg_get_expr(
+                                 index_definition.indpred,
+                                 index_definition.indrelid
+                             ) = '((circuit_epoch IS NOT NULL) AND (circuit_key IS NOT NULL) AND (upstream_success IS NOT NULL))'
+                       ) AS partial_covering_index,
+                       (
+                           SELECT COUNT(*)
+                           FROM pg_catalog.pg_inherits index_partition
+                           WHERE index_partition.inhparent =
+                               'starry_api.idx_request_logs_circuit_window'::regclass
+                       ) = (
+                           SELECT COUNT(*)
+                           FROM pg_catalog.pg_inherits table_partition
+                           WHERE table_partition.inhparent = 'starry_api.request_logs'::regclass
+                       ) AS all_partitions_have_index
+                """)
+            .fetch()
+            .one()
+            .block();
+
+        assertThat(state)
+            .containsEntry("model_pool_migration_applied", true)
+            .containsEntry("epoch_migration_applied", true)
+            .containsEntry("policy_disabled", true)
+            .containsEntry("circuit_key_type", true)
+            .containsEntry("circuit_tier_type", true)
+            .containsEntry("upstream_model_type", true)
+            .containsEntry("upstream_success_type", true)
+            .containsEntry("circuit_epoch_type", true)
+            .containsEntry("epoch_settings_initialized", true)
+            .containsEntry("all_partitions_have_columns", true)
+            .containsEntry("circuit_key_constraint", true)
+            .containsEntry("circuit_tier_constraint", true)
+            .containsEntry("partial_covering_index", true)
+            .containsEntry("all_partitions_have_index", true);
+    }
+
+    @Test
+    void partitionMaintenancePreservesCircuitMetadataMovedFromDefaultPartition() {
+        String requestId = "circuit-partition-move-" + randomSuffix();
+        UUID circuitEpoch = UUID.randomUUID();
+        YearMonth targetMonth = YearMonth.now(ZoneOffset.UTC).minusMonths(24);
+        Instant createdAt = targetMonth.atDay(2).atStartOfDay(ZoneOffset.UTC).toInstant();
+        String expectedPartition = "request_logs_"
+            + targetMonth.format(
+                DateTimeFormatter.ofPattern("'y'yyy'M'MM").withLocale(java.util.Locale.ROOT)
+            ).toLowerCase(java.util.Locale.ROOT);
+
+        databaseClient.sql("""
+                INSERT INTO request_logs (
+                    request_id, account_id, path, model, status_code, success,
+                    input_tokens, output_tokens, credits, latency_ms, error_message,
+                    circuit_key, circuit_tier, upstream_model, upstream_success, circuit_epoch, created_at
+                )
+                VALUES (
+                    :requestId, 'deepseek-main', '/v1/chat/completions', 'deepseek-v4-flash',
+                    503, FALSE, 11, 7, 0.5, 42, 'upstream unavailable',
+                    'deepseek:deepseek-v4', 'secondary', 'deepseek-v4-flash', FALSE,
+                    :circuitEpoch, :createdAt
+                )
+                """)
+            .bind("requestId", requestId)
+            .bind("circuitEpoch", circuitEpoch)
+            .bind("createdAt", createdAt)
+            .fetch()
+            .rowsUpdated()
+            .block();
+
+        try {
+            String initialPartition = databaseClient.sql("""
+                    SELECT tableoid::regclass::text AS routed_partition
+                    FROM request_logs
+                    WHERE request_id = :requestId
+                    """)
+                .bind("requestId", requestId)
+                .map((row, metadata) -> row.get("routed_partition", String.class))
+                .one()
+                .block();
+            assertThat(initialPartition).endsWith("request_logs_default");
+
+            callPartitionFunction("SELECT starry_api.ensure_request_log_partitions(0, 24)");
+
+            Map<String, Object> movedRow = databaseClient.sql("""
+                    SELECT tableoid::regclass::text AS routed_partition,
+                           circuit_key,
+                           circuit_tier,
+                           upstream_model,
+                           upstream_success,
+                           circuit_epoch
+                    FROM request_logs
+                    WHERE request_id = :requestId
+                    """)
+                .bind("requestId", requestId)
+                .fetch()
+                .one()
+                .block();
+
+            assertThat(movedRow)
+                .containsEntry("circuit_key", "deepseek:deepseek-v4")
+                .containsEntry("circuit_tier", "secondary")
+                .containsEntry("upstream_model", "deepseek-v4-flash")
+                .containsEntry("upstream_success", false)
+                .containsEntry("circuit_epoch", circuitEpoch);
+            assertThat(movedRow.get("routed_partition").toString()).endsWith(expectedPartition);
+        } finally {
+            executeAsDatabaseOwner(
+                "DELETE FROM starry_api.request_logs WHERE request_id = '" + requestId + "'"
+            );
+        }
     }
 
     @Test
@@ -2460,6 +2771,8 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
             "managed-key-" + suffix
         ).block();
         insertApiKey(keyId, userId);
+        databaseClient.sql("UPDATE api_keys SET model_provider=\'OpenAI\' WHERE key_id=:id")
+            .bind("id",keyId).fetch().rowsUpdated().block();
         ApiKeyPrincipal keyPrincipal = apiKeyPrincipal(keyId, userId, "0");
         AdminPrincipal admin = new AdminPrincipal(
             "integration-admin",
@@ -2470,7 +2783,7 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         );
 
         Mono<Void> usageWrites = Flux.range(0, CONCURRENT_REQUESTS)
-            .flatMap(index -> apiKeyService.accountUsage(
+            .flatMap(index -> reserveAndAccountUsage(
                 keyPrincipal,
                 "managed-key-request-" + suffix + "-" + index,
                 BigDecimal.ZERO,
@@ -2482,7 +2795,12 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
             .flatMap(index -> apiKeyService.update(
                 admin,
                 keyId,
-                new ApiKeyDtos.UpdateApiKeyRequest("managed-" + index, true, new BigDecimal("1000"))
+                new ApiKeyDtos.UpdateApiKeyRequest(
+                    "managed-" + index,
+                    true,
+                    new BigDecimal("1000"),
+                    "OpenAI"
+                )
             ), CONCURRENT_REQUESTS)
             .then();
 
@@ -2665,7 +2983,7 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         ApiKeyPrincipal principal = apiKeyPrincipal(keyId, userId, "10.00");
 
         List<Integer> completions = Flux.range(0, CONCURRENT_REQUESTS)
-            .flatMap(index -> apiKeyService.accountUsage(
+            .flatMap(index -> reserveAndAccountUsage(
                     principal,
                     requestId,
                     new BigDecimal("0.25"),
@@ -2682,11 +3000,11 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         assertThat(dailyUsageCounters(keyId)).isEqualTo(expected);
         assertThat(eventUsageCounters(keyId)).isEqualTo(expected);
         assertThat(userBalance(userId)).isEqualByComparingTo("9.75");
-        assertThat(ledgerState(userId, "API_USAGE_DEBIT"))
+        assertThat(ledgerState(userId, "API_USAGE_RESERVE"))
             .isEqualTo(new LedgerState(1L, new BigDecimal("-0.250000")));
         String keyScopedRequest = keyId.length() + ":" + keyId + requestId;
-        assertThat(idempotencyLedgerCount("api-request:" + Hashing.sha256(keyScopedRequest))).isEqualTo(1L);
-        assertThat(brokenLedgerTransitions(userId, "API_USAGE_DEBIT")).isZero();
+        assertThat(idempotencyLedgerCount("billing-reserve:" + Hashing.sha256(keyScopedRequest))).isEqualTo(1L);
+        assertThat(brokenLedgerTransitions(userId, "API_USAGE_RESERVE")).isZero();
 
         String secondUserId = "usage-replay-user-2-" + suffix;
         String secondKeyId = "usage-replay-key-2-" + suffix;
@@ -2698,7 +3016,7 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         ).block();
         updateUserBalance(secondUserId, "10.00");
         insertApiKey(secondKeyId, secondUserId);
-        apiKeyService.accountUsage(
+        reserveAndAccountUsage(
             apiKeyPrincipal(secondKeyId, secondUserId, "10.00"),
             requestId,
             new BigDecimal("0.25"),
@@ -2709,7 +3027,7 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         assertThat(eventUsageCounters(secondKeyId)).isEqualTo(expected);
         assertThat(userBalance(secondUserId)).isEqualByComparingTo("9.75");
         String secondKeyScopedRequest = secondKeyId.length() + ":" + secondKeyId + requestId;
-        assertThat(idempotencyLedgerCount("api-request:" + Hashing.sha256(secondKeyScopedRequest))).isEqualTo(1L);
+        assertThat(idempotencyLedgerCount("billing-reserve:" + Hashing.sha256(secondKeyScopedRequest))).isEqualTo(1L);
     }
 
     @Test
@@ -2723,7 +3041,7 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         ApiKeyPrincipal principal = apiKeyPrincipal(keyId, userId, "25.00");
 
         List<Integer> completions = Flux.range(0, CONCURRENT_REQUESTS)
-            .flatMap(index -> apiKeyService.accountUsage(
+            .flatMap(index -> reserveAndAccountUsage(
                     principal,
                     "usage-volume-request-" + suffix + "-" + index,
                     new BigDecimal("0.25"),
@@ -2740,9 +3058,9 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         assertThat(dailyUsageCounters(keyId)).isEqualTo(expected);
         assertThat(eventUsageCounters(keyId)).isEqualTo(expected);
         assertThat(userBalance(userId)).isEqualByComparingTo(BigDecimal.ZERO);
-        assertThat(ledgerState(userId, "API_USAGE_DEBIT"))
+        assertThat(ledgerState(userId, "API_USAGE_RESERVE"))
             .isEqualTo(new LedgerState(100L, new BigDecimal("-25.000000")));
-        assertThat(brokenLedgerTransitions(userId, "API_USAGE_DEBIT")).isZero();
+        assertThat(brokenLedgerTransitions(userId, "API_USAGE_RESERVE")).isZero();
     }
 
     @Test
@@ -2766,7 +3084,7 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         ApiKeyPrincipal principal = apiKeyPrincipal(keyId, userId, "100.00");
 
         List<Boolean> results = Flux.range(0, CONCURRENT_REQUESTS)
-            .flatMap(index -> apiKeyService.accountUsage(
+            .flatMap(index -> reserveAndAccountUsage(
                     principal,
                     "usage-credit-limit-request-" + suffix + "-" + index,
                     new BigDecimal("0.25"),
@@ -2788,10 +3106,10 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         assertThat(dailyUsageCounters(keyId)).isEqualTo(expected);
         assertThat(eventUsageCounters(keyId)).isEqualTo(expected);
         assertThat(userBalance(userId)).isEqualByComparingTo("99.00");
-        assertThat(ledgerState(userId, "API_USAGE_DEBIT"))
+        assertThat(ledgerState(userId, "API_USAGE_RESERVE"))
             .isEqualTo(new LedgerState(4L, new BigDecimal("-1.000000")));
-        assertThat(apiKeyBillingMinimum(keyId)).isEqualByComparingTo("0.250000");
-        assertThat(brokenLedgerTransitions(userId, "API_USAGE_DEBIT")).isZero();
+        assertThat(apiKeyBillingMinimum(keyId)).isEqualByComparingTo(BigDecimal.ZERO);
+        assertThat(brokenLedgerTransitions(userId, "API_USAGE_RESERVE")).isZero();
     }
 
     @Test
@@ -2805,7 +3123,7 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         ApiKeyPrincipal principal = apiKeyPrincipal(keyId, userId, "0.50");
 
         List<Boolean> results = Flux.range(0, CONCURRENT_REQUESTS)
-            .flatMap(index -> apiKeyService.accountUsage(
+            .flatMap(index -> reserveAndAccountUsage(
                     principal,
                     "usage-limited-request-" + suffix + "-" + index,
                     new BigDecimal("0.25"),
@@ -2827,12 +3145,12 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         assertThat(dailyUsageCounters(keyId)).isEqualTo(expected);
         assertThat(eventUsageCounters(keyId)).isEqualTo(expected);
         assertThat(userBalance(userId)).isEqualByComparingTo(BigDecimal.ZERO);
-        assertThat(ledgerState(userId, "API_USAGE_DEBIT"))
+        assertThat(ledgerState(userId, "API_USAGE_RESERVE"))
             .isEqualTo(new LedgerState(2L, new BigDecimal("-0.500000")));
-        assertThat(apiKeyBillingMinimum(keyId)).isEqualByComparingTo("0.250000");
+        assertThat(apiKeyBillingMinimum(keyId)).isEqualByComparingTo(BigDecimal.ZERO);
 
         updateUserBalance(userId, "0.25");
-        apiKeyService.accountUsage(
+        reserveAndAccountUsage(
             principal,
             "usage-limited-after-top-up-" + suffix,
             new BigDecimal("0.25"),
@@ -2842,7 +3160,14 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
 
         assertThat(userBalance(userId)).isEqualByComparingTo(BigDecimal.ZERO);
         assertThat(apiKeyBillingMinimum(keyId)).isEqualByComparingTo(BigDecimal.ZERO);
-        assertThat(brokenLedgerTransitions(userId, "API_USAGE_DEBIT")).isZero();
+        assertThat(brokenLedgerTransitions(userId, "API_USAGE_RESERVE")).isZero();
+    }
+
+    private Mono<Void> reserveAndAccountUsage(ApiKeyPrincipal principal, String requestId, BigDecimal credits, long input, long output) {
+        return apiKeyService.reserveUsage(principal, requestId, credits, "{}")
+            .onErrorResume(ApiException.class, error -> "BILLING_REQUEST_FINISHED".equals(error.getCode())
+                ? Mono.empty() : Mono.error(error))
+            .then(apiKeyService.accountUsage(principal, requestId, credits, input, output));
     }
 
     private void runConcurrently(Mono<?> first, Mono<?> second) {
@@ -2918,7 +3243,10 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
     }
 
     private void restoreSystemSettings(Map<String, String> snapshot) {
-        executeAsDatabaseOwner("DELETE FROM starry_api.system_settings");
+        executeAsDatabaseOwner("""
+            DELETE FROM starry_api.system_settings
+            WHERE setting_key <> 'application_root_user_id'
+            """);
         if (snapshot != null && !snapshot.isEmpty()) {
             String[] keys = snapshot.keySet().toArray(String[]::new);
             String[] values = Arrays.stream(keys).map(snapshot::get).toArray(String[]::new);
@@ -3595,6 +3923,18 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         boolean baselineApplied,
         int usageEventPartitions,
         boolean requestHashPrimaryKey
+    ) {
+    }
+
+    private record ApplicationRootIdentity(
+        String markerUserId,
+        String userId,
+        String username,
+        String role,
+        boolean enabled,
+        boolean migrationApplied,
+        boolean settingTriggerEnabled,
+        boolean userTriggerEnabled
     ) {
     }
 

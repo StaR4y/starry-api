@@ -2,10 +2,14 @@
 import http, { unwrap } from '@/utils/http';
 import type {
   Account,
+  AccountAllocationPolicy,
   AccountPoolStatus,
   AccountSettings,
   ApiResponse,
   ClearAccountsResult,
+  ChatGptOAuthStartRequest,
+  ChatGptOAuthStartResult,
+  ChatGptOAuthStatusResult,
   CreateAccountRequest,
   ImportAccountsRequest,
   ImportAccountsResult,
@@ -14,6 +18,7 @@ import type {
   TestAccountsRequest,
   TestAccountsResult,
   UpdateAccountSettingsRequest,
+  UpdateAccountAllocationPolicyRequest,
   UpdateAccountRequest,
   OpenAiQuotaResponse,
 } from '@/types/api';
@@ -27,8 +32,37 @@ export const accountsApi = {
       http.get<ApiResponse<OpenAiQuotaResponse>>(`/admin/accounts/${accountId}/openai-quota`),
     );
   },
+  allocationPolicy(accountId: string) {
+    return unwrap<AccountAllocationPolicy>(
+      http.get<ApiResponse<AccountAllocationPolicy>>(
+        `/admin/accounts/${accountId}/allocation-policy`,
+      ),
+    );
+  },
   create(payload: CreateAccountRequest) {
     return unwrap<Account>(http.post<ApiResponse<Account>>('/admin/accounts', payload));
+  },
+  startChatGptOAuth(payload: ChatGptOAuthStartRequest = {}) {
+    return unwrap<ChatGptOAuthStartResult>(
+      http.post<ApiResponse<ChatGptOAuthStartResult>>(
+        '/admin/accounts/chatgpt-oauth/start',
+        payload,
+      ),
+    );
+  },
+  pollChatGptOAuth(loginId: string) {
+    return unwrap<ChatGptOAuthStatusResult>(
+      http.post<ApiResponse<ChatGptOAuthStatusResult>>(
+        `/admin/accounts/chatgpt-oauth/${loginId}/poll`,
+      ),
+    );
+  },
+  cancelChatGptOAuth(loginId: string) {
+    return unwrap<ChatGptOAuthStatusResult>(
+      http.delete<ApiResponse<ChatGptOAuthStatusResult>>(
+        `/admin/accounts/chatgpt-oauth/${loginId}`,
+      ),
+    );
   },
   importBatch(payload: ImportAccountsRequest | Record<string, unknown>) {
     return unwrap<ImportAccountsResult>(
@@ -53,6 +87,14 @@ export const accountsApi = {
   update(accountId: string, payload: UpdateAccountRequest) {
     return unwrap<Account>(
       http.patch<ApiResponse<Account>>(`/admin/accounts/${accountId}`, payload),
+    );
+  },
+  updateAllocationPolicy(accountId: string, payload: UpdateAccountAllocationPolicyRequest) {
+    return unwrap<AccountAllocationPolicy>(
+      http.patch<ApiResponse<AccountAllocationPolicy>>(
+        `/admin/accounts/${accountId}/allocation-policy`,
+        payload,
+      ),
     );
   },
   suspend(accountId: string, payload: SuspendAccountRequest) {

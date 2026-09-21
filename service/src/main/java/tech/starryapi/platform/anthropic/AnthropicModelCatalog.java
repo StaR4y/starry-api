@@ -3,7 +3,7 @@ package tech.starryapi.platform.anthropic;
 import java.util.List;
 import tech.starryapi.model.ModelCatalogProvider;
 import tech.starryapi.model.ModelDtos.ModelSpec;
-import tech.starryapi.platform.catalog.OpenRouterModelIds;
+import tech.starryapi.platform.catalog.ModelPriceRepoModelIds;
 import tech.starryapi.platform.catalog.PlatformModelCatalogSupport.AliasProfile;
 
 import static tech.starryapi.platform.catalog.PlatformModelCatalogSupport.appendAliases;
@@ -32,17 +32,32 @@ public final class AnthropicModelCatalog {
         model("auto", "Auto", "Routing Preset", "Auto select best model", "auto"),
         model(DEFAULT_MODEL_ID, "Claude Sonnet 4.5", "Claude 4", "The latest Claude Sonnet model", DEFAULT_MODEL_ID),
         model("claude-sonnet-4", "Claude Sonnet 4", "Claude 4", "Hybrid reasoning and coding", "claude-sonnet-4"),
+        model("claude-4-sonnet", "Claude Sonnet 4", "Claude 4", "Claude 4 Sonnet compatible alias", "claude-sonnet-4"),
+        model("claude-4-sonnet-20250514", "Claude Sonnet 4", "Claude 4", "Claude 4 Sonnet dated alias", "claude-sonnet-4"),
+        model("claude-sonnet-4-20250514", "Claude Sonnet 4", "Claude 4", "Claude Sonnet 4 dated alias", "claude-sonnet-4"),
         model("claude-sonnet-4.6", "Claude Sonnet 4.6", "Claude 4", "Claude Sonnet 4.6 compatible alias", DEFAULT_MODEL_ID),
         model("claude-sonnet-4-6", "Claude Sonnet 4.6", "Claude 4", "Claude Sonnet 4.6 compatible alias", DEFAULT_MODEL_ID),
+        model("claude-sonnet-5", "Claude Sonnet 5", "Claude 5", "Claude Sonnet 5 compatible alias", DEFAULT_MODEL_ID),
         model("claude-sonnet-latest", "Claude Sonnet Latest", "Claude 4", "Latest Claude Sonnet compatible alias", DEFAULT_MODEL_ID),
         model("sonnet", "Claude Sonnet", "Claude 4", "Claude Code sonnet alias", DEFAULT_MODEL_ID),
         model(HAIKU_MODEL_ID, "Claude Haiku 4.5", "Claude 4", "The latest Claude Haiku model", HAIKU_MODEL_ID),
         model("claude-haiku-4-5-20251001", "Claude Haiku 4.5", "Claude 4", "Claude Haiku dated compatible alias", HAIKU_MODEL_ID),
         model("claude-haiku-latest", "Claude Haiku Latest", "Claude 4", "Latest Claude Haiku compatible alias", HAIKU_MODEL_ID),
         model("haiku", "Claude Haiku", "Claude 4", "Claude Code haiku alias", HAIKU_MODEL_ID),
+        model("claude-opus-4", "Claude Opus 4", "Claude 4", "Claude Opus 4 compatible alias", "claude-opus-4.5"),
+        model("claude-4-opus", "Claude Opus 4", "Claude 4", "Claude 4 Opus compatible alias", "claude-opus-4.5"),
+        model("claude-4-opus-20250514", "Claude Opus 4", "Claude 4", "Claude 4 Opus dated alias", "claude-opus-4.5"),
+        model("claude-opus-4-20250514", "Claude Opus 4", "Claude 4", "Claude Opus 4 dated alias", "claude-opus-4.5"),
+        model("claude-opus-4.1", "Claude Opus 4.1", "Claude 4", "Claude Opus 4.1 compatible alias", "claude-opus-4.5"),
+        model("claude-opus-4-1", "Claude Opus 4.1", "Claude 4", "Claude Opus 4.1 compatible alias", "claude-opus-4.5"),
         model("claude-opus-4.5", "Claude Opus 4.5", "Claude 4", "The most powerful model", "claude-opus-4.5"),
-        model("claude-opus-4.7", "Claude Opus 4.7", "Claude 4", "Claude Opus 4.7 compatible alias", DEFAULT_MODEL_ID),
-        model("claude-opus-4-7", "Claude Opus 4.7", "Claude 4", "Claude Opus 4.7 compatible alias", DEFAULT_MODEL_ID),
+        model("claude-opus-4.6", "Claude Opus 4.6", "Claude 4", "Claude Opus 4.6 compatible alias", "claude-opus-4.5"),
+        model("claude-opus-4-6", "Claude Opus 4.6", "Claude 4", "Claude Opus 4.6 compatible alias", "claude-opus-4.5"),
+        model("claude-opus-4.7", "Claude Opus 4.7", "Claude 4", "Claude Opus 4.7 compatible alias", "claude-opus-4.5"),
+        model("claude-opus-4-7", "Claude Opus 4.7", "Claude 4", "Claude Opus 4.7 compatible alias", "claude-opus-4.5"),
+        model("claude-opus-4.8", "Claude Opus 4.8", "Claude 4", "Claude Opus 4.8 compatible alias", "claude-opus-4.5"),
+        model("claude-opus-4-8", "Claude Opus 4.8", "Claude 4", "Claude Opus 4.8 compatible alias", "claude-opus-4.5"),
+        model("claude-opus-5", "Claude Opus 5", "Claude 5", "Claude Opus 5 compatible alias", "claude-opus-4.5"),
         model("claude-opus-latest", "Claude Opus Latest", "Claude 4", "Latest Claude Opus compatible alias", DEFAULT_MODEL_ID),
         model("opus", "Claude Opus", "Claude 4", "Claude Code opus alias", DEFAULT_MODEL_ID),
         model("claude-3-opus", "Claude 3 Opus", "Claude 3", "Claude 3 Opus compatible alias", DEFAULT_MODEL_ID),
@@ -99,7 +114,7 @@ public final class AnthropicModelCatalog {
     private static List<ModelSpec> buildModels() {
         return appendAliases(
             UPSTREAM_MODELS,
-            OpenRouterModelIds.ANTHROPIC,
+            ModelPriceRepoModelIds.ANTHROPIC,
             ALIAS_PROFILE,
             AnthropicModelCatalog::family,
             AnthropicModelCatalog::targetModelId
@@ -107,16 +122,25 @@ public final class AnthropicModelCatalog {
     }
 
     private static String family(String id) {
-        return switch (localModelId(id).toLowerCase()) {
-            case String model when model.contains("claude-3") || model.contains("3.") -> "Claude 3";
-            default -> "Claude 4";
-        };
+        String model = localModelId(id).toLowerCase();
+        if (model.contains("claude-3") || model.contains("3.")) {
+            return "Claude 3";
+        }
+        if (model.contains("claude-5")
+            || model.contains("fable-5")
+            || model.contains("mythos-5")
+            || (model.endsWith("-5") && !model.contains("4-5") && !model.contains("4.5"))) {
+            return "Claude 5";
+        }
+        return "Claude 4";
     }
 
     private static String targetModelId(String id) {
         return switch (localModelId(id).toLowerCase()) {
             case String model when HAIKU_MODEL_ID.equals(model) || model.contains("haiku") -> HAIKU_MODEL_ID;
-            case "claude-sonnet-4", "claude-opus-4.5" -> localModelId(id);
+            case "claude-sonnet-4", "claude-4-sonnet", "claude-4-sonnet-20250514", "claude-sonnet-4-20250514" ->
+                "claude-sonnet-4";
+            case String model when model.contains("opus") && !model.contains("3") -> "claude-opus-4.5";
             default -> DEFAULT_MODEL_ID;
         };
     }

@@ -272,6 +272,9 @@ function openCodeJson(context: SetupContext) {
             apiKey: normalizedApiKey(context.apiKey),
           },
           models: {
+            'gpt-6': openCodeModel('GPT-6', 200000, 64000),
+            'gpt-6-astra': openCodeModel('GPT-6 Astra', 200000, 64000),
+            'gpt-6-mini': openCodeModel('GPT-6 Mini', 200000, 32000),
             'gpt-5.5': openCodeModel('GPT-5.5', 200000, 64000),
             'gpt-5.5-pro': openCodeModel('GPT-5.5 Pro', 200000, 64000),
             'gpt-5.4': openCodeModel('GPT-5.4', 200000, 64000),

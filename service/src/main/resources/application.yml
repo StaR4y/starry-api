@@ -45,7 +45,7 @@ spring:
       max-in-memory-size: 256KB
       max-headers-size: 16KB
       max-disk-usage-per-part: ${STARRY_MAX_IMPORT_BYTES:268435456}B
-      max-parts: 2
+      max-parts: 4
 
 management:
   endpoints:
@@ -64,10 +64,48 @@ springdoc:
     path: /v3/api-docs
 
 starry:
+  plugins:
+    directory: ${STARRY_PLUGIN_DIR:${user.home}/.starry-api/plugins}
+    disabled: ${STARRY_PLUGINS_DISABLED:false}
+  model-pricing:
+    remote-refresh-enabled: ${STARRY_MODEL_PRICING_REMOTE_REFRESH_ENABLED:true}
+    sync-catalog-ids: ${STARRY_MODEL_PRICING_SYNC_CATALOG_IDS:false}
+    source-url: ${STARRY_MODEL_PRICING_SOURCE_URL:https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.json}
+    checksum-url: ${STARRY_MODEL_PRICING_CHECKSUM_URL:https://raw.githubusercontent.com/Wei-Shaw/model-price-repo/main/model_prices_and_context_window.sha256}
+    refresh-interval: ${STARRY_MODEL_PRICING_REFRESH_INTERVAL:PT10M}
+    max-catalog-bytes: ${STARRY_MODEL_PRICING_MAX_CATALOG_BYTES:4194304}
+    cache-dir: ${STARRY_MODEL_PRICING_DIR:${user.home}/.starry-api/model-pricing}
+  model-ranking:
+    enabled: ${STARRY_MODEL_RANKING_ENABLED:true}
+    remote-refresh-enabled: ${STARRY_MODEL_RANKING_REMOTE_REFRESH_ENABLED:true}
+    cache-dir: ${STARRY_MODEL_RANKING_DIR:${user.home}/.starry-api/model-ranking}
+    refresh-cron: ${STARRY_MODEL_RANKING_REFRESH_CRON:0 40 4 * * *}
+    max-bytes: ${STARRY_MODEL_RANKING_MAX_BYTES:1048576}
+    max-entries: ${STARRY_MODEL_RANKING_MAX_ENTRIES:12}
+    programbench-url: ${STARRY_MODEL_RANKING_PROGRAMBENCH_URL:https://raw.githubusercontent.com/StaR4y/ai-benchmark-ranking/main/data/programbench.json}
+    frontierbench-url: ${STARRY_MODEL_RANKING_FRONTIERBENCH_URL:https://raw.githubusercontent.com/StaR4y/ai-benchmark-ranking/main/data/frontierbench.json}
+  account-allocation:
+    maintenance-enabled: ${STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_ENABLED:true}
+    maintenance-cron: ${STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_CRON:0 35 3 * * *}
+    lease-retention-days: ${STARRY_ACCOUNT_ALLOCATION_LEASE_RETENTION_DAYS:7}
+    event-retention-days: ${STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS:90}
+    delete-batch-size: ${STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE:10000}
+    delete-max-batches: ${STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES:20}
+  models:
+    icon-dir: ${STARRY_MODEL_ICON_DIR:${user.home}/.starry-api/model-icons}
+    max-icon-bytes: ${STARRY_MODEL_MAX_ICON_BYTES:2097152}
+  appearance:
+    branding-dir: ${STARRY_APPEARANCE_BRANDING_DIR:${user.home}/.starry-api/branding}
+    max-logo-bytes: ${STARRY_APPEARANCE_MAX_LOGO_BYTES:8388608}
+    max-background-bytes: ${STARRY_APPEARANCE_MAX_BACKGROUND_BYTES:16777216}
   data-transfer:
     backup-dir: ${STARRY_BACKUP_DIR:${user.home}/.starry-api/backups}
     max-import-bytes: ${STARRY_MAX_IMPORT_BYTES:268435456}
     process-timeout: ${STARRY_DATA_TRANSFER_PROCESS_TIMEOUT:30m}
+  data-management:
+    security-file: ${STARRY_DATA_MANAGEMENT_SECURITY_FILE:${user.home}/.starry-api/security/data-management.json}
+    recovery-key-file: ${STARRY_DATA_MANAGEMENT_RECOVERY_KEY_FILE:}
+    require-initialized: ${STARRY_DATA_MANAGEMENT_REQUIRE_INITIALIZED:false}
   stats:
     aggregation-enabled: ${STARRY_STATS_AGGREGATION_ENABLED:true}
     aggregation-interval: ${STARRY_STATS_AGGREGATION_INTERVAL:PT1M}

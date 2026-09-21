@@ -11,6 +11,7 @@ import static org.mockito.Mockito.when;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Instant;
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import reactor.core.publisher.Flux;
@@ -119,7 +120,7 @@ class AccountTestServiceTest {
         ProxyAccountEntity account = openAiAccount("openai-main", "sk-test");
 
         when(repository.findAll()).thenReturn(Flux.just(account));
-        when(openAiAccountTestClient.test(eq(account), eq("gpt-5.4-mini"), eq("ping")))
+        when(openAiAccountTestClient.test(eq(account), eq("gpt-5.5"), eq("ping")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", PlatformUsage.zero())));
         when(accountPoolService.recordTestSuccess(eq("openai-main"), eq(0L), eq(false))).thenReturn(Mono.empty());
 
@@ -142,10 +143,10 @@ class AccountTestServiceTest {
         assertThat(response.items()).singleElement()
             .satisfies(item -> {
                 assertThat(item.accountId()).isEqualTo("openai-main");
-                assertThat(item.model()).isEqualTo("gpt-5.4-mini");
+                assertThat(item.model()).isEqualTo("gpt-5.5");
                 assertThat(item.status()).isEqualTo("SUCCESS");
             });
-        verify(openAiAccountTestClient).test(eq(account), eq("gpt-5.4-mini"), eq("ping"));
+        verify(openAiAccountTestClient).test(eq(account), eq("gpt-5.5"), eq("ping"));
         verifyNoInteractions(upstreamClient);
     }
 
@@ -323,7 +324,7 @@ class AccountTestServiceTest {
         ProxyAccountEntity account = anthropicAccount("anthropic-main", "sk-ant-test");
 
         when(repository.findAll()).thenReturn(Flux.just(account));
-        when(anthropicUpstreamClient.testClaudeCode(eq(account), eq("claude-sonnet-4-5-20250929")))
+        when(anthropicUpstreamClient.testClaudeCode(eq(account), eq("claude-opus-4-8")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", PlatformUsage.zero())));
         when(accountPoolService.recordTestSuccess(eq("anthropic-main"), eq(0L), eq(false))).thenReturn(Mono.empty());
 
@@ -338,14 +339,14 @@ class AccountTestServiceTest {
         );
 
         AccountDtos.TestAccountsResponse response = service
-            .test(new AccountDtos.TestAccountsRequest(null, true, "claude-opus-4.8", "ping", 1, false))
+            .test(new AccountDtos.TestAccountsRequest(null, true, "anthropic/claude-opus-4-8", "ping", 1, false))
             .block();
 
         assertThat(response).isNotNull();
         assertThat(response.success()).isEqualTo(1);
         assertThat(response.items()).singleElement()
-            .satisfies(item -> assertThat(item.model()).isEqualTo("claude-sonnet-4-5-20250929"));
-        verify(anthropicUpstreamClient).testClaudeCode(eq(account), eq("claude-sonnet-4-5-20250929"));
+            .satisfies(item -> assertThat(item.model()).isEqualTo("claude-opus-4-8"));
+        verify(anthropicUpstreamClient).testClaudeCode(eq(account), eq("claude-opus-4-8"));
         verifyNoInteractions(upstreamClient, openAiAccountTestClient);
     }
 
@@ -499,63 +500,51 @@ class AccountTestServiceTest {
 
         assertThat(options.kiro()).extracting(AccountDtos.TestModelOption::value)
             .containsExactly("auto", "claude-sonnet-4.5", "simple-task", "claude-haiku-4.5", "claude-sonnet-4", "claude-opus-4.5");
-        assertThat(options.openAi())
-            .extracting(AccountDtos.TestModelOption::value)
-            .containsExactlyElementsOf(options.codex().stream().map(AccountDtos.TestModelOption::value).toList());
         assertThat(options.openAi()).extracting(AccountDtos.TestModelOption::value)
-            .containsExactly(
+            .hasSize(78)
+            .contains(
                 "auto",
                 "gpt-5.5",
                 "gpt-5.4",
-                "gpt-5.4-mini",
-                "gpt-5.4-nano",
-                "gpt-5.4-pro",
-                "gpt-5.3-chat",
-                "gpt-5.2",
-                "gpt-5.2-chat",
-                "gpt-5.2-pro",
-                "gpt-5.1",
-                "gpt-5.1-chat",
-                "gpt-5",
-                "gpt-5-mini",
-                "gpt-5-nano",
-                "gpt-5-pro",
-                "gpt-4.1",
-                "gpt-4.1-mini",
-                "gpt-4o",
-                "gpt-4o-mini"
+                "gpt-5.4-2026-03-05",
+                "gpt-5.5",
+                "gpt-5.6",
+                "gpt-6-astra",
+                "o4-mini-2025-04-16"
             );
         assertThat(options.google()).extracting(AccountDtos.TestModelOption::value)
-            .hasSize(27)
-            .contains("auto", "google/gemini-2.5-pro", "google/gemini-3.5-flash", "google/gemma-4-31b-it:free");
+            .hasSize(32)
+            .contains("auto", "google/gemini-2.5-pro", "google/gemini-3.5-flash", "google/gemini-3.7-flash")
+            .doesNotContain("google/gemma-4-31b-it:free");
         assertThat(options.anthropic()).extracting(AccountDtos.TestModelOption::value)
-            .hasSizeGreaterThanOrEqualTo(27)
+            .hasSize(28)
             .contains(
                 "auto",
                 "claude-sonnet-4-5-20250929",
                 "claude-opus-4-5-20251101",
-                "claude-sonnet-4.5",
                 "claude-sonnet-4-6",
                 "claude-haiku-4-5-20251001",
-                "claude-opus-4.8-fast",
-                "claude-opus-latest"
+                "claude-opus-4-8",
+                "claude-sonnet-5"
             );
         assertThat(options.anthropic()).extracting(AccountDtos.TestModelOption::value)
             .noneMatch(value -> value.startsWith("anthropic/"));
         assertThat(options.codex()).extracting(AccountDtos.TestModelOption::value)
             .containsExactly(
                 "auto",
+                "gpt-6",
+                "gpt-6-astra",
+                "gpt-6-mini",
                 "gpt-5.5",
                 "gpt-5.4",
-                "gpt-5.4-mini",
                 "gpt-5.4-nano",
                 "gpt-5.4-pro",
-                "gpt-5.3-chat",
+                "gpt-5.3-chat-latest",
                 "gpt-5.2",
-                "gpt-5.2-chat",
+                "gpt-5.2-chat-latest",
                 "gpt-5.2-pro",
                 "gpt-5.1",
-                "gpt-5.1-chat",
+                "gpt-5.1-chat-latest",
                 "gpt-5",
                 "gpt-5-mini",
                 "gpt-5-nano",
@@ -566,7 +555,75 @@ class AccountTestServiceTest {
                 "gpt-4o-mini"
             );
         assertThat(options.deepSeek()).extracting(AccountDtos.TestModelOption::value)
-            .containsExactly("auto", "deepseek-v4-flash", "deepseek-v4-pro");
+            .containsExactly(
+                "auto",
+                "deepseek-chat",
+                "deepseek-reasoner",
+                "deepseek-v4-flash",
+                "deepseek-v4-pro"
+            );
+        assertThat(options.compatibleVendors()).isEmpty();
+    }
+
+    @Test
+    void testsCustomCompatibleVendorWithCatalogModelIds() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        OpenAiAccountTestClient openAiAccountTestClient = mock(OpenAiAccountTestClient.class);
+        DefaultModelCatalogProvider catalog = mock(DefaultModelCatalogProvider.class);
+        ProxyAccountEntity account = openAiAccount("or-main", "sk-or");
+        account.setProvider("OpenRouter");
+        account.setBaseUrl("https://openrouter.ai/api/v1");
+        when(catalog.managedModels()).thenReturn(List.of(
+            new tech.starryapi.model.ModelDtos.ManagedModelResponse(
+                "or-kimi",
+                "Kimi K2",
+                "/assets/model-icons/or.png",
+                "OpenRouter",
+                "Custom",
+                "moonshotai/kimi-k2",
+                "OPENAI_CHAT_COMPLETIONS",
+                "/v1/chat/completions",
+                128000,
+                null,
+                true,
+                false,
+                "#4D6BFE",
+                null
+            )
+        ));
+        when(repository.findAll()).thenReturn(Flux.just(account));
+        when(openAiAccountTestClient.test(eq(account), eq("moonshotai/kimi-k2"), eq("ping")))
+            .thenReturn(Mono.just(new PlatformCompletionResult("OK", PlatformUsage.zero())));
+        when(accountPoolService.recordTestSuccess(eq("or-main"), eq(0L), eq(true))).thenReturn(Mono.empty());
+
+        AccountTestService service = new AccountTestService(
+            objectMapper,
+            repository,
+            accountPoolService,
+            new KiroPayloadFactory(objectMapper, modelCatalog),
+            mock(KiroUpstreamClient.class),
+            openAiAccountTestClient,
+            mock(AnthropicUpstreamClient.class),
+            catalog
+        );
+
+        AccountDtos.TestModelOptionsResponse options = service.modelOptions();
+        assertThat(options.compatibleVendors()).singleElement().satisfies(vendor -> {
+            assertThat(vendor.name()).isEqualTo("OpenRouter");
+            assertThat(vendor.icon()).isEqualTo("/assets/model-icons/or.png");
+            assertThat(vendor.color()).isEqualTo("#4D6BFE");
+            assertThat(vendor.models()).extracting(AccountDtos.TestModelOption::value)
+                .containsExactly("auto", "moonshotai/kimi-k2");
+        });
+
+        AccountDtos.TestAccountsResponse response = service
+            .test(new AccountDtos.TestAccountsRequest(null, true, "auto", "ping", 1, true))
+            .block();
+        assertThat(response).isNotNull();
+        assertThat(response.items()).singleElement()
+            .satisfies(item -> assertThat(item.model()).isEqualTo("moonshotai/kimi-k2"));
+        verify(openAiAccountTestClient).test(eq(account), eq("moonshotai/kimi-k2"), eq("ping"));
     }
 
     @Test
@@ -579,7 +636,7 @@ class AccountTestServiceTest {
         account.setAuthMethod(AccountPlatforms.OPENAI_CODEX_AUTH);
 
         when(repository.findAll()).thenReturn(Flux.just(account));
-        when(openAiAccountTestClient.test(eq(account), eq("gpt-5.4-mini"), eq("ping")))
+        when(openAiAccountTestClient.test(eq(account), eq("gpt-5.5"), eq("ping")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", PlatformUsage.zero())));
         when(accountPoolService.recordTestSuccess(eq("codex-main"), eq(0L), eq(false))).thenReturn(Mono.empty());
 
@@ -600,8 +657,8 @@ class AccountTestServiceTest {
         assertThat(response).isNotNull();
         assertThat(response.success()).isEqualTo(1);
         assertThat(response.items()).singleElement()
-            .satisfies(item -> assertThat(item.model()).isEqualTo("gpt-5.4-mini"));
-        verify(openAiAccountTestClient).test(eq(account), eq("gpt-5.4-mini"), eq("ping"));
+            .satisfies(item -> assertThat(item.model()).isEqualTo("gpt-5.5"));
+        verify(openAiAccountTestClient).test(eq(account), eq("gpt-5.5"), eq("ping"));
         verifyNoInteractions(upstreamClient);
     }
 
@@ -615,7 +672,7 @@ class AccountTestServiceTest {
         account.setAuthMethod(AccountPlatforms.OPENAI_CODEX_AUTH);
 
         when(repository.findAll()).thenReturn(Flux.just(account));
-        when(openAiAccountTestClient.test(eq(account), eq("gpt-5.4-mini"), eq("ping")))
+        when(openAiAccountTestClient.test(eq(account), eq("gpt-5.5"), eq("ping")))
             .thenReturn(Mono.just(new PlatformCompletionResult("OK", PlatformUsage.zero())));
         when(accountPoolService.recordTestSuccess(eq("codex-main"), eq(0L), eq(false))).thenReturn(Mono.empty());
 
@@ -636,8 +693,8 @@ class AccountTestServiceTest {
         assertThat(response).isNotNull();
         assertThat(response.success()).isEqualTo(1);
         assertThat(response.items()).singleElement()
-            .satisfies(item -> assertThat(item.model()).isEqualTo("gpt-5.4-mini"));
-        verify(openAiAccountTestClient).test(eq(account), eq("gpt-5.4-mini"), eq("ping"));
+            .satisfies(item -> assertThat(item.model()).isEqualTo("gpt-5.5"));
+        verify(openAiAccountTestClient).test(eq(account), eq("gpt-5.5"), eq("ping"));
         verifyNoInteractions(upstreamClient);
     }
 

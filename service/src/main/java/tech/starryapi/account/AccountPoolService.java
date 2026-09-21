@@ -14,8 +14,10 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
@@ -32,6 +34,8 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import tech.starryapi.admin.SystemMaintenanceTaskGate;
+import tech.starryapi.account.allocation.AccountCandidateRanker;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.common.Hashing;
 import tech.starryapi.config.ProxyProperties;
@@ -52,6 +56,8 @@ public class AccountPoolService {
     private final R2dbcEntityTemplate template;
     private final ProxyProperties properties;
     private final AccountPoolPolicyService poolPolicyService;
+    private final SystemMaintenanceTaskGate maintenanceTaskGate;
+    private final AccountCandidateRanker candidateRanker;
     private final AtomicInteger nextIndex = new AtomicInteger();
     private final AtomicLong cacheVersion = new AtomicLong();
     private final AtomicLong refreshGeneration = new AtomicLong();
@@ -68,7 +74,40 @@ public class AccountPoolService {
         R2dbcEntityTemplate template,
         ProxyProperties properties
     ) {
-        this(repository, template, properties, null);
+        this(
+            repository,
+            template,
+            properties,
+            null,
+            SystemMaintenanceTaskGate.alwaysOperationalForDirectConstruction(),
+            null
+        );
+    }
+
+    public AccountPoolService(
+        ProxyAccountRepository repository,
+        R2dbcEntityTemplate template,
+        ProxyProperties properties,
+        AccountPoolPolicyService poolPolicyService
+    ) {
+        this(
+            repository,
+            template,
+            properties,
+            poolPolicyService,
+            SystemMaintenanceTaskGate.alwaysOperationalForDirectConstruction(),
+            null
+        );
+    }
+
+    public AccountPoolService(
+        ProxyAccountRepository repository,
+        R2dbcEntityTemplate template,
+        ProxyProperties properties,
+        AccountPoolPolicyService poolPolicyService,
+        SystemMaintenanceTaskGate maintenanceTaskGate
+    ) {
+        this(repository, template, properties, poolPolicyService, maintenanceTaskGate, null);
     }
 
     @Autowired
@@ -76,12 +115,16 @@ public class AccountPoolService {
         ProxyAccountRepository repository,
         R2dbcEntityTemplate template,
         ProxyProperties properties,
-        AccountPoolPolicyService poolPolicyService
+        AccountPoolPolicyService poolPolicyService,
+        SystemMaintenanceTaskGate maintenanceTaskGate,
+        AccountCandidateRanker candidateRanker
     ) {
         this.repository = repository;
         this.template = template;
         this.properties = properties;
         this.poolPolicyService = poolPolicyService;
+        this.maintenanceTaskGate = maintenanceTaskGate;
+        this.candidateRanker = candidateRanker;
         this.affinity = Caffeine.newBuilder()
             .maximumSize(Math.max(1, properties.getSessionAffinityMaximumSize()))
             .expireAfterAccess(positiveAffinityTtl(properties.getSessionAffinityTtl()))
@@ -95,11 +138,117 @@ public class AccountPoolService {
 
     @Scheduled(fixedDelay = 30_000)
     public void scheduledRefresh() {
-        refreshCache().subscribe(null, error -> log.warn("Failed to refresh account cache", error));
+        maintenanceTaskGate.whenOperational(this::refreshCache)
+            .subscribe(null, error -> log.warn("Failed to refresh account cache", error));
     }
 
     public Mono<List<ProxyAccountEntity>> list() {
         return repository.findAll().collectList();
+    }
+
+    public Mono<PoolAccountInventory> poolAccountInventory() {
+        String sql = """
+            WITH account_inventory AS MATERIALIZED (
+                SELECT
+                    provider,
+                    auth_method,
+                    base_url,
+                    CASE
+                        WHEN LOWER(COALESCE(pool_tier, 'primary')) IN ('secondary', '2', 'level2')
+                            THEN 'secondary'
+                        ELSE 'primary'
+                    END AS pool_tier,
+                    COALESCE(enabled, FALSE)
+                        AND suspended_at IS NULL
+                        AND NOT (
+                            (quota_reset_at IS NULL OR quota_reset_at > CURRENT_TIMESTAMP)
+                            AND (
+                                quota_exhausted_at IS NOT NULL
+                                OR (
+                                    COALESCE(quota_limit, 0) > 0
+                                    AND COALESCE(quota_used, 0) >= quota_limit
+                                )
+                            )
+                        )
+                        AND NOT (
+                            COALESCE(quota_5h_limit, 0) > 0
+                            AND COALESCE(quota_5h_used, 0) >= quota_5h_limit
+                            AND (quota_5h_reset_at IS NULL OR quota_5h_reset_at > CURRENT_TIMESTAMP)
+                        )
+                        AND NOT (
+                            COALESCE(quota_7d_limit, 0) > 0
+                            AND COALESCE(quota_7d_used, 0) >= quota_7d_limit
+                            AND (quota_7d_reset_at IS NULL OR quota_7d_reset_at > CURRENT_TIMESTAMP)
+                        ) AS available
+                FROM proxy_accounts
+            ),
+            totals AS (
+                SELECT
+                    COUNT(*)::bigint AS account_count,
+                    COUNT(*) FILTER (WHERE available)::bigint AS available_account_count
+                FROM account_inventory
+            ),
+            available_groups AS (
+                SELECT provider, auth_method, base_url, pool_tier, COUNT(*)::bigint AS group_count
+                FROM account_inventory
+                WHERE available
+                GROUP BY provider, auth_method, base_url, pool_tier
+            )
+            SELECT
+                totals.account_count,
+                totals.available_account_count,
+                available_groups.provider,
+                available_groups.auth_method,
+                available_groups.base_url,
+                available_groups.pool_tier,
+                available_groups.group_count
+            FROM totals
+            LEFT JOIN available_groups ON TRUE
+            ORDER BY available_groups.provider, available_groups.auth_method,
+                     available_groups.base_url, available_groups.pool_tier
+            """;
+        return template.getDatabaseClient().sql(sql)
+            .map((row, metadata) -> new PoolInventoryRow(
+                numberValue(row.get("account_count")),
+                numberValue(row.get("available_account_count")),
+                textValue(row.get("provider")),
+                textValue(row.get("auth_method")),
+                textValue(row.get("base_url")),
+                textValue(row.get("pool_tier")),
+                numberValue(row.get("group_count"))
+            ))
+            .all()
+            .collectList()
+            .map(this::poolAccountInventory);
+    }
+
+    private PoolAccountInventory poolAccountInventory(List<PoolInventoryRow> rows) {
+        if (rows == null || rows.isEmpty()) {
+            return PoolAccountInventory.EMPTY;
+        }
+        PoolInventoryRow totals = rows.get(0);
+        List<PoolAccountGroup> groups = rows.stream()
+            .filter(row -> row.groupCount() > 0)
+            .map(row -> new PoolAccountGroup(
+                row.provider(),
+                row.authMethod(),
+                row.baseUrl(),
+                row.poolTier(),
+                row.groupCount()
+            ))
+            .toList();
+        return new PoolAccountInventory(totals.accountCount(), totals.availableAccountCount(), groups);
+    }
+
+    private static long numberValue(Object value) {
+        if (value instanceof Number number) {
+            return Math.max(0, number.longValue());
+        }
+        return value == null ? 0L : Math.max(0, Long.parseLong(value.toString()));
+    }
+
+    private static String textValue(Object value) {
+        return value == null ? null : value.toString();
     }
 
     public Mono<ProxyAccountEntity> create(AccountDtos.CreateAccountRequest request) {
@@ -179,73 +328,227 @@ public class AccountPoolService {
             .doOnNext(this::updateCachedAccount);
     }
 
+    public boolean hasUsableAccount(Predicate<ProxyAccountEntity> filter) {
+        Predicate<ProxyAccountEntity> matcher = filter == null ? account -> true : filter;
+        return !cachedAccountsSnapshot(account -> matcher.test(account) && isAvailable(account)).isEmpty();
+    }
+
     public Mono<ProxyAccountEntity> selectAccount(String sessionHint) {
         return selectAccount(sessionHint, account -> true, "No available upstream account");
     }
 
     public Mono<ProxyAccountEntity> selectKiroAccount(String sessionHint) {
-        return selectAccount(sessionHint, AccountPlatforms::isKiroCompatible, "No available Kiro upstream account");
+        return selectKiroAccountForPool(sessionHint, null);
+    }
+
+    public Mono<ProxyAccountEntity> selectKiroAccountForPool(
+        String sessionHint,
+        AccountPoolRequestContext context
+    ) {
+        return selectAccount(sessionHint, AccountPlatforms::isKiroCompatible, "No available Kiro upstream account", context);
     }
 
     public Mono<ProxyAccountEntity> selectKiroAccount(String sessionHint, Collection<String> excludedAccountIds) {
+        return selectKiroAccountForPool(sessionHint, excludedAccountIds, null);
+    }
+
+    public Mono<ProxyAccountEntity> selectKiroAccountForPool(
+        String sessionHint,
+        Collection<String> excludedAccountIds,
+        AccountPoolRequestContext context
+    ) {
         return selectAccount(
             sessionHint,
             account -> AccountPlatforms.isKiroCompatible(account) && !isExcluded(account, excludedAccountIds),
-            "No available Kiro upstream account"
+            "No available Kiro upstream account",
+            context
         );
     }
 
     public Mono<ProxyAccountEntity> selectOpenAiAccount(String sessionHint) {
-        return selectAccount(sessionHint, AccountPlatforms::isOpenAi, "No available OpenAI upstream account");
+        return selectOpenAiAccountForPool(sessionHint, null);
+    }
+
+    public Mono<ProxyAccountEntity> selectOpenAiAccountForPool(
+        String sessionHint,
+        AccountPoolRequestContext context
+    ) {
+        return selectAccount(
+            sessionHint,
+            account -> AccountPlatforms.isOfficialOpenAiApiKey(account) || AccountPlatforms.isCodex(account),
+            "No available OpenAI upstream account",
+            context
+        );
     }
 
     public Mono<ProxyAccountEntity> selectOpenAiAccount(String sessionHint, Collection<String> excludedAccountIds) {
+        return selectOpenAiAccountForPool(sessionHint, excludedAccountIds, null);
+    }
+
+    public Mono<ProxyAccountEntity> selectOpenAiAccountForPool(
+        String sessionHint,
+        Collection<String> excludedAccountIds,
+        AccountPoolRequestContext context
+    ) {
         return selectAccount(
             sessionHint,
-            account -> AccountPlatforms.isOpenAi(account) && !isExcluded(account, excludedAccountIds),
-            "No available OpenAI upstream account"
+            account -> (AccountPlatforms.isOfficialOpenAiApiKey(account) || AccountPlatforms.isCodex(account))
+                && !isExcluded(account, excludedAccountIds),
+            "No available OpenAI upstream account",
+            context
+        );
+    }
+
+    public Mono<ProxyAccountEntity> selectOpenAiApiKeyAccountForPool(
+        String sessionHint,
+        AccountPoolRequestContext context
+    ) {
+        return selectAccount(
+            sessionHint,
+            AccountPlatforms::isOfficialOpenAiApiKey,
+            "No available OpenAI upstream account",
+            context
+        );
+    }
+
+    public Mono<ProxyAccountEntity> selectOpenAiApiKeyAccountForPool(
+        String sessionHint,
+        Collection<String> excludedAccountIds,
+        AccountPoolRequestContext context
+    ) {
+        return selectAccount(
+            sessionHint,
+            account -> AccountPlatforms.isOfficialOpenAiApiKey(account) && !isExcluded(account, excludedAccountIds),
+            "No available OpenAI upstream account",
+            context
+        );
+    }
+
+    public Mono<ProxyAccountEntity> selectOpenAiCompatibleAccountForPool(
+        String sessionHint,
+        AccountPoolRequestContext context
+    ) {
+        return selectAccount(
+            sessionHint,
+            AccountPlatforms::isOpenAiCompatibleApiKey,
+            "No available OpenAI-compatible upstream account",
+            context
+        );
+    }
+
+    public Mono<ProxyAccountEntity> selectOpenAiCompatibleAccountForPool(
+        String sessionHint,
+        Collection<String> excludedAccountIds,
+        AccountPoolRequestContext context
+    ) {
+        return selectAccount(
+            sessionHint,
+            account -> AccountPlatforms.isOpenAiCompatibleApiKey(account)
+                && !isExcluded(account, excludedAccountIds),
+            "No available OpenAI-compatible upstream account",
+            context
+        );
+    }
+
+    public Mono<ProxyAccountEntity> selectOpenAiAccountByIdForPool(
+        String accountId,
+        AccountPoolRequestContext context
+    ) {
+        return selectAccount(
+            null,
+            account -> (AccountPlatforms.isOpenAi(account) || AccountPlatforms.isDeepSeek(account))
+                && Objects.equals(accountId, account.getAccountId()),
+            "The account that owns the OpenAI response is unavailable",
+            context
         );
     }
 
     public Mono<ProxyAccountEntity> selectAnthropicAccount(String sessionHint) {
-        return selectAccount(sessionHint, AccountPlatforms::isAnthropicApiKey, "No available Anthropic upstream account");
+        return selectAnthropicAccountForPool(sessionHint, null);
+    }
+
+    public Mono<ProxyAccountEntity> selectAnthropicAccountForPool(
+        String sessionHint,
+        AccountPoolRequestContext context
+    ) {
+        return selectAccount(sessionHint, AccountPlatforms::isAnthropicApiKey, "No available Anthropic upstream account", context);
     }
 
     public Mono<ProxyAccountEntity> selectAnthropicAccount(String sessionHint, Collection<String> excludedAccountIds) {
+        return selectAnthropicAccountForPool(sessionHint, excludedAccountIds, null);
+    }
+
+    public Mono<ProxyAccountEntity> selectAnthropicAccountForPool(
+        String sessionHint,
+        Collection<String> excludedAccountIds,
+        AccountPoolRequestContext context
+    ) {
         return selectAccount(
             sessionHint,
             account -> AccountPlatforms.isAnthropicApiKey(account) && !isExcluded(account, excludedAccountIds),
-            "No available Anthropic upstream account"
+            "No available Anthropic upstream account",
+            context
         );
     }
 
     public Mono<ProxyAccountEntity> selectCodexOpenAiAccount(String sessionHint) {
-        return selectAccount(sessionHint, AccountPlatforms::isCodex, "No available Codex upstream account");
+        return selectCodexOpenAiAccountForPool(sessionHint, null);
+    }
+
+    public Mono<ProxyAccountEntity> selectCodexOpenAiAccountForPool(
+        String sessionHint,
+        AccountPoolRequestContext context
+    ) {
+        return selectAccount(sessionHint, AccountPlatforms::isCodex, "No available Codex upstream account", context);
     }
 
     public Mono<ProxyAccountEntity> selectCodexOpenAiAccount(String sessionHint, Collection<String> excludedAccountIds) {
+        return selectCodexOpenAiAccountForPool(sessionHint, excludedAccountIds, null);
+    }
+
+    public Mono<ProxyAccountEntity> selectCodexOpenAiAccountForPool(
+        String sessionHint,
+        Collection<String> excludedAccountIds,
+        AccountPoolRequestContext context
+    ) {
         return selectAccount(
             sessionHint,
             account -> AccountPlatforms.isCodex(account) && !isExcluded(account, excludedAccountIds),
-            "No available Codex upstream account"
+            "No available Codex upstream account",
+            context
         );
     }
 
     public Mono<ProxyAccountEntity> selectDeepSeekOpenAiAccount(String sessionHint) {
+        return selectDeepSeekOpenAiAccountForPool(sessionHint, null);
+    }
+
+    public Mono<ProxyAccountEntity> selectDeepSeekOpenAiAccountForPool(
+        String sessionHint,
+        AccountPoolRequestContext context
+    ) {
         return selectAccount(
             sessionHint,
             AccountPlatforms::isDeepSeek,
             "No available DeepSeek upstream account",
-            false
+            context
         );
     }
 
     public Mono<ProxyAccountEntity> selectDeepSeekOpenAiAccount(String sessionHint, Collection<String> excludedAccountIds) {
+        return selectDeepSeekOpenAiAccountForPool(sessionHint, excludedAccountIds, null);
+    }
+
+    public Mono<ProxyAccountEntity> selectDeepSeekOpenAiAccountForPool(
+        String sessionHint,
+        Collection<String> excludedAccountIds,
+        AccountPoolRequestContext context
+    ) {
         return selectAccount(
             sessionHint,
             account -> AccountPlatforms.isDeepSeek(account) && !isExcluded(account, excludedAccountIds),
             "No available DeepSeek upstream account",
-            false
+            context
         );
     }
 
@@ -254,27 +557,68 @@ public class AccountPoolService {
         Predicate<ProxyAccountEntity> filter,
         String unavailableMessage
     ) {
-        return selectAccount(sessionHint, filter, unavailableMessage, true);
+        return selectAccount(sessionHint, filter, unavailableMessage, null);
     }
 
     private Mono<ProxyAccountEntity> selectAccount(
         String sessionHint,
         Predicate<ProxyAccountEntity> filter,
         String unavailableMessage,
-        boolean allowCooldownFallback
+        AccountPoolRequestContext context
     ) {
-        List<ProxyAccountEntity> accounts = applyTierPolicy(cachedAccountsSnapshot(filter));
+        String affinityKey = poolPolicyService == null
+            ? sessionHint
+            : poolPolicyService.affinityKey(context, sessionHint);
+        List<ProxyAccountEntity> accounts = applyTierPolicy(cachedAccountsSnapshot(filter), context);
         if (accounts.isEmpty()) {
             return refreshCacheIfStale()
-                .then(Mono.defer(() -> Mono.justOrEmpty(selectFrom(
-                    applyTierPolicy(cachedAccountsSnapshot(filter)),
-                    sessionHint,
-                    allowCooldownFallback
-                ))))
+                .then(Mono.defer(() -> {
+                    List<ProxyAccountEntity> refreshed = cachedAccountsSnapshot(filter);
+                    List<ProxyAccountEntity> routed = applyTierPolicy(refreshed, context);
+                    if (!refreshed.isEmpty()
+                        && routed.isEmpty()
+                        && poolPolicyService != null
+                        && poolPolicyService.isEnabled()) {
+                        return Mono.error(new ApiException(
+                            HttpStatus.SERVICE_UNAVAILABLE,
+                            "ACCOUNT_POOL_CIRCUIT_OPEN",
+                            "Model-family account pool circuit is open and no secondary account is available"
+                        ));
+                    }
+                    return selectFromPool(routed, affinityKey, context);
+                }))
                 .switchIfEmpty(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", unavailableMessage)));
         }
-        return Mono.justOrEmpty(selectFrom(accounts, sessionHint, allowCooldownFallback))
+        return selectFromPool(accounts, affinityKey, context)
             .switchIfEmpty(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", unavailableMessage)));
+    }
+
+    private Mono<ProxyAccountEntity> selectFromPool(
+        List<ProxyAccountEntity> accounts,
+        String affinityKey,
+        AccountPoolRequestContext context
+    ) {
+        ProxyAccountEntity affinitySelection = affinitySelection(accounts, affinityKey);
+        if (affinitySelection != null) {
+            return Mono.just(affinitySelection);
+        }
+        List<ProxyAccountEntity> available = accounts.stream().filter(this::isAvailable).toList();
+        if (available.isEmpty()) {
+            if (poolPolicyService != null) {
+                poolPolicyService.cancelSelection(context);
+            }
+            return Mono.empty();
+        }
+        if (candidateRanker == null) {
+            return Mono.just(selectFrom(available));
+        }
+        return candidateRanker.select(available)
+            .switchIfEmpty(Mono.defer(() -> {
+                if (poolPolicyService != null) {
+                    poolPolicyService.cancelSelection(context);
+                }
+                return Mono.empty();
+            }));
     }
 
     private boolean isExcluded(ProxyAccountEntity account, Collection<String> excludedAccountIds) {
@@ -284,7 +628,78 @@ public class AccountPoolService {
             && excludedAccountIds.contains(account.getAccountId());
     }
 
+    public String circuitKey(AccountPoolRequestContext context) {
+        return poolPolicyService == null ? null : poolPolicyService.circuitKey(context);
+    }
+
+    public String circuitTier(ProxyAccountEntity account) {
+        return poolPolicyService == null || !poolPolicyService.isEnabled() || account == null
+            ? null
+            : AccountPoolPolicyService.normalizePoolTier(account.getPoolTier());
+    }
+
+    public String circuitTier(ProxyAccountEntity account, AccountPoolRequestContext context) {
+        return account == null || poolPolicyService == null || !poolPolicyService.isActive(context)
+            ? null
+            : AccountPoolPolicyService.normalizePoolTier(account.getPoolTier());
+    }
+
+    public UUID captureCircuitEpoch() {
+        return poolPolicyService == null ? null : poolPolicyService.currentCircuitEpoch();
+    }
+
+    public ModelPoolKey captureCircuitPool(
+        String requestedModel,
+        String upstreamModel,
+        String providerHint,
+        UUID circuitEpoch
+    ) {
+        return poolPolicyService == null
+            ? null
+            : poolPolicyService.capturePoolKey(requestedModel, upstreamModel, providerHint, circuitEpoch);
+    }
+
+    public UUID circuitEpoch(AccountPoolRequestContext context) {
+        return poolPolicyService == null || !poolPolicyService.isActive(context)
+            ? null
+            : context.circuitEpoch();
+    }
+
+    public void cancelCircuitProbe(AccountPoolRequestContext context) {
+        if (poolPolicyService != null) {
+            poolPolicyService.cancelSelection(context);
+        }
+    }
+
+    public long recordCircuitSuccess(AccountPoolRequestContext context, ProxyAccountEntity account) {
+        return poolPolicyService == null ? 0 : poolPolicyService.recordSuccess(context, account);
+    }
+
+    public long recordCircuitFailure(AccountPoolRequestContext context, ProxyAccountEntity account) {
+        return poolPolicyService == null ? 0 : poolPolicyService.recordFailure(context, account);
+    }
+
+    public void acknowledgeCircuitOutcome(AccountPoolRequestContext context, long outcomeId) {
+        if (poolPolicyService != null) {
+            poolPolicyService.acknowledgeOutcome(context, outcomeId);
+        }
+    }
+
+    public void markCircuitOutcomePersistenceFailed(AccountPoolRequestContext context, long outcomeId) {
+        if (poolPolicyService != null) {
+            poolPolicyService.markOutcomePersistenceFailed(context, outcomeId);
+        }
+    }
+
     public Mono<Void> recordSuccess(String accountId, long tokens) {
+        return recordSuccess(accountId, tokens, null);
+    }
+
+    public Mono<Void> recordSuccess(
+        String accountId,
+        long tokens,
+        AccountPoolRequestContext context
+    ) {
         long safeTokens = Math.max(tokens, 0);
         Instant totalQuotaResetAt = nextTotalQuotaResetAt();
         String sql = """
@@ -434,7 +849,17 @@ public class AccountPoolService {
         Integer statusCode,
         String message
     ) {
-        return recordRequestFailure(accountId, type, statusCode, message, true);
+        return recordRequestFailure(accountId, type, statusCode, message, false, null);
+    }
+
+    public Mono<RequestFailureRecord> recordRequestFailure(
+        String accountId,
+        UpstreamErrorType type,
+        Integer statusCode,
+        String message,
+        AccountPoolRequestContext context
+    ) {
+        return recordRequestFailure(accountId, type, statusCode, message, false, context);
     }
 
     public Mono<RequestFailureRecord> recordRequestFailure(
@@ -444,13 +869,33 @@ public class AccountPoolService {
         String message,
         boolean rateLimitIsQuota
     ) {
+        return recordRequestFailure(accountId, type, statusCode, message, rateLimitIsQuota, null);
+    }
+
+    public Mono<RequestFailureRecord> recordRequestFailure(
+        String accountId,
+        UpstreamErrorType type,
+        Integer statusCode,
+        String message,
+        boolean rateLimitIsQuota,
+        AccountPoolRequestContext context
+    ) {
         Instant now = Instant.now();
         boolean quotaFailure = isQuotaStatus(statusCode, rateLimitIsQuota);
-        boolean authFailure = isAuthStatus(statusCode);
-        boolean suspended = quotaFailure || authFailure;
+        boolean authFailure = isAuthStatus(statusCode) && type == UpstreamErrorType.FATAL;
+        boolean suspended = authFailure;
+        boolean circuitScopedFailure = context != null
+            && poolPolicyService != null
+            && poolPolicyService.isActive(context)
+            && isCircuitBreakerFailure(type, statusCode);
         String sql = """
             UPDATE proxy_accounts
-            SET error_count = COALESCE(error_count, 0) + 1,
+            SET error_count = CASE
+                    WHEN :circuitScopedFailure
+                        AND LOWER(COALESCE(pool_tier, 'primary')) NOT IN ('secondary', '2', 'level2')
+                        THEN COALESCE(error_count, 0)
+                    ELSE COALESCE(error_count, 0) + 1
+                END,
                 last_used_at = :now,
                 enabled = CASE WHEN :suspended THEN FALSE ELSE enabled END,
                 quota_exhausted_at = CASE
@@ -474,9 +919,10 @@ public class AccountPoolService {
             .bind("suspended", suspended)
             .bind("quotaFailure", quotaFailure)
             .bind("authFailure", authFailure)
+            .bind("circuitScopedFailure", circuitScopedFailure)
             .bind("accountId", accountId);
         spec = message == null ? spec.bindNull("message", String.class) : spec.bind("message", message);
-        return spec
+        Mono<RequestFailureRecord> update = spec
             .map((row, metadata) -> template.getConverter().read(ProxyAccountEntity.class, row, metadata))
             .one()
             .doOnNext(this::updateCachedAccount)
@@ -486,6 +932,7 @@ public class AccountPoolService {
                 statusCode,
                 suspended
             ));
+        return update;
     }
 
     public Mono<Void> recordTestFailure(
@@ -495,7 +942,7 @@ public class AccountPoolService {
         String message,
         boolean updateStatus
     ) {
-        return recordTestFailure(accountId, type, statusCode, message, updateStatus, true);
+        return recordTestFailure(accountId, type, statusCode, message, updateStatus, false);
     }
 
     public Mono<Void> recordTestFailure(
@@ -511,17 +958,28 @@ public class AccountPoolService {
         }
         Instant now = Instant.now();
         boolean quotaFailure = isQuotaStatus(statusCode, rateLimitIsQuota);
-        boolean authFailure = isAuthStatus(statusCode);
-        String reason = quotaFailure ? "QUOTA_EXHAUSTED" : authFailure ? "AUTH_FAILED" : "ACCOUNT_TEST_FAILED";
+        boolean permanentCredentialFailure = isAuthStatus(statusCode)
+            && hasPermanentCredentialEvidence(message);
         String sql = """
             UPDATE proxy_accounts
             SET error_count = COALESCE(error_count, 0) + 1,
                 last_used_at = :now,
-                enabled = FALSE,
-                quota_exhausted_at = CASE WHEN :quotaFailure THEN :now ELSE NULL END,
-                suspended_at = :now,
-                suspend_reason = :reason,
-                suspend_message = :message,
+                enabled = CASE WHEN :permanentCredentialFailure THEN FALSE ELSE enabled END,
+                quota_exhausted_at = CASE
+                    WHEN :quotaFailure THEN :now
+                    WHEN :permanentCredentialFailure THEN NULL
+                    ELSE quota_exhausted_at
+                END,
+                suspended_at = CASE WHEN :permanentCredentialFailure THEN :now ELSE suspended_at END,
+                suspend_reason = CASE
+                    WHEN :quotaFailure THEN 'QUOTA_EXHAUSTED'
+                    WHEN :permanentCredentialFailure THEN 'AUTH_FAILED'
+                    ELSE suspend_reason
+                END,
+                suspend_message = CASE
+                    WHEN :permanentCredentialFailure THEN :message
+                    ELSE suspend_message
+                END,
                 updated_at = clock_timestamp()
             WHERE account_id = :accountId
             RETURNING *
@@ -529,7 +987,7 @@ public class AccountPoolService {
         var spec = template.getDatabaseClient().sql(sql)
             .bind("now", now)
             .bind("quotaFailure", quotaFailure)
-            .bind("reason", reason)
+            .bind("permanentCredentialFailure", permanentCredentialFailure)
             .bind("accountId", accountId);
         spec = message == null ? spec.bindNull("message", String.class) : spec.bind("message", message);
         return spec
@@ -545,6 +1003,27 @@ public class AccountPoolService {
 
     private boolean isAuthStatus(Integer statusCode) {
         return statusCode != null && (statusCode == 401 || statusCode == 403);
+    }
+
+    private boolean hasPermanentCredentialEvidence(String message) {
+        if (message == null || message.isBlank()) {
+            return false;
+        }
+        String normalized = message.toLowerCase(Locale.ROOT);
+        return normalized.contains("token_revoked")
+            || normalized.contains("token revoked")
+            || normalized.contains("token_invalidated")
+            || normalized.contains("organization disabled")
+            || normalized.contains("account disabled")
+            || normalized.contains("credential has been revoked")
+            || normalized.contains("access permanently revoked");
+    }
+
+    public static boolean isCircuitBreakerFailure(UpstreamErrorType type, Integer statusCode) {
+        if (type != UpstreamErrorType.RECOVERABLE) {
+            return false;
+        }
+        return statusCode == null || statusCode == 408 || statusCode == 409 || statusCode >= 500;
     }
 
     public Mono<Void> refreshCache() {
@@ -700,11 +1179,7 @@ public class AccountPoolService {
         affinity.asMap().entrySet().removeIf(entry -> accountId.equals(entry.getValue()));
     }
 
-    private ProxyAccountEntity selectFrom(
-        List<ProxyAccountEntity> accounts,
-        String sessionHint,
-        boolean allowCooldownFallback
-    ) {
+    private ProxyAccountEntity affinitySelection(List<ProxyAccountEntity> accounts, String sessionHint) {
         if (properties.isSessionAffinityEnabled() && sessionHint != null && !sessionHint.isBlank()) {
             String affinityAccountId = affinity.getIfPresent(sessionHint);
             if (affinityAccountId != null) {
@@ -713,22 +1188,12 @@ public class AccountPoolService {
                         return account;
                     }
                 }
-                affinity.invalidate(sessionHint);
             }
         }
+        return null;
+    }
 
-        List<ProxyAccountEntity> available = new ArrayList<>(accounts.stream().filter(this::isAvailable).toList());
-        if (available.isEmpty() && allowCooldownFallback) {
-            available = accounts.stream()
-                .filter(account -> !isQuotaExhausted(account))
-                .min(Comparator.comparing(account -> Optional.ofNullable(account.getLastUsedAt()).orElse(Instant.EPOCH)))
-                .map(List::of)
-                .orElse(List.of());
-        }
-        if (available.isEmpty()) {
-            return null;
-        }
-
+    private ProxyAccountEntity selectFrom(List<ProxyAccountEntity> available) {
         ProxyAccountEntity selected;
         if (properties.getAccountSelectionStrategy() == ProxyProperties.AccountSelectionStrategy.STICKY) {
             selected = available.get(0);
@@ -738,10 +1203,43 @@ public class AccountPoolService {
             int index = Math.floorMod(nextIndex.getAndIncrement(), available.size());
             selected = available.get(index);
         }
-        if (properties.isSessionAffinityEnabled() && sessionHint != null && !sessionHint.isBlank()) {
-            affinity.put(sessionHint, selected.getAccountId());
-        }
         return selected;
+    }
+
+    public void commitSessionAffinity(String sessionHint, String accountId) {
+        commitSessionAffinity(null, sessionHint, accountId, false);
+    }
+
+    /**
+     * Binds later requests with the same session key to {@code accountId}.
+     *
+     * <p>A bare API key id is used as the session key when {@code bindByApiKey} is true.
+     * Conversation-scoped keys always contain {@code apiKeyId:hint} and bind regardless.
+     */
+    public void commitSessionAffinity(String sessionHint, String accountId, boolean bindByApiKey) {
+        commitSessionAffinity(null, sessionHint, accountId, bindByApiKey);
+    }
+
+    public void commitSessionAffinity(
+        AccountPoolRequestContext context,
+        String sessionHint,
+        String accountId,
+        boolean bindByApiKey
+    ) {
+        if (!properties.isSessionAffinityEnabled()
+            || sessionHint == null
+            || sessionHint.isBlank()
+            || accountId == null
+            || accountId.isBlank()) {
+            return;
+        }
+        if (!bindByApiKey && sessionHint.indexOf(':') <= 0) {
+            return;
+        }
+        String affinityKey = poolPolicyService == null
+            ? sessionHint
+            : poolPolicyService.affinityKey(context, sessionHint);
+        affinity.asMap().putIfAbsent(affinityKey, accountId);
     }
 
     private boolean shouldUseWeights(List<ProxyAccountEntity> accounts) {
@@ -767,7 +1265,14 @@ public class AccountPoolService {
     }
 
     private List<ProxyAccountEntity> applyTierPolicy(List<ProxyAccountEntity> accounts) {
-        return poolPolicyService == null ? accounts : poolPolicyService.applyTierPolicy(accounts);
+        return applyTierPolicy(accounts, null);
+    }
+
+    private List<ProxyAccountEntity> applyTierPolicy(
+        List<ProxyAccountEntity> accounts,
+        AccountPoolRequestContext context
+    ) {
+        return poolPolicyService == null ? accounts : poolPolicyService.applyTierPolicy(accounts, context);
     }
 
     private int effectiveWeight(ProxyAccountEntity account) {
@@ -891,7 +1396,12 @@ public class AccountPoolService {
         boolean upsert,
         int attempt
     ) {
-        ProxyAccountEntity entity = newAccount(request);
+        ProxyAccountEntity entity;
+        try {
+            entity = newAccount(request);
+        } catch (ApiException error) {
+            return Mono.error(error);
+        }
         if (attempt > 0) {
             entity.setAccountId(Hashing.shortUuid());
         }
@@ -918,20 +1428,21 @@ public class AccountPoolService {
                     quota_limit = EXCLUDED.quota_limit,
                     quota_5h_limit = EXCLUDED.quota_5h_limit,
                     quota_7d_limit = EXCLUDED.quota_7d_limit,
+                    badge_color = EXCLUDED.badge_color,
                     updated_at = clock_timestamp()
                 """
-            : "DO NOTHING";
+            : "DO NOTHING\n";
         String sql = """
             INSERT INTO proxy_accounts AS target (
                 account_id, email, access_token, refresh_token, client_id, client_secret,
                 region, auth_method, provider, base_url, upstream_account_id, id_token,
                 token_expires_at, profile_arn, machine_id, proxy_url, pool_tier, pool_weight,
-                quota_limit, quota_5h_limit, quota_7d_limit
+                quota_limit, quota_5h_limit, quota_7d_limit, badge_color
             ) VALUES (
                 :accountId, :email, :accessToken, :refreshToken, :clientId, :clientSecret,
                 :region, :authMethod, :provider, :baseUrl, :upstreamAccountId, :idToken,
                 :tokenExpiresAt, :profileArn, :machineId, :proxyUrl, :poolTier, :poolWeight,
-                :quotaLimit, :quota5hLimit, :quota7dLimit
+                :quotaLimit, :quota5hLimit, :quota7dLimit, :badgeColor
             )
             ON CONFLICT (lower(email)) WHERE email IS NOT NULL
             """ + conflictAction + """
@@ -959,6 +1470,7 @@ public class AccountPoolService {
         spec = bindNullable(spec, "quotaLimit", entity.getQuotaLimit(), Long.class);
         spec = bindNullable(spec, "quota5hLimit", entity.getQuota5hLimit(), Long.class);
         spec = bindNullable(spec, "quota7dLimit", entity.getQuota7dLimit(), Long.class);
+        spec = bindNullable(spec, "badgeColor", entity.getBadgeColor(), String.class);
         return spec
             .map((row, metadata) -> new AccountWriteResult(
                 template.getConverter().read(ProxyAccountEntity.class, row, metadata),
@@ -1012,7 +1524,21 @@ public class AccountPoolService {
         entity.setRegion(defaultString(request.region(), regionlessApiKey ? null : AccountPlatforms.DEFAULT_KIRO_REGION));
         entity.setAuthMethod(normalizedAuthMethod);
         entity.setProvider(normalizedProvider);
-        entity.setBaseUrl(AccountPlatforms.defaultBaseUrl(normalizedProvider, normalizedAuthMethod, request.baseUrl()));
+        String baseUrl = AccountPlatforms.defaultBaseUrl(normalizedProvider, normalizedAuthMethod, request.baseUrl());
+        if (AccountPlatforms.requiresExplicitBaseUrl(normalizedProvider, normalizedAuthMethod)
+            && AccountPlatforms.clean(baseUrl) == null) {
+            throw new ApiException(
+                HttpStatus.BAD_REQUEST,
+                "ACCOUNT_BASE_URL_REQUIRED",
+                "OpenAI-compatible accounts require a Base URL"
+            );
+        }
+        entity.setBaseUrl(baseUrl);
+        entity.setBadgeColor(
+            AccountPlatforms.isCustomOpenAiCompatibleProvider(normalizedProvider, normalizedAuthMethod)
+                ? AccountPlatforms.normalizeBadgeColor(request.badgeColor())
+                : null
+        );
         entity.setUpstreamAccountId(request.upstreamAccountId());
         entity.setIdToken(request.idToken());
         entity.setTokenExpiresAt(request.tokenExpiresAt());
@@ -1056,15 +1582,43 @@ public class AccountPoolService {
             baseUrl = request.baseUrl() == null && (providerChanged || endpointFamilyChanged)
                 ? AccountPlatforms.defaultBaseUrl(provider, authMethod, null)
                 : AccountPlatforms.defaultBaseUrl(provider, authMethod, baseUrl);
+            if (AccountPlatforms.requiresExplicitBaseUrl(provider, authMethod)
+                && AccountPlatforms.clean(baseUrl) == null) {
+                throw new ApiException(
+                    HttpStatus.BAD_REQUEST,
+                    "ACCOUNT_BASE_URL_REQUIRED",
+                    "OpenAI-compatible accounts require a Base URL"
+                );
+            }
             updates.put("auth_method", new SqlValue(authMethod, String.class));
             updates.put("provider", new SqlValue(provider, String.class));
             updates.put("base_url", new SqlValue(baseUrl, String.class));
+            if (!AccountPlatforms.isCustomOpenAiCompatibleProvider(provider, authMethod)) {
+                updates.put("badge_color", new SqlValue(null, String.class));
+            }
         }
         if (request.baseUrl() != null) {
-            updates.put("base_url", new SqlValue(
-                AccountPlatforms.defaultBaseUrl(provider, authMethod, request.baseUrl()),
-                String.class
-            ));
+            String nextBaseUrl = AccountPlatforms.defaultBaseUrl(provider, authMethod, request.baseUrl());
+            if (AccountPlatforms.requiresExplicitBaseUrl(provider, authMethod)
+                && AccountPlatforms.clean(nextBaseUrl) == null) {
+                throw new ApiException(
+                    HttpStatus.BAD_REQUEST,
+                    "ACCOUNT_BASE_URL_REQUIRED",
+                    "OpenAI-compatible accounts require a Base URL"
+                );
+            }
+            updates.put("base_url", new SqlValue(nextBaseUrl, String.class));
+        }
+        if (request.badgeColor() != null) {
+            updates.put(
+                "badge_color",
+                new SqlValue(
+                    AccountPlatforms.isCustomOpenAiCompatibleProvider(provider, authMethod)
+                        ? AccountPlatforms.normalizeBadgeColor(request.badgeColor())
+                        : null,
+                    String.class
+                )
+            );
         }
 
         putIfPresent(updates, "upstream_account_id", request.upstreamAccountId(), request.upstreamAccountId(), String.class);
@@ -1203,6 +1757,47 @@ public class AccountPoolService {
         int consecutiveFailures,
         Integer statusCode,
         boolean suspended
+    ) {
+    }
+
+    public record PoolAccountInventory(
+        long accountCount,
+        long availableAccountCount,
+        List<PoolAccountGroup> groups
+    ) {
+        private static final PoolAccountInventory EMPTY = new PoolAccountInventory(0, 0, List.of());
+
+        static PoolAccountInventory empty() {
+            return EMPTY;
+        }
+
+        public PoolAccountInventory {
+            accountCount = Math.max(0, accountCount);
+            availableAccountCount = Math.max(0, Math.min(accountCount, availableAccountCount));
+            groups = groups == null ? List.of() : List.copyOf(groups);
+        }
+    }
+
+    public record PoolAccountGroup(
+        String provider,
+        String authMethod,
+        String baseUrl,
+        String poolTier,
+        long accountCount
+    ) {
+        public PoolAccountGroup {
+            accountCount = Math.max(0, accountCount);
+        }
+    }
+
+    private record PoolInventoryRow(
+        long accountCount,
+        long availableAccountCount,
+        String provider,
+        String authMethod,
+        String baseUrl,
+        String poolTier,
+        long groupCount
     ) {
     }
 

@@ -1,25 +1,28 @@
 <script setup lang="ts">
   /**
-   * 仪表盘视图。
+   * 仪表盘视图（精简版）。
    *
    * 内容：
-   * - 服务运行状态（/health）
-   * - 模型调用趋势（基于 /admin/logs 最新 100 条聚合）
-   * - 账号、API Key、最近请求总览
+   * - 概览指标行：服务状态 / 模型 / 账号 / API Key + 调用统计
+   * - 性能指标行：CPU / 内存 / JVM 堆 / 网络（无趋势图）
+   * - 模型调用趋势（基于 /admin/logs 最新 100 条聚合）+ 模型排行
+   * - 用户分析：近五分钟活跃用户、用户排行（请求/Token/余额 Tab）、异常用户
+   * - 最近请求 6 条
    *
    * 全部数据为只读概览，刷新按钮触发并行拉取。
    */
   import { computed, onMounted, ref } from 'vue';
   import { ElMessage } from 'element-plus';
+  import { Cpu, Document, Odometer, Refresh, User } from '@element-plus/icons-vue';
   import PageSection from '@/components/PageSection.vue';
+  import MetricsPanel, { type MetricPanelItem } from '@/components/MetricsPanel.vue';
+  import { useAppearanceStore } from '@/stores/appearance';
   import { accountsApi, apiKeysApi, logsApi, systemApi, usersApi } from '@/api';
   import type {
     Account,
     AdminUser,
     ApiKey,
     HealthInfo,
-    ModelInfo,
-    ModelUsageSummary,
     PerformanceMetric,
     RequestLog,
     ActiveUserUsage,
@@ -27,9 +30,9 @@
   } from '@/types/api';
   import { formatDateTime, formatNumber } from '@/utils/format';
 
+  const appearance = useAppearanceStore();
   const loading = ref(false);
   const health = ref<HealthInfo | null>(null);
-  const models = ref<ModelInfo[]>([]);
   const accounts = ref<Account[]>([]);
   const apiKeys = ref<ApiKey[]>([]);
   const users = ref<AdminUser[]>([]);
@@ -86,11 +89,6 @@
     name: string;
     color: string;
     values: number[];
-    total: number;
-    successRate: number;
-    averageLatency: number | null;
-    share: number;
-    lastValue: number;
     points: string;
     areaPoints: string;
   }
@@ -217,11 +215,6 @@
       index += 1;
     }
     return `${index === 0 ? Math.round(size) : size.toFixed(size >= 10 ? 1 : 2)} ${units[index]}`;
-  }
-
-  function rateText(value: number | null | undefined) {
-    const text = bytesText(value);
-    return text === '—' ? text : `${text}/s`;
   }
 
   function getChartColor(index: number) {
@@ -472,11 +465,6 @@
         name: summary.name,
         color: summary.color,
         values,
-        total: values.reduce((sum, value) => sum + value, 0),
-        successRate: summary.successRate,
-        averageLatency: summary.averageLatency,
-        share: summary.share,
-        lastValue: values.at(-1) ?? 0,
         points: buildPoints(values, maxValue),
         areaPoints: buildAreaPoints(values, maxValue),
       };
@@ -536,55 +524,27 @@
   const enabledAccounts = computed(
     () => accounts.value.filter((account) => account.enabled).length,
   );
-  const enabledApiKeys = computed(() => apiKeys.value.filter((key) => key.enabled).length);
   const parsedLogs = computed(() => parseLogs(logs.value));
   const modelSummaries = computed(() => summarizeModels(parsedLogs.value));
   const userSummaries = computed(() => summarizeUsers(parsedLogs.value));
-  const topUsersByRequests = computed(() => userSummaries.value.slice(0, 8));
-  const topUsersByTokens = computed(() =>
-    [...userSummaries.value].sort((a, b) => b.tokens - a.tokens || b.count - a.count).slice(0, 8),
-  );
-  const topUsersByCredits = computed(() =>
-    [...userSummaries.value].sort((a, b) => b.credits - a.credits || b.count - a.count).slice(0, 8),
-  );
-  const riskyUsers = computed(() =>
-    [...userSummaries.value]
-      .filter((user) => user.failed > 0)
-      .sort((a, b) => a.successRate - b.successRate || b.failed - a.failed || b.count - a.count)
-      .slice(0, 6),
-  );
-  const maxUserRequests = computed(() =>
-    Math.max(0, ...topUsersByRequests.value.map((user) => user.count)),
-  );
-  const maxUserTokens = computed(() =>
-    Math.max(0, ...topUsersByTokens.value.map((user) => user.tokens)),
-  );
-  const maxUserCredits = computed(() =>
-    Math.max(0, ...topUsersByCredits.value.map((user) => user.credits)),
-  );
   const chartData = computed(() => buildChart(logs.value));
+
   const performanceSamples = computed(() =>
     performanceMetrics.value
       .filter((metric) => validTime(metric.sampledAt) !== null)
       .sort((a, b) => (validTime(a.sampledAt) ?? 0) - (validTime(b.sampledAt) ?? 0)),
   );
-  const latestPerformance = computed(() => performanceSamples.value.at(-1) ?? null);
-  const heapUsedPercent = computed(() => {
-    const latest = latestPerformance.value;
-    if (!latest?.heapUsedBytes) return null;
-    const max =
-      latest.heapMaxBytes && latest.heapMaxBytes > 0
-        ? latest.heapMaxBytes
-        : latest.heapCommittedBytes;
-    if (!max || max <= 0) return null;
-    return (latest.heapUsedBytes / max) * 100;
-  });
+
+  /* 实例性能趋势图 */
+  const hoveredResourceIndex = ref<number | null>(null);
+  const hoveredMemoryIndex = ref<number | null>(null);
+
   const resourceChart = computed(() =>
     buildPerformanceChart(
       [
         { name: '系统 CPU', color: '#2563eb', value: (metric) => metric.systemCpuLoadPercent },
         { name: '进程 CPU', color: '#10b981', value: (metric) => metric.processCpuLoadPercent },
-        { name: '系统内存', color: '#f59e0b', value: (metric) => metric.systemMemoryUsedPercent },
+        { name: '物理内存', color: '#f59e0b', value: (metric) => metric.systemMemoryUsedPercent },
       ],
       100,
     ),
@@ -594,7 +554,7 @@
       { name: 'JVM 堆内存', color: '#06b6d4', value: (metric) => metric.heapUsedBytes },
       { name: 'JVM 非堆内存', color: '#b387ff', value: (metric) => metric.nonHeapUsedBytes },
       {
-        name: '系统已用内存',
+        name: '物理已用内存',
         color: '#ef5b6b',
         value: (metric) =>
           metric.systemMemoryTotalBytes && metric.systemMemoryFreeBytes
@@ -603,11 +563,13 @@
       },
     ]),
   );
-  const hoveredResourceIndex = ref<number | null>(null);
-  const hoveredMemoryIndex = ref<number | null>(null);
+
+  function shouldShowPerformanceBucketLabel(chart: PerformanceChartData, index: number) {
+    return index === 0 || index === chart.buckets.length - 1 || index % 20 === 0;
+  }
+
   const hoveredUsageIndex = ref<number | null>(null);
   const totalRequests = computed(() => logs.value.length);
-  const totalTokens = computed(() => logs.value.reduce((sum, log) => sum + tokensOf(log), 0));
   const successRate = computed(() => {
     if (!logs.value.length) return null;
     return (logs.value.filter((log) => log.success).length / logs.value.length) * 100;
@@ -619,45 +581,87 @@
         .filter((value): value is number => value !== null && value !== undefined),
     ),
   );
-  const totalCredits = computed(() => logs.value.reduce((sum, log) => sum + creditsOf(log), 0));
-  const usageTotalRequests = computed(
-    () => usageSummary.value?.totalRequests ?? totalRequests.value,
-  );
-  const usageTotalTokens = computed(() => usageSummary.value?.totalTokens ?? totalTokens.value);
-  const usageTotalCredits = computed(() => usageSummary.value?.totalCredits ?? totalCredits.value);
+
   const recentActiveUsers = computed(() => usageSummary.value?.activeUsers ?? []);
-  const recentActiveUserCount = computed(() => usageSummary.value?.activeUserCount ?? 0);
   const activeWindowStartedAt = computed(() => usageSummary.value?.activeWindowStartedAt ?? null);
-  const modelUsageSummaries = computed<ModelUsageSummary[]>(() => {
-    const models = usageSummary.value?.models ?? [];
-    if (models.length) {
-      return models;
-    }
-    return modelSummaries.value.map((model) => ({
-      model: model.name,
-      requestCount: model.count,
-      successfulRequests: model.success,
-      failedRequests: model.count - model.success,
-      inputTokens: 0,
-      outputTokens: 0,
-      totalTokens: model.tokens,
-      credits: null,
-      lastUsedAt: model.lastUsedAt,
-    }));
+
+  /* 顶部两条状态栏（统一 MetricsPanel 组件） */
+  const overviewMetrics = computed<MetricPanelItem[]>(() => {
+    const healthy = health.value?.status === 'ok';
+    return [
+      {
+        label: '服务状态',
+        value: healthy ? 'running' : 'failed',
+        tone: healthy ? 'success' : 'danger',
+        valueTone: healthy ? 'success' : 'danger',
+        sub: health.value ? `已运行 ${uptimeText(health.value.uptime_ms)}` : '—',
+      },
+      {
+        label: '上游账号',
+        value: accounts.value.length,
+        tone: 'primary',
+        sub: `启用 ${enabledAccounts.value} 个`,
+      },
+      {
+        label: '成功率',
+        value: percentText(successRate.value),
+        tone: 'accent',
+        sub: `最近 ${formatNumber(totalRequests.value)} 次调用`,
+      },
+      {
+        label: '平均耗时',
+        value: latencyText(averageLatencyMs.value),
+        tone: 'info',
+        sub: '按当前日志窗口平均',
+      },
+    ];
   });
-  const topModelUsage = computed(() => modelUsageSummaries.value.slice(0, 8));
-  const maxModelUsageTokens = computed(() =>
-    Math.max(0, ...topModelUsage.value.map((model) => model.totalTokens)),
-  );
-  const topUserRequests = computed(() => topUsersByRequests.value[0]?.count ?? 0);
-  const userAverageSuccessRate = computed(() =>
-    average(userSummaries.value.map((user) => user.successRate)),
+
+
+
+  const riskyUsers = computed(() =>
+    [...userSummaries.value]
+      .filter((user) => user.failed > 0)
+      .sort((a, b) => a.successRate - b.successRate || b.failed - a.failed || b.count - a.count)
+      .slice(0, 6),
   );
 
-  function modelUsageSuccessRate(model: ModelUsageSummary) {
-    if (!model.requestCount) return null;
-    return (model.successfulRequests / model.requestCount) * 100;
+  /* 用户排行：同一批用户数据按 请求 / Token / 余额 三种维度切换 */
+  type UserRankMode = 'requests' | 'tokens' | 'credits';
+  const userRankMode = ref<UserRankMode>('requests');
+
+  const rankedUsers = computed(() => {
+    const source = [...userSummaries.value];
+    if (userRankMode.value === 'tokens') {
+      return source.sort((a, b) => b.tokens - a.tokens || b.count - a.count).slice(0, 8);
+    }
+    if (userRankMode.value === 'credits') {
+      return source.sort((a, b) => b.credits - a.credits || b.count - a.count).slice(0, 8);
+    }
+    return source.sort((a, b) => b.count - a.count || b.tokens - a.tokens).slice(0, 8);
+  });
+
+  function rankValueOf(user: UserUsageSummary) {
+    if (userRankMode.value === 'tokens') return user.tokens;
+    if (userRankMode.value === 'credits') return user.credits;
+    return user.count;
   }
+
+  function rankValueText(user: UserUsageSummary) {
+    if (userRankMode.value === 'tokens') return formatNumber(user.tokens);
+    if (userRankMode.value === 'credits') return balanceText(user.credits);
+    return `${formatNumber(user.count)} 次`;
+  }
+
+  function rankMetaText(user: UserUsageSummary) {
+    if (userRankMode.value === 'tokens') return latencyText(user.averageLatency);
+    if (userRankMode.value === 'credits') return `最近 ${formatDateTime(user.lastUsedAt)}`;
+    return `${user.keyCount} Key · 成功率 ${percentText(user.successRate)}`;
+  }
+
+  const maxUserRankValue = computed(() =>
+    Math.max(0, ...rankedUsers.value.map((user) => rankValueOf(user))),
+  );
 
   function shouldShowBucketLabel(index: number) {
     return index === 0 || index === chartData.value.buckets.length - 1 || index % 2 === 0;
@@ -666,9 +670,8 @@
   async function loadAll() {
     loading.value = true;
     try {
-      const [h, m, a, k, u, l, p, s] = await Promise.allSettled([
+      const [h, a, k, u, l, p, s] = await Promise.allSettled([
         systemApi.health(),
-        systemApi.models(),
         accountsApi.list(),
         apiKeysApi.list(),
         usersApi.list(),
@@ -677,7 +680,6 @@
         logsApi.usageSummary(),
       ]);
       if (h.status === 'fulfilled') health.value = h.value;
-      if (m.status === 'fulfilled') models.value = m.value;
       if (a.status === 'fulfilled') accounts.value = a.value;
       if (k.status === 'fulfilled') apiKeys.value = k.value;
       if (u.status === 'fulfilled') users.value = u.value;
@@ -691,429 +693,339 @@
     }
   }
 
-  function shouldShowPerformanceBucketLabel(chart: PerformanceChartData, index: number) {
-    return index === 0 || index === chart.buckets.length - 1 || index % 20 === 0;
-  }
-
   onMounted(loadAll);
 </script>
 
 <template>
-  <PageSection title="仪表盘" subtitle="服务运行状态与资源概览">
+  <div class="dashboard-view" :class="`is-${appearance.chrome}`">
+  <PageSection title="仪表盘" subtitle="运行概览" :icon="Odometer">
     <template #actions>
-      <el-button :loading="loading" @click="loadAll">刷新</el-button>
+      <el-button :icon="Refresh" :loading="loading" @click="loadAll">刷新</el-button>
+    </template>
+    <template #summary>
+      <MetricsPanel :items="overviewMetrics" />
     </template>
 
-    <div class="dash-grid">
-      <div class="metric glass-panel">
-        <div class="metric__label">服务状态</div>
-        <div class="metric__value">
-          <el-tag v-if="health?.status === 'ok'" type="success" effect="light" round>运行中</el-tag>
-          <el-tag v-else type="danger" effect="light" round>不可达</el-tag>
-        </div>
-        <div class="metric__sub text-muted">
-          <span v-if="health">运行 {{ uptimeText(health.uptime_ms) }}</span>
-          <span v-else>—</span>
-        </div>
-      </div>
-
-      <div class="metric glass-panel">
-        <div class="metric__label">可用模型</div>
-        <div class="metric__value">{{ formatNumber(models.length) }}</div>
-        <div class="metric__sub text-muted">/v1/models 暴露</div>
-      </div>
-
-      <div class="metric glass-panel">
-        <div class="metric__label">上游账号</div>
-        <div class="metric__value">{{ formatNumber(accounts.length) }}</div>
-        <div class="metric__sub text-muted">启用 {{ enabledAccounts }} 个</div>
-      </div>
-
-      <div class="metric glass-panel">
-        <div class="metric__label">API Key</div>
-        <div class="metric__value">{{ formatNumber(apiKeys.length) }}</div>
-        <div class="metric__sub text-muted">启用 {{ enabledApiKeys }} 个</div>
-      </div>
-    </div>
-  </PageSection>
-
-  <PageSection
-    title="性能日志"
-    subtitle="每 30 秒记录一次 CPU、内存与网络吞吐，展示最近 120 个采样点"
-  >
-    <div class="performance-dashboard">
-      <div class="performance-stats">
-        <div class="performance-stat">
-          <span>系统 CPU</span>
-          <strong>{{ percentText(latestPerformance?.systemCpuLoadPercent) }}</strong>
-          <small class="text-muted">进程 {{ percentText(latestPerformance?.processCpuLoadPercent) }}</small>
-        </div>
-        <div class="performance-stat">
-          <span>系统内存</span>
-          <strong>{{ percentText(latestPerformance?.systemMemoryUsedPercent) }}</strong>
-          <small class="text-muted">
-            可用 {{ bytesText(latestPerformance?.systemMemoryFreeBytes) }}
-          </small>
-        </div>
-        <div class="performance-stat">
-          <span>JVM 堆内存</span>
-          <strong>{{ bytesText(latestPerformance?.heapUsedBytes) }}</strong>
-          <small class="text-muted">占用 {{ percentText(heapUsedPercent) }}</small>
-        </div>
-        <div class="performance-stat">
-          <span>网络吞吐</span>
-          <strong>{{ rateText(latestPerformance?.networkRxBytesPerSecond) }}</strong>
-          <small class="text-muted">上行 {{ rateText(latestPerformance?.networkTxBytesPerSecond) }}</small>
-        </div>
-      </div>
-
-      <div class="performance-charts">
-        <!-- Resource Chart -->
-        <div class="chart-shell">
-          <div class="chart-shell__header">
-            <div>
-              <h3>资源占用趋势</h3>
-              <p class="text-muted">CPU 与内存使用率</p>
-            </div>
-            <div v-if="resourceChart.series.length" class="chart-legend">
-              <span v-for="series in resourceChart.series" :key="series.name">
-                <i :style="{ backgroundColor: series.color }" />
-                {{ series.name }}
-              </span>
-            </div>
+    <div class="performance-charts">
+      <!-- Resource Chart -->
+      <div class="chart-shell">
+        <div class="chart-shell__header">
+          <div>
+            <h3>资源占用趋势</h3>
+            <p class="text-muted">CPU 与内存使用率</p>
           </div>
+          <div v-if="resourceChart.series.length" class="chart-legend">
+            <span v-for="series in resourceChart.series" :key="series.name">
+              <i :style="{ backgroundColor: series.color }" />
+              {{ series.name }}
+            </span>
+          </div>
+        </div>
 
-          <div class="chart-stage" :class="{ 'is-empty': resourceChart.empty }">
-            <svg
-              class="usage-chart"
-              :viewBox="`0 0 ${chartWidth} ${chartHeight}`"
-              role="img"
-              aria-label="资源占用趋势折线图"
-            >
-              <defs>
-                <linearGradient
-                  v-for="(series, index) in resourceChart.series"
-                  :id="`resource-fill-${index}`"
-                  :key="series.name"
-                  x1="0"
-                  x2="0"
-                  y1="0"
-                  y2="1"
-                >
-                  <stop offset="0%" :stop-color="series.color" stop-opacity="0.22" />
-                  <stop offset="100%" :stop-color="series.color" stop-opacity="0.02" />
-                </linearGradient>
-              </defs>
-              <g class="chart-grid">
-                <g v-for="grid in resourceChart.yLabels" :key="grid.value">
-                  <line
-                    :x1="chartPadding.left"
-                    :x2="chartWidth - chartPadding.right"
-                    :y1="grid.y"
-                    :y2="grid.y"
-                  />
-                  <text :x="chartPadding.left - 12" :y="grid.y + 4" text-anchor="end">
-                    {{ percentText(grid.value) }}
-                  </text>
-                </g>
-              </g>
-              <g class="chart-series">
-                <g v-for="(series, index) in resourceChart.series" :key="series.name">
-                  <path
-                    class="chart-area"
-                    :d="series.areaPoints"
-                    :fill="`url(#resource-fill-${index})`"
-                  />
-                  <path class="chart-line" :d="series.points" :stroke="series.color" />
-                </g>
-              </g>
-
-              <!-- Hover Guide Line -->
-              <line
-                v-if="hoveredResourceIndex !== null"
-                :x1="xFor(hoveredResourceIndex, resourceChart.buckets.length)"
-                :x2="xFor(hoveredResourceIndex, resourceChart.buckets.length)"
-                :y1="chartPadding.top"
-                :y2="chartHeight - chartPadding.bottom"
-                stroke="rgba(31, 42, 68, 0.15)"
-                stroke-width="1.5"
-                stroke-dasharray="3 3"
-              />
-
-              <!-- Glowing Active Point Circles -->
-              <g v-if="hoveredResourceIndex !== null" class="chart-active-points">
-                <circle
-                  v-for="series in resourceChart.series"
-                  :key="`active-res-${series.name}`"
-                  :cx="xFor(hoveredResourceIndex, series.values.length)"
-                  :cy="yFor(series.values[hoveredResourceIndex], resourceChart.maxValue)"
-                  :fill="series.color"
-                  r="6"
-                  stroke="#fff"
-                  stroke-width="2.5"
-                  style="filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.15))"
-                />
-              </g>
-
-              <!-- Transparent Hotspot Columns -->
-              <g class="chart-hotspots">
-                <rect
-                  v-for="(bucket, idx) in resourceChart.buckets"
-                  :key="bucket.timestamp"
-                  :x="
-                    xFor(idx, resourceChart.buckets.length) -
-                      (xFor(1, resourceChart.buckets.length) -
-                        xFor(0, resourceChart.buckets.length)) /
-                      2
-                  "
-                  y="0"
-                  :width="
-                    xFor(1, resourceChart.buckets.length) - xFor(0, resourceChart.buckets.length)
-                  "
-                  :height="chartHeight"
-                  fill="transparent"
-                  style="cursor: crosshair"
-                  @mouseenter="hoveredResourceIndex = idx"
-                  @mouseleave="hoveredResourceIndex = null"
-                />
-              </g>
-
-              <g class="chart-x-axis">
-                <template v-for="(bucket, index) in resourceChart.buckets" :key="bucket.timestamp">
-                  <text
-                    v-if="shouldShowPerformanceBucketLabel(resourceChart, index)"
-                    :x="xFor(index, resourceChart.buckets.length)"
-                    :y="chartHeight - 14"
-                    text-anchor="middle"
-                  >
-                    {{ bucket.label }}
-                  </text>
-                </template>
-              </g>
-            </svg>
-            <div v-if="resourceChart.empty" class="chart-empty">
-              <strong>暂无性能采样</strong>
-            </div>
-
-            <!-- Tooltip Panel -->
-            <transition name="fade">
-              <div
-                v-if="hoveredResourceIndex !== null && resourceChart.buckets[hoveredResourceIndex]"
-                class="chart-tooltip glass-panel"
-                :style="{
-                  left:
-                    xFor(hoveredResourceIndex, resourceChart.buckets.length) > chartWidth / 2
-                      ? '58px'
-                      : 'auto',
-                  right:
-                    xFor(hoveredResourceIndex, resourceChart.buckets.length) > chartWidth / 2
-                      ? 'auto'
-                      : '58px',
-                }"
+        <div class="chart-stage" :class="{ 'is-empty': resourceChart.empty }">
+          <svg
+            class="usage-chart"
+            :viewBox="`0 0 ${chartWidth} ${chartHeight}`"
+            role="img"
+            aria-label="资源占用趋势折线图"
+          >
+            <defs>
+              <linearGradient
+                v-for="(series, index) in resourceChart.series"
+                :id="`resource-fill-${index}`"
+                :key="series.name"
+                x1="0"
+                x2="0"
+                y1="0"
+                y2="1"
               >
-                <div class="tooltip-time">
-                  {{ resourceChart.buckets[hoveredResourceIndex].label }}
-                </div>
-                <div class="tooltip-divider" />
-                <div v-for="series in resourceChart.series" :key="series.name" class="tooltip-row">
-                  <i :style="{ backgroundColor: series.color }" class="tooltip-dot" />
-                  <span class="tooltip-name">{{ series.name }}</span>
-                  <strong class="tooltip-value">
-                    {{ percentText(series.values[hoveredResourceIndex]) }}
-                  </strong>
-                </div>
+                <stop offset="0%" :stop-color="series.color" stop-opacity="0.22" />
+                <stop offset="100%" :stop-color="series.color" stop-opacity="0.02" />
+              </linearGradient>
+            </defs>
+            <g class="chart-grid">
+              <g v-for="grid in resourceChart.yLabels" :key="grid.value">
+                <line
+                  :x1="chartPadding.left"
+                  :x2="chartWidth - chartPadding.right"
+                  :y1="grid.y"
+                  :y2="grid.y"
+                />
+                <text :x="chartPadding.left - 12" :y="grid.y + 4" text-anchor="end">
+                  {{ percentText(grid.value) }}
+                </text>
+              </g>
+            </g>
+            <g class="chart-series">
+              <g v-for="(series, index) in resourceChart.series" :key="series.name">
+                <path
+                  class="chart-area"
+                  :d="series.areaPoints"
+                  :fill="`url(#resource-fill-${index})`"
+                />
+                <path class="chart-line" :d="series.points" :stroke="series.color" />
+              </g>
+            </g>
+
+            <!-- Hover Guide Line -->
+            <line
+              v-if="hoveredResourceIndex !== null"
+              :x1="xFor(hoveredResourceIndex, resourceChart.buckets.length)"
+              :x2="xFor(hoveredResourceIndex, resourceChart.buckets.length)"
+              :y1="chartPadding.top"
+              :y2="chartHeight - chartPadding.bottom"
+              stroke="rgba(31, 42, 68, 0.15)"
+              stroke-width="1.5"
+              stroke-dasharray="3 3"
+            />
+
+            <!-- Glowing Active Point Circles -->
+            <g v-if="hoveredResourceIndex !== null" class="chart-active-points">
+              <circle
+                v-for="series in resourceChart.series"
+                :key="`active-res-${series.name}`"
+                :cx="xFor(hoveredResourceIndex, series.values.length)"
+                :cy="yFor(series.values[hoveredResourceIndex], resourceChart.maxValue)"
+                :fill="series.color"
+                r="6"
+                stroke="#fff"
+                stroke-width="2.5"
+                style="filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.15))"
+              />
+            </g>
+
+            <!-- Transparent Hotspot Columns -->
+            <g class="chart-hotspots">
+              <rect
+                v-for="(bucket, idx) in resourceChart.buckets"
+                :key="bucket.timestamp"
+                :x="
+                  xFor(idx, resourceChart.buckets.length) -
+                    (xFor(1, resourceChart.buckets.length) - xFor(0, resourceChart.buckets.length)) /
+                    2
+                "
+                y="0"
+                :width="xFor(1, resourceChart.buckets.length) - xFor(0, resourceChart.buckets.length)"
+                :height="chartHeight"
+                fill="transparent"
+                style="cursor: crosshair"
+                @mouseenter="hoveredResourceIndex = idx"
+                @mouseleave="hoveredResourceIndex = null"
+              />
+            </g>
+
+            <g class="chart-x-axis">
+              <template v-for="(bucket, index) in resourceChart.buckets" :key="bucket.timestamp">
+                <text
+                  v-if="shouldShowPerformanceBucketLabel(resourceChart, index)"
+                  :x="xFor(index, resourceChart.buckets.length)"
+                  :y="chartHeight - 14"
+                  text-anchor="middle"
+                >
+                  {{ bucket.label }}
+                </text>
+              </template>
+            </g>
+          </svg>
+          <div v-if="resourceChart.empty" class="chart-empty">
+            <strong>暂无性能采样</strong>
+          </div>
+
+          <!-- Tooltip Panel -->
+          <transition name="fade">
+            <div
+              v-if="hoveredResourceIndex !== null && resourceChart.buckets[hoveredResourceIndex]"
+              class="chart-tooltip"
+              :style="{
+                left:
+                  xFor(hoveredResourceIndex, resourceChart.buckets.length) > chartWidth / 2
+                    ? '58px'
+                    : 'auto',
+                right:
+                  xFor(hoveredResourceIndex, resourceChart.buckets.length) > chartWidth / 2
+                    ? 'auto'
+                    : '58px',
+              }"
+            >
+              <div class="tooltip-time">
+                {{ resourceChart.buckets[hoveredResourceIndex].label }}
               </div>
-            </transition>
+              <div class="tooltip-divider" />
+              <div v-for="series in resourceChart.series" :key="series.name" class="tooltip-row">
+                <i :style="{ backgroundColor: series.color }" class="tooltip-dot" />
+                <span class="tooltip-name">{{ series.name }}</span>
+                <strong class="tooltip-value">
+                  {{ percentText(series.values[hoveredResourceIndex]) }}
+                </strong>
+              </div>
+            </div>
+          </transition>
+        </div>
+      </div>
+
+      <!-- Memory Chart -->
+      <div class="chart-shell">
+        <div class="chart-shell__header">
+          <div>
+            <h3>内存使用趋势</h3>
+            <p class="text-muted">JVM 堆、非堆与物理内存占用</p>
+          </div>
+          <div v-if="memoryChart.series.length" class="chart-legend">
+            <span v-for="series in memoryChart.series" :key="series.name">
+              <i :style="{ backgroundColor: series.color }" />
+              {{ series.name }}
+            </span>
           </div>
         </div>
 
-        <!-- Memory Chart -->
-        <div class="chart-shell">
-          <div class="chart-shell__header">
-            <div>
-              <h3>内存使用趋势</h3>
-              <p class="text-muted">JVM 堆、非堆与系统内存占用</p>
-            </div>
-            <div v-if="memoryChart.series.length" class="chart-legend">
-              <span v-for="series in memoryChart.series" :key="series.name">
-                <i :style="{ backgroundColor: series.color }" />
-                {{ series.name }}
-              </span>
-            </div>
-          </div>
-
-          <div class="chart-stage" :class="{ 'is-empty': memoryChart.empty }">
-            <svg
-              class="usage-chart"
-              :viewBox="`0 0 ${chartWidth} ${chartHeight}`"
-              role="img"
-              aria-label="内存使用趋势折线图"
-            >
-              <defs>
-                <linearGradient
-                  v-for="(series, index) in memoryChart.series"
-                  :id="`memory-fill-${index}`"
-                  :key="series.name"
-                  x1="0"
-                  x2="0"
-                  y1="0"
-                  y2="1"
-                >
-                  <stop offset="0%" :stop-color="series.color" stop-opacity="0.22" />
-                  <stop offset="100%" :stop-color="series.color" stop-opacity="0.02" />
-                </linearGradient>
-              </defs>
-              <g class="chart-grid">
-                <g v-for="grid in memoryChart.yLabels" :key="grid.value">
-                  <line
-                    :x1="chartPadding.left"
-                    :x2="chartWidth - chartPadding.right"
-                    :y1="grid.y"
-                    :y2="grid.y"
-                  />
-                  <text :x="chartPadding.left - 12" :y="grid.y + 4" text-anchor="end">
-                    {{ bytesText(grid.value) }}
-                  </text>
-                </g>
-              </g>
-              <g class="chart-series">
-                <g v-for="(series, index) in memoryChart.series" :key="series.name">
-                  <path
-                    class="chart-area"
-                    :d="series.areaPoints"
-                    :fill="`url(#memory-fill-${index})`"
-                  />
-                  <path class="chart-line" :d="series.points" :stroke="series.color" />
-                </g>
-              </g>
-
-              <!-- Hover Guide Line -->
-              <line
-                v-if="hoveredMemoryIndex !== null"
-                :x1="xFor(hoveredMemoryIndex, memoryChart.buckets.length)"
-                :x2="xFor(hoveredMemoryIndex, memoryChart.buckets.length)"
-                :y1="chartPadding.top"
-                :y2="chartHeight - chartPadding.bottom"
-                stroke="rgba(31, 42, 68, 0.15)"
-                stroke-width="1.5"
-                stroke-dasharray="3 3"
-              />
-
-              <!-- Glowing Active Point Circles -->
-              <g v-if="hoveredMemoryIndex !== null" class="chart-active-points">
-                <circle
-                  v-for="series in memoryChart.series"
-                  :key="`active-mem-${series.name}`"
-                  :cx="xFor(hoveredMemoryIndex, series.values.length)"
-                  :cy="yFor(series.values[hoveredMemoryIndex], memoryChart.maxValue)"
-                  :fill="series.color"
-                  r="6"
-                  stroke="#fff"
-                  stroke-width="2.5"
-                  style="filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.15))"
-                />
-              </g>
-
-              <!-- Transparent Hotspot Columns -->
-              <g class="chart-hotspots">
-                <rect
-                  v-for="(bucket, idx) in memoryChart.buckets"
-                  :key="bucket.timestamp"
-                  :x="
-                    xFor(idx, memoryChart.buckets.length) -
-                      (xFor(1, memoryChart.buckets.length) - xFor(0, memoryChart.buckets.length)) / 2
-                  "
-                  y="0"
-                  :width="xFor(1, memoryChart.buckets.length) - xFor(0, memoryChart.buckets.length)"
-                  :height="chartHeight"
-                  fill="transparent"
-                  style="cursor: crosshair"
-                  @mouseenter="hoveredMemoryIndex = idx"
-                  @mouseleave="hoveredMemoryIndex = null"
-                />
-              </g>
-
-              <g class="chart-x-axis">
-                <template v-for="(bucket, index) in memoryChart.buckets" :key="bucket.timestamp">
-                  <text
-                    v-if="shouldShowPerformanceBucketLabel(memoryChart, index)"
-                    :x="xFor(index, memoryChart.buckets.length)"
-                    :y="chartHeight - 14"
-                    text-anchor="middle"
-                  >
-                    {{ bucket.label }}
-                  </text>
-                </template>
-              </g>
-            </svg>
-            <div v-if="memoryChart.empty" class="chart-empty">
-              <strong>暂无内存采样</strong>
-            </div>
-
-            <!-- Tooltip Panel -->
-            <transition name="fade">
-              <div
-                v-if="hoveredMemoryIndex !== null && memoryChart.buckets[hoveredMemoryIndex]"
-                class="chart-tooltip glass-panel"
-                :style="{
-                  left:
-                    xFor(hoveredMemoryIndex, memoryChart.buckets.length) > chartWidth / 2
-                      ? '58px'
-                      : 'auto',
-                  right:
-                    xFor(hoveredMemoryIndex, memoryChart.buckets.length) > chartWidth / 2
-                      ? 'auto'
-                      : '58px',
-                }"
+        <div class="chart-stage" :class="{ 'is-empty': memoryChart.empty }">
+          <svg
+            class="usage-chart"
+            :viewBox="`0 0 ${chartWidth} ${chartHeight}`"
+            role="img"
+            aria-label="内存使用趋势折线图"
+          >
+            <defs>
+              <linearGradient
+                v-for="(series, index) in memoryChart.series"
+                :id="`memory-fill-${index}`"
+                :key="series.name"
+                x1="0"
+                x2="0"
+                y1="0"
+                y2="1"
               >
-                <div class="tooltip-time">{{ memoryChart.buckets[hoveredMemoryIndex].label }}</div>
-                <div class="tooltip-divider" />
-                <div v-for="series in memoryChart.series" :key="series.name" class="tooltip-row">
-                  <i :style="{ backgroundColor: series.color }" class="tooltip-dot" />
-                  <span class="tooltip-name">{{ series.name }}</span>
-                  <strong class="tooltip-value">
-                    {{ bytesText(series.values[hoveredMemoryIndex]) }}
-                  </strong>
-                </div>
-              </div>
-            </transition>
+                <stop offset="0%" :stop-color="series.color" stop-opacity="0.22" />
+                <stop offset="100%" :stop-color="series.color" stop-opacity="0.02" />
+              </linearGradient>
+            </defs>
+            <g class="chart-grid">
+              <g v-for="grid in memoryChart.yLabels" :key="grid.value">
+                <line
+                  :x1="chartPadding.left"
+                  :x2="chartWidth - chartPadding.right"
+                  :y1="grid.y"
+                  :y2="grid.y"
+                />
+                <text :x="chartPadding.left - 12" :y="grid.y + 4" text-anchor="end">
+                  {{ bytesText(grid.value) }}
+                </text>
+              </g>
+            </g>
+            <g class="chart-series">
+              <g v-for="(series, index) in memoryChart.series" :key="series.name">
+                <path
+                  class="chart-area"
+                  :d="series.areaPoints"
+                  :fill="`url(#memory-fill-${index})`"
+                />
+                <path class="chart-line" :d="series.points" :stroke="series.color" />
+              </g>
+            </g>
+
+            <!-- Hover Guide Line -->
+            <line
+              v-if="hoveredMemoryIndex !== null"
+              :x1="xFor(hoveredMemoryIndex, memoryChart.buckets.length)"
+              :x2="xFor(hoveredMemoryIndex, memoryChart.buckets.length)"
+              :y1="chartPadding.top"
+              :y2="chartHeight - chartPadding.bottom"
+              stroke="rgba(31, 42, 68, 0.15)"
+              stroke-width="1.5"
+              stroke-dasharray="3 3"
+            />
+
+            <!-- Glowing Active Point Circles -->
+            <g v-if="hoveredMemoryIndex !== null" class="chart-active-points">
+              <circle
+                v-for="series in memoryChart.series"
+                :key="`active-mem-${series.name}`"
+                :cx="xFor(hoveredMemoryIndex, series.values.length)"
+                :cy="yFor(series.values[hoveredMemoryIndex], memoryChart.maxValue)"
+                :fill="series.color"
+                r="6"
+                stroke="#fff"
+                stroke-width="2.5"
+                style="filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.15))"
+              />
+            </g>
+
+            <!-- Transparent Hotspot Columns -->
+            <g class="chart-hotspots">
+              <rect
+                v-for="(bucket, idx) in memoryChart.buckets"
+                :key="bucket.timestamp"
+                :x="
+                  xFor(idx, memoryChart.buckets.length) -
+                    (xFor(1, memoryChart.buckets.length) - xFor(0, memoryChart.buckets.length)) / 2
+                "
+                y="0"
+                :width="xFor(1, memoryChart.buckets.length) - xFor(0, memoryChart.buckets.length)"
+                :height="chartHeight"
+                fill="transparent"
+                style="cursor: crosshair"
+                @mouseenter="hoveredMemoryIndex = idx"
+                @mouseleave="hoveredMemoryIndex = null"
+              />
+            </g>
+
+            <g class="chart-x-axis">
+              <template v-for="(bucket, index) in memoryChart.buckets" :key="bucket.timestamp">
+                <text
+                  v-if="shouldShowPerformanceBucketLabel(memoryChart, index)"
+                  :x="xFor(index, memoryChart.buckets.length)"
+                  :y="chartHeight - 14"
+                  text-anchor="middle"
+                >
+                  {{ bucket.label }}
+                </text>
+              </template>
+            </g>
+          </svg>
+          <div v-if="memoryChart.empty" class="chart-empty">
+            <strong>暂无内存采样</strong>
           </div>
+
+          <!-- Tooltip Panel -->
+          <transition name="fade">
+            <div
+              v-if="hoveredMemoryIndex !== null && memoryChart.buckets[hoveredMemoryIndex]"
+              class="chart-tooltip"
+              :style="{
+                left:
+                  xFor(hoveredMemoryIndex, memoryChart.buckets.length) > chartWidth / 2
+                    ? '58px'
+                    : 'auto',
+                right:
+                  xFor(hoveredMemoryIndex, memoryChart.buckets.length) > chartWidth / 2
+                    ? 'auto'
+                    : '58px',
+              }"
+            >
+              <div class="tooltip-time">{{ memoryChart.buckets[hoveredMemoryIndex].label }}</div>
+              <div class="tooltip-divider" />
+              <div v-for="series in memoryChart.series" :key="series.name" class="tooltip-row">
+                <i :style="{ backgroundColor: series.color }" class="tooltip-dot" />
+                <span class="tooltip-name">{{ series.name }}</span>
+                <strong class="tooltip-value">
+                  {{ bytesText(series.values[hoveredMemoryIndex]) }}
+                </strong>
+              </div>
+            </div>
+          </transition>
         </div>
       </div>
     </div>
   </PageSection>
 
-  <PageSection title="模型调用仪表盘" subtitle="基于最新请求日志聚合，展示模型调用趋势与请求健康度">
+  <PageSection title="模型调用" subtitle="用量趋势" variant="section" :icon="Cpu">
     <div class="usage-dashboard">
       <div class="usage-dashboard__main">
-        <div class="usage-stats">
-          <div class="usage-stat">
-            <span class="usage-stat__label">总调用</span>
-            <strong>{{ formatNumber(totalRequests) }}</strong>
-          </div>
-          <div class="usage-stat">
-            <span class="usage-stat__label">成功率</span>
-            <strong>{{ percentText(successRate) }}</strong>
-          </div>
-          <div class="usage-stat">
-            <span class="usage-stat__label">消耗 Tokens</span>
-            <strong>{{ formatNumber(totalTokens) }}</strong>
-          </div>
-          <div class="usage-stat">
-            <span class="usage-stat__label">平均耗时</span>
-            <strong>{{ latencyText(averageLatencyMs) }}</strong>
-          </div>
-          <div class="usage-stat">
-            <span class="usage-stat__label">近5分钟活跃用户</span>
-            <strong>{{ formatNumber(recentActiveUserCount) }}</strong>
-          </div>
-        </div>
-
         <div class="chart-shell">
           <div class="chart-shell__header">
             <div>
               <h3>模型调用趋势</h3>
-              <p class="text-muted">Top 4 模型按时间聚合</p>
+              <p class="text-muted">按时间桶聚合的请求量</p>
             </div>
             <div v-if="chartData.series.length" class="chart-legend">
               <span v-for="series in chartData.series" :key="series.name">
@@ -1238,7 +1150,7 @@
             <transition name="fade">
               <div
                 v-if="hoveredUsageIndex !== null && chartData.buckets[hoveredUsageIndex]"
-                class="chart-tooltip glass-panel"
+                class="chart-tooltip"
                 :style="{
                   left:
                     xFor(hoveredUsageIndex, chartData.buckets.length) > chartWidth / 2
@@ -1299,242 +1211,103 @@
     </div>
   </PageSection>
 
-  <PageSection
-    title="用户使用分析"
-    subtitle="按用户聚合最新请求日志，并显示全量 Token 与近五分钟活跃用户"
-  >
-    <div class="user-usage-dashboard">
-      <div class="usage-stats">
-        <div class="usage-stat">
-          <span class="usage-stat__label">使用 Token 总数</span>
-          <strong>{{ formatNumber(usageTotalTokens) }}</strong>
+  <PageSection title="用户分析" subtitle="使用情况" variant="section" :icon="User">
+    <div class="user-chart-grid">
+      <div class="user-chart-card active-users-card">
+        <div class="user-chart-card__header">
+          <div>
+            <h3>近五分钟活跃用户</h3>
+            <p class="text-muted">
+              <span v-if="activeWindowStartedAt">自 {{ formatDateTime(activeWindowStartedAt) }} 起</span>
+              <span v-else>按最近 5 分钟请求统计</span>
+            </p>
+          </div>
+          <span class="text-muted">{{ formatNumber(recentActiveUsers.length) }} 个</span>
         </div>
-        <div class="usage-stat">
-          <span class="usage-stat__label">累计请求</span>
-          <strong>{{ formatNumber(usageTotalRequests) }}</strong>
+        <div v-if="recentActiveUsers.length" class="active-user-list">
+          <div
+            v-for="(user, index) in recentActiveUsers"
+            :key="user.userId || user.email || `${user.lastActiveAt}-${index}`"
+            class="active-user-item"
+          >
+            <div class="active-user-item__main">
+              <strong :title="activeUserDisplayName(user)">{{ activeUserDisplayName(user) }}</strong>
+              <span class="text-muted">{{ activeUserSecondary(user) }}</span>
+            </div>
+            <div class="active-user-item__stats">
+              <span>{{ formatNumber(user.requestCount) }} 次</span>
+              <span>{{ formatNumber(user.totalTokens) }} token</span>
+              <small class="text-muted">最近 {{ formatDateTime(user.lastActiveAt) }}</small>
+            </div>
+          </div>
         </div>
-        <div class="usage-stat">
-          <span class="usage-stat__label">5分钟活跃用户</span>
-          <strong>{{ formatNumber(recentActiveUserCount) }}</strong>
-        </div>
-        <div class="usage-stat">
-          <span class="usage-stat__label">消耗余额</span>
-          <strong>{{ balanceText(usageTotalCredits) }}</strong>
-        </div>
-        <div class="usage-stat">
-          <span class="usage-stat__label">最高调用</span>
-          <strong>{{ formatNumber(topUserRequests) }}</strong>
-        </div>
-        <div class="usage-stat">
-          <span class="usage-stat__label">用户平均成功率</span>
-          <strong>{{ percentText(userAverageSuccessRate) }}</strong>
-        </div>
+        <div v-else class="user-chart-empty text-muted">最近五分钟暂无活跃用户</div>
       </div>
 
-      <div class="user-chart-grid">
-        <div class="user-chart-card active-users-card">
-          <div class="user-chart-card__header">
-            <div>
-              <h3>近五分钟活跃用户</h3>
-              <p class="text-muted">
-                <span v-if="activeWindowStartedAt">自 {{ formatDateTime(activeWindowStartedAt) }} 起</span>
-                <span v-else>按最近 5 分钟请求统计</span>
-              </p>
-            </div>
-            <span class="text-muted">{{ formatNumber(recentActiveUsers.length) }} 个</span>
+      <div class="user-chart-card">
+        <div class="user-chart-card__header">
+          <div>
+            <h3>用户排行</h3>
+            <p class="text-muted">当前日志窗口内按用户聚合</p>
           </div>
-          <div v-if="recentActiveUsers.length" class="active-user-list">
-            <div
-              v-for="(user, index) in recentActiveUsers"
-              :key="user.userId || user.email || `${user.lastActiveAt}-${index}`"
-              class="active-user-item"
-            >
-              <div class="active-user-item__main">
-                <strong :title="activeUserDisplayName(user)">{{
-                  activeUserDisplayName(user)
-                }}</strong>
-                <span class="text-muted">{{ activeUserSecondary(user) }}</span>
-              </div>
-              <div class="active-user-item__stats">
-                <span>{{ formatNumber(user.requestCount) }} 次</span>
-                <span>{{ formatNumber(user.totalTokens) }} token</span>
-                <small class="text-muted">最近 {{ formatDateTime(user.lastActiveAt) }}</small>
-              </div>
-            </div>
-          </div>
-          <div v-else class="user-chart-empty text-muted">最近五分钟暂无活跃用户</div>
+          <el-radio-group v-model="userRankMode" size="small">
+            <el-radio-button label="requests">按请求</el-radio-button>
+            <el-radio-button label="tokens">按 Token</el-radio-button>
+            <el-radio-button label="credits">按余额</el-radio-button>
+          </el-radio-group>
         </div>
-
-        <div class="user-chart-card model-usage-card">
-          <div class="user-chart-card__header">
-            <div>
-              <h3>模型使用情况</h3>
-              <p class="text-muted">按全量请求日志聚合模型调用和 token 消耗</p>
-            </div>
-            <span class="text-muted">总 Token {{ formatNumber(usageTotalTokens) }}</span>
-          </div>
-          <div v-if="topModelUsage.length" class="user-bars">
-            <div
-              v-for="(model, index) in topModelUsage"
-              :key="model.model || index"
-              class="user-bar-row"
-            >
-              <div class="user-bar-row__head">
-                <div class="user-bar-row__identity">
-                  <span class="user-rank-dot" :style="{ backgroundColor: getChartColor(index) }" />
-                  <strong :title="model.model || '未指定模型'">{{
-                    model.model || '未指定模型'
-                  }}</strong>
-                </div>
-                <span>{{ formatNumber(model.totalTokens) }} token</span>
-              </div>
-              <div class="user-bar-track">
-                <span
-                  :style="{
-                    width: barWidth(model.totalTokens, maxModelUsageTokens),
-                    backgroundColor: getChartColor(index),
-                  }"
-                />
-              </div>
-              <div class="user-bar-row__meta text-muted">
-                <span>{{ formatNumber(model.requestCount) }} 次 · 成功率
-                  {{ percentText(modelUsageSuccessRate(model)) }}</span>
-                <span>最近 {{ formatDateTime(model.lastUsedAt) }}</span>
-              </div>
-            </div>
-          </div>
-          <div v-else class="user-chart-empty text-muted">暂无模型使用数据</div>
-        </div>
-
-        <div class="user-chart-card">
-          <div class="user-chart-card__header">
-            <div>
-              <h3>用户调用量排行</h3>
-              <p class="text-muted">按请求次数排序</p>
-            </div>
-            <span class="text-muted">Top {{ formatNumber(topUsersByRequests.length) }}</span>
-          </div>
-          <div v-if="topUsersByRequests.length" class="user-bars">
-            <div v-for="user in topUsersByRequests" :key="user.id" class="user-bar-row">
-              <div class="user-bar-row__head">
-                <div class="user-bar-row__identity">
-                  <span class="user-rank-dot" :style="{ backgroundColor: user.color }" />
-                  <strong :title="user.name">{{ user.name }}</strong>
-                </div>
-                <span>{{ formatNumber(user.count) }} 次</span>
-              </div>
-              <div class="user-bar-track">
-                <span
-                  :style="{
-                    width: barWidth(user.count, maxUserRequests),
-                    backgroundColor: user.color,
-                  }"
-                />
-              </div>
-              <div class="user-bar-row__meta text-muted">
-                <span>{{ user.secondary }}</span>
-                <span>{{ user.keyCount }} Key · 成功率 {{ percentText(user.successRate) }}</span>
-              </div>
-            </div>
-          </div>
-          <div v-else class="user-chart-empty text-muted">暂无用户调用数据</div>
-        </div>
-
-        <div class="user-chart-card">
-          <div class="user-chart-card__header">
-            <div>
-              <h3>Token 消耗排行</h3>
-              <p class="text-muted">输入 + 输出 token</p>
-            </div>
-            <span class="text-muted">Top {{ formatNumber(topUsersByTokens.length) }}</span>
-          </div>
-          <div v-if="topUsersByTokens.length" class="user-bars">
-            <div v-for="user in topUsersByTokens" :key="user.id" class="user-bar-row">
-              <div class="user-bar-row__head">
-                <div class="user-bar-row__identity">
-                  <span class="user-rank-dot" :style="{ backgroundColor: user.color }" />
-                  <strong :title="user.name">{{ user.name }}</strong>
-                </div>
-                <span>{{ formatNumber(user.tokens) }}</span>
-              </div>
-              <div class="user-bar-track">
-                <span
-                  :style="{
-                    width: barWidth(user.tokens, maxUserTokens),
-                    backgroundColor: user.color,
-                  }"
-                />
-              </div>
-              <div class="user-bar-row__meta text-muted">
-                <span>{{ user.secondary }}</span>
-                <span>{{ latencyText(user.averageLatency) }}</span>
-              </div>
-            </div>
-          </div>
-          <div v-else class="user-chart-empty text-muted">暂无 Token 消耗数据</div>
-        </div>
-
-        <div class="user-chart-card">
-          <div class="user-chart-card__header">
-            <div>
-              <h3>余额消耗排行</h3>
-              <p class="text-muted">按本次日志窗口扣费统计</p>
-            </div>
-            <span class="text-muted">Top {{ formatNumber(topUsersByCredits.length) }}</span>
-          </div>
-          <div v-if="topUsersByCredits.length" class="user-bars">
-            <div v-for="user in topUsersByCredits" :key="user.id" class="user-bar-row">
-              <div class="user-bar-row__head">
-                <div class="user-bar-row__identity">
-                  <span class="user-rank-dot" :style="{ backgroundColor: user.color }" />
-                  <strong :title="user.name">{{ user.name }}</strong>
-                </div>
-                <span>{{ balanceText(user.credits) }}</span>
-              </div>
-              <div class="user-bar-track">
-                <span
-                  :style="{
-                    width: barWidth(user.credits, maxUserCredits),
-                    backgroundColor: user.color,
-                  }"
-                />
-              </div>
-              <div class="user-bar-row__meta text-muted">
-                <span>{{ user.secondary }}</span>
-                <span>最近 {{ formatDateTime(user.lastUsedAt) }}</span>
-              </div>
-            </div>
-          </div>
-          <div v-else class="user-chart-empty text-muted">暂无余额消耗数据</div>
-        </div>
-
-        <div class="user-chart-card user-risk-card">
-          <div class="user-chart-card__header">
-            <div>
-              <h3>异常用户</h3>
-              <p class="text-muted">按失败率优先排序</p>
-            </div>
-            <span class="text-muted">{{ formatNumber(riskyUsers.length) }} 个</span>
-          </div>
-          <div v-if="riskyUsers.length" class="risk-list">
-            <div v-for="user in riskyUsers" :key="user.id" class="risk-item">
-              <div>
+        <div v-if="rankedUsers.length" class="user-bars">
+          <div v-for="user in rankedUsers" :key="user.id" class="user-bar-row">
+            <div class="user-bar-row__head">
+              <div class="user-bar-row__identity">
+                <span class="user-rank-dot" :style="{ backgroundColor: user.color }" />
                 <strong :title="user.name">{{ user.name }}</strong>
-                <span class="text-muted">{{ user.secondary }}</span>
               </div>
-              <div class="risk-item__stats">
-                <el-tag type="danger" effect="light" round>{{ user.failed }} 失败</el-tag>
-                <span>成功率 {{ percentText(user.successRate) }}</span>
-              </div>
+              <span>{{ rankValueText(user) }}</span>
+            </div>
+            <div class="user-bar-track">
+              <span
+                :style="{
+                  width: barWidth(rankValueOf(user), maxUserRankValue),
+                  backgroundColor: user.color,
+                }"
+              />
+            </div>
+            <div class="user-bar-row__meta text-muted">
+              <span>{{ user.secondary }}</span>
+              <span>{{ rankMetaText(user) }}</span>
             </div>
           </div>
-          <div v-else class="user-chart-empty text-muted">当前日志窗口内没有失败用户</div>
         </div>
+        <div v-else class="user-chart-empty text-muted">暂无用户调用数据</div>
+      </div>
+
+      <div class="user-chart-card user-risk-card">
+        <div class="user-chart-card__header">
+          <div>
+            <h3>异常用户</h3>
+            <p class="text-muted">按失败率优先排序</p>
+          </div>
+          <span class="text-muted">{{ formatNumber(riskyUsers.length) }} 个</span>
+        </div>
+        <div v-if="riskyUsers.length" class="risk-list">
+          <div v-for="user in riskyUsers" :key="user.id" class="risk-item">
+            <div>
+              <strong :title="user.name">{{ user.name }}</strong>
+              <span class="text-muted">{{ user.secondary }}</span>
+            </div>
+            <div class="risk-item__stats">
+              <el-tag type="danger" effect="light" round>{{ user.failed }} 失败</el-tag>
+              <span>成功率 {{ percentText(user.successRate) }}</span>
+            </div>
+          </div>
+        </div>
+        <div v-else class="user-chart-empty text-muted">当前日志窗口内没有失败用户</div>
       </div>
     </div>
   </PageSection>
 
-  <PageSection title="最近请求" subtitle="仅展示最新 6 条，完整列表请前往请求日志">
+  <PageSection title="最近请求" subtitle="最新 6 条" variant="section" :icon="Document">
     <el-table :data="recentLogs" stripe>
       <el-table-column label="时间" width="180">
         <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
@@ -1553,34 +1326,18 @@
       </el-table-column>
     </el-table>
   </PageSection>
+  </div>
 </template>
 
 <style scoped lang="scss">
-  .dash-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 16px;
+  .dashboard-view {
+    min-width: 0;
   }
 
-  .metric {
-    padding: 18px 20px;
-
-    &__label {
-      font-size: 13px;
-      color: var(--kp-text-secondary);
-      margin-bottom: 8px;
-    }
-
-    &__value {
-      font-size: 28px;
-      font-weight: 700;
-      letter-spacing: 0;
-    }
-
-    &__sub {
-      font-size: 12px;
-      margin-top: 6px;
-    }
+  .performance-charts {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
   }
 
   .usage-dashboard {
@@ -1596,95 +1353,12 @@
     }
   }
 
-  .user-usage-dashboard {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-  }
-
-  .performance-dashboard {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-  }
-
-  .performance-stats {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 12px;
-  }
-
-  .performance-stat {
-    min-height: 86px;
-    padding: 14px 16px;
-    border: 1px solid rgba(15, 23, 42, 0.07);
-    border-radius: 14px;
-    background: rgba(255, 255, 255, 0.56);
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 5px;
-
-    span {
-      color: var(--kp-text-secondary);
-      font-size: 12px;
-    }
-
-    strong {
-      font-size: 22px;
-      line-height: 1.2;
-      letter-spacing: 0;
-      white-space: nowrap;
-    }
-
-    small {
-      font-size: 12px;
-    }
-  }
-
-  .performance-charts {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 16px;
-  }
-
-  .usage-stats {
-    display: grid;
-    grid-template-columns: repeat(5, minmax(120px, 1fr));
-    gap: 12px;
-  }
-
-  .usage-stat {
-    min-height: 74px;
-    padding: 14px 16px;
-    border: 1px solid rgba(15, 23, 42, 0.07);
-    border-radius: 14px;
-    background: rgba(255, 255, 255, 0.52);
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-
-    &__label {
-      color: var(--kp-text-secondary);
-      font-size: 12px;
-      margin-bottom: 6px;
-    }
-
-    strong {
-      font-size: 22px;
-      line-height: 1.2;
-      letter-spacing: 0;
-      white-space: nowrap;
-    }
-  }
-
   .chart-shell,
   .model-rank,
   .user-chart-card {
-    border: 1px solid rgba(15, 23, 42, 0.07);
-    border-radius: 16px;
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.74), rgba(255, 255, 255, 0.44)),
-      rgba(255, 255, 255, 0.58);
+    border: 1px solid var(--el-border-color);
+    border-radius: 8px;
+    background: transparent;
   }
 
   .chart-shell {
@@ -1832,8 +1506,7 @@
     gap: 12px;
   }
 
-  .active-users-card,
-  .model-usage-card {
+  .active-users-card {
     grid-column: 1 / -1;
   }
 
@@ -2031,17 +1704,61 @@
     top: 48px;
     padding: 10px 12px;
     border-radius: 8px;
-    background: rgba(255, 255, 255, 0.92) !important;
-    backdrop-filter: blur(10px) !important;
-    border: 1px solid var(--kp-border) !important;
-    box-shadow: 0 4px 16px rgba(31, 45, 80, 0.08) !important;
+    background: color-mix(in srgb, white 38%, transparent);
+    border: 1px solid var(--el-border-color);
+    box-shadow: none;
     pointer-events: none;
     z-index: 100;
     min-width: 150px;
     display: flex;
     flex-direction: column;
     gap: 6px;
-    transition: all 0.2s cubic-bezier(0.25, 0.8, 0.25, 1);
+  }
+
+  .dashboard-view.is-classic .chart-tooltip {
+    background: rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    border: 1px solid var(--kp-border);
+    box-shadow: 0 4px 16px rgba(31, 45, 80, 0.08);
+  }
+
+  .dashboard-view.is-editorial {
+    .performance-charts,
+    .user-chart-grid {
+      gap: 8px;
+    }
+
+    .usage-dashboard {
+      gap: 8px;
+
+      &__main {
+        gap: 8px;
+      }
+    }
+
+    .chart-shell,
+    .user-chart-card,
+    .model-rank {
+      padding: 10px 12px;
+    }
+
+    .chart-shell__header,
+    .user-chart-card__header,
+    .model-rank__header {
+      margin-bottom: 8px;
+
+      h3 {
+        font-size: 14px;
+        font-weight: 600;
+      }
+    }
+
+    .chart-tooltip {
+      background: color-mix(in srgb, white 38%, transparent);
+      border: 1px solid var(--el-border-color);
+      box-shadow: none;
+    }
   }
 
   .tooltip-time {
@@ -2196,10 +1913,6 @@
 
     .performance-charts {
       grid-template-columns: 1fr;
-
-      > .chart-shell:first-child {
-        grid-column: auto;
-      }
     }
 
     .user-chart-grid {
@@ -2212,11 +1925,6 @@
   }
 
   @media (max-width: 820px) {
-    .usage-stats,
-    .performance-stats {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-
     .chart-shell__header {
       flex-direction: column;
     }
@@ -2255,15 +1963,4 @@
     }
   }
 
-  @media (max-width: 560px) {
-    .usage-stats,
-    .performance-stats {
-      grid-template-columns: 1fr;
-    }
-
-    .usage-stat,
-    .performance-stat {
-      min-height: 64px;
-    }
-  }
 </style>

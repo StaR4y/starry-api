@@ -1,6 +1,8 @@
 package tech.starryapi.account;
 
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.ZoneId;
 import java.time.zone.ZoneRulesException;
 import java.util.Arrays;
@@ -8,7 +10,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.support.CronExpression;
 import org.springframework.stereotype.Service;
@@ -50,6 +54,17 @@ public class AccountSettingsService {
     static final String POOL_POLICY_RETEST_INTERVAL_MINUTES = "account_pool_policy_retest_interval_minutes";
     static final String POOL_POLICY_RETEST_MAX_CONCURRENCY = "account_pool_policy_retest_max_concurrency";
     static final String POOL_POLICY_AUTO_WEIGHT_ENABLED = "account_pool_policy_auto_weight_enabled";
+    static final String POOL_POLICY_EPOCH = "account_pool_policy_epoch";
+    static final String POOL_POLICY_ACTIVATION_STARTED_AT = "account_pool_policy_activation_started_at";
+    static final String ROUTING_POLICY_ISOLATE_CODEX = "account_routing_policy_isolate_codex_pool";
+    static final String ROUTING_POLICY_GPT_USES_CODEX = "account_routing_policy_gpt_uses_codex_accounts";
+    static final String ROUTING_POLICY_BIND_SESSION_ON_ADMISSION = "account_routing_policy_bind_session_on_admission";
+    static final String ROUTING_POLICY_BIND_SESSION_BY_API_KEY = "account_routing_policy_bind_session_by_api_key";
+    static final String ROUTING_POLICY_CODEX_MAX_RETRY_ACCOUNTS = "account_routing_policy_codex_max_retry_accounts";
+    static final String ROUTING_POLICY_OPENAI_MAX_RETRY_ACCOUNTS = "account_routing_policy_openai_max_retry_accounts";
+    static final String ROUTING_POLICY_DEEPSEEK_MAX_RETRY_ACCOUNTS = "account_routing_policy_deepseek_max_retry_accounts";
+    static final String ROUTING_POLICY_ANTHROPIC_MAX_RETRY_ACCOUNTS = "account_routing_policy_anthropic_max_retry_accounts";
+    static final String ROUTING_POLICY_KIRO_MAX_RETRY_ACCOUNTS = "account_routing_policy_kiro_max_retry_accounts";
 
     private static final List<String> ACCOUNT_SETTING_KEYS = List.of(
         GPT_FAST_MODE_ENABLED,
@@ -78,16 +93,62 @@ public class AccountSettingsService {
         POOL_POLICY_RECOVERY_THRESHOLD_PERCENT,
         POOL_POLICY_RETEST_INTERVAL_MINUTES,
         POOL_POLICY_RETEST_MAX_CONCURRENCY,
-        POOL_POLICY_AUTO_WEIGHT_ENABLED
+        POOL_POLICY_AUTO_WEIGHT_ENABLED,
+        POOL_POLICY_EPOCH,
+        POOL_POLICY_ACTIVATION_STARTED_AT,
+        ROUTING_POLICY_ISOLATE_CODEX,
+        ROUTING_POLICY_GPT_USES_CODEX,
+        ROUTING_POLICY_BIND_SESSION_ON_ADMISSION,
+        ROUTING_POLICY_BIND_SESSION_BY_API_KEY,
+        ROUTING_POLICY_CODEX_MAX_RETRY_ACCOUNTS,
+        ROUTING_POLICY_OPENAI_MAX_RETRY_ACCOUNTS,
+        ROUTING_POLICY_DEEPSEEK_MAX_RETRY_ACCOUNTS,
+        ROUTING_POLICY_ANTHROPIC_MAX_RETRY_ACCOUNTS,
+        ROUTING_POLICY_KIRO_MAX_RETRY_ACCOUNTS
+    );
+    private static final List<String> POOL_POLICY_SETTING_KEYS = List.of(
+        POOL_POLICY_ENABLED,
+        POOL_POLICY_WINDOW_MINUTES,
+        POOL_POLICY_MIN_SAMPLE_SIZE,
+        POOL_POLICY_RETEST_THRESHOLD_PERCENT,
+        POOL_POLICY_FAILOVER_THRESHOLD_PERCENT,
+        POOL_POLICY_RECOVERY_THRESHOLD_PERCENT,
+        POOL_POLICY_RETEST_INTERVAL_MINUTES,
+        POOL_POLICY_RETEST_MAX_CONCURRENCY,
+        POOL_POLICY_AUTO_WEIGHT_ENABLED,
+        POOL_POLICY_EPOCH,
+        POOL_POLICY_ACTIVATION_STARTED_AT
+    );
+
+    private static final List<String> ROUTING_POLICY_SETTING_KEYS = List.of(
+        ROUTING_POLICY_ISOLATE_CODEX,
+        ROUTING_POLICY_GPT_USES_CODEX,
+        ROUTING_POLICY_BIND_SESSION_ON_ADMISSION,
+        ROUTING_POLICY_BIND_SESSION_BY_API_KEY,
+        ROUTING_POLICY_CODEX_MAX_RETRY_ACCOUNTS,
+        ROUTING_POLICY_OPENAI_MAX_RETRY_ACCOUNTS,
+        ROUTING_POLICY_DEEPSEEK_MAX_RETRY_ACCOUNTS,
+        ROUTING_POLICY_ANTHROPIC_MAX_RETRY_ACCOUNTS,
+        ROUTING_POLICY_KIRO_MAX_RETRY_ACCOUNTS
     );
 
     private final SystemSettingRepository repository;
+    private final Clock clock;
     private volatile CachedBoolean cachedGptFastMode;
     private volatile Mono<Boolean> gptFastModeLoad;
     private long gptFastModeCacheGeneration;
+    private volatile CachedRoutingPolicy cachedRoutingPolicy;
+    private volatile Mono<AccountDtos.RoutingPolicySettings> routingPolicyLoad;
+    private long routingPolicyCacheGeneration;
 
+    @Autowired
     public AccountSettingsService(SystemSettingRepository repository) {
+        this(repository, Clock.systemUTC());
+    }
+
+    AccountSettingsService(SystemSettingRepository repository, Clock clock) {
         this.repository = repository;
+        this.clock = clock == null ? Clock.systemUTC() : clock;
     }
 
     public Mono<AccountDtos.AccountSettingsResponse> settings() {
@@ -111,9 +172,26 @@ public class AccountSettingsService {
                     current.poolPolicy(),
                     request == null ? null : request.poolPolicy()
                 );
-                return saveSettings(gptFastMode, disabledTest, poolPolicy)
-                    .thenReturn(new AccountDtos.AccountSettingsResponse(gptFastMode, disabledTest, poolPolicy));
+                AccountDtos.RoutingPolicySettings routingPolicy = mergeRoutingPolicySettings(
+                    current.routingPolicy(),
+                    request == null ? null : request.routingPolicy()
+                );
+                return saveSettings(gptFastMode, disabledTest, poolPolicy, routingPolicy)
+                    .thenReturn(new AccountDtos.AccountSettingsResponse(
+                        gptFastMode,
+                        disabledTest,
+                        poolPolicy,
+                        routingPolicy
+                    ));
             });
+    }
+
+    public Mono<AccountDtos.RoutingPolicySettings> routingPolicy() {
+        CachedRoutingPolicy current = cachedRoutingPolicy;
+        if (current != null && !current.expired()) {
+            return Mono.just(current.value());
+        }
+        return loadRoutingPolicy();
     }
 
     public Mono<Boolean> gptFastModeEnabled() {
@@ -182,20 +260,66 @@ public class AccountSettingsService {
     }
 
     public synchronized void invalidateCacheForSetting(String settingKey) {
-        if (!GPT_FAST_MODE_ENABLED.equals(settingKey)) {
-            return;
+        if (GPT_FAST_MODE_ENABLED.equals(settingKey)) {
+            invalidateGptFastModeCache();
         }
-        invalidateGptFastModeCache();
+        if (settingKey != null && settingKey.startsWith("account_routing_policy_")) {
+            invalidateRoutingPolicyCache();
+        }
     }
 
     public synchronized void invalidateAllCaches() {
         invalidateGptFastModeCache();
+        invalidateRoutingPolicyCache();
     }
 
     private void invalidateGptFastModeCache() {
         gptFastModeCacheGeneration++;
         cachedGptFastMode = null;
         gptFastModeLoad = null;
+    }
+
+    private synchronized Mono<AccountDtos.RoutingPolicySettings> loadRoutingPolicy() {
+        CachedRoutingPolicy current = cachedRoutingPolicy;
+        if (current != null && !current.expired()) {
+            return Mono.just(current.value());
+        }
+        if (routingPolicyLoad != null) {
+            return routingPolicyLoad;
+        }
+        long generation = routingPolicyCacheGeneration;
+        AtomicReference<Mono<AccountDtos.RoutingPolicySettings>> reference = new AtomicReference<>();
+        Mono<AccountDtos.RoutingPolicySettings> load = repository.findAllById(ROUTING_POLICY_SETTING_KEYS)
+            .collectMap(SystemSettingEntity::getSettingKey, SystemSettingEntity::getSettingValue)
+            .map(this::routingPolicySettings)
+            .doOnNext(settings -> cacheRoutingPolicy(settings, generation))
+            .doFinally(signal -> clearRoutingPolicyLoad(reference.get()))
+            .cache();
+        reference.set(load);
+        routingPolicyLoad = load;
+        return load;
+    }
+
+    private synchronized void clearRoutingPolicyLoad(Mono<AccountDtos.RoutingPolicySettings> load) {
+        if (routingPolicyLoad == load) {
+            routingPolicyLoad = null;
+        }
+    }
+
+    private synchronized void cacheRoutingPolicy(AccountDtos.RoutingPolicySettings settings, long generation) {
+        if (routingPolicyCacheGeneration != generation) {
+            return;
+        }
+        cachedRoutingPolicy = new CachedRoutingPolicy(
+            settings,
+            System.nanoTime() + HOT_SETTING_CACHE_TTL.toNanos()
+        );
+    }
+
+    private void invalidateRoutingPolicyCache() {
+        routingPolicyCacheGeneration++;
+        cachedRoutingPolicy = null;
+        routingPolicyLoad = null;
     }
 
     private Mono<Map<String, String>> values() {
@@ -207,7 +331,53 @@ public class AccountSettingsService {
         return new AccountDtos.AccountSettingsResponse(
             bool(values, GPT_FAST_MODE_ENABLED, false),
             disabledTestSettings(values),
-            poolPolicySettings(values)
+            poolPolicySettings(values),
+            routingPolicySettings(values)
+        );
+    }
+
+    private AccountDtos.RoutingPolicySettings routingPolicySettings(Map<String, String> values) {
+        AccountDtos.RoutingPolicySettings defaults = AccountDtos.RoutingPolicySettings.defaults();
+        return new AccountDtos.RoutingPolicySettings(
+            bool(values, ROUTING_POLICY_ISOLATE_CODEX, defaults.isolateCodexPoolEnabled()),
+            bool(values, ROUTING_POLICY_GPT_USES_CODEX, defaults.gptUsesCodexAccountsEnabled()),
+            bool(values, ROUTING_POLICY_BIND_SESSION_ON_ADMISSION, defaults.bindSessionOnAdmissionEnabled()),
+            bool(values, ROUTING_POLICY_BIND_SESSION_BY_API_KEY, defaults.bindSessionByApiKeyEnabled()),
+            intValue(
+                values,
+                ROUTING_POLICY_CODEX_MAX_RETRY_ACCOUNTS,
+                defaults.codexMaxRetryAccounts(),
+                AccountDtos.RoutingPolicySettings.MIN_RETRY_ACCOUNTS,
+                AccountDtos.RoutingPolicySettings.MAX_RETRY_ACCOUNTS
+            ),
+            intValue(
+                values,
+                ROUTING_POLICY_OPENAI_MAX_RETRY_ACCOUNTS,
+                defaults.openAiMaxRetryAccounts(),
+                AccountDtos.RoutingPolicySettings.MIN_RETRY_ACCOUNTS,
+                AccountDtos.RoutingPolicySettings.MAX_RETRY_ACCOUNTS
+            ),
+            intValue(
+                values,
+                ROUTING_POLICY_DEEPSEEK_MAX_RETRY_ACCOUNTS,
+                defaults.deepSeekMaxRetryAccounts(),
+                AccountDtos.RoutingPolicySettings.MIN_RETRY_ACCOUNTS,
+                AccountDtos.RoutingPolicySettings.MAX_RETRY_ACCOUNTS
+            ),
+            intValue(
+                values,
+                ROUTING_POLICY_ANTHROPIC_MAX_RETRY_ACCOUNTS,
+                defaults.anthropicMaxRetryAccounts(),
+                AccountDtos.RoutingPolicySettings.MIN_RETRY_ACCOUNTS,
+                AccountDtos.RoutingPolicySettings.MAX_RETRY_ACCOUNTS
+            ),
+            intValue(
+                values,
+                ROUTING_POLICY_KIRO_MAX_RETRY_ACCOUNTS,
+                defaults.kiroMaxRetryAccounts(),
+                AccountDtos.RoutingPolicySettings.MIN_RETRY_ACCOUNTS,
+                AccountDtos.RoutingPolicySettings.MAX_RETRY_ACCOUNTS
+            )
         );
     }
 
@@ -238,12 +408,14 @@ public class AccountSettingsService {
     }
 
     public Mono<AccountDtos.PoolPolicySettings> poolPolicySettings() {
-        return values().map(values -> response(values).poolPolicy());
+        return repository.findAllById(POOL_POLICY_SETTING_KEYS)
+            .collectMap(SystemSettingEntity::getSettingKey, SystemSettingEntity::getSettingValue)
+            .map(this::poolPolicySettings);
     }
 
     private AccountDtos.PoolPolicySettings poolPolicySettings(Map<String, String> values) {
         return new AccountDtos.PoolPolicySettings(
-            bool(values, POOL_POLICY_ENABLED, true),
+            bool(values, POOL_POLICY_ENABLED, false),
             intValue(values, POOL_POLICY_WINDOW_MINUTES, 5, 1, 24 * 60),
             intValue(values, POOL_POLICY_MIN_SAMPLE_SIZE, 10, 1, 100000),
             doubleValue(values, POOL_POLICY_RETEST_THRESHOLD_PERCENT, 50.0, 0.0, 100.0),
@@ -251,7 +423,9 @@ public class AccountSettingsService {
             doubleValue(values, POOL_POLICY_RECOVERY_THRESHOLD_PERCENT, 70.0, 0.0, 100.0),
             intValue(values, POOL_POLICY_RETEST_INTERVAL_MINUTES, 5, 1, 24 * 60),
             intValue(values, POOL_POLICY_RETEST_MAX_CONCURRENCY, 4, 1, 16),
-            bool(values, POOL_POLICY_AUTO_WEIGHT_ENABLED, true)
+            bool(values, POOL_POLICY_AUTO_WEIGHT_ENABLED, true),
+            uuidValue(values.get(POOL_POLICY_EPOCH)),
+            instantValue(values.get(POOL_POLICY_ACTIVATION_STARTED_AT))
         );
     }
 
@@ -296,8 +470,14 @@ public class AccountSettingsService {
         if (request == null) {
             return current;
         }
+        boolean enabled = request.enabled() == null
+            ? Boolean.TRUE.equals(current.enabled())
+            : Boolean.TRUE.equals(request.enabled());
+        boolean activating = enabled && !Boolean.TRUE.equals(current.enabled());
+        UUID epoch = activating ? UUID.randomUUID() : current.circuitEpoch();
+        Instant activationStartedAt = activating ? clock.instant() : current.activationStartedAt();
         return normalizePoolPolicySettings(new AccountDtos.PoolPolicySettings(
-            request.enabled() == null ? current.enabled() : Boolean.TRUE.equals(request.enabled()),
+            enabled,
             firstNonNull(request.windowMinutes(), current.windowMinutes()),
             firstNonNull(request.minSampleSize(), current.minSampleSize()),
             firstNonNull(request.retestThresholdPercent(), current.retestThresholdPercent()),
@@ -305,7 +485,9 @@ public class AccountSettingsService {
             firstNonNull(request.recoveryThresholdPercent(), current.recoveryThresholdPercent()),
             firstNonNull(request.retestIntervalMinutes(), current.retestIntervalMinutes()),
             firstNonNull(request.retestMaxConcurrency(), current.retestMaxConcurrency()),
-            request.autoWeightEnabled() == null ? current.autoWeightEnabled() : Boolean.TRUE.equals(request.autoWeightEnabled())
+            request.autoWeightEnabled() == null ? current.autoWeightEnabled() : Boolean.TRUE.equals(request.autoWeightEnabled()),
+            epoch,
+            activationStartedAt
         ));
     }
 
@@ -325,7 +507,60 @@ public class AccountSettingsService {
             recovery,
             clamp(firstNonNull(settings.retestIntervalMinutes(), 5), 1, 24 * 60),
             clamp(firstNonNull(settings.retestMaxConcurrency(), 4), 1, 16),
-            Boolean.TRUE.equals(settings.autoWeightEnabled())
+            Boolean.TRUE.equals(settings.autoWeightEnabled()),
+            settings.circuitEpoch(),
+            settings.activationStartedAt()
+        );
+    }
+
+    private AccountDtos.RoutingPolicySettings mergeRoutingPolicySettings(
+        AccountDtos.RoutingPolicySettings current,
+        AccountDtos.RoutingPolicySettings request
+    ) {
+        AccountDtos.RoutingPolicySettings baseline = current == null
+            ? AccountDtos.RoutingPolicySettings.defaults()
+            : current;
+        if (request == null) {
+            return baseline;
+        }
+        return new AccountDtos.RoutingPolicySettings(
+            request.isolateCodexPool() == null
+                ? baseline.isolateCodexPoolEnabled()
+                : Boolean.TRUE.equals(request.isolateCodexPool()),
+            request.gptUsesCodexAccounts() == null
+                ? baseline.gptUsesCodexAccountsEnabled()
+                : Boolean.TRUE.equals(request.gptUsesCodexAccounts()),
+            request.bindSessionOnAdmission() == null
+                ? baseline.bindSessionOnAdmissionEnabled()
+                : Boolean.TRUE.equals(request.bindSessionOnAdmission()),
+            request.bindSessionByApiKey() == null
+                ? baseline.bindSessionByApiKeyEnabled()
+                : Boolean.TRUE.equals(request.bindSessionByApiKey()),
+            clamp(
+                firstNonNull(request.codexMaxRetryAccounts(), baseline.codexMaxRetryAccounts()),
+                AccountDtos.RoutingPolicySettings.MIN_RETRY_ACCOUNTS,
+                AccountDtos.RoutingPolicySettings.MAX_RETRY_ACCOUNTS
+            ),
+            clamp(
+                firstNonNull(request.openAiMaxRetryAccounts(), baseline.openAiMaxRetryAccounts()),
+                AccountDtos.RoutingPolicySettings.MIN_RETRY_ACCOUNTS,
+                AccountDtos.RoutingPolicySettings.MAX_RETRY_ACCOUNTS
+            ),
+            clamp(
+                firstNonNull(request.deepSeekMaxRetryAccounts(), baseline.deepSeekMaxRetryAccounts()),
+                AccountDtos.RoutingPolicySettings.MIN_RETRY_ACCOUNTS,
+                AccountDtos.RoutingPolicySettings.MAX_RETRY_ACCOUNTS
+            ),
+            clamp(
+                firstNonNull(request.anthropicMaxRetryAccounts(), baseline.anthropicMaxRetryAccounts()),
+                AccountDtos.RoutingPolicySettings.MIN_RETRY_ACCOUNTS,
+                AccountDtos.RoutingPolicySettings.MAX_RETRY_ACCOUNTS
+            ),
+            clamp(
+                firstNonNull(request.kiroMaxRetryAccounts(), baseline.kiroMaxRetryAccounts()),
+                AccountDtos.RoutingPolicySettings.MIN_RETRY_ACCOUNTS,
+                AccountDtos.RoutingPolicySettings.MAX_RETRY_ACCOUNTS
+            )
         );
     }
 
@@ -347,7 +582,8 @@ public class AccountSettingsService {
     private Mono<Void> saveSettings(
         boolean gptFastMode,
         AccountDtos.DisabledAccountScheduledTestSettings disabledTest,
-        AccountDtos.PoolPolicySettings poolPolicy
+        AccountDtos.PoolPolicySettings poolPolicy,
+        AccountDtos.RoutingPolicySettings routingPolicy
     ) {
         Map<String, String> settings = new LinkedHashMap<>();
         settings.put(GPT_FAST_MODE_ENABLED, Boolean.toString(gptFastMode));
@@ -377,17 +613,50 @@ public class AccountSettingsService {
         settings.put(POOL_POLICY_RETEST_INTERVAL_MINUTES, Integer.toString(poolPolicy.retestIntervalMinutes()));
         settings.put(POOL_POLICY_RETEST_MAX_CONCURRENCY, Integer.toString(poolPolicy.retestMaxConcurrency()));
         settings.put(POOL_POLICY_AUTO_WEIGHT_ENABLED, Boolean.toString(Boolean.TRUE.equals(poolPolicy.autoWeightEnabled())));
+        settings.put(POOL_POLICY_EPOCH, poolPolicy.circuitEpoch() == null ? "" : poolPolicy.circuitEpoch().toString());
+        settings.put(
+            POOL_POLICY_ACTIVATION_STARTED_AT,
+            poolPolicy.activationStartedAt() == null ? "" : poolPolicy.activationStartedAt().toString()
+        );
+        settings.put(ROUTING_POLICY_ISOLATE_CODEX, Boolean.toString(routingPolicy.isolateCodexPoolEnabled()));
+        settings.put(ROUTING_POLICY_GPT_USES_CODEX, Boolean.toString(routingPolicy.gptUsesCodexAccountsEnabled()));
+        settings.put(ROUTING_POLICY_BIND_SESSION_ON_ADMISSION, Boolean.toString(routingPolicy.bindSessionOnAdmissionEnabled()));
+        settings.put(ROUTING_POLICY_BIND_SESSION_BY_API_KEY, Boolean.toString(routingPolicy.bindSessionByApiKeyEnabled()));
+        settings.put(ROUTING_POLICY_CODEX_MAX_RETRY_ACCOUNTS, Integer.toString(routingPolicy.codexMaxRetryAccounts()));
+        settings.put(ROUTING_POLICY_OPENAI_MAX_RETRY_ACCOUNTS, Integer.toString(routingPolicy.openAiMaxRetryAccounts()));
+        settings.put(ROUTING_POLICY_DEEPSEEK_MAX_RETRY_ACCOUNTS, Integer.toString(routingPolicy.deepSeekMaxRetryAccounts()));
+        settings.put(ROUTING_POLICY_ANTHROPIC_MAX_RETRY_ACCOUNTS, Integer.toString(routingPolicy.anthropicMaxRetryAccounts()));
+        settings.put(ROUTING_POLICY_KIRO_MAX_RETRY_ACCOUNTS, Integer.toString(routingPolicy.kiroMaxRetryAccounts()));
         return repository.upsertSettings(
                 settings.keySet().toArray(String[]::new),
                 settings.values().toArray(String[]::new)
             )
-            .doOnSuccess(ignored -> invalidateCacheForSetting(GPT_FAST_MODE_ENABLED))
+            .doOnSuccess(ignored -> {
+                invalidateGptFastModeCache();
+                invalidateRoutingPolicyCache();
+            })
             .then();
     }
 
     private boolean bool(Map<String, String> values, String key, boolean fallback) {
         String value = values.get(key);
         return value == null || value.isBlank() ? fallback : Boolean.parseBoolean(value);
+    }
+
+    private UUID uuidValue(String value) {
+        try {
+            return value == null || value.isBlank() ? null : UUID.fromString(value.trim());
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
+    }
+
+    private Instant instantValue(String value) {
+        try {
+            return value == null || value.isBlank() ? null : Instant.parse(value.trim());
+        } catch (java.time.format.DateTimeParseException ignored) {
+            return null;
+        }
     }
 
     private int intValue(Map<String, String> values, String key, int fallback, int min, int max) {
@@ -447,6 +716,12 @@ public class AccountSettingsService {
     }
 
     private record CachedBoolean(boolean value, long expiresAtNanos) {
+        boolean expired() {
+            return System.nanoTime() >= expiresAtNanos;
+        }
+    }
+
+    private record CachedRoutingPolicy(AccountDtos.RoutingPolicySettings value, long expiresAtNanos) {
         boolean expired() {
             return System.nanoTime() >= expiresAtNanos;
         }

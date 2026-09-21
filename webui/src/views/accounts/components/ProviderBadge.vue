@@ -2,17 +2,35 @@
   /**
    * 账号列表「账号类型」列的平台徽章。
    *
-   * 从 AccountListView.vue 原样抽出：平台 Logo + 名称，
-   * 颜色风格由 provider 决定。
+   * 内置平台使用固定 Logo 与配色；第三方 OpenAI 兼容厂商使用
+   * 模型目录里的图标，以及账号设置时选择的颜色。
    */
   import { computed } from 'vue';
-  import { getProviderDisplayName } from '../utils';
+  import {
+    badgeColorFromName,
+    colorBadgeStyle,
+    getProviderDisplayName,
+    isCustomOpenAiCompatibleProvider,
+    providerInitials,
+  } from '../utils';
 
-  const props = defineProps<{ provider: string | null | undefined }>();
+  const props = defineProps<{
+    provider: string | null | undefined;
+    authMethod?: string | null;
+    color?: string | null;
+    icon?: string | null;
+  }>();
 
   const upperProvider = computed(() => (props.provider || '').toUpperCase());
+  const customVendor = computed(() =>
+    isCustomOpenAiCompatibleProvider(props.provider, props.authMethod),
+  );
+  const displayName = computed(() => getProviderDisplayName(props.provider));
 
   function getProviderTagStyle(provider: string | null | undefined) {
+    if (customVendor.value) {
+      return colorBadgeStyle(props.color || badgeColorFromName(props.provider));
+    }
     const p = (provider || '').toUpperCase();
     if (p === 'DEEPSEEK') {
       return {
@@ -59,7 +77,19 @@
 
 <template>
   <span class="provider-badge" :style="getProviderTagStyle(provider)">
-    <span v-if="upperProvider === 'DEEPSEEK'" class="provider-logo provider-logo--deepseek">D</span>
+    <img
+      v-if="customVendor && icon"
+      class="provider-logo provider-logo--image"
+      :src="icon"
+      alt=""
+    />
+    <span
+      v-else-if="customVendor"
+      class="provider-logo provider-logo--initials"
+    >
+      {{ providerInitials(provider) }}
+    </span>
+    <span v-else-if="upperProvider === 'DEEPSEEK'" class="provider-logo provider-logo--deepseek">D</span>
     <!-- OpenAI Logo -->
     <svg
       v-else-if="['OPENAI', 'OPENAI-COMPATIBLE'].includes(upperProvider)"
@@ -106,7 +136,7 @@
     >
       <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
     </svg>
-    <span class="provider-name">{{ getProviderDisplayName(provider) }}</span>
+    <span class="provider-name">{{ displayName }}</span>
   </span>
 </template>
 
@@ -129,7 +159,8 @@
       height: 13px;
       flex-shrink: 0;
 
-      &--deepseek {
+      &--deepseek,
+      &--initials {
         display: inline-flex;
         align-items: center;
         justify-content: center;
@@ -138,6 +169,12 @@
         font-size: 9px;
         font-weight: 800;
         line-height: 1;
+      }
+
+      &--image {
+        border-radius: 3px;
+        object-fit: cover;
+        background: #fff;
       }
     }
 

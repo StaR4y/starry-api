@@ -1,11 +1,33 @@
 package tech.starryapi.stats;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 import java.time.Instant;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
+import tech.starryapi.admin.DataManagementSecurityService;
+import tech.starryapi.admin.SystemMaintenanceTaskGate;
 
 class PerformanceMetricServiceTest {
+
+    @Test
+    void scheduledMetricWritesSkipRepositoryDuringMaintenance() {
+        PerformanceMetricRepository repository = mock(PerformanceMetricRepository.class);
+        DataManagementSecurityService securityService = mock(DataManagementSecurityService.class);
+        when(securityService.isLocked()).thenReturn(Mono.just(true));
+        PerformanceMetricService service = new PerformanceMetricService(
+            repository,
+            new SystemMaintenanceTaskGate(securityService)
+        );
+
+        service.scheduledSample();
+        service.scheduledCleanup();
+
+        verifyNoInteractions(repository);
+    }
 
     @Test
     void parsesLinuxNetworkCountersAndSkipsLocalDockerInterfaces() {
@@ -53,5 +75,21 @@ class PerformanceMetricServiceTest {
 
         assertThat(snapshot).isNotNull();
         assertThat(snapshot.availableBytes()).isEqualTo(750_000L * 1024);
+    }
+
+    @Test
+    void parsesMacPhysicalAvailableMemoryPercentage() {
+        long totalBytes = 32L * 1024 * 1024 * 1024;
+
+        assertThat(PerformanceMetricService.parseMacAvailableBytes(
+            "System-wide memory free percentage: 63%\n",
+            totalBytes
+        )).isEqualTo(Math.round(totalBytes * 0.63));
+        assertThat(PerformanceMetricService.parseMacAvailableBytes(
+            "System-wide memory free percentage: 120%\n",
+            totalBytes
+        )).isEqualTo(totalBytes);
+        assertThat(PerformanceMetricService.parseMacAvailableBytes("memory pressure: normal", totalBytes))
+            .isNull();
     }
 }

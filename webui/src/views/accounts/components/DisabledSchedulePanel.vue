@@ -152,7 +152,7 @@
         : `Cron: "${form.cronExpression}"`;
     const filterText =
       form.providers.length > 0 ? `过滤: ${form.providers.join(', ')}` : '全部平台';
-    return `运行中 (${modeText} • ${filterText})`;
+    return `Running (${modeText} • ${filterText})`;
   });
 
   function toggleExpand() {
@@ -163,7 +163,7 @@
 <template>
   <div
     v-loading="loading"
-    class="disabled-schedule-card glass-panel"
+    class="disabled-schedule-card surface-card"
     :class="{ 'is-active': form.enabled, 'is-expanded': isExpanded }"
   >
     <!-- Collapsible Header -->

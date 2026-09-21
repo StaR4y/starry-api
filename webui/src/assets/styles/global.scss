@@ -9,10 +9,26 @@
  */
 
 :root {
-  /* 品牌主色与渐变 */
+  /* 品牌主色与渐变。
+   * HTML 邮件使用同一组色值（service/.../BrandTheme.java）。
+   * 设计新的平台配色时，必须同时改 SCSS 与 BrandTheme，邮件才会跟着变。 */
   --kp-primary: #5b8def;
+  --kp-primary-mid: #7b7cff;
   --kp-primary-soft: rgba(91, 141, 239, 0.16);
   --kp-accent: #b387ff;
+  --kp-brand-gradient: linear-gradient(
+    135deg,
+    var(--kp-primary) 0%,
+    var(--kp-primary-mid) 50%,
+    var(--kp-accent) 100%
+  );
+  --kp-brand-gradient-y: linear-gradient(
+    180deg,
+    var(--kp-primary) 0%,
+    var(--kp-primary-mid) 50%,
+    var(--kp-accent) 100%
+  );
+  --kp-header: #1a1f36;
   --kp-success: #36c08a;
   --kp-warning: #f0a84d;
   --kp-danger: #ef5b6b;
@@ -30,6 +46,9 @@
   --kp-text: #1f2a44;
   --kp-text-secondary: #54607a;
   --kp-text-muted: #8a93a8;
+  --kp-sidebar-opacity: 0.62;
+  --kp-bg-image: none;
+  --kp-bg-blur: 0px;
 
   /* 圆角与间距 */
   --kp-radius-sm: 8px;
@@ -64,12 +83,30 @@ body {
     Helvetica, Arial, sans-serif;
   font-size: 14px;
   line-height: 1.55;
-  background: radial-gradient(circle at 12% 18%, #d4e3ff 0%, transparent 45%),
-    radial-gradient(circle at 88% 12%, #f0d6ff 0%, transparent 50%),
-    radial-gradient(circle at 50% 92%, #cdf3ff 0%, transparent 55%),
+  background: radial-gradient(circle at 12% 18%, color-mix(in srgb, var(--kp-primary) 28%, transparent) 0%, transparent 45%),
+    radial-gradient(circle at 88% 12%, color-mix(in srgb, var(--kp-accent) 32%, transparent) 0%, transparent 50%),
+    radial-gradient(circle at 50% 92%, color-mix(in srgb, var(--kp-primary-mid) 22%, transparent) 0%, transparent 55%),
     linear-gradient(135deg, #eef3ff 0%, #f8f0ff 60%, #ecfbff 100%);
   background-attachment: fixed;
   -webkit-font-smoothing: antialiased;
+}
+
+html[data-has-bg='true'] body {
+  background-image: var(--kp-bg-image);
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+}
+
+html[data-has-bg='true'] body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  backdrop-filter: blur(var(--kp-bg-blur));
+  -webkit-backdrop-filter: blur(var(--kp-bg-blur));
+  background: rgba(255, 255, 255, 0.28);
 }
 
 /* 主题：磨砂玻璃通用面板 */
@@ -85,6 +122,12 @@ body {
 .glass-panel--strong {
   background: var(--kp-surface-strong);
   box-shadow: var(--kp-shadow-lg);
+}
+
+.surface-card {
+  border: 1px solid var(--el-border-color);
+  border-radius: 8px;
+  background: var(--kp-surface-strong);
 }
 
 /* Element Plus 视觉适配 */
@@ -118,6 +161,164 @@ body {
   font-weight: 600;
   font-size: 12.5px;
   letter-spacing: 0.4px;
+}
+
+html[data-ui-chrome='editorial'] .el-table th.el-table__cell {
+  background-color: transparent !important;
+  color: var(--kp-text-muted);
+  font-size: 11px;
+  letter-spacing: 0.3px;
+}
+
+html[data-ui-chrome='classic'] .surface-card,
+html[data-ui-chrome='classic'] .product-item,
+html[data-ui-chrome='classic'] .subscription-row {
+  background: var(--kp-surface);
+  backdrop-filter: blur(var(--kp-blur)) saturate(160%);
+  -webkit-backdrop-filter: blur(var(--kp-blur)) saturate(160%);
+  border: 1px solid var(--kp-border);
+  border-radius: var(--kp-radius);
+  box-shadow: var(--kp-shadow);
+}
+
+html[data-ui-chrome='classic'] .chart-shell,
+html[data-ui-chrome='classic'] .model-rank,
+html[data-ui-chrome='classic'] .user-chart-card {
+  border: 1px solid rgba(15, 23, 42, 0.07);
+  border-radius: 16px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.74), rgba(255, 255, 255, 0.44)),
+    rgba(255, 255, 255, 0.58);
+}
+
+html[data-ui-chrome='classic'] .payment__panel,
+html[data-ui-chrome='classic'] .payment__orders,
+html[data-ui-chrome='classic'] .payment-admin__panel,
+html[data-ui-chrome='classic'] .payment-admin__orders {
+  background: rgba(255, 255, 255, 0.45);
+  backdrop-filter: blur(var(--kp-blur)) saturate(160%);
+  -webkit-backdrop-filter: blur(var(--kp-blur)) saturate(160%);
+  border-radius: var(--kp-radius);
+  box-shadow: var(--kp-shadow);
+}
+
+html[data-ui-chrome='editorial'] .surface-card,
+html[data-ui-chrome='editorial'] .chart-shell,
+html[data-ui-chrome='editorial'] .model-rank,
+html[data-ui-chrome='editorial'] .user-chart-card,
+html[data-ui-chrome='editorial'] .payment__panel,
+html[data-ui-chrome='editorial'] .payment__orders,
+html[data-ui-chrome='editorial'] .payment-admin__panel,
+html[data-ui-chrome='editorial'] .payment-admin__orders,
+html[data-ui-chrome='editorial'] .product-item,
+html[data-ui-chrome='editorial'] .secret-panel,
+html[data-ui-chrome='editorial'] .chrome-option {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+}
+
+html[data-ui-chrome='editorial'] .product-item:hover,
+html[data-ui-chrome='editorial'] .payment__panel:hover,
+html[data-ui-chrome='editorial'] .payment__orders:hover,
+html[data-ui-chrome='editorial'] .payment-admin__panel:hover,
+html[data-ui-chrome='editorial'] .payment-admin__orders:hover {
+  box-shadow: none;
+}
+
+html[data-ui-chrome='editorial'] .chart-shell,
+html[data-ui-chrome='editorial'] .model-rank,
+html[data-ui-chrome='editorial'] .user-chart-card,
+html[data-ui-chrome='editorial'] .payment__panel,
+html[data-ui-chrome='editorial'] .payment__orders,
+html[data-ui-chrome='editorial'] .payment-admin__panel,
+html[data-ui-chrome='editorial'] .payment-admin__orders {
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+  padding: 12px;
+}
+
+html[data-ui-chrome='editorial'] .chart-tooltip {
+  background: color-mix(in srgb, white 38%, transparent) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border: 1px solid var(--el-border-color) !important;
+  box-shadow: none !important;
+}
+
+html[data-ui-chrome='editorial'] .payment-admin__row--switch,
+html[data-ui-chrome='editorial'] .quote-item,
+html[data-ui-chrome='editorial'] .active-user-item {
+  background: transparent;
+}
+
+html[data-ui-chrome='editorial'] .smtp-form {
+  gap: 12px;
+}
+
+html[data-ui-chrome='editorial'] .smtp-section + .smtp-section {
+  padding-top: 12px;
+}
+
+html[data-ui-chrome='editorial'] .smtp-section h3 {
+  margin-bottom: 8px;
+}
+
+html[data-ui-chrome='editorial'] .smtp-grid {
+  gap: 10px;
+}
+
+html[data-ui-chrome='editorial'] .settings-layout {
+  gap: 12px;
+}
+
+html[data-ui-chrome='editorial'] .el-form-item {
+  margin-bottom: 12px;
+}
+
+html[data-ui-chrome='editorial'] .el-tabs__header {
+  margin-bottom: 8px;
+}
+
+html[data-ui-chrome='editorial'] .el-table .el-table__cell {
+  padding-top: 8px;
+  padding-bottom: 8px;
+}
+
+html[data-ui-chrome='editorial'] .el-table-fixed-column--right {
+  background-color: transparent !important;
+}
+
+html[data-ui-chrome='editorial'] body:has(.layout) .el-dialog,
+html[data-ui-chrome='editorial'] body:has(.layout) .el-drawer,
+html[data-ui-chrome='editorial'] body:has(.layout) .el-message-box,
+html[data-ui-chrome='editorial'] body:has(.layout) .el-popover.el-popper {
+  background: color-mix(in srgb, white 48%, transparent) !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  border: 1px solid var(--el-border-color) !important;
+  border-radius: 8px !important;
+  box-shadow: none !important;
+}
+
+html[data-ui-chrome='editorial'] body:has(.layout) .glass-panel {
+  background: transparent;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+  box-shadow: none;
+  border: 1px solid var(--el-border-color);
+  border-radius: 6px;
+}
+
+html[data-ui-chrome='editorial'] body:has(.layout) .el-input__wrapper,
+html[data-ui-chrome='editorial'] body:has(.layout) .el-textarea__inner,
+html[data-ui-chrome='editorial'] body:has(.layout) .el-select__wrapper {
+  background: transparent !important;
+}
+
+html[data-ui-chrome='editorial'] body:has(.layout) .el-button:not(.el-button--primary):not(.el-button--danger):not(.el-button--link):not(.el-button--text):not(.is-link):not(.is-text) {
+  background: transparent !important;
+  box-shadow: none !important;
 }
 
 .el-table--enable-row-hover .el-table__body tr:hover > td.el-table__cell {
@@ -169,7 +370,7 @@ body {
 
 // 1. 主色按钮 (Primary) - 渐变与霓虹投影，仅用于非 link/text 的实体按钮
 .el-button--primary:not(.is-link):not(.is-text) {
-  background: linear-gradient(135deg, var(--kp-primary), var(--kp-accent)) !important;
+  background: var(--kp-brand-gradient) !important;
   border: 1px solid transparent !important;
   color: white !important;
   box-shadow: 0 2px 6px rgba(91, 141, 239, 0.15);
@@ -177,11 +378,7 @@ body {
   &:not(.is-disabled):not(:disabled) {
     &:hover,
     &:focus {
-      background: linear-gradient(
-        135deg,
-        var(--kp-primary),
-        var(--kp-accent)
-      ) !important; // 保持原有渐变背景色
+      background: var(--kp-brand-gradient) !important;
       filter: brightness(1.08); // 通过亮度提升提供交互反馈
       box-shadow:
         0 6px 16px rgba(91, 141, 239, 0.3),
@@ -189,7 +386,7 @@ body {
       color: white !important;
     }
     &:active {
-      background: linear-gradient(135deg, var(--kp-primary), var(--kp-accent)) !important;
+      background: var(--kp-brand-gradient) !important;
       filter: brightness(0.92); // 降低亮度表现按压感
       box-shadow: 0 2px 4px rgba(91, 141, 239, 0.2) !important;
     }

@@ -1,129 +1,138 @@
 # Project Plan
 
+Last reviewed against the worktree on 2026-09-20.
+
 ## Current Status
 
-Starry API has entered the platform modularization phase.
+Platform modularization is complete. The project is now in a reliability, security, billing, and operations phase.
 
-Completed in this phase:
+The current baseline includes:
 
-- Renamed the Spring Boot entrypoint to `StarryApiApplication`.
-- Split backend protocol code into platform packages:
-  - `platform/core`
-  - `platform/openai`
-  - `platform/anthropic`
-  - `platform/gemini`
-  - `platform/kiro`
-  - `platform/catalog`
-  - `platform/upstream`
-- Introduced provider-neutral `PlatformCompletionResult`, `PlatformUsage`, and `PlatformToolUse`.
-- Moved shared model capabilities and default routing targets into the `api/model` model catalog contract.
-- Kept `proxy` focused on orchestration: auth, rate limit, model mapping, account selection, upstream invocation, accounting, logs.
-- Added Gemini model aliases and basic GenerateContent compatibility.
-- Split Anthropic response formatting out of the OpenAI response factory.
-- Split frontend `src/platforms` into provider-scoped modules:
-  - `openai/`, `anthropic/`, `gemini/` for model metadata and client setup fragments
-  - `opencode/` for OpenCode setup fragments
-  - `registry.ts` for provider/family inference and display order
-  - `clientSetup.ts` for OS-specific setup script aggregation
-- Updated visible WebUI brand from the legacy Kiro-only name to Starry API.
-- Rewrote README, architecture, package guide, API, and configuration docs for the platform model.
-- Established PostgreSQL 17 as the persistence baseline with database/schema `starry_api`, R2DBC pooling, a fresh Flyway baseline, partitioned request logs, rollups, and custom-format backups.
+- Support tickets (2026-09-20): user submissions/private attachments, administrator conversations/status workflow, durable SMTP reminders or content emails, retries, concurrency checks and responsive console pages. See [implementation and verification](SUPPORT_TICKETS.md).
 
-Still intentionally preserved:
+- Provider-neutral completion, usage, reasoning, and tool records under `platform/core`.
+- Independent OpenAI, Anthropic, Gemini, DeepSeek, Kiro, catalog, and upstream packages.
+- OpenAI API-key, Codex token, native Anthropic API-key, official DeepSeek, generic OpenAI-compatible, and Kiro/AWS execution paths.
+- OpenAI Chat Completions and Responses, Anthropic Messages, and Gemini GenerateContent inbound compatibility APIs.
+- Administrator-managed model providers, families, aliases, icons, pricing rules, and model-provider-scoped API keys.
+- Pricing consistency repair (2026-09-20): shared display/quote/charge resolution, normalized prefix and catalog-alias matching, deterministic exact/wildcard precedence, preserved legacy fixed prices, stale-cache protection, draft preview, and responsive pricing controls. Missing verified prices now explicitly block billable requests. See [verification](MODEL_PRICING_FIXES.md).
+- Provider/family pricing (2026-09-20): direct provider-default and family-override controls, automatic inheritance for future catalog models, scoped matching by requested-model ownership, and warnings for unmatched exact IDs.
+- PostgreSQL 17 persistence with Flyway, partitioned request/usage data, aggregate statistics, backup/restore, payments, balances, invite codes, and redemption codes.
+- Coding Plan rebuild (2026-09-12): explicit API-key billing source, immutable product versions, queued renewals, PostgreSQL billing reservations, and audited reconciliation. See [implementation and verification](CODING_PLAN_REBUILD.md).
+- Plugin developer mode (2026-09-12): default-disabled full-trust PF4J plugins, root password plus email verification, JAR lifecycle/config/debug tooling and audit logs. No marketplace or sandbox. See [plugin SDK and operations](PLUGINS.md).
+- Plugin SDK 1.1 (2026-09-13): renamed `api` to `service-api` without changing Java packages or HTTP routes; added typed JSON/configuration, named service discovery, managed resources/tasks and streaming HTTP with cancellation/session cleanup. SDK 1.0 contracts remain compatible on the updated host.
+- Plugin hot reload (2026-09-13): normal lifecycle operations no longer require a restart; managed cleanup is verified before unloading, with root-only diagnostics and sticky per-plugin blocking on uncertainty. Queued timeouts never execute later and cancelled starts cannot publish late success. Full-trust code is still cooperative, not sandboxed or forcibly terminable.
+- Per-model-family experimental circuit breakers, account cooldown/failover, session affinity, disabled-account tests, and single-flight account token refresh.
+- Immutable application Root identity plus fail-closed data-management security, append-only security auditing, durable SMTP alerts, and an offline recovery workflow.
+- Vue management pages for accounts, keys, models, pricing, mappings, users, payments, logs, and data transfer, plus a unified system settings center for payment, registration, SMTP, model creation, and account-pool policy.
 
-- Kiro/AWS is still the only real upstream adapter.
-- `KIRO_*` runtime variables remain for the active Kiro/AWS upstream adapter.
-- Kiro Account Manager import format is still supported directly.
+Compatibility intentionally retained:
+
+- `KIRO_*` runtime variables remain the primary proxy configuration namespace.
+- Kiro Account Manager import documents remain accepted.
+- Legacy API keys with `model_provider='*'` remain usable, but new keys must select an enabled catalog provider.
 
 ## Design Rules
 
-- New inbound client protocols go under `service/.../platform/<provider>`.
-- New upstream execution providers go under `service/.../platform/<upstream>` and expose a narrow call/result abstraction.
-- Protocol response factories consume `platform/core.PlatformCompletionResult`; they must not import Kiro result records.
-- Protocol model catalogs may use `api/model/ModelCatalogProvider` constants; they must not import another protocol's catalog.
-- `proxy/ProxyFacade` remains the routing coordinator and should not gain large protocol conversion helpers.
-- Model IDs are registered in `platform/catalog` and should include provider/family/target metadata.
-- Frontend provider ordering and client setup scripts belong in `webui/src/platforms`, with provider-specific pieces under `webui/src/platforms/<provider>`, not page components.
-- Tests should sit in package-aligned platform test packages when they verify package-private adapter behavior.
+- New inbound client protocols belong under `service/src/main/java/tech/starryapi/platform/<provider>`.
+- New upstream execution providers belong in a platform package and return `PlatformCompletionResult` rather than provider-specific records to the proxy layer.
+- Protocol response factories consume `platform/core` records and must not import Kiro result records.
+- Protocol modules may depend on `platform/core` and `platform/catalog`, but OpenAI, Anthropic, and Gemini modules must not import each other.
+- `proxy/ProxyFacade` remains the routing coordinator and should not accumulate protocol conversion helpers.
+- Public and mapped model IDs must be enabled in the managed catalog under the API key's provider before routing.
+- Frontend provider ordering and client setup generation belong in `webui/src/platforms`, not view components.
+- Tests should use package-aligned test packages when they verify package-private adapter behavior.
 
-## Known Gaps
+## Current Gaps
 
-- Runtime env names still use `KIRO_*`; a later migration should add `STARRY_*` aliases without breaking old deployments.
-- Gemini compatibility is basic GenerateContent text/function-call conversion, not full Google SDK parity.
-- OpenAI and Anthropic tool/image/document handling is partial.
-- `stream=true` emits SSE after upstream completion, not true upstream chunk passthrough.
-- Dynamic upstream model discovery is still Kiro-specific.
-- Per-account outbound proxy URL is stored but not wired into WebClient dispatch.
-- Rate limiting is in-memory and not distributed across multiple nodes.
+- Coding Plan checkout uses wallet purchase, grants, and redemption codes; direct payment-gateway plan fulfillment remains pending.
 
-## Milestone 1: Platform Protocol Parity
+- `stream=true` formats SSE only after the upstream call completes; true chunk passthrough and disconnect cancellation are not implemented.
+- The Kiro, OpenAI, and Anthropic clients do not yet implement one unified upstream adapter interface.
+- Gemini is an inbound compatibility layer routed through Kiro aliases; direct Google API-key dispatch, account testing, and `streamGenerateContent` are missing.
+- OpenAI/Anthropic image, document, file, and prompt-cache parity remains partial.
+- Per-account `proxyUrl` is stored but is not wired into outbound `WebClient` dispatch.
+- Rate limiting and data-management unlock state are instance-local. Rate limiting is not distributed, and data-management security supports one active service instance only.
+- `/actuator/prometheus` is exposed, but domain metrics for providers, upstream latency/errors, account state, and circuit transitions are incomplete.
+- Most server configuration still uses `KIRO_*`; compatible `STARRY_*` aliases have not been introduced broadly.
 
-Goal: make OpenAI, Anthropic, and Gemini inbound modules independently testable.
+## Workstream 1: Protocol Compatibility
 
-Tasks:
+Completed:
 
-1. Add unit tests for OpenAI Responses request conversion.
-2. Add unit tests for Anthropic tool-use/tool-result request conversion.
-3. Expand Gemini support for `streamGenerateContent`.
-4. Add image/document/file conversion coverage per platform.
-5. Add prompt-cache and thinking/reasoning option normalization per platform.
-6. Add a compatibility matrix in docs for each request/response field.
+- OpenAI Responses request conversion and response/event tests, including functions, custom tools, reasoning, multimodal input, and previous-response IDs.
+- Anthropic tool-use request conversion, tool-choice conversion, response formatting, native upstream requests, and streamed tool-use parsing tests.
+- Basic Gemini text, system instruction, generation config, function declaration/call/response conversion.
 
-## Milestone 2: Upstream Adapter Abstraction
+Remaining:
 
-Goal: make Kiro/AWS one adapter instead of the implicit execution core.
+1. Add explicit Anthropic `tool_result` request regression coverage.
+2. Add Gemini `streamGenerateContent` support and tests.
+3. Expand per-protocol image/document/file conversion coverage.
+4. Document and test a field-by-field compatibility matrix for all three inbound protocols.
 
-Tasks:
+## Workstream 2: Upstream Abstraction
 
-1. Introduce a narrow upstream adapter interface over the existing `PlatformCompletionResult` return type.
-2. Wrap `KiroPayloadFactory`, `KiroUpstreamClient`, and `AwsEventStreamParser` behind that interface.
-3. Move Kiro-specific account credential fields behind adapter-aware account metadata where practical.
-4. Add adapter selection config.
-5. Add adapter-specific health/test logic.
-6. Add `STARRY_*` runtime config aliases while keeping `KIRO_*` backwards compatible.
+Completed:
 
-## Milestone 3: Streaming and Latency
+- Kiro/AWS event-stream transport is isolated under `platform/kiro`.
+- OpenAI API-key, generic OpenAI-compatible, Codex, and DeepSeek execution use the OpenAI transport with route-specific policy.
+- Native Anthropic API-key execution and account testing are implemented.
+- Provider failures are normalized through the shared upstream error model and failure classifier.
 
-Goal: reduce perceived latency for streaming clients.
+Remaining:
 
-Tasks:
+1. Define a narrow common upstream adapter interface around `PlatformCompletionResult`.
+2. Move adapter selection and account test behavior behind that interface.
+3. Separate provider-specific credential metadata further where it reduces branching in account services.
+4. Implement a direct Google/Gemini adapter only when account testing, dispatch, and streaming can ship together.
 
-1. Parse AWS event-stream chunks incrementally.
-2. Emit OpenAI SSE chunks as upstream chunks arrive.
-3. Emit Anthropic streaming events as upstream chunks arrive.
-4. Add Gemini stream response support.
-5. Track first-token latency and total latency separately.
-6. Add cancellation handling for disconnected clients.
+## Workstream 3: Streaming and Latency
 
-## Milestone 4: Account Reliability
+1. Parse upstream event streams incrementally instead of buffering the completed result.
+2. Emit OpenAI and Anthropic SSE events as chunks arrive.
+3. Add first-token latency separately from total request latency.
+4. Propagate client disconnect cancellation to the active upstream request.
+5. Verify accounting and circuit outcomes for cancelled or partially streamed calls.
 
-Goal: stabilize multi-account operation under real traffic.
+## Workstream 4: Account Reliability
 
-Tasks:
+Completed:
 
-1. Prevent concurrent refresh for the same upstream account.
-2. Add manual token validation endpoint.
-3. Add account-to-API-key binding.
-4. Add group-based account selection.
-5. Add account-bound outbound proxy dispatch.
-6. Add quota reset reconciliation.
+- Per-account token refresh is single-flight and handles rotated Codex credentials.
+- Manual, scheduled-disabled, and failure-triggered account tests are available.
+- Total, 5-hour, and 7-day quota windows are tracked; `KIRO_QUOTA_RESET` supplies the fallback total-quota reset duration.
+- Official DeepSeek accounts and retries are isolated from OpenAI/Codex pools.
+- Experimental provider/model-family circuits reconcile from PostgreSQL request logs and support primary/secondary tiers.
+- API keys are restricted to one managed model provider, and both sides of model mappings are authorized.
 
-## Milestone 5: Operations
+Remaining:
 
-Goal: make deployment and upgrades predictable.
+1. Wire each account's outbound proxy URL into its HTTP client dispatch.
+2. Decide whether exact account/group-to-key binding is still needed beyond provider scoping.
+3. Add distributed rate limiting before supporting horizontally scaled public traffic.
+4. Graduate the model-family circuit policy only after production observation, alerting, and rollback exercises.
 
-Tasks:
+## Workstream 5: Security and Operations
 
-1. Keep PostgreSQL 17 Testcontainers integration tests mandatory and validate PostgreSQL 18 compatibility in CI.
-2. Add production profile defaults.
-3. Add Prometheus metrics for platform, upstream, account state, latency, and errors.
-4. Add structured request IDs to logs.
-5. Maintain PostgreSQL backup/restore, Flyway recovery, partition retention, and capacity-planning runbooks.
-6. Add a deployment upgrade guide for the Kiro-to-Starry naming transition.
+Completed:
+
+- PostgreSQL 17 integration tests are mandatory in the main CI job; a separate PostgreSQL 18 compatibility job runs the PostgreSQL test suite.
+- PostgreSQL backup/restore, rollback validation, retention, aggregation, and capacity guidance are documented.
+- Application Root identity, data-management hard lock, maintenance health behavior, append-only audit/outbox, and interactive recovery tooling are implemented and tested.
+- Prometheus registry and `/actuator/prometheus` exposure are configured.
+
+Remaining:
+
+1. Add provider, upstream, account, billing, and circuit-specific Micrometer metrics and alerts.
+2. Propagate request IDs consistently through response headers and structured application logs; IDs are currently generated and persisted for proxy statistics.
+3. Add explicit production-profile defaults and a documented `KIRO_*` to `STARRY_*` migration path.
+4. Design an external strongly consistent data-management state store before allowing service replicas when that feature is enabled.
+5. Add a separate backup/restore procedure for uploaded model icons, which are filesystem state rather than PostgreSQL data.
 
 ## Verification Checklist
 
-For platform/package changes:
+For platform, persistence, or documentation contract changes:
 
 ```bash
 ./gradlew test
@@ -134,6 +143,8 @@ For packaged deployment changes:
 
 ```bash
 ./gradlew :service:bootJar
+./scripts/test-install-server.sh
+./scripts/test-recover-data-management.sh
 ```
 
 For local runtime changes:
@@ -145,12 +156,4 @@ curl http://127.0.0.1:8080/health
 curl http://127.0.0.1:8080/v1/models
 ```
 
-For proxy behavior changes:
-
-1. Create an API key.
-2. Add one valid upstream account.
-3. Call OpenAI Chat Completions.
-4. Call Anthropic Messages.
-5. Call Gemini GenerateContent.
-6. Check `/admin/logs`.
-7. Check account/API key counters.
+For proxy behavior changes, verify an enabled catalog model and matching provider-scoped API key against each affected upstream account type, then inspect `/admin/logs`, `/admin/usage-summary`, account state, API key usage, and balance settlement.

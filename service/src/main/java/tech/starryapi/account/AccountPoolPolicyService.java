@@ -1,255 +1,778 @@
 package tech.starryapi.account;
 
 import io.r2dbc.spi.Row;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.LocalDateTime;
-import java.time.OffsetDateTime;
-import java.time.ZoneId;
-import java.time.ZonedDateTime;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 @Service
-public class AccountPoolPolicyService {
+public class AccountPoolPolicyService implements ApplicationRunner {
 
     static final String PRIMARY_TIER = "primary";
     static final String SECONDARY_TIER = "secondary";
 
     private final AccountSettingsService settingsService;
     private final DatabaseClient databaseClient;
+    private final ModelPoolKeyResolver keyResolver;
+    private final Clock clock;
 
-    private volatile boolean primaryDisabled = false;
-    private volatile Instant lastEvaluatedAt;
-    private volatile Instant lastRetestAt;
-    private volatile double lastRetestFailureRatePercent = 0.0;
-    private volatile double lastRetestRecoveryRatePercent = 0.0;
-    private volatile long primaryRequests = 0;
-    private volatile long primaryFailures = 0;
-    private volatile double primaryFailureRatePercent = 0.0;
-    private volatile AccountDtos.PoolPolicySettings cachedSettings;
+    private volatile PolicyRuntime runtimeState;
+    private volatile Mono<Void> inFlightSettingsRefresh;
+    private long settingsRefreshGeneration;
+    private long settingsRefreshRequestGeneration;
 
-    public AccountPoolPolicyService(AccountSettingsService settingsService, DatabaseClient databaseClient) {
+    @Autowired
+    public AccountPoolPolicyService(
+        AccountSettingsService settingsService,
+        DatabaseClient databaseClient,
+        ModelPoolKeyResolver keyResolver
+    ) {
+        this(settingsService, databaseClient, keyResolver, Clock.systemUTC());
+    }
+
+    AccountPoolPolicyService(
+        AccountSettingsService settingsService,
+        DatabaseClient databaseClient,
+        ModelPoolKeyResolver keyResolver,
+        Clock clock
+    ) {
         this.settingsService = settingsService;
         this.databaseClient = databaseClient;
-        this.cachedSettings = settingsService.defaultPoolPolicySettings();
+        this.keyResolver = keyResolver;
+        this.clock = clock == null ? Clock.systemUTC() : clock;
+        this.runtimeState = newRuntime(settingsService.defaultPoolPolicySettings());
     }
 
     public Mono<PoolEvaluation> evaluate() {
+        return refreshSettings().then(Mono.fromSupplier(this::currentEvaluation));
+    }
+
+    @Override
+    public void run(ApplicationArguments args) {
+        refreshSettings().block();
+    }
+
+    public synchronized Mono<Void> refreshSettings() {
+        settingsRefreshGeneration++;
+        settingsRefreshRequestGeneration++;
+        Mono<Void> current = inFlightSettingsRefresh;
+        if (current != null) {
+            return current;
+        }
+        Mono<Void> created = Mono.defer(this::runSettingsRefreshPass).cache();
+        inFlightSettingsRefresh = created;
+        return created;
+    }
+
+    private Mono<Void> runSettingsRefreshPass() {
+        long generation;
+        long requestGeneration;
+        synchronized (this) {
+            generation = settingsRefreshGeneration;
+            requestGeneration = settingsRefreshRequestGeneration;
+        }
         return settingsService.poolPolicySettings()
-            .doOnNext(settings -> cachedSettings = settings)
-            .flatMap(settings -> recentPrimaryMetrics(settings)
-                .map(metrics -> evaluate(settings, metrics)));
+            .flatMap(settings -> reconcile(settings, generation).then())
+            .then(Mono.defer(() -> continueOrFinishRefresh(requestGeneration)))
+            .onErrorResume(error -> Mono.defer(() -> continueOrFailRefresh(requestGeneration, error)));
+    }
+
+    private synchronized Mono<Void> continueOrFinishRefresh(long completedRequestGeneration) {
+        if (settingsRefreshRequestGeneration > completedRequestGeneration) {
+            return runSettingsRefreshPass();
+        }
+        inFlightSettingsRefresh = null;
+        return Mono.empty();
+    }
+
+    private synchronized Mono<Void> continueOrFailRefresh(long failedRequestGeneration, Throwable error) {
+        if (settingsRefreshRequestGeneration > failedRequestGeneration) {
+            return runSettingsRefreshPass();
+        }
+        inFlightSettingsRefresh = null;
+        return Mono.error(error);
+    }
+
+    public boolean managesSetting(String settingKey) {
+        return settingKey != null && settingKey.startsWith("account_pool_policy_");
     }
 
     public Mono<AccountDtos.AccountPoolStatusResponse> status(boolean retestRunning) {
-        return settingsService.poolPolicySettings()
-            .doOnNext(settings -> cachedSettings = settings)
-            .flatMap(settings -> {
-                Instant windowStartedAt = Instant.now().minus(Duration.ofMinutes(settings.windowMinutes()));
-                return failureRanking(windowStartedAt, settings)
-                    .collectList()
-                    .map(ranking -> new AccountDtos.AccountPoolStatusResponse(
-                        settings.enabled(),
-                        activeTier(),
-                        primaryDisabled,
-                        primaryFailureRatePercent,
-                        primaryRequests,
-                        primaryFailures,
-                        windowStartedAt,
-                        lastEvaluatedAt,
-                        lastRetestAt,
-                        lastRetestFailureRatePercent,
-                        lastRetestRecoveryRatePercent,
-                        retestRunning,
-                        settings,
-                        ranking
-                    ));
-            });
+        return status(retestRunning, new AccountPoolService.PoolAccountInventory(0, 0, List.of()));
+    }
+
+    public Mono<AccountDtos.AccountPoolStatusResponse> status(
+        boolean retestRunning,
+        Supplier<Mono<AccountPoolService.PoolAccountInventory>> inventoryLoader
+    ) {
+        return Mono.defer(() -> {
+            PolicyRuntime initial = runtimeState;
+            if (!enabled(initial.settings())) {
+                return Mono.just(disabledStatus(initial.settings(), retestRunning));
+            }
+            Mono<AccountPoolService.PoolAccountInventory> inventory = inventoryLoader == null
+                ? Mono.just(AccountPoolService.PoolAccountInventory.empty())
+                : Mono.defer(inventoryLoader);
+            return inventory.defaultIfEmpty(AccountPoolService.PoolAccountInventory.empty())
+                .map(value -> {
+                    PolicyRuntime current = runtimeState;
+                    return enabled(current.settings())
+                        ? status(current, retestRunning, value)
+                        : disabledStatus(current.settings(), retestRunning);
+                });
+        });
+    }
+
+    public Mono<AccountDtos.AccountPoolStatusResponse> status(
+        boolean retestRunning,
+        AccountPoolService.PoolAccountInventory inventory
+    ) {
+        return Mono.fromSupplier(() -> {
+            PolicyRuntime current = runtimeState;
+            return enabled(current.settings())
+                ? status(current, retestRunning, inventory)
+                : disabledStatus(current.settings(), retestRunning);
+        });
+    }
+
+    public synchronized void replaceSettings(AccountDtos.PoolPolicySettings settings) {
+        if (settings == null) {
+            return;
+        }
+        settingsRefreshGeneration++;
+        applySettings(settings);
+    }
+
+    private PolicyRuntime applySettings(AccountDtos.PoolPolicySettings settings) {
+        PolicyRuntime previous = runtimeState;
+        boolean wasEnabled = enabled(previous.settings());
+        boolean isEnabled = enabled(settings);
+        UUID previousEpoch = previous.settings() == null ? null : previous.settings().circuitEpoch();
+        if (wasEnabled != isEnabled || !Objects.equals(previousEpoch, settings.circuitEpoch())) {
+            PolicyRuntime replacement = newRuntime(settings);
+            runtimeState = replacement;
+            return replacement;
+        }
+        PolicyRuntime replacement = new PolicyRuntime(
+            settings,
+            previous.circuitBreaker(),
+            previous.observedPools()
+        );
+        runtimeState = replacement;
+        return replacement;
+    }
+
+    public boolean isEnabled() {
+        return enabled(runtimeState.settings());
+    }
+
+    public UUID currentCircuitEpoch() {
+        AccountDtos.PoolPolicySettings settings = runtimeState.settings();
+        return enabled(settings) ? settings.circuitEpoch() : null;
+    }
+
+    public ModelPoolKey poolKey(AccountPoolRequestContext context) {
+        return poolKey(runtimeState, context);
+    }
+
+    public ModelPoolKey capturePoolKey(
+        String requestedModel,
+        String upstreamModel,
+        String providerHint,
+        UUID circuitEpoch
+    ) {
+        PolicyRuntime runtime = runtimeState;
+        if (!enabled(runtime.settings())
+            || circuitEpoch == null
+            || !Objects.equals(circuitEpoch, runtime.settings().circuitEpoch())) {
+            return null;
+        }
+        ModelPoolKey key = keyResolver.resolve(requestedModel, upstreamModel, providerHint);
+        return key;
+    }
+
+    public boolean isActive(AccountPoolRequestContext context) {
+        return matchesCurrentEpoch(runtimeState, context);
+    }
+
+    public String circuitKey(AccountPoolRequestContext context) {
+        PolicyRuntime runtime = runtimeState;
+        return matchesCurrentEpoch(runtime, context) ? poolKey(runtime, context).key() : null;
+    }
+
+    private ModelPoolKey poolKey(PolicyRuntime runtime, AccountPoolRequestContext context) {
+        ModelPoolKey key = context != null && context.modelPoolKey() != null
+            ? context.modelPoolKey()
+            : keyResolver.resolve(
+            context == null ? null : context.requestedModel(),
+            context == null ? null : context.upstreamModel(),
+            context == null ? null : context.providerHint()
+        );
+        return key;
+    }
+
+    public String affinityKey(AccountPoolRequestContext context, String sessionHint) {
+        PolicyRuntime runtime = runtimeState;
+        if (!matchesCurrentEpoch(runtime, context) || sessionHint == null || sessionHint.isBlank()) {
+            return sessionHint;
+        }
+        return poolKey(runtime, context).key() + ':' + sessionHint;
     }
 
     public List<ProxyAccountEntity> applyTierPolicy(List<ProxyAccountEntity> accounts) {
+        return applyTierPolicy(accounts, null);
+    }
+
+    public List<ProxyAccountEntity> applyTierPolicy(
+        List<ProxyAccountEntity> accounts,
+        AccountPoolRequestContext context
+    ) {
         if (accounts == null || accounts.isEmpty()) {
             return List.of();
         }
-        if (!Boolean.TRUE.equals(cachedSettings.enabled())) {
+        PolicyRuntime runtime = runtimeState;
+        AccountDtos.PoolPolicySettings settings = runtime.settings();
+        if (!matchesCurrentEpoch(runtime, context)) {
             return accounts;
         }
-        String preferredTier = primaryDisabled ? SECONDARY_TIER : PRIMARY_TIER;
+        ModelPoolKey key = poolKey(runtime, context);
+        String requestToken = context == null ? null : context.requestToken();
+        AccountPoolCircuitBreaker.Decision decision;
+        try {
+            decision = runtime.circuitBreaker().select(key, requestToken, settings);
+        } finally {
+            remember(runtime, key);
+        }
+        if (decision.activeTier() == AccountPoolCircuitBreaker.ActiveTier.ALL) {
+            return accounts;
+        }
+        String preferredTier = decision.activeTier() == AccountPoolCircuitBreaker.ActiveTier.SECONDARY
+            ? SECONDARY_TIER
+            : PRIMARY_TIER;
         List<ProxyAccountEntity> preferred = accounts.stream()
             .filter(account -> preferredTier.equals(normalizePoolTier(account.getPoolTier())))
             .toList();
-        if (primaryDisabled || !preferred.isEmpty()) {
+        if (!preferred.isEmpty()) {
             return preferred;
         }
-        return accounts;
+        if (decision.probe()) {
+            runtime.circuitBreaker().cancelProbe(key, requestToken);
+            return accounts.stream()
+                .filter(account -> SECONDARY_TIER.equals(normalizePoolTier(account.getPoolTier())))
+                .toList();
+        }
+        return decision.activeTier() == AccountPoolCircuitBreaker.ActiveTier.PRIMARY ? accounts : List.of();
+    }
+
+    public void cancelSelection(AccountPoolRequestContext context) {
+        PolicyRuntime runtime = runtimeState;
+        if (context == null || !matchesCurrentEpoch(runtime, context)) {
+            return;
+        }
+        runtime.circuitBreaker().cancelProbe(poolKey(runtime, context), context.requestToken());
+    }
+
+    public long recordSuccess(AccountPoolRequestContext context, ProxyAccountEntity account) {
+        PolicyRuntime runtime = runtimeState;
+        if (!matchesCurrentEpoch(runtime, context) || account == null) {
+            return 0;
+        }
+        ModelPoolKey key = poolKey(runtime, context);
+        try {
+            return runtime.circuitBreaker().recordSuccess(
+                key,
+                context.requestToken(),
+                account.getPoolTier(),
+                runtime.settings()
+            );
+        } finally {
+            remember(runtime, key);
+        }
+    }
+
+    public long recordFailure(AccountPoolRequestContext context, ProxyAccountEntity account) {
+        PolicyRuntime runtime = runtimeState;
+        if (!matchesCurrentEpoch(runtime, context) || account == null) {
+            return 0;
+        }
+        ModelPoolKey key = poolKey(runtime, context);
+        try {
+            return runtime.circuitBreaker().recordFailure(
+                key,
+                context.requestToken(),
+                account.getPoolTier(),
+                runtime.settings()
+            );
+        } finally {
+            remember(runtime, key);
+        }
+    }
+
+    public void acknowledgeOutcome(AccountPoolRequestContext context, long outcomeId) {
+        PolicyRuntime runtime = runtimeState;
+        if (outcomeId <= 0 || !matchesCurrentEpoch(runtime, context)) {
+            return;
+        }
+        runtime.circuitBreaker().acknowledge(poolKey(runtime, context), outcomeId);
+    }
+
+    public void markOutcomePersistenceFailed(AccountPoolRequestContext context, long outcomeId) {
+        PolicyRuntime runtime = runtimeState;
+        if (outcomeId <= 0 || !matchesCurrentEpoch(runtime, context)) {
+            return;
+        }
+        runtime.circuitBreaker().persistenceFailed(poolKey(runtime, context), outcomeId);
     }
 
     public int effectiveWeight(ProxyAccountEntity account) {
         int base = normalizeWeight(account == null ? null : account.getPoolWeight());
-        if (account == null || !Boolean.TRUE.equals(cachedSettings.autoWeightEnabled())) {
+        AccountDtos.PoolPolicySettings settings = runtimeState.settings();
+        if (account == null
+            || !Boolean.TRUE.equals(settings.enabled())
+            || !Boolean.TRUE.equals(settings.autoWeightEnabled())) {
             return base;
         }
         int errors = Math.max(0, account.getErrorCount() == null ? 0 : account.getErrorCount());
         double multiplier = 1.0 / (1.0 + errors);
-        if (account.getLastUsedAt() != null && account.getLastUsedAt().isAfter(Instant.now().minus(Duration.ofMinutes(5)))) {
+        if (account.getLastUsedAt() != null
+            && account.getLastUsedAt().isAfter(clock.instant().minus(Duration.ofMinutes(5)))) {
             multiplier *= errors > 0 ? 0.75 : 1.05;
         }
         return Math.max(1, (int) Math.round(base * multiplier));
     }
 
-    public void markRetestStarted() {
-        lastRetestAt = Instant.now();
+    public synchronized void invalidateAllCaches() {
+        settingsRefreshGeneration++;
     }
 
-    public void markRetestCompleted(double retestRecoveryRatePercent, long retestSamples) {
-        lastRetestAt = Instant.now();
-        lastRetestRecoveryRatePercent = roundPercent(retestRecoveryRatePercent);
-        lastRetestFailureRatePercent = roundPercent(Math.max(0.0, 100.0 - retestRecoveryRatePercent));
-        AccountDtos.PoolPolicySettings settings = cachedSettings;
-        if (retestSamples <= 0 || !Boolean.TRUE.equals(settings.enabled())) {
-            return;
+    private boolean matchesCurrentEpoch(PolicyRuntime runtime, AccountPoolRequestContext context) {
+        AccountDtos.PoolPolicySettings settings = runtime.settings();
+        if (!enabled(settings)) {
+            return false;
         }
-        if (primaryDisabled && retestRecoveryRatePercent >= settings.recoveryThresholdPercent()) {
-            primaryDisabled = false;
-            return;
-        }
-        if (!primaryDisabled && lastRetestFailureRatePercent >= settings.failoverThresholdPercent()) {
-            primaryDisabled = true;
-        }
+        return context == null || Objects.equals(context.circuitEpoch(), settings.circuitEpoch());
     }
 
-    public void invalidateAllCaches() {
-        cachedSettings = settingsService.defaultPoolPolicySettings();
-        primaryDisabled = false;
-        lastEvaluatedAt = null;
-        lastRetestAt = null;
-        lastRetestFailureRatePercent = 0.0;
-        lastRetestRecoveryRatePercent = 0.0;
-        primaryRequests = 0;
-        primaryFailures = 0;
-        primaryFailureRatePercent = 0.0;
-    }
-
-    private PoolEvaluation evaluate(AccountDtos.PoolPolicySettings settings, PoolMetrics metrics) {
-        lastEvaluatedAt = Instant.now();
-        primaryRequests = metrics.requests();
-        primaryFailures = metrics.failures();
-        primaryFailureRatePercent = metrics.failureRatePercent();
-
-        if (!Boolean.TRUE.equals(settings.enabled()) || metrics.requests() < settings.minSampleSize()) {
-            return new PoolEvaluation(settings, false, primaryDisabled, metrics);
-        }
-
-        boolean retestRecommended = false;
-        if (primaryDisabled) {
-            retestRecommended = retestDue(settings);
-        } else if (metrics.failureRatePercent() >= settings.failoverThresholdPercent()) {
-            primaryDisabled = true;
-            retestRecommended = true;
-        } else if (metrics.failureRatePercent() >= settings.retestThresholdPercent()) {
-            retestRecommended = true;
-        }
-        return new PoolEvaluation(settings, retestRecommended, primaryDisabled, metrics);
-    }
-
-    private boolean retestDue(AccountDtos.PoolPolicySettings settings) {
-        return lastRetestAt == null
-            || lastRetestAt.plus(Duration.ofMinutes(settings.retestIntervalMinutes())).isBefore(Instant.now());
-    }
-
-    private Mono<PoolMetrics> recentPrimaryMetrics(AccountDtos.PoolPolicySettings settings) {
-        Instant since = Instant.now().minus(Duration.ofMinutes(settings.windowMinutes()));
-        String sql = """
-            SELECT
-                COUNT(*) AS requests,
-                COUNT(*) FILTER (WHERE NOT l.success) AS failures
-            FROM request_logs l
-            INNER JOIN proxy_accounts a ON a.account_id = l.account_id
-            WHERE l.created_at >= :since
-              AND COALESCE(NULLIF(a.pool_tier, ''), 'primary') = 'primary'
-            """;
-        return databaseClient.sql(sql)
-            .bind("since", since)
-            .map((row, metadata) -> poolMetrics(row))
-            .one()
-            .defaultIfEmpty(new PoolMetrics(0, 0, 0.0));
-    }
-
-    private Flux<AccountDtos.AccountFailureRankingResponse> failureRanking(
-        Instant since,
-        AccountDtos.PoolPolicySettings settings
+    private AccountDtos.AccountPoolStatusResponse status(
+        PolicyRuntime runtime,
+        boolean retestRunning,
+        AccountPoolService.PoolAccountInventory inventory
     ) {
-        String sql = """
-            WITH account_metrics AS (
-                SELECT
-                    a.account_id,
-                    MAX(a.email) AS email,
-                    MAX(a.provider) AS provider,
-                    MAX(a.auth_method) AS auth_method,
-                    MAX(COALESCE(NULLIF(a.pool_tier, ''), 'primary')) AS pool_tier,
-                    COUNT(l.id) AS requests,
-                    COUNT(l.id) FILTER (WHERE NOT l.success) AS failures,
-                    COALESCE(MAX(a.error_count), 0) AS error_count,
-                    MAX(a.pool_weight) AS pool_weight,
-                    MAX(l.created_at) FILTER (WHERE NOT l.success) AS last_failure_at
-                FROM proxy_accounts a
-                LEFT JOIN request_logs l ON l.account_id = a.account_id AND l.created_at >= :since
-                GROUP BY a.account_id
-            )
-            SELECT *
-            FROM account_metrics
-            WHERE requests > 0 OR error_count > 0
-            ORDER BY
-                failures::numeric / NULLIF(requests, 0) DESC NULLS LAST,
-                failures DESC,
-                requests DESC
-            LIMIT 20
-            """;
-        return databaseClient.sql(sql)
-            .bind("since", since)
-            .map((row, metadata) -> failureRanking(row, settings))
-            .all();
-    }
+        AccountDtos.PoolPolicySettings settings = runtime.settings();
+        AccountPoolService.PoolAccountInventory safeInventory = inventory == null
+            ? new AccountPoolService.PoolAccountInventory(0, 0, List.of())
+            : inventory;
+        Instant now = clock.instant();
+        Instant windowStartedAt = effectiveWindowStart(settings, now);
+        List<AccountPoolCircuitBreaker.Snapshot> snapshots = circuitSnapshots(runtime);
+        Set<ModelPoolKey> pools = snapshots.stream()
+            .map(AccountPoolCircuitBreaker.Snapshot::key)
+            .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        Map<String, AccountCounts> accountCounts = accountCountsByProvider(pools, safeInventory.groups());
+        List<AccountDtos.ModelPoolCircuitStatusResponse> modelPools = snapshots.stream()
+            .map(snapshot -> modelPoolStatus(snapshot, accountCounts, windowStartedAt))
+            .toList();
 
-    private AccountDtos.AccountFailureRankingResponse failureRanking(Row row, AccountDtos.PoolPolicySettings settings) {
-        long requests = longValue(row, "requests");
-        long failures = longValue(row, "failures");
-        int weight = normalizeWeight(intValue(row, "pool_weight"));
-        int errors = intValue(row, "error_count");
-        double rate = requests <= 0 ? 0.0 : failures * 100.0 / requests;
-        return new AccountDtos.AccountFailureRankingResponse(
-            stringValue(row, "account_id"),
-            stringValue(row, "email"),
-            stringValue(row, "provider"),
-            stringValue(row, "auth_method"),
-            normalizePoolTier(stringValue(row, "pool_tier")),
-            requests,
-            failures,
-            roundPercent(rate),
-            errors,
-            weight,
-            Boolean.TRUE.equals(settings.autoWeightEnabled()) ? Math.max(1, (int) Math.round(weight / (1.0 + Math.max(0, errors)))) : weight,
-            instantValue(row, "last_failure_at")
+        long primaryRequests = modelPools.stream().mapToLong(AccountDtos.ModelPoolCircuitStatusResponse::primaryRequests).sum();
+        long primaryFailures = modelPools.stream().mapToLong(AccountDtos.ModelPoolCircuitStatusResponse::primaryFailures).sum();
+        double primaryFailureRate = primaryRequests <= 0
+            ? 0.0
+            : roundPercent(primaryFailures * 100.0 / primaryRequests);
+        boolean anyOpen = modelPools.stream().anyMatch(pool -> !"CLOSED".equals(pool.state()));
+        String activeTier = aggregateActiveTier(settings, modelPools);
+        Instant lastProbeAt = modelPools.stream()
+            .map(AccountDtos.ModelPoolCircuitStatusResponse::lastOutcomeAt)
+            .filter(value -> value != null)
+            .max(Instant::compareTo)
+            .orElse(null);
+        long halfOpenCompleted = modelPools.stream()
+            .mapToLong(AccountDtos.ModelPoolCircuitStatusResponse::halfOpenCompleted)
+            .sum();
+        long halfOpenSucceeded = modelPools.stream()
+            .mapToLong(AccountDtos.ModelPoolCircuitStatusResponse::halfOpenSucceeded)
+            .sum();
+        double recoveryRate = halfOpenCompleted <= 0
+            ? 0.0
+            : roundPercent(halfOpenSucceeded * 100.0 / halfOpenCompleted);
+
+        return new AccountDtos.AccountPoolStatusResponse(
+            settings.enabled(),
+            safeInventory.accountCount(),
+            safeInventory.availableAccountCount(),
+            activeTier,
+            anyOpen,
+            primaryFailureRate,
+            primaryRequests,
+            primaryFailures,
+            windowStartedAt,
+            now,
+            lastProbeAt,
+            roundPercent(Math.max(0.0, 100.0 - recoveryRate)),
+            recoveryRate,
+            retestRunning,
+            settings,
+            List.of(),
+            modelPools
         );
     }
 
-    private PoolMetrics poolMetrics(Row row) {
-        long requests = longValue(row, "requests");
-        long failures = longValue(row, "failures");
-        double rate = requests <= 0 ? 0.0 : failures * 100.0 / requests;
-        return new PoolMetrics(requests, failures, roundPercent(rate));
+    private AccountDtos.AccountPoolStatusResponse disabledStatus(
+        AccountDtos.PoolPolicySettings settings,
+        boolean retestRunning
+    ) {
+        return new AccountDtos.AccountPoolStatusResponse(
+            false,
+            0L,
+            0L,
+            "all",
+            false,
+            0.0,
+            0L,
+            0L,
+            null,
+            null,
+            null,
+            0.0,
+            0.0,
+            retestRunning,
+            settings,
+            List.of(),
+            List.of()
+        );
     }
 
-    private String activeTier() {
-        if (!Boolean.TRUE.equals(cachedSettings.enabled())) {
+    private AccountDtos.ModelPoolCircuitStatusResponse modelPoolStatus(
+        AccountPoolCircuitBreaker.Snapshot snapshot,
+        Map<String, AccountCounts> accountCounts,
+        Instant windowStartedAt
+    ) {
+        ModelPoolKey key = snapshot.key();
+        AccountCounts counts = accountCounts.getOrDefault(key.provider(), AccountCounts.EMPTY);
+        return new AccountDtos.ModelPoolCircuitStatusResponse(
+            key.key(),
+            key.providerLabel(),
+            key.familyLabel(),
+            keyResolver.representativeModel(key).orElse(null),
+            snapshot.state().name(),
+            snapshot.activeTier().name().toLowerCase(Locale.ROOT),
+            snapshot.primary().requests(),
+            snapshot.primary().failures(),
+            snapshot.primary().failureRatePercent(),
+            snapshot.secondary().requests(),
+            snapshot.secondary().failures(),
+            snapshot.secondary().failureRatePercent(),
+            counts.primary(),
+            counts.secondary(),
+            windowStartedAt,
+            snapshot.lastTransitionAt(),
+            snapshot.openedAt(),
+            snapshot.nextProbeAt(),
+            snapshot.lastOutcomeAt(),
+            snapshot.halfOpenInFlight(),
+            snapshot.halfOpenCompleted(),
+            snapshot.halfOpenSucceeded()
+        );
+    }
+
+    private Map<String, AccountCounts> accountCountsByProvider(
+        Collection<ModelPoolKey> pools,
+        Collection<AccountPoolService.PoolAccountGroup> groups
+    ) {
+        if (groups == null || groups.isEmpty()) {
+            return Map.of();
+        }
+        Set<String> providers = new LinkedHashSet<>();
+        pools.forEach(pool -> providers.add(pool.provider()));
+        Map<String, AccountCounts> counts = new HashMap<>();
+        for (AccountPoolService.PoolAccountGroup group : groups) {
+            if (group == null || group.accountCount() <= 0) {
+                continue;
+            }
+            ProxyAccountEntity account = new ProxyAccountEntity();
+            account.setProvider(group.provider());
+            account.setAuthMethod(group.authMethod());
+            account.setBaseUrl(group.baseUrl());
+            boolean secondary = SECONDARY_TIER.equals(normalizePoolTier(group.poolTier()));
+            int groupCount = safeAccountCount(group.accountCount());
+            for (String provider : providers) {
+                if (supportsPoolProvider(account, provider)) {
+                    counts.merge(provider, AccountCounts.of(secondary, groupCount), AccountCounts::plus);
+                }
+            }
+        }
+        return Map.copyOf(counts);
+    }
+
+    private int safeAccountCount(long count) {
+        return count >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) Math.max(0, count);
+    }
+
+    private boolean supportsPoolProvider(ProxyAccountEntity account, String provider) {
+        return switch (provider) {
+            case "deepseek" -> AccountPlatforms.isDeepSeek(account);
+            case "openai", "openai-compatible" -> AccountPlatforms.isOpenAi(account);
+            case "anthropic" -> AccountPlatforms.isAnthropicApiKey(account)
+                || AccountPlatforms.isKiroCompatible(account);
+            case "google", "kiro", "unknown" -> AccountPlatforms.isKiroCompatible(account);
+            default -> true;
+        };
+    }
+
+    private String aggregateActiveTier(
+        AccountDtos.PoolPolicySettings settings,
+        List<AccountDtos.ModelPoolCircuitStatusResponse> pools
+    ) {
+        if (!Boolean.TRUE.equals(settings.enabled())) {
             return "all";
         }
-        return primaryDisabled ? SECONDARY_TIER : PRIMARY_TIER;
+        Set<String> tiers = pools.stream()
+            .map(AccountDtos.ModelPoolCircuitStatusResponse::activeTier)
+            .collect(java.util.stream.Collectors.toSet());
+        return tiers.size() <= 1 ? tiers.stream().findFirst().orElse(PRIMARY_TIER) : "mixed";
+    }
+
+    private Flux<CircuitWindowMetrics> recentMetrics(Instant since, Instant until, UUID circuitEpoch) {
+        String sql = """
+            SELECT
+                circuit_key,
+                COUNT(*) FILTER (WHERE circuit_tier = 'primary') AS primary_requests,
+                COUNT(*) FILTER (WHERE circuit_tier = 'primary' AND NOT upstream_success) AS primary_failures,
+                COUNT(*) FILTER (WHERE circuit_tier = 'secondary') AS secondary_requests,
+                COUNT(*) FILTER (WHERE circuit_tier = 'secondary' AND NOT upstream_success) AS secondary_failures
+            FROM request_logs
+            WHERE circuit_epoch = :circuitEpoch
+              AND created_at >= :since
+              AND created_at < :until
+              AND circuit_key IS NOT NULL
+              AND upstream_success IS NOT NULL
+            GROUP BY circuit_key
+            """;
+        return databaseClient.sql(sql)
+            .bind("circuitEpoch", circuitEpoch)
+            .bind("since", since)
+            .bind("until", until)
+            .map((row, metadata) -> new CircuitWindowMetrics(
+                stringValue(row, "circuit_key"),
+                longValue(row, "primary_requests"),
+                longValue(row, "primary_failures"),
+                longValue(row, "secondary_requests"),
+                longValue(row, "secondary_failures")
+            ))
+            .all();
+    }
+
+    private Mono<PoolEvaluation> reconcile(
+        AccountDtos.PoolPolicySettings settings,
+        long expectedGeneration
+    ) {
+        if (!Boolean.TRUE.equals(settings.enabled())) {
+            return Mono.fromSupplier(() -> applyDisabledSettings(settings, expectedGeneration));
+        }
+        if (settings.circuitEpoch() == null) {
+            return Mono.error(new IllegalStateException("Enabled account pool policy is missing its circuit epoch"));
+        }
+        Instant evaluatedAt = clock.instant();
+        Instant since = effectiveWindowStart(settings, evaluatedAt);
+        PolicyRuntime queryRuntime = runtimeState;
+        AccountPoolCircuitBreaker queryCircuitBreaker = queryRuntime.circuitBreaker();
+        long acknowledgedThrough = sameEpoch(queryRuntime.settings(), settings)
+            ? queryCircuitBreaker.beginExternalEvaluation()
+            : 0L;
+        return recentMetrics(since, evaluatedAt, settings.circuitEpoch())
+            .collectList()
+            .map(metricsByPool -> applyMetrics(
+                settings,
+                metricsByPool,
+                evaluatedAt,
+                acknowledgedThrough,
+                queryCircuitBreaker,
+                expectedGeneration
+            ));
+    }
+
+    private synchronized PoolEvaluation applyDisabledSettings(
+        AccountDtos.PoolPolicySettings settings,
+        long expectedGeneration
+    ) {
+        if (settingsRefreshGeneration != expectedGeneration) {
+            return currentEvaluation();
+        }
+        applySettings(settings);
+        return new PoolEvaluation(settings, false, false, new PoolMetrics(0, 0, 0.0));
+    }
+
+    private synchronized PoolEvaluation applyMetrics(
+        AccountDtos.PoolPolicySettings settings,
+        List<CircuitWindowMetrics> metricsByPool,
+        Instant evaluatedAt,
+        long acknowledgedThrough,
+        AccountPoolCircuitBreaker queryCircuitBreaker,
+        long expectedGeneration
+    ) {
+        if (settingsRefreshGeneration != expectedGeneration) {
+            return currentEvaluation();
+        }
+        PolicyRuntime runtime = applySettings(settings);
+        long effectiveAcknowledgedThrough = runtime.circuitBreaker() == queryCircuitBreaker
+            ? acknowledgedThrough
+            : 0L;
+        Set<String> evaluatedKeys = new LinkedHashSet<>();
+        for (CircuitWindowMetrics metrics : metricsByPool) {
+            ModelPoolKey key = keyFor(runtime, metrics.circuitKey());
+            evaluatedKeys.add(key.key());
+            evaluateCircuit(runtime, key, metrics, effectiveAcknowledgedThrough, evaluatedAt, settings);
+        }
+        for (ModelPoolKey key : List.copyOf(runtime.observedPools().values())) {
+            if (evaluatedKeys.add(key.key())) {
+                evaluateCircuit(
+                    runtime,
+                    key,
+                    new CircuitWindowMetrics(key.key(), 0, 0, 0, 0),
+                    effectiveAcknowledgedThrough,
+                    evaluatedAt,
+                    settings
+                );
+            }
+        }
+        return evaluation(runtime);
+    }
+
+    private synchronized PoolEvaluation currentEvaluation() {
+        PolicyRuntime runtime = runtimeState;
+        AccountDtos.PoolPolicySettings settings = runtime.settings();
+        return enabled(settings)
+            ? evaluation(runtime)
+            : new PoolEvaluation(settings, false, false, new PoolMetrics(0, 0, 0.0));
+    }
+
+    private Instant effectiveWindowStart(AccountDtos.PoolPolicySettings settings, Instant evaluatedAt) {
+        Instant windowStart = evaluatedAt.minus(Duration.ofMinutes(settings.windowMinutes()));
+        Instant activationStartedAt = settings.activationStartedAt();
+        return activationStartedAt != null && activationStartedAt.isAfter(windowStart)
+            ? activationStartedAt
+            : windowStart;
+    }
+
+    private PoolEvaluation evaluation(PolicyRuntime runtime) {
+        AccountDtos.PoolPolicySettings settings = runtime.settings();
+        List<AccountPoolCircuitBreaker.Snapshot> snapshots = circuitSnapshots(runtime);
+        boolean anyOpen = snapshots.stream().anyMatch(snapshot -> snapshot.state() != AccountPoolCircuitBreaker.State.CLOSED);
+        long requests = snapshots.stream().mapToLong(snapshot -> snapshot.primary().requests()).sum();
+        long failures = snapshots.stream().mapToLong(snapshot -> snapshot.primary().failures()).sum();
+        double rate = requests <= 0 ? 0.0 : roundPercent(failures * 100.0 / requests);
+        return new PoolEvaluation(settings, false, anyOpen, new PoolMetrics(requests, failures, rate));
+    }
+
+    private List<AccountPoolCircuitBreaker.Snapshot> circuitSnapshots(PolicyRuntime runtime) {
+        List<AccountPoolCircuitBreaker.Snapshot> snapshots = runtime.circuitBreaker().snapshots(
+            runtime.settings(),
+            keyResolver.knownPools()
+        );
+        Set<String> retainedKeys = snapshots.stream()
+            .map(snapshot -> snapshot.key().key())
+            .collect(java.util.stream.Collectors.toSet());
+        runtime.observedPools().keySet().removeIf(key -> !retainedKeys.contains(key));
+        runtime.circuitBreaker().activeKeys().forEach(key -> remember(runtime, key));
+        return snapshots;
+    }
+
+    private ModelPoolKey keyFor(PolicyRuntime runtime, String serializedKey) {
+        if (serializedKey == null || serializedKey.isBlank()) {
+            return poolKey(runtime, null);
+        }
+        ModelPoolKey observed = runtime.observedPools().get(serializedKey);
+        if (observed != null) {
+            return observed;
+        }
+        for (ModelPoolKey known : keyResolver.knownPools()) {
+            if (serializedKey.equals(known.key())) {
+                return known;
+            }
+        }
+        String[] parts = serializedKey.split(":", 2);
+        if (parts.length == 2) {
+            try {
+                ModelPoolKey restored = "other".equals(parts[1])
+                    ? keyResolver.resolve(null, null, parts[0])
+                    : new ModelPoolKey(parts[0], parts[1], parts[0], parts[1]);
+                return restored;
+            } catch (IllegalArgumentException ignored) {
+                // Malformed historical dimensions are isolated in the bounded unknown pool.
+            }
+        }
+        return poolKey(runtime, null);
+    }
+
+    private PolicyRuntime newRuntime(AccountDtos.PoolPolicySettings settings) {
+        AccountPoolCircuitBreaker circuitBreaker = new AccountPoolCircuitBreaker(clock);
+        if (enabled(settings)) {
+            // Reserve generation zero before publication so post-switch outcomes cannot be
+            // mistaken for rows covered by an evaluation that started on the previous epoch.
+            circuitBreaker.beginExternalEvaluation();
+        }
+        ConcurrentHashMap<String, ModelPoolKey> observedPools = new ConcurrentHashMap<>();
+        return new PolicyRuntime(settings, circuitBreaker, observedPools);
+    }
+
+    private boolean sameEpoch(
+        AccountDtos.PoolPolicySettings left,
+        AccountDtos.PoolPolicySettings right
+    ) {
+        return enabled(left)
+            && enabled(right)
+            && Objects.equals(left.circuitEpoch(), right.circuitEpoch());
+    }
+
+    private void evaluateCircuit(
+        PolicyRuntime runtime,
+        ModelPoolKey key,
+        CircuitWindowMetrics metrics,
+        long acknowledgedThrough,
+        Instant evaluatedAt,
+        AccountDtos.PoolPolicySettings settings
+    ) {
+        try {
+            runtime.circuitBreaker().evaluate(
+                key,
+                metrics.primaryRequests(),
+                metrics.primaryFailures(),
+                metrics.secondaryRequests(),
+                metrics.secondaryFailures(),
+                acknowledgedThrough,
+                evaluatedAt,
+                settings
+            );
+        } finally {
+            remember(runtime, key);
+        }
+    }
+
+    private void remember(PolicyRuntime runtime, ModelPoolKey key) {
+        runtime.observedPools().putIfAbsent(key.key(), key);
+    }
+
+    private boolean enabled(AccountDtos.PoolPolicySettings settings) {
+        return settings != null
+            && Boolean.TRUE.equals(settings.enabled())
+            && settings.circuitEpoch() != null;
     }
 
     static String normalizePoolTier(String value) {
@@ -279,37 +802,9 @@ public class AccountPoolPolicyService {
         return 0L;
     }
 
-    private static int intValue(Row row, String column) {
-        Object value = row.get(column);
-        if (value instanceof Number number) {
-            return number.intValue();
-        }
-        if (value instanceof String text && !text.isBlank()) {
-            return Integer.parseInt(text);
-        }
-        return 0;
-    }
-
     private static String stringValue(Row row, String column) {
         Object value = row.get(column);
         return value == null ? null : value.toString();
-    }
-
-    private static Instant instantValue(Row row, String column) {
-        Object value = row.get(column);
-        if (value instanceof Instant instant) {
-            return instant;
-        }
-        if (value instanceof OffsetDateTime offsetDateTime) {
-            return offsetDateTime.toInstant();
-        }
-        if (value instanceof ZonedDateTime zonedDateTime) {
-            return zonedDateTime.toInstant();
-        }
-        if (value instanceof LocalDateTime localDateTime) {
-            return localDateTime.atZone(ZoneId.systemDefault()).toInstant();
-        }
-        return null;
     }
 
     public record PoolEvaluation(
@@ -321,5 +816,42 @@ public class AccountPoolPolicyService {
     }
 
     public record PoolMetrics(long requests, long failures, double failureRatePercent) {
+    }
+
+    private record CircuitWindowMetrics(
+        String circuitKey,
+        long primaryRequests,
+        long primaryFailures,
+        long secondaryRequests,
+        long secondaryFailures
+    ) {
+    }
+
+    private record AccountCounts(int primary, int secondary) {
+
+        private static final AccountCounts EMPTY = new AccountCounts(0, 0);
+
+        private static AccountCounts of(boolean secondary, int count) {
+            return secondary ? new AccountCounts(0, count) : new AccountCounts(count, 0);
+        }
+
+        private AccountCounts plus(AccountCounts other) {
+            return new AccountCounts(
+                saturatedCount(primary, other.primary),
+                saturatedCount(secondary, other.secondary)
+            );
+        }
+
+        private static int saturatedCount(int left, int right) {
+            long total = (long) left + right;
+            return total >= Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) total;
+        }
+    }
+
+    private record PolicyRuntime(
+        AccountDtos.PoolPolicySettings settings,
+        AccountPoolCircuitBreaker circuitBreaker,
+        ConcurrentHashMap<String, ModelPoolKey> observedPools
+    ) {
     }
 }

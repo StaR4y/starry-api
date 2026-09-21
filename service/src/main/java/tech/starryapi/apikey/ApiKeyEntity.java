@@ -18,6 +18,9 @@ public class ApiKeyEntity {
     private String keyPrefix;
     private Boolean enabled;
     private BigDecimal creditsLimit;
+    private String modelProvider;
+    private String billingSource = "BALANCE";
+    private BigDecimal reservedCredits = BigDecimal.ZERO;
     private BigDecimal billingMinimumCredits;
     private Long totalRequests;
     private BigDecimal totalCredits;
@@ -97,6 +100,19 @@ public class ApiKeyEntity {
 
     public void setCreditsLimit(BigDecimal creditsLimit) {
         this.creditsLimit = creditsLimit;
+    }
+
+    public String getModelProvider() {
+        return modelProvider;
+    }
+
+    public String getBillingSource() { return billingSource; }
+    public void setBillingSource(String billingSource) { this.billingSource = billingSource; }
+    public BigDecimal getReservedCredits() { return reservedCredits; }
+    public void setReservedCredits(BigDecimal reservedCredits) { this.reservedCredits = reservedCredits; }
+
+    public void setModelProvider(String modelProvider) {
+        this.modelProvider = modelProvider;
     }
 
     public BigDecimal getBillingMinimumCredits() {

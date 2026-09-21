@@ -1,5 +1,18 @@
 rootProject.name = 'starry-api'
 
-include 'api'
+include 'service-api'
+include 'plugin-api'
 include 'service'
 include 'webui'
+
+def optionalPlugins = [
+    'plugin-whale-widget': '../whale-whidget-plugin',
+    'plugin-dynamic-island': '../dynamic-island-plugin',
+]
+optionalPlugins.each { name, relative ->
+    def directory = file(relative)
+    if (directory.directory) {
+        include name
+        project(":${name}").projectDir = directory
+    }
+}

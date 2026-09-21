@@ -36,16 +36,15 @@ public final class PlatformModelCatalogSupport {
         Map<String, ModelSpec> modelsById = new LinkedHashMap<>();
         Stream.concat(
             baseModels.stream(),
-            aliasIds.stream().map(id -> {
-                String aliasId = canonicalOpenRouterId(id, profile);
-                return compatibleAlias(
+            aliasIds.stream().flatMap(id -> aliasIdsFor(id, profile).stream().map(aliasId ->
+                compatibleAlias(
                     aliasId,
-                    "OpenRouter " + localModelId(aliasId),
+                    localModelId(aliasId),
                     family.apply(aliasId),
                     targetModelId.apply(aliasId),
                     profile
-                );
-            })
+                )
+            ))
         ).forEach(model -> modelsById.putIfAbsent(model.id().toLowerCase(Locale.ROOT), model));
         return List.copyOf(modelsById.values());
     }
@@ -79,14 +78,84 @@ public final class PlatformModelCatalogSupport {
         };
     }
 
-    private static String canonicalOpenRouterId(String id, AliasProfile profile) {
+    public static String canonicalCatalogProvider(String provider) {
+        if (provider == null) {
+            return null;
+        }
+        String trimmed = provider.trim();
+        if (trimmed.isEmpty()) {
+            return trimmed;
+        }
+        if ("gemini".equalsIgnoreCase(trimmed)) {
+            return "Google";
+        }
+        return trimmed;
+    }
+
+    public static boolean sameCatalogProvider(String left, String right) {
+        String canonicalLeft = canonicalCatalogProvider(left);
+        String canonicalRight = canonicalCatalogProvider(right);
+        if (canonicalLeft == null || canonicalRight == null) {
+            return canonicalLeft == null && canonicalRight == null;
+        }
+        return canonicalLeft.equalsIgnoreCase(canonicalRight);
+    }
+
+    public static String googleFamily(String id) {
+        String local = localModelId(id);
+        String geminiVersion = numberedGeminiFamily(local);
+        if (geminiVersion != null) {
+            return geminiVersion;
+        }
+        return switch (local) {
+            case String model when model.startsWith("gemma-4") -> "Gemma 4";
+            case String model when model.startsWith("gemma-3") -> "Gemma 3";
+            case String model when model.startsWith("gemma-2") -> "Gemma 2";
+            case String model when model.startsWith("lyria-") -> "Lyria";
+            default -> "Google";
+        };
+    }
+
+    private static String numberedGeminiFamily(String local) {
+        if (local == null || !local.startsWith("gemini-")) {
+            return null;
+        }
+        String rest = local.substring("gemini-".length());
+        int end = 0;
+        while (end < rest.length()) {
+            char next = rest.charAt(end);
+            if (next != '.' && (next < '0' || next > '9')) {
+                break;
+            }
+            end++;
+        }
+        if (end == 0) {
+            return null;
+        }
+        String version = rest.substring(0, end);
+        if (version.endsWith(".")) {
+            version = version.substring(0, version.length() - 1);
+        }
+        return version.isEmpty() ? null : "Gemini " + version;
+    }
+
+    private static List<String> aliasIdsFor(String id, AliasProfile profile) {
+        String local = localModelId(id);
+        String prefixed = canonicalProviderId(id, profile);
+        if (prefixed == null || prefixed.isBlank() || prefixed.equals(local)) {
+            return List.of(local);
+        }
+        return List.of(local, prefixed);
+    }
+
+    private static String canonicalProviderId(String id, AliasProfile profile) {
         if (id == null || id.isBlank() || id.contains("/")) {
             return id;
         }
-        return openRouterPrefix(profile.provider()) + "/" + id;
+        return providerPrefix(profile.provider()) + "/" + id;
     }
 
-    private static String openRouterPrefix(String provider) {
+    private static String providerPrefix(String provider) {
         String normalized = provider == null ? "" : provider.trim().toLowerCase(Locale.ROOT);
         return switch (normalized) {
             case "gemini", "google" -> "google";

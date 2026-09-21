@@ -6,8 +6,9 @@
    */
   import { computed, onMounted, reactive, ref } from 'vue';
   import { ElMessage } from 'element-plus';
-  import { Refresh, Check, Setting, Connection } from '@element-plus/icons-vue';
+  import { Refresh, Check, Setting, Connection, CreditCard } from '@element-plus/icons-vue';
   import PageSection from '@/components/PageSection.vue';
+  import MetricsPanel, { type MetricPanelItem } from '@/components/MetricsPanel.vue';
   import { adminPaymentApi } from '@/api';
   import type {
     InviteRebateRecord,
@@ -40,7 +41,7 @@
     maxPendingOrders: 3,
     enabledTypes: ['alipay', 'wxpay'],
     balanceRechargeMultiplier: 1,
-    apiBillingMultiplier: 0.0000166666666667,
+    apiBillingMultiplier: 1,
     rechargeFeeRate: 0,
     productNamePrefix: 'Starry API',
     productNameSuffix: '余额充值',
@@ -109,6 +110,25 @@
     total: rebates.value.reduce((sum, record) => sum + record.rebateAmount, 0),
   }));
 
+  const orderMetrics = computed<MetricPanelItem[]>(() => [
+    {
+      label: '已入账订单',
+      value: orderStats.value.completed,
+      unit: '笔',
+      tone: 'success',
+      valueTone: 'success',
+    },
+    {
+      label: '待处理订单',
+      value: orderStats.value.pending,
+      unit: '笔',
+      tone: 'warning',
+      valueTone: 'warning',
+    },
+    { label: '实际收入', value: orderStats.value.actualIncome, unit: '元', tone: 'primary' },
+    { label: '发放余额', value: orderStats.value.creditedAmount, unit: '元', tone: 'accent' },
+  ]);
+
   function applySettings(settings: PaymentSettings) {
     form.enabled = settings.enabled;
     form.minAmount = settings.minAmount;
@@ -118,7 +138,7 @@
     form.maxPendingOrders = settings.maxPendingOrders;
     form.enabledTypes = settings.enabledTypes.length ? settings.enabledTypes : ['alipay', 'wxpay'];
     form.balanceRechargeMultiplier = settings.balanceRechargeMultiplier;
-    form.apiBillingMultiplier = settings.apiBillingMultiplier ?? 0.0000166666666667;
+    form.apiBillingMultiplier = settings.apiBillingMultiplier ?? 1;
     form.rechargeFeeRate = settings.rechargeFeeRate;
     form.productNamePrefix = settings.productNamePrefix ?? '';
     form.productNameSuffix = settings.productNameSuffix ?? '';
@@ -162,7 +182,7 @@
       return;
     }
     if (form.apiBillingMultiplier <= 0) {
-      ElMessage.warning('API计费倍率必须大于 0');
+      ElMessage.warning('模型计费倍率必须大于 0');
       return;
     }
     if (form.inviteRebateRate < 0.1 || form.inviteRebateRate > 0.2) {
@@ -270,62 +290,16 @@
 </script>
 
 <template>
-  <PageSection title="支付设置" subtitle="配置 EasyPay 在线充值，并查看近期充值订单">
+  <PageSection title="支付设置" subtitle="业务配置" :icon="CreditCard">
     <template #actions>
       <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
       <el-button type="primary" :loading="submitting" @click="submit">保存设置</el-button>
     </template>
+    <template #summary>
+      <MetricsPanel :items="orderMetrics" />
+    </template>
 
     <div v-loading="loading" class="payment-admin">
-      <!-- 统计卡片 -->
-      <!-- 统计栏 -->
-      <div class="metrics-panel glass-panel">
-        <div class="metric-item">
-          <div class="metric-item__header">
-            <span class="metric-dot dot-success" />
-            <span class="metric-label">已入账订单</span>
-          </div>
-          <div class="metric-value text-success">
-            {{ formatNumber(orderStats.completed) }}<span class="metric-value__unit"> 笔</span>
-          </div>
-        </div>
-
-        <div class="metric-divider" />
-
-        <div class="metric-item">
-          <div class="metric-item__header">
-            <span class="metric-dot dot-warning" />
-            <span class="metric-label">待处理订单</span>
-          </div>
-          <div class="metric-value text-warning">
-            {{ formatNumber(orderStats.pending) }}<span class="metric-value__unit"> 笔</span>
-          </div>
-        </div>
-
-        <div class="metric-divider" />
-
-        <div class="metric-item">
-          <div class="metric-item__header">
-            <span class="metric-dot dot-primary" />
-            <span class="metric-label">实际收入</span>
-          </div>
-          <div class="metric-value">
-            {{ formatNumber(orderStats.actualIncome) }}<span class="metric-value__unit"> 元</span>
-          </div>
-        </div>
-
-        <div class="metric-divider" />
-
-        <div class="metric-item">
-          <div class="metric-item__header">
-            <span class="metric-dot dot-accent" />
-            <span class="metric-label">发放余额</span>
-          </div>
-          <div class="metric-value">
-            {{ formatNumber(orderStats.creditedAmount) }}<span class="metric-value__unit"> 元</span>
-          </div>
-        </div>
-      </div>
 
       <!-- 配置区域 -->
       <section class="payment-admin__grid">
@@ -467,17 +441,17 @@
                   style="width: 100%"
                 />
               </el-form-item>
-              <el-form-item label="API计费倍率 (每 token 扣多少余额)">
+              <el-form-item label="模型官方价格计费倍率">
                 <el-input-number
                   v-model="form.apiBillingMultiplier"
-                  :min="0.0000000000000001"
-                  :precision="16"
-                  :step="0.000000000001"
+                  :min="0.0001"
+                  :precision="4"
+                  :step="0.1"
                   controls-position="right"
                   style="width: 100%"
                 />
                 <p class="field-hint text-muted">
-                  默认 0.0000166666666667，即 100 余额约可用 600 万 token。
+                  1.0 按模型官方美元成本计费；2.0 为官方成本的 2 倍。
                 </p>
               </el-form-item>
               <el-form-item label="充值手续费率 (例如 0.006)">
@@ -647,7 +621,9 @@
           </el-table-column>
           <el-table-column label="返利余额" width="120" align="right">
             <template #default="{ row }">
-              <span class="amount-val amount-val--credited">+{{ formatNumber(row.rebateAmount) }}</span>
+              <span class="amount-val amount-val--credited">
+                +{{ formatNumber(row.rebateAmount) }}
+              </span>
             </template>
           </el-table-column>
           <el-table-column label="第几笔" width="90" align="center">
@@ -753,17 +729,14 @@
 
     &__panel,
     &__orders {
-      border: 1px solid var(--kp-divider);
-      background: rgba(255, 255, 255, 0.45);
-      backdrop-filter: blur(var(--kp-blur)) saturate(160%);
-      -webkit-backdrop-filter: blur(var(--kp-blur)) saturate(160%);
-      border-radius: var(--kp-radius);
-      box-shadow: var(--kp-shadow);
+      border: 1px solid var(--el-border-color);
+      background: var(--kp-surface-strong);
+      border-radius: 8px;
       padding: 24px;
-      transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
 
       &:hover {
-        box-shadow: var(--kp-shadow-lg);
+        box-shadow: 0 8px 22px rgba(22, 35, 52, 0.06);
         border-color: rgba(91, 141, 239, 0.25);
       }
     }
@@ -845,101 +818,6 @@
     margin: 6px 0 0;
     font-size: 12px;
     line-height: 1.4;
-  }
-
-  /* Unified Metrics Panel */
-  .metrics-panel {
-    display: flex;
-    align-items: center;
-    padding: 20px 28px;
-    margin-bottom: 24px;
-    width: 100%;
-    border: 1px solid var(--kp-divider);
-    background: rgba(255, 255, 255, 0.45);
-    backdrop-filter: blur(var(--kp-blur)) saturate(160%);
-    -webkit-backdrop-filter: blur(var(--kp-blur)) saturate(160%);
-    border-radius: var(--kp-radius);
-    box-shadow: var(--kp-shadow);
-    transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
-
-    &:hover {
-      box-shadow: var(--kp-shadow-lg);
-      border-color: rgba(91, 141, 239, 0.25);
-    }
-
-    .metric-item {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      min-width: 0;
-
-      &__header {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-      }
-
-      .metric-dot {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        display: inline-block;
-
-        &.dot-success {
-          background-color: var(--kp-success);
-          box-shadow: 0 0 6px rgba(54, 192, 138, 0.6);
-        }
-        &.dot-warning {
-          background-color: var(--kp-warning);
-          box-shadow: 0 0 6px rgba(240, 168, 77, 0.6);
-        }
-        &.dot-primary {
-          background-color: var(--kp-primary);
-          box-shadow: 0 0 6px rgba(91, 141, 239, 0.6);
-        }
-        &.dot-accent {
-          background-color: var(--kp-accent);
-          box-shadow: 0 0 6px rgba(179, 135, 255, 0.6);
-        }
-      }
-
-      .metric-label {
-        font-size: 12.5px;
-        font-weight: 600;
-        color: var(--kp-text-secondary);
-      }
-
-      .metric-value {
-        font-size: 26px;
-        font-weight: 800;
-        color: var(--kp-text);
-        line-height: 1.15;
-        font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Consolas, monospace;
-
-        &.text-success {
-          color: var(--kp-success);
-        }
-        &.text-warning {
-          color: var(--kp-warning);
-        }
-
-        &__unit {
-          font-size: 13px;
-          font-weight: 500;
-          color: var(--kp-text-muted);
-        }
-      }
-    }
-
-    .metric-divider {
-      width: 1px;
-      height: 40px;
-      background-color: var(--kp-divider);
-      margin: 0 28px;
-      align-self: center;
-      flex-shrink: 0;
-    }
   }
 
   /* 支付方式定制卡片选择器 */
@@ -1077,7 +955,7 @@
       font-weight: 500;
     }
     :deep(.el-radio-button__original-radio:checked + .el-radio-button__inner) {
-      background: linear-gradient(135deg, var(--kp-primary), var(--kp-accent)) !important;
+      background: var(--kp-brand-gradient) !important;
       color: #fff !important;
       border-color: transparent !important;
       box-shadow: var(--kp-shadow) !important;
@@ -1217,31 +1095,6 @@
     .payment-admin {
       &__grid {
         grid-template-columns: 1fr;
-      }
-    }
-  }
-
-  @media (max-width: 1024px) {
-    .metrics-panel {
-      padding: 16px 20px;
-
-      .metric-divider {
-        margin: 0 20px;
-      }
-    }
-  }
-
-  @media (max-width: 768px) {
-    .metrics-panel {
-      flex-direction: column;
-      align-items: stretch;
-      gap: 16px;
-      padding: 20px;
-
-      .metric-divider {
-        width: 100%;
-        height: 1px;
-        margin: 4px 0;
       }
     }
   }

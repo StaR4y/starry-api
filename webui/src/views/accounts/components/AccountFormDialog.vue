@@ -6,10 +6,25 @@
    * 高级与路由）、表单校验与提交逻辑；提交成功后通知父组件刷新列表。
    */
   import { computed, reactive, ref, watch } from 'vue';
+  import { useRouter } from 'vue-router';
   import { ElMessage, type FormInstance, type FormRules } from 'element-plus';
-  import { accountsApi } from '@/api';
-  import type { Account, CreateAccountRequest } from '@/types/api';
-  import { normalized, normalizedPoolTier } from '../utils';
+  import { accountsApi, modelsApi } from '@/api';
+  import type {
+    Account,
+    AccountAllocationPolicy,
+    CreateAccountRequest,
+    UpdateAccountAllocationPolicyRequest,
+  } from '@/types/api';
+  import ChatGptOAuthFlow from './ChatGptOAuthFlow.vue';
+  import ProviderBadge from './ProviderBadge.vue';
+  import {
+    customOpenAiCompatibleVendors,
+    isCustomOpenAiCompatibleProvider,
+    isLegacyOpenAiCompatibleProvider,
+    normalized,
+    normalizedPoolTier,
+    type CompatibleVendorOption,
+  } from '../utils';
 
   const props = defineProps<{
     visible: boolean;
@@ -31,10 +46,23 @@
   const ANTHROPIC_PROVIDER = 'Anthropic';
   const DEEPSEEK_PROVIDER = 'DeepSeek';
   const DEEPSEEK_DEFAULT_BASE_URL = 'https://api.deepseek.com/v1';
+  const router = useRouter();
 
   const formRef = ref<FormInstance>();
+  const protocol = ref('BuilderID');
+  const compatibleVendors = ref<CompatibleVendorOption[]>([]);
+  const vendorsLoading = ref(false);
   const formSubmitting = ref(false);
+  const allocationPolicyLoading = ref(false);
+  const allocationPolicy = ref<AccountAllocationPolicy | null>(null);
   const activeFormTab = ref('basic');
+  const createMethod = ref<'credentials' | 'chatgpt'>('credentials');
+  let allocationPolicyRequest = 0;
+
+  const createMethodOptions = [
+    { label: '手动凭证', value: 'credentials' },
+    { label: 'ChatGPT 浏览器授权', value: 'chatgpt' },
+  ];
 
   // 与后端 DTO 字段一致；可选字段使用空字符串占位，提交时再清洗
   const form = reactive({
@@ -57,9 +85,40 @@
     poolWeight: 100,
     quotaLimit: undefined as number | undefined,
     enabled: true,
+    catalogVendor: '',
   });
 
-  const isOpenAiCompatibleForm = computed(() => isOpenAiCompatibleProvider(form.provider));
+  const policyForm = reactive({
+    allocationPriority: 100,
+    safeConcurrency: 4,
+    safeRpm: 60,
+    burstCapacity: 4,
+    maxSessions: 0,
+    sessionIdleSeconds: 600,
+    maxInflightTokens: 1_000_000,
+  });
+
+  const isOpenAiCompatibleForm = computed(
+    () =>
+      protocol.value === OPENAI_COMPATIBLE_PROVIDER ||
+      isLegacyOpenAiCompatibleProvider(form.provider) ||
+      isCustomOpenAiCompatibleProvider(form.provider, form.authMethod),
+  );
+  const selectedVendor = computed(
+    () => compatibleVendors.value.find((vendor) => vendor.name === form.catalogVendor) ?? null,
+  );
+  const vendorSelectOptions = computed(() => {
+    if (
+      form.catalogVendor &&
+      !compatibleVendors.value.some((vendor) => vendor.name === form.catalogVendor)
+    ) {
+      return [
+        { name: form.catalogVendor, icon: null, color: null, modelCount: 0 },
+        ...compatibleVendors.value,
+      ];
+    }
+    return compatibleVendors.value;
+  });
   const isOpenAiApiKeyForm = computed(
     () => isOpenAiCompatibleForm.value || normalized(form.provider) === 'openai',
   );
@@ -68,6 +127,17 @@
   const isApiKeyForm = computed(
     () => isOpenAiApiKeyForm.value || isAnthropicApiKeyForm.value || isDeepSeekApiKeyForm.value,
   );
+  const isChatGptCreate = computed(
+    () => props.mode === 'create' && createMethod.value === 'chatgpt',
+  );
+  const usesSessionLimit = computed(() => {
+    const provider = normalized(form.provider);
+    return !(
+      isOpenAiApiKeyForm.value ||
+      isDeepSeekApiKeyForm.value ||
+      provider === 'codex'
+    );
+  });
   const accessTokenLabel = computed(() => {
     const suffix = props.mode === 'edit' ? '（留空则不修改）' : '';
     return isApiKeyForm.value ? `API Key${suffix}` : `Access Token${suffix}`;
@@ -125,9 +195,25 @@
         trigger: 'blur',
       },
     ],
+    catalogVendor: [
+      {
+        validator: (_rule, _value, callback) => {
+          if (isOpenAiCompatibleForm.value && !form.catalogVendor.trim()) {
+            callback(new Error('请选择支持 OpenAI 兼容协议的厂商分类'));
+            return;
+          }
+          callback();
+        },
+        trigger: 'change',
+      },
+    ],
   };
 
   function resetForm() {
+    allocationPolicyRequest += 1;
+    allocationPolicy.value = null;
+    allocationPolicyLoading.value = false;
+    createMethod.value = 'credentials';
     Object.assign(form, {
       accountId: '',
       email: '',
@@ -148,7 +234,45 @@
       poolWeight: 100,
       quotaLimit: undefined,
       enabled: true,
+      catalogVendor: '',
     });
+    protocol.value = 'BuilderID';
+    Object.assign(policyForm, {
+      allocationPriority: 100,
+      safeConcurrency: 4,
+      safeRpm: 60,
+      burstCapacity: 4,
+      maxSessions: 0,
+      sessionIdleSeconds: 600,
+      maxInflightTokens: 1_000_000,
+    });
+  }
+
+  async function loadAllocationPolicy(accountId: string) {
+    const request = ++allocationPolicyRequest;
+    allocationPolicyLoading.value = true;
+    try {
+      const policy = await accountsApi.allocationPolicy(accountId);
+      if (request !== allocationPolicyRequest) return;
+      allocationPolicy.value = policy;
+      Object.assign(policyForm, {
+        allocationPriority: policy.allocationPriority,
+        safeConcurrency: policy.safeConcurrency,
+        safeRpm: policy.safeRpm,
+        burstCapacity: policy.burstCapacity,
+        maxSessions: policy.maxSessions,
+        sessionIdleSeconds: policy.sessionIdleSeconds,
+        maxInflightTokens: policy.maxInflightTokens,
+      });
+    } catch {
+      if (request === allocationPolicyRequest) {
+        ElMessage.error('账号分配策略加载失败');
+      }
+    } finally {
+      if (request === allocationPolicyRequest) {
+        allocationPolicyLoading.value = false;
+      }
+    }
   }
 
   /** 把空串字段从 payload 中剔除，避免覆盖后端为空 */
@@ -163,7 +287,7 @@
     { label: 'OpenAI 官方 API Key', value: 'OpenAI' },
     { label: '第三方 OpenAI 兼容 API Key', value: OPENAI_COMPATIBLE_PROVIDER },
     { label: 'Anthropic / Claude API Key', value: ANTHROPIC_PROVIDER },
-    { label: 'DeepSeek 官方 API Key', value: DEEPSEEK_PROVIDER },
+    { label: 'DeepSeek API Key', value: DEEPSEEK_PROVIDER },
   ];
 
   const authMethodOptions = [
@@ -174,11 +298,6 @@
   ];
 
   // normalized / normalizedPoolTier 已收敛至 ../utils
-
-  function isOpenAiCompatibleProvider(provider: string | null | undefined) {
-    const value = normalized(provider);
-    return value === 'openai-compatible' || value === 'openaicompatibility';
-  }
 
   function isAnthropicProvider(provider: string | null | undefined) {
     const value = normalized(provider);
@@ -192,7 +311,11 @@
   function applyProviderDefaults(provider: string | null | undefined) {
     const value = normalized(provider);
     const auth = normalized(form.authMethod);
-    if (isOpenAiCompatibleProvider(provider)) {
+    if (
+      protocol.value === OPENAI_COMPATIBLE_PROVIDER ||
+      isLegacyOpenAiCompatibleProvider(provider) ||
+      isCustomOpenAiCompatibleProvider(provider, form.authMethod)
+    ) {
       form.authMethod = 'api-key';
       form.region = '';
       return;
@@ -245,7 +368,65 @@
     applyProviderDefaults(provider);
   }
 
+  function handleProtocolChange(value: string) {
+    protocol.value = value;
+    if (value === OPENAI_COMPATIBLE_PROVIDER) {
+      form.authMethod = 'api-key';
+      form.region = '';
+      form.provider = form.catalogVendor || OPENAI_COMPATIBLE_PROVIDER;
+      if (form.baseUrl.trim() === DEEPSEEK_DEFAULT_BASE_URL) form.baseUrl = '';
+      return;
+    }
+    form.catalogVendor = '';
+    form.provider = value;
+    handleProviderChange(value);
+  }
+
+  function handleVendorChange(vendor: string) {
+    form.catalogVendor = vendor;
+    form.provider = vendor;
+    form.authMethod = 'api-key';
+  }
+
+  async function loadCompatibleVendors() {
+    vendorsLoading.value = true;
+    try {
+      compatibleVendors.value = customOpenAiCompatibleVendors(await modelsApi.list());
+    } catch {
+      compatibleVendors.value = [];
+    } finally {
+      vendorsLoading.value = false;
+    }
+  }
+
+  function goAddVendorModel() {
+    visibleValue.value = false;
+    void router.push({ name: 'model-create' });
+  }
+
+  function protocolFromAccount(row: Account) {
+    if (
+      isCustomOpenAiCompatibleProvider(row.provider, row.authMethod) ||
+      isLegacyOpenAiCompatibleProvider(row.provider)
+    ) {
+      return OPENAI_COMPATIBLE_PROVIDER;
+    }
+    const provider = normalized(row.provider);
+    const authMethod = normalized(row.authMethod);
+    if (provider === 'openai' || provider === 'codex' || authMethod === 'codex') return 'OpenAI';
+    if (provider === 'anthropic' || provider === 'claude') return ANTHROPIC_PROVIDER;
+    if (provider === 'deepseek') return DEEPSEEK_PROVIDER;
+    return 'BuilderID';
+  }
+
   watch(() => form.provider, applyProviderDefaults);
+  watch(
+    () => form.catalogVendor,
+    (vendor) => {
+      if (!isOpenAiCompatibleForm.value) return;
+      form.provider = vendor || OPENAI_COMPATIBLE_PROVIDER;
+    },
+  );
 
   // 对话框每次打开时按 mode / account 初始化表单，与原 openCreate / openEdit 行为一致
   watch(
@@ -254,6 +435,7 @@
       if (!visible) return;
       resetForm();
       activeFormTab.value = 'basic';
+      void loadCompatibleVendors();
       if (props.mode === 'edit' && props.account) {
         const row = props.account;
         Object.assign(form, {
@@ -272,7 +454,17 @@
           poolWeight: row.poolWeight ?? 100,
           quotaLimit: row.quotaLimit ?? undefined,
           enabled: row.enabled,
+          catalogVendor: '',
         });
+        protocol.value = protocolFromAccount(row);
+        if (protocol.value === OPENAI_COMPATIBLE_PROVIDER) {
+          form.catalogVendor = isLegacyOpenAiCompatibleProvider(row.provider)
+            ? ''
+            : (row.provider ?? '');
+        }
+        void loadAllocationPolicy(row.accountId);
+      } else {
+        protocol.value = 'BuilderID';
       }
     },
   );
@@ -284,12 +476,25 @@
 
     formSubmitting.value = true;
     try {
+      if (isOpenAiCompatibleForm.value) {
+        form.provider = form.catalogVendor.trim();
+        form.authMethod = 'api-key';
+      }
       if (props.mode === 'create') {
-        const payload = compact({ ...form }) as CreateAccountRequest;
+        const { catalogVendor: _catalogVendor, ...createFields } = form;
+        const payload = compact({ ...createFields }) as CreateAccountRequest;
         await accountsApi.create(payload);
         ElMessage.success('账号已创建');
       } else if (props.account) {
-        const { accessToken, refreshToken, clientId, clientSecret, idToken, ...rest } = form;
+        const {
+          accessToken,
+          refreshToken,
+          clientId,
+          clientSecret,
+          idToken,
+          catalogVendor: _catalogVendor,
+          ...rest
+        } = form;
         // 编辑模式下 access/refresh token 仅在有值时提交
         const payload = compact({
           ...rest,
@@ -300,6 +505,16 @@
           idToken: idToken || undefined,
         });
         await accountsApi.update(props.account.accountId, payload);
+        if (allocationPolicy.value) {
+          const policyPayload: UpdateAccountAllocationPolicyRequest = {
+            ...policyForm,
+            maxSessions: usesSessionLimit.value ? policyForm.maxSessions : 0,
+          };
+          allocationPolicy.value = await accountsApi.updateAllocationPolicy(
+            props.account.accountId,
+            policyPayload,
+          );
+        }
         ElMessage.success('账号已更新');
       }
       visibleValue.value = false;
@@ -308,23 +523,64 @@
       formSubmitting.value = false;
     }
   }
+
+  function handleOAuthSaved() {
+    emit('saved');
+  }
+
+  function lifecycleLabel(state: string | null | undefined) {
+    const labels: Record<string, string> = {
+      WARMING: '预热中',
+      HEALTHY: '健康',
+      DEGRADED: '性能下降',
+      COOLDOWN: '冷却中',
+      QUARANTINED: '已隔离',
+      DISABLED: '已停用',
+    };
+    return labels[state ?? ''] ?? state ?? '-';
+  }
+
+  function lifecycleTagType(state: string | null | undefined) {
+    if (state === 'HEALTHY') return 'success';
+    if (state === 'WARMING') return 'primary';
+    if (state === 'DEGRADED' || state === 'COOLDOWN') return 'warning';
+    return 'danger';
+  }
+
+  function compactNumber(value: number | null | undefined) {
+    return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(
+      value ?? 0,
+    );
+  }
 </script>
 
 <template>
   <el-dialog
     v-model="visibleValue"
+    class="account-form-dialog"
     :title="mode === 'create' ? '新建账号' : '编辑账号'"
-    width="min(720px, calc(100vw - 32px))"
+    width="min(780px, calc(100vw - 32px))"
     destroy-on-close
   >
-    <el-form ref="formRef" :model="form" :rules="rules" label-position="top">
+    <div v-if="mode === 'create'" class="create-method-switch">
+      <span class="create-method-switch__label">添加方式</span>
+      <el-segmented v-model="createMethod" :options="createMethodOptions" />
+    </div>
+
+    <ChatGptOAuthFlow
+      v-if="isChatGptCreate"
+      :active="visible && isChatGptCreate"
+      @saved="handleOAuthSaved"
+    />
+
+    <el-form v-else ref="formRef" :model="form" :rules="rules" label-position="top">
       <el-alert
         v-if="isOpenAiCompatibleForm"
         class="account-form-alert"
         type="info"
         show-icon
         :closable="false"
-        title="第三方 API Key 账号会按 OpenAI 兼容协议调用 Base URL；填写站点根地址时会自动使用 /v1。模型映射目标可写成 openai-compatible/真实模型ID，例如 openai-compatible/deepseek-chat。"
+        title="请先选择你在模型管理中自行添加、且使用 OpenAI 兼容协议的厂商。账号类型会显示该厂商当时配置的图标、名称和配色，测试时只能选择该厂商已配置的模型 ID。填写站点根地址时会自动使用 /v1。"
       />
       <el-alert
         v-else-if="isDeepSeekApiKeyForm"
@@ -360,13 +616,12 @@
               </el-col>
 
               <el-col :span="12" :xs="24">
-                <el-form-item label="Provider">
+                <el-form-item label="账号协议">
                   <el-select
-                    v-model="form.provider"
-                    allow-create
+                    v-model="protocol"
                     filterable
                     class="w-full"
-                    @change="handleProviderChange"
+                    @change="handleProtocolChange"
                   >
                     <el-option
                       v-for="item in providerOptions"
@@ -379,7 +634,13 @@
               </el-col>
               <el-col :span="12" :xs="24">
                 <el-form-item label="认证方式">
-                  <el-select v-model="form.authMethod" allow-create filterable class="w-full">
+                  <el-select
+                    v-model="form.authMethod"
+                    allow-create
+                    filterable
+                    class="w-full"
+                    :disabled="isOpenAiCompatibleForm"
+                  >
                     <el-option
                       v-for="item in authMethodOptions"
                       :key="item.value"
@@ -390,26 +651,56 @@
                 </el-form-item>
               </el-col>
 
-              <el-col :span="12" :xs="24">
-                <el-form-item label="账号池级别">
-                  <el-radio-group v-model="form.poolTier">
-                    <el-radio-button label="primary">一级号池</el-radio-button>
-                    <el-radio-button label="secondary">二级号池</el-radio-button>
-                  </el-radio-group>
-                </el-form-item>
-              </el-col>
-              <el-col :span="12" :xs="24">
-                <el-form-item label="基础权重">
-                  <el-input-number
-                    v-model="form.poolWeight"
-                    :min="1"
-                    :max="10000"
-                    :step="10"
-                    class="w-full"
-                  />
-                  <p class="form-hint">自动权重开启时，连续错误越多，实际调度权重越低。</p>
-                </el-form-item>
-              </el-col>
+              <template v-if="isOpenAiCompatibleForm">
+                <el-col :span="12" :xs="24">
+                  <el-form-item label="厂商分类" prop="catalogVendor">
+                    <el-select
+                      v-model="form.catalogVendor"
+                      filterable
+                      class="w-full"
+                      :loading="vendorsLoading"
+                      placeholder="选择已添加的 OpenAI 兼容厂商"
+                      @change="handleVendorChange"
+                    >
+                      <el-option
+                        v-for="vendor in vendorSelectOptions"
+                        :key="vendor.name"
+                        :label="vendor.name"
+                        :value="vendor.name"
+                      >
+                        <span class="vendor-option">
+                          <img
+                            v-if="vendor.icon"
+                            class="vendor-option__icon"
+                            :src="vendor.icon"
+                            alt=""
+                          />
+                          <span v-else class="vendor-option__icon vendor-option__icon--fallback">
+                            {{ vendor.name.slice(0, 1).toUpperCase() }}
+                          </span>
+                          <span class="vendor-option__name">{{ vendor.name }}</span>
+                          <span class="vendor-option__count">{{ vendor.modelCount }} 个模型</span>
+                        </span>
+                      </el-option>
+                    </el-select>
+                    <p v-if="!vendorsLoading && compatibleVendors.length === 0" class="form-hint">
+                      还没有第三方 OpenAI 兼容厂商。
+                      <el-button link type="primary" @click="goAddVendorModel">去添加模型</el-button>
+                    </p>
+                  </el-form-item>
+                </el-col>
+                <el-col v-if="form.catalogVendor" :span="12" :xs="24">
+                  <el-form-item label="账号类型预览">
+                    <ProviderBadge
+                      :provider="form.catalogVendor"
+                      auth-method="api-key"
+                      :color="selectedVendor?.color"
+                      :icon="selectedVendor?.icon"
+                    />
+                    <p class="form-hint">图标和配色来自该厂商在模型管理中的设置。</p>
+                  </el-form-item>
+                </el-col>
+              </template>
 
               <el-col :span="24">
                 <el-form-item label="出站代理 URL">
@@ -522,17 +813,173 @@
             </el-row>
           </div>
         </el-tab-pane>
+
+        <el-tab-pane v-if="mode === 'edit'" label="分配策略" name="allocation">
+          <div v-loading="allocationPolicyLoading" class="tab-pane-content allocation-pane">
+            <template v-if="allocationPolicy">
+              <div class="allocation-runtime">
+                <div class="runtime-state">
+                  <span class="runtime-label">运行状态</span>
+                  <el-tag :type="lifecycleTagType(allocationPolicy.lifecycleState)" effect="light">
+                    {{ lifecycleLabel(allocationPolicy.lifecycleState) }}
+                  </el-tag>
+                </div>
+                <div class="runtime-metric">
+                  <span>预热阶段</span>
+                  <strong>{{ allocationPolicy.warmupStage }}/4</strong>
+                </div>
+                <div class="runtime-metric">
+                  <span>当前并发</span>
+                  <strong>{{ allocationPolicy.activeConcurrency }}/{{ policyForm.safeConcurrency }}</strong>
+                </div>
+                <div class="runtime-metric">
+                  <span>预留令牌</span>
+                  <strong>
+                    {{
+                      compactNumber(
+                        allocationPolicy.reservedInputTokens + allocationPolicy.reservedOutputTokens,
+                      )
+                    }}
+                  </strong>
+                </div>
+                <div class="runtime-metric">
+                  <span>近期错误率</span>
+                  <strong>{{ (allocationPolicy.recentErrorRate * 100).toFixed(1) }}%</strong>
+                </div>
+              </div>
+
+              <el-row :gutter="20">
+                <el-col :span="12" :xs="24">
+                  <el-form-item label="分配优先级">
+                    <el-input-number
+                      v-model="policyForm.allocationPriority"
+                      :min="1"
+                      :max="10000"
+                      controls-position="right"
+                      class="w-full"
+                    />
+                    <p class="form-hint">数值越小，账号越优先。</p>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12" :xs="24">
+                  <el-form-item label="安全并发数">
+                    <el-input-number
+                      v-model="policyForm.safeConcurrency"
+                      :min="1"
+                      :max="10000"
+                      controls-position="right"
+                      class="w-full"
+                    />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12" :xs="24">
+                  <el-form-item label="每分钟请求数（RPM）">
+                    <el-input-number
+                      v-model="policyForm.safeRpm"
+                      :min="1"
+                      :max="1000000"
+                      controls-position="right"
+                      class="w-full"
+                    />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12" :xs="24">
+                  <el-form-item label="突发容量">
+                    <el-input-number
+                      v-model="policyForm.burstCapacity"
+                      :min="1"
+                      :max="100000"
+                      controls-position="right"
+                      class="w-full"
+                    />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12" :xs="24">
+                  <el-form-item label="最大活跃会话数">
+                    <el-input-number
+                      v-model="policyForm.maxSessions"
+                      :min="0"
+                      :max="100000"
+                      :disabled="!usesSessionLimit"
+                      controls-position="right"
+                      class="w-full"
+                    />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12" :xs="24">
+                  <el-form-item label="会话空闲时间（秒）">
+                    <el-input-number
+                      v-model="policyForm.sessionIdleSeconds"
+                      :min="60"
+                      :max="86400"
+                      :disabled="!usesSessionLimit"
+                      controls-position="right"
+                      class="w-full"
+                    />
+                  </el-form-item>
+                </el-col>
+                <el-col :span="24">
+                  <el-form-item label="最大在途令牌数">
+                    <el-input-number
+                      v-model="policyForm.maxInflightTokens"
+                      :min="1"
+                      :max="1000000000"
+                      :step="10000"
+                      controls-position="right"
+                      class="w-full"
+                    />
+                  </el-form-item>
+                </el-col>
+              </el-row>
+            </template>
+            <el-empty v-else :image-size="72" description="暂无分配策略" />
+          </div>
+        </el-tab-pane>
       </el-tabs>
     </el-form>
 
     <template #footer>
-      <el-button @click="visibleValue = false">取消</el-button>
-      <el-button type="primary" :loading="formSubmitting" @click="submitForm">提交</el-button>
+      <el-button @click="visibleValue = false">
+        {{ isChatGptCreate ? '关闭' : '取消' }}
+      </el-button>
+      <el-button
+        v-if="!isChatGptCreate"
+        type="primary"
+        :loading="formSubmitting"
+        @click="submitForm"
+      >
+        提交
+      </el-button>
     </template>
   </el-dialog>
 </template>
 
 <style scoped lang="scss">
+  .create-method-switch {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--kp-border);
+
+    &__label {
+      color: var(--kp-text-secondary);
+      font-size: 13px;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    :deep(.el-segmented) {
+      width: min(360px, 100%);
+    }
+
+    :deep(.el-segmented__item) {
+      min-width: 0;
+    }
+  }
+
   .account-form-alert {
     margin-bottom: 16px;
   }
@@ -551,6 +998,51 @@
     color: var(--kp-text-muted);
     font-size: 12px;
     line-height: 1.45;
+  }
+
+  .vendor-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+
+    &__icon {
+      width: 18px;
+      height: 18px;
+      border-radius: 4px;
+      object-fit: cover;
+      flex: 0 0 auto;
+
+      &--fallback {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--kp-surface-soft);
+        color: var(--kp-text-secondary);
+        font-size: 11px;
+        font-weight: 800;
+      }
+    }
+
+    &__name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    &__count {
+      margin-left: auto;
+      color: var(--kp-text-muted);
+      font-size: 12px;
+    }
+  }
+
+  .badge-color-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 32px;
   }
 
   .account-form-tabs {
@@ -577,8 +1069,110 @@
 
     .tab-pane-content {
       padding: 4px 2px;
-      max-height: 480px;
-      overflow-y: auto;
+    }
+  }
+
+  :global(.account-form-dialog.el-dialog) {
+    display: flex;
+    flex-direction: column;
+    max-height: calc(100vh - 32px);
+    margin-top: 16px;
+    margin-bottom: 16px;
+  }
+
+  :global(.account-form-dialog .el-dialog__body) {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+  }
+
+  @media (max-width: 560px) {
+    .create-method-switch {
+      align-items: stretch;
+      flex-direction: column;
+      gap: 10px;
+
+      :deep(.el-segmented) {
+        width: 100%;
+      }
+    }
+  }
+
+  .allocation-pane {
+    min-height: 330px;
+  }
+
+  .allocation-runtime {
+    display: grid;
+    grid-template-columns: 1.25fr repeat(4, 1fr);
+    gap: 0;
+    margin-bottom: 20px;
+    padding: 12px 0;
+    border-top: 1px solid var(--kp-border);
+    border-bottom: 1px solid var(--kp-border);
+    background: var(--kp-surface-soft);
+  }
+
+  .runtime-state,
+  .runtime-metric {
+    min-width: 0;
+    padding: 0 14px;
+    border-right: 1px solid var(--kp-border);
+  }
+
+  .runtime-metric:last-child {
+    border-right: 0;
+  }
+
+  .runtime-state {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 5px;
+  }
+
+  .runtime-label,
+  .runtime-metric span {
+    color: var(--kp-text-muted);
+    font-size: 12px;
+    line-height: 1.3;
+  }
+
+  .runtime-metric {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 3px;
+
+    strong {
+      overflow: hidden;
+      color: var(--kp-text);
+      font-size: 14px;
+      line-height: 1.4;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
+  @media (max-width: 680px) {
+    .allocation-runtime {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .runtime-state,
+    .runtime-metric {
+      min-height: 56px;
+      border-bottom: 1px solid var(--kp-border);
+    }
+
+    .runtime-metric:nth-child(even) {
+      border-right: 0;
+    }
+
+    .runtime-metric:last-child {
+      grid-column: span 2;
+      border-bottom: 0;
     }
   }
 </style>

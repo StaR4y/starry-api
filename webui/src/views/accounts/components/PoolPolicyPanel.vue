@@ -1,897 +1,663 @@
 <script setup lang="ts">
-  /**
-   * 账号池熔断策略面板（从 AccountListView.vue 抽离）。
-   *
-   * 覆盖：路由状态、熔断策略表单、一级/二级号池拖拽看板、错误率排行。
-   * 账号列表与全局配置由父组件持有，本组件通过 props 接收、emit 回传变更。
-   */
-  import { computed, onMounted, reactive, ref, watch } from 'vue';
+  import { computed, onMounted, ref } from 'vue';
+  import { Monitor, Refresh } from '@element-plus/icons-vue';
   import { ElMessage } from 'element-plus';
-  import AppIcon from './AppIcon.vue';
   import { accountsApi } from '@/api';
   import { ApiError } from '@/utils/http';
   import type {
-    Account,
-    AccountPoolPolicySettings,
     AccountPoolStatus,
     AccountSettings,
+    ModelPoolCircuitState,
+    ModelPoolCircuitStatus,
   } from '@/types/api';
-  import { formatNumber, shorten } from '@/utils/format';
-  import {
-    getProviderDisplayName,
-    normalizedPoolTier,
-    poolTierLabel,
-    poolTierTagType,
-    statusOf,
-  } from '../utils';
+  import { formatDateTime, formatNumber } from '@/utils/format';
 
   const props = defineProps<{
-    accounts: Account[];
-    visibleAccounts: Account[];
     settings: AccountSettings;
   }>();
 
   const emit = defineEmits<{
     (e: 'settings-updated', settings: AccountSettings): void;
-    (e: 'accounts-updated', accounts: Account[]): void;
   }>();
 
   const poolStatus = ref<AccountPoolStatus | null>(null);
-  const poolPolicySaving = ref(false);
-  const poolDragAccountId = ref<string | null>(null);
-  const poolDropTarget = ref<'primary' | 'secondary' | null>(null);
-  const poolUpdatingAccountIds = ref<Record<string, boolean>>({});
+  const refreshing = ref(false);
+  const snapshotError = ref('');
+  const generatedAt = ref(new Date().toISOString());
 
-  // 策略表单的本地副本，与父组件 settings.poolPolicy 保持同步
-  const poolPolicy = reactive<AccountPoolPolicySettings>({ ...props.settings.poolPolicy });
-  watch(
-    () => props.settings.poolPolicy,
-    (value) => {
-      Object.assign(poolPolicy, value);
-    },
+  interface TierSnapshot {
+    accountCount: number;
+    availableAccountCount: number | null;
+    requests: number;
+    failures: number;
+    failureRatePercent: number;
+  }
+
+  interface MonitorGroup {
+    key: string;
+    provider: string;
+    modelFamily: string;
+    representativeModel: string | null;
+    state: ModelPoolCircuitState;
+    activeTier: 'primary' | 'secondary' | string;
+    primary: TierSnapshot;
+    secondary: TierSnapshot;
+    windowStartedAt: string | null;
+    lastTransitionAt: string | null;
+    openedAt: string | null;
+    nextProbeAt: string | null;
+    lastOutcomeAt: string | null;
+    halfOpenInFlight: number;
+    halfOpenCompleted: number;
+    halfOpenSucceeded: number;
+  }
+
+  function count(value: number | null | undefined) {
+    return Math.max(0, Number.isFinite(value) ? Number(value) : 0);
+  }
+
+  function nativeTier(
+    accountCount: number,
+    requests: number,
+    failures: number,
+    failureRatePercent: number,
+  ): TierSnapshot {
+    return {
+      accountCount: count(accountCount),
+      availableAccountCount: null,
+      requests: count(requests),
+      failures: count(failures),
+      failureRatePercent: Math.min(100, count(failureRatePercent)),
+    };
+  }
+
+  function nativeGroup(item: ModelPoolCircuitStatus): MonitorGroup {
+    return {
+      key: item.key,
+      provider: item.provider,
+      modelFamily: item.modelFamily,
+      representativeModel: item.representativeModel,
+      state: item.state,
+      activeTier: item.activeTier,
+      primary: nativeTier(
+        item.primaryAccountCount,
+        item.primaryRequests,
+        item.primaryFailures,
+        item.primaryFailureRatePercent,
+      ),
+      secondary: nativeTier(
+        item.secondaryAccountCount,
+        item.secondaryRequests,
+        item.secondaryFailures,
+        item.secondaryFailureRatePercent,
+      ),
+      windowStartedAt: item.windowStartedAt,
+      lastTransitionAt: item.lastTransitionAt,
+      openedAt: item.openedAt,
+      nextProbeAt: item.nextProbeAt,
+      lastOutcomeAt: item.lastOutcomeAt,
+      halfOpenInFlight: count(item.halfOpenInFlight),
+      halfOpenCompleted: count(item.halfOpenCompleted),
+      halfOpenSucceeded: count(item.halfOpenSucceeded),
+    };
+  }
+
+  const groups = computed<MonitorGroup[]>(() => {
+    if (!poolStatus.value) return [];
+    const values = (poolStatus.value.modelPools ?? []).map(nativeGroup);
+    const stateOrder: Record<ModelPoolCircuitState, number> = {
+      OPEN: 0,
+      HALF_OPEN: 1,
+      CLOSED: 2,
+    };
+    return [...values].sort(
+      (left, right) =>
+        stateOrder[left.state] - stateOrder[right.state] ||
+        left.provider.localeCompare(right.provider),
+    );
+  });
+
+  const snapshot = computed(() => ({
+    generatedAt: generatedAt.value,
+    activeTier: poolStatus.value?.activeTier ?? 'all',
+    lastEvaluatedAt: poolStatus.value?.lastEvaluatedAt ?? null,
+    groups: groups.value,
+  }));
+
+  const summary = computed(() => ({
+    groupCount: snapshot.value.groups.length,
+    accountCount: count(poolStatus.value?.accountCount),
+    availableCount: count(poolStatus.value?.availableAccountCount),
+    abnormalGroupCount: snapshot.value.groups.filter((group) => group.state !== 'CLOSED').length,
+  }));
+
+  const failoverThreshold = computed(
+    () =>
+      poolStatus.value?.settings.failoverThresholdPercent ??
+      props.settings.poolPolicy.failoverThresholdPercent ??
+      70,
   );
 
-  const primaryPoolAccounts = computed(() =>
-    props.visibleAccounts.filter((account) => normalizedPoolTier(account.poolTier) === 'primary'),
-  );
+  function activeTierLabel(value: string) {
+    if (value === 'secondary') return '二级池接管';
+    if (value === 'primary') return '一级池';
+    if (value === 'mixed') return '模型池混合路由';
+    return '全部账号';
+  }
 
-  const secondaryPoolAccounts = computed(() =>
-    props.visibleAccounts.filter(
-      (account) => normalizedPoolTier(account.poolTier) === 'secondary',
-    ),
-  );
+  function activeTierType(value: string) {
+    if (value === 'secondary') return 'warning';
+    if (value === 'primary') return 'success';
+    if (value === 'mixed') return 'primary';
+    return 'info';
+  }
 
-  // statusOf / normalizedPoolTier / poolTierLabel / poolTierTagType 已收敛至 ../utils
+  function stateMeta(state: ModelPoolCircuitState) {
+    if (state === 'OPEN') return { label: '已熔断', type: 'danger' as const };
+    if (state === 'HALF_OPEN') return { label: '半开探测', type: 'warning' as const };
+    return { label: '闭合正常', type: 'success' as const };
+  }
+
+  function tierAccountLabel(tier: TierSnapshot) {
+    if (tier.availableAccountCount === null) return `${tier.accountCount}`;
+    return `${tier.availableAccountCount}/${tier.accountCount}`;
+  }
+
+  function activeTierOf(group: MonitorGroup) {
+    return group.activeTier === 'secondary' ? group.secondary : group.primary;
+  }
+
+  function healthProgressStatus(group: MonitorGroup) {
+    return activeTierOf(group).failureRatePercent >= failoverThreshold.value
+      ? ('exception' as const)
+      : undefined;
+  }
 
   async function loadPoolStatus() {
+    if (refreshing.value) return;
+    refreshing.value = true;
     try {
       poolStatus.value = await accountsApi.poolStatus();
-      if (poolStatus.value?.settings) {
+      snapshotError.value = '';
+      generatedAt.value = new Date().toISOString();
+      if (poolStatus.value.settings) {
         emit('settings-updated', {
           ...props.settings,
           poolPolicy: poolStatus.value.settings,
         });
       }
     } catch (err) {
-      if (err instanceof ApiError) ElMessage.warning(`账号池状态加载失败：${err.message}`);
-    }
-  }
-
-  async function savePoolPolicy() {
-    poolPolicySaving.value = true;
-    try {
-      const updated = await accountsApi.updateSettings({
-        poolPolicy: { ...poolPolicy },
-      });
-      emit('settings-updated', updated);
-      await loadPoolStatus();
-      ElMessage.success('账号池策略已保存');
-    } catch (err) {
-      if (err instanceof ApiError) ElMessage.error(err.message);
-    } finally {
-      poolPolicySaving.value = false;
-    }
-  }
-
-  function poolColumnDescription(tier: 'primary' | 'secondary') {
-    return tier === 'primary'
-      ? '主力账号池，正常情况下优先承接请求'
-      : '备用账号池，一级池熔断时自动接管请求';
-  }
-
-  function isPoolUpdating(accountId: string) {
-    return Boolean(poolUpdatingAccountIds.value[accountId]);
-  }
-
-  function setPoolUpdating(accountId: string, value: boolean) {
-    poolUpdatingAccountIds.value = {
-      ...poolUpdatingAccountIds.value,
-      [accountId]: value,
-    };
-  }
-
-  function onPoolDragStart(event: DragEvent, account: Account) {
-    poolDragAccountId.value = account.accountId;
-    event.dataTransfer?.setData('text/plain', account.accountId);
-    if (event.dataTransfer) {
-      event.dataTransfer.effectAllowed = 'move';
-    }
-  }
-
-  function onPoolDragEnd() {
-    poolDragAccountId.value = null;
-    poolDropTarget.value = null;
-  }
-
-  function onPoolDragOver(event: DragEvent, tier: 'primary' | 'secondary') {
-    event.preventDefault();
-    const account = draggedPoolAccount(event);
-    if (account && normalizedPoolTier(account.poolTier) !== tier) {
-      poolDropTarget.value = tier;
-      if (event.dataTransfer) {
-        event.dataTransfer.dropEffect = 'move';
+      snapshotError.value = err instanceof ApiError ? err.message : '服务暂时不可用';
+      if (poolStatus.value) {
+        ElMessage.warning(`分级熔断快照刷新失败：${snapshotError.value}`);
       }
-    }
-  }
-
-  function onPoolDragLeave(tier: 'primary' | 'secondary') {
-    if (poolDropTarget.value === tier) {
-      poolDropTarget.value = null;
-    }
-  }
-
-  async function onPoolDrop(event: DragEvent, tier: 'primary' | 'secondary') {
-    event.preventDefault();
-    const account = draggedPoolAccount(event);
-    poolDropTarget.value = null;
-    poolDragAccountId.value = null;
-    if (
-      !account ||
-      normalizedPoolTier(account.poolTier) === tier ||
-      isPoolUpdating(account.accountId)
-    ) {
-      return;
-    }
-    await moveAccountToPool(account, tier);
-  }
-
-  function draggedPoolAccount(event: DragEvent) {
-    const accountId = event.dataTransfer?.getData('text/plain') || poolDragAccountId.value;
-    if (!accountId) return null;
-    return props.accounts.find((account) => account.accountId === accountId) ?? null;
-  }
-
-  async function moveAccountToPool(account: Account, tier: 'primary' | 'secondary') {
-    const previousTier = normalizedPoolTier(account.poolTier);
-    setPoolUpdating(account.accountId, true);
-    emit(
-      'accounts-updated',
-      props.accounts.map((item) =>
-        item.accountId === account.accountId ? { ...item, poolTier: tier } : item,
-      ),
-    );
-    try {
-      await accountsApi.update(account.accountId, { poolTier: tier });
-      ElMessage.success(
-        `${account.email || shorten(account.accountId, 8, 4)} 已移动到${poolTierLabel(tier)}`,
-      );
-      await loadPoolStatus();
-    } catch (err) {
-      emit(
-        'accounts-updated',
-        props.accounts.map((item) =>
-          item.accountId === account.accountId ? { ...item, poolTier: previousTier } : item,
-        ),
-      );
-      if (err instanceof ApiError) ElMessage.error(err.message);
     } finally {
-      setPoolUpdating(account.accountId, false);
+      refreshing.value = false;
     }
   }
 
-  // getProviderDisplayName 已收敛至 ../utils
-
-  onMounted(() => {
-    loadPoolStatus();
-  });
+  onMounted(loadPoolStatus);
 </script>
 
 <template>
-  <div class="pool-policy-panel glass-panel">
-    <div class="pool-policy-panel__status">
-      <div class="panel-header-left">
-        <span class="brand-indicator" />
-        <div class="panel-title">账号池熔断策略</div>
-        <div class="panel-subtitle">
-          当前路由：
-          <el-tag
-            :type="poolStatus?.activeTier === 'secondary' ? 'warning' : 'success'"
-            effect="light"
-            round
-          >
-            {{
-              poolStatus?.activeTier === 'secondary'
-                ? '二级号池'
-                : poolStatus?.activeTier === 'all'
-                  ? '全部账号'
-                  : '一级号池'
-            }}
-          </el-tag>
-          <span class="pool-status-text">
-            一级池错误率 {{ poolStatus?.primaryFailureRatePercent ?? 0 }}% （{{
-              poolStatus?.primaryFailures ?? 0
-            }}/{{ poolStatus?.primaryRequests ?? 0 }}）
-          </span>
-          <span v-if="poolStatus?.lastRetestAt" class="pool-status-text">
-            最近复测成功率 {{ poolStatus?.lastRetestRecoveryRatePercent ?? 0 }}%
-          </span>
-          <span v-if="poolStatus?.retestRunning" class="pool-status-text is-running"> 正在复测 </span>
+  <section v-loading="refreshing" class="pool-monitor" aria-label="账号池分级熔断监控">
+    <header class="pool-monitor__header">
+      <div class="monitor-heading">
+        <el-icon class="monitor-heading__icon"><Monitor /></el-icon>
+        <div>
+          <div class="monitor-heading__title">模型路由健康快照</div>
+          <div v-if="poolStatus" class="monitor-heading__meta">
+            <span>数据口径：模型池原生快照</span>
+            <span>更新于 {{ formatDateTime(snapshot.generatedAt) }}</span>
+            <span v-if="snapshot.lastEvaluatedAt">
+              评估于 {{ formatDateTime(snapshot.lastEvaluatedAt) }}
+            </span>
+          </div>
         </div>
       </div>
-      <el-button size="small" @click="loadPoolStatus">
-        <template #icon>
-          <AppIcon name="refresh" width="12" height="12" class="btn-icon" />
-        </template>
-        刷新状态
+      <el-button :icon="Refresh" :loading="refreshing" @click="loadPoolStatus">
+        刷新快照
       </el-button>
-    </div>
+    </header>
 
-    <el-form class="pool-policy-form" label-position="top" size="small">
-      <el-row :gutter="16">
-        <el-col :xs="24" :sm="12" :md="6" :lg="3">
-          <el-form-item label="启用熔断">
-            <el-switch v-model="poolPolicy.enabled" />
-          </el-form-item>
-        </el-col>
-        <el-col :xs="24" :sm="12" :md="6" :lg="3">
-          <el-form-item label="自动权重">
-            <el-switch v-model="poolPolicy.autoWeightEnabled" />
-          </el-form-item>
-        </el-col>
-        <el-col :xs="24" :sm="12" :md="6" :lg="3">
-          <el-form-item label="窗口(分钟)">
-            <el-input-number
-              v-model="poolPolicy.windowMinutes"
-              :min="1"
-              :max="1440"
-              controls-position="right"
-            />
-          </el-form-item>
-        </el-col>
-        <el-col :xs="24" :sm="12" :md="6" :lg="3">
-          <el-form-item label="最小样本">
-            <el-input-number
-              v-model="poolPolicy.minSampleSize"
-              :min="1"
-              :max="100000"
-              controls-position="right"
-            />
-          </el-form-item>
-        </el-col>
-        <el-col :xs="24" :sm="12" :md="6" :lg="3">
-          <el-form-item label="复测阈值%">
-            <el-input-number
-              v-model="poolPolicy.retestThresholdPercent"
-              :min="0"
-              :max="100"
-              controls-position="right"
-            />
-          </el-form-item>
-        </el-col>
-        <el-col :xs="24" :sm="12" :md="6" :lg="3">
-          <el-form-item label="切二级%">
-            <el-input-number
-              v-model="poolPolicy.failoverThresholdPercent"
-              :min="0"
-              :max="100"
-              controls-position="right"
-            />
-          </el-form-item>
-        </el-col>
-        <el-col :xs="24" :sm="12" :md="6" :lg="3">
-          <el-form-item label="恢复成功率%">
-            <el-input-number
-              v-model="poolPolicy.recoveryThresholdPercent"
-              :min="0"
-              :max="100"
-              controls-position="right"
-            />
-          </el-form-item>
-        </el-col>
-        <el-col :xs="24" :sm="12" :md="6" :lg="3">
-          <el-form-item label="复测间隔">
-            <el-input-number
-              v-model="poolPolicy.retestIntervalMinutes"
-              :min="1"
-              :max="1440"
-              controls-position="right"
-            />
-          </el-form-item>
-        </el-col>
-      </el-row>
-      <div class="pool-policy-footer">
-        <div class="info-alert">
-          <AppIcon name="info" width="14" height="14" class="info-alert-icon" />
-          <span>
-            当一级池错误率达到复测阈值时会全量测试账号；达到切二级阈值时临时将请求转到二级号池，并持续复测所有账号，直到全账号复测成功率达到恢复成功率阈值。
-          </span>
-        </div>
-        <el-button type="primary" :loading="poolPolicySaving" @click="savePoolPolicy">
-          保存账号池策略
-        </el-button>
-      </div>
-    </el-form>
+    <el-skeleton v-if="refreshing && !poolStatus" class="snapshot-state" :rows="6" animated />
 
-    <div class="pool-drag-board">
-      <div
-        class="pool-drag-column"
-        :class="{
-          'is-drop-target': poolDropTarget === 'primary',
-          'is-active-route': poolStatus?.activeTier === 'primary',
-        }"
-        @dragover="(event) => onPoolDragOver(event, 'primary')"
-        @dragleave="onPoolDragLeave('primary')"
-        @drop="(event) => onPoolDrop(event, 'primary')"
-      >
-        <div class="pool-drag-column__head">
-          <div>
-            <div class="pool-drag-column__title">
-              <AppIcon name="star" width="16" height="16" class="pool-tier-icon is-primary" />
-              一级号池
-              <el-tag
-                v-if="poolStatus?.activeTier === 'primary'"
-                size="small"
-                type="success"
-                effect="light"
-                round
-              >
-                当前路由
-              </el-tag>
-            </div>
-            <div class="pool-drag-column__desc">{{ poolColumnDescription('primary') }}</div>
-          </div>
-          <strong class="mono">{{ primaryPoolAccounts.length }}</strong>
-        </div>
+    <el-result
+      v-else-if="snapshotError && !poolStatus"
+      class="snapshot-state"
+      icon="warning"
+      title="熔断快照不可用"
+      :sub-title="snapshotError"
+    >
+      <template #extra>
+        <el-button type="primary" :loading="refreshing" @click="loadPoolStatus">重新加载</el-button>
+      </template>
+    </el-result>
 
-        <div v-if="primaryPoolAccounts.length === 0" class="pool-drag-empty">
-          拖入账号作为一级号池
+    <template v-else-if="poolStatus">
+      <el-alert
+        v-if="snapshotError"
+        type="warning"
+        :title="`快照刷新失败，当前显示上次成功结果：${snapshotError}`"
+        :closable="false"
+        show-icon
+      />
+
+      <div class="monitor-summary">
+        <div class="summary-item">
+          <span class="summary-item__label">当前路由</span>
+          <el-tag :type="activeTierType(snapshot.activeTier)" effect="light" round>
+            {{ activeTierLabel(snapshot.activeTier) }}
+          </el-tag>
         </div>
-        <div
-          v-for="account in primaryPoolAccounts"
-          :key="account.accountId"
-          class="pool-account-card"
-          :class="{
-            'is-dragging': poolDragAccountId === account.accountId,
-            'is-updating': isPoolUpdating(account.accountId),
-          }"
-          draggable="true"
-          @dragstart="(event) => onPoolDragStart(event, account)"
-          @dragend="onPoolDragEnd"
-        >
-          <div class="pool-account-card__drag-handle">
-            <AppIcon name="grip" width="12" height="12" />
-          </div>
-          <div class="pool-account-card__info-wrapper">
-            <div class="pool-account-card__main">
-              <span class="pool-account-card__name" :title="account.email || account.accountId">
-                {{ account.email || shorten(account.accountId, 10, 6) }}
-              </span>
-              <span class="pool-account-card__id mono">{{
-                shorten(account.accountId, 10, 4)
-              }}</span>
-            </div>
-            <div class="pool-account-card__meta">
-              <el-tag size="small" effect="plain">
-                {{ getProviderDisplayName(account.provider) }}
-              </el-tag>
-              <el-tag size="small" :type="statusOf(account).tone" effect="light">
-                {{ statusOf(account).label }}
-              </el-tag>
-              <span class="meta-item">权重: <strong>{{ account.poolWeight ?? 100 }}</strong></span>
-              <span class="meta-item">错误:
-                <strong class="text-danger">{{ formatNumber(account.errorCount) }}</strong></span>
-            </div>
-          </div>
+        <div class="summary-item">
+          <span class="summary-item__label">供应商 / 模型族</span>
+          <strong class="mono">{{ summary.groupCount }}</strong>
+        </div>
+        <div class="summary-item">
+          <span class="summary-item__label">可用账号</span>
+          <strong class="mono">{{ summary.availableCount }} / {{ summary.accountCount }}</strong>
+        </div>
+        <div class="summary-item">
+          <span class="summary-item__label">异常分组</span>
+          <strong class="mono" :class="{ 'is-danger': summary.abnormalGroupCount > 0 }">
+            {{ summary.abnormalGroupCount }}
+          </strong>
         </div>
       </div>
 
-      <div
-        class="pool-drag-column is-secondary"
-        :class="{
-          'is-drop-target': poolDropTarget === 'secondary',
-          'is-active-route': poolStatus?.activeTier === 'secondary',
-        }"
-        @dragover="(event) => onPoolDragOver(event, 'secondary')"
-        @dragleave="onPoolDragLeave('secondary')"
-        @drop="(event) => onPoolDrop(event, 'secondary')"
-      >
-        <div class="pool-drag-column__head">
-          <div>
-            <div class="pool-drag-column__title">
-              <AppIcon name="lock" width="16" height="16" class="pool-tier-icon is-warning" />
-              二级号池
-              <el-tag
-                v-if="poolStatus?.activeTier === 'secondary'"
-                size="small"
-                type="warning"
-                effect="light"
-                round
-              >
-                当前接管
-              </el-tag>
-            </div>
-            <div class="pool-drag-column__desc">{{ poolColumnDescription('secondary') }}</div>
-          </div>
-          <strong class="mono">{{ secondaryPoolAccounts.length }}</strong>
-        </div>
-
-        <div v-if="secondaryPoolAccounts.length === 0" class="pool-drag-empty">
-          拖入账号作为熔断备用池
-        </div>
-        <div
-          v-for="account in secondaryPoolAccounts"
-          :key="account.accountId"
-          class="pool-account-card"
-          :class="{
-            'is-dragging': poolDragAccountId === account.accountId,
-            'is-updating': isPoolUpdating(account.accountId),
-          }"
-          draggable="true"
-          @dragstart="(event) => onPoolDragStart(event, account)"
-          @dragend="onPoolDragEnd"
-        >
-          <div class="pool-account-card__drag-handle">
-            <AppIcon name="grip" width="12" height="12" />
-          </div>
-          <div class="pool-account-card__info-wrapper">
-            <div class="pool-account-card__main">
-              <span class="pool-account-card__name" :title="account.email || account.accountId">
-                {{ account.email || shorten(account.accountId, 10, 6) }}
-              </span>
-              <span class="pool-account-card__id mono">{{
-                shorten(account.accountId, 10, 4)
-              }}</span>
-            </div>
-            <div class="pool-account-card__meta">
-              <el-tag size="small" effect="plain">
-                {{ getProviderDisplayName(account.provider) }}
-              </el-tag>
-              <el-tag size="small" :type="statusOf(account).tone" effect="light">
-                {{ statusOf(account).label }}
-              </el-tag>
-              <span class="meta-item">权重: <strong>{{ account.poolWeight ?? 100 }}</strong></span>
-              <span class="meta-item">错误:
-                <strong class="text-danger">{{ formatNumber(account.errorCount) }}</strong></span>
-            </div>
-          </div>
-        </div>
+      <div class="group-list__head" aria-hidden="true">
+        <span>模型供应商 / 模型族</span>
+        <span>分级账号池</span>
+        <span>窗口健康指标</span>
       </div>
-    </div>
 
-    <div v-if="poolStatus?.failureRanking?.length" class="failure-ranking">
-      <div class="failure-ranking__title">账号错误率排行</div>
-      <div class="failure-ranking__list">
-        <div
-          v-for="item in poolStatus.failureRanking.slice(0, 6)"
-          :key="item.accountId"
-          class="failure-ranking__item"
-        >
-          <div class="failure-ranking__id">
-            <span class="item-id mono">{{ shorten(item.accountId, 8, 4) }}</span>
-            <el-tag :type="poolTierTagType(item.poolTier)" size="small" effect="light" round>
-              {{ poolTierLabel(item.poolTier) }}
-            </el-tag>
+      <div v-if="snapshot.groups.length" class="group-list">
+        <article v-for="group in snapshot.groups" :key="group.key" class="group-row">
+          <div class="group-identity">
+            <div class="group-identity__vendor">{{ group.provider }}</div>
+            <div class="group-identity__family">
+              <span>{{ group.modelFamily }}</span>
+              <el-tag :type="stateMeta(group.state).type" size="small" effect="light" round>
+                {{ stateMeta(group.state).label }}
+              </el-tag>
+            </div>
+            <div v-if="group.representativeModel" class="group-identity__models mono">
+              {{ group.representativeModel }}
+            </div>
           </div>
-          <div class="item-stats">
-            <span class="failure-pct" :class="{ 'is-zero': item.failureRatePercent === 0 }">
-              {{ item.failureRatePercent }}%
-            </span>
-            <span class="text-secondary item-stat">
-              ({{ item.failures }}/{{ item.requests }})
-            </span>
-            <span class="text-secondary item-stat item-stat--weight">
-              W:{{ item.effectiveWeight }}
-            </span>
+
+          <div class="tier-snapshots">
+            <div class="tier-snapshot">
+              <div class="tier-snapshot__head">
+                <span class="tier-dot is-primary" />
+                <span>一级池</span>
+                <el-tag
+                  v-if="group.activeTier === 'primary'"
+                  size="small"
+                  type="success"
+                  effect="plain"
+                >
+                  当前
+                </el-tag>
+                <strong class="mono">{{ tierAccountLabel(group.primary) }}</strong>
+              </div>
+              <div class="tier-snapshot__meta">
+                {{ formatNumber(group.primary.requests) }} 请求 ·
+                {{ formatNumber(group.primary.failures) }} 失败 ·
+                {{ group.primary.failureRatePercent }}%
+              </div>
+            </div>
+            <div class="tier-snapshot">
+              <div class="tier-snapshot__head">
+                <span class="tier-dot is-secondary" />
+                <span>二级池</span>
+                <el-tag
+                  v-if="group.activeTier === 'secondary'"
+                  size="small"
+                  type="warning"
+                  effect="plain"
+                >
+                  当前
+                </el-tag>
+                <strong class="mono">{{ tierAccountLabel(group.secondary) }}</strong>
+              </div>
+              <div class="tier-snapshot__meta">
+                {{ formatNumber(group.secondary.requests) }} 请求 ·
+                {{ formatNumber(group.secondary.failures) }} 失败 ·
+                {{ group.secondary.failureRatePercent }}%
+              </div>
+            </div>
           </div>
-        </div>
+
+          <div class="health-metrics">
+            <div class="health-metrics__rate">
+              <strong class="mono">{{ activeTierOf(group).failureRatePercent }}%</strong>
+              <span> {{ activeTierLabel(group.activeTier) }}窗口错误率 </span>
+            </div>
+            <el-progress
+              :percentage="activeTierOf(group).failureRatePercent"
+              :show-text="false"
+              :stroke-width="6"
+              :status="healthProgressStatus(group)"
+            />
+            <div class="health-metrics__detail">
+              {{ formatNumber(activeTierOf(group).failures) }} 失败 /
+              {{ formatNumber(activeTierOf(group).requests) }} 请求 · 熔断阈值
+              {{ failoverThreshold }}%
+            </div>
+            <div v-if="group.state === 'HALF_OPEN'" class="health-metrics__detail">
+              探测 {{ group.halfOpenSucceeded }}/{{ group.halfOpenCompleted }} 成功 ·
+              {{ group.halfOpenInFlight }} 进行中
+            </div>
+            <div v-else-if="group.lastTransitionAt" class="health-metrics__detail">
+              状态变更 {{ formatDateTime(group.lastTransitionAt) }}
+            </div>
+            <div v-if="group.nextProbeAt" class="health-metrics__detail">
+              下次探测 {{ formatDateTime(group.nextProbeAt) }}
+            </div>
+          </div>
+        </article>
       </div>
-    </div>
-  </div>
+
+      <el-empty v-else :image-size="84" description="暂无可监控的模型路由分组" />
+    </template>
+  </section>
 </template>
 
 <style scoped lang="scss">
-  .pool-policy-panel {
+  .pool-monitor {
     display: grid;
-    gap: 16px;
-    padding: 20px 24px;
-    margin-bottom: 24px;
+    gap: 18px;
+    min-width: 0;
   }
 
-  .pool-policy-panel__status {
+  .pool-monitor__header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    flex-wrap: wrap;
-    padding-bottom: 12px;
-    border-bottom: 1px solid var(--kp-divider);
+    gap: 16px;
+    min-width: 0;
   }
 
-  .panel-header-left {
+  .snapshot-state {
+    min-height: 320px;
+  }
+
+  .monitor-heading {
     display: flex;
     align-items: center;
     gap: 12px;
-    flex-wrap: wrap;
+    min-width: 0;
 
-    .brand-indicator {
-      width: 4px;
-      height: 16px;
-      border-radius: 99px;
-      background: var(--kp-primary);
+    &__icon {
+      flex: 0 0 auto;
+      width: 34px;
+      height: 34px;
+      border-radius: 6px;
+      background: rgba(91, 141, 239, 0.1);
+      color: var(--kp-primary);
+      font-size: 18px;
     }
 
-    .panel-title {
+    &__title {
+      color: var(--kp-text);
       font-size: 15px;
       font-weight: 800;
-      color: var(--kp-text);
-      line-height: 1;
-    }
-
-    .panel-subtitle {
-      margin-top: 0;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      color: var(--kp-text-secondary);
-      font-size: 12.5px;
-
-      .pool-status-text strong {
-        color: var(--kp-danger);
-      }
-
-      .is-running {
-        color: var(--el-color-warning);
-        font-weight: 700;
-        animation: pulse-warn 1.5s infinite;
-      }
-    }
-  }
-
-  @keyframes pulse-warn {
-    0% {
-      opacity: 0.6;
-    }
-    50% {
-      opacity: 1;
-    }
-    100% {
-      opacity: 0.6;
-    }
-  }
-
-  .pool-policy-form {
-    :deep(.el-form-item) {
-      margin-bottom: 8px;
-    }
-
-    :deep(.el-input-number) {
-      width: 100%;
-    }
-  }
-
-  .pool-policy-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    margin-top: 12px;
-    padding-top: 12px;
-    border-top: 1px dashed var(--kp-divider);
-
-    .info-alert {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex: 1;
-
-      &-icon {
-        color: var(--kp-primary);
-        flex-shrink: 0;
-      }
-
-      span {
-        font-size: 12px;
-        color: var(--kp-text-secondary);
-        line-height: 1.4;
-      }
-    }
-  }
-
-  .pool-drag-board {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 16px;
-  }
-
-  @media (max-width: 768px) {
-    .pool-drag-board {
-      grid-template-columns: 1fr;
-    }
-  }
-
-  .btn-icon {
-    margin-right: 4px;
-  }
-
-  .pool-tier-icon {
-    margin-right: 4px;
-
-    &.is-primary {
-      color: var(--kp-primary);
-    }
-
-    &.is-warning {
-      color: var(--kp-warning);
-    }
-  }
-
-  .pool-drag-column {
-    min-height: 240px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    padding: 16px;
-    border: 1px solid rgba(54, 192, 138, 0.18);
-    border-radius: var(--kp-radius-sm);
-    background: linear-gradient(180deg, rgba(54, 192, 138, 0.04), rgba(255, 255, 255, 0.6));
-    transition: all 0.25s ease;
-
-    &.is-secondary {
-      border-color: rgba(245, 158, 11, 0.2);
-      background: linear-gradient(180deg, rgba(245, 158, 11, 0.04), rgba(255, 255, 255, 0.6));
-    }
-
-    &.is-active-route {
-      border-color: rgba(91, 141, 239, 0.4);
-      box-shadow: 0 8px 24px rgba(91, 141, 239, 0.08);
-    }
-
-    &.is-drop-target {
-      border-color: var(--kp-primary);
-      box-shadow: 0 0 0 3px rgba(91, 141, 239, 0.12);
-      transform: translateY(-2px);
-    }
-  }
-
-  .pool-drag-column__head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 10px;
-    padding-bottom: 10px;
-    border-bottom: 1px solid var(--kp-divider);
-
-    strong {
-      min-width: 34px;
-      text-align: right;
-      color: var(--kp-text);
-      font-size: 24px;
-      line-height: 1;
-    }
-  }
-
-  .pool-drag-column__title {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--kp-text);
-    font-size: 14.5px;
-    font-weight: 800;
-  }
-
-  .pool-drag-column__desc {
-    margin-top: 4px;
-    color: var(--kp-text-secondary);
-    font-size: 12px;
-  }
-
-  .pool-drag-empty {
-    display: grid;
-    place-items: center;
-    min-height: 120px;
-    border: 2px dashed rgba(15, 23, 42, 0.12);
-    border-radius: var(--kp-radius-sm);
-    color: var(--kp-text-muted);
-    font-size: 12px;
-    background: rgba(255, 255, 255, 0.35);
-  }
-
-  .pool-account-card {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 12px;
-    border: 1px solid rgba(15, 23, 42, 0.08);
-    border-radius: 8px;
-    background: rgba(255, 255, 255, 0.75);
-    cursor: grab;
-    user-select: none;
-    transition: all 0.2s cubic-bezier(0.25, 0.8, 0.25, 1);
-
-    &__drag-handle {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: var(--kp-text-muted);
-      cursor: grab;
-      margin-top: 4px;
-      flex-shrink: 0;
-      opacity: 0.4;
-      transition: opacity 0.2s ease;
-    }
-
-    &:hover {
-      border-color: rgba(91, 141, 239, 0.36);
-      box-shadow: 0 6px 14px rgba(15, 23, 42, 0.06);
-      transform: translateY(-1.5px);
-      background: #ffffff;
-
-      .pool-account-card__drag-handle {
-        opacity: 0.8;
-        color: var(--kp-primary);
-      }
-    }
-
-    &:active {
-      cursor: grabbing;
-      .pool-account-card__drag-handle {
-        cursor: grabbing;
-      }
-    }
-
-    &.is-dragging {
-      opacity: 0.5;
-      border-style: dashed;
-    }
-
-    &.is-updating {
-      pointer-events: none;
-      opacity: 0.6;
-    }
-
-    &__info-wrapper {
-      flex: 1;
-      min-width: 0;
-      display: grid;
-      gap: 6px;
-    }
-
-    &__main {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 8px;
-      min-width: 0;
-    }
-
-    &__name {
-      min-width: 0;
-      overflow: hidden;
-      color: var(--kp-text);
-      font-size: 13px;
-      font-weight: 700;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-
-    &__id {
-      flex: 0 0 auto;
-      color: var(--kp-text-muted);
-      font-size: 11px;
     }
 
     &__meta {
       display: flex;
-      align-items: center;
       flex-wrap: wrap;
-      gap: 6px;
+      gap: 4px 14px;
+      margin-top: 4px;
+      color: var(--kp-text-muted);
+      font-size: 11.5px;
+    }
+  }
+
+  .monitor-summary {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    border-block: 1px solid var(--kp-divider);
+    background: rgba(15, 23, 42, 0.018);
+  }
+
+  .summary-item {
+    display: flex;
+    min-height: 76px;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 7px;
+    min-width: 0;
+    padding: 14px 18px;
+
+    & + & {
+      border-left: 1px solid var(--kp-divider);
+    }
+
+    &__label {
       color: var(--kp-text-secondary);
-      font-size: 11px;
+      font-size: 12px;
+    }
 
-      .meta-item {
-        color: var(--kp-text-secondary);
+    strong {
+      color: var(--kp-text);
+      font-size: 20px;
 
-        strong {
-          color: var(--kp-text);
-        }
-        .text-danger {
-          color: var(--kp-danger) !important;
-        }
+      &.is-danger {
+        color: var(--kp-danger);
       }
     }
   }
 
-  .failure-ranking {
+  .group-list__head,
+  .group-row {
     display: grid;
-    gap: 10px;
-    padding-top: 16px;
+    grid-template-columns: minmax(170px, 1.15fr) minmax(300px, 2fr) minmax(180px, 1fr);
+    gap: 22px;
+    align-items: center;
+  }
+
+  .group-list__head {
+    padding: 0 14px;
+    color: var(--kp-text-muted);
+    font-size: 11.5px;
+    font-weight: 700;
+  }
+
+  .group-list {
     border-top: 1px solid var(--kp-divider);
+  }
 
-    &__title {
+  .group-row {
+    min-height: 116px;
+    padding: 18px 14px;
+    border-bottom: 1px solid var(--kp-divider);
+
+    &:hover {
+      background: rgba(91, 141, 239, 0.025);
+    }
+  }
+
+  .group-identity {
+    min-width: 0;
+
+    &__vendor {
+      overflow: hidden;
+      color: var(--kp-text);
+      font-size: 15px;
+      font-weight: 800;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    &__family {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 6px;
       color: var(--kp-text-secondary);
-      font-size: 12.5px;
-      font-weight: 700;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-
-      &::before {
-        content: '';
-        width: 3px;
-        height: 12px;
-        background-color: var(--kp-danger);
-        border-radius: 4px;
-      }
-    }
-
-    &__list {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-      gap: 10px;
-    }
-
-    &__item {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 8px 12px;
-      border: 1px solid var(--kp-divider);
-      border-radius: 8px;
-      background: rgba(255, 255, 255, 0.45);
       font-size: 12px;
-      transition: all 0.2s ease;
+    }
 
-      &:hover {
-        background: #ffffff;
-        border-color: rgba(239, 91, 107, 0.24);
-        box-shadow: 0 4px 10px rgba(15, 23, 42, 0.04);
-        transform: translateY(-1px);
-      }
+    &__models {
+      overflow: hidden;
+      margin-top: 6px;
+      color: var(--kp-text-muted);
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
 
-      .failure-ranking__id {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
+  .tier-snapshots {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+    min-width: 0;
+  }
 
-      .item-id {
-        font-weight: 600;
+  .tier-snapshot {
+    min-width: 0;
+
+    &__head {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--kp-text-secondary);
+      font-size: 12px;
+
+      strong {
+        margin-left: auto;
         color: var(--kp-text);
+        font-size: 15px;
+      }
+    }
+
+    &__meta {
+      overflow: hidden;
+      margin-top: 7px;
+      color: var(--kp-text-muted);
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
+  .tier-dot {
+    width: 7px;
+    height: 7px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+
+    &.is-primary {
+      background: var(--kp-success);
+    }
+
+    &.is-secondary {
+      background: var(--kp-warning);
+    }
+  }
+
+  .health-metrics {
+    min-width: 0;
+
+    &__rate {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 7px;
+
+      strong {
+        color: var(--kp-text);
+        font-size: 16px;
       }
 
-      .item-stats {
-        display: flex;
-        align-items: center;
-        gap: 6px;
+      span {
         color: var(--kp-text-secondary);
-      }
-
-      .item-stat {
         font-size: 11px;
-
-        &--weight {
-          margin-left: 2px;
-        }
       }
+    }
 
-      .failure-pct {
-        font-weight: 700;
-        color: var(--kp-danger);
+    &__detail {
+      overflow: hidden;
+      margin-top: 6px;
+      color: var(--kp-text-muted);
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
 
-        &.is-zero {
-          color: var(--kp-success);
-        }
-      }
+  @media (max-width: 960px) {
+    .monitor-summary {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .summary-item:nth-child(3) {
+      border-left: none;
+      border-top: 1px solid var(--kp-divider);
+    }
+
+    .summary-item:nth-child(4) {
+      border-top: 1px solid var(--kp-divider);
+    }
+
+    .group-list__head {
+      display: none;
+    }
+
+    .group-row {
+      grid-template-columns: 1fr;
+      gap: 16px;
+    }
+
+    .health-metrics {
+      grid-column: auto;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .pool-monitor__header {
+      align-items: flex-start;
+      flex-direction: column;
+    }
+
+    .pool-monitor__header .el-button {
+      width: 100%;
+    }
+
+    .monitor-summary {
+      grid-template-columns: 1fr;
+    }
+
+    .summary-item + .summary-item {
+      border-top: 1px solid var(--kp-divider);
+      border-left: none;
+    }
+
+    .group-row {
+      grid-template-columns: 1fr;
+      gap: 16px;
+      padding-inline: 4px;
+    }
+
+    .health-metrics {
+      grid-column: auto;
+    }
+
+    .tier-snapshots {
+      gap: 12px;
+    }
+  }
+
+  @media (max-width: 520px) {
+    .tier-snapshots {
+      grid-template-columns: 1fr;
     }
   }
 </style>

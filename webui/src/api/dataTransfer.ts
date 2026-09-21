@@ -4,9 +4,13 @@ import type {
   ApiResponse,
   BackupCreateResponse,
   BackupListResponse,
+  DataManagementAction,
+  DataManagementSecurityStatus,
   DataTransferStatus,
   DeleteBackupResponse,
   ImportDataResult,
+  InitializeDataManagementSecurityResponse,
+  UnlockDataManagementResponse,
 } from '@/types/api';
 
 export interface DownloadedFile {
@@ -24,8 +28,19 @@ function fileNameFromDisposition(disposition?: string): string | null {
   return plain?.[1]?.trim() ?? null;
 }
 
-async function download(url: string, fallbackName: string): Promise<DownloadedFile> {
-  const response = await http.get<Blob>(url, { responseType: 'blob' });
+function securityHeaders(securityToken: string) {
+  return { 'X-Data-Management-Token': securityToken };
+}
+
+async function download(
+  url: string,
+  fallbackName: string,
+  securityToken: string,
+): Promise<DownloadedFile> {
+  const response = await http.get<Blob>(url, {
+    responseType: 'blob',
+    headers: securityHeaders(securityToken),
+  });
   return {
     blob: response.data,
     fileName: fileNameFromDisposition(response.headers['content-disposition']) ?? fallbackName,
@@ -44,45 +59,81 @@ export function saveDownloadedFile(file: DownloadedFile) {
 }
 
 export const dataTransferApi = {
+  securityStatus() {
+    return unwrap<DataManagementSecurityStatus>(
+      http.get<ApiResponse<DataManagementSecurityStatus>>(
+        '/admin/data-transfer/security/status',
+      ),
+    );
+  },
+  initializeSecurity() {
+    return unwrap<InitializeDataManagementSecurityResponse>(
+      http.post<ApiResponse<InitializeDataManagementSecurityResponse>>(
+        '/admin/data-transfer/security/init',
+      ),
+    );
+  },
+  unlockSecurity(securityKey: string, action: DataManagementAction, target: string | null = null) {
+    return unwrap<UnlockDataManagementResponse>(
+      http.post<ApiResponse<UnlockDataManagementResponse>>(
+        '/admin/data-transfer/security/unlock',
+        { securityKey, action, target },
+      ),
+    );
+  },
   status() {
     return unwrap<DataTransferStatus>(
       http.get<ApiResponse<DataTransferStatus>>('/admin/data-transfer/status'),
     );
   },
-  exportDatabase() {
-    return download('/admin/data-transfer/database.dump', 'starry-api-database.dump');
+  exportDatabase(securityToken: string) {
+    return download(
+      '/admin/data-transfer/database.dump',
+      'starry-api-database.dump',
+      securityToken,
+    );
   },
-  exportBackup() {
-    return download('/admin/data-transfer/backup.zip', 'starry-api-backup.zip');
+  exportBackup(securityToken: string) {
+    return download('/admin/data-transfer/backup.zip', 'starry-api-backup.zip', securityToken);
   },
   backups() {
     return unwrap<BackupListResponse>(
       http.get<ApiResponse<BackupListResponse>>('/admin/data-transfer/backups'),
     );
   },
-  createBackup() {
+  createBackup(securityToken: string) {
     return unwrap<BackupCreateResponse>(
-      http.post<ApiResponse<BackupCreateResponse>>('/admin/data-transfer/backups'),
+      http.post<ApiResponse<BackupCreateResponse>>('/admin/data-transfer/backups', undefined, {
+        headers: securityHeaders(securityToken),
+      }),
     );
   },
-  downloadBackup(fileName: string) {
-    return download(`/admin/data-transfer/backups/${encodeURIComponent(fileName)}`, fileName);
+  downloadBackup(fileName: string, securityToken: string) {
+    return download(
+      `/admin/data-transfer/backups/${encodeURIComponent(fileName)}`,
+      fileName,
+      securityToken,
+    );
   },
-  deleteBackup(fileName: string) {
+  deleteBackup(fileName: string, securityToken: string) {
     return unwrap<DeleteBackupResponse>(
       http.delete<ApiResponse<DeleteBackupResponse>>(
         `/admin/data-transfer/backups/${encodeURIComponent(fileName)}`,
+        { headers: securityHeaders(securityToken) },
       ),
     );
   },
-  importBackup(file: File) {
+  importBackup(file: File, securityToken: string) {
     const formData = new FormData();
     formData.append('file', file);
     return unwrap<ImportDataResult>(
       http.post<ApiResponse<ImportDataResult>>(
         '/admin/data-transfer/import?confirm=RESTORE_DATABASE',
         formData,
-        { timeout: 180_000 },
+        {
+          timeout: 180_000,
+          headers: securityHeaders(securityToken),
+        },
       ),
     );
   },

@@ -15,9 +15,28 @@ import org.springframework.http.HttpStatus;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import tech.starryapi.admin.DataManagementSecurityService;
+import tech.starryapi.admin.SystemMaintenanceTaskGate;
 import tech.starryapi.common.ApiException;
 
 class DisabledAccountScheduledTestServiceTest {
+
+    @Test
+    void scheduledTickSkipsSettingsAndAccountTestsDuringMaintenance() {
+        AccountSettingsService settingsService = mock(AccountSettingsService.class);
+        DataManagementSecurityService securityService = mock(DataManagementSecurityService.class);
+        when(securityService.isLocked()).thenReturn(Mono.just(true));
+        DisabledAccountScheduledTestService service = new DisabledAccountScheduledTestService(
+            settingsService,
+            mock(ProxyAccountRepository.class),
+            mock(AccountTestService.class),
+            new SystemMaintenanceTaskGate(securityService)
+        );
+
+        service.scheduledTick();
+
+        verify(settingsService, never()).disabledAccountScheduledTestSettings();
+    }
 
     @Test
     void tickSkipsWhenScheduleIsDisabled() {

@@ -2,6 +2,7 @@ package tech.starryapi.stats;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.UUID;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.relational.core.mapping.Table;
 
@@ -23,6 +24,11 @@ public class RequestLogEntity {
     private BigDecimal credits;
     private Long latencyMs;
     private String errorMessage;
+    private String circuitKey;
+    private String circuitTier;
+    private String upstreamModel;
+    private Boolean upstreamSuccess;
+    private UUID circuitEpoch;
     private Instant createdAt;
 
     public Long getId() {
@@ -135,6 +141,46 @@ public class RequestLogEntity {
 
     public void setErrorMessage(String errorMessage) {
         this.errorMessage = errorMessage;
+    }
+
+    public String getCircuitKey() {
+        return circuitKey;
+    }
+
+    public void setCircuitKey(String circuitKey) {
+        this.circuitKey = circuitKey;
+    }
+
+    public String getCircuitTier() {
+        return circuitTier;
+    }
+
+    public void setCircuitTier(String circuitTier) {
+        this.circuitTier = circuitTier;
+    }
+
+    public String getUpstreamModel() {
+        return upstreamModel;
+    }
+
+    public void setUpstreamModel(String upstreamModel) {
+        this.upstreamModel = upstreamModel;
+    }
+
+    public Boolean getUpstreamSuccess() {
+        return upstreamSuccess;
+    }
+
+    public void setUpstreamSuccess(Boolean upstreamSuccess) {
+        this.upstreamSuccess = upstreamSuccess;
+    }
+
+    public UUID getCircuitEpoch() {
+        return circuitEpoch;
+    }
+
+    public void setCircuitEpoch(UUID circuitEpoch) {
+        this.circuitEpoch = circuitEpoch;
     }
 
     public Instant getCreatedAt() {

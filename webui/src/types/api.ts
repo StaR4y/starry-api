@@ -1,7 +1,7 @@
 /**
  * 后端 API 类型定义。
  *
- * 与 `api/` 模块的 Java DTO 一一对应，命名保留 camelCase 与后端字段一致，
+ * 与 `service-api/` 模块的 Java DTO 一一对应，命名保留 camelCase 与后端字段一致，
  * 便于以后由 OpenAPI 自动生成时无缝替换。
  */
 
@@ -102,6 +102,8 @@ export interface ResetPasswordResult {
   password: string;
 }
 
+export type SmtpVerifyStatus = 'UNCONFIGURED' | 'PENDING' | 'VERIFIED' | 'SKIPPED' | 'FAILED';
+
 export interface RegistrationSettings {
   registrationEnabled: boolean;
   emailVerifyEnabled: boolean;
@@ -118,15 +120,20 @@ export interface RegistrationSettings {
   turnstileEnabled?: boolean | null;
   turnstileSiteKey?: string | null;
   turnstileSecretConfigured?: boolean | null;
+  smtpVerifyEnabled?: boolean | null;
+  smtpVerifyStatus?: SmtpVerifyStatus | null;
+  smtpVerifySentTo?: string | null;
+  smtpVerifyExpiresAt?: string | null;
+  smtpVerifyLastError?: string | null;
 }
 
 export type SmtpSecurityMode = 'auto' | 'ssl' | 'starttls' | 'none';
 
 export interface UpdateRegistrationSettingsRequest {
-  registrationEnabled: boolean;
-  emailVerifyEnabled: boolean;
-  inviteCodeEnabled: boolean;
-  registrationEmailSuffixWhitelist: string[];
+  registrationEnabled?: boolean;
+  emailVerifyEnabled?: boolean;
+  inviteCodeEnabled?: boolean;
+  registrationEmailSuffixWhitelist?: string[];
   smtpHost?: string;
   smtpPort?: number;
   smtpUsername?: string;
@@ -138,6 +145,18 @@ export interface UpdateRegistrationSettingsRequest {
   turnstileEnabled?: boolean;
   turnstileSiteKey?: string;
   turnstileSecretKey?: string;
+  smtpVerifyEnabled?: boolean;
+  smtpVerifySendNow?: boolean;
+}
+
+export interface SmtpVerifyRequest {
+  token: string;
+}
+
+export interface SmtpVerifyResult {
+  verified: boolean;
+  status: SmtpVerifyStatus | string;
+  message: string;
 }
 
 export interface CreateInviteCodeRequest {
@@ -172,6 +191,39 @@ export interface DataTransferStatus {
   backupBytes: number;
 }
 
+export interface DataManagementSecurityStatus {
+  initialized: boolean;
+  locked: boolean;
+  failedAttempts: number;
+  maxFailedAttempts: number;
+  unlockTtlSeconds: number;
+  initializedAt: string | null;
+  lastFailureAt: string | null;
+  lockedAt: string | null;
+  updatedAt: string | null;
+}
+
+export interface InitializeDataManagementSecurityResponse {
+  status: DataManagementSecurityStatus;
+  securityKey: string;
+}
+
+export type DataManagementAction =
+  | 'EXPORT_DATABASE'
+  | 'EXPORT_BACKUP'
+  | 'CREATE_BACKUP'
+  | 'DOWNLOAD_BACKUP'
+  | 'DELETE_BACKUP'
+  | 'RESTORE_DATABASE';
+
+export interface UnlockDataManagementResponse {
+  tokenType: string;
+  accessToken: string;
+  expiresAt: string;
+  action: DataManagementAction;
+  target: string | null;
+}
+
 export interface BackupFile {
   fileName: string;
   sizeBytes: number;
@@ -197,6 +249,117 @@ export interface ImportDataResult {
   sourceType: 'DUMP' | 'ZIP' | string;
   preRestoreBackupName: string | null;
   importedAt: string;
+}
+
+/* ================== 公共系统状态 ================== */
+
+export interface SystemStatus {
+  status: string;
+  maintenance: boolean;
+  code: string | null;
+  message: string | null;
+  checkedAt: string;
+}
+
+export type ModelRankingBenchmark = 'programbench' | 'frontierbench';
+
+export interface ModelRankingEntry {
+  rank: number;
+  model: string;
+  organization: string;
+  agent: string;
+  score: number;
+  secondaryScore?: number | null;
+}
+
+export interface ModelRankingSnapshot {
+  benchmark: ModelRankingBenchmark;
+  title: string;
+  sourceUrl: string | null;
+  fetchedAt: string | null;
+  entries: ModelRankingEntry[];
+}
+
+export interface ModelRankingBenchmarkStatus {
+  benchmark: ModelRankingBenchmark;
+  title: string;
+  sourceUrl: string | null;
+  fetchedAt: string | null;
+  entryCount: number;
+  due: boolean;
+}
+
+export interface ModelRankingPublicConfig {
+  enabled: boolean;
+}
+
+export interface ModelRankingSettings {
+  enabled: boolean;
+  remoteRefreshEnabled: boolean;
+  refreshCron: string;
+  maxEntries: number;
+  programbenchUrl: string;
+  frontierbenchUrl: string;
+  lastError: string | null;
+  benchmarks: ModelRankingBenchmarkStatus[];
+}
+
+export interface UpdateModelRankingSettingsRequest {
+  enabled?: boolean;
+  remoteRefreshEnabled?: boolean;
+  maxEntries?: number;
+  programbenchUrl?: string;
+  frontierbenchUrl?: string;
+  refreshNow?: boolean;
+}
+
+export type AppearancePreset = 'default' | 'custom';
+export type AppearanceChrome = 'classic' | 'editorial';
+
+export interface Appearance {
+  siteName: string;
+  logoUrl: string | null;
+  faviconUrl: string | null;
+  backgroundImageUrl: string | null;
+  preset: AppearancePreset;
+  primary: string;
+  primaryMid: string;
+  accent: string;
+  success: string;
+  warning: string;
+  danger: string;
+  header: string;
+  text: string;
+  textSecondary: string;
+  textMuted: string;
+  sidebarOpacity: number;
+  surfaceOpacity: number;
+  blurPx: number;
+  backgroundBlurPx: number;
+  chrome: AppearanceChrome;
+}
+
+export interface UpdateAppearanceRequest {
+  siteName?: string;
+  primary?: string;
+  primaryMid?: string;
+  accent?: string;
+  success?: string;
+  warning?: string;
+  danger?: string;
+  header?: string;
+  text?: string;
+  textSecondary?: string;
+  textMuted?: string;
+  sidebarOpacity?: number;
+  surfaceOpacity?: number;
+  blurPx?: number;
+  backgroundBlurPx?: number;
+  chrome?: AppearanceChrome;
+  clearLogo?: boolean;
+  clearFavicon?: boolean;
+  clearBackground?: boolean;
+  restoreDefault?: boolean;
 }
 
 /* ================== 账号 ================== */
@@ -234,6 +397,35 @@ export interface Account {
   lastUsedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  badgeColor?: string | null;
+}
+
+export interface ChatGptOAuthStartRequest {
+  accountId?: string;
+}
+
+export interface ChatGptOAuthStartResult {
+  loginId: string;
+  verificationUrl: string;
+  userCode: string;
+  expiresAt: string;
+  pollIntervalSeconds: number;
+}
+
+export type ChatGptOAuthStatus =
+  | 'PENDING'
+  | 'COMPLETING'
+  | 'SUCCEEDED'
+  | 'FAILED'
+  | 'EXPIRED'
+  | 'CANCELLED';
+
+export interface ChatGptOAuthStatusResult {
+  loginId: string;
+  status: ChatGptOAuthStatus;
+  message: string | null;
+  retryAfterSeconds: number | null;
+  account: Account | null;
 }
 
 export interface CreateAccountRequest {
@@ -260,6 +452,7 @@ export interface CreateAccountRequest {
   quotaLimit?: number;
   quota5hLimit?: number;
   quota7dLimit?: number;
+  badgeColor?: string | null;
   credentials?: {
     accessToken?: string;
     csrfToken?: string;
@@ -295,16 +488,65 @@ export type UpdateAccountRequest = Partial<
   }
 >;
 
+export interface AccountAllocationPolicy {
+  accountId: string;
+  allocationPriority: number;
+  safeConcurrency: number;
+  safeRpm: number;
+  burstCapacity: number;
+  maxSessions: number;
+  sessionIdleSeconds: number;
+  maxInflightTokens: number;
+  policyVersion: number;
+  lifecycleState: string;
+  stateVersion: number;
+  warmupStage: number;
+  cooldownUntil: string | null;
+  recentErrorRate: number;
+  recentLatencyMs: number;
+  activeConcurrency: number;
+  reservedInputTokens: number;
+  reservedOutputTokens: number;
+  updatedAt: string;
+}
+
+export type UpdateAccountAllocationPolicyRequest = Partial<
+  Pick<
+    AccountAllocationPolicy,
+    | 'allocationPriority'
+    | 'safeConcurrency'
+    | 'safeRpm'
+    | 'burstCapacity'
+    | 'maxSessions'
+    | 'sessionIdleSeconds'
+    | 'maxInflightTokens'
+  >
+>;
+
 export interface AccountSettings {
   gptFastModeEnabled: boolean;
   disabledAccountScheduledTest: DisabledAccountScheduledTestSettings;
   poolPolicy: AccountPoolPolicySettings;
+  routingPolicy: AccountRoutingPolicySettings;
 }
 
 export interface UpdateAccountSettingsRequest {
   gptFastModeEnabled?: boolean;
   disabledAccountScheduledTest?: Partial<DisabledAccountScheduledTestSettings>;
   poolPolicy?: Partial<AccountPoolPolicySettings>;
+  routingPolicy?: Partial<AccountRoutingPolicySettings>;
+}
+
+export interface AccountRoutingPolicySettings {
+  isolateCodexPool: boolean;
+  gptUsesCodexAccounts: boolean;
+  bindSessionOnAdmission: boolean;
+  bindSessionByApiKey: boolean;
+  codexMaxRetryAccounts: number;
+  openAiMaxRetryAccounts: number;
+  deepSeekMaxRetryAccounts: number;
+  anthropicMaxRetryAccounts: number;
+  kiroMaxRetryAccounts: number;
 }
 
 export interface DisabledAccountScheduledTestSettings {
@@ -337,6 +579,8 @@ export interface AccountPoolPolicySettings {
   retestIntervalMinutes: number;
   retestMaxConcurrency: number;
   autoWeightEnabled: boolean;
+  circuitEpoch: string | null;
+  activationStartedAt: string | null;
 }
 
 export interface AccountFailureRankingItem {
@@ -356,6 +600,8 @@ export interface AccountFailureRankingItem {
 
 export interface AccountPoolStatus {
   enabled: boolean;
+  accountCount: number;
+  availableAccountCount: number;
   activeTier: 'primary' | 'secondary' | 'all' | string;
   primaryDisabled: boolean;
   primaryFailureRatePercent: number;
@@ -369,6 +615,35 @@ export interface AccountPoolStatus {
   retestRunning: boolean;
   settings: AccountPoolPolicySettings;
   failureRanking: AccountFailureRankingItem[];
+  modelPools: ModelPoolCircuitStatus[];
+}
+
+export type ModelPoolCircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
+
+/** 按模型供应商与模型族聚合的服务端原生熔断快照。 */
+export interface ModelPoolCircuitStatus {
+  key: string;
+  provider: string;
+  modelFamily: string;
+  representativeModel: string | null;
+  state: ModelPoolCircuitState;
+  activeTier: 'primary' | 'secondary' | string;
+  primaryRequests: number;
+  primaryFailures: number;
+  primaryFailureRatePercent: number;
+  secondaryRequests: number;
+  secondaryFailures: number;
+  secondaryFailureRatePercent: number;
+  primaryAccountCount: number;
+  secondaryAccountCount: number;
+  windowStartedAt: string | null;
+  lastTransitionAt: string | null;
+  openedAt: string | null;
+  nextProbeAt: string | null;
+  lastOutcomeAt: string | null;
+  halfOpenInFlight: number;
+  halfOpenCompleted: number;
+  halfOpenSucceeded: number;
 }
 
 export interface SuspendAccountRequest {
@@ -390,6 +665,13 @@ export interface TestModelOption {
   value: string;
 }
 
+export interface CompatibleVendorModels {
+  name: string;
+  icon?: string | null;
+  color?: string | null;
+  models: TestModelOption[];
+}
+
 export interface TestModelOptionsResult {
   kiro: TestModelOption[];
   openAi: TestModelOption[];
@@ -397,6 +679,7 @@ export interface TestModelOptionsResult {
   anthropic: TestModelOption[];
   codex: TestModelOption[];
   deepSeek: TestModelOption[];
+  compatibleVendors?: CompatibleVendorModels[];
 }
 
 export interface TestAccountsResult {
@@ -451,6 +734,7 @@ export interface ClearAccountsResult {
 /* ================== API Key ================== */
 
 export interface ApiKey {
+  billingSource: 'BALANCE' | 'CODING_PLAN';
   keyId: string;
   userId: string | null;
   name: string;
@@ -458,6 +742,7 @@ export interface ApiKey {
   keyPrefix: string;
   enabled: boolean;
   creditsLimit: number | null;
+  modelProvider: string;
   totalRequests: number | null;
   totalCredits: number | null;
   totalInputTokens: number | null;
@@ -468,17 +753,23 @@ export interface ApiKey {
 }
 
 export interface CreateApiKeyRequest {
+  billingSource: 'BALANCE' | 'CODING_PLAN';
   name: string;
   creditsLimit?: number;
+  modelProvider: string;
 }
 
 export interface UpdateApiKeyRequest {
+  billingSource?: 'BALANCE' | 'CODING_PLAN';
+  clearCreditsLimit?: boolean;
   name?: string;
   enabled?: boolean;
   creditsLimit?: number;
+  modelProvider?: string;
 }
 
 export interface CreatedApiKey {
+  billingSource: 'BALANCE' | 'CODING_PLAN';
   keyId: string;
   userId: string | null;
   name: string;
@@ -487,6 +778,7 @@ export interface CreatedApiKey {
   keyPrefix: string;
   enabled: boolean;
   creditsLimit: number | null;
+  modelProvider: string;
   createdAt: string;
 }
 
@@ -531,8 +823,12 @@ export interface UpdateModelMappingRequest {
 
 export interface ModelPricingRule {
   ruleId: string;
+  scope?: 'model' | 'provider' | 'family';
+  provider?: string | null;
+  family?: string | null;
   enabled: boolean;
   modelPattern: string;
+  priceMultiplier: number | null;
   inputMultiplier: number | null;
   outputMultiplier: number | null;
   cacheWriteMultiplier: number | null;
@@ -550,12 +846,47 @@ export interface ModelPricingRule {
 
 export interface ModelPricingSettings {
   rules: ModelPricingRule[];
+  source?: ModelPricingSourceStatus | null;
+}
+
+export interface ModelPricingPreview {
+  model: string;
+  pricingModel: string;
+  source: string;
+  matchedPriceModel: string | null;
+  multiplier: number | null;
+  matchedRuleIds: string[];
+  basePricing: ModelPublicPricing;
+  pricing: ModelPublicPricing;
+}
+
+export interface ModelPricingSourceStatus {
+  remoteRefreshEnabled: boolean;
+  syncCatalogIds: boolean;
+  sourceUrl: string;
+  checksumUrl: string;
+  refreshInterval?: string | null;
+  catalogEntries: number;
+  refreshedAt?: string | null;
+  lastError?: string | null;
+}
+
+export interface UpdateModelPricingSourceRequest {
+  remoteRefreshEnabled?: boolean;
+  syncCatalogIds?: boolean;
+  sourceUrl?: string;
+  checksumUrl?: string;
+  refreshNow?: boolean;
 }
 
 export interface UpdateModelPricingRuleRequest {
   ruleId?: string;
+  scope?: 'model' | 'provider' | 'family';
+  provider?: string | null;
+  family?: string | null;
   enabled?: boolean;
   modelPattern: string;
+  priceMultiplier?: number | null;
   inputMultiplier?: number | null;
   outputMultiplier?: number | null;
   cacheWriteMultiplier?: number | null;
@@ -630,6 +961,45 @@ export interface UsageSummary {
   models: ModelUsageSummary[];
 }
 
+export interface UsageDay {
+  day: string;
+  requestCount: number;
+  successfulRequests: number;
+  failedRequests: number;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  credits: number | null;
+  peakRequests: number;
+  offPeakRequests: number;
+  peakCredits: number | null;
+  offPeakCredits: number | null;
+}
+
+export interface UsageTracker {
+  from: string;
+  to: string;
+  totalRequests: number;
+  successfulRequests: number;
+  failedRequests: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalTokens: number;
+  totalCredits: number | null;
+  peakRequests: number;
+  offPeakRequests: number;
+  peakCredits: number | null;
+  offPeakCredits: number | null;
+  models: ModelUsageSummary[];
+  days: UsageDay[];
+}
+
+export interface RequestLogPage {
+  items: RequestLog[];
+  hasMore: boolean;
+  nextBefore: string | null;
+}
+
 export interface PerformanceMetric {
   systemCpuLoadPercent: number | null;
   processCpuLoadPercent: number | null;
@@ -668,6 +1038,100 @@ export interface ModelInfo {
   outputTokensPer100Balance?: number | null;
   cacheWriteTokensPer100Balance?: number | null;
   cacheReadTokensPer100Balance?: number | null;
+  totalPricePerMillionTokens?: number | null;
+  inputPricePerMillionTokens?: number | null;
+  outputPricePerMillionTokens?: number | null;
+  cacheWritePricePerMillionTokens?: number | null;
+  cacheReadPricePerMillionTokens?: number | null;
+  icon?: string | null;
+  requestFormat?: ModelRequestFormat;
+  endpoint?: string;
+}
+
+export type ModelRequestFormat = 'OPENAI_CHAT_COMPLETIONS';
+
+export interface ModelPublicPricing {
+  billingMode: 'total' | 'input_output' | string;
+  tokensPer100Balance?: number | null;
+  inputTokensPer100Balance?: number | null;
+  outputTokensPer100Balance?: number | null;
+  cacheWriteTokensPer100Balance?: number | null;
+  cacheReadTokensPer100Balance?: number | null;
+  totalPricePerMillionTokens?: number | null;
+  inputPricePerMillionTokens?: number | null;
+  outputPricePerMillionTokens?: number | null;
+  cacheWritePricePerMillionTokens?: number | null;
+  cacheReadPricePerMillionTokens?: number | null;
+}
+
+export interface ManagedModel {
+  id: string;
+  name: string;
+  icon?: string | null;
+  provider: string;
+  family: string;
+  targetModelId: string;
+  requestFormat: ModelRequestFormat;
+  endpoint: string;
+  contextWindow: number;
+  description?: string | null;
+  enabled: boolean;
+  builtIn: boolean;
+  badgeColor?: string | null;
+  pricing?: ModelPublicPricing | null;
+}
+
+export interface UpsertManagedModelRequest {
+  id: string;
+  name: string;
+  icon?: string | null;
+  provider?: string;
+  family?: string;
+  targetModelId?: string;
+  requestFormat: ModelRequestFormat;
+  endpoint: string;
+  contextWindow: number;
+  description?: string | null;
+  enabled: boolean;
+  badgeColor?: string;
+}
+
+export interface ModelIconUploadResponse {
+  url: string;
+  fileName: string;
+  sizeBytes: number;
+}
+
+export type ModelCatalogLayout = 'cards' | 'list' | 'compact';
+export type ModelCatalogDensity = 'comfortable' | 'compact';
+export type ModelCatalogGroupBy = 'provider' | 'none';
+export type ModelCatalogCardStyle = 'default' | 'outline' | 'flat';
+
+export interface ModelCatalogDisplaySettings {
+  layout: ModelCatalogLayout;
+  density: ModelCatalogDensity;
+  columns: number;
+  showIcon: boolean;
+  showFamily: boolean;
+  showContext: boolean;
+  showOrigin: boolean;
+  showDescription: boolean;
+  groupBy: ModelCatalogGroupBy;
+  cardStyle: ModelCatalogCardStyle;
+}
+
+export interface UpdateModelCatalogDisplayRequest extends Partial<ModelCatalogDisplaySettings> {
+  restoreDefault?: boolean;
+}
+
+export interface ReorderManagedModelsRequest {
+  modelIds?: string[];
+  restoreDefault?: boolean;
+}
+
+export interface ModelCatalogViewSettings {
+  display: ModelCatalogDisplaySettings;
+  modelIds: string[];
 }
 
 export interface HealthInfo {
@@ -791,7 +1255,8 @@ export interface CreatePaymentOrderResponse {
 }
 
 export interface CreateRedemptionCodeRequest {
-  balance: number;
+  balance?: number | null;
+  planId?: string | null;
   count?: number;
   expiresAt?: string | null;
 }
@@ -799,7 +1264,8 @@ export interface CreateRedemptionCodeRequest {
 export interface RedemptionCode {
   codeId: string;
   code: string;
-  balance: number;
+  balance: number | null;
+  planId: string | null;
   enabled: boolean;
   used: boolean;
   usedByUserId: string | null;
@@ -822,9 +1288,71 @@ export interface RedeemCodeRequest {
 
 export interface RedeemCodeResponse {
   codeId: string;
-  redeemedBalance: number;
+  redeemedBalance: number | null;
   balance: number;
+  subscriptionId: string | null;
   redeemedAt: string;
+}
+
+export interface CodingPlan {
+  version: number;
+  planId: string;
+  name: string;
+  description: string | null;
+  priceCredits: string | number;
+  durationDays: number;
+  quotaCredits: string | number;
+  allowedProviders: string[];
+  sortOrder: number;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateCodingPlanRequest {
+  name: string;
+  description?: string | null;
+  priceCredits: string | number;
+  durationDays: number;
+  quotaCredits: string | number;
+  allowedProviders?: string[] | null;
+  sortOrder?: number | null;
+}
+
+export interface UpdateCodingPlanRequest extends Partial<CreateCodingPlanRequest> {
+  enabled?: boolean | null;
+}
+
+export interface CodingPlanSubscription {
+  planVersion: number;
+  reservedCredits: number;
+  availableCredits: number;
+  subscriptionId: string;
+  userId: string;
+  username: string | null;
+  planId: string;
+  planName: string;
+  status: string;
+  startsAt: string;
+  endsAt: string;
+  quotaCredits: number;
+  usedCredits: number;
+  remainingCredits: number;
+  allowedProviders: string[];
+  source: string;
+  sourceRefId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PurchaseCodingPlanResponse {
+  subscription: CodingPlanSubscription;
+  balance: number;
+}
+
+export interface AdminGrantSubscriptionRequest {
+  userId: string;
+  planId: string;
 }
 
 export interface OpenAiQuotaWindowResponse {

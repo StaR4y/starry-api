@@ -13,8 +13,13 @@ import './assets/styles/global.scss';
 
 import App from './App.vue';
 import router from './router';
+import { useAppearanceStore } from '@/stores/appearance';
+import { useRankingStore } from '@/stores/ranking';
 
 const app = createApp(App);
-app.use(createPinia());
+const pinia = createPinia();
+app.use(pinia);
+void useAppearanceStore(pinia).load();
+void useRankingStore(pinia).load();
 app.use(router);
 app.mount('#app');

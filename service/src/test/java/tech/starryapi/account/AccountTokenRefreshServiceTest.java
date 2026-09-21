@@ -5,12 +5,15 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -21,8 +24,28 @@ import org.springframework.web.reactive.function.client.ExchangeFunction;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import tech.starryapi.admin.DataManagementSecurityService;
+import tech.starryapi.admin.SystemMaintenanceTaskGate;
 
 class AccountTokenRefreshServiceTest {
+
+    @Test
+    void scheduledRefreshSkipsRepositoryAndUpstreamWorkDuringMaintenance() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        DataManagementSecurityService securityService = mock(DataManagementSecurityService.class);
+        when(securityService.isLocked()).thenReturn(Mono.just(true));
+        AccountTokenRefreshService service = new AccountTokenRefreshService(
+            new ObjectMapper(),
+            WebClient.create(),
+            repository,
+            mock(AccountPoolService.class),
+            new SystemMaintenanceTaskGate(securityService)
+        );
+
+        service.scheduledRefresh();
+
+        verify(repository, never()).findAllByEnabledTrue();
+    }
 
     @Test
     void refreshesOidcTokenAndSavesAccount() {
@@ -103,6 +126,8 @@ class AccountTokenRefreshServiceTest {
 
     @Test
     void refreshesCodexTokenAndSavesAccount() {
+        Instant expectedExpiry = Instant.parse("2099-01-01T00:00:00Z");
+        String refreshedAccessToken = jwtWithExpiration(expectedExpiry);
         AtomicReference<URI> requestUri = new AtomicReference<>();
         AtomicReference<MediaType> requestContentType = new AtomicReference<>();
         ExchangeFunction exchange = request -> {
@@ -112,12 +137,11 @@ class AccountTokenRefreshServiceTest {
                 .header("Content-Type", "application/json")
                 .body("""
                     {
-                      "access_token":"codex-new-access",
+                      "access_token":"%s",
                       "refresh_token":"codex-new-refresh",
-                      "id_token":"codex-id-token",
-                      "expires_in":3600
+                      "id_token":"codex-id-token"
                     }
-                    """)
+                    """.formatted(refreshedAccessToken))
                 .build());
         };
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
@@ -140,12 +164,12 @@ class AccountTokenRefreshServiceTest {
 
         assertThat(refreshed).isNotNull();
         assertThat(requestUri.get()).isEqualTo(URI.create("https://auth.openai.com/oauth/token"));
-        assertThat(requestContentType.get()).isEqualTo(MediaType.APPLICATION_FORM_URLENCODED);
-        assertThat(refreshed.getAccessToken()).isEqualTo("codex-new-access");
+        assertThat(requestContentType.get()).isEqualTo(MediaType.APPLICATION_JSON);
+        assertThat(refreshed.getAccessToken()).isEqualTo(refreshedAccessToken);
         assertThat(refreshed.getRefreshToken()).isEqualTo("codex-new-refresh");
         assertThat(refreshed.getIdToken()).isEqualTo("codex-id-token");
         assertThat(refreshed.getClientId()).isEqualTo("codex-client-id");
-        assertThat(refreshed.getTokenExpiresAt()).isAfterOrEqualTo(Instant.now().plusSeconds(3500));
+        assertThat(refreshed.getTokenExpiresAt()).isEqualTo(expectedExpiry);
         assertThat(service.canRefresh(account)).isTrue();
     }
 
@@ -427,5 +451,14 @@ class AccountTokenRefreshServiceTest {
         account.setProvider(AccountPlatforms.OPENAI_PROVIDER);
         account.setAuthMethod(AccountPlatforms.OPENAI_CODEX_AUTH);
         return account;
+    }
+
+    private String jwtWithExpiration(Instant expiresAt) {
+        String header = Base64.getUrlEncoder().withoutPadding()
+            .encodeToString("{\"alg\":\"RS256\"}".getBytes(StandardCharsets.UTF_8));
+        String payload = Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(("{\"exp\":" + expiresAt.getEpochSecond() + "}")
+                .getBytes(StandardCharsets.UTF_8));
+        return header + "." + payload + ".signature";
     }
 }

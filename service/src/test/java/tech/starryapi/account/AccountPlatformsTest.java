@@ -29,13 +29,44 @@ class AccountPlatformsTest {
     }
 
     @Test
+    void customOpenAiCompatibleVendorKeepsCatalogNameAndUsesCompatibleRouting() {
+        ProxyAccountEntity account = account("OpenRouter", AccountPlatforms.OPENAI_API_KEY_AUTH);
+        account.setBaseUrl("https://openrouter.ai/api/v1");
+
+        assertThat(AccountPlatforms.normalizeProvider("OpenRouter", AccountPlatforms.OPENAI_API_KEY_AUTH))
+            .isEqualTo("OpenRouter");
+        assertThat(AccountPlatforms.normalizeAuthMethod(null, "OpenRouter"))
+            .isEqualTo(AccountPlatforms.OPENAI_API_KEY_AUTH);
+        assertThat(AccountPlatforms.isCustomOpenAiCompatibleAccount(account)).isTrue();
+        assertThat(AccountPlatforms.isOpenAiCompatibleApiKey(account)).isTrue();
+        assertThat(AccountPlatforms.isOfficialOpenAiApiKey(account)).isFalse();
+        assertThat(AccountPlatforms.defaultBaseUrl("OpenRouter", AccountPlatforms.OPENAI_API_KEY_AUTH, null))
+            .isNull();
+        assertThat(AccountPlatforms.requiresExplicitBaseUrl("OpenRouter", AccountPlatforms.OPENAI_API_KEY_AUTH))
+            .isTrue();
+    }
+
+    @Test
     void openAiCompatibleProviderKeepsDisplayNameAndUsesOpenAiRouting() {
         ProxyAccountEntity account = account("openai-compatible", AccountPlatforms.OPENAI_API_KEY_AUTH);
 
         assertThat(AccountPlatforms.normalizeProvider("openai-compatible", AccountPlatforms.OPENAI_API_KEY_AUTH))
             .isEqualTo(AccountPlatforms.OPENAI_COMPATIBLE_PROVIDER);
         assertThat(AccountPlatforms.isOpenAi(account)).isTrue();
+        assertThat(AccountPlatforms.isOpenAiApiKey(account)).isTrue();
         assertThat(AccountPlatforms.isKiroCompatible(account)).isFalse();
+    }
+
+    @Test
+    void openAiApiKeyFilterExcludesCodexOauthTokens() {
+        ProxyAccountEntity apiKey = account(AccountPlatforms.OPENAI_PROVIDER, AccountPlatforms.OPENAI_API_KEY_AUTH);
+        ProxyAccountEntity codex = account(AccountPlatforms.OPENAI_PROVIDER, AccountPlatforms.OPENAI_CODEX_AUTH);
+
+        assertThat(AccountPlatforms.isOpenAi(apiKey)).isTrue();
+        assertThat(AccountPlatforms.isOpenAi(codex)).isTrue();
+        assertThat(AccountPlatforms.isOpenAiApiKey(apiKey)).isTrue();
+        assertThat(AccountPlatforms.isOpenAiApiKey(codex)).isFalse();
+        assertThat(AccountPlatforms.isCodex(codex)).isTrue();
     }
 
     @Test

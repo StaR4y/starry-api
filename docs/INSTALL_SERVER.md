@@ -11,7 +11,7 @@ Nginx / 1Panel reverse proxy
 
 The installer binds the service port to `0.0.0.0:${HOST_HTTP_PORT}` by default so Docker-based 1Panel/OpenResty can reach it through the host port. Restrict that port with your firewall/security group and expose the service publicly through HTTPS reverse proxy. If Nginx runs directly on the host instead of in Docker, you may set `HOST_BIND_ADDR=127.0.0.1`.
 
-It downloads `artifacts/starry-api-bundle.tar.gz` and does not run Gradle or npm on the server. Compose builds only a small JRE runtime layer containing PostgreSQL 17 client tools. See [Prebuilt Artifact Deployment](PREBUILT_ARTIFACTS.md) for the artifact publishing flow.
+It downloads `artifacts/starry-api-bundle.tar.gz` and does not run Gradle or npm on the server. Compose builds only a small JRE runtime layer containing PostgreSQL 17 client tools, `jq`, and the checked recovery utility. See [Prebuilt Artifact Deployment](PREBUILT_ARTIFACTS.md) for the artifact publishing flow.
 
 ## One-Line Install
 
@@ -50,7 +50,7 @@ The installer will:
 
 - install `curl`, `openssl`, Docker, and Docker Compose when missing
 - download `artifacts/starry-api-bundle.tar.gz` and verify `artifacts/starry-api-bundle.tar.gz.sha256`
-- extract the prebuilt jar, WebUI archive, Compose file, and metadata
+- extract the prebuilt jar, WebUI archive, Compose file, checksum-verified recovery utility, and metadata
 - create `.env` with distinct generated PostgreSQL bootstrap, migration, and runtime passwords
 - write `docker-compose.artifact.yml`
 - start PostgreSQL 17 and the service container with Docker Compose
@@ -85,6 +85,8 @@ Supported variables:
 | `ARTIFACT_URL` | `${REPO_RAW_BASE}/artifacts/starry-api.jar` | Direct jar URL |
 | `CHECKSUM_URL` | `${REPO_RAW_BASE}/artifacts/starry-api.jar.sha256` | Direct checksum URL |
 | `BUILD_INFO_URL` | `${REPO_RAW_BASE}/artifacts/build-info.json` | Optional build metadata URL |
+| `RECOVERY_TOOL_URL` | `${REPO_RAW_BASE}/artifacts/runtime/recover-data-management.sh` | Direct recovery utility URL for the single-jar fallback |
+| `RECOVERY_TOOL_CHECKSUM_URL` | `${RECOVERY_TOOL_URL}.sha256` | Direct recovery utility checksum URL |
 | `INSTALL_DIR` | `/opt/starry-api` | Server install directory |
 | `HOST_BIND_ADDR` | `0.0.0.0` | Host address for compose port binding; use `127.0.0.1` only when reverse proxy runs on the host |
 | `HOST_HTTP_PORT` | `18080` | Local host port exposed by compose |
@@ -110,7 +112,7 @@ POSTGRES_POOL_INITIAL_SIZE=4
 POSTGRES_POOL_MAX_SIZE=20
 ```
 
-The database and schema are fixed as `starry_api`; Flyway uses `starry_api_migration` and application traffic uses `starry_api`. The generated PostgreSQL profile assumes at least 2 GiB available memory and SSD-backed storage. Size every replica's `POSTGRES_POOL_MAX_SIZE` against `POSTGRES_MAX_CONNECTIONS`, leaving headroom for Flyway, maintenance, monitoring, and operator sessions. The installer refuses to generate new passwords after `data/postgresql/PG_VERSION` exists because changing `.env` alone cannot rotate credentials in an initialized cluster. The only automatic exception is a matching `.env.postgresql-retry` retained during rollback of a failed first PostgreSQL deployment; `FORCE_ENV=true` reactivates that file instead of generating new secrets. Otherwise, rotate roles in PostgreSQL and update `.env` manually.
+The database and schema are fixed as `starry_api`; Flyway uses `starry_api_migration` and application traffic uses `starry_api`. `starry_api_bootstrap` remains a PostgreSQL superuser for cluster ownership and database-level break-glass recovery, but it is not used by the service or published outside the internal Compose network. Protect and audit its password independently. The generated PostgreSQL profile assumes at least 2 GiB available memory and SSD-backed storage. Size every replica's `POSTGRES_POOL_MAX_SIZE` against `POSTGRES_MAX_CONNECTIONS`, leaving headroom for Flyway, maintenance, monitoring, and operator sessions. The installer refuses to generate new passwords after `data/postgresql/PG_VERSION` exists because changing `.env` alone cannot rotate credentials in an initialized cluster. The only automatic exception is a matching `.env.postgresql-retry` retained during rollback of a failed first PostgreSQL deployment; `FORCE_ENV=true` reactivates that file instead of generating new secrets. Otherwise, rotate roles in PostgreSQL and update `.env` manually.
 
 ## 1Panel Reverse Proxy
 
@@ -139,7 +141,7 @@ username: admin
 password: printed once in first startup logs
 ```
 
-The password is only printed when the admin table is created. Save it immediately, then log in and change it.
+The password is printed only when the application Root marker is unassigned and `admin_users` is empty. Save it immediately, then log in and change it; it is not printed again.
 
 ## Operations
 
@@ -149,6 +151,26 @@ docker compose -f docker-compose.artifact.yml logs -f service
 docker compose -f docker-compose.artifact.yml restart service
 docker compose -f docker-compose.artifact.yml down
 ```
+
+### Locked data-management recovery
+
+The installed service image includes a bilingual interactive recovery utility. While the locked service is running in maintenance mode, execute it from a real terminal, enter the original `dmsk-...` key twice, then restart only the service:
+
+```bash
+cd /opt/starry-api
+docker compose -f docker-compose.artifact.yml exec service \
+  /app/bin/recover-data-management --lang zh
+# Use --lang en for English prompts.
+
+docker compose -f docker-compose.artifact.yml restart service
+# Wait for the service to finish starting, then verify:
+docker compose -f docker-compose.artifact.yml exec service \
+  curl -fsS http://127.0.0.1:8080/system/status
+docker compose -f docker-compose.artifact.yml exec service \
+  sh -c 'test ! -e /app/security/recovery.key && test ! -e /app/security/.recovery.key.consuming && echo "recovery key files consumed"'
+```
+
+Do not use `docker compose exec -T`: the utility requires a TTY so it can hide and double-check the key. Recovery succeeds only when the response contains `"maintenance":false` and both recovery paths are absent. A normal readable, valid-format but nonmatching key is audited and consumed while maintenance remains active; run the utility again with the correct key. If cleanup fails, the service stays fail-closed and startup retries `/app/security/.recovery.key.consuming`; inspect storage and logs rather than staging another key or deleting files manually. The tool is shipped in the bundled runtime image at `/app/bin/recover-data-management`; do not download or pipe a cloud recovery script with `curl ... | sh`. See [Operations](OPERATIONS.md#recover-a-docker-compose-deployment) for the full cleanup-failure procedure and direct host/JAR recovery.
 
 Update:
 
@@ -165,8 +187,8 @@ cat app/build-info.json
 docker compose -f docker-compose.artifact.yml logs --tail=160 service
 ```
 
-Deployment files are installed with atomic renames. Before an update, the installer preserves `.env` (mode `0600`), the current jar and checksum, `docker-compose.artifact.yml`, and `postgres-init/001-starry-api-roles.sh` as adjacent `.previous` files. If any later deployment step fails, it restores that complete deployment unit. Once Compose has begun changing containers, the installer also recreates the previous stack, removes new orphan containers, and verifies its health. If PostgreSQL initialized during an attempted transition from an older deployment, its generated credentials are retained as `.env.postgresql-retry` while the previous `.env` is restored; a later `FORCE_ENV=true` retry reuses those exact credentials. Automatic rollback is attempted at most once per installer run.
+Deployment files are installed with atomic renames. Before an update, the installer preserves `.env` (mode `0600`), the current jar and checksum, `docker-compose.artifact.yml`, `postgres-init/001-starry-api-roles.sh`, and the recovery utility and checksum as adjacent `.previous` files. If any later deployment step fails, it restores that complete deployment unit. Once Compose has begun changing containers, the installer also recreates the previous stack, removes new orphan containers, and verifies its health. If PostgreSQL initialized during an attempted transition from an older deployment, its generated credentials are retained as `.env.postgresql-retry` while the previous `.env` is restored; a later `FORCE_ENV=true` retry reuses those exact credentials. Automatic rollback is attempted at most once per installer run.
 
-On a first installation there is no previous deployment to restore. A failed first attempt keeps the generated credentials, verified artifact, Compose file, and PostgreSQL data in place for a deterministic retry; it never labels that partial installation as a successful rollback.
+On a first installation there is no previous deployment to restore. A failed first attempt keeps the generated credentials, verified artifact and recovery utility, Compose file, and PostgreSQL data in place for a deterministic retry; it never labels that partial installation as a successful rollback.
 
 Do not delete `./data/postgresql` unless you intend to permanently reset the PostgreSQL cluster.

@@ -1,6 +1,6 @@
 # Starry API WebUI
 
-Starry API 的 Web 控制台。提供管理员登录、上游账号池维护、API Key 下发、模型映射、平台模型目录、请求日志和 PostgreSQL 数据备份管理等能力。
+Starry API 的 Web 控制台。提供登录与用户欢迎页、上游账号池维护、API Key 下发、模型目录与价格、模型映射、用量日志、支付充值、统一系统设置和 PostgreSQL 数据管理等能力。
 
 ## 技术栈
 
@@ -30,21 +30,26 @@ webui/
 │   │   ├── users.ts
 │   │   ├── accounts.ts
 │   │   ├── apiKeys.ts
+│   │   ├── models.ts
+│   │   ├── modelPricing.ts
 │   │   ├── modelMappings.ts
+│   │   ├── payment.ts
 │   │   ├── logs.ts
 │   │   ├── dataTransfer.ts # PostgreSQL custom dump 导出、恢复与备份管理
-│   │   ├── system.ts      # 健康检查 / 模型清单
+│   │   ├── system.ts      # 维护状态 / 健康检查 / 模型清单
 │   │   └── index.ts       # 统一出口
 │   ├── assets/styles/     # 全局样式（含玻璃主题）
 │   ├── components/        # 可复用 UI 组件
-│   ├── composables/       # 组合式逻辑（按需添加）
 │   ├── layouts/
 │   │   └── DefaultLayout.vue
 │   ├── platforms/         # 前端平台注册、模型推断、客户端配置
 │   │   ├── openai/        # OpenAI 展示元数据与客户端环境变量片段
+│   │   ├── deepseek/      # DeepSeek 展示元数据与模型推断
 │   │   ├── anthropic/     # Anthropic / Claude Code 展示元数据与配置片段
 │   │   ├── gemini/        # Gemini 展示元数据
 │   │   ├── opencode/      # OpenCode 项目配置片段
+│   │   ├── other/         # 管理员自定义 provider 的回退展示元数据
+│   │   ├── models.ts      # 平台模型元数据公共工具
 │   │   ├── registry.ts    # 统一 provider / family 顺序与模型推断
 │   │   ├── clientSetup.ts # 聚合 Codex/Claude/OpenCode 配置与 CC Switch 链接
 │   │   ├── setupShared.ts # 配置生成公共工具
@@ -60,10 +65,15 @@ webui/
 │       ├── dashboard/
 │       ├── accounts/
 │       ├── api-keys/
+│       ├── models/        # 模型 ID 目录、价格展示与管理员模型管理
 │       ├── model-mappings/
 │       ├── logs/
+│       ├── payment/       # 用户充值、支付配置页和兑换码管理
+│       ├── settings/      # 系统设置导航、注册/SMTP 设置和预留模板
+│       ├── system/        # 全站维护状态
 │       ├── data-transfer/ # PostgreSQL 数据导出、备份与恢复
-│       └── users/
+│       ├── users/
+│       └── welcome/       # 普通用户首次进入页
 └── README.md
 ```
 
@@ -74,9 +84,25 @@ webui/
 - **视图** 按业务模块在 `src/views/<module>/` 下组织，文件命名遵循 `XxxView.vue`，便于路由 lazy import。
 - **平台注册** 集中在 `src/platforms/`；每个平台的展示元数据放在 `src/platforms/<provider>/index.ts`，客户端配置片段放在 `src/platforms/<provider>/setup.ts`。
 - **平台聚合** 只在 `src/platforms/registry.ts` 和 `src/platforms/clientSetup.ts` 完成；页面组件不要写 provider/family 推断或环境变量块。
-- **全局基础组件**（`PageSection.vue` / `StatusTag.vue`）放在 `src/components/`；只属于单个视图的组件放在该视图目录下。
+- **全局基础组件**（`PageSection.vue` / `MetricsPanel.vue` / `ProviderLogo.vue` / `StatusTag.vue`）放在 `src/components/`；只属于单个视图的组件放在该视图目录下。
 - **路由元信息** 通过 `meta.title / meta.requiresAuth / meta.allowFirstLogin` 描述行为，由全局守卫统一处理。
+- **系统设置子页** 统一注册在 `/settings` 父路由下；`meta.menuName = 'settings'` 用于让兼容入口和子页保持主菜单高亮。
 - **样式** 优先使用 `:root` 中定义的 CSS 变量；新增主题色或圆角请扩展该变量集，而不是写死值。
+
+### 系统设置结构
+
+管理员主菜单只保留一个“系统设置”入口，页面内使用二级分类导航：
+
+| 分类 | 路由 | 状态 |
+| --- | --- | --- |
+| 支付设置 | `/settings/payment` | 已接入支付业务配置 |
+| 注册设置 | `/settings/registration` | 已接入注册、邮箱策略、Turnstile 与邀请码 |
+| SMTP 设置 | `/settings/smtp` | 已从注册设置中独立，继续复用后端注册设置接口的部分更新能力 |
+| 模型管理 | `/settings/models` | 已接入模型目录、显示顺序与「模型 ID」页样式；添加模型仍在 `/settings/models/new` |
+| 账号池设置 | `/settings/account-pool` | 已接入路由策略与自动复检配置 |
+| UI 自定义 | `/settings/appearance` | 站点品牌、配色与界面风格 |
+
+旧的 `/payment-settings` 和 `/models/new` hash 路由会重定向到新分类，供历史书签兼容；新代码应直接使用 `settings-*` 命名路由。
 
 ## 开发
 
@@ -87,13 +113,13 @@ cp .env.example .env        # 修改 VITE_API_BASE 为你的后端地址
 npm run dev
 ```
 
-默认在 `http://127.0.0.1:5173`，开发服务器会把 `/auth /admin /v1 /health /models /chat /responses /actuator` 这些后端路径代理到 `VITE_API_BASE`。
+默认在 `http://127.0.0.1:5173`。当前 Vite 配置会代理 `/auth`、`/admin`、`/system`、`/v1`、`/health`、`/models`、`/chat`、`/responses`、`/messages`、`/actuator` 和 `/assets/model-icons` 到 `VITE_API_BASE`。`/payment` 尚未包含在开发代理规则中；调试充值页时应使用同源后端入口，或同步扩展 `vite.config.ts` 的代理表达式。
 
-> 第一次部署 Spring Boot 后，启动日志中会打印一次性的 admin 随机密码，使用 `admin` + 该密码登录。
+> 首次启动且 application Root 尚未分配、`admin_users` 为空时，日志会打印一次性的 `admin` 随机密码。使用该密码登录并立即修改；后续启动不会再次打印。
 
 ## 数据备份协议
 
-数据管理页与 PostgreSQL 17 后端协议保持一致：单库导出下载 custom-format `.dump`，完整 ZIP 包内使用 `database.dump`，恢复入口仅接受 `.dump` 和 `.zip`。数据库和应用 schema 均为 `starry_api`；WebUI 不解析归档内容，上传大小和恢复互斥由后端控制。
+数据管理页与 PostgreSQL 17 后端协议保持一致：单库导出下载 custom-format `.dump`，完整 ZIP 包内使用 `database.dump`，恢复入口仅接受 `.dump` 和 `.zip`。数据库和应用 schema 均为 `starry_api`；WebUI 不解析归档内容，上传大小和恢复互斥由后端控制。管理员上传的模型图标存放在独立文件目录，不包含在数据库导出中。
 
 ## 构建与部署
 

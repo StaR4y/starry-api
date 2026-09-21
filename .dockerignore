@@ -2,7 +2,9 @@
 .gradle
 .idea
 build
-api/build
+service-api/build
+plugin-api/build
+examples/plugin-demo/build
 service/build
 webui/dist
 webui/node_modules

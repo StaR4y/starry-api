@@ -42,6 +42,10 @@ public class OpenAiResponseStateStore {
     }
 
     public void remember(ObjectNode response, JsonNode request) {
+        remember(response, request, null);
+    }
+
+    public void remember(ObjectNode response, JsonNode request, String accountId) {
         String responseId = clean(response.path("id").asText(null));
         if (responseId == null) {
             return;
@@ -49,7 +53,16 @@ public class OpenAiResponseStateStore {
         ArrayNode history = objectMapper.createArrayNode();
         appendInput(history, request.path("input"));
         appendAll(history, response.path("output"));
-        put(responseId, history);
+        put(responseId, history, clean(accountId));
+    }
+
+    public String ownerAccountId(String responseId) {
+        Entry entry = clean(responseId) == null ? null : get(responseId);
+        return entry == null ? null : entry.accountId;
+    }
+
+    public boolean canExpand(String responseId) {
+        return clean(responseId) != null && get(responseId) != null;
     }
 
     private synchronized Entry get(String responseId) {
@@ -57,10 +70,10 @@ public class OpenAiResponseStateStore {
         return entries.get(responseId);
     }
 
-    private synchronized void put(String responseId, ArrayNode history) {
+    private synchronized void put(String responseId, ArrayNode history, String accountId) {
         pruneExpired();
         entries.remove(responseId);
-        entries.put(responseId, new Entry(history.deepCopy(), Instant.now()));
+        entries.put(responseId, new Entry(history.deepCopy(), accountId, Instant.now()));
         while (entries.size() > MAX_ENTRIES) {
             Iterator<String> iterator = entries.keySet().iterator();
             if (!iterator.hasNext()) {
@@ -114,6 +127,6 @@ public class OpenAiResponseStateStore {
         return trimmed.isEmpty() ? null : trimmed;
     }
 
-    private record Entry(ArrayNode history, Instant createdAt) {
+    private record Entry(ArrayNode history, String accountId, Instant createdAt) {
     }
 }

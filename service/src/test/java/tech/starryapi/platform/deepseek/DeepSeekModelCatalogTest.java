@@ -9,10 +9,15 @@ import tech.starryapi.model.ModelDtos;
 class DeepSeekModelCatalogTest {
 
     @Test
-    void exposesOfficialV4ModelIdsAndLimits() {
+    void exposesRepositoryModelIdsAndLimits() {
         assertThat(DeepSeekModelCatalog.models())
             .extracting(ModelDtos.ModelSpec::id)
-            .containsExactly("deepseek-v4-flash", "deepseek-v4-pro");
+            .containsExactly(
+                "deepseek-chat",
+                "deepseek-reasoner",
+                "deepseek-v4-flash",
+                "deepseek-v4-pro"
+            );
         assertThat(DeepSeekModelCatalog.models())
             .allSatisfy(model -> {
                 assertThat(model.provider()).isEqualTo("DeepSeek");

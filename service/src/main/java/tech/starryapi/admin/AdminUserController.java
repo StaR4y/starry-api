@@ -2,8 +2,10 @@ package tech.starryapi.admin;
 
 import jakarta.validation.Valid;
 import java.util.List;
+import org.springframework.http.HttpHeaders;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
@@ -17,6 +19,7 @@ public class AdminUserController implements AdminUserApi {
     private final AdminAuth adminAuth;
     private final RegistrationSettingsService registrationSettingsService;
     private final InviteCodeService inviteCodeService;
+    private final SmtpVerificationService smtpVerificationService;
 
     public AdminUserController(
         AdminUserService adminUserService,
@@ -24,10 +27,22 @@ public class AdminUserController implements AdminUserApi {
         RegistrationSettingsService registrationSettingsService,
         InviteCodeService inviteCodeService
     ) {
+        this(adminUserService, adminAuth, registrationSettingsService, inviteCodeService, null);
+    }
+
+    @Autowired
+    public AdminUserController(
+        AdminUserService adminUserService,
+        AdminAuth adminAuth,
+        RegistrationSettingsService registrationSettingsService,
+        InviteCodeService inviteCodeService,
+        SmtpVerificationService smtpVerificationService
+    ) {
         this.adminUserService = adminUserService;
         this.adminAuth = adminAuth;
         this.registrationSettingsService = registrationSettingsService;
         this.inviteCodeService = inviteCodeService;
+        this.smtpVerificationService = smtpVerificationService;
     }
 
     @Override
@@ -54,8 +69,8 @@ public class AdminUserController implements AdminUserApi {
         @PathVariable String userId,
         @RequestBody AdminDtos.UpdateAdminUserRequest request
     ) {
-        adminAuth.verifyAdmin(exchange);
-        return adminUserService.update(userId, request)
+        AdminPrincipal principal = adminAuth.verifyAdmin(exchange);
+        return adminUserService.update(principal, userId, request)
             .map(AdminUserMapper::toResponse)
             .map(ApiResponse::ok);
     }
@@ -65,8 +80,8 @@ public class AdminUserController implements AdminUserApi {
         ServerWebExchange exchange,
         @PathVariable String userId
     ) {
-        adminAuth.verifyAdmin(exchange);
-        return adminUserService.resetPassword(userId).map(ApiResponse::ok);
+        AdminPrincipal principal = adminAuth.verifyAdmin(exchange);
+        return adminUserService.resetPassword(principal, userId).map(ApiResponse::ok);
     }
 
     @Override
@@ -80,8 +95,35 @@ public class AdminUserController implements AdminUserApi {
         ServerWebExchange exchange,
         AdminDtos.UpdateRegistrationSettingsRequest request
     ) {
-        adminAuth.verifyAdmin(exchange);
-        return registrationSettingsService.update(request).map(ApiResponse::ok);
+        AdminPrincipal principal = adminAuth.verifyAdmin(exchange);
+        return registrationSettingsService.update(request)
+            .flatMap(settings -> smtpVerificationService == null
+                ? Mono.just(settings)
+                : smtpVerificationService.afterSave(settings, request, principal, smtpVerifyBaseUrl(exchange)))
+            .map(ApiResponse::ok);
+    }
+
+    private String smtpVerifyBaseUrl(ServerWebExchange exchange) {
+        String proto = firstHeader(exchange, "X-Forwarded-Proto", exchange.getRequest().getURI().getScheme());
+        String host = firstHeader(exchange, "X-Forwarded-Host", exchange.getRequest().getHeaders().getFirst(HttpHeaders.HOST));
+        if (host == null || host.isBlank()) {
+            return "/#/smtp-verify";
+        }
+        String prefix = firstHeader(exchange, "X-Forwarded-Prefix", "");
+        if (prefix == null) {
+            prefix = "";
+        }
+        prefix = prefix.trim();
+        if (prefix.endsWith("/")) {
+            prefix = prefix.substring(0, prefix.length() - 1);
+        }
+        String scheme = proto == null || proto.isBlank() ? "http" : proto.trim();
+        return scheme + "://" + host.trim() + prefix + "/#/smtp-verify";
+    }
+
+    private String firstHeader(ServerWebExchange exchange, String name, String fallback) {
+        String value = exchange.getRequest().getHeaders().getFirst(name);
+        return value == null || value.isBlank() ? fallback : value.trim();
     }
 
     @Override

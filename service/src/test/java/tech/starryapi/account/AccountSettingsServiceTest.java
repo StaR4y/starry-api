@@ -8,10 +8,15 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.time.Clock;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -21,6 +26,18 @@ import tech.starryapi.admin.SystemSettingRepository;
 import tech.starryapi.common.ApiException;
 
 class AccountSettingsServiceTest {
+
+    @Test
+    void productionConstructorIsTheOnlyExplicitSpringInjectionPoint() {
+        var injectionConstructors = Arrays.stream(AccountSettingsService.class.getDeclaredConstructors())
+            .filter(constructor -> constructor.isAnnotationPresent(Autowired.class))
+            .toList();
+
+        assertThat(injectionConstructors)
+            .singleElement()
+            .satisfies(constructor -> assertThat(constructor.getParameterTypes())
+                .containsExactly(SystemSettingRepository.class));
+    }
 
     @Test
     void settingsDefaultsGptFastModeToDisabled() {
@@ -36,6 +53,13 @@ class AccountSettingsServiceTest {
         assertThat(response.disabledAccountScheduledTest().scheduleMode()).isEqualTo("interval");
         assertThat(response.disabledAccountScheduledTest().intervalMinutes()).isEqualTo(60);
         assertThat(response.disabledAccountScheduledTest().autoRunWhenNoAvailableAccounts()).isFalse();
+        assertThat(response.poolPolicy().enabled()).isFalse();
+        assertThat(response.routingPolicy().isolateCodexPoolEnabled()).isTrue();
+        assertThat(response.routingPolicy().gptUsesCodexAccountsEnabled()).isFalse();
+        assertThat(response.routingPolicy().bindSessionOnAdmissionEnabled()).isFalse();
+        assertThat(response.routingPolicy().bindSessionByApiKeyEnabled()).isFalse();
+        assertThat(response.routingPolicy().codexMaxRetryAccounts()).isEqualTo(1);
+        assertThat(response.routingPolicy().openAiMaxRetryAccounts()).isEqualTo(3);
     }
 
     @Test
@@ -50,6 +74,50 @@ class AccountSettingsServiceTest {
         assertThat(response).isNotNull();
         assertThat(response.gptFastModeEnabled()).isTrue();
         assertThat(store.get(AccountSettingsService.GPT_FAST_MODE_ENABLED)).isEqualTo("true");
+    }
+
+    @Test
+    void enablingPolicyCreatesANewPersistentEpochAndActivationBoundary() {
+        Map<String, String> store = new HashMap<>();
+        SystemSettingRepository repository = mockRepository(store);
+        Instant activatedAt = Instant.parse("2026-08-11T02:00:00Z");
+        AccountSettingsService service = new AccountSettingsService(
+            repository,
+            Clock.fixed(activatedAt, ZoneOffset.UTC)
+        );
+        AccountDtos.PoolPolicySettings enable = new AccountDtos.PoolPolicySettings(
+            true,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null
+        );
+
+        AccountDtos.PoolPolicySettings first = service
+            .update(new AccountDtos.UpdateAccountSettingsRequest(null, null, enable))
+            .block()
+            .poolPolicy();
+        service.update(new AccountDtos.UpdateAccountSettingsRequest(
+            null,
+            null,
+            new AccountDtos.PoolPolicySettings(false, null, null, null, null, null, null, null, null)
+        )).block();
+        AccountDtos.PoolPolicySettings second = service
+            .update(new AccountDtos.UpdateAccountSettingsRequest(null, null, enable))
+            .block()
+            .poolPolicy();
+
+        assertThat(first.circuitEpoch()).isNotNull();
+        assertThat(first.activationStartedAt()).isEqualTo(activatedAt);
+        assertThat(second.circuitEpoch()).isNotEqualTo(first.circuitEpoch());
+        assertThat(store.get(AccountSettingsService.POOL_POLICY_EPOCH))
+            .isEqualTo(second.circuitEpoch().toString());
+        assertThat(store.get(AccountSettingsService.POOL_POLICY_ACTIVATION_STARTED_AT))
+            .isEqualTo(activatedAt.toString());
     }
 
     @Test
@@ -90,6 +158,40 @@ class AccountSettingsServiceTest {
         assertThat(store.get(AccountSettingsService.DISABLED_TEST_AUTO_RUN_WHEN_NO_AVAILABLE)).isEqualTo("true");
         assertThat(store.get(AccountSettingsService.DISABLED_TEST_CRON_EXPRESSION)).isEqualTo("0 */15 * * * *");
         assertThat(store.get(AccountSettingsService.DISABLED_TEST_PROVIDERS)).isEqualTo("Anthropic,OpenAI-compatible");
+    }
+
+    @Test
+    void updateStoresRoutingPolicySettingsAndMergesPartialPatches() {
+        Map<String, String> store = new HashMap<>();
+        SystemSettingRepository repository = mockRepository(store);
+        AccountSettingsService service = new AccountSettingsService(repository);
+
+        AccountDtos.AccountSettingsResponse created = service
+            .update(new AccountDtos.UpdateAccountSettingsRequest(
+                null,
+                null,
+                null,
+                new AccountDtos.RoutingPolicySettings(true, true, true, true, 1, 3, 3, 2, 2)
+            ))
+            .block();
+        AccountDtos.AccountSettingsResponse patched = service
+            .update(new AccountDtos.UpdateAccountSettingsRequest(
+                null,
+                null,
+                null,
+                new AccountDtos.RoutingPolicySettings(false, null, null, null, 2, null, null, null, null)
+            ))
+            .block();
+
+        assertThat(created).isNotNull();
+        assertThat(created.routingPolicy().isolateCodexPoolEnabled()).isTrue();
+        assertThat(patched).isNotNull();
+        assertThat(patched.routingPolicy().isolateCodexPoolEnabled()).isFalse();
+        assertThat(patched.routingPolicy().gptUsesCodexAccountsEnabled()).isTrue();
+        assertThat(patched.routingPolicy().codexMaxRetryAccounts()).isEqualTo(2);
+        assertThat(patched.routingPolicy().openAiMaxRetryAccounts()).isEqualTo(3);
+        assertThat(store.get(AccountSettingsService.ROUTING_POLICY_ISOLATE_CODEX)).isEqualTo("false");
+        assertThat(store.get(AccountSettingsService.ROUTING_POLICY_CODEX_MAX_RETRY_ACCOUNTS)).isEqualTo("2");
     }
 
     @Test

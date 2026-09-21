@@ -137,7 +137,7 @@ class OpenAiResponseFactoryTest {
             new PlatformUsage(10, 2, java.math.BigDecimal.ZERO, 0, 0, 0)
         );
 
-        List<ServerSentEvent<String>> events = factory.responsesStreamEvents("gpt-5.4-mini", result, "resp_prev")
+        List<ServerSentEvent<String>> events = factory.responsesStreamEvents("gpt-5.5", result, "resp_prev")
             .collectList()
             .block();
 
@@ -248,7 +248,7 @@ class OpenAiResponseFactoryTest {
             new PlatformUsage(10, 2, java.math.BigDecimal.ZERO, 0, 0, 0)
         );
 
-        List<ServerSentEvent<String>> events = factory.responsesStreamEvents("gpt-5.4-mini", result, null)
+        List<ServerSentEvent<String>> events = factory.responsesStreamEvents("gpt-5.5", result, null)
             .collectList()
             .block();
 

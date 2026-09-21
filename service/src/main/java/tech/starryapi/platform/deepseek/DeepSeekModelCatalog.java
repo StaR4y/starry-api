@@ -1,11 +1,14 @@
 package tech.starryapi.platform.deepseek;
 
 import java.math.BigDecimal;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import tech.starryapi.model.ModelCatalogProvider;
 import tech.starryapi.model.ModelDtos.ModelSpec;
+import tech.starryapi.platform.catalog.ModelPriceRepoModelIds;
 
 /** Official DeepSeek API models and their default per-million-token prices. */
 public final class DeepSeekModelCatalog {
@@ -28,18 +31,7 @@ public final class DeepSeekModelCatalog {
         new BigDecimal("0.003625")
     );
 
-    private static final List<ModelSpec> MODELS = List.of(
-        model(
-            FLASH_MODEL_ID,
-            "DeepSeek V4 Flash",
-            "DeepSeek-V4-Flash with thinking and non-thinking modes"
-        ),
-        model(
-            PRO_MODEL_ID,
-            "DeepSeek V4 Pro",
-            "DeepSeek-V4-Pro with thinking enabled by default"
-        )
-    );
+    private static final List<ModelSpec> MODELS = buildModels();
 
     private DeepSeekModelCatalog() {
     }
@@ -77,12 +69,40 @@ public final class DeepSeekModelCatalog {
         return normalized;
     }
 
+    private static List<ModelSpec> buildModels() {
+        Map<String, ModelSpec> models = new LinkedHashMap<>();
+        ModelPriceRepoModelIds.DEEPSEEK.forEach(id -> models.put(id, model(
+            id,
+            displayName(id),
+            description(id)
+        )));
+        return List.copyOf(models.values());
+    }
+
+    private static String displayName(String id) {
+        return switch (id) {
+            case FLASH_MODEL_ID -> "DeepSeek V4 Flash";
+            case PRO_MODEL_ID -> "DeepSeek V4 Pro";
+            case "deepseek-chat" -> "DeepSeek Chat";
+            case "deepseek-reasoner" -> "DeepSeek Reasoner";
+            default -> id;
+        };
+    }
+
+    private static String description(String id) {
+        return switch (id) {
+            case FLASH_MODEL_ID -> "DeepSeek-V4-Flash with thinking and non-thinking modes";
+            case PRO_MODEL_ID -> "DeepSeek-V4-Pro with thinking enabled by default";
+            default -> "Official DeepSeek chat model from model-price-repo";
+        };
+    }
+
     private static ModelSpec model(String id, String name, String description) {
         return new ModelSpec(
             id,
             name,
             "DeepSeek",
-            "DeepSeek V4",
+            id.startsWith("deepseek-v4-") ? "DeepSeek V4" : "DeepSeek",
             ModelCatalogProvider.STARRY_OWNER,
             description,
             ModelCatalogProvider.TEXT_ONLY,

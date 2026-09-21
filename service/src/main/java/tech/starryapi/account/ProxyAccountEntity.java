@@ -19,6 +19,7 @@ public class ProxyAccountEntity {
     private String region;
     private String authMethod;
     private String provider;
+    private String badgeColor;
     private String baseUrl;
     private String upstreamAccountId;
     private String idToken;
@@ -132,6 +133,14 @@ public class ProxyAccountEntity {
 
     public void setProvider(String provider) {
         this.provider = provider;
+    }
+
+    public String getBadgeColor() {
+        return badgeColor;
+    }
+
+    public void setBadgeColor(String badgeColor) {
+        this.badgeColor = badgeColor;
     }
 
     public String getBaseUrl() {

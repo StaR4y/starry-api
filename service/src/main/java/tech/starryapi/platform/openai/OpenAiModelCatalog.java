@@ -3,7 +3,7 @@ package tech.starryapi.platform.openai;
 import java.util.List;
 import tech.starryapi.model.ModelCatalogProvider;
 import tech.starryapi.model.ModelDtos.ModelSpec;
-import tech.starryapi.platform.catalog.OpenRouterModelIds;
+import tech.starryapi.platform.catalog.ModelPriceRepoModelIds;
 import tech.starryapi.platform.catalog.PlatformModelCatalogSupport.AliasProfile;
 
 import static tech.starryapi.platform.catalog.PlatformModelCatalogSupport.appendAliases;
@@ -21,13 +21,33 @@ public final class OpenAiModelCatalog {
         ModelCatalogProvider.DEFAULT_OUTPUT_TOKENS
     );
     private static final List<ModelSpec> LEGACY_ALIASES = List.of(
+        alias("gpt-6", "GPT-6", "GPT-6", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
+        alias("gpt-6-astra", "GPT-6 Astra", "GPT-6", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
+        alias("gpt-6-mini", "GPT-6 mini", "GPT-6", ModelCatalogProvider.FAST_TARGET_MODEL_ID),
+        alias("gpt-6-nano", "GPT-6 nano", "GPT-6", ModelCatalogProvider.FAST_TARGET_MODEL_ID),
+        alias("gpt-6-pro", "GPT-6 pro", "GPT-6", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
+        alias("gpt-6-chat-latest", "GPT-6 Chat", "GPT-6", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
+        alias("gpt-5.6", "GPT-5.6", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
+        alias("gpt-5.6-luna", "GPT-5.6 Luna", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
+        alias("gpt-5.6-sol", "GPT-5.6 Sol", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
+        alias("gpt-5.6-terra", "GPT-5.6 Terra", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
+        alias("gpt-5.5", "GPT-5.5", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
+        alias("gpt-5.5-pro", "GPT-5.5 pro", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
+        alias("gpt-5.4", "GPT-5.4", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
+        alias("gpt-5.4-mini", "GPT-5.4 mini", "GPT-5", ModelCatalogProvider.FAST_TARGET_MODEL_ID),
+        alias("gpt-5.4-nano", "GPT-5.4 nano", "GPT-5", ModelCatalogProvider.FAST_TARGET_MODEL_ID),
+        alias("gpt-5.4-pro", "GPT-5.4 pro", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
+        alias("gpt-5.3-chat-latest", "GPT-5.3 Chat", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
         alias("gpt-5.2", "GPT-5.2", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
+        alias("gpt-5.2-chat-latest", "GPT-5.2 Chat", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
         alias("gpt-5.2-pro", "GPT-5.2 pro", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
         alias("gpt-5.1", "GPT-5.1", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
         alias("gpt-5.1-chat-latest", "GPT-5.1 Chat", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
         alias("gpt-5", "GPT-5", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
+        alias("gpt-5-chat-latest", "GPT-5 Chat", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
         alias("gpt-5-mini", "GPT-5 mini", "GPT-5", ModelCatalogProvider.FAST_TARGET_MODEL_ID),
         alias("gpt-5-nano", "GPT-5 nano", "GPT-5", ModelCatalogProvider.FAST_TARGET_MODEL_ID),
+        alias("gpt-5-pro", "GPT-5 pro", "GPT-5", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
         alias("gpt-4.1", "GPT-4.1", "GPT-4", ModelCatalogProvider.DEFAULT_TARGET_MODEL_ID),
         alias("gpt-4.1-mini", "GPT-4.1 mini", "GPT-4", ModelCatalogProvider.FAST_TARGET_MODEL_ID),
         alias("gpt-4.1-nano", "GPT-4.1 nano", "GPT-4", ModelCatalogProvider.FAST_TARGET_MODEL_ID),
@@ -57,7 +77,7 @@ public final class OpenAiModelCatalog {
     private static List<ModelSpec> buildModels() {
         return appendAliases(
             LEGACY_ALIASES,
-            OpenRouterModelIds.OPENAI,
+            ModelPriceRepoModelIds.OPENAI,
             ALIAS_PROFILE,
             OpenAiModelCatalog::family,
             OpenAiModelCatalog::targetModelId
@@ -66,6 +86,7 @@ public final class OpenAiModelCatalog {
 
     private static String family(String id) {
         return switch (localModelId(id)) {
+            case String model when model.startsWith("gpt-6") -> "GPT-6";
             case String model when model.startsWith("gpt-5") -> "GPT-5";
             case String model when model.startsWith("gpt-4") || model.startsWith("chatgpt-4") -> "GPT-4";
             case String model when model.startsWith("gpt-3.5") -> "GPT-3.5";

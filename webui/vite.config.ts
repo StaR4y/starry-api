@@ -61,10 +61,11 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       proxy: {
         // 仅代理后端管理与代理 API 路径，避免拦截前端路由
-        '^/(auth|admin|v1|health|models|chat|responses|messages|actuator)': {
-          target,
-          changeOrigin: true,
-        },
+        '^/(auth|admin|system|payment|tickets|assistant|v1|health|models|chat|responses|messages|actuator|assets/model-icons|assets/branding|plugin-assets)':
+          {
+            target,
+            changeOrigin: true,
+          },
       },
     },
     build: {
@@ -80,7 +81,12 @@ export default defineConfig(({ mode }) => {
               if (id.includes('element-plus')) {
                 return 'vendor-element-plus';
               }
-              if (id.includes('vue') || id.includes('pinia') || id.includes('vue-router') || id.includes('axios')) {
+              if (
+                id.includes('vue') ||
+                id.includes('pinia') ||
+                id.includes('vue-router') ||
+                id.includes('axios')
+              ) {
                 return 'vendor-core';
               }
               return 'vendor-libs';

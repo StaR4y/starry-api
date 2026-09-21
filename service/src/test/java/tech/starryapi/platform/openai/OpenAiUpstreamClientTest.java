@@ -56,10 +56,10 @@ class OpenAiUpstreamClientTest {
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
             JsonNode request = objectMapper.readTree("""
-                {"model":"gpt-5.4-mini","messages":[{"role":"user","content":"write a detailed explanation"}]}
+                {"model":"gpt-5.5","messages":[{"role":"user","content":"write a detailed explanation"}]}
                 """);
 
-            PlatformCompletionResult result = client.complete(account, request, "gpt-5.4-mini").block();
+            PlatformCompletionResult result = client.complete(account, request, "gpt-5.5").block();
 
             assertThat(result).isNotNull();
             JsonNode body = objectMapper.readTree(requestBody.get());
@@ -101,7 +101,7 @@ class OpenAiUpstreamClientTest {
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
             JsonNode request = objectMapper.readTree("""
                 {
-                  "model": "gpt-5.4-mini",
+                  "model": "gpt-5.5",
                   "service_tier": "priority",
                   "messages": [
                     {"role": "system", "content": "Use short replies."},
@@ -124,7 +124,7 @@ class OpenAiUpstreamClientTest {
                 }
                 """);
 
-            PlatformCompletionResult result = client.complete(account, request, "gpt-5.4-mini").block();
+            PlatformCompletionResult result = client.complete(account, request, "gpt-5.5").block();
 
             assertThat(result).isNotNull();
             assertThat(result.content()).isEqualTo("OK");
@@ -198,10 +198,10 @@ class OpenAiUpstreamClientTest {
                 tokenRefreshService
             );
             JsonNode request = objectMapper.readTree("""
-                {"model":"gpt-5.4-mini","messages":[{"role":"user","content":"ping"}]}
+                {"model":"gpt-5.5","messages":[{"role":"user","content":"ping"}]}
                 """);
 
-            PlatformCompletionResult result = client.complete(account, request, "gpt-5.4-mini").block();
+            PlatformCompletionResult result = client.complete(account, request, "gpt-5.5").block();
 
             assertThat(result).isNotNull();
             assertThat(result.content()).isEqualTo("OK");
@@ -244,7 +244,7 @@ class OpenAiUpstreamClientTest {
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
             JsonNode request = objectMapper.readTree("""
                 {
-                  "model": "gpt-5.4-mini",
+                  "model": "gpt-5.5",
                   "messages": [{"role": "user", "content": "lookup stars"}],
                   "tools": [
                     {
@@ -274,7 +274,7 @@ class OpenAiUpstreamClientTest {
                 }
                 """);
 
-            PlatformCompletionResult result = client.complete(account, request, "gpt-5.4-mini").block();
+            PlatformCompletionResult result = client.complete(account, request, "gpt-5.5").block();
 
             assertThat(result).isNotNull();
             assertThat(result.content()).isBlank();
@@ -347,14 +347,14 @@ class OpenAiUpstreamClientTest {
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
             JsonNode request = objectMapper.readTree("""
                 {
-                  "model": "gpt-5.4-mini",
+                  "model": "gpt-5.5",
                   "input": "edit the file",
                   "tools": [{"type": "function", "name": "apply_patch", "parameters": {"type": "object", "properties": {}}}],
                   "tool_choice": {"type": "function", "name": "apply_patch"}
                 }
                 """);
 
-            PlatformCompletionResult result = client.completeResponses(account, request, "gpt-5.4-mini").block();
+            PlatformCompletionResult result = client.completeResponses(account, request, "gpt-5.5").block();
 
             assertThat(result).isNotNull();
             assertThat(result.toolUses()).hasSize(1);
@@ -632,7 +632,7 @@ class OpenAiUpstreamClientTest {
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
             JsonNode request = objectMapper.readTree("""
                 {
-                  "model": "gpt-5.4-mini",
+                  "model": "gpt-5.5",
                   "input": [
                     {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "edit file"}]},
                     {"type": "function_call", "call_id": "call_write", "name": "edit_file", "arguments": {"patch": "*** Begin Patch"}},
@@ -663,7 +663,7 @@ class OpenAiUpstreamClientTest {
                 }
                 """);
 
-            PlatformCompletionResult result = client.completeResponses(account, request, "gpt-5.4-mini").block();
+            PlatformCompletionResult result = client.completeResponses(account, request, "gpt-5.5").block();
 
             assertThat(result).isNotNull();
             JsonNode body = objectMapper.readTree(requestBody.get());
@@ -777,7 +777,7 @@ class OpenAiUpstreamClientTest {
             ProxyAccountEntity account = openAiAccount("http://127.0.0.1:" + server.getAddress().getPort());
             JsonNode request = objectMapper.readTree("""
                 {
-                  "model": "gpt-5.4-mini",
+                  "model": "gpt-5.5",
                   "input": [
                     {
                       "type": "message",
@@ -792,7 +792,7 @@ class OpenAiUpstreamClientTest {
                 }
                 """);
 
-            PlatformCompletionResult result = client.completeResponses(account, request, "openai/gpt-5.4-mini").block();
+            PlatformCompletionResult result = client.completeResponses(account, request, "openai/gpt-5.5").block();
 
             assertThat(result).isNotNull();
             assertThat(result.content()).isEqualTo("OK");
@@ -1237,14 +1237,14 @@ class OpenAiUpstreamClientTest {
             ProxyAccountEntity account = openAiCompatibleAccount("http://127.0.0.1:" + server.getAddress().getPort());
             JsonNode request = objectMapper.readTree("""
                 {
-                  "model": "gpt-5.4-mini",
+                  "model": "gpt-5.5",
                   "stream": true,
                   "stream_options": {"include_usage": true},
                   "messages": [{"role": "user", "content": "hi"}]
                 }
                 """);
 
-            PlatformCompletionResult result = client.complete(account, request, "gpt-5.4-mini").block();
+            PlatformCompletionResult result = client.complete(account, request, "gpt-5.5").block();
 
             assertThat(result).isNotNull();
             assertThat(result.content()).isEqualTo("OK");
@@ -1333,7 +1333,7 @@ class OpenAiUpstreamClientTest {
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
             JsonNode request = objectMapper.readTree("""
                 {
-                  "model": "gpt-5.4-mini",
+                  "model": "gpt-5.5",
                   "instructions": "Use vision.",
                   "input": [
                     {
@@ -1349,7 +1349,7 @@ class OpenAiUpstreamClientTest {
                 }
                 """);
 
-            PlatformCompletionResult result = client.completeResponses(account, request, "gpt-5.4-mini").block();
+            PlatformCompletionResult result = client.completeResponses(account, request, "gpt-5.5").block();
 
             assertThat(result).isNotNull();
             assertThat(result.content()).isEqualTo("OK");

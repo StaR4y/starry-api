@@ -6,8 +6,9 @@
    */
   import { computed, onMounted, reactive, ref } from 'vue';
   import { ElMessage, ElMessageBox } from 'element-plus';
-  import { Refresh, Wallet, Timer, Check, Calendar, Warning } from '@element-plus/icons-vue';
+  import { Refresh, Wallet, Check, Warning } from '@element-plus/icons-vue';
   import PageSection from '@/components/PageSection.vue';
+  import MetricsPanel, { type MetricPanelItem } from '@/components/MetricsPanel.vue';
   import { paymentApi } from '@/api';
   import { useAuthStore } from '@/stores/auth';
   import type { PaymentOrder, PaymentSettings, PaymentType } from '@/types/api';
@@ -62,6 +63,27 @@
   const latestCompleted = computed(
     () => orders.value.find((order) => order.status === 'COMPLETED') ?? null,
   );
+
+  /* 顶部状态栏（统一 MetricsPanel 组件） */
+  const summaryMetrics = computed<MetricPanelItem[]>(() => [
+    {
+      label: '当前账户余额',
+      value: formatNumber(currentBalance.value),
+      unit: '元',
+      tone: 'primary',
+    },
+    {
+      label: '待支付订单数',
+      value: pendingOrders.value.length,
+      unit: '笔',
+      tone: 'warning',
+    },
+    {
+      label: '最近一次充值入账',
+      value: latestCompleted.value ? formatDateTime(latestCompleted.value.completedAt) : '无充值记录',
+      tone: 'success',
+    },
+  ]);
 
   function statusLabel(status: string) {
     const map: Record<string, string> = {
@@ -184,7 +206,11 @@
       const result = await paymentApi.redeemCode({ code });
       redeemForm.code = '';
       await auth.refreshCurrentUser();
-      ElMessage.success(`兑换成功，已入账 ${formatNumber(result.redeemedBalance)} 余额`);
+      if (result.subscriptionId) {
+        ElMessage.success('兑换成功，Coding 套餐订阅已开通');
+      } else {
+        ElMessage.success(`兑换成功，已入账 ${formatNumber(result.redeemedBalance)} 余额`);
+      }
     } finally {
       redeeming.value = false;
     }
@@ -194,48 +220,15 @@
 </script>
 
 <template>
-  <PageSection title="余额充值" subtitle="为当前登录账号充值余额，支付完成后由回调自动入账">
+  <PageSection title="余额充值" subtitle="账户资金" :icon="Wallet">
     <template #actions>
       <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
     </template>
+    <template #summary>
+      <MetricsPanel :items="summaryMetrics" />
+    </template>
 
     <div v-loading="loading" class="payment">
-      <!-- 统计指标 -->
-      <section class="payment__summary">
-        <article class="stat-card stat-card--balance">
-          <div class="stat-card__icon-wrapper">
-            <el-icon><Wallet /></el-icon>
-          </div>
-          <div class="stat-card__content">
-            <span class="stat-card__label">当前账户余额</span>
-            <strong class="stat-card__value mono">{{ formatNumber(currentBalance) }}<span class="stat-card__unit">元</span></strong>
-          </div>
-        </article>
-        <article class="stat-card stat-card--pending">
-          <div class="stat-card__icon-wrapper">
-            <el-icon><Timer /></el-icon>
-          </div>
-          <div class="stat-card__content">
-            <span class="stat-card__label">待支付订单数</span>
-            <strong class="stat-card__value mono">{{ formatNumber(pendingOrders.length)
-            }}<span class="stat-card__unit">笔</span></strong>
-          </div>
-        </article>
-        <article class="stat-card stat-card--completed">
-          <div class="stat-card__icon-wrapper">
-            <el-icon><Calendar /></el-icon>
-          </div>
-          <div class="stat-card__content">
-            <span class="stat-card__label">最近一次充值入账</span>
-            <strong
-              class="stat-card__value"
-              style="font-size: 14px; font-weight: 600; padding: 4px 0"
-            >
-              {{ latestCompleted ? formatDateTime(latestCompleted.completedAt) : '无充值记录' }}
-            </strong>
-          </div>
-        </article>
-      </section>
 
       <!-- 主要内容 -->
       <section class="payment__grid">
@@ -558,17 +551,14 @@
 
     &__panel,
     &__orders {
-      border: 1px solid var(--kp-divider);
-      background: rgba(255, 255, 255, 0.45);
-      backdrop-filter: blur(var(--kp-blur)) saturate(160%);
-      -webkit-backdrop-filter: blur(var(--kp-blur)) saturate(160%);
-      border-radius: var(--kp-radius);
-      box-shadow: var(--kp-shadow);
+      border: 1px solid var(--el-border-color);
+      background: var(--kp-surface-strong);
+      border-radius: 8px;
       padding: 24px;
-      transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+      transition: border-color 0.2s ease, box-shadow 0.2s ease;
 
       &:hover {
-        box-shadow: var(--kp-shadow-lg);
+        box-shadow: 0 8px 22px rgba(22, 35, 52, 0.06);
         border-color: rgba(91, 141, 239, 0.25);
       }
     }
@@ -779,117 +769,6 @@
         font-weight: 600;
         margin: 0 0 16px;
         color: var(--kp-text);
-      }
-    }
-  }
-
-  /* 统计卡片设计 */
-  .stat-card {
-    display: flex;
-    align-items: center;
-    gap: 16px;
-    border: 1px solid var(--kp-divider);
-    background: rgba(255, 255, 255, 0.5);
-    backdrop-filter: blur(var(--kp-blur)) saturate(160%);
-    -webkit-backdrop-filter: blur(var(--kp-blur)) saturate(160%);
-    border-radius: 16px;
-    padding: 20px;
-    box-shadow: var(--kp-shadow);
-    transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
-    position: relative;
-    overflow: hidden;
-
-    &::before {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 4px;
-      height: 100%;
-    }
-
-    &:hover {
-      transform: translateY(-4px);
-      box-shadow: var(--kp-shadow-lg);
-    }
-
-    &__icon-wrapper {
-      width: 48px;
-      height: 48px;
-      border-radius: 12px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 24px;
-    }
-
-    &__content {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      flex: 1;
-    }
-
-    &__label {
-      font-size: 12px;
-      color: var(--kp-text-secondary);
-      font-weight: 500;
-    }
-
-    &__value {
-      font-size: 24px;
-      font-weight: 700;
-      color: var(--kp-text);
-      line-height: 1.1;
-      display: flex;
-      align-items: baseline;
-      gap: 2px;
-    }
-
-    &__unit {
-      font-size: 12px;
-      font-weight: 400;
-      color: var(--kp-text-muted);
-      margin-left: 2px;
-    }
-
-    /* 各卡片特有颜色方案 */
-    &--completed {
-      &::before {
-        background: var(--kp-success);
-      }
-      &:hover {
-        border-color: rgba(54, 192, 138, 0.3);
-      }
-      .stat-card__icon-wrapper {
-        background: rgba(54, 192, 138, 0.12);
-        color: var(--kp-success);
-      }
-    }
-
-    &--pending {
-      &::before {
-        background: var(--kp-warning);
-      }
-      &:hover {
-        border-color: rgba(240, 168, 77, 0.3);
-      }
-      .stat-card__icon-wrapper {
-        background: rgba(240, 168, 77, 0.12);
-        color: var(--kp-warning);
-      }
-    }
-
-    &--balance {
-      &::before {
-        background: var(--kp-primary);
-      }
-      &:hover {
-        border-color: rgba(91, 141, 239, 0.3);
-      }
-      .stat-card__icon-wrapper {
-        background: rgba(91, 141, 239, 0.12);
-        color: var(--kp-primary);
       }
     }
   }

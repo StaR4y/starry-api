@@ -1,0 +1,174 @@
+{
+  "title": "ProgramBench Leaderboard",
+  "sourceUrl": "https://programbench.com/",
+  "entries": [
+    {
+      "rank": 1,
+      "model": "Claude Opus 5 (xhigh)",
+      "organization": "Anthropic",
+      "agent": "mini-SWE-agent",
+      "score": 4.5,
+      "secondaryScore": 37.0
+    },
+    {
+      "rank": 2,
+      "model": "GPT-5.6 Sol (xhigh)",
+      "organization": "OpenAI",
+      "agent": "mini-SWE-agent",
+      "score": 1.0,
+      "secondaryScore": 15.5
+    },
+    {
+      "rank": 3,
+      "model": "GPT 5.5 (xhigh)",
+      "organization": "OpenAI",
+      "agent": "mini-SWE-agent",
+      "score": 0.5,
+      "secondaryScore": 13.5
+    },
+    {
+      "rank": 4,
+      "model": "GPT 5.5 (high)",
+      "organization": "OpenAI",
+      "agent": "mini-SWE-agent",
+      "score": 0.5,
+      "secondaryScore": 5.0
+    },
+    {
+      "rank": 5,
+      "model": "Gemini 3.6 Flash",
+      "organization": "Google",
+      "agent": "mini-SWE-agent",
+      "score": 0.5,
+      "secondaryScore": 4.0
+    },
+    {
+      "rank": 6,
+      "model": "GPT-5.6 Sol",
+      "organization": "OpenAI",
+      "agent": "mini-SWE-agent",
+      "score": 0.5,
+      "secondaryScore": 2.5
+    },
+    {
+      "rank": 7,
+      "model": "Claude Opus 4.8 (xhigh)",
+      "organization": "Anthropic",
+      "agent": "mini-SWE-agent",
+      "score": 0.0,
+      "secondaryScore": 16.5
+    },
+    {
+      "rank": 8,
+      "model": "GLM-5.2",
+      "organization": "Z.ai (Zhipu AI)",
+      "agent": "mini-SWE-agent",
+      "score": 0.0,
+      "secondaryScore": 8.5
+    },
+    {
+      "rank": 9,
+      "model": "Gemini 3.7 Flash",
+      "organization": "Google",
+      "agent": "mini-SWE-agent",
+      "score": 0.0,
+      "secondaryScore": 5.5
+    },
+    {
+      "rank": 10,
+      "model": "Claude Opus 4.7 (xhigh)",
+      "organization": "Anthropic",
+      "agent": "mini-SWE-agent",
+      "score": 0.0,
+      "secondaryScore": 4.5
+    },
+    {
+      "rank": 11,
+      "model": "Gemini 3.5 Flash",
+      "organization": "Google",
+      "agent": "mini-SWE-agent",
+      "score": 0.0,
+      "secondaryScore": 3.0
+    },
+    {
+      "rank": 12,
+      "model": "Claude Opus 4.7",
+      "organization": "Anthropic",
+      "agent": "mini-SWE-agent",
+      "score": 0.0,
+      "secondaryScore": 3.0
+    },
+    {
+      "rank": 13,
+      "model": "Claude Opus 4.6",
+      "organization": "Anthropic",
+      "agent": "mini-SWE-agent",
+      "score": 0.0,
+      "secondaryScore": 2.5
+    },
+    {
+      "rank": 14,
+      "model": "GPT 5.5",
+      "organization": "OpenAI",
+      "agent": "mini-SWE-agent",
+      "score": 0.0,
+      "secondaryScore": 1.5
+    },
+    {
+      "rank": 15,
+      "model": "Claude Sonnet 4.6",
+      "organization": "Anthropic",
+      "agent": "mini-SWE-agent",
+      "score": 0.0,
+      "secondaryScore": 1.0
+    },
+    {
+      "rank": 16,
+      "model": "GPT 5.4",
+      "organization": "OpenAI",
+      "agent": "mini-SWE-agent",
+      "score": 0.0,
+      "secondaryScore": 0.0
+    },
+    {
+      "rank": 17,
+      "model": "Gemini 3.1 Pro",
+      "organization": "Google",
+      "agent": "mini-SWE-agent",
+      "score": 0.0,
+      "secondaryScore": 0.0
+    },
+    {
+      "rank": 18,
+      "model": "Gemini 3 Flash",
+      "organization": "Google",
+      "agent": "mini-SWE-agent",
+      "score": 0.0,
+      "secondaryScore": 0.0
+    },
+    {
+      "rank": 19,
+      "model": "Claude Haiku 4.5",
+      "organization": "Anthropic",
+      "agent": "mini-SWE-agent",
+      "score": 0.0,
+      "secondaryScore": 0.0
+    },
+    {
+      "rank": 20,
+      "model": "GPT 5.4 mini",
+      "organization": "OpenAI",
+      "agent": "mini-SWE-agent",
+      "score": 0.0,
+      "secondaryScore": 0.0
+    },
+    {
+      "rank": 21,
+      "model": "GPT 5 mini",
+      "organization": "OpenAI",
+      "agent": "mini-SWE-agent",
+      "score": 0.0,
+      "secondaryScore": 0.0
+    }
+  ]
+}

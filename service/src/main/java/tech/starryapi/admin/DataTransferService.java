@@ -23,6 +23,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -59,9 +60,32 @@ public class DataTransferService {
     private static final String DATABASE_DUMP_ENTRY = "database.dump";
     private static final String POSTGRES_DATABASE = "starry_api";
     private static final String POSTGRES_SCHEMA = "starry_api";
+    private static final String POSTGRES_SECURITY_SCHEMA = "starry_security";
     private static final String POSTGRES_OWNER_ROLE = "starry_api_owner";
     private static final String POSTGRES_RUNTIME_ROLE = "starry_api_runtime";
     private static final String POSTGRES_RUNTIME_LOGIN = "starry_api";
+    private static final String REQUIRED_FLYWAY_VERSION = "19";
+    private static final List<FlywayMigration> REQUIRED_FLYWAY_MIGRATIONS = List.of(
+        new FlywayMigration("1", "V1__postgresql_baseline.sql", "SQL", null, true),
+        new FlywayMigration("2", "V2__model_family_account_pool_circuits.sql", "SQL", null, true),
+        new FlywayMigration("3", "V3__data_management_security_audit.sql", "SQL", null, true),
+        new FlywayMigration("4", "V4__data_management_security_outbox.sql", "SQL", null, true),
+        new FlywayMigration("5", "V5__account_pool_circuit_epochs.sql", "SQL", null, true),
+        new FlywayMigration("6", "V6__application_root_identity.sql", "SQL", null, true),
+        new FlywayMigration("7", "V7__api_key_model_provider.sql", "SQL", null, true),
+        new FlywayMigration("8", "V8__account_allocation_admission.sql", "SQL", null, true),
+        new FlywayMigration("9", "V9__account_allocation_consistency_fixes.sql", "SQL", null, true),
+        new FlywayMigration("10", "V10__account_scoped_cooldowns_and_retention.sql", "SQL", null, true),
+        new FlywayMigration("11", "V11__account_badge_color.sql", "SQL", null, true),
+        new FlywayMigration("12", "V12__coding_plan_subscriptions.sql", "SQL", null, true),
+        new FlywayMigration("13", "V13__coding_plan_versions.sql", "SQL", null, true),
+        new FlywayMigration("14", "V14__explicit_billing_reservations.sql", "SQL", null, true),
+        new FlywayMigration("15", "V15__billing_boundary_consistency.sql", "SQL", null, true),
+        new FlywayMigration("16", "V16__plugin_developer_mode.sql", "SQL", null, true),
+        new FlywayMigration("17", "V17__announcements.sql", "SQL", null, true),
+        new FlywayMigration("18", "V18__announcement_runtime_grants.sql", "SQL", null, true),
+        new FlywayMigration("19", "V19__support_tickets.sql", "SQL", null, true)
+    );
     private static final long DATA_TRANSFER_LOCK_KEY = 0x5354415252594150L;
     private static final int COPY_BUFFER_BYTES = 64 * 1024;
     private static final int MAX_PROCESS_OUTPUT_BYTES = 64 * 1024;
@@ -76,7 +100,10 @@ public class DataTransferService {
         "api_keys",
         "request_logs",
         "payment_orders",
-        "balance_ledger"
+        "balance_ledger", "coding_plans", "coding_plan_versions", "coding_plan_subscriptions",
+        "subscription_ledger", "billing_reservations", "billing_reservation_allocations", "billing_review_actions",
+        "support_tickets", "support_ticket_messages", "support_ticket_attachments",
+        "announcements", "announcement_recipients"
     );
     private static final Set<String> GLOBAL_TOC_TYPES = Set.of(
         "ENCODING",
@@ -344,7 +371,10 @@ public class DataTransferService {
             Exception restoreFailure = null;
             boolean runtimeStateRequiresInvalidation = false;
             Path rollbackDump = null;
+            Path restoreTocList = null;
+            Path rollbackTocList = null;
             try {
+                List<FlywayMigration> expectedMigrations = maintenance.requireCurrentMigrationHistory();
                 runtimeStateRequiresInvalidation = true;
                 maintenance.suspendRuntimeConnections();
                 preRestoreBackup = createStoredBackup();
@@ -352,17 +382,23 @@ public class DataTransferService {
                     resolveBackupFile(preRestoreBackup.file().fileName()),
                     Long.MAX_VALUE
                 );
+                restoreTocList = createRestoreTocList(restoreFile);
+                rollbackTocList = createRestoreTocList(rollbackDump);
                 Path rollbackArchive = rollbackDump;
+                Path incomingTocList = restoreTocList;
+                Path previousTocList = rollbackTocList;
                 restoreWithRollback(
-                    () -> runDatabaseTool(pgRestoreCommand(restoreFile)),
-                    maintenance::verifyAndAnalyzeRestoredDatabase,
-                    () -> runDatabaseTool(pgRestoreCommand(rollbackArchive)),
-                    maintenance::verifyAndAnalyzeRestoredDatabase
+                    () -> runDatabaseTool(pgRestoreCommand(restoreFile, incomingTocList)),
+                    () -> maintenance.verifyAndAnalyzeRestoredDatabase(expectedMigrations),
+                    () -> runDatabaseTool(pgRestoreCommand(rollbackArchive, previousTocList)),
+                    () -> maintenance.verifyAndAnalyzeRestoredDatabase(expectedMigrations)
                 );
             } catch (Exception exception) {
                 restoreFailure = exception;
                 throw exception;
             } finally {
+                deleteTempFile(restoreTocList);
+                deleteTempFile(rollbackTocList);
                 deleteTempFile(rollbackDump);
                 Exception cleanupFailure = null;
                 try {
@@ -477,7 +513,11 @@ public class DataTransferService {
     }
 
     List<String> pgRestoreCommand(Path archive) {
-        return List.of(
+        return pgRestoreCommand(archive, null);
+    }
+
+    List<String> pgRestoreCommand(Path archive, Path tocList) {
+        List<String> command = new ArrayList<>(List.of(
             "pg_restore",
             "--host", database.host(),
             "--port", Integer.toString(database.port()),
@@ -492,7 +532,95 @@ public class DataTransferService {
             "--single-transaction",
             "--exit-on-error",
             archive.toAbsolutePath().normalize().toString()
-        );
+        ));
+        if (tocList != null) {
+            int archiveIndex = command.size() - 1;
+            command.add(archiveIndex, "--use-list");
+            command.add(archiveIndex + 1, tocList.toAbsolutePath().normalize().toString());
+        }
+        return List.copyOf(command);
+    }
+
+    private Path createRestoreTocList(Path archive) throws IOException {
+        ProcessOutput toc = runDatabaseToolForOutput(pgRestoreValidationCommand(archive), MAX_TOC_OUTPUT_BYTES);
+        if (toc.truncated()) {
+            throw incompatibleArchive("PostgreSQL archive table of contents exceeds the validation limit");
+        }
+        validateRestoreToc(toc.text());
+        Path list = Files.createTempFile("starry-api-restore-", ".toc");
+        try {
+            Files.writeString(
+                list,
+                filterInheritedPartitionObjects(toc.text()),
+                StandardCharsets.UTF_8,
+                StandardOpenOption.TRUNCATE_EXISTING,
+                StandardOpenOption.WRITE
+            );
+            return list;
+        } catch (Exception exception) {
+            deleteTempFile(list);
+            throw exception;
+        }
+    }
+
+    static String filterInheritedPartitionObjects(String toc) {
+        if (toc == null || toc.isEmpty()) {
+            return toc;
+        }
+
+        // Partition creation recreates inherited constraints and their indexes; pg_restore --clean cannot drop them.
+        List<String> lines = toc.lines().toList();
+        Set<String> partitionTables = new HashSet<>();
+        for (String line : lines) {
+            Matcher matcher = TOC_ENTRY.matcher(line.strip());
+            if (!matcher.matches()) {
+                continue;
+            }
+            TocObject object = parseTocObject(matcher.group(1));
+            if (POSTGRES_SCHEMA.equals(object.namespace()) && "TABLE ATTACH".equals(object.type())) {
+                partitionTables.add(readIdentifier(object.details()).value());
+            }
+        }
+
+        if (partitionTables.isEmpty()) {
+            return toc;
+        }
+
+        Set<String> inheritedConstraintNames = new HashSet<>();
+        Set<String> skippedLines = new HashSet<>();
+        for (String line : lines) {
+            Matcher matcher = TOC_ENTRY.matcher(line.strip());
+            if (!matcher.matches()) {
+                continue;
+            }
+            TocObject object = parseTocObject(matcher.group(1));
+            if (!POSTGRES_SCHEMA.equals(object.namespace()) || !"CONSTRAINT".equals(object.type())) {
+                continue;
+            }
+            Identifier table = readIdentifier(object.details());
+            if (!partitionTables.contains(table.value())) {
+                continue;
+            }
+            Identifier constraint = readIdentifier(table.remaining());
+            inheritedConstraintNames.add(constraint.value());
+            skippedLines.add(line);
+        }
+
+        StringBuilder filtered = new StringBuilder(toc.length());
+        for (String line : lines) {
+            Matcher matcher = TOC_ENTRY.matcher(line.strip());
+            boolean skip = skippedLines.contains(line);
+            if (!skip && matcher.matches()) {
+                TocObject object = parseTocObject(matcher.group(1));
+                if (POSTGRES_SCHEMA.equals(object.namespace()) && "INDEX ATTACH".equals(object.type())) {
+                    skip = inheritedConstraintNames.contains(readIdentifier(object.details()).value());
+                }
+            }
+            if (!skip) {
+                filtered.append(line).append('\n');
+            }
+        }
+        return filtered.toString();
     }
 
     private void validateRestoreArchive(Path archive) {
@@ -679,6 +807,43 @@ public class DataTransferService {
                 verificationFailure.addSuppressed(rollbackFailure);
             }
             throw verificationFailure;
+        }
+    }
+
+    static void validateMigrationHistory(List<FlywayMigration> history) throws SQLException {
+        if (history == null || history.size() != REQUIRED_FLYWAY_MIGRATIONS.size()) {
+            throw new SQLException(
+                "PostgreSQL schema must contain exactly the supported Flyway V1-V"
+                    + REQUIRED_FLYWAY_VERSION + " migration history"
+            );
+        }
+        for (int index = 0; index < REQUIRED_FLYWAY_MIGRATIONS.size(); index++) {
+            FlywayMigration expected = REQUIRED_FLYWAY_MIGRATIONS.get(index);
+            FlywayMigration actual = history.get(index);
+            if (actual == null
+                || !expected.version().equals(actual.version())
+                || !expected.script().equals(actual.script())
+                || !expected.type().equals(actual.type())
+                || !actual.success()
+                || actual.checksum() == null) {
+                throw new SQLException(
+                    "PostgreSQL schema is not at the exact supported Flyway V"
+                        + REQUIRED_FLYWAY_VERSION + " migration contract"
+                );
+            }
+        }
+    }
+
+    static void verifyRestoreMigrationHistory(
+        List<FlywayMigration> expected,
+        List<FlywayMigration> restored
+    ) throws SQLException {
+        validateMigrationHistory(expected);
+        validateMigrationHistory(restored);
+        if (!expected.equals(restored)) {
+            throw new SQLException(
+                "PostgreSQL restore Flyway history or migration checksums do not match the running application"
+            );
         }
     }
 
@@ -1139,6 +1304,15 @@ public class DataTransferService {
     private record Identifier(String value, String remaining) {
     }
 
+    record FlywayMigration(
+        String version,
+        String script,
+        String type,
+        Integer checksum,
+        boolean success
+    ) {
+    }
+
     @FunctionalInterface
     private interface CheckedSupplier<T> {
         T get() throws Exception;
@@ -1206,7 +1380,37 @@ public class DataTransferService {
             }
         }
 
-        private void verifyRestoredDatabase() throws SQLException {
+        private List<FlywayMigration> requireCurrentMigrationHistory() throws SQLException {
+            List<FlywayMigration> migrations = readMigrationHistory();
+            validateMigrationHistory(migrations);
+            return migrations;
+        }
+
+        private List<FlywayMigration> readMigrationHistory() throws SQLException {
+            List<FlywayMigration> migrations = new ArrayList<>();
+            try (Statement statement = connection.createStatement(); ResultSet result = statement.executeQuery("""
+                SELECT version,
+                       script,
+                       type,
+                       checksum,
+                       success
+                FROM starry_api.flyway_schema_history
+                ORDER BY installed_rank
+                """)) {
+                while (result.next()) {
+                    migrations.add(new FlywayMigration(
+                        result.getString("version"),
+                        result.getString("script"),
+                        result.getString("type"),
+                        result.getObject("checksum", Integer.class),
+                        result.getBoolean("success")
+                    ));
+                }
+            }
+            return List.copyOf(migrations);
+        }
+
+        private void verifyRestoredDatabase(List<FlywayMigration> expectedMigrations) throws SQLException {
             try (PreparedStatement statement = connection.prepareStatement(
                 "SELECT pg_catalog.to_regnamespace(?) IS NOT NULL"
             )) {
@@ -1227,22 +1431,189 @@ public class DataTransferService {
                 }
             }
 
-            try (Statement statement = connection.createStatement(); ResultSet result = statement.executeQuery("""
-                SELECT EXISTS (
-                    SELECT 1
-                    FROM starry_api.flyway_schema_history
-                    WHERE version = '1'
-                      AND success
-                )
+            verifyRestoreMigrationHistory(expectedMigrations, readMigrationHistory());
+            verifyApplicationRoot();
+            verifyCircuitEpochContract();
+            verifySecurityAuditBoundary();
+        }
+
+        private void verifyApplicationRoot() throws SQLException {
+            try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT COUNT(*) = 1
+                       AND COUNT(*) FILTER (
+                           WHERE users.username = 'admin'
+                             AND users.role = 'ADMIN'
+                             AND users.enabled
+                             AND NULLIF(btrim(users.user_id), '') IS NOT NULL
+                             AND users.password_hash ~ '^[0-9a-f]{64}$'
+                             AND users.password_salt ~ '^[0-9a-f]{32}$'
+                       ) = 1
+                FROM starry_api.admin_users AS users
+                JOIN starry_api.system_settings AS settings
+                  ON settings.setting_key = 'application_root_user_id'
+                 AND settings.setting_value = users.user_id
+                WHERE lower(users.username) = 'admin'
+                  AND settings.setting_value <> ''
                 """)) {
-                if (!result.next() || !result.getBoolean(1)) {
-                    throw new SQLException("PostgreSQL restore does not contain a successful Flyway V1 baseline");
+                if (!singleBoolean(statement)) {
+                    throw new SQLException(
+                        "PostgreSQL restore does not contain exactly one enabled ADMIN system Root matching its identity marker"
+                    );
                 }
             }
         }
 
-        private void verifyAndAnalyzeRestoredDatabase() throws SQLException {
-            verifyRestoredDatabase();
+        private void verifyCircuitEpochContract() throws SQLException {
+            try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT EXISTS (
+                           SELECT 1
+                           FROM pg_catalog.pg_attribute
+                           WHERE attrelid = 'starry_api.request_logs'::pg_catalog.regclass
+                             AND attname = 'circuit_epoch'
+                             AND atttypid = 'pg_catalog.uuid'::pg_catalog.regtype
+                             AND attnum > 0
+                             AND NOT attisdropped
+                       )
+                       AND EXISTS (
+                           SELECT 1
+                           FROM pg_catalog.pg_class AS index_relation
+                           JOIN pg_catalog.pg_namespace AS namespace
+                             ON namespace.oid = index_relation.relnamespace
+                           JOIN pg_catalog.pg_index AS index_metadata
+                             ON index_metadata.indexrelid = index_relation.oid
+                           WHERE namespace.nspname = 'starry_api'
+                             AND index_relation.relname = 'idx_request_logs_circuit_window'
+                             AND index_metadata.indrelid = 'starry_api.request_logs'::pg_catalog.regclass
+                             AND index_metadata.indisvalid
+                             AND index_metadata.indisready
+                       )
+                       AND (
+                           SELECT COUNT(*)
+                           FROM starry_api.system_settings
+                           WHERE setting_key IN (
+                               'account_pool_policy_epoch',
+                               'account_pool_policy_activation_started_at'
+                           )
+                       ) = 2
+                """)) {
+                if (!singleBoolean(statement)) {
+                    throw new SQLException(
+                        "PostgreSQL restore is missing the Flyway V5 account-pool circuit epoch contract"
+                    );
+                }
+            }
+        }
+
+        private void verifySecurityAuditBoundary() throws SQLException {
+            try (PreparedStatement statement = connection.prepareStatement("""
+                SELECT
+                    pg_catalog.to_regnamespace(?) IS NOT NULL
+                    AND pg_catalog.to_regclass('starry_security.data_management_security_audit_events')
+                        IS NOT NULL
+                    AND pg_catalog.to_regclass('starry_security.data_management_security_alert_outbox')
+                        IS NOT NULL
+                    AND EXISTS (
+                        SELECT 1
+                        FROM pg_catalog.pg_trigger AS trigger
+                        JOIN pg_catalog.pg_class AS relation ON relation.oid = trigger.tgrelid
+                        JOIN pg_catalog.pg_namespace AS namespace ON namespace.oid = relation.relnamespace
+                        WHERE namespace.nspname = 'starry_security'
+                          AND relation.relname = 'data_management_security_audit_events'
+                          AND trigger.tgname = 'trg_data_management_security_audit_append_only'
+                          AND NOT trigger.tgisinternal
+                          AND trigger.tgenabled = 'O'
+                    )
+                    AND pg_catalog.has_schema_privilege(
+                        'starry_api_runtime',
+                        'starry_security',
+                        'USAGE'
+                    )
+                    AND pg_catalog.has_table_privilege(
+                        'starry_api_runtime',
+                        'starry_security.data_management_security_audit_events',
+                        'SELECT'
+                    )
+                    AND pg_catalog.has_table_privilege(
+                        'starry_api_runtime',
+                        'starry_security.data_management_security_audit_events',
+                        'INSERT'
+                    )
+                    AND NOT pg_catalog.has_table_privilege(
+                        'starry_api_runtime',
+                        'starry_security.data_management_security_audit_events',
+                        'UPDATE'
+                    )
+                    AND NOT pg_catalog.has_table_privilege(
+                        'starry_api_runtime',
+                        'starry_security.data_management_security_audit_events',
+                        'DELETE'
+                    )
+                    AND NOT pg_catalog.has_table_privilege(
+                        'starry_api_runtime',
+                        'starry_security.data_management_security_audit_events',
+                        'TRUNCATE'
+                    )
+                    AND pg_catalog.has_table_privilege(
+                        'starry_api_runtime',
+                        'starry_security.data_management_security_alert_outbox',
+                        'SELECT'
+                    )
+                    AND pg_catalog.has_column_privilege(
+                        'starry_api_runtime',
+                        'starry_security.data_management_security_alert_outbox',
+                        'event_id',
+                        'INSERT'
+                    )
+                    AND pg_catalog.has_column_privilege(
+                        'starry_api_runtime',
+                        'starry_security.data_management_security_alert_outbox',
+                        'lease_owner',
+                        'UPDATE'
+                    )
+                    AND NOT pg_catalog.has_table_privilege(
+                        'starry_api_runtime',
+                        'starry_security.data_management_security_alert_outbox',
+                        'DELETE'
+                    )
+                    AND NOT pg_catalog.has_table_privilege(
+                        'starry_api_runtime',
+                        'starry_security.data_management_security_alert_outbox',
+                        'TRUNCATE'
+                    )
+                    AND NOT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'starry_security'
+                          AND table_name IN (
+                              'data_management_security_audit_events',
+                              'data_management_security_alert_outbox'
+                          )
+                          AND column_name IN (
+                              'password',
+                              'password_hash',
+                              'password_salt',
+                              'security_key',
+                              'submitted_key',
+                              'access_token',
+                              'refresh_token',
+                              'id_token',
+                              'client_secret',
+                              'session_token',
+                              'data_management_token'
+                          )
+                    )
+                """)) {
+                statement.setString(1, POSTGRES_SECURITY_SCHEMA);
+                if (!singleBoolean(statement)) {
+                    throw new SQLException(
+                        "PostgreSQL security audit schema failed append-only, privilege, or secret-column checks"
+                    );
+                }
+            }
+        }
+
+        private void verifyAndAnalyzeRestoredDatabase(List<FlywayMigration> expectedMigrations) throws SQLException {
+            verifyRestoredDatabase(expectedMigrations);
             try (Statement statement = connection.createStatement()) {
                 statement.execute("ANALYZE");
             }

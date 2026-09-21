@@ -44,6 +44,7 @@ class RedemptionCodeServiceTest {
 
         var response = service.create(ADMIN, new CreateRedemptionCodeRequest(
             new BigDecimal("25.5"),
+            null,
             2,
             null
         )).block();
@@ -103,6 +104,54 @@ class RedemptionCodeServiceTest {
             .doesNotContain("used =", "used_by_user_id", "used_by_username", "used_at", "balance =");
         assertThat(harness.sql()).contains("RETURNING *");
         verify(harness.repository(), never()).save(any(RedemptionCodeEntity.class));
+    }
+
+    @Test
+    void rejectsRedemptionCodesWithBothBalanceAndPlan() {
+        RedemptionCodeRepository repository = mock(RedemptionCodeRepository.class);
+        RedemptionCodeService service = service(repository);
+
+        assertThatThrownBy(() -> service.create(ADMIN, new CreateRedemptionCodeRequest(
+            new BigDecimal("25.5"),
+            "plan-1",
+            2,
+            null
+        )).block())
+            .isInstanceOf(ApiException.class)
+            .hasMessage("Redemption code requires exactly one of a positive balance or a coding plan");
+
+        verify(repository, never()).save(any(RedemptionCodeEntity.class));
+    }
+
+    @Test
+    void createsPlanRedemptionCodesAfterVerifyingEnabledPlan() {
+        RedemptionCodeRepository repository = mock(RedemptionCodeRepository.class);
+        when(repository.save(any(RedemptionCodeEntity.class))).thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
+        DatabaseClient databaseClient = mock(DatabaseClient.class);
+        DatabaseClient.GenericExecuteSpec spec = mock(DatabaseClient.GenericExecuteSpec.class);
+        R2dbcEntityTemplate template = mock(R2dbcEntityTemplate.class);
+        RowsFetchSpec<String> fetch = mock(RowsFetchSpec.class);
+        when(template.getDatabaseClient()).thenReturn(databaseClient);
+        when(databaseClient.sql(anyString())).thenReturn(spec);
+        when(spec.bind(anyString(), any())).thenReturn(spec);
+        when(spec.map(any(BiFunction.class))).thenReturn(fetch);
+        when(fetch.one()).thenReturn(Mono.just("plan-1"));
+        RedemptionCodeService service = new RedemptionCodeService(repository, template);
+
+        var response = service.create(ADMIN, new CreateRedemptionCodeRequest(
+            null,
+            "plan-1",
+            2,
+            null
+        )).block();
+
+        assertThat(response).isNotNull();
+        assertThat(response.total()).isEqualTo(2);
+        assertThat(response.codes()).allSatisfy(code -> {
+            assertThat(code.code()).startsWith("PLN-");
+            assertThat(code.balance()).isNull();
+            assertThat(code.planId()).isEqualTo("plan-1");
+        });
     }
 
     private RedemptionCodeService service(RedemptionCodeRepository repository) {

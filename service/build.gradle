@@ -9,7 +9,8 @@ def webuiDistDir = project(':webui').layout.projectDirectory.dir('dist')
 def webuiRuntimeResourcesDir = layout.buildDirectory.dir('generated/webui-resources')
 
 dependencies {
-    implementation project(':api')
+    implementation project(':service-api')
+    implementation project(':plugin-api')
 
     implementation 'org.springframework.boot:spring-boot-starter-actuator'
     implementation 'org.springframework.boot:spring-boot-starter-cache'

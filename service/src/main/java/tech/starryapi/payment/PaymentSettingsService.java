@@ -30,7 +30,7 @@ public class PaymentSettingsService {
     static final String MAX_PENDING_ORDERS = "MAX_PENDING_ORDERS";
     static final String ENABLED_PAYMENT_TYPES = "ENABLED_PAYMENT_TYPES";
     static final String BALANCE_RECHARGE_MULTIPLIER = "BALANCE_RECHARGE_MULTIPLIER";
-    static final String API_BILLING_MULTIPLIER = "API_BILLING_MULTIPLIER";
+    static final String MODEL_PRICE_BILLING_MULTIPLIER = "MODEL_PRICE_BILLING_MULTIPLIER";
     static final String RECHARGE_FEE_RATE = "RECHARGE_FEE_RATE";
     static final String PRODUCT_NAME_PREFIX = "PRODUCT_NAME_PREFIX";
     static final String PRODUCT_NAME_SUFFIX = "PRODUCT_NAME_SUFFIX";
@@ -45,7 +45,7 @@ public class PaymentSettingsService {
     static final String INVITE_REBATE_MAX_ORDERS = "INVITE_REBATE_MAX_ORDERS";
     static final String INVITE_REBATE_START_AT = "INVITE_REBATE_START_AT";
     static final String INVITE_REBATE_END_AT = "INVITE_REBATE_END_AT";
-    public static final BigDecimal DEFAULT_API_BILLING_MULTIPLIER = new BigDecimal("0.0000166666666667");
+    public static final BigDecimal DEFAULT_API_BILLING_MULTIPLIER = BigDecimal.ONE;
     public static final BigDecimal DEFAULT_INVITE_REBATE_RATE = new BigDecimal("0.10");
     public static final int DEFAULT_INVITE_REBATE_MAX_ORDERS = 10;
     private static final Duration CONFIG_CACHE_TTL = Duration.ofSeconds(5);
@@ -59,7 +59,7 @@ public class PaymentSettingsService {
         MAX_PENDING_ORDERS,
         ENABLED_PAYMENT_TYPES,
         BALANCE_RECHARGE_MULTIPLIER,
-        API_BILLING_MULTIPLIER,
+        MODEL_PRICE_BILLING_MULTIPLIER,
         RECHARGE_FEE_RATE,
         PRODUCT_NAME_PREFIX,
         PRODUCT_NAME_SUFFIX,
@@ -210,7 +210,7 @@ public class PaymentSettingsService {
             normalizeMaxPending(number(values, MAX_PENDING_ORDERS, 3)),
             normalizeTypes(splitTypes(values.get(ENABLED_PAYMENT_TYPES))),
             normalizeMultiplier(amount(values, BALANCE_RECHARGE_MULTIPLIER, BigDecimal.ONE)),
-            normalizeApiBillingMultiplier(amount(values, API_BILLING_MULTIPLIER, DEFAULT_API_BILLING_MULTIPLIER)),
+            normalizeApiBillingMultiplier(amount(values, MODEL_PRICE_BILLING_MULTIPLIER, DEFAULT_API_BILLING_MULTIPLIER)),
             normalizeFeeRate(amount(values, RECHARGE_FEE_RATE, BigDecimal.ZERO)),
             clean(values.get(PRODUCT_NAME_PREFIX)),
             clean(values.get(PRODUCT_NAME_SUFFIX)),
@@ -268,7 +268,7 @@ public class PaymentSettingsService {
         settings.put(MAX_PENDING_ORDERS, Integer.toString(config.maxPendingOrders()));
         settings.put(ENABLED_PAYMENT_TYPES, String.join(",", config.enabledTypes()));
         settings.put(BALANCE_RECHARGE_MULTIPLIER, config.balanceRechargeMultiplier().toPlainString());
-        settings.put(API_BILLING_MULTIPLIER, config.apiBillingMultiplier().toPlainString());
+        settings.put(MODEL_PRICE_BILLING_MULTIPLIER, config.apiBillingMultiplier().toPlainString());
         settings.put(RECHARGE_FEE_RATE, config.rechargeFeeRate().toPlainString());
         settings.put(PRODUCT_NAME_PREFIX, config.productNamePrefix());
         settings.put(PRODUCT_NAME_SUFFIX, config.productNameSuffix());
@@ -294,7 +294,7 @@ public class PaymentSettingsService {
         return switch (key) {
             case PAYMENT_ENABLED -> "false";
             case MIN_RECHARGE_AMOUNT, BALANCE_RECHARGE_MULTIPLIER -> "1";
-            case API_BILLING_MULTIPLIER -> DEFAULT_API_BILLING_MULTIPLIER.toPlainString();
+            case MODEL_PRICE_BILLING_MULTIPLIER -> DEFAULT_API_BILLING_MULTIPLIER.toPlainString();
             case ORDER_TIMEOUT_MINUTES -> "30";
             case MAX_PENDING_ORDERS -> "3";
             case ENABLED_PAYMENT_TYPES -> "alipay,wxpay";
@@ -359,7 +359,7 @@ public class PaymentSettingsService {
         if (multiplier.compareTo(BigDecimal.ZERO) <= 0) {
             return DEFAULT_API_BILLING_MULTIPLIER;
         }
-        return multiplier.setScale(16, RoundingMode.HALF_UP);
+        return multiplier.setScale(6, RoundingMode.HALF_UP);
     }
 
     private BigDecimal normalizeFeeRate(BigDecimal value) {

@@ -11,15 +11,15 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
-import org.springframework.util.LinkedMultiValueMap;
-import org.springframework.util.MultiValueMap;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import tech.starryapi.admin.SystemMaintenanceTaskGate;
 import tech.starryapi.common.Hashing;
 import tech.starryapi.platform.upstream.UpstreamException;
 
@@ -29,9 +29,6 @@ public class AccountTokenRefreshService {
     private static final Logger log = LoggerFactory.getLogger(AccountTokenRefreshService.class);
     private static final int SCHEDULED_REFRESH_CONCURRENCY = 4;
     private static final String KIRO_AUTH_ENDPOINT = "https://prod.us-east-1.auth.desktop.kiro.dev";
-    private static final String CODEX_TOKEN_REFRESH_URL = "https://auth.openai.com/oauth/token";
-    private static final String CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-    private static final String CODEX_REFRESH_SCOPE = "openid profile email";
     private static final Duration CODEX_REFRESH_WINDOW = Duration.ofHours(2);
     private static final String KIRO_VERSION = "0.12.155";
     private static final String AWS_SDK_VERSION = "1.0.34";
@@ -41,6 +38,7 @@ public class AccountTokenRefreshService {
     private final WebClient webClient;
     private final ProxyAccountRepository repository;
     private final AccountPoolService accountPoolService;
+    private final SystemMaintenanceTaskGate maintenanceTaskGate;
     private final Map<String, Mono<ProxyAccountEntity>> inFlightRefreshes = new ConcurrentHashMap<>();
 
     public AccountTokenRefreshService(
@@ -49,10 +47,28 @@ public class AccountTokenRefreshService {
         ProxyAccountRepository repository,
         AccountPoolService accountPoolService
     ) {
+        this(
+            objectMapper,
+            kiroWebClient,
+            repository,
+            accountPoolService,
+            SystemMaintenanceTaskGate.alwaysOperationalForDirectConstruction()
+        );
+    }
+
+    @Autowired
+    public AccountTokenRefreshService(
+        ObjectMapper objectMapper,
+        WebClient kiroWebClient,
+        ProxyAccountRepository repository,
+        AccountPoolService accountPoolService,
+        SystemMaintenanceTaskGate maintenanceTaskGate
+    ) {
         this.objectMapper = objectMapper;
         this.webClient = kiroWebClient;
         this.repository = repository;
         this.accountPoolService = accountPoolService;
+        this.maintenanceTaskGate = maintenanceTaskGate;
     }
 
     public Mono<ProxyAccountEntity> refresh(ProxyAccountEntity account) {
@@ -70,7 +86,7 @@ public class AccountTokenRefreshService {
         initialDelayString = "${kiro.proxy.token-refresh-initial-delay-ms:60000}"
     )
     public void scheduledRefresh() {
-        refreshEligibleAccounts()
+        maintenanceTaskGate.whenOperational(this::refreshEligibleAccounts)
             .subscribe(
                 summary -> log.info(
                     "Scheduled upstream token refresh completed: total={}, eligible={}, refreshed={}, failed={}",
@@ -157,18 +173,17 @@ public class AccountTokenRefreshService {
     }
 
     private Mono<TokenRefreshResult> refreshCodexToken(ProxyAccountEntity account, String refreshToken) {
-        String clientId = firstNonBlank(account.getClientId(), CODEX_CLIENT_ID);
-        MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
-        form.add("client_id", clientId);
-        form.add("grant_type", "refresh_token");
-        form.add("refresh_token", refreshToken);
-        form.add("scope", CODEX_REFRESH_SCOPE);
+        String clientId = firstNonBlank(account.getClientId(), OpenAiOAuthConstants.CLIENT_ID);
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("client_id", clientId);
+        body.put("grant_type", "refresh_token");
+        body.put("refresh_token", refreshToken);
 
         return webClient.post()
-            .uri(CODEX_TOKEN_REFRESH_URL)
-            .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+            .uri(OpenAiOAuthConstants.TOKEN_URL)
+            .contentType(MediaType.APPLICATION_JSON)
             .accept(MediaType.APPLICATION_JSON)
-            .bodyValue(form)
+            .bodyValue(body)
             .exchangeToMono(response -> {
                 if (response.statusCode().isError()) {
                     return response.bodyToMono(String.class)
@@ -177,7 +192,7 @@ public class AccountTokenRefreshService {
                             "Codex token refresh failed " + response.statusCode().value() + ": " + text
                         )));
                 }
-                return response.bodyToMono(JsonNode.class).map(json -> tokenResult(json, null, clientId));
+                return response.bodyToMono(JsonNode.class).map(json -> codexTokenResult(json, clientId));
             });
     }
 
@@ -358,6 +373,21 @@ public class AccountTokenRefreshService {
             firstNonBlank(json.path("idToken").asText(null), json.path("id_token").asText(null)),
             firstNonBlank(json.path("clientId").asText(null), json.path("client_id").asText(null), fallbackClientId),
             tokenExpiresAt(json)
+        );
+    }
+
+    private TokenRefreshResult codexTokenResult(JsonNode json, String clientId) {
+        TokenRefreshResult result = tokenResult(json, null, clientId);
+        Instant expiresAt = result.tokenExpiresAt();
+        if (expiresAt == null) {
+            expiresAt = OpenAiOAuthTokenClaims.tokenExpirationOrNull(objectMapper, result.accessToken());
+        }
+        return new TokenRefreshResult(
+            result.accessToken(),
+            result.refreshToken(),
+            result.idToken(),
+            result.clientId(),
+            expiresAt
         );
     }
 

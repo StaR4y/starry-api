@@ -5,8 +5,9 @@
    * 展示当前账号余额与用户可访问的 API Key 使用概览，作为普通用户登录后的默认首页。
    */
   import { computed, onMounted, ref } from 'vue';
-  import { Refresh } from '@element-plus/icons-vue';
+  import { DataAnalysis, Refresh } from '@element-plus/icons-vue';
   import PageSection from '@/components/PageSection.vue';
+  import MetricsPanel, { type MetricPanelItem } from '@/components/MetricsPanel.vue';
   import { apiKeysApi, logsApi } from '@/api';
   import { useAuthStore } from '@/stores/auth';
   import type { ApiKey, ModelUsageSummary, UsageSummary } from '@/types/api';
@@ -46,6 +47,37 @@
     return latest ?? null;
   });
 
+  /* 顶部状态栏（统一 MetricsPanel 组件） */
+  const welcomeMetrics = computed<MetricPanelItem[]>(() => [
+    {
+      label: '当前余额',
+      value: formatNumber(balance.value),
+      tone: 'primary',
+      sub: `最近使用：${latestUsedAt.value ? formatDateTime(latestUsedAt.value) : '无使用记录'}`,
+    },
+    {
+      label: 'API Key 密钥',
+      value: formatNumber(activeKeys.value),
+      unit: `/ ${formatNumber(apiKeys.value.length)}`,
+      tone: 'success',
+      valueTone: 'success',
+      sub: activeKeys.value > 0 ? '服务正常运行中' : '暂无启用密钥',
+    },
+    {
+      label: '累计调用',
+      value: formatNumber(totalRequests.value),
+      tone: 'accent',
+      sub: '次 API 请求',
+    },
+    {
+      label: '已用 Token / 累计消耗',
+      value: formatNumber(totalTokens.value),
+      unit: `/ ${formatNumber(totalCredits.value)}`,
+      tone: 'warning',
+      sub: 'Tokens / 累计消耗额度',
+    },
+  ]);
+
   function colorFor(index: number) {
     return chartColors[index % chartColors.length];
   }
@@ -79,76 +111,24 @@
 
 <template>
   <div class="welcome">
-    <PageSection :title="`欢迎，${displayName}`" subtitle="这里汇总你的账号余额和调用使用情况">
+    <PageSection :title="`欢迎，${displayName}`" subtitle="使用概览" :icon="DataAnalysis">
       <template #actions>
         <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
       </template>
+      <template #summary>
+        <MetricsPanel :items="welcomeMetrics" />
+      </template>
 
       <div v-loading="loading" class="welcome__content">
-        <!-- 1. Stats Summary Panel (Unified metrics style with Admin Account List) -->
-        <div class="metrics-panel glass-panel">
-          <div class="metric-item">
-            <div class="metric-item__header">
-              <span class="metric-dot dot-balance" />
-              <span class="metric-label">当前余额</span>
-            </div>
-            <div class="metric-value">{{ formatNumber(balance) }}</div>
-            <div class="metric-subtext">
-              最近使用：{{ formatDateTime(latestUsedAt) || '无使用记录' }}
-            </div>
-          </div>
-
-          <div class="metric-divider" />
-
-          <div class="metric-item">
-            <div class="metric-item__header">
-              <span class="metric-dot dot-keys" />
-              <span class="metric-label">API Key 密钥</span>
-            </div>
-            <div class="metric-value text-success">
-              {{ formatNumber(activeKeys) }}
-              <span class="metric-value__sub">/ {{ formatNumber(apiKeys.length) }}</span>
-            </div>
-            <div class="metric-subtext">
-              {{ activeKeys > 0 ? '服务正常运行中' : '暂无启用密钥' }}
-            </div>
-          </div>
-
-          <div class="metric-divider" />
-
-          <div class="metric-item">
-            <div class="metric-item__header">
-              <span class="metric-dot dot-requests" />
-              <span class="metric-label">累计调用</span>
-            </div>
-            <div class="metric-value">{{ formatNumber(totalRequests) }}</div>
-            <div class="metric-subtext">次 API 请求</div>
-          </div>
-
-          <div class="metric-divider" />
-
-          <div class="metric-item">
-            <div class="metric-item__header">
-              <span class="metric-dot dot-tokens" />
-              <span class="metric-label">已用 Token / 累计消耗</span>
-            </div>
-            <div class="metric-value">
-              {{ formatNumber(totalTokens) }}
-              <span class="metric-value__sub">/ {{ formatNumber(totalCredits) }}</span>
-            </div>
-            <div class="metric-subtext">Tokens / 累计消耗额度</div>
-          </div>
-        </div>
 
         <!-- 2. Model Usage Card -->
-        <section class="welcome__model-card glass-panel">
+        <section class="welcome__model-card surface-card">
           <div class="welcome__model-header">
             <div>
               <h3 class="welcome__model-title">
                 <span class="model-title-dot" />
                 模型使用情况
               </h3>
-              <p class="text-muted">按你的 API Key 请求日志聚合模型调用和 token 消耗</p>
             </div>
             <div class="welcome__model-header-total text-secondary">
               总 Token：<strong class="mono">{{ formatNumber(totalTokens) }}</strong>
@@ -216,94 +196,9 @@
       flex-direction: column;
       gap: 18px;
       min-height: 260px;
-    }
 
-    /* Unified Metrics Panel with Admin Account List */
-    .metrics-panel {
-      display: flex;
-      align-items: center;
-      padding: 20px 28px;
-      margin-bottom: 6px;
-      width: 100%;
-
-      .metric-item {
-        flex: 1;
-        display: flex;
-        flex-direction: column;
-        gap: 4px;
-        min-width: 0;
-
-        &__header {
-          display: flex;
-          align-items: center;
-          gap: 6px;
-        }
-
-        .metric-dot {
-          width: 7px;
-          height: 7px;
-          border-radius: 50%;
-          display: inline-block;
-
-          &.dot-balance {
-            background-color: var(--kp-primary);
-            box-shadow: 0 0 6px rgba(91, 141, 239, 0.6);
-          }
-          &.dot-keys {
-            background-color: #36c08a;
-            box-shadow: 0 0 6px rgba(54, 192, 138, 0.6);
-          }
-          &.dot-requests {
-            background-color: #b387ff;
-            box-shadow: 0 0 6px rgba(179, 135, 255, 0.6);
-          }
-          &.dot-tokens {
-            background-color: #f0a84d;
-            box-shadow: 0 0 6px rgba(240, 168, 77, 0.6);
-          }
-        }
-
-        .metric-label {
-          font-size: 12.5px;
-          font-weight: 600;
-          color: var(--kp-text-secondary);
-        }
-
-        .metric-value {
-          font-size: 26px;
-          font-weight: 800;
-          color: var(--kp-text);
-          line-height: 1.15;
-          font-family: ui-monospace, 'JetBrains Mono', 'SF Mono', Consolas, monospace;
-
-          &.text-success {
-            color: #36c08a;
-          }
-          &.text-danger {
-            color: #ef5b6b;
-          }
-
-          &__sub {
-            font-size: 13px;
-            font-weight: 500;
-            color: var(--kp-text-muted);
-          }
-        }
-
-        .metric-subtext {
-          font-size: 11px;
-          color: var(--kp-text-muted);
-          font-weight: 500;
-        }
-      }
-
-      .metric-divider {
-        width: 1px;
-        height: 40px;
-        background-color: var(--kp-divider);
-        margin: 0 28px;
-        align-self: center;
-        flex-shrink: 0;
+      > .metrics-panel {
+        margin-bottom: 6px;
       }
     }
 
@@ -333,7 +228,7 @@
           width: 4px;
           height: 15px;
           border-radius: 99px;
-          background: linear-gradient(to bottom, var(--kp-primary), var(--kp-accent));
+          background: var(--kp-brand-gradient-y);
           margin-right: 8px;
         }
       }
@@ -467,35 +362,6 @@
       font-size: 13.5px;
       color: var(--kp-text-muted);
       gap: 6px;
-    }
-  }
-
-  @media (max-width: 1024px) {
-    .welcome {
-      .metrics-panel {
-        padding: 16px 20px;
-
-        .metric-divider {
-          margin: 0 20px;
-        }
-      }
-    }
-  }
-
-  @media (max-width: 768px) {
-    .welcome {
-      .metrics-panel {
-        flex-direction: column;
-        align-items: stretch;
-        gap: 16px;
-        padding: 20px;
-
-        .metric-divider {
-          width: 100%;
-          height: 1px;
-          margin: 4px 0;
-        }
-      }
     }
   }
 

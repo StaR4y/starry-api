@@ -1,0 +1,102 @@
+{
+  "title": "Terminal-Bench 3.0 Leaderboard",
+  "sourceUrl": "https://www.frontierbench.ai/",
+  "entries": [
+    {
+      "rank": 1,
+      "model": "Opus 5 (max)",
+      "organization": "Anthropic",
+      "agent": "mini-SWE-agent",
+      "score": 42.7,
+      "secondaryScore": null
+    },
+    {
+      "rank": 2,
+      "model": "GPT-5.6 Sol (max)",
+      "organization": "OpenAI",
+      "agent": "Codex",
+      "score": 34.59,
+      "secondaryScore": null
+    },
+    {
+      "rank": 3,
+      "model": "Fable 5 (max)",
+      "organization": "Anthropic",
+      "agent": "Claude Code",
+      "score": 34.05,
+      "secondaryScore": null
+    },
+    {
+      "rank": 4,
+      "model": "GLM 5.3 (max)",
+      "organization": "Z.AI",
+      "agent": "Claude Code",
+      "score": 32.43,
+      "secondaryScore": null
+    },
+    {
+      "rank": 5,
+      "model": "Grok 4.6 (high)",
+      "organization": "xAI",
+      "agent": "Grok Build",
+      "score": 26.49,
+      "secondaryScore": null
+    },
+    {
+      "rank": 6,
+      "model": "Opus 4.8 (max)",
+      "organization": "Anthropic",
+      "agent": "Claude Code",
+      "score": 21.08,
+      "secondaryScore": null
+    },
+    {
+      "rank": 7,
+      "model": "GPT-5.6 Terra (max)",
+      "organization": "OpenAI",
+      "agent": "Codex",
+      "score": 20.81,
+      "secondaryScore": null
+    },
+    {
+      "rank": 8,
+      "model": "SWE-1.7 Lightning",
+      "organization": "Cognition",
+      "agent": "Devin",
+      "score": 18.65,
+      "secondaryScore": null
+    },
+    {
+      "rank": 9,
+      "model": "Grok 4.5 (xhigh)",
+      "organization": "xAI",
+      "agent": "Cursor CLI",
+      "score": 15.68,
+      "secondaryScore": null
+    },
+    {
+      "rank": 10,
+      "model": "Sonnet 5 (max)",
+      "organization": "Anthropic",
+      "agent": "Claude Code",
+      "score": 14.59,
+      "secondaryScore": null
+    },
+    {
+      "rank": 11,
+      "model": "GPT-5.6 Luna (max)",
+      "organization": "OpenAI",
+      "agent": "Codex",
+      "score": 14.32,
+      "secondaryScore": null
+    },
+    {
+      "rank": 12,
+      "model": "GLM 5.2 (max)",
+      "organization": "Z.ai",
+      "agent": "Claude Code",
+      "score": 4.59,
+      "secondaryScore": null
+    }
+  ]
+}

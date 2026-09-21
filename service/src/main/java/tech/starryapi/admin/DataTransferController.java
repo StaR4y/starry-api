@@ -26,65 +26,175 @@ public class DataTransferController implements DataTransferApi {
 
     private final AdminAuth adminAuth;
     private final DataTransferService service;
+    private final DataManagementSecurityService securityService;
 
-    public DataTransferController(AdminAuth adminAuth, DataTransferService service) {
+    public DataTransferController(
+        AdminAuth adminAuth,
+        DataTransferService service,
+        DataManagementSecurityService securityService
+    ) {
         this.adminAuth = adminAuth;
         this.service = service;
+        this.securityService = securityService;
     }
 
     @Override
     public Mono<ApiResponse<DataTransferDtos.DataTransferStatusResponse>> status(ServerWebExchange exchange) {
-        adminAuth.verifyAdmin(exchange);
-        return service.status().map(ApiResponse::ok);
+        AdminPrincipal principal = adminAuth.verifyAdmin(exchange);
+        return securityService.requireDatabaseAdmin(principal)
+            .then(service.status())
+            .map(ApiResponse::ok);
     }
 
     @Override
-    public Mono<ResponseEntity<Flux<DataBuffer>>> exportDatabase(ServerWebExchange exchange) {
-        adminAuth.verifyAdmin(exchange);
-        return service.exportDatabase().map(file -> download(exchange, file, DUMP_MEDIA_TYPE));
+    public Mono<ApiResponse<DataTransferDtos.DataManagementSecurityStatusResponse>> securityStatus(
+        ServerWebExchange exchange
+    ) {
+        AdminPrincipal principal = adminAuth.verifyAdmin(exchange);
+        return securityService.status(principal).map(ApiResponse::ok);
     }
 
     @Override
-    public Mono<ResponseEntity<Flux<DataBuffer>>> exportBackup(ServerWebExchange exchange) {
-        adminAuth.verifyAdmin(exchange);
-        return service.exportBackup().map(file -> download(exchange, file, ZIP_MEDIA_TYPE));
+    public Mono<ApiResponse<DataTransferDtos.InitializeDataManagementSecurityResponse>> initializeSecurity(
+        ServerWebExchange exchange
+    ) {
+        AdminPrincipal principal = adminAuth.verifyAdmin(exchange);
+        return securityService.initialize(principal, exchange).map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<DataTransferDtos.UnlockDataManagementResponse>> unlockSecurity(
+        ServerWebExchange exchange,
+        DataTransferDtos.UnlockDataManagementRequest request
+    ) {
+        AdminPrincipal principal = adminAuth.verifyAdmin(exchange);
+        return securityService.unlock(
+            principal,
+            exchange,
+            request.securityKey(),
+            request.action(),
+            request.target()
+        ).map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ResponseEntity<Flux<DataBuffer>>> exportDatabase(
+        ServerWebExchange exchange,
+        String securityToken
+    ) {
+        AdminPrincipal principal = adminAuth.verifyAdmin(exchange);
+        return securityService.authorize(
+                principal,
+                exchange,
+                securityToken,
+                DataManagementSecurityService.Action.EXPORT_DATABASE,
+                null,
+                false
+            )
+            .then(service.exportDatabase())
+            .map(file -> download(exchange, file, DUMP_MEDIA_TYPE));
+    }
+
+    @Override
+    public Mono<ResponseEntity<Flux<DataBuffer>>> exportBackup(
+        ServerWebExchange exchange,
+        String securityToken
+    ) {
+        AdminPrincipal principal = adminAuth.verifyAdmin(exchange);
+        return securityService.authorize(
+                principal,
+                exchange,
+                securityToken,
+                DataManagementSecurityService.Action.EXPORT_BACKUP,
+                null,
+                false
+            )
+            .then(service.exportBackup())
+            .map(file -> download(exchange, file, ZIP_MEDIA_TYPE));
     }
 
     @Override
     public Mono<ApiResponse<DataTransferDtos.BackupListResponse>> backups(ServerWebExchange exchange) {
-        adminAuth.verifyAdmin(exchange);
-        return service.backups().map(ApiResponse::ok);
+        AdminPrincipal principal = adminAuth.verifyAdmin(exchange);
+        return securityService.requireDatabaseAdmin(principal)
+            .then(service.backups())
+            .map(ApiResponse::ok);
     }
 
     @Override
-    public Mono<ApiResponse<DataTransferDtos.BackupCreateResponse>> createBackup(ServerWebExchange exchange) {
-        adminAuth.verifyAdmin(exchange);
-        return service.createBackup().map(ApiResponse::ok);
+    public Mono<ApiResponse<DataTransferDtos.BackupCreateResponse>> createBackup(
+        ServerWebExchange exchange,
+        String securityToken
+    ) {
+        AdminPrincipal principal = adminAuth.verifyAdmin(exchange);
+        return securityService.authorize(
+                principal,
+                exchange,
+                securityToken,
+                DataManagementSecurityService.Action.CREATE_BACKUP,
+                null,
+                false
+            )
+            .then(service.createBackup())
+            .map(ApiResponse::ok);
     }
 
     @Override
-    public Mono<ResponseEntity<Flux<DataBuffer>>> downloadBackup(ServerWebExchange exchange, @PathVariable String fileName) {
-        adminAuth.verifyAdmin(exchange);
-        return service.downloadBackup(fileName).map(file -> download(exchange, file, ZIP_MEDIA_TYPE));
+    public Mono<ResponseEntity<Flux<DataBuffer>>> downloadBackup(
+        ServerWebExchange exchange,
+        @PathVariable String fileName,
+        String securityToken
+    ) {
+        AdminPrincipal principal = adminAuth.verifyAdmin(exchange);
+        return securityService.authorize(
+                principal,
+                exchange,
+                securityToken,
+                DataManagementSecurityService.Action.DOWNLOAD_BACKUP,
+                fileName,
+                false
+            )
+            .then(service.downloadBackup(fileName))
+            .map(file -> download(exchange, file, ZIP_MEDIA_TYPE));
     }
 
     @Override
     public Mono<ApiResponse<DataTransferDtos.DeleteBackupResponse>> deleteBackup(
         ServerWebExchange exchange,
-        @PathVariable String fileName
+        @PathVariable String fileName,
+        String securityToken
     ) {
-        adminAuth.verifyAdmin(exchange);
-        return service.deleteBackup(fileName).map(ApiResponse::ok);
+        AdminPrincipal principal = adminAuth.verifyAdmin(exchange);
+        return securityService.authorize(
+                principal,
+                exchange,
+                securityToken,
+                DataManagementSecurityService.Action.DELETE_BACKUP,
+                fileName,
+                true
+            )
+            .then(service.deleteBackup(fileName))
+            .map(ApiResponse::ok);
     }
 
     @Override
     public Mono<ApiResponse<DataTransferDtos.ImportResultResponse>> importBackup(
         ServerWebExchange exchange,
         @RequestPart("file") Mono<FilePart> file,
-        @RequestParam("confirm") String confirm
+        @RequestParam("confirm") String confirm,
+        String securityToken
     ) {
-        adminAuth.verifyAdmin(exchange);
-        return service.importBackup(file, confirm).map(ApiResponse::ok);
+        AdminPrincipal principal = adminAuth.verifyAdmin(exchange);
+        return securityService.authorize(
+                principal,
+                exchange,
+                securityToken,
+                DataManagementSecurityService.Action.RESTORE_DATABASE,
+                null,
+                true
+            )
+            .then(service.importBackup(file, confirm))
+            .map(ApiResponse::ok);
     }
 
     private ResponseEntity<Flux<DataBuffer>> download(

@@ -82,7 +82,7 @@ cp .env.example .env
 nano .env
 ```
 
-Set three distinct strong PostgreSQL passwords. The database and role names are fixed by the least-privilege bootstrap:
+Set three distinct strong PostgreSQL passwords. `POSTGRES_BOOTSTRAP_PASSWORD` protects the database-level break-glass superuser and is never used by the application; restrict and audit access to it. The database and role names are fixed by the least-privilege bootstrap:
 
 ```dotenv
 POSTGRES_BOOTSTRAP_PASSWORD=replace-with-strong-bootstrap-password
@@ -143,7 +143,8 @@ Username: admin
 Password: ...
 ```
 
-The password is printed only when the `admin_users` table is empty. It is not printed again.
+The password is printed only when the application Root marker is unassigned and the
+`admin_users` table is empty. It is not printed again.
 
 If the second startup still sees `firstLogin=true`, logs only show a reminder:
 
@@ -209,6 +210,28 @@ curl -X POST https://your-domain.example/auth/password \
   -d '{"oldPassword":"<first-startup-password>","newPassword":"<new-password>"}'
 ```
 
+The change revokes every existing console session for the account. Sign in again with the new password before continuing.
+
+## Emergency Data-Management Recovery
+
+If five incorrect data-management security-key attempts lock the site, keep public traffic isolated and make sure only one service instance is active. The Docker image includes the reviewed recovery utility; from the 1Panel terminal or an interactive SSH session run:
+
+```bash
+cd /opt/starry-api
+docker compose -f docker-compose.artifact.yml exec service \
+  /app/bin/recover-data-management --lang zh
+# English prompts: use --lang en.
+
+docker compose -f docker-compose.artifact.yml restart service
+# Wait for the service to finish starting, then verify:
+docker compose -f docker-compose.artifact.yml exec service \
+  curl -fsS http://127.0.0.1:8080/system/status
+docker compose -f docker-compose.artifact.yml exec service \
+  sh -c 'test ! -e /app/security/recovery.key && test ! -e /app/security/.recovery.key.consuming && echo "recovery key files consumed"'
+```
+
+The utility hides the original `dmsk-...` key and requires identical double entry. Do not add `-T`, pass the key in an argument, or pipe a downloaded recovery script through `curl ... | sh`. A normal matching attempt returns the site to `"maintenance":false`; a normal readable, valid-format but nonmatching attempt is audited and consumed while maintenance remains enabled, so rerun the utility and restart with the correct key. If either recovery path remains, cleanup was not confirmed: do not stage another key or delete files manually, and follow the storage/log procedure in [Operations](OPERATIONS.md#recover-a-docker-compose-deployment). Source-build deployments using `docker-compose.yml` omit `-f docker-compose.artifact.yml`.
+
 ## 7. Import Kiro Upstream Accounts
 
 Create an import file on the server:
@@ -265,10 +288,10 @@ curl https://your-domain.example/admin/accounts \
 curl -X POST https://your-domain.example/admin/api-keys \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{"name":"default","creditsLimit":1000}'
+  -d '{"name":"default","creditsLimit":1000,"modelProvider":"OpenAI"}'
 ```
 
-Save `data.key`. It is shown only once.
+Save `data.key`. Current keys are stored per owner and can also be copied later from the API Key page; legacy hash-only keys cannot be recovered.
 
 Client configuration:
 

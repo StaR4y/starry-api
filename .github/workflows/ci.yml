@@ -39,11 +39,30 @@ jobs:
       - name: Verify Docker
         run: docker info
 
+      - name: Install shell test dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends expect
+
       - name: Test installer rollback paths
         run: ./scripts/test-install-server.sh
 
+      - name: Test data-management recovery tool
+        run: ./scripts/test-recover-data-management.sh
+
       - name: Run all tests and build WebUI
         run: ./gradlew --no-daemon clean test :webui:npmBuild
+
+      - name: Test artifact publisher idempotency
+        run: |
+          ./gradlew --no-daemon :service:bootJar -PskipWebuiBuild=true
+          artifact_test_dir="$(mktemp -d)"
+          RUN_TESTS=false SKIP_BUILD=true ARTIFACT_DIR="$artifact_test_dir" \
+            ./scripts/publish-artifact.sh
+          RUN_TESTS=false SKIP_BUILD=true ARTIFACT_DIR="$artifact_test_dir" \
+            ./scripts/publish-artifact.sh
+          test -x "$artifact_test_dir/runtime/recover-data-management.sh"
+          cmp scripts/recover-data-management.sh \
+            "$artifact_test_dir/runtime/recover-data-management.sh"
+          (cd "$artifact_test_dir" && sha256sum -c sha256sums.txt)
 
       - name: Verify PostgreSQL integration tests ran
         run: |

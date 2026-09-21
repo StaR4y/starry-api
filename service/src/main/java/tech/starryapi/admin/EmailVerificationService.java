@@ -10,11 +10,13 @@ import java.time.DateTimeException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.Locale;
 import java.util.Properties;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.mail.javamail.JavaMailSenderImpl;
 import org.springframework.mail.javamail.MimeMessageHelper;
@@ -41,6 +43,7 @@ public class EmailVerificationService {
     private final TurnstileVerificationService turnstileVerificationService;
     private final SystemSettingRepository systemSettingRepository;
     private final RegistrationEmailTokenRepository tokenRepository;
+    private final SystemMaintenanceTaskGate maintenanceTaskGate;
 
     public EmailVerificationService(
         RegistrationSettingsService registrationSettingsService,
@@ -48,10 +51,28 @@ public class EmailVerificationService {
         SystemSettingRepository systemSettingRepository,
         RegistrationEmailTokenRepository tokenRepository
     ) {
+        this(
+            registrationSettingsService,
+            turnstileVerificationService,
+            systemSettingRepository,
+            tokenRepository,
+            SystemMaintenanceTaskGate.alwaysOperationalForDirectConstruction()
+        );
+    }
+
+    @Autowired
+    public EmailVerificationService(
+        RegistrationSettingsService registrationSettingsService,
+        TurnstileVerificationService turnstileVerificationService,
+        SystemSettingRepository systemSettingRepository,
+        RegistrationEmailTokenRepository tokenRepository,
+        SystemMaintenanceTaskGate maintenanceTaskGate
+    ) {
         this.registrationSettingsService = registrationSettingsService;
         this.turnstileVerificationService = turnstileVerificationService;
         this.systemSettingRepository = systemSettingRepository;
         this.tokenRepository = tokenRepository;
+        this.maintenanceTaskGate = maintenanceTaskGate;
     }
 
     public Mono<AdminDtos.SendVerifyCodeResponse> sendRegistrationLink(
@@ -150,24 +171,22 @@ public class EmailVerificationService {
                 try {
                     JavaMailSenderImpl sender = mailSender(config);
                     MimeMessage message = sender.createMimeMessage();
-                    MimeMessageHelper helper = new MimeMessageHelper(message, "UTF-8");
+                    MimeMessageHelper helper = HtmlEmail.multipartHelper(message);
                     String fromName = config.fromName().isBlank() ? "Starry API" : config.fromName();
-                    helper.setFrom(config.fromEmail(), fromName);
+                    helper.setFrom(mailFromAddress(config), fromName);
                     helper.setTo(email);
-                    helper.setSubject("Starry API registration link");
-                    helper.setText("""
-                        Use this link to continue registering your Starry API account:
-
-                        %s
-
-                        This link expires in 10 minutes and can only be used once.
-                        """.formatted(link), false);
+                    helper.setSubject(HtmlEmail.registrationSubject());
+                    HtmlEmail.write(
+                        helper,
+                        HtmlEmail.registrationPlain(link),
+                        HtmlEmail.registrationHtml(link)
+                    );
                     sender.send(message);
                 } catch (Exception error) {
                     throw new ApiException(
                         HttpStatus.SERVICE_UNAVAILABLE,
                         "EMAIL_SEND_FAILED",
-                        "Failed to send verification email: " + error.getMessage() + smtpFailureHint(config)
+                        smtpSendFailureMessage(config, error)
                     );
                 }
             })
@@ -223,6 +242,43 @@ public class EmailVerificationService {
         };
     }
 
+    static String mailFromAddress(RegistrationSettingsService.SmtpConfig config) {
+        String from = config == null ? "" : config.fromEmail().trim();
+        String username = config == null ? "" : config.username().trim();
+        if (from.isBlank() && looksLikeEmail(username)) {
+            return username;
+        }
+        if (authUserMustMatchFrom(config == null ? "" : config.host())
+            && looksLikeEmail(username)
+            && !from.equalsIgnoreCase(username)) {
+            return username;
+        }
+        return from;
+    }
+
+    static String smtpSendFailureMessage(RegistrationSettingsService.SmtpConfig config, Throwable error) {
+        String details = failureText(error);
+        String lower = details.toLowerCase(Locale.ROOT);
+        if (lower.contains("mail from address must be same as authorization user")
+            || (lower.contains("501") && lower.contains("mail from"))) {
+            String username = config == null ? "" : config.username().trim();
+            String hint = looksLikeEmail(username)
+                ? "请把发件邮箱改成 " + username + " 后再发送。"
+                : "请把发件邮箱改成与 SMTP 用户名相同的邮箱后再发送。";
+            return "发件邮箱必须与 SMTP 登录账号相同。" + hint;
+        }
+        boolean smtpProtocolReject = lower.contains("smtpsendfailedexception")
+            || lower.contains("smtpsenderfailedexception")
+            || lower.contains(" 550 ")
+            || lower.contains(" 535 ")
+            || lower.contains(" 553 ");
+        String prefix = "Failed to send verification email: ";
+        String raw = error == null || error.getMessage() == null || error.getMessage().isBlank()
+            ? "Unknown SMTP error"
+            : error.getMessage();
+        return prefix + raw + (smtpProtocolReject ? "" : smtpFailureHint(config));
+    }
+
     static String smtpFailureHint(RegistrationSettingsService.SmtpConfig config) {
         try {
             InetAddress[] addresses = InetAddress.getAllByName(config.host());
@@ -240,6 +296,36 @@ public class EmailVerificationService {
         return "";
     }
 
+    private static boolean authUserMustMatchFrom(String host) {
+        String normalized = host == null ? "" : host.trim().toLowerCase(Locale.ROOT);
+        return normalized.contains("exmail.qq.com")
+            || normalized.equals("smtp.qq.com")
+            || normalized.endsWith(".smtp.qq.com")
+            || normalized.contains("smtp.163.com")
+            || normalized.contains("smtp.126.com")
+            || normalized.contains("smtp.yeah.net");
+    }
+
+    private static boolean looksLikeEmail(String value) {
+        int at = value == null ? -1 : value.indexOf('@');
+        return at > 0 && at < value.length() - 1;
+    }
+
+    private static String failureText(Throwable error) {
+        StringBuilder text = new StringBuilder();
+        Throwable current = error;
+        for (int depth = 0; current != null && depth < 8; depth++) {
+            if (current.getMessage() != null && !current.getMessage().isBlank()) {
+                if (!text.isEmpty()) {
+                    text.append(' ');
+                }
+                text.append(current.getMessage());
+            }
+            current = current.getCause();
+        }
+        return text.toString();
+    }
+
     static boolean isFakeIpAddress(InetAddress address) {
         byte[] bytes = address.getAddress();
         if (bytes.length != 4) {
@@ -252,7 +338,7 @@ public class EmailVerificationService {
 
     @Scheduled(fixedDelay = 60_000, initialDelay = 60_000)
     public void cleanupExpiredTokens() {
-        tokenRepository.pruneExpired(CLEANUP_BATCH_SIZE)
+        maintenanceTaskGate.whenOperational(() -> tokenRepository.pruneExpired(CLEANUP_BATCH_SIZE))
             .subscribe(null, error -> log.warn("Failed to clean up expired registration email tokens", error));
     }
 

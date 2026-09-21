@@ -1,6 +1,7 @@
 package tech.starryapi.stats;
 
 import java.math.BigDecimal;
+import java.util.UUID;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 
@@ -28,6 +29,11 @@ public class StatsService {
         entity.setCredits(event.credits() == null ? BigDecimal.ZERO : event.credits());
         entity.setLatencyMs(event.latencyMs());
         entity.setErrorMessage(sanitize(event.errorMessage()));
+        entity.setCircuitKey(event.circuitKey());
+        entity.setCircuitTier(event.circuitTier());
+        entity.setUpstreamModel(event.upstreamModel());
+        entity.setUpstreamSuccess(event.upstreamSuccess());
+        entity.setCircuitEpoch(event.circuitEpoch());
         return repository.save(entity).then();
     }
 
@@ -53,7 +59,48 @@ public class StatsService {
         long outputTokens,
         BigDecimal credits,
         long latencyMs,
-        String errorMessage
+        String errorMessage,
+        String circuitKey,
+        String circuitTier,
+        String upstreamModel,
+        Boolean upstreamSuccess,
+        UUID circuitEpoch
     ) {
+        public RequestLog(
+            String requestId,
+            String apiKeyId,
+            String userId,
+            String accountId,
+            String path,
+            String model,
+            int statusCode,
+            boolean success,
+            long inputTokens,
+            long outputTokens,
+            BigDecimal credits,
+            long latencyMs,
+            String errorMessage
+        ) {
+            this(
+                requestId,
+                apiKeyId,
+                userId,
+                accountId,
+                path,
+                model,
+                statusCode,
+                success,
+                inputTokens,
+                outputTokens,
+                credits,
+                latencyMs,
+                errorMessage,
+                null,
+                null,
+                null,
+                null,
+                null
+            );
+        }
     }
 }

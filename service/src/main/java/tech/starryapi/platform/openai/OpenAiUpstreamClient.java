@@ -1368,7 +1368,11 @@ public class OpenAiUpstreamClient {
             return false;
         }
         String lower = normalized.toLowerCase(Locale.ROOT);
-        return lower.startsWith("gpt-5") || lower.startsWith("o1") || lower.startsWith("o3") || lower.startsWith("o4");
+        return lower.startsWith("gpt-6")
+            || lower.startsWith("gpt-5")
+            || lower.startsWith("o1")
+            || lower.startsWith("o3")
+            || lower.startsWith("o4");
     }
 
     private String clean(String value) {

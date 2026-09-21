@@ -19,6 +19,7 @@ public class AccountAdminController implements AccountAdminApi {
     private final AccountTestService testService;
     private final DisabledAccountScheduledTestService disabledAccountScheduledTestService;
     private final AccountOpenAiQuotaService openAiQuotaService;
+    private final AccountAllocationPolicyService allocationPolicyService;
     private final AccountSettingsService settingsService;
     private final AccountPoolPolicyService poolPolicyService;
     private final AccountPoolRetestService poolRetestService;
@@ -30,6 +31,7 @@ public class AccountAdminController implements AccountAdminApi {
         AccountTestService testService,
         DisabledAccountScheduledTestService disabledAccountScheduledTestService,
         AccountOpenAiQuotaService openAiQuotaService,
+        AccountAllocationPolicyService allocationPolicyService,
         AccountSettingsService settingsService,
         AccountPoolPolicyService poolPolicyService,
         AccountPoolRetestService poolRetestService,
@@ -40,6 +42,7 @@ public class AccountAdminController implements AccountAdminApi {
         this.testService = testService;
         this.disabledAccountScheduledTestService = disabledAccountScheduledTestService;
         this.openAiQuotaService = openAiQuotaService;
+        this.allocationPolicyService = allocationPolicyService;
         this.settingsService = settingsService;
         this.poolPolicyService = poolPolicyService;
         this.poolRetestService = poolRetestService;
@@ -83,8 +86,7 @@ public class AccountAdminController implements AccountAdminApi {
     @Override
     public Mono<ApiResponse<AccountDtos.AccountPoolStatusResponse>> poolStatus(ServerWebExchange exchange) {
         adminAuth.verifyAdmin(exchange);
-        return poolPolicyService.evaluate()
-            .then(poolPolicyService.status(poolRetestService.isRunning()))
+        return poolPolicyService.status(poolRetestService.isRunning(), service::poolAccountInventory)
             .map(ApiResponse::ok);
     }
 
@@ -94,7 +96,10 @@ public class AccountAdminController implements AccountAdminApi {
         @RequestBody AccountDtos.UpdateAccountSettingsRequest request
     ) {
         adminAuth.verifyAdmin(exchange);
-        return settingsService.update(request).map(ApiResponse::ok);
+        return settingsService.update(request)
+            .then(poolPolicyService.refreshSettings())
+            .then(settingsService.settings())
+            .map(ApiResponse::ok);
     }
 
     @Override
@@ -136,6 +141,25 @@ public class AccountAdminController implements AccountAdminApi {
     ) {
         adminAuth.verifyAdmin(exchange);
         return openAiQuotaService.quota(accountId).map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<AccountDtos.AccountAllocationPolicyResponse>> allocationPolicy(
+        ServerWebExchange exchange,
+        @PathVariable String accountId
+    ) {
+        adminAuth.verifyAdmin(exchange);
+        return allocationPolicyService.get(accountId).map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<AccountDtos.AccountAllocationPolicyResponse>> updateAllocationPolicy(
+        ServerWebExchange exchange,
+        @PathVariable String accountId,
+        @Valid @RequestBody AccountDtos.UpdateAccountAllocationPolicyRequest request
+    ) {
+        adminAuth.verifyAdmin(exchange);
+        return allocationPolicyService.update(accountId, request).map(ApiResponse::ok);
     }
 
     @Override

@@ -7,6 +7,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.util.Map;
@@ -17,8 +18,24 @@ import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.r2dbc.core.FetchSpec;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import tech.starryapi.admin.DataManagementSecurityService;
+import tech.starryapi.admin.SystemMaintenanceTaskGate;
 
 class RequestUsageAggregationServiceTest {
+
+    @Test
+    void scheduledAggregationAndMaintenanceSkipSqlDuringMaintenance() {
+        DatabaseClient databaseClient = mock(DatabaseClient.class);
+        DataManagementSecurityService securityService = mock(DataManagementSecurityService.class);
+        when(securityService.isLocked()).thenReturn(Mono.just(true));
+        RequestUsageAggregationService service = service(databaseClient, 6);
+        service.setMaintenanceTaskGate(new SystemMaintenanceTaskGate(securityService));
+
+        service.scheduledAggregate();
+        service.scheduledMaintenance();
+
+        verifyNoInteractions(databaseClient);
+    }
 
     @Test
     void runsSequentialBatchesUntilTheDatabaseReportsThatItIsCaughtUp() {

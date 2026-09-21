@@ -4,18 +4,24 @@ import com.sun.management.OperatingSystemMXBean;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
 import java.lang.management.MemoryUsage;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Locale;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
+import tech.starryapi.admin.SystemMaintenanceTaskGate;
 
 @Service
 public class PerformanceMetricService {
@@ -24,14 +30,29 @@ public class PerformanceMetricService {
     private static final Duration RETENTION = Duration.ofDays(7);
     private static final Path PROC_NET_DEV = Path.of("/proc/net/dev");
     private static final Path PROC_MEMINFO = Path.of("/proc/meminfo");
+    private static final Path MAC_MEMORY_PRESSURE = Path.of("/usr/bin/memory_pressure");
+    private static final Duration MEMORY_PRESSURE_TIMEOUT = Duration.ofSeconds(2);
+    private static final Pattern MAC_FREE_PERCENT = Pattern.compile(
+        "(?m)^System-wide memory free percentage:\\s*([0-9]+(?:\\.[0-9]+)?)%"
+    );
 
     private final PerformanceMetricRepository repository;
+    private final SystemMaintenanceTaskGate maintenanceTaskGate;
     private final OperatingSystemMXBean osBean;
     private final MemoryMXBean memoryBean;
     private volatile NetworkSnapshot previousNetwork;
 
     public PerformanceMetricService(PerformanceMetricRepository repository) {
+        this(repository, SystemMaintenanceTaskGate.alwaysOperationalForDirectConstruction());
+    }
+
+    @Autowired
+    public PerformanceMetricService(
+        PerformanceMetricRepository repository,
+        SystemMaintenanceTaskGate maintenanceTaskGate
+    ) {
         this.repository = repository;
+        this.maintenanceTaskGate = maintenanceTaskGate;
         this.osBean = (OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean();
         this.memoryBean = ManagementFactory.getMemoryMXBean();
     }
@@ -43,12 +64,14 @@ public class PerformanceMetricService {
 
     @Scheduled(fixedDelay = 30_000, initialDelay = 30_000)
     public void scheduledSample() {
-        sample().subscribe(null, error -> log.warn("Failed to sample performance metrics", error));
+        maintenanceTaskGate.whenOperational(this::sample)
+            .subscribe(null, error -> log.warn("Failed to sample performance metrics", error));
     }
 
     @Scheduled(cron = "0 15 3 * * *", zone = "UTC")
     public void scheduledCleanup() {
-        repository.deleteBySampledAtBefore(Instant.now().minus(RETENTION))
+        maintenanceTaskGate.whenOperational(() ->
+            repository.deleteBySampledAtBefore(Instant.now().minus(RETENTION)))
             .subscribe(null, error -> log.warn("Failed to clean up performance metrics", error));
     }
 
@@ -70,8 +93,11 @@ public class PerformanceMetricService {
         NetworkSnapshot network = readNetworkSnapshot(now);
         NetworkRate rate = networkRate(network);
         SystemMemorySnapshot systemMemory = readSystemMemorySnapshot();
-        long systemMemoryTotalBytes = systemMemory == null ? osBean.getTotalMemorySize() : systemMemory.totalBytes();
-        long systemMemoryAvailableBytes = systemMemory == null ? osBean.getFreeMemorySize() : systemMemory.availableBytes();
+        if (systemMemory == null) {
+            systemMemory = physicalMemoryFromOperatingSystemBean();
+        }
+        long systemMemoryTotalBytes = systemMemory.totalBytes();
+        long systemMemoryAvailableBytes = systemMemory.availableBytes();
 
         PerformanceMetricEntity entity = new PerformanceMetricEntity();
         entity.setSystemCpuLoadPercent(percent(osBean.getCpuLoad()));
@@ -192,12 +218,75 @@ public class PerformanceMetricService {
 
     private SystemMemorySnapshot readSystemMemorySnapshot() {
         try {
-            if (!Files.isRegularFile(PROC_MEMINFO)) {
-                return null;
+            if (Files.isRegularFile(PROC_MEMINFO)) {
+                return parseProcMemInfo(Files.readString(PROC_MEMINFO));
             }
-            return parseProcMemInfo(Files.readString(PROC_MEMINFO));
+            if (System.getProperty("os.name", "").toLowerCase(Locale.ROOT).contains("mac")) {
+                return readMacSystemMemorySnapshot();
+            }
+            return null;
         } catch (Exception error) {
             log.debug("Unable to read memory counters from {}", PROC_MEMINFO, error);
+            return null;
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private SystemMemorySnapshot readMacSystemMemorySnapshot() {
+        if (!Files.isExecutable(MAC_MEMORY_PRESSURE)) {
+            return null;
+        }
+        Process process = null;
+        try {
+            process = new ProcessBuilder(MAC_MEMORY_PRESSURE.toString(), "-Q")
+                .redirectErrorStream(true)
+                .start();
+            if (!process.waitFor(MEMORY_PRESSURE_TIMEOUT.toMillis(), java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                process.destroyForcibly();
+                return null;
+            }
+            if (process.exitValue() != 0) {
+                return null;
+            }
+            long totalBytes = osBean.getTotalPhysicalMemorySize();
+            Long availableBytes = parseMacAvailableBytes(
+                new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8),
+                totalBytes
+            );
+            if (availableBytes == null) {
+                return null;
+            }
+            return new SystemMemorySnapshot(totalBytes, availableBytes);
+        } catch (Exception error) {
+            log.debug("Unable to read macOS physical memory counters", error);
+            return null;
+        } finally {
+            if (process != null && process.isAlive()) {
+                process.destroyForcibly();
+            }
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private SystemMemorySnapshot physicalMemoryFromOperatingSystemBean() {
+        return new SystemMemorySnapshot(osBean.getTotalPhysicalMemorySize(), osBean.getFreePhysicalMemorySize());
+    }
+
+    static Long parseMacAvailableBytes(String output, long totalBytes) {
+        if (output == null || totalBytes <= 0) {
+            return null;
+        }
+        Matcher matcher = MAC_FREE_PERCENT.matcher(output);
+        if (!matcher.find()) {
+            return null;
+        }
+        try {
+            double freePercent = Double.parseDouble(matcher.group(1));
+            if (Double.isNaN(freePercent) || Double.isInfinite(freePercent)) {
+                return null;
+            }
+            return Math.round(totalBytes * Math.max(0.0, Math.min(100.0, freePercent)) / 100.0);
+        } catch (NumberFormatException ignored) {
             return null;
         }
     }

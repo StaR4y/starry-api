@@ -55,3 +55,6 @@ webui/components.d.ts
 !.env.example
 !**/.env.example
 *.log
+
+### Local persistent data ###
+/data/

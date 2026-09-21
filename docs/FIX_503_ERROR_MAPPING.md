@@ -27,7 +27,7 @@
 ## 修复方案
 
 ### 修改文件
-`service/src/main/java/xyz/star4y/api/proxy/ProxyFacade.java`
+`service/src/main/java/tech/starryapi/proxy/ProxyFacade.java`
 
 ### 修改内容
 
@@ -122,7 +122,8 @@ private HttpStatus mapUpstreamStatusCode(int upstreamStatusCode) {
 
 ## 相关文件
 
-- `service/src/main/java/xyz/star4y/api/proxy/ProxyFacade.java` - 主要修改
-- `service/src/main/java/xyz/star4y/api/platform/openai/OpenAiUpstreamClient.java` - 重试逻辑
-- `service/src/main/java/xyz/star4y/api/platform/upstream/UpstreamException.java` - 异常定义
-- `service/src/main/java/xyz/star4y/api/common/GlobalExceptionHandler.java` - 全局异常处理
+- `service/src/main/java/tech/starryapi/proxy/ProxyFacade.java` - 主要修改
+- `service/src/main/java/tech/starryapi/proxy/UpstreamFailureClassifier.java` - 当前统一重试分类
+- `service/src/main/java/tech/starryapi/platform/openai/OpenAiUpstreamClient.java` - OpenAI 上游调用
+- `service/src/main/java/tech/starryapi/platform/upstream/UpstreamException.java` - 异常定义
+- `service/src/main/java/tech/starryapi/common/GlobalExceptionHandler.java` - 全局异常处理

@@ -37,7 +37,8 @@ final class AccountMapper {
             entity.getSuspendMessage(),
             entity.getLastUsedAt(),
             entity.getCreatedAt(),
-            entity.getUpdatedAt()
+            entity.getUpdatedAt(),
+            entity.getBadgeColor()
         );
     }
 

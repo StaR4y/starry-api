@@ -8,14 +8,17 @@ import java.util.List;
 import java.util.Map;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.stream.Stream;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import tech.starryapi.model.DefaultModelCatalogProvider;
 import tech.starryapi.model.ModelDtos;
 import tech.starryapi.platform.anthropic.AnthropicModelCatalog;
-import tech.starryapi.platform.catalog.OpenRouterModelIds;
+import tech.starryapi.platform.catalog.ModelPriceRepoModelIds;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.anthropic.AnthropicUpstreamClient;
 import tech.starryapi.platform.deepseek.DeepSeekModelCatalog;
@@ -39,18 +42,23 @@ public class AccountTestService {
         "claude-opus-4-5-20251101",
         "claude-haiku-4-5-20251001"
     );
-    private static final List<String> OPENAI_STYLE_TEST_MODEL_IDS = List.of(
+    private static final Set<String> ANTHROPIC_REPOSITORY_MODEL_IDS = Set.copyOf(
+        unprefixedModelIds(ModelPriceRepoModelIds.ANTHROPIC)
+    );
+    private static final List<String> CODEX_TEST_MODEL_IDS = List.of(
+        "gpt-6",
+        "gpt-6-astra",
+        "gpt-6-mini",
         "gpt-5.5",
         "gpt-5.4",
-        "gpt-5.4-mini",
         "gpt-5.4-nano",
         "gpt-5.4-pro",
-        "gpt-5.3-chat",
+        "gpt-5.3-chat-latest",
         "gpt-5.2",
-        "gpt-5.2-chat",
+        "gpt-5.2-chat-latest",
         "gpt-5.2-pro",
         "gpt-5.1",
-        "gpt-5.1-chat",
+        "gpt-5.1-chat-latest",
         "gpt-5",
         "gpt-5-mini",
         "gpt-5-nano",
@@ -70,27 +78,25 @@ public class AccountTestService {
     );
     private static final List<AccountDtos.TestModelOption> OPENAI_TEST_MODELS = testModelOptions(
         option("auto (" + DEFAULT_OPENAI_API_KEY_TEST_MODEL + ")", DEFAULT_MODEL),
-        OPENAI_STYLE_TEST_MODEL_IDS
+        unprefixedModelIds(ModelPriceRepoModelIds.OPENAI)
     );
-    private static final List<AccountDtos.TestModelOption> GOOGLE_TEST_MODELS = openRouterOptions(
+    private static final List<AccountDtos.TestModelOption> GOOGLE_TEST_MODELS = testModelOptions(
         option("auto (google/gemini-2.5-flash)", DEFAULT_MODEL),
-        "google",
-        OpenRouterModelIds.GOOGLE
+        ModelPriceRepoModelIds.GOOGLE
     );
     private static final List<AccountDtos.TestModelOption> ANTHROPIC_TEST_MODELS = testModelOptions(
         option("auto (" + DEFAULT_ANTHROPIC_API_KEY_TEST_MODEL + ")", DEFAULT_MODEL),
-        Stream.concat(CLAUDE_CODE_TEST_MODEL_IDS.stream(), unprefixedModelIds(OpenRouterModelIds.ANTHROPIC).stream())
+        Stream.concat(CLAUDE_CODE_TEST_MODEL_IDS.stream(), unprefixedModelIds(ModelPriceRepoModelIds.ANTHROPIC).stream())
             .distinct()
             .toList()
     );
     private static final List<AccountDtos.TestModelOption> CODEX_TEST_MODELS = testModelOptions(
         option("auto (" + OpenAiAccountTestClient.DEFAULT_CODEX_TEST_MODEL + ")", DEFAULT_MODEL),
-        OPENAI_STYLE_TEST_MODEL_IDS
+        CODEX_TEST_MODEL_IDS
     );
-    private static final List<AccountDtos.TestModelOption> DEEPSEEK_TEST_MODELS = List.of(
+    private static final List<AccountDtos.TestModelOption> DEEPSEEK_TEST_MODELS = testModelOptions(
         option("auto (" + DEFAULT_DEEPSEEK_TEST_MODEL + ")", DEFAULT_MODEL),
-        option("deepseek-v4-flash", "deepseek-v4-flash"),
-        option("deepseek-v4-pro", "deepseek-v4-pro")
+        ModelPriceRepoModelIds.DEEPSEEK
     );
 
     private final ObjectMapper objectMapper;
@@ -100,6 +106,7 @@ public class AccountTestService {
     private final KiroUpstreamClient upstreamClient;
     private final OpenAiAccountTestClient openAiAccountTestClient;
     private final AnthropicUpstreamClient anthropicUpstreamClient;
+    private final DefaultModelCatalogProvider modelCatalog;
 
     public AccountTestService(
         ObjectMapper objectMapper,
@@ -110,6 +117,29 @@ public class AccountTestService {
         OpenAiAccountTestClient openAiAccountTestClient,
         AnthropicUpstreamClient anthropicUpstreamClient
     ) {
+        this(
+            objectMapper,
+            repository,
+            accountPoolService,
+            payloadFactory,
+            upstreamClient,
+            openAiAccountTestClient,
+            anthropicUpstreamClient,
+            new DefaultModelCatalogProvider()
+        );
+    }
+
+    @Autowired
+    public AccountTestService(
+        ObjectMapper objectMapper,
+        ProxyAccountRepository repository,
+        AccountPoolService accountPoolService,
+        KiroPayloadFactory payloadFactory,
+        KiroUpstreamClient upstreamClient,
+        OpenAiAccountTestClient openAiAccountTestClient,
+        AnthropicUpstreamClient anthropicUpstreamClient,
+        DefaultModelCatalogProvider modelCatalog
+    ) {
         this.objectMapper = objectMapper;
         this.repository = repository;
         this.accountPoolService = accountPoolService;
@@ -117,6 +147,7 @@ public class AccountTestService {
         this.upstreamClient = upstreamClient;
         this.openAiAccountTestClient = openAiAccountTestClient;
         this.anthropicUpstreamClient = anthropicUpstreamClient;
+        this.modelCatalog = modelCatalog == null ? new DefaultModelCatalogProvider() : modelCatalog;
     }
 
     public Mono<AccountDtos.TestAccountsResponse> test(AccountDtos.TestAccountsRequest request) {
@@ -139,8 +170,13 @@ public class AccountTestService {
             GOOGLE_TEST_MODELS,
             ANTHROPIC_TEST_MODELS,
             CODEX_TEST_MODELS,
-            DEEPSEEK_TEST_MODELS
+            DEEPSEEK_TEST_MODELS,
+            compatibleVendors()
         );
+    }
+
+    private List<AccountDtos.CompatibleVendorModels> compatibleVendors() {
+        return CompatibleAccountVendors.from(modelCatalog.managedModels());
     }
 
     private Flux<AccountTarget> targets(AccountDtos.TestAccountsRequest request) {
@@ -400,6 +436,9 @@ public class AccountTestService {
             model = model.substring("starry/".length());
             normalized = model.toLowerCase(Locale.ROOT);
         }
+        if (ANTHROPIC_REPOSITORY_MODEL_IDS.contains(normalized)) {
+            return model;
+        }
         for (ModelDtos.ModelSpec spec : AnthropicModelCatalog.models()) {
             String id = spec.id().toLowerCase(Locale.ROOT);
             if (id.startsWith("anthropic/")) {
@@ -431,9 +470,22 @@ public class AccountTestService {
             || "simple-task".equals(normalized)
             || normalized.startsWith("claude-")
             || normalized.startsWith("claude_")) {
-            return AccountPlatforms.isCodex(account)
-                ? OpenAiAccountTestClient.DEFAULT_CODEX_TEST_MODEL
-                : DEFAULT_OPENAI_API_KEY_TEST_MODEL;
+            if (AccountPlatforms.isCodex(account)) {
+                return OpenAiAccountTestClient.DEFAULT_CODEX_TEST_MODEL;
+            }
+            if (AccountPlatforms.isOpenAiCompatibleApiKey(account)) {
+                String vendorModel = CompatibleAccountVendors.defaultTestModel(
+                    compatibleVendors(),
+                    account.getProvider()
+                );
+                if (vendorModel != null) {
+                    return vendorModel;
+                }
+                if (AccountPlatforms.isCustomOpenAiCompatibleAccount(account)) {
+                    return model;
+                }
+            }
+            return DEFAULT_OPENAI_API_KEY_TEST_MODEL;
         }
         String unprefixed = normalized.startsWith("openai/") ? model.substring("openai/".length()) : model;
         if (normalized.startsWith("openai-compatible/")) {
@@ -474,16 +526,6 @@ public class AccountTestService {
         return baseUrl == null
             || baseUrl.isBlank()
             || baseUrl.replaceAll("/+$", "").equalsIgnoreCase(AccountPlatforms.DEFAULT_OPENAI_BASE_URL);
-    }
-
-    private static List<AccountDtos.TestModelOption> openRouterOptions(
-        AccountDtos.TestModelOption autoOption,
-        String providerPrefix,
-        List<String> modelIds
-    ) {
-        return testModelOptions(autoOption, modelIds.stream()
-            .map(id -> id.contains("/") ? id : providerPrefix + "/" + id)
-            .toList());
     }
 
     private static List<String> unprefixedModelIds(List<String> modelIds) {

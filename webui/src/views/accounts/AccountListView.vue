@@ -8,26 +8,26 @@
    * - 批量 JSON 导入（支持 upsert）
    *
    * 各对话框已抽离至 ./components/（AccountFormDialog / ImportDialog /
-   * BatchTestResultDialog / TestDetailDialog），本组件只保留列表与调度逻辑。
-   */
+   * TestDetailDialog），本组件只保留列表与调度逻辑。
+   * 账号池分级熔断策略与停用账号定期复检已统一迁移至系统设置页（views/settings）。
+  */
   import { computed, onMounted, reactive, ref } from 'vue';
   import { ElMessage, ElMessageBox } from 'element-plus';
+  import { CreditCard, MoreFilled, Plus, Refresh, Search } from '@element-plus/icons-vue';
   import PageSection from '@/components/PageSection.vue';
-  import DisabledSchedulePanel from './components/DisabledSchedulePanel.vue';
-  import PoolPolicyPanel from './components/PoolPolicyPanel.vue';
+  import MetricsPanel, { type MetricPanelItem } from '@/components/MetricsPanel.vue';
   import AppIcon from './components/AppIcon.vue';
   import ProviderBadge from './components/ProviderBadge.vue';
   import QuotaCell from './components/QuotaCell.vue';
   import AccountTestPopover from './components/AccountTestPopover.vue';
   import AccountFormDialog from './components/AccountFormDialog.vue';
   import ImportDialog from './components/ImportDialog.vue';
-  import BatchTestResultDialog from './components/BatchTestResultDialog.vue';
   import TestDetailDialog from './components/TestDetailDialog.vue';
+  import ChatGptOAuthDialog from './components/ChatGptOAuthDialog.vue';
   import { accountsApi } from '@/api';
   import { ApiError } from '@/utils/http';
   import type {
     Account,
-    AccountSettings,
     TestAccountItem,
     TestModelOption,
     TestModelOptionsResult,
@@ -37,10 +37,8 @@
   import { formatDateTime, formatNumber, shorten } from '@/utils/format';
   import {
     isCodexAccount,
+    isCustomOpenAiCompatibleProvider,
     normalized,
-    normalizedPoolTier,
-    poolTierLabel,
-    poolTierTagType,
     statusOf,
   } from './utils';
 
@@ -49,54 +47,25 @@
   const loading = ref(false);
   const accounts = ref<Account[]>([]);
   const keyword = ref('');
-  const accountSettings = ref<AccountSettings>({
-    gptFastModeEnabled: false,
-    disabledAccountScheduledTest: {
-      enabled: false,
-      scheduleMode: 'interval',
-      intervalMinutes: 60,
-      cronExpression: '0 0 * * * *',
-      timezone: 'Asia/Shanghai',
-      initialDelayMinutes: 5,
-      maxConcurrency: 2,
-      maxAccountsPerRun: 20,
-      model: 'auto',
-      prompt: '',
-      updateStatus: true,
-      autoRunWhenNoAvailableAccounts: false,
-      includeDisabled: true,
-      includeSuspended: true,
-      includeQuotaExhausted: false,
-      minAgeMinutes: 10,
-      providers: [],
-    },
-    poolPolicy: {
-      enabled: true,
-      windowMinutes: 5,
-      minSampleSize: 10,
-      retestThresholdPercent: 50,
-      failoverThresholdPercent: 70,
-      recoveryThresholdPercent: 70,
-      retestIntervalMinutes: 5,
-      retestMaxConcurrency: 4,
-      autoWeightEnabled: true,
-    },
-  });
-  // 熔断策略面板相关状态已迁移至 components/PoolPolicyPanel.vue
-  const settingsSaving = ref(false);
+  const statusFilter = ref<'all' | 'active' | 'abnormal'>('all');
   const clearingAccounts = ref(false);
+  const hasFilter = computed(() => Boolean(keyword.value.trim() || statusFilter.value !== 'all'));
 
   const visibleAccounts = computed(() => {
     const q = keyword.value.trim().toLowerCase();
-    if (!q) return accounts.value;
-    return accounts.value.filter(
-      (a) =>
-        a.accountId.toLowerCase().includes(q) ||
-        (a.email ?? '').toLowerCase().includes(q) ||
-        (a.region ?? '').toLowerCase().includes(q) ||
-        (a.provider ?? '').toLowerCase().includes(q) ||
-        (a.baseUrl ?? '').toLowerCase().includes(q),
-    );
+    return accounts.value.filter((account) => {
+      const available = account.enabled && !account.suspendedAt && !account.quotaExhaustedAt;
+      if (statusFilter.value === 'active' && !available) return false;
+      if (statusFilter.value === 'abnormal' && available) return false;
+      if (!q) return true;
+      return (
+        account.accountId.toLowerCase().includes(q) ||
+        (account.email ?? '').toLowerCase().includes(q) ||
+        (account.region ?? '').toLowerCase().includes(q) ||
+        (account.provider ?? '').toLowerCase().includes(q) ||
+        (account.baseUrl ?? '').toLowerCase().includes(q)
+      );
+    });
   });
 
   const summary = computed(() => {
@@ -110,106 +79,81 @@
 
     const totalRequests = accounts.value.reduce((sum, a) => sum + (a.requestCount || 0), 0);
     const totalErrors = accounts.value.reduce((sum, a) => sum + (a.errorCount || 0), 0);
-    const primary = accounts.value.filter(
-      (a) => normalizedPoolTier(a.poolTier) === 'primary',
-    ).length;
-    const secondary = accounts.value.filter(
-      (a) => normalizedPoolTier(a.poolTier) === 'secondary',
-    ).length;
-
     return {
       total,
       active,
       abnormal,
       totalRequests,
       totalErrors,
-      primary,
-      secondary,
     };
   });
 
-  // primaryPoolAccounts / secondaryPoolAccounts 已迁移至 components/PoolPolicyPanel.vue
-
-  // statusOf 已收敛至 ./utils
+  const accountMetrics = computed<MetricPanelItem[]>(() => [
+    { label: '总账号数', value: summary.value.total, tone: 'primary' },
+    { label: '正常运行', value: summary.value.active, tone: 'success', valueTone: 'success' },
+    {
+      label: '异常 / 停用',
+      value: summary.value.abnormal,
+      tone: 'danger',
+      valueTone: summary.value.abnormal > 0 ? 'danger' : undefined,
+    },
+    {
+      label: '累计请求 / 错误',
+      value: formatNumber(summary.value.totalRequests),
+      unit: `/ ${formatNumber(summary.value.totalErrors)}`,
+      tone: 'accent',
+    },
+  ]);
 
   const openAiQuotas = ref<
     Record<string, { loading: boolean; error?: string; data?: OpenAiQuotaResponse }>
   >({});
+  let accountDataGeneration = 0;
 
   // isCodexAccount 已收敛至 ./utils
 
-  async function fetchOpenAiQuota(accountId: string, force = false) {
+  async function fetchOpenAiQuota(
+    accountId: string,
+    force = false,
+    generation = accountDataGeneration,
+  ) {
     if (!force && openAiQuotas.value[accountId]?.data) return;
 
     openAiQuotas.value[accountId] = { loading: true };
     try {
       const res = await accountsApi.openAiQuota(accountId);
+      if (generation !== accountDataGeneration) return;
       openAiQuotas.value[accountId] = { loading: false, data: res };
     } catch (err) {
+      if (generation !== accountDataGeneration) return;
       const msg = err instanceof ApiError ? err.message : String(err);
       openAiQuotas.value[accountId] = { loading: false, error: msg };
     }
   }
 
-  async function loadAccounts() {
+  function loadOpenAiQuotas(generation = accountDataGeneration) {
+    accounts.value.forEach((account) => {
+      if (isCodexAccount(account)) {
+        fetchOpenAiQuota(account.accountId, false, generation);
+      }
+    });
+  }
+
+  async function loadAccounts(loadQuotas = true) {
+    const generation = ++accountDataGeneration;
     loading.value = true;
     try {
-      accounts.value = await accountsApi.list();
-      accounts.value.forEach((account) => {
-        if (isCodexAccount(account)) {
-          fetchOpenAiQuota(account.accountId);
-        }
-      });
-    } finally {
-      loading.value = false;
-    }
-  }
-
-  async function loadAccountSettings() {
-    try {
-      accountSettings.value = await accountsApi.settings();
+      const nextAccounts = await accountsApi.list();
+      if (generation !== accountDataGeneration) return;
+      accounts.value = nextAccounts;
+      if (loadQuotas) loadOpenAiQuotas(generation);
     } catch (err) {
-      if (err instanceof ApiError) ElMessage.warning(`账号配置加载失败：${err.message}`);
-    }
-  }
-
-  // loadPoolStatus / savePoolPolicy 已迁移至 components/PoolPolicyPanel.vue
-
-  async function toggleGptFastMode(value: string | number | boolean) {
-    settingsSaving.value = true;
-    try {
-      accountSettings.value = await accountsApi.updateSettings({
-        gptFastModeEnabled: Boolean(value),
-      });
-      ElMessage.success(
-        accountSettings.value.gptFastModeEnabled ? '已允许 GPT Fast 模式' : '已关闭 GPT Fast 模式',
-      );
-    } catch (err) {
-      accountSettings.value.gptFastModeEnabled = !value;
-      if (err instanceof ApiError) ElMessage.error(err.message);
+      if (generation !== accountDataGeneration) return;
+      const message = err instanceof ApiError ? err.message : '服务暂时不可用';
+      ElMessage.error(`账号列表加载失败：${message}`);
     } finally {
-      settingsSaving.value = false;
+      if (generation === accountDataGeneration) loading.value = false;
     }
-  }
-
-  function handleTestCompleted(result: TestAccountsResult) {
-    const nextResults = { ...latestTestResults.value };
-    result.items.forEach((item) => {
-      nextResults[item.accountId] = item;
-    });
-    latestTestResults.value = nextResults;
-    batchTestResult.value = result;
-    batchTestVisible.value = true;
-    testDetail.value =
-      result.items.find((item) => item.status === 'FAILED') ?? result.items[0] ?? null;
-    testDetailVisible.value = false;
-    const message = `复检完成：总计 ${result.total}，成功 ${result.success}，失败 ${result.failed}，跳过 ${result.skipped}`;
-    if (result.total === 0) {
-      ElMessage.warning('没有找到可测试账号，请检查平台过滤或单批额度配置');
-    } else {
-      ElMessage.success(message);
-    }
-    loadAccounts();
   }
 
   /* ============= 新建 / 编辑 ============= */
@@ -229,6 +173,14 @@
     formMode.value = 'edit';
     editingAccount.value = row;
     formVisible.value = true;
+  }
+
+  const chatGptOAuthVisible = ref(false);
+  const chatGptOAuthAccountId = ref<string | null>(null);
+
+  function openChatGptOAuth(accountId: string) {
+    chatGptOAuthAccountId.value = accountId;
+    chatGptOAuthVisible.value = true;
   }
 
   /* ============= 启停 / 挂起 / 重置 / 删除 ============= */
@@ -310,14 +262,11 @@
   const testDetailVisible = ref(false);
   const testDetail = ref<TestAccountItem | null>(null);
   const latestTestResults = ref<Record<string, TestAccountItem>>({});
-  const batchTestVisible = ref(false);
-  const batchTestResult = ref<TestAccountsResult | null>(null);
   const testModelByAccount = reactive<Record<string, string>>({});
   const fallbackOpenAiStyleTestModels: TestModelOption[] = [
-    { label: 'auto (gpt-5.4-mini)', value: 'auto' },
+    { label: 'auto (gpt-5.5)', value: 'auto' },
     { label: 'gpt-5.5', value: 'gpt-5.5' },
     { label: 'gpt-5.4', value: 'gpt-5.4' },
-    { label: 'gpt-5.4-mini', value: 'gpt-5.4-mini' },
     { label: 'gpt-5.4-nano', value: 'gpt-5.4-nano' },
     { label: 'gpt-5.4-pro', value: 'gpt-5.4-pro' },
     { label: 'gpt-5.3-chat', value: 'gpt-5.3-chat' },
@@ -359,6 +308,7 @@
       { label: 'deepseek-v4-flash', value: 'deepseek-v4-flash' },
       { label: 'deepseek-v4-pro', value: 'deepseek-v4-pro' },
     ],
+    compatibleVendors: [],
   };
   const testModelOptions = ref<TestModelOptionsResult>(fallbackTestModelOptions);
   const testOptions = reactive({
@@ -371,11 +321,6 @@
 
   function latestTest(accountId: string) {
     return latestTestResults.value[accountId];
-  }
-
-  function openBatchTestDetail(item: TestAccountItem) {
-    testDetail.value = item;
-    testDetailVisible.value = true;
   }
 
   type TestModelGroup = 'kiro' | 'openAi' | 'google' | 'anthropic' | 'codex' | 'deepSeek';
@@ -420,7 +365,21 @@
     return 'kiro';
   }
 
+  function compatibleVendors() {
+    return testModelOptions.value.compatibleVendors ?? [];
+  }
+
+  function vendorFor(account: Account) {
+    const name = normalized(account.provider);
+    return compatibleVendors().find((vendor) => normalized(vendor.name) === name);
+  }
+
   function testModelsFor(account: Account): TestModelOption[] {
+    const vendor = vendorFor(account);
+    if (vendor?.models?.length) return vendor.models;
+    if (isCustomOpenAiCompatibleProvider(account.provider, account.authMethod)) {
+      return [{ label: 'auto', value: 'auto' }];
+    }
     const group = accountTestModelGroup(account);
     return testModelOptions.value[group]?.length
       ? testModelOptions.value[group]
@@ -439,10 +398,6 @@
     ensureTestModel(account);
     return testModelByAccount[account.accountId] || 'auto';
   }
-
-  // normalized / normalizedPoolTier / poolTierLabel / poolTierTagType 已收敛至 ./utils
-
-  // 号池拖拽与移动逻辑已迁移至 components/PoolPolicyPanel.vue
 
   function openTestDetail(row: Account) {
     const item = latestTest(row.accountId);
@@ -497,7 +452,17 @@
     importVisible.value = true;
   }
 
-  // getProviderDisplayName 已迁移至 components/PoolPolicyPanel.vue
+  function formatLastUsed(value: string | null | undefined) {
+    if (!value) return '尚未使用';
+    const at = new Date(value);
+    if (Number.isNaN(at.getTime())) return '尚未使用';
+    const elapsed = Date.now() - at.getTime();
+    if (elapsed < 60_000) return '刚刚';
+    if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)} 分钟前`;
+    if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)} 小时前`;
+    if (elapsed < 7 * 86_400_000) return `${Math.floor(elapsed / 86_400_000)} 天前`;
+    return formatDateTime(value).slice(0, 16);
+  }
 
   function handleCommand(command: string, row: Account) {
     if (command === 'toggle') {
@@ -506,256 +471,203 @@
       suspend(row);
     } else if (command === 'reset') {
       resetAccount(row);
+    } else if (command === 'reauthorize') {
+      openChatGptOAuth(row.accountId);
     } else if (command === 'remove') {
       removeAccount(row);
     }
   }
 
-  onMounted(() => {
-    loadAccountSettings();
-    loadTestModelOptions();
-    loadAccounts();
+  onMounted(async () => {
+    await Promise.all([loadAccounts(), loadTestModelOptions()]);
   });
 </script>
 
 <template>
-  <PageSection title="账号管理" subtitle="维护上游账号池、配额与状态">
-    <template #actions>
-      <div class="fast-mode-toggle">
-        <span>GPT Fast</span>
-        <el-switch
-          v-model="accountSettings.gptFastModeEnabled"
-          :disabled="settingsSaving"
-          inline-prompt
-          @change="toggleGptFastMode"
+  <div class="account-list-view">
+    <PageSection title="账号管理" subtitle="上游资源" :icon="CreditCard">
+      <template #actions>
+        <el-button type="primary" :icon="Plus" @click="openCreate">新建账号</el-button>
+        <el-button @click="openImport">批量导入</el-button>
+        <el-button
+          type="danger"
+          plain
+          :loading="clearingAccounts"
+          :disabled="loading || accounts.length === 0"
+          @click="clearAllAccounts"
+        >
+          清空全部
+        </el-button>
+      </template>
+      <template #summary>
+        <MetricsPanel :items="accountMetrics" />
+      </template>
+      <template #toolbar>
+        <el-input
+          v-model="keyword"
+          :prefix-icon="Search"
+          placeholder="搜索账号 ID / 邮箱 / 平台 / Base URL"
+          clearable
+          class="search-input"
         />
-      </div>
-      <el-input
-        v-model="keyword"
-        placeholder="搜索账号 ID / 邮箱 / 平台 / Base URL"
-        clearable
-        class="search-input"
-      >
-        <template #prefix>
-          <AppIcon name="search" class="search-input__icon" />
+        <el-select v-model="statusFilter" aria-label="筛选状态">
+          <el-option label="全部状态" value="all" />
+          <el-option label="正常运行" value="active" />
+          <el-option label="异常 / 停用" value="abnormal" />
+        </el-select>
+        <span class="toolbar-count">
+          {{
+            hasFilter
+              ? `筛选 ${visibleAccounts.length} / ${accounts.length}`
+              : `${accounts.length} 个账号`
+          }}
+        </span>
+        <el-tooltip content="刷新账号">
+          <el-button :icon="Refresh" aria-label="刷新账号" :loading="loading" @click="loadAccounts()" />
+        </el-tooltip>
+      </template>
+
+      <el-table v-loading="loading" class="account-table" :data="visibleAccounts">
+        <template #empty>
+          <el-empty
+            :image-size="88"
+            :description="hasFilter ? '没有匹配的账号，试试换个筛选条件' : '还没有上游账号'"
+          >
+            <template v-if="!hasFilter">
+              <el-button type="primary" :icon="Plus" @click="openCreate">新建账号</el-button>
+              <el-button @click="openImport">批量导入</el-button>
+            </template>
+          </el-empty>
         </template>
-      </el-input>
-      <el-button type="primary" @click="openCreate">新建账号</el-button>
-      <el-button @click="openImport">批量导入</el-button>
-      <el-button
-        type="danger"
-        plain
-        :loading="clearingAccounts"
-        :disabled="loading || accounts.length === 0"
-        @click="clearAllAccounts"
-      >
-        清空全部
-      </el-button>
-    </template>
+        <el-table-column label="账号类型" min-width="168" width="180">
+          <template #default="{ row }">
+            <ProviderBadge
+              :provider="row.provider"
+              :auth-method="row.authMethod"
+              :color="vendorFor(row)?.color"
+              :icon="vendorFor(row)?.icon"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column label="邮箱 / 账号 ID" min-width="180">
+          <template #default="{ row }">
+            <div class="email-id-cell">
+              <strong class="email-text" :title="row.email">{{ row.email || '—' }}</strong>
+              <span class="id-subtext" :title="row.accountId">{{ shorten(row.accountId, 10, 6) }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="Base URL" min-width="160" show-overflow-tooltip>
+          <template #default="{ row }">
+            <span class="url-text">{{ row.baseUrl ? shorten(row.baseUrl, 24, 10) : '—' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="区域" width="88">
+          <template #default="{ row }">
+            <span class="region-text">{{ row.region || '—' }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="状态" width="108">
+          <template #default="{ row }">
+            <span class="account-state" :class="`is-${statusOf(row).tone}`">
+              <i />{{ statusOf(row).label }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="请求 / 错误" width="120">
+          <template #default="{ row }">
+            <div class="req-cell">
+              <b>{{ formatNumber(row.requestCount) }}</b>
+              <span :class="{ 'is-error': (row.errorCount || 0) > 0 }">{{
+                formatNumber(row.errorCount)
+              }}</span>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="可用配额" width="180">
+          <template #default="{ row }">
+            <QuotaCell
+              :account="row"
+              :quota-state="openAiQuotas[row.accountId]"
+              @refresh="(accountId) => fetchOpenAiQuota(accountId, true)"
+            />
+          </template>
+        </el-table-column>
+        <el-table-column label="最近使用" min-width="128">
+          <template #default="{ row }">
+            <span class="last-used" :title="row.lastUsedAt ? formatDateTime(row.lastUsedAt) : ''">
+              {{ formatLastUsed(row.lastUsedAt) }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="168" fixed="right">
+          <template #default="{ row }">
+            <div class="row-actions">
+              <el-tooltip content="编辑">
+                <el-button text aria-label="编辑账号" @click="openEdit(row)">
+                  <template #icon>
+                    <AppIcon name="edit" width="13" height="13" />
+                  </template>
+                </el-button>
+              </el-tooltip>
+              <AccountTestPopover
+                v-model:model="testModelByAccount[row.accountId]"
+                v-model:prompt="testOptions.prompt"
+                v-model:only-enabled="testOptions.onlyEnabled"
+                v-model:update-status="testOptions.updateStatus"
+                :latest-test="latestTest(row.accountId)"
+                :testing="testingAccountId === row.accountId"
+                :model-options="testModelsFor(row)"
+                @ensure-model="ensureTestModel(row)"
+                @test="testAccount(row)"
+                @show-detail="openTestDetail(row)"
+              />
+              <el-dropdown trigger="click" @command="(cmd: string) => handleCommand(cmd, row)">
+                <button class="more-action" type="button" aria-label="更多操作">
+                  <el-icon><MoreFilled /></el-icon>
+                </button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="toggle">
+                      {{ row.enabled ? '停用' : '启用' }}
+                    </el-dropdown-item>
+                    <el-dropdown-item command="suspend">挂起</el-dropdown-item>
+                    <el-dropdown-item command="reset">重置</el-dropdown-item>
+                    <el-dropdown-item v-if="isCodexAccount(row)" command="reauthorize">
+                      重新授权
+                    </el-dropdown-item>
+                    <el-dropdown-item command="remove" divided>
+                      <span class="dropdown-danger-text">删除</span>
+                    </el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
+            </div>
+          </template>
+        </el-table-column>
+      </el-table>
+    </PageSection>
 
-    <!-- 1. Stats Summary Panel -->
-    <div class="metrics-panel glass-panel">
-      <div class="metric-item">
-        <div class="metric-item__header">
-          <span class="metric-dot dot-total" />
-          <span class="metric-label">总账号数</span>
-        </div>
-        <div class="metric-value mono">{{ summary.total }}</div>
-      </div>
-
-      <div class="metric-item">
-        <div class="metric-item__header">
-          <span class="metric-dot dot-active" />
-          <span class="metric-label">正常运行</span>
-        </div>
-        <div class="metric-value mono text-success">{{ summary.active }}</div>
-      </div>
-
-      <div class="metric-item">
-        <div class="metric-item__header">
-          <span class="metric-dot dot-suspended" />
-          <span class="metric-label">异常 / 停用</span>
-        </div>
-        <div class="metric-value mono" :class="{ 'text-danger': summary.abnormal > 0 }">
-          {{ summary.abnormal }}
-        </div>
-      </div>
-
-      <div class="metric-item">
-        <div class="metric-item__header">
-          <span class="metric-dot dot-requests" />
-          <span class="metric-label">累计请求 / 错误</span>
-        </div>
-        <div class="metric-value mono">
-          {{ formatNumber(summary.totalRequests) }}
-          <span class="metric-value__sub">/ {{ formatNumber(summary.totalErrors) }}</span>
-        </div>
-      </div>
-
-      <div class="metric-item">
-        <div class="metric-item__header">
-          <span class="metric-dot dot-requests" />
-          <span class="metric-label">一级 / 二级</span>
-        </div>
-        <div class="metric-value mono">
-          {{ summary.primary }}
-          <span class="metric-value__sub">/ {{ summary.secondary }}</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- 账号池熔断策略面板已抽离至 ./components/PoolPolicyPanel.vue -->
-    <PoolPolicyPanel
-      :accounts="accounts"
-      :visible-accounts="visibleAccounts"
-      :settings="accountSettings"
-      @settings-updated="accountSettings = $event"
-      @accounts-updated="accounts = $event"
+    <!-- 新建 / 编辑对话框已抽离至 ./components/AccountFormDialog.vue -->
+    <AccountFormDialog
+      v-model:visible="formVisible"
+      :mode="formMode"
+      :account="editingAccount"
+      @saved="() => { void loadAccounts(); void loadTestModelOptions(); }"
     />
 
-    <!-- 2. Suspended Accounts Periodic Review Collapsible Module -->
-    <DisabledSchedulePanel @test-completed="handleTestCompleted" />
+    <!-- 批量导入对话框已抽离至 ./components/ImportDialog.vue -->
+    <ImportDialog v-model:visible="importVisible" @imported="loadAccounts" />
 
-    <!-- 3. 列表工具条：数量统计 + 手动刷新 -->
-    <div class="table-toolbar">
-      <span class="table-toolbar__count text-secondary">
-        共 {{ accounts.length }} 个账号
-        <template v-if="keyword.trim()">，筛选出 {{ visibleAccounts.length }} 个</template>
-      </span>
-      <el-button :loading="loading" @click="loadAccounts">
-        <template #icon>
-          <AppIcon name="refresh" width="13" height="13" />
-        </template>
-        刷新
-      </el-button>
-    </div>
+    <!-- 单账号测试结果对话框已抽离至 ./components/TestDetailDialog.vue -->
+    <TestDetailDialog v-model:visible="testDetailVisible" :detail="testDetail" />
 
-    <el-table v-loading="loading" :data="visibleAccounts" stripe>
-      <template #empty>
-        <el-empty
-          :image-size="90"
-          :description="keyword.trim() ? '没有匹配的账号，换个关键词试试' : '暂无账号，点击右上角「新建账号」或「批量导入」'"
-        />
-      </template>
-      <el-table-column label="账号类型" width="160">
-        <template #default="{ row }">
-          <ProviderBadge :provider="row.provider" />
-        </template>
-      </el-table-column>
-      <el-table-column label="邮箱 / 账号 ID" min-width="160">
-        <template #default="{ row }">
-          <div class="email-id-cell">
-            <span class="email-text" :title="row.email">{{ row.email || '—' }}</span>
-            <span class="id-subtext mono">{{ shorten(row.accountId, 10, 6) }}</span>
-          </div>
-        </template>
-      </el-table-column>
-      <el-table-column label="Base URL" min-width="160" show-overflow-tooltip>
-        <template #default="{ row }">
-          <span class="mono">{{ row.baseUrl ? shorten(row.baseUrl, 24, 10) : '—' }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column prop="region" label="区域" width="80" />
-      <el-table-column label="号池 / 权重" width="110">
-        <template #default="{ row }">
-          <div class="pool-cell">
-            <el-tag :type="poolTierTagType(row.poolTier)" effect="light" round>
-              {{ poolTierLabel(row.poolTier) }}
-            </el-tag>
-            <span class="text-secondary">权重 {{ row.poolWeight ?? 100 }}</span>
-          </div>
-        </template>
-      </el-table-column>
-      <el-table-column label="状态" width="110">
-        <template #default="{ row }">
-          <el-tag :type="statusOf(row).tone" effect="light" round>
-            <span class="status-dot" :class="`status-dot--${statusOf(row).tone}`" />
-            {{ statusOf(row).label }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="请求 / 错误" width="100">
-        <template #default="{ row }">
-          {{ formatNumber(row.requestCount) }} / {{ formatNumber(row.errorCount) }}
-        </template>
-      </el-table-column>
-      <el-table-column label="可用配额" width="180">
-        <template #default="{ row }">
-          <QuotaCell
-            :account="row"
-            :quota-state="openAiQuotas[row.accountId]"
-            @refresh="(accountId) => fetchOpenAiQuota(accountId, true)"
-          />
-        </template>
-      </el-table-column>
-      <el-table-column label="最近使用" width="150">
-        <template #default="{ row }">{{ formatDateTime(row.lastUsedAt) }}</template>
-      </el-table-column>
-      <el-table-column label="操作" width="160" fixed="right">
-        <template #default="{ row }">
-          <div class="actions-wrapper">
-            <el-button link type="primary" @click="openEdit(row)">
-              <template #icon>
-                <AppIcon name="edit" width="12" height="12" class="action-icon" />
-              </template>
-              编辑
-            </el-button>
-            <AccountTestPopover
-              v-model:model="testModelByAccount[row.accountId]"
-              v-model:prompt="testOptions.prompt"
-              v-model:only-enabled="testOptions.onlyEnabled"
-              v-model:update-status="testOptions.updateStatus"
-              :latest-test="latestTest(row.accountId)"
-              :testing="testingAccountId === row.accountId"
-              :model-options="testModelsFor(row)"
-              @ensure-model="ensureTestModel(row)"
-              @test="testAccount(row)"
-              @show-detail="openTestDetail(row)"
-            />
-            <el-dropdown trigger="click" @command="(cmd: string) => handleCommand(cmd, row)">
-              <el-button link type="primary" class="more-btn">
-                更多
-                <AppIcon name="chevron-down" width="10" height="10" class="caret" />
-              </el-button>
-              <template #dropdown>
-                <el-dropdown-menu>
-                  <el-dropdown-item command="toggle">
-                    {{ row.enabled ? '停用' : '启用' }}
-                  </el-dropdown-item>
-                  <el-dropdown-item command="suspend">挂起</el-dropdown-item>
-                  <el-dropdown-item command="reset">重置</el-dropdown-item>
-                  <el-dropdown-item command="remove" divided>
-                    <span class="dropdown-danger-text">删除</span>
-                  </el-dropdown-item>
-                </el-dropdown-menu>
-              </template>
-            </el-dropdown>
-          </div>
-        </template>
-      </el-table-column>
-    </el-table>
-  </PageSection>
-
-  <!-- 新建 / 编辑对话框已抽离至 ./components/AccountFormDialog.vue -->
-  <AccountFormDialog
-    v-model:visible="formVisible"
-    :mode="formMode"
-    :account="editingAccount"
-    @saved="loadAccounts"
-  />
-
-  <!-- 批量导入对话框已抽离至 ./components/ImportDialog.vue -->
-  <ImportDialog v-model:visible="importVisible" @imported="loadAccounts" />
-
-  <!-- 批量复检结果对话框已抽离至 ./components/BatchTestResultDialog.vue -->
-  <BatchTestResultDialog
-    v-model:visible="batchTestVisible"
-    :result="batchTestResult"
-    @show-detail="openBatchTestDetail"
-  />
-
-  <!-- 单账号测试结果对话框已抽离至 ./components/TestDetailDialog.vue -->
-  <TestDetailDialog v-model:visible="testDetailVisible" :detail="testDetail" />
+    <ChatGptOAuthDialog
+      v-model:visible="chatGptOAuthVisible"
+      :account-id="chatGptOAuthAccountId"
+      @saved="() => loadAccounts()"
+    />
+  </div>
 </template>
 
 <style scoped lang="scss">
@@ -767,244 +679,154 @@
   // 批量导入样式（.import-summary / .import-drop-zone）已迁移至 components/ImportDialog.vue
   // 表单样式（.account-form-alert / .form-hint）已迁移至 components/AccountFormDialog.vue
 
-  .caret {
-    margin-left: 3px;
-    vertical-align: middle;
-    display: inline-block;
+  .account-list-view {
+    min-width: 0;
   }
 
-  /* 状态标签内的语义色圆点，提升列表扫读效率 */
-  .status-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    display: inline-block;
-    margin-right: 5px;
-    vertical-align: 1px;
-
-    &--success {
-      background: var(--kp-success);
-      box-shadow: 0 0 4px rgba(54, 192, 138, 0.6);
-    }
-    &--warning {
-      background: var(--kp-warning);
-      box-shadow: 0 0 4px rgba(240, 168, 77, 0.6);
-    }
-    &--danger {
-      background: var(--kp-danger);
-      box-shadow: 0 0 4px rgba(239, 91, 107, 0.6);
-    }
-    &--info {
-      background: var(--kp-text-muted);
-    }
+  .page-section__toolbar :deep(.el-select) {
+    width: 148px;
   }
 
-  /* 列表工具条 */
-  .table-toolbar {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 12px;
-    margin-bottom: 12px;
-
-    &__count {
-      font-size: 13px;
-    }
+  .toolbar-count {
+    margin-left: auto;
+    color: var(--kp-text-secondary);
+    font-size: 12px;
   }
-
-  // Provider badge styling moved to components/ProviderBadge.vue
 
   .email-id-cell {
     display: flex;
     flex-direction: column;
-    gap: 2px;
-    line-height: 1.3;
+    gap: 5px;
     min-width: 0;
 
     .email-text {
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--el-text-color-primary);
       overflow: hidden;
+      font-size: 13px;
+      font-weight: 600;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
 
     .id-subtext {
-      font-size: 11px;
       color: var(--kp-text-muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 11px;
     }
   }
 
-  /* Unified Metrics Panel：grid 5 列，分隔线用 border 实现，换行断点处隐藏 */
-  .metrics-panel {
-    display: grid;
-    grid-template-columns: repeat(5, 1fr);
-    column-gap: 28px;
+  .url-text,
+  .region-text,
+  .last-used {
+    color: var(--kp-text-secondary);
+    font-size: 12px;
+  }
+
+  .url-text {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .account-state {
+    display: inline-flex;
     align-items: center;
-    padding: 20px 28px;
-    margin-bottom: 24px;
-    width: 100%;
+    gap: 6px;
+    color: var(--kp-text-muted);
+    font-size: 12px;
 
-    .metric-item {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      min-width: 0;
-      padding: 8px 12px;
-      border-radius: 12px;
-      transition:
-        background 0.2s ease,
-        transform 0.2s ease;
+    i {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+    }
 
-      &:hover {
-        background: rgba(255, 255, 255, 0.45);
-        transform: translateY(-2px);
-      }
+    &.is-success {
+      color: var(--kp-success);
+    }
+    &.is-warning {
+      color: var(--kp-warning);
+    }
+    &.is-danger {
+      color: var(--kp-danger);
+    }
+  }
 
-      & + .metric-item {
-        border-left: 1px solid var(--kp-divider);
-        padding-left: 28px;
-        border-radius: 0 12px 12px 0;
-      }
+  .req-cell {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-variant-numeric: tabular-nums;
 
-      &__header {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-      }
+    b {
+      font-size: 13px;
+    }
 
-      .metric-dot {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        display: inline-block;
+    span {
+      color: var(--kp-text-muted);
+      font-size: 11px;
 
-        &.dot-total {
-          background-color: var(--kp-primary);
-          box-shadow: 0 0 6px rgba(91, 141, 239, 0.6);
-        }
-        &.dot-active {
-          background-color: var(--kp-success);
-          box-shadow: 0 0 6px rgba(54, 192, 138, 0.6);
-        }
-        &.dot-suspended {
-          background-color: var(--kp-danger);
-          box-shadow: 0 0 6px rgba(239, 91, 107, 0.6);
-        }
-        &.dot-requests {
-          background-color: var(--kp-accent);
-          box-shadow: 0 0 6px rgba(179, 135, 255, 0.6);
-        }
-      }
-
-      .metric-label {
-        font-size: 12.5px;
-        font-weight: 600;
-        color: var(--kp-text-secondary);
-      }
-
-      .metric-value {
-        font-size: 26px;
-        font-weight: 800;
-        color: var(--kp-text);
-        line-height: 1.15;
-
-        &.text-success {
-          color: var(--kp-success);
-        }
-        &.text-danger {
-          color: var(--kp-danger);
-        }
-
-        &__sub {
-          font-size: 13px;
-          font-weight: 500;
-          color: var(--kp-text-muted);
-        }
+      &.is-error {
+        color: var(--kp-danger);
       }
     }
   }
 
-  .pool-cell {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 5px;
-  }
+  .account-table {
+    :deep(.el-table-fixed-column--right) {
+      background-color: color-mix(in srgb, var(--kp-surface-strong) 92%, white) !important;
+    }
 
-  .actions-wrapper {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-
-    .el-button {
+    :deep(.row-actions .el-button) {
       margin: 0;
-    }
-
-    .action-icon {
-      margin-right: 2px;
-    }
-
-    .more-btn {
-      padding: 0 2px;
+      padding: 7px;
     }
   }
 
-  // 删除项渲染在 teleport 到 body 的下拉菜单里，选择器需置于顶层
+  .row-actions {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    white-space: nowrap;
+  }
+
+  .more-action {
+    width: 28px;
+    height: 28px;
+    display: inline-grid;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--el-color-primary);
+    cursor: pointer;
+
+    &:hover,
+    &:focus-visible {
+      background: rgba(91, 141, 239, 0.1);
+      outline: none;
+    }
+  }
+
   .dropdown-danger-text {
     color: var(--el-color-danger);
   }
 
   .search-input {
     width: 280px;
-
-    &__icon {
-      width: 14px;
-      height: 14px;
-      color: var(--kp-text-muted);
-      margin-right: 4px;
-    }
   }
 
-  .fast-mode-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    min-height: 32px;
-    padding: 0 10px;
-    border: 1px solid var(--kp-divider);
-    border-radius: 6px;
-    background: rgba(255, 255, 255, 0.55);
-    color: var(--kp-text-secondary);
-    font-size: 12px;
-    font-weight: 700;
-    white-space: nowrap;
+  @media (max-width: 640px) {
+    .search-input {
+      width: 100%;
+    }
+
+    .toolbar-count {
+      margin-left: 0;
+      width: 100%;
+    }
   }
 
   // Quota cell styling moved to components/QuotaCell.vue
 
   // 表单页签样式（.account-form-tabs）已迁移至 components/AccountFormDialog.vue
-
-  @media (max-width: 1024px) {
-    .metrics-panel {
-      grid-template-columns: repeat(3, 1fr);
-      row-gap: 16px;
-      padding: 16px 20px;
-
-      // 换行后隐藏分隔线，避免出现孤立分隔线
-      .metric-item + .metric-item {
-        border-left: none;
-        padding-left: 12px;
-        border-radius: 12px;
-      }
-    }
-  }
-
-  @media (max-width: 640px) {
-    .metrics-panel {
-      grid-template-columns: repeat(2, 1fr);
-      padding: 20px;
-    }
-  }
 </style>

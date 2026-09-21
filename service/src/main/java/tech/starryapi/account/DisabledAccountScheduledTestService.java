@@ -12,12 +12,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.scheduling.support.CronExpression;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import tech.starryapi.admin.SystemMaintenanceTaskGate;
 import tech.starryapi.common.ApiException;
 
 @Service
@@ -28,6 +30,7 @@ public class DisabledAccountScheduledTestService {
     private final AccountSettingsService settingsService;
     private final ProxyAccountRepository repository;
     private final AccountTestService accountTestService;
+    private final SystemMaintenanceTaskGate maintenanceTaskGate;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private volatile Instant nextRunAt;
     private volatile String scheduleFingerprint = "";
@@ -37,14 +40,30 @@ public class DisabledAccountScheduledTestService {
         ProxyAccountRepository repository,
         AccountTestService accountTestService
     ) {
+        this(
+            settingsService,
+            repository,
+            accountTestService,
+            SystemMaintenanceTaskGate.alwaysOperationalForDirectConstruction()
+        );
+    }
+
+    @Autowired
+    public DisabledAccountScheduledTestService(
+        AccountSettingsService settingsService,
+        ProxyAccountRepository repository,
+        AccountTestService accountTestService,
+        SystemMaintenanceTaskGate maintenanceTaskGate
+    ) {
         this.settingsService = settingsService;
         this.repository = repository;
         this.accountTestService = accountTestService;
+        this.maintenanceTaskGate = maintenanceTaskGate;
     }
 
     @Scheduled(fixedDelay = 30_000, initialDelay = 30_000)
     public void scheduledTick() {
-        tick().subscribe(
+        maintenanceTaskGate.whenOperational(this::tick).subscribe(
             null,
             error -> log.warn("Scheduled disabled account test failed unexpectedly", error)
         );
@@ -203,7 +222,20 @@ public class DisabledAccountScheduledTestService {
         String authMethod = key(account.getAuthMethod());
         return providers.stream()
             .map(this::key)
-            .anyMatch(item -> item.equals(provider) || item.equals(authMethod));
+            .anyMatch(item -> matchesConfiguredProvider(account, provider, authMethod, item));
+    }
+
+    private boolean matchesConfiguredProvider(
+        ProxyAccountEntity account,
+        String provider,
+        String authMethod,
+        String configured
+    ) {
+        if (configured.equals(provider) || configured.equals(authMethod)) {
+            return true;
+        }
+        return ("openai-compatible".equals(configured) || "openaicompatibility".equals(configured))
+            && AccountPlatforms.isOpenAiCompatibleApiKey(account);
     }
 
     private boolean oldEnough(ProxyAccountEntity account, Integer minAgeMinutes, Instant now) {

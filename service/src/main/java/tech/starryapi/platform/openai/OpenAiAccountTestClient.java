@@ -26,7 +26,7 @@ import tech.starryapi.platform.upstream.UpstreamException;
 public class OpenAiAccountTestClient {
 
     public static final String DEFAULT_OPENAI_TEST_MODEL = "gpt-4o-mini";
-    public static final String DEFAULT_CODEX_TEST_MODEL = "gpt-5.4-mini";
+    public static final String DEFAULT_CODEX_TEST_MODEL = "gpt-5.5";
 
     private static final String CODEX_USER_AGENT = "codex_cli_rs/0.139.0";
     private static final String CODEX_ORIGINATOR = "codex_cli_rs";
@@ -389,7 +389,11 @@ public class OpenAiAccountTestClient {
             return false;
         }
         String lower = normalized.toLowerCase();
-        return lower.startsWith("gpt-5") || lower.startsWith("o1") || lower.startsWith("o3") || lower.startsWith("o4");
+        return lower.startsWith("gpt-6")
+            || lower.startsWith("gpt-5")
+            || lower.startsWith("o1")
+            || lower.startsWith("o3")
+            || lower.startsWith("o4");
     }
 
     private OpenAiQuotaSnapshot quotaSnapshot(HttpHeaders headers, Instant checkedAt) {

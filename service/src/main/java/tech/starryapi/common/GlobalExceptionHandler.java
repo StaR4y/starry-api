@@ -1,5 +1,6 @@
 package tech.starryapi.common;
 
+import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ResponseEntity;
@@ -36,6 +37,12 @@ public class GlobalExceptionHandler {
             message = resolvedStatus == null ? code : resolvedStatus.getReasonPhrase();
         }
         return ResponseEntity.status(status).body(ApiResponse.error(code, message));
+    }
+
+    @ExceptionHandler(DataBufferLimitException.class)
+    ResponseEntity<ApiResponse<Void>> handleDataBufferLimit(DataBufferLimitException ignored) {
+        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
+            .body(ApiResponse.error("PAYLOAD_TOO_LARGE", "上传文件过大"));
     }
 
     @ExceptionHandler(Throwable.class)

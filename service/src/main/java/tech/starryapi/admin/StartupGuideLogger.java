@@ -2,14 +2,14 @@ package tech.starryapi.admin;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.boot.context.event.ApplicationReadyEvent;
-import org.springframework.context.event.EventListener;
+import org.springframework.boot.ApplicationArguments;
+import org.springframework.boot.ApplicationRunner;
 import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 import tech.starryapi.config.ProxyProperties;
 
 @Component
-public class StartupGuideLogger {
+public class StartupGuideLogger implements ApplicationRunner {
 
     private static final Logger log = LoggerFactory.getLogger(StartupGuideLogger.class);
 
@@ -23,10 +23,13 @@ public class StartupGuideLogger {
         this.environment = environment;
     }
 
-    @EventListener(ApplicationReadyEvent.class)
-    public void onReady() {
-        adminUserService.ensureDefaultAdmin()
-            .subscribe(this::logGuide, error -> log.warn("Failed to initialize default admin user", error));
+    @Override
+    public void run(ApplicationArguments args) {
+        AdminUserService.BootstrapAdmin bootstrap = adminUserService.ensureDefaultAdmin().block();
+        if (bootstrap == null) {
+            throw new IllegalStateException("Application Root bootstrap completed without a Root account");
+        }
+        logGuide(bootstrap);
     }
 
     private void logGuide(AdminUserService.BootstrapAdmin bootstrap) {
@@ -35,7 +38,7 @@ public class StartupGuideLogger {
         String webuiUrl = webuiUrl(baseUrl);
 
         log.info("------------------------------------------------------------");
-        log.info("Starry API is ready");
+        log.info("Starry API startup checks passed");
         log.info("WebUI login:   {}", webuiUrl);
         log.info("API docs:      {}/docs", baseUrl);
         log.info("Health check:  {}/health", baseUrl);
@@ -46,16 +49,18 @@ public class StartupGuideLogger {
 
         if (bootstrap.created()) {
             log.warn("Default admin user created. Save this password now.");
+            log.warn("SECURITY: This default administrator is the application root. Credential disclosure means full service compromise.");
             log.warn("Username: {}", bootstrap.username());
             log.warn("Password: {}", bootstrap.password());
-            log.warn("Open WebUI login page, then change the password before using admin APIs.");
+            log.warn("Do not share these credentials. Open WebUI, change the password immediately, and store it in a protected password manager.");
         } else if (bootstrap.firstLogin()) {
             log.warn("Default admin user already exists and still uses the first-login password.");
+            log.warn("SECURITY: This default administrator is the application root. Credential disclosure means full service compromise.");
             log.warn("The password was printed only during first startup and will not be shown again.");
             log.warn("Open {} and login as '{}' with the saved password, then change it.", webuiUrl, bootstrap.username());
             log.warn("Other admin APIs are blocked until the password is changed.");
         } else {
-            log.info("Admin user table already initialized. Login with an existing admin user.");
+            log.info("Application Root is already initialized. Login with an existing administrator.");
         }
 
         if (properties.getAdminToken() != null && !properties.getAdminToken().isBlank()) {

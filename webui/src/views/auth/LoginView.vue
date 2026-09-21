@@ -12,11 +12,14 @@
   import { ElMessage, type FormInstance, type FormRules } from 'element-plus';
   import { authApi } from '@/api';
   import { useAuthStore } from '@/stores/auth';
+  import { useAppearanceStore } from '@/stores/appearance';
+  import SiteBrandLogo from '@/components/SiteBrandLogo.vue';
   import { ApiError } from '@/utils/http';
 
   const route = useRoute();
   const router = useRouter();
   const auth = useAuthStore();
+  const appearance = useAppearanceStore();
 
   const formRef = ref<FormInstance>();
   const registerFormRef = ref<FormInstance>();
@@ -89,7 +92,7 @@
     ],
     password: [
       { required: true, message: '请输入密码', trigger: 'blur' },
-      { min: 6, message: '密码至少 6 位', trigger: 'blur' },
+      { min: 12, max: 128, message: '密码长度须为 12–128 位', trigger: 'blur' },
     ],
     confirm: [{ required: true, message: '请确认密码', trigger: 'blur' }],
   };
@@ -436,8 +439,8 @@
   <div class="login">
     <div class="login__panel glass-panel glass-panel--strong">
       <div class="login__header">
-        <img class="login__brand-logo" src="/logo.svg" alt="Starry API">
-        <h1 class="login__title">控制台登录</h1>
+        <SiteBrandLogo class="login__brand-logo" />
+        <h1 class="login__title">{{ appearance.siteName }} 登录</h1>
         <p class="login__hint text-secondary" />
       </div>
 
@@ -456,6 +459,7 @@
           <el-input
             v-model="form.password"
             type="password"
+            maxlength="128"
             autocomplete="current-password"
             show-password
             @keyup.enter="submit"
@@ -482,7 +486,7 @@
       </div>
     </div>
 
-    <el-dialog v-model="registerVisible" title="注册控制台账号" width="460px">
+    <el-dialog v-model="registerVisible" :title="`注册 ${appearance.siteName} 账号`" width="460px">
       <el-form
         ref="registerFormRef"
         :model="registerForm"
@@ -535,6 +539,7 @@
             <el-input
               v-model="registerForm.password"
               type="password"
+              maxlength="128"
               show-password
               autocomplete="new-password"
             />
@@ -543,6 +548,7 @@
             <el-input
               v-model="registerForm.confirm"
               type="password"
+              maxlength="128"
               show-password
               autocomplete="new-password"
               @keyup.enter="submitRegister"

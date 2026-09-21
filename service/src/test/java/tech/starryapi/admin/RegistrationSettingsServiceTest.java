@@ -172,6 +172,63 @@ class RegistrationSettingsServiceTest {
         assertThat(second).isNotEqualTo(first);
     }
 
+    @Test
+    void savingSmtpMarksPendingVerificationUntilSkippedOrVerified() {
+        Map<String, String> store = new HashMap<>();
+        RegistrationSettingsService service = new RegistrationSettingsService(
+            mockRepository(store),
+            new ObjectMapper()
+        );
+
+        AdminDtos.RegistrationSettingsResponse saved = service.update(new AdminDtos.UpdateRegistrationSettingsRequest(
+            null,
+            null,
+            null,
+            null,
+            "smtp.example.com",
+            587,
+            "user@example.com",
+            "secret",
+            "noreply@example.com",
+            "Starry",
+            true,
+            "starttls",
+            null,
+            null,
+            null,
+            true,
+            null
+        )).block();
+
+        assertThat(saved).isNotNull();
+        assertThat(saved.smtpVerifyEnabled()).isTrue();
+        assertThat(saved.smtpVerifyStatus()).isEqualTo("PENDING");
+
+        AdminDtos.RegistrationSettingsResponse skipped = service.update(new AdminDtos.UpdateRegistrationSettingsRequest(
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            false,
+            null
+        )).block();
+
+        assertThat(skipped).isNotNull();
+        assertThat(skipped.smtpVerifyEnabled()).isFalse();
+        assertThat(skipped.smtpVerifyStatus()).isEqualTo("SKIPPED");
+    }
+
     private SystemSettingRepository mockRepository(Map<String, String> store) {
         SystemSettingRepository repository = mock(SystemSettingRepository.class);
         when(repository.acquireTransactionLock(anyString())).thenReturn(Mono.just(true));

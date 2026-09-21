@@ -28,21 +28,6 @@ public class AdminSessionService {
         return new SessionToken(token, expiresAt);
     }
 
-    public void clearFirstLogin(String userId) {
-        sessions.replaceAll((token, principal) -> {
-            if (!principal.userId().equals(userId) || !principal.firstLogin()) {
-                return principal;
-            }
-            return new AdminPrincipal(
-                principal.userId(),
-                principal.username(),
-                principal.role(),
-                principal.expiresAt(),
-                false
-            );
-        });
-    }
-
     public AdminPrincipal verify(String token) {
         AdminPrincipal principal = sessions.get(token);
         if (principal == null || principal.expiresAt().isBefore(Instant.now())) {
@@ -56,6 +41,17 @@ public class AdminSessionService {
 
     public void invalidateAllSessions() {
         sessions.clear();
+    }
+
+    public void invalidateSession(String token) {
+        if (token != null) sessions.remove(token);
+    }
+
+    public void invalidateUserSessions(String userId) {
+        if (userId == null || userId.isBlank()) {
+            return;
+        }
+        sessions.entrySet().removeIf(entry -> userId.equals(entry.getValue().userId()));
     }
 
     @Scheduled(fixedDelay = 60_000)

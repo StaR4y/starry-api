@@ -45,16 +45,49 @@ public class RedemptionCodeService {
     }
 
     public Mono<CreateRedemptionCodesResponse> create(AdminPrincipal principal, CreateRedemptionCodeRequest request) {
-        BigDecimal balance = validateBalance(request == null ? null : request.balance());
+        String planId = clean(request == null ? null : request.planId());
+        boolean hasPlan = !planId.isEmpty();
+        boolean hasBalance = request != null && request.balance() != null;
+        if (hasPlan == hasBalance) {
+            return Mono.error(new ApiException(
+                HttpStatus.BAD_REQUEST,
+                "INVALID_REDEMPTION_CODE_PAYLOAD",
+                "Redemption code requires exactly one of a positive balance or a coding plan"
+            ));
+        }
+        BigDecimal balance = hasPlan ? null : validateBalance(request.balance());
         int count = validateCount(request == null ? null : request.count());
         Instant expiresAt = request == null ? null : request.expiresAt();
         if (expiresAt != null && !expiresAt.isAfter(Instant.now())) {
             return Mono.error(new ApiException(HttpStatus.BAD_REQUEST, "INVALID_REDEMPTION_CODE_EXPIRY", "Expiration time must be in the future"));
         }
-        return Flux.range(0, count)
-            .concatMap(index -> saveNewCode(principal, balance, expiresAt))
+        if (!hasPlan) {
+            return Flux.range(0, count)
+                .concatMap(index -> saveNewCode(principal, null, balance, expiresAt))
+                .collectList()
+                .map(codes -> new CreateRedemptionCodesResponse(codes.size(), codes));
+        }
+        return requireEnabledPlan(planId)
+            .flatMapMany(verifiedPlanId -> Flux.range(0, count)
+                .concatMap(index -> saveNewCode(principal, verifiedPlanId, null, expiresAt)))
             .collectList()
             .map(codes -> new CreateRedemptionCodesResponse(codes.size(), codes));
+    }
+
+    private Mono<String> requireEnabledPlan(String planId) {
+        String sql = """
+            SELECT plan_id FROM coding_plans
+            WHERE plan_id = :planId AND enabled = TRUE
+            """;
+        return template.getDatabaseClient().sql(sql)
+            .bind("planId", planId)
+            .map((row, metadata) -> row.get("plan_id", String.class))
+            .one()
+            .switchIfEmpty(Mono.error(new ApiException(
+                HttpStatus.BAD_REQUEST,
+                "REDEMPTION_CODE_PLAN_UNAVAILABLE",
+                "Coding plan does not exist or is disabled"
+            )));
     }
 
     public Mono<RedemptionCodeResponse> revoke(String codeId) {
@@ -94,18 +127,24 @@ public class RedemptionCodeService {
             )));
     }
 
-    private Mono<RedemptionCodeResponse> saveNewCode(AdminPrincipal principal, BigDecimal balance, Instant expiresAt) {
-        return Mono.defer(() -> repository.save(newCode(principal, balance, expiresAt)))
+    private Mono<RedemptionCodeResponse> saveNewCode(
+        AdminPrincipal principal,
+        String planId,
+        BigDecimal balance,
+        Instant expiresAt
+    ) {
+        return Mono.defer(() -> repository.save(newCode(principal, planId, balance, expiresAt)))
             .retryWhen(Retry.max(5).filter(DuplicateKeyException.class::isInstance))
             .map(RedemptionCodeMapper::toResponse);
     }
 
-    private RedemptionCodeEntity newCode(AdminPrincipal principal, BigDecimal balance, Instant expiresAt) {
+    private RedemptionCodeEntity newCode(AdminPrincipal principal, String planId, BigDecimal balance, Instant expiresAt) {
         RedemptionCodeEntity entity = new RedemptionCodeEntity();
         Instant now = Instant.now();
         entity.setCodeId(Hashing.shortUuid());
-        entity.setCode(generateCode());
+        entity.setCode(generateCode(planId != null));
         entity.setBalance(balance);
+        entity.setPlanId(planId);
         entity.setEnabled(true);
         entity.setUsed(false);
         entity.setExpiresAt(expiresAt);
@@ -122,6 +161,7 @@ public class RedemptionCodeService {
                 SELECT r.id,
                        r.code_id,
                        r.balance AS redeemed_balance,
+                       r.plan_id,
                        u.user_id,
                        u.username,
                        u.balance AS balance_before,
@@ -151,6 +191,7 @@ public class RedemptionCodeService {
                        'redemption-code:' || candidate.code_id,
                        '{}'::jsonb
                 FROM candidate
+                WHERE candidate.plan_id IS NULL
                 ON CONFLICT (idempotency_key) DO NOTHING
                 RETURNING user_id, reference_id, amount, balance_after
             ), credited_user AS (
@@ -162,6 +203,17 @@ public class RedemptionCodeService {
                 RETURNING ledger_entry.reference_id,
                           ledger_entry.amount AS redeemed_balance,
                           u.balance AS current_balance
+            ), activated_subscription AS MATERIALIZED (
+                SELECT result->>'subscriptionId' AS subscription_id
+                FROM candidate
+                JOIN redemption_codes code ON code.code_id = candidate.code_id
+                CROSS JOIN LATERAL (
+                    SELECT starry_api.activate_coding_plan(candidate.user_id, candidate.plan_id,
+                        code.plan_version, 'REDEMPTION_CODE', candidate.code_id,
+                        'redemption:' || candidate.code_id, candidate.user_id) AS result
+                    WHERE candidate.plan_id IS NOT NULL
+                ) activation
+                WHERE result ? 'subscriptionId'
             )
             UPDATE redemption_codes AS r
             SET enabled = FALSE,
@@ -170,12 +222,21 @@ public class RedemptionCodeService {
                 used_by_username = candidate.username,
                 used_at = :now,
                 updated_at = :now
-            FROM credited_user
-            INNER JOIN candidate ON candidate.code_id = credited_user.reference_id
+            FROM candidate
             WHERE r.id = candidate.id
               AND r.enabled = TRUE
               AND r.used = FALSE
-            RETURNING r.code_id, r.balance AS redeemed_balance, credited_user.current_balance
+              AND (
+                  (candidate.plan_id IS NULL AND (SELECT COUNT(*) FROM credited_user) = 1)
+                  OR (candidate.plan_id IS NOT NULL AND (SELECT COUNT(*) FROM activated_subscription) = 1)
+              )
+            RETURNING r.code_id,
+                      r.balance AS redeemed_balance,
+                      COALESCE(
+                          (SELECT current_balance FROM credited_user),
+                          candidate.balance_before
+                      ) AS current_balance,
+                      (SELECT subscription_id FROM activated_subscription) AS subscription_id
             """;
         return template.getDatabaseClient().sql(sql)
             .bind("transactionId", transactionId)
@@ -187,6 +248,7 @@ public class RedemptionCodeService {
                 row.get("code_id", String.class),
                 row.get("redeemed_balance", BigDecimal.class),
                 row.get("current_balance", BigDecimal.class),
+                row.get("subscription_id", String.class),
                 now
             ))
             .one();
@@ -208,8 +270,8 @@ public class RedemptionCodeService {
         return count;
     }
 
-    private String generateCode() {
-        StringBuilder builder = new StringBuilder("BAL");
+    private String generateCode(boolean forPlan) {
+        StringBuilder builder = new StringBuilder(forPlan ? "PLN" : "BAL");
         for (int part = 0; part < CODE_PARTS; part++) {
             builder.append('-');
             for (int index = 0; index < CODE_PART_LENGTH; index++) {

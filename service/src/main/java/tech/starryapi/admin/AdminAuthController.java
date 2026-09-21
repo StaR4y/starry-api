@@ -3,6 +3,7 @@ package tech.starryapi.admin;
 import jakarta.validation.Valid;
 import java.net.InetSocketAddress;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
@@ -16,6 +17,7 @@ public class AdminAuthController implements AdminAuthApi {
     private final AdminAuth adminAuth;
     private final RegistrationSettingsService registrationSettingsService;
     private final EmailVerificationService emailVerificationService;
+    private final SmtpVerificationService smtpVerificationService;
 
     public AdminAuthController(
         AdminUserService adminUserService,
@@ -23,10 +25,22 @@ public class AdminAuthController implements AdminAuthApi {
         RegistrationSettingsService registrationSettingsService,
         EmailVerificationService emailVerificationService
     ) {
+        this(adminUserService, adminAuth, registrationSettingsService, emailVerificationService, null);
+    }
+
+    @Autowired
+    public AdminAuthController(
+        AdminUserService adminUserService,
+        AdminAuth adminAuth,
+        RegistrationSettingsService registrationSettingsService,
+        EmailVerificationService emailVerificationService,
+        SmtpVerificationService smtpVerificationService
+    ) {
         this.adminUserService = adminUserService;
         this.adminAuth = adminAuth;
         this.registrationSettingsService = registrationSettingsService;
         this.emailVerificationService = emailVerificationService;
+        this.smtpVerificationService = smtpVerificationService;
     }
 
     @Override
@@ -40,6 +54,12 @@ public class AdminAuthController implements AdminAuthApi {
         return adminUserService.currentUser(principal)
             .map(AdminUserMapper::toResponse)
             .map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<AdminDtos.AdminPermissions>> permissions(ServerWebExchange exchange) {
+        exchange.getResponse().getHeaders().setCacheControl(org.springframework.http.CacheControl.noStore());
+        return adminUserService.permissions(adminAuth.verify(exchange)).map(ApiResponse::ok);
     }
 
     @Override
@@ -67,6 +87,20 @@ public class AdminAuthController implements AdminAuthApi {
     @Override
     public Mono<ApiResponse<AdminDtos.RegistrationSettingsResponse>> registrationSettings() {
         return registrationSettingsService.publicSettings().map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<AdminDtos.SmtpVerifyResponse>> verifySmtp(
+        @Valid @RequestBody AdminDtos.SmtpVerifyRequest request
+    ) {
+        if (smtpVerificationService == null) {
+            return Mono.error(new tech.starryapi.common.ApiException(
+                org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE,
+                "SMTP_VERIFY_UNAVAILABLE",
+                "SMTP verification is unavailable"
+            ));
+        }
+        return smtpVerificationService.verify(request == null ? null : request.token()).map(ApiResponse::ok);
     }
 
     @Override

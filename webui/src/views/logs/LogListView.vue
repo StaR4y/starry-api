@@ -6,6 +6,7 @@
    * 这里提供：客户端关键字过滤、状态过滤、错误详情查看。
    */
   import { computed, onMounted, ref } from 'vue';
+  import { Document, Refresh, Search } from '@element-plus/icons-vue';
   import PageSection from '@/components/PageSection.vue';
   import { logsApi } from '@/api';
   import type { RequestLog } from '@/types/api';
@@ -51,23 +52,25 @@
 </script>
 
 <template>
-  <PageSection title="请求日志" subtitle="最新 100 条代理请求记录">
-    <template #actions>
+  <div class="log-list-view">
+  <PageSection title="请求日志" subtitle="调用记录" :icon="Document">
+    <template #toolbar>
       <el-input
         v-model="keyword"
+        :prefix-icon="Search"
         placeholder="搜索路径 / 模型 / 请求 ID / 错误信息"
         clearable
-        style="width: 280px"
+        style="max-width: 320px"
       />
-      <el-select v-model="statusFilter" style="width: 120px">
+      <el-select v-model="statusFilter" style="width: 120px" aria-label="筛选状态">
         <el-option label="全部" value="all" />
         <el-option label="成功" value="success" />
         <el-option label="失败" value="failed" />
       </el-select>
-      <el-button :loading="loading" @click="loadLogs">刷新</el-button>
+      <el-button :icon="Refresh" :loading="loading" @click="loadLogs">刷新</el-button>
     </template>
 
-    <el-table v-loading="loading" :data="filtered" stripe @row-click="openDetail">
+    <el-table v-loading="loading" :data="filtered" @row-click="openDetail">
       <el-table-column label="时间" width="180">
         <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
       </el-table-column>
@@ -134,6 +137,7 @@
       </el-descriptions>
     </template>
   </el-drawer>
+  </div>
 </template>
 
 <style scoped lang="scss">

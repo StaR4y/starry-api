@@ -9,6 +9,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -34,6 +35,8 @@ import reactor.core.publisher.Mono;
 import tech.starryapi.admin.AdminPrincipal;
 import tech.starryapi.admin.AdminUserEntity;
 import tech.starryapi.admin.AdminUserRepository;
+import tech.starryapi.admin.DataManagementSecurityService;
+import tech.starryapi.admin.SystemMaintenanceTaskGate;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.payment.EasyPayClient.CreatePaymentResult;
 import tech.starryapi.payment.EasyPayClient.Notification;
@@ -50,6 +53,29 @@ class PaymentServiceTest {
         Instant.now().plusSeconds(3600),
         false
     );
+
+    @Test
+    void scheduledReconciliationSkipsAllDatabaseWorkDuringMaintenance() {
+        PaymentOrderRepository repository = mock(PaymentOrderRepository.class);
+        R2dbcEntityTemplate template = mock(R2dbcEntityTemplate.class);
+        DataManagementSecurityService securityService = mock(DataManagementSecurityService.class);
+        when(securityService.isLocked()).thenReturn(Mono.just(true));
+        PaymentService service = new PaymentService(
+            repository,
+            mock(AdminUserRepository.class),
+            template,
+            mock(PaymentSettingsService.class),
+            mock(EasyPayClient.class),
+            mock(InviteRebateService.class),
+            mock(TransactionalOperator.class),
+            new SystemMaintenanceTaskGate(securityService)
+        );
+
+        service.scheduledReconcileUncreditedOrders();
+        service.scheduledReconcileProviderOrders();
+
+        verifyNoInteractions(repository, template);
+    }
 
     @Test
     void initializesCreatedAndUpdatedTimestampsForNewOrder() {

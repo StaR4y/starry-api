@@ -59,12 +59,12 @@ services:
 
   service:
     build:
-      context: ./postgres-init
+      context: ./runtime
       dockerfile_inline: |
         FROM eclipse-temurin:25-jre-noble
         RUN set -eux; \
             apt-get update; \
-            apt-get install -y --no-install-recommends ca-certificates curl; \
+            apt-get install -y --no-install-recommends ca-certificates curl jq; \
             install -d -m 0755 /usr/share/postgresql-common/pgdg; \
             curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc; \
             . /etc/os-release; \
@@ -72,6 +72,7 @@ services:
             apt-get update; \
             apt-get install -y --no-install-recommends postgresql-client-17; \
             rm -rf /var/lib/apt/lists/*
+        COPY --chmod=0555 recover-data-management.sh /app/bin/recover-data-management
     image: starryapi-runtime:java25-pg17
     container_name: starryapi-service
     restart: unless-stopped
@@ -82,6 +83,7 @@ services:
     volumes:
       - ./app/starry-api.jar:/app/app.jar:ro
       - ./data/backups:/app/backups
+      - ./data/security:/app/security
     environment:
       SERVER_PORT: ${SERVER_PORT:-8080}
       SERVER_ADDRESS: 0.0.0.0
@@ -125,6 +127,9 @@ services:
       STARRY_BACKUP_DIR: /app/backups
       STARRY_MAX_IMPORT_BYTES: ${STARRY_MAX_IMPORT_BYTES:-268435456}
       STARRY_DATA_TRANSFER_PROCESS_TIMEOUT: ${STARRY_DATA_TRANSFER_PROCESS_TIMEOUT:-30m}
+      STARRY_DATA_MANAGEMENT_SECURITY_FILE: /app/security/data-management.json
+      STARRY_DATA_MANAGEMENT_RECOVERY_KEY_FILE: /app/security/recovery.key
+      STARRY_DATA_MANAGEMENT_REQUIRE_INITIALIZED: ${STARRY_DATA_MANAGEMENT_REQUIRE_INITIALIZED:-false}
       STARRY_PAYMENT_RECONCILIATION_INTERVAL: ${STARRY_PAYMENT_RECONCILIATION_INTERVAL:-PT30S}
       STARRY_PAYMENT_RECONCILIATION_INITIAL_DELAY: ${STARRY_PAYMENT_RECONCILIATION_INITIAL_DELAY:-PT30S}
       STARRY_PAYMENT_PROVIDER_RECONCILIATION_INTERVAL: ${STARRY_PAYMENT_PROVIDER_RECONCILIATION_INTERVAL:-PT30S}
@@ -146,6 +151,12 @@ services:
       STARRY_STATS_USAGE_EVENT_RETENTION_DAYS: ${STARRY_STATS_USAGE_EVENT_RETENTION_DAYS:-400}
       STARRY_STATS_USAGE_EVENT_DELETE_BATCH_SIZE: ${STARRY_STATS_USAGE_EVENT_DELETE_BATCH_SIZE:-10000}
       STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES: ${STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES:-20}
+      STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_ENABLED: ${STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_ENABLED:-true}
+      STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_CRON: "${STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_CRON:-0 35 3 * * *}"
+      STARRY_ACCOUNT_ALLOCATION_LEASE_RETENTION_DAYS: ${STARRY_ACCOUNT_ALLOCATION_LEASE_RETENTION_DAYS:-7}
+      STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS: ${STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS:-90}
+      STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE: ${STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE:-10000}
+      STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES: ${STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES:-20}
       JAVA_OPTS: ${JAVA_OPTS:-}
     ports:
       - "${HOST_BIND_ADDR:-127.0.0.1}:${HOST_HTTP_PORT:-18080}:${SERVER_PORT:-8080}"

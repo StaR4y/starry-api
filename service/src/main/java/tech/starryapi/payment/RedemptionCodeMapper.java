@@ -12,6 +12,7 @@ public final class RedemptionCodeMapper {
             entity.getCodeId(),
             entity.getCode(),
             entity.getBalance(),
+            entity.getPlanId(),
             entity.getEnabled(),
             entity.getUsed(),
             entity.getUsedByUserId(),

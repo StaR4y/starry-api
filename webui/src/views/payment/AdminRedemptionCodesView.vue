@@ -1,25 +1,41 @@
 <script setup lang="ts">
   import { computed, onMounted, reactive, ref } from 'vue';
   import { ElMessage, ElMessageBox } from 'element-plus';
-  import { Refresh } from '@element-plus/icons-vue';
+  import { Present, Refresh } from '@element-plus/icons-vue';
   import PageSection from '@/components/PageSection.vue';
-  import { adminPaymentApi } from '@/api';
-  import type { RedemptionCode } from '@/types/api';
+  import { adminCodingPlanApi, adminPaymentApi } from '@/api';
+  import type { CodingPlan, RedemptionCode } from '@/types/api';
   import { formatDateTime, formatNumber } from '@/utils/format';
+  import { credits } from './codingPlanDisplay';
 
   const loading = ref(false);
   const creating = ref(false);
   const codes = ref<RedemptionCode[]>([]);
+  const plans = ref<CodingPlan[]>([]);
 
   const form = reactive<{
+    kind: 'balance' | 'plan';
     balance: number;
+    planId: string;
     count: number;
     expiresAt: Date | undefined;
   }>({
+    kind: 'balance',
     balance: 100,
+    planId: '',
     count: 1,
     expiresAt: undefined,
   });
+
+  const planNameById = computed(() => {
+    const map = new Map<string, string>();
+    for (const plan of plans.value) {
+      map.set(plan.planId, plan.name);
+    }
+    return map;
+  });
+
+  const enabledPlans = computed(() => plans.value.filter((plan) => plan.enabled));
 
   const stats = computed(() => {
     const available = codes.value.filter((code) => code.enabled && !code.used && !isExpired(code));
@@ -35,15 +51,24 @@
   async function load() {
     loading.value = true;
     try {
-      codes.value = await adminPaymentApi.redemptionCodes();
+      const [codeList, planList] = await Promise.all([
+        adminPaymentApi.redemptionCodes(),
+        plans.value.length ? Promise.resolve(plans.value) : adminCodingPlanApi.plans(),
+      ]);
+      codes.value = codeList;
+      plans.value = planList;
     } finally {
       loading.value = false;
     }
   }
 
   async function createCodes() {
-    if (!Number.isFinite(form.balance) || form.balance <= 0) {
+    if (form.kind === 'balance' && (!Number.isFinite(form.balance) || form.balance <= 0)) {
       ElMessage.warning('请填写大于 0 的兑换余额');
+      return;
+    }
+    if (form.kind === 'plan' && !form.planId) {
+      ElMessage.warning('请选择要兑换的套餐');
       return;
     }
     if (!Number.isInteger(form.count) || form.count < 1 || form.count > 100) {
@@ -53,7 +78,8 @@
     creating.value = true;
     try {
       const result = await adminPaymentApi.createRedemptionCodes({
-        balance: form.balance,
+        balance: form.kind === 'balance' ? form.balance : null,
+        planId: form.kind === 'plan' ? form.planId : null,
         count: form.count,
         expiresAt: form.expiresAt ? form.expiresAt.toISOString() : null,
       });
@@ -110,10 +136,7 @@
 </script>
 
 <template>
-  <PageSection
-    title="兑换码"
-    subtitle="生成可兑换指定余额的一次性兑换码，用户在余额充值页兑换后自动入账"
-  >
+  <PageSection title="兑换码" subtitle="业务配置" :icon="Present">
     <template #actions>
       <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
     </template>
@@ -141,7 +164,13 @@
       <section class="redemption__panel">
         <div class="redemption__panel-title">生成兑换码</div>
         <el-form label-position="top" class="redemption__form">
-          <el-form-item label="每个兑换码到账余额">
+          <el-form-item label="兑换类型">
+            <el-radio-group v-model="form.kind">
+              <el-radio-button label="balance">余额</el-radio-button>
+              <el-radio-button label="plan">套餐订阅</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item v-if="form.kind === 'balance'" label="每个兑换码到账余额">
             <el-input-number
               v-model="form.balance"
               :min="0.000001"
@@ -150,6 +179,16 @@
               controls-position="right"
               style="width: 100%"
             />
+          </el-form-item>
+          <el-form-item v-else label="兑换套餐">
+            <el-select v-model="form.planId" placeholder="选择要开通的套餐" style="width: 100%">
+              <el-option
+                v-for="plan in enabledPlans"
+                :key="plan.planId"
+                :label="`${plan.name}（${plan.durationDays} 天 / 配额 ${credits(plan.quotaCredits)}）`"
+                :value="plan.planId"
+              />
+            </el-select>
           </el-form-item>
           <el-form-item label="生成数量">
             <el-input-number
@@ -187,8 +226,11 @@
               <el-button link type="primary" @click="copy(row.code)">复制</el-button>
             </template>
           </el-table-column>
-          <el-table-column label="余额" width="130" align="right">
-            <template #default="{ row }">{{ formatNumber(row.balance) }}</template>
+          <el-table-column label="面值" width="150" align="right">
+            <template #default="{ row }">
+              <span v-if="row.planId">{{ planNameById.get(row.planId) || row.planId }}</span>
+              <span v-else>{{ formatNumber(row.balance) }}</span>
+            </template>
           </el-table-column>
           <el-table-column label="状态" width="110" align="center">
             <template #default="{ row }">

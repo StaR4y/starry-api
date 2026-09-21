@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -57,6 +58,60 @@ class PostgreSqlHostConfigurationContractTest {
     @Test
     void keepsTheComposeServiceOnThePostgresNetworkAlias() throws IOException {
         assertThat(stringAt(composeServiceEnvironment(), "POSTGRES_HOST")).isEqualTo("postgres");
+    }
+
+    @Test
+    void persistsDataManagementSecurityStateAcrossDeploymentTemplates() throws IOException {
+        String compose = Files.readString(repositoryRoot().resolve("docker-compose.yml"));
+        String artifactCompose = Files.readString(
+            repositoryRoot().resolve("artifacts/docker-compose.artifact.yml")
+        );
+        String artifactPublisher = Files.readString(repositoryRoot().resolve("scripts/publish-artifact.sh"));
+        String serverInstaller = Files.readString(repositoryRoot().resolve("scripts/install-server.sh"));
+
+        for (String deploymentTemplate : List.of(
+            compose,
+            artifactCompose,
+            artifactPublisher,
+            serverInstaller
+        )) {
+            assertThat(deploymentTemplate)
+                .contains("- ./data/security:/app/security")
+                .contains("STARRY_DATA_MANAGEMENT_SECURITY_FILE: /app/security/data-management.json")
+                .contains("STARRY_DATA_MANAGEMENT_REQUIRE_INITIALIZED:")
+                .contains("STARRY_DATA_MANAGEMENT_RECOVERY_KEY_FILE:");
+        }
+        for (String currentDeploymentTemplate : List.of(
+            compose,
+            artifactPublisher,
+            serverInstaller
+        )) {
+            assertThat(currentDeploymentTemplate)
+                .contains("STARRY_DATA_MANAGEMENT_RECOVERY_KEY_FILE: /app/security/recovery.key");
+        }
+        assertThat(serverInstaller)
+            .contains("\"$INSTALL_DIR/data/security\"")
+            .contains("root_cmd chmod 0700 \"$INSTALL_DIR/data/security\"");
+    }
+
+    @Test
+    void packagesTheRecoveryToolInSourceAndArtifactRuntimeImages() throws IOException {
+        String dockerfile = Files.readString(repositoryRoot().resolve("Dockerfile"));
+        String artifactPublisher = Files.readString(repositoryRoot().resolve("scripts/publish-artifact.sh"));
+        String serverInstaller = Files.readString(repositoryRoot().resolve("scripts/install-server.sh"));
+
+        assertThat(dockerfile)
+            .contains("apt-get install -y --no-install-recommends ca-certificates curl jq")
+            .contains("COPY --chmod=0555 scripts/recover-data-management.sh /app/bin/recover-data-management");
+        for (String artifactDeploymentTemplate : List.of(artifactPublisher, serverInstaller)) {
+            assertThat(artifactDeploymentTemplate)
+                .contains("context: ./runtime")
+                .contains("apt-get install -y --no-install-recommends ca-certificates curl jq")
+                .contains("COPY --chmod=0555 recover-data-management.sh /app/bin/recover-data-management");
+        }
+        assertThat(serverInstaller)
+            .contains("\"$INSTALL_DIR/runtime\"")
+            .contains("install_verified_recovery_tool");
     }
 
     private Map<String, Object> loadApplicationConfiguration() throws IOException {

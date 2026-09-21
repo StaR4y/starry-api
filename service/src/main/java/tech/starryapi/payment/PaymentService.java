@@ -25,6 +25,7 @@ import reactor.core.publisher.Mono;
 import tech.starryapi.admin.AdminPrincipal;
 import tech.starryapi.admin.AdminUserEntity;
 import tech.starryapi.admin.AdminUserRepository;
+import tech.starryapi.admin.SystemMaintenanceTaskGate;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.common.Hashing;
 import tech.starryapi.payment.EasyPayClient.CreatePaymentResult;
@@ -63,10 +64,10 @@ public class PaymentService {
     private final EasyPayClient easyPayClient;
     private final InviteRebateService inviteRebateService;
     private final TransactionalOperator transactionalOperator;
+    private final SystemMaintenanceTaskGate maintenanceTaskGate;
     private final AtomicBoolean reconciliationRunning = new AtomicBoolean();
     private final AtomicBoolean providerReconciliationRunning = new AtomicBoolean();
 
-    @Autowired
     public PaymentService(
         PaymentOrderRepository repository,
         AdminUserRepository userRepository,
@@ -84,7 +85,32 @@ public class PaymentService {
             inviteRebateService,
             TransactionalOperator.create(new R2dbcTransactionManager(
                 template.getDatabaseClient().getConnectionFactory()
-            ))
+            )),
+            SystemMaintenanceTaskGate.alwaysOperationalForDirectConstruction()
+        );
+    }
+
+    @Autowired
+    public PaymentService(
+        PaymentOrderRepository repository,
+        AdminUserRepository userRepository,
+        R2dbcEntityTemplate template,
+        PaymentSettingsService settingsService,
+        EasyPayClient easyPayClient,
+        InviteRebateService inviteRebateService,
+        SystemMaintenanceTaskGate maintenanceTaskGate
+    ) {
+        this(
+            repository,
+            userRepository,
+            template,
+            settingsService,
+            easyPayClient,
+            inviteRebateService,
+            TransactionalOperator.create(new R2dbcTransactionManager(
+                template.getDatabaseClient().getConnectionFactory()
+            )),
+            maintenanceTaskGate
         );
     }
 
@@ -97,6 +123,28 @@ public class PaymentService {
         InviteRebateService inviteRebateService,
         TransactionalOperator transactionalOperator
     ) {
+        this(
+            repository,
+            userRepository,
+            template,
+            settingsService,
+            easyPayClient,
+            inviteRebateService,
+            transactionalOperator,
+            SystemMaintenanceTaskGate.alwaysOperationalForDirectConstruction()
+        );
+    }
+
+    PaymentService(
+        PaymentOrderRepository repository,
+        AdminUserRepository userRepository,
+        R2dbcEntityTemplate template,
+        PaymentSettingsService settingsService,
+        EasyPayClient easyPayClient,
+        InviteRebateService inviteRebateService,
+        TransactionalOperator transactionalOperator,
+        SystemMaintenanceTaskGate maintenanceTaskGate
+    ) {
         this.repository = repository;
         this.userRepository = userRepository;
         this.template = template;
@@ -104,6 +152,7 @@ public class PaymentService {
         this.easyPayClient = easyPayClient;
         this.inviteRebateService = inviteRebateService;
         this.transactionalOperator = transactionalOperator;
+        this.maintenanceTaskGate = maintenanceTaskGate;
     }
 
     public Mono<CreatePaymentOrderResponse> createOrder(
@@ -185,18 +234,19 @@ public class PaymentService {
         initialDelayString = "${starry.payment.reconciliation-initial-delay:PT30S}"
     )
     public void scheduledReconcileUncreditedOrders() {
-        if (!reconciliationRunning.compareAndSet(false, true)) {
-            return;
-        }
-        reconcileUncreditedOrders()
-            .doOnSuccess(count -> {
-                if (count > 0) {
-                    log.info("Reconciled {} uncredited payment order(s)", count);
-                }
-            })
-            .doOnError(error -> log.warn("Could not reconcile uncredited payment orders", error))
-            .doFinally(signal -> reconciliationRunning.set(false))
-            .subscribe();
+        maintenanceTaskGate.whenOperational(() -> {
+            if (!reconciliationRunning.compareAndSet(false, true)) {
+                return Mono.empty();
+            }
+            return reconcileUncreditedOrders()
+                .doOnSuccess(count -> {
+                    if (count > 0) {
+                        log.info("Reconciled {} uncredited payment order(s)", count);
+                    }
+                })
+                .doOnError(error -> log.warn("Could not reconcile uncredited payment orders", error))
+                .doFinally(signal -> reconciliationRunning.set(false));
+        }).subscribe();
     }
 
     @Scheduled(
@@ -204,18 +254,19 @@ public class PaymentService {
         initialDelayString = "${starry.payment.provider-reconciliation-initial-delay:PT45S}"
     )
     public void scheduledReconcileProviderOrders() {
-        if (!providerReconciliationRunning.compareAndSet(false, true)) {
-            return;
-        }
-        reconcileProviderOrders()
-            .doOnSuccess(count -> {
-                if (count > 0) {
-                    log.info("Recovered {} paid order(s) through provider reconciliation", count);
-                }
-            })
-            .doOnError(error -> log.warn("Could not reconcile stale payment orders with provider", error))
-            .doFinally(signal -> providerReconciliationRunning.set(false))
-            .subscribe();
+        maintenanceTaskGate.whenOperational(() -> {
+            if (!providerReconciliationRunning.compareAndSet(false, true)) {
+                return Mono.empty();
+            }
+            return reconcileProviderOrders()
+                .doOnSuccess(count -> {
+                    if (count > 0) {
+                        log.info("Recovered {} paid order(s) through provider reconciliation", count);
+                    }
+                })
+                .doOnError(error -> log.warn("Could not reconcile stale payment orders with provider", error))
+                .doFinally(signal -> providerReconciliationRunning.set(false));
+        }).subscribe();
     }
 
     private Mono<CreatePaymentOrderResponse> createPendingOrder(

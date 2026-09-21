@@ -2,7 +2,7 @@
 
 Starry API is a Spring Boot + Vue management service for routing multiple LLM client protocols through a unified model and account layer.
 
-The current runtime supports OpenAI-compatible, Anthropic-compatible, and Gemini-compatible inbound APIs. GPT/OpenAI model requests can use OpenAI API key or Codex token accounts directly, official DeepSeek V4 requests use an isolated DeepSeek API-key account pool, and Claude/Kiro-compatible requests use the Kiro/AWS CodeWhisperer upstream path isolated under `platform/kiro`. Provider-neutral response data lives in `platform/core`, so inbound protocol modules format a common completion result instead of depending on provider-specific records.
+The current runtime supports OpenAI-compatible, Anthropic-compatible, and Gemini-compatible inbound APIs. GPT/OpenAI model requests can use OpenAI API-key or Codex token accounts directly, cataloged DeepSeek requests use an isolated DeepSeek API-key account pool, and Anthropic Messages requests prefer native Anthropic API-key accounts before falling back to compatible Kiro/AWS accounts. Bare Claude/Kiro-compatible model requests continue to use the Kiro/AWS CodeWhisperer upstream path isolated under `platform/kiro`. Provider-neutral response data lives in `platform/core`, so inbound protocol modules format a common completion result instead of depending on provider-specific records.
 
 ## Features
 
@@ -11,11 +11,12 @@ The current runtime supports OpenAI-compatible, Anthropic-compatible, and Gemini
 - OpenAI Responses-style `POST /v1/responses`
 - Anthropic Messages-style `POST /v1/messages`
 - Gemini GenerateContent-style `POST /v1beta/models/{model}:generateContent`
-- Official DeepSeek V4 Flash and Pro model IDs, isolated account routing, and built-in official default token prices
+- Default OpenAI, Anthropic, Gemini, and DeepSeek chat model IDs with verified official USD token prices sourced from `Wei-Shaw/model-price-repo`
 - Platform-scoped backend modules for OpenAI, DeepSeek, Anthropic, Gemini, Kiro upstream, shared core records, and shared model catalog
 - Platform-scoped frontend modules for provider registry, model grouping, and client setup scripts
 - Admin APIs for upstream accounts, API keys, model mappings, request logs, and local administrators
-- Account management supports Kiro, official DeepSeek, OpenAI API key, and Codex token import/testing/routing, automatic health testing after consecutive failures, and total/5h/7day quota progress.
+- Account management supports Kiro, official DeepSeek, OpenAI API key, ChatGPT browser-authorized Codex OAuth, manual Codex token import, and Anthropic API-key import/testing/routing, automatic health testing after consecutive failures, and total/5h/7day quota progress.
+- Administrator-managed model catalog entries and icons, model-provider-scoped API keys, model pricing, user balances, recharge orders, redemption codes, and coding-plan subscriptions whose quota is consumed before the user balance
 - WebFlux, R2DBC PostgreSQL 17, Flyway migrations, API key accounting, rate limits, account failover, and session affinity
 - Vue/Vite management console embedded into the Spring Boot jar
 - OpenAPI UI at `/docs`
@@ -103,6 +104,8 @@ curl -X POST http://127.0.0.1:8080/auth/password \
   -d '{"oldPassword":"<startup-password>","newPassword":"<new-password>"}'
 ```
 
+The change revokes all existing console sessions. Log in again with the new password before calling another authenticated endpoint.
+
 Optional: enable public admin registration with email verification:
 
 ```bash
@@ -133,10 +136,10 @@ Create a client API key:
 curl -X POST http://127.0.0.1:8080/admin/api-keys \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{"name":"default","creditsLimit":1000}'
+  -d '{"name":"default","creditsLimit":1000,"modelProvider":"OpenAI"}'
 ```
 
-API keys are bound to the logged-in local user. Normal users only see and manage their own keys; administrators can see all keys with their owner. New keys can be copied later from the console because the owning key record stores the full `sk-...` value.
+API keys are bound to the logged-in local user and one enabled model-catalog provider. Use the exact provider value returned by `/v1/models`, such as `OpenAI`, `Anthropic`, `Google`, or `DeepSeek`. Normal users only see and manage their own keys; administrators can see all keys with their owner. New keys can be copied later from the console because the owning key record stores the full `sk-...` value.
 
 Add an upstream Kiro account:
 
@@ -168,6 +171,19 @@ curl -X POST http://127.0.0.1:8080/admin/accounts \
   }'
 ```
 
+To add a ChatGPT-backed Codex account without copying tokens, open **账号管理**, select
+**新建账号 -> ChatGPT 授权**. Before requesting a code, enable device code login in the ChatGPT
+security settings for a personal account, or ask the workspace administrator to enable it in the
+workspace permissions. Then open the displayed `auth.openai.com` page and enter the one-time code.
+The server polls OpenAI's device authorization endpoint and stores the resulting credentials in
+the existing upstream account table. This account type is used only with the Codex backend at
+`https://chatgpt.com/backend-api/codex`; it does not automate or scrape the ChatGPT website.
+Device authorization can be unavailable for some accounts or regions. Only authorize accounts
+you are permitted to operate, and follow the applicable OpenAI terms and account policies. Keep
+this mode to trusted private deployments; use an OpenAI Platform API-key account for public or
+untrusted programmatic workloads, as recommended by the
+[official OpenAI authentication guidance](https://learn.chatgpt.com/docs/auth#mainContent).
+
 Add an official DeepSeek account:
 
 ```bash
@@ -182,7 +198,7 @@ curl -X POST http://127.0.0.1:8080/admin/accounts \
   }'
 ```
 
-When `baseUrl` is omitted, DeepSeek uses `https://api.deepseek.com/v1`. Prefer the bare model IDs `deepseek-v4-flash` and `deepseek-v4-pro`; `starry/` and `deepseek/` prefixes are also accepted for official routing, while `openai-compatible/` remains the explicit route to a generic third-party account. Both DeepSeek models support Chat Completions, while the Responses API currently supports only `deepseek-v4-flash`. DeepSeek requests stay within the DeepSeek account pool and never fall back to OpenAI or Codex accounts.
+When `baseUrl` is omitted, DeepSeek uses `https://api.deepseek.com/v1`. Use one of the cataloged `deepseek-chat`, `deepseek-reasoner`, `deepseek-v4-flash`, or `deepseek-v4-pro` IDs; the `starry/` prefix is also accepted. All four support Chat Completions, while the Responses API currently supports only `deepseek-v4-flash`. DeepSeek requests stay within the DeepSeek account pool and never fall back to OpenAI or Codex accounts. Legacy unrestricted keys can still reach route-only aliases, but provider-scoped keys require every requested and mapped model ID to exist in the enabled model catalog.
 
 Call through OpenAI-compatible Chat Completions:
 
@@ -216,8 +232,14 @@ curl -X POST http://127.0.0.1:8080/v1beta/models/gemini-2.5-pro:generateContent 
 ## Module Layout
 
 ```text
-api
+service-api
   Spring API contracts and shared DTOs
+
+plugin-api
+  Plugin SDK, host access, JSON, managed resources/tasks and streaming HTTP
+
+plugin-whale-widget
+  Local sibling plugin in ../whale-whidget-plugin
 
 service
   admin / account / apikey / model / stats / config / common
@@ -243,6 +265,7 @@ webui
 
 - [API Reference](docs/API.md)
 - [Architecture](docs/ARCHITECTURE.md)
+- [Plugin Developer Mode and SDK](docs/PLUGINS.md)
 - [Configuration](docs/CONFIGURATION.md)
 - [Package Guide](docs/PACKAGE_GUIDE.md)
 - [Platform Module Plan](docs/PLAN.md)
@@ -250,6 +273,8 @@ webui
 - [1Panel Deployment](docs/1PANEL_DEPLOY.md)
 - [Prebuilt Artifact Deployment](docs/PREBUILT_ARTIFACTS.md)
 - [Operations](docs/OPERATIONS.md)
+- [Performance and Memory Baseline](docs/PERFORMANCE.md)
+- [Account Allocation Security Fix Report](docs/ACCOUNT_ALLOCATION_SECURITY_FIX_REPORT.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 
 ## Verification
@@ -298,12 +323,26 @@ curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
 sudo bash /tmp/install-server.sh
 ```
 
+For a data-management hard lock, use the recovery utility already packaged in the service image. From an interactive terminal in a source Compose deployment:
+
+```bash
+docker compose exec service /app/bin/recover-data-management --lang zh
+# Use --lang en for English prompts.
+docker compose restart service
+# Wait for the service to finish starting, then verify:
+docker compose exec service curl -fsS http://127.0.0.1:8080/system/status
+docker compose exec service sh -c 'test ! -e /app/security/recovery.key && test ! -e /app/security/.recovery.key.consuming'
+```
+
+The prompt hides and double-checks the original key; never pass it as an argument or use a downloaded `curl ... | sh` recovery script. Installed artifact deployments add `-f docker-compose.artifact.yml` to each Compose command. See [Operations](docs/OPERATIONS.md#recover-a-docker-compose-deployment) for failure behavior and direct host/JAR recovery.
+
 ## Current Boundaries
 
-- OpenAI/GPT requests route to OpenAI API key or Codex token accounts.
-- DeepSeek V4 requests route only to official DeepSeek accounts; no cross-provider fallback is attempted.
-- Claude/Kiro-compatible requests route to the Kiro/AWS upstream adapter.
-- Anthropic and Gemini are currently inbound compatibility modules unless mapped to a supported upstream route.
+- Ordinary OpenAI/GPT requests use official OpenAI API keys by default. Codex tokens are isolated unless an administrator explicitly enables Codex routing or mixed fallback.
+- Cataloged DeepSeek requests route only to official DeepSeek accounts; no cross-provider fallback is attempted.
+- Anthropic Messages requests and `anthropic/` model IDs prefer native Anthropic API-key accounts, with Kiro-compatible accounts as fallback capacity.
+- Bare Claude/Kiro-compatible requests route to the Kiro/AWS upstream adapter.
+- Gemini is currently an inbound compatibility module. Built-in Gemini aliases execute through the Kiro target mapping; direct Google API-key dispatch and account testing are not implemented.
 - Inbound protocol response factories consume `PlatformCompletionResult`; they should not import Kiro result records.
 - `stream=true` still emits SSE after upstream completion; true chunk passthrough is a later streaming milestone.
 - Image/document/file conversion is partial.

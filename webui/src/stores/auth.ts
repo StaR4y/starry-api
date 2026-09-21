@@ -6,12 +6,14 @@
  */
 import { defineStore } from 'pinia';
 import { authApi } from '@/api';
-import { getStoredToken, setStoredToken } from '@/utils/http';
+import { ApiError, getStoredToken, setStoredToken } from '@/utils/http';
 import type { AdminUser, LoginRequest, RegisterRequest } from '@/types/api';
 
 interface AuthState {
   token: string | null;
   user: AdminUser | null;
+  permissions: { root: boolean } | null;
+  permissionsToken: string | null;
 }
 
 const USER_STORAGE_KEY = 'kp.adminUser';
@@ -44,12 +46,16 @@ export const useAuthStore = defineStore('auth', {
   state: (): AuthState => ({
     token: getStoredToken(),
     user: readStoredUser(),
+    permissions: null,
+    permissionsToken: null,
   }),
 
   getters: {
     isAuthenticated: (state) => Boolean(state.token),
     requirePasswordChange: (state) => Boolean(state.user?.firstLogin),
     isAdmin: (state) => state.user?.role === 'ADMIN',
+    isRoot: (state) => state.user?.role === 'ADMIN' && Boolean(state.token)
+      && state.permissionsToken === state.token && state.permissions?.root === true,
     defaultRouteName: (state) => (state.user?.role === 'ADMIN' ? 'dashboard' : 'welcome'),
     displayName: (state) => state.user?.displayName || state.user?.username || '账号',
   },
@@ -60,6 +66,8 @@ export const useAuthStore = defineStore('auth', {
       const result = await authApi.login(loginPayload);
       this.token = result.accessToken;
       this.user = result.user;
+      this.permissions = null;
+      this.permissionsToken = null;
       setStoredToken(result.accessToken, remember);
       writeStoredUser(result.user, remember);
       return result;
@@ -70,9 +78,35 @@ export const useAuthStore = defineStore('auth', {
       const result = await authApi.register(registerPayload);
       this.token = result.accessToken;
       this.user = result.user;
+      this.permissions = null;
+      this.permissionsToken = null;
       setStoredToken(result.accessToken, remember);
       writeStoredUser(result.user, remember);
       return result;
+    },
+
+    async loadPermissions(force = false) {
+      const token = this.token;
+      if (!token || !this.isAdmin) {
+        this.permissions = null;
+        this.permissionsToken = null;
+        return;
+      }
+      if (!force && this.permissionsToken === token) return;
+      try {
+        const permissions = await authApi.permissions();
+        if (this.token === token) {
+          this.permissions = permissions;
+          this.permissionsToken = token;
+        }
+      } catch (error) {
+        if (this.token === token) {
+          this.permissions = null;
+          this.permissionsToken = null;
+          if (error instanceof ApiError && error.status === 401) this.logout();
+        }
+        throw error;
+      }
     },
 
     async refreshCurrentUser() {
@@ -88,17 +122,10 @@ export const useAuthStore = defineStore('auth', {
     logout() {
       this.token = null;
       this.user = null;
+      this.permissions = null;
+      this.permissionsToken = null;
       setStoredToken(null);
       writeStoredUser(null);
-    },
-
-    /** 用户改密成功后，标记 firstLogin = false，避免重复跳转改密页。 */
-    markPasswordChanged() {
-      if (this.user) {
-        this.user = { ...this.user, firstLogin: false };
-        const remember = localStorage.getItem('kp.adminToken') !== null;
-        writeStoredUser(this.user, remember);
-      }
     },
   },
 });

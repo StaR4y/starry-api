@@ -2,6 +2,10 @@ package tech.starryapi.account;
 
 import java.net.URI;
 import java.util.Locale;
+import java.util.Set;
+import java.util.regex.Pattern;
+import org.springframework.http.HttpStatus;
+import tech.starryapi.common.ApiException;
 
 public final class AccountPlatforms {
 
@@ -17,6 +21,21 @@ public final class AccountPlatforms {
     public static final String DEFAULT_ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
     public static final String DEFAULT_DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1";
     public static final String DEFAULT_KIRO_REGION = "us-east-1";
+    private static final Pattern BADGE_COLOR = Pattern.compile("^#[0-9A-Fa-f]{6}$");
+    private static final Set<String> FIRST_CLASS_PROVIDER_KEYS = Set.of(
+        "openai",
+        "openai-compatible",
+        "openaicompatibility",
+        "google",
+        "gemini",
+        "anthropic",
+        "claude",
+        "deepseek",
+        "codex",
+        "builderid",
+        "builder_id",
+        "kiro"
+    );
 
     private AccountPlatforms() {
     }
@@ -25,6 +44,27 @@ public final class AccountPlatforms {
         return account != null
             && !isDeepSeek(account)
             && isOpenAi(account.getProvider(), account.getAuthMethod());
+    }
+
+    /** Official or compatible API-key accounts, excluding Codex OAuth tokens. */
+    public static boolean isOpenAiApiKey(ProxyAccountEntity account) {
+        return isOpenAi(account) && !isCodex(account);
+    }
+
+    public static boolean isOfficialOpenAiApiKey(ProxyAccountEntity account) {
+        if (!isOpenAiApiKey(account)) {
+            return false;
+        }
+        String providerKey = key(account.getProvider());
+        if ("openai-compatible".equals(providerKey) || "openaicompatibility".equals(providerKey)) {
+            return false;
+        }
+        return (providerKey.isEmpty() || "openai".equals(providerKey))
+            && isOfficialOpenAiBaseUrl(account.getBaseUrl());
+    }
+
+    public static boolean isOpenAiCompatibleApiKey(ProxyAccountEntity account) {
+        return isOpenAiApiKey(account) && !isOfficialOpenAiApiKey(account);
     }
 
     public static boolean isOpenAi(String provider, String authMethod) {
@@ -92,6 +132,55 @@ public final class AccountPlatforms {
         return isAnthropicProvider(key(provider)) && isApiKey(authMethod);
     }
 
+    public static boolean isFirstClassAccountProvider(String provider) {
+        String providerKey = key(provider);
+        if (providerKey.isEmpty() || FIRST_CLASS_PROVIDER_KEYS.contains(providerKey)) {
+            return true;
+        }
+        return providerKey.contains("builder")
+            || providerKey.contains("kiro")
+            || providerKey.contains("enterprise")
+            || providerKey.contains("sso")
+            || providerKey.contains("idc");
+    }
+
+    public static boolean isLegacyOpenAiCompatibleProvider(String provider) {
+        String providerKey = key(provider);
+        return "openai-compatible".equals(providerKey) || "openaicompatibility".equals(providerKey);
+    }
+
+    public static boolean isCustomOpenAiCompatibleProvider(String provider, String authMethod) {
+        if (isFirstClassAccountProvider(provider) || isGoogleProvider(key(provider))
+            || isAnthropicProvider(key(provider)) || isDeepSeek(provider)) {
+            return false;
+        }
+        String authKey = key(authMethod);
+        return authKey.isEmpty() || isApiKey(authMethod);
+    }
+
+    public static boolean isCustomOpenAiCompatibleAccount(ProxyAccountEntity account) {
+        return account != null && isCustomOpenAiCompatibleProvider(account.getProvider(), account.getAuthMethod());
+    }
+
+    public static boolean requiresExplicitBaseUrl(String provider, String authMethod) {
+        return isLegacyOpenAiCompatibleProvider(provider) || isCustomOpenAiCompatibleProvider(provider, authMethod);
+    }
+
+    public static String normalizeBadgeColor(String color) {
+        String cleaned = clean(color);
+        if (cleaned == null) {
+            return null;
+        }
+        if (!BADGE_COLOR.matcher(cleaned).matches()) {
+            throw new ApiException(
+                HttpStatus.BAD_REQUEST,
+                "ACCOUNT_BADGE_COLOR_INVALID",
+                "Account badge color must be a 6-digit hex value such as #4D6BFE"
+            );
+        }
+        return cleaned;
+    }
+
     public static String normalizeProvider(String provider, String authMethod) {
         String cleaned = clean(provider);
         String providerKey = key(cleaned);
@@ -106,6 +195,9 @@ public final class AccountPlatforms {
         }
         if ("deepseek".equals(providerKey)) {
             return DEEPSEEK_PROVIDER;
+        }
+        if (isCustomOpenAiCompatibleProvider(cleaned, authMethod)) {
+            return cleaned;
         }
         if (isOpenAi(cleaned, authMethod)) {
             return OPENAI_PROVIDER;
@@ -129,6 +221,9 @@ public final class AccountPlatforms {
         }
         String providerKey = key(provider);
         if (cleaned == null && (isGoogleProvider(providerKey) || isAnthropicProvider(providerKey))) {
+            return OPENAI_API_KEY_AUTH;
+        }
+        if (isCustomOpenAiCompatibleProvider(provider, cleaned)) {
             return OPENAI_API_KEY_AUTH;
         }
         if (isOpenAi(provider, cleaned)) {
@@ -159,6 +254,9 @@ public final class AccountPlatforms {
         }
         if (isDeepSeek(provider)) {
             return DEFAULT_DEEPSEEK_BASE_URL;
+        }
+        if (requiresExplicitBaseUrl(provider, authMethod)) {
+            return cleaned;
         }
         if (isOpenAi(provider, authMethod)) {
             return DEFAULT_OPENAI_BASE_URL;
@@ -194,6 +292,18 @@ public final class AccountPlatforms {
         }
         try {
             return "api.deepseek.com".equalsIgnoreCase(URI.create(cleaned).getHost());
+        } catch (IllegalArgumentException ignored) {
+            return false;
+        }
+    }
+
+    private static boolean isOfficialOpenAiBaseUrl(String baseUrl) {
+        String cleaned = clean(baseUrl);
+        if (cleaned == null) {
+            return true;
+        }
+        try {
+            return "api.openai.com".equalsIgnoreCase(URI.create(cleaned).getHost());
         } catch (IllegalArgumentException ignored) {
             return false;
         }

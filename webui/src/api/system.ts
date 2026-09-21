@@ -1,17 +1,30 @@
 /**
- * 公共代理端点：健康检查 / 模型清单。
- * 注意：这些是 OpenAI 兼容接口，**不**走 ApiResponse 包装，直接返回原始结构。
+ * 公共系统端点：运行状态、健康检查与模型清单。
+ * 运行状态使用 ApiResponse 包装，OpenAI 兼容端点返回原始结构。
  */
-import http from '@/utils/http';
-import type { HealthInfo, ModelInfo } from '@/types/api';
+import http, { unwrap } from '@/utils/http';
+import { withCanonicalCatalogProvider } from '@/platforms/models';
+import type { ApiResponse, HealthInfo, ModelCatalogViewSettings, ModelInfo, SystemStatus } from '@/types/api';
+import { modelRankingApi } from './modelRanking';
 
 export const systemApi = {
+  status() {
+    return unwrap<SystemStatus>(
+      http.get<ApiResponse<SystemStatus>>('/system/status', { timeout: 5_000 }),
+    );
+  },
+  modelRanking: modelRankingApi.public,
   async health(): Promise<HealthInfo> {
     const { data } = await http.get<HealthInfo>('/health');
     return data;
   },
   async models(): Promise<ModelInfo[]> {
     const { data } = await http.get<{ data: ModelInfo[] }>('/v1/models');
-    return data?.data ?? [];
+    return (data?.data ?? []).map(withCanonicalCatalogProvider);
+  },
+  modelCatalogDisplay() {
+    return unwrap<ModelCatalogViewSettings>(
+      http.get<ApiResponse<ModelCatalogViewSettings>>('/system/model-catalog-display', { timeout: 5_000 }),
+    );
   },
 };

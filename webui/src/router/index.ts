@@ -8,9 +8,19 @@
  */
 
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router';
+import { systemApi } from '@/api';
 import { useAuthStore } from '@/stores/auth';
+import { useAppearanceStore } from '@/stores/appearance';
+import { useRankingStore } from '@/stores/ranking';
+import { ApiError } from '@/utils/http';
 
 const routes: RouteRecordRaw[] = [
+  {
+    path: '/maintenance',
+    name: 'maintenance',
+    component: () => import('@/views/system/MaintenanceView.vue'),
+    meta: { title: '系统维护', maintenancePage: true },
+  },
   {
     path: '/login',
     name: 'login',
@@ -30,11 +40,35 @@ const routes: RouteRecordRaw[] = [
     meta: { title: '修改密码', requiresAuth: true, allowFirstLogin: true },
   },
   {
+    path: '/smtp-verify',
+    name: 'smtp-verify',
+    component: () => import('@/views/auth/SmtpVerifyView.vue'),
+    meta: { title: 'SMTP 验证', anonymous: true },
+  },
+  {
     path: '/',
     component: () => import('@/layouts/DefaultLayout.vue'),
     meta: { requiresAuth: true },
     redirect: { name: 'dashboard' },
     children: [
+      {
+        path: 'tickets/new',
+        name: 'ticket-create',
+        component: () => import('@/views/tickets/TicketCreateView.vue'),
+        meta: { title: '新建工单', menuName: 'tickets' },
+      },
+      {
+        path: 'tickets',
+        name: 'tickets',
+        component: () => import('@/views/tickets/TicketView.vue'),
+        meta: { title: '工单', menuName: 'tickets' },
+      },
+      {
+        path: 'tickets/:id',
+        name: 'ticket-detail',
+        component: () => import('@/views/tickets/TicketView.vue'),
+        meta: { title: '工单详情', menuName: 'tickets' },
+      },
       {
         path: 'welcome',
         name: 'welcome',
@@ -66,6 +100,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '余额充值' },
       },
       {
+        path: 'coding-plans',
+        name: 'coding-plans',
+        component: () => import('@/views/payment/CodingPlanView.vue'),
+        meta: { title: 'Coding 订阅' },
+      },
+      {
         path: 'model-mappings',
         name: 'model-mappings',
         component: () => import('@/views/model-mappings/ModelMappingListView.vue'),
@@ -74,8 +114,34 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'model-pricing',
         name: 'model-pricing',
-        component: () => import('@/views/model-pricing/ModelPricingView.vue'),
-        meta: { title: '模型价格', adminOnly: true },
+        redirect: { name: 'models' },
+        meta: { title: '模型 ID' },
+      },
+      {
+        path: 'model-ranking',
+        name: 'model-ranking',
+        redirect: { name: 'model-ranking-frontierbench' },
+        meta: { title: '模型天梯', menuName: 'model-ranking' },
+      },
+      {
+        path: 'model-ranking/programbench',
+        name: 'model-ranking-programbench',
+        component: () => import('@/views/model-ranking/ModelRankingView.vue'),
+        props: { benchmark: 'programbench' },
+        meta: { title: 'ProgramBench 天梯', menuName: 'model-ranking' },
+      },
+      {
+        path: 'model-ranking/frontierbench',
+        name: 'model-ranking-frontierbench',
+        component: () => import('@/views/model-ranking/ModelRankingView.vue'),
+        props: { benchmark: 'frontierbench' },
+        meta: { title: 'FrontierBench 天梯', menuName: 'model-ranking' },
+      },
+      {
+        path: 'models/new',
+        name: 'model-create',
+        redirect: (to) => ({ name: 'settings-model-create', query: to.query }),
+        meta: { title: '添加模型', adminOnly: true, menuName: 'settings' },
       },
       {
         path: 'models',
@@ -98,8 +164,8 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'payment-settings',
         name: 'payment-settings',
-        component: () => import('@/views/payment/AdminPaymentSettingsView.vue'),
-        meta: { title: '支付设置', adminOnly: true },
+        redirect: { name: 'settings-payment' },
+        meta: { title: '支付设置', adminOnly: true, menuName: 'settings' },
       },
       {
         path: 'redemption-codes',
@@ -111,7 +177,96 @@ const routes: RouteRecordRaw[] = [
         path: 'data-transfer',
         name: 'data-transfer',
         component: () => import('@/views/data-transfer/DataTransferView.vue'),
-        meta: { title: '数据管理', adminOnly: true },
+        meta: { title: '数据管理', adminOnly: true, rootOnly: true },
+      },
+      {
+        path: 'settings',
+        name: 'settings',
+        component: () => import('@/views/settings/SystemSettingsLayout.vue'),
+        redirect: { name: 'settings-payment' },
+        meta: { title: '系统设置', adminOnly: true, menuName: 'settings' },
+        children: [
+          {
+            path: 'tickets',
+            name: 'settings-tickets',
+            component: () => import('@/views/settings/TicketSettingsView.vue'),
+            meta: { title: '工单通知' },
+          },
+          {
+            path: 'payment',
+            name: 'settings-payment',
+            component: () => import('@/views/payment/AdminPaymentSettingsView.vue'),
+            meta: { title: '支付设置' },
+          },
+          {
+            path: 'coding-plans',
+            name: 'settings-coding-plans',
+            component: () => import('@/views/settings/CodingPlanSettingsView.vue'),
+            meta: { title: 'Coding 套餐' },
+          },
+          {
+            path: 'registration',
+            name: 'settings-registration',
+            component: () => import('@/views/settings/RegistrationSettingsView.vue'),
+            meta: { title: '注册设置' },
+          },
+          {
+            path: 'smtp',
+            name: 'settings-smtp',
+            component: () => import('@/views/settings/SmtpSettingsView.vue'),
+            meta: { title: 'SMTP 设置' },
+          },
+          {
+            path: 'models',
+            name: 'settings-models',
+            component: () => import('@/views/settings/ModelCatalogSettingsView.vue'),
+            meta: { title: '模型管理' },
+          },
+          {
+            path: 'models/new',
+            name: 'settings-model-create',
+            component: () => import('@/views/models/ModelCreateView.vue'),
+            meta: { title: '添加模型' },
+          },
+          {
+            path: 'account-pool',
+            name: 'settings-account-pool',
+            component: () => import('@/views/settings/SettingsView.vue'),
+            meta: { title: '账号池设置' },
+          },
+          {
+            path: 'appearance',
+            name: 'settings-appearance',
+            component: () => import('@/views/settings/AppearanceSettingsView.vue'),
+            meta: { title: 'UI 自定义' },
+          },
+          {
+            path: 'model-ranking',
+            name: 'settings-model-ranking',
+            component: () => import('@/views/settings/ModelRankingSettingsView.vue'),
+            meta: { title: '模型天梯' },
+          },
+          {
+            path: 'plugin/:pluginId',
+            name: 'settings-plugin',
+            component: () => import('@/views/settings/PluginContributedSettingsView.vue'),
+            meta: { title: '插件设置' },
+          },
+          {
+            path: 'plugins',
+            name: 'settings-plugins',
+            component: () => import('@/views/settings/PluginSettingsView.vue'),
+            meta: { title: '插件开发', rootOnly: true },
+          },
+          {
+            path: 'news',
+            redirect: { name: 'settings-payment' },
+          },
+          {
+            path: 'security',
+            redirect: { name: 'settings-payment' },
+          },
+        ],
       },
     ],
   },
@@ -123,17 +278,36 @@ const router = createRouter({
   routes,
 });
 
-router.beforeEach((to) => {
+router.beforeEach(async (to) => {
   const auth = useAuthStore();
   const requiresAuth = to.matched.some((r) => r.meta.requiresAuth);
   const isAnonymous = to.meta.anonymous === true;
+
+  if (to.name !== 'maintenance') {
+    try {
+      const systemStatus = await systemApi.status();
+      if (systemStatus.maintenance || systemStatus.code === 'SYSTEM_MAINTENANCE') {
+        return { name: 'maintenance', query: { redirect: to.fullPath } };
+      }
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'SYSTEM_MAINTENANCE') {
+        return { name: 'maintenance', query: { redirect: to.fullPath } };
+      }
+      // 状态探测不可用时保留原导航，由目标接口给出真实服务状态。
+    }
+  }
 
   if (requiresAuth && !auth.isAuthenticated) {
     return { name: 'login', query: { redirect: to.fullPath } };
   }
 
   // 已登录用户访问登录页直接送回首页
-  if (isAnonymous && auth.isAuthenticated && !auth.requirePasswordChange) {
+  if (
+    isAnonymous &&
+    auth.isAuthenticated &&
+    !auth.requirePasswordChange &&
+    to.name !== 'smtp-verify'
+  ) {
     return { name: auth.defaultRouteName };
   }
 
@@ -151,12 +325,35 @@ router.beforeEach((to) => {
     return { name: auth.defaultRouteName };
   }
 
+  if (auth.isAuthenticated && auth.isAdmin && !auth.requirePasswordChange) {
+    try {
+      await auth.loadPermissions(to.meta.rootOnly === true);
+    } catch {
+      // Missing or unavailable permission data must not expose Root-only pages.
+    }
+  }
+  if (to.meta.rootOnly === true && !auth.isRoot) {
+    return auth.isAuthenticated
+      ? { name: auth.defaultRouteName }
+      : { name: 'login', query: { redirect: to.fullPath } };
+  }
+  if (requiresAuth && !auth.isAuthenticated) {
+    return { name: 'login', query: { redirect: to.fullPath } };
+  }
+
+  if (auth.isAuthenticated && to.meta.menuName === 'model-ranking') {
+    const ranking = useRankingStore();
+    if (!ranking.loaded) await ranking.load();
+    if (!ranking.enabled) return { name: auth.defaultRouteName };
+  }
+
   return true;
 });
 
 router.afterEach((to) => {
   const title = (to.meta.title as string | undefined) ?? '';
-  document.title = title ? `${title} · Starry API` : 'Starry API 控制台';
+  const siteName = useAppearanceStore().siteName;
+  document.title = title ? `${title} · ${siteName}` : `${siteName} 控制台`;
 });
 
 export default router;

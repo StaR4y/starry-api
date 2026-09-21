@@ -39,7 +39,7 @@ class PaymentSettingsServiceTest {
                 5,
                 List.of("alipay"),
                 new BigDecimal("2"),
-                new BigDecimal("0.00002"),
+                new BigDecimal("1.5"),
                 new BigDecimal("0.01"),
                 "Prefix",
                 "Suffix",
@@ -62,7 +62,7 @@ class PaymentSettingsServiceTest {
         assertThat(response.maxAmount()).isEqualByComparingTo("0.00");
         assertThat(response.dailyLimit()).isEqualByComparingTo("0.00");
         assertThat(response.enabledTypes()).containsExactly("alipay");
-        assertThat(response.apiBillingMultiplier()).isEqualByComparingTo("0.0000200000000000");
+        assertThat(response.apiBillingMultiplier()).isEqualByComparingTo("1.500000");
         assertThat(response.easypayApiBase()).isEqualTo("https://pay.example.com/submit.php");
         assertThat(response.easypayPid()).isEqualTo("10001");
         assertThat(response.easypayPkeyConfigured()).isTrue();
@@ -72,21 +72,32 @@ class PaymentSettingsServiceTest {
 
         assertThat(store.get(PaymentSettingsService.PAYMENT_ENABLED)).isEqualTo("true");
         assertThat(store.get(PaymentSettingsService.MAX_RECHARGE_AMOUNT)).isEqualTo("0.00");
-        assertThat(store.get(PaymentSettingsService.API_BILLING_MULTIPLIER)).isEqualTo("0.0000200000000000");
+        assertThat(store.get(PaymentSettingsService.MODEL_PRICE_BILLING_MULTIPLIER)).isEqualTo("1.500000");
         assertThat(store.get(PaymentSettingsService.EASYPAY_PKEY)).isEqualTo("secret");
         assertThat(store.get(PaymentSettingsService.INVITE_REBATE_RATE)).isEqualTo("0.150000");
         verify(repository).upsertSettings(any(String[].class), any(String[].class));
     }
 
     @Test
-    void defaultApiBillingMultiplierTargetsSixMillionTokensPerOneHundredBalance() {
+    void defaultApiBillingMultiplierUsesOfficialPriceWithoutMarkup() {
         Map<String, String> store = new ConcurrentHashMap<>();
         SystemSettingRepository repository = mockRepository(store);
 
         PaymentSettingsResponse response = new PaymentSettingsService(repository).settings().block();
 
         assertThat(response).isNotNull();
-        assertThat(response.apiBillingMultiplier()).isEqualByComparingTo("0.0000166666666667");
+        assertThat(response.apiBillingMultiplier()).isEqualByComparingTo("1.000000");
+    }
+
+    @Test
+    void doesNotInterpretLegacyPerTokenSettingAsOfficialPriceMultiplier() {
+        Map<String, String> store = new ConcurrentHashMap<>();
+        store.put("API_BILLING_MULTIPLIER", "0.0000166666666667");
+
+        PaymentSettingsResponse response = new PaymentSettingsService(mockRepository(store)).settings().block();
+
+        assertThat(response).isNotNull();
+        assertThat(response.apiBillingMultiplier()).isEqualByComparingTo("1.000000");
     }
 
     @Test

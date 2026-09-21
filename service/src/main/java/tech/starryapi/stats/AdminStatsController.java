@@ -57,4 +57,28 @@ public class AdminStatsController implements AdminStatsApi {
         return statsAnalyticsService.usageSummaryForUser(principal.userId())
             .map(ApiResponse::ok);
     }
+
+    @Override
+    public Mono<ApiResponse<StatsDtos.UsageTrackerResponse>> myUsageTracker(
+        ServerWebExchange exchange,
+        String from,
+        String to
+    ) {
+        AdminPrincipal principal = adminAuth.verify(exchange);
+        return statsAnalyticsService.usageTrackerForUser(principal.userId(), from, to)
+            .map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<StatsDtos.RequestLogPageResponse>> myLogs(
+        ServerWebExchange exchange,
+        String from,
+        String to,
+        String before,
+        Integer limit
+    ) {
+        AdminPrincipal principal = adminAuth.verify(exchange);
+        return statsAnalyticsService.logsForUser(principal.userId(), from, to, before, limit)
+            .map(ApiResponse::ok);
+    }
 }

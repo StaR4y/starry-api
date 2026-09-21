@@ -20,16 +20,29 @@ export function getFamilyOrder() {
   return familyOrder;
 }
 
+export function canonicalCatalogProvider(provider: string | null | undefined) {
+  const value = (provider ?? '').trim();
+  if (!value) return value;
+  if (value.toLowerCase() === 'gemini') return 'Google';
+  return value;
+}
+
+export function withCanonicalCatalogProvider<T extends { provider?: string | null }>(model: T): T {
+  const provider = canonicalCatalogProvider(model.provider);
+  return provider && provider !== model.provider ? { ...model, provider } : model;
+}
+
 export function platformClass(provider: string) {
+  const canonical = canonicalCatalogProvider(provider);
   return (
-    platformDefinitions.find((item) => item.provider === provider)?.className ??
+    platformDefinitions.find((item) => item.provider === canonical)?.className ??
     otherPlatform.className
   );
 }
 
 export function inferModelProvider(model: ModelInfo) {
   if (model.provider) {
-    return model.provider;
+    return canonicalCatalogProvider(model.provider);
   }
   return (
     providerPlatforms.find((platform) => platform.matches?.(model))?.provider ??
