@@ -22,7 +22,10 @@ import tech.starryapi.common.ApiResponse;
 public interface DataTransferApi {
 
     @GetMapping("/status")
-    Mono<ApiResponse<DataTransferDtos.DataTransferStatusResponse>> status(ServerWebExchange exchange);
+    Mono<ApiResponse<DataTransferDtos.DataTransferStatusResponse>> status(
+        ServerWebExchange exchange,
+        @RequestHeader(name = "X-Data-Management-Token", required = false) String securityToken
+    );
 
     @GetMapping("/security/status")
     Mono<ApiResponse<DataTransferDtos.DataManagementSecurityStatusResponse>> securityStatus(ServerWebExchange exchange);
@@ -51,7 +54,10 @@ public interface DataTransferApi {
     );
 
     @GetMapping("/backups")
-    Mono<ApiResponse<DataTransferDtos.BackupListResponse>> backups(ServerWebExchange exchange);
+    Mono<ApiResponse<DataTransferDtos.BackupListResponse>> backups(
+        ServerWebExchange exchange,
+        @RequestHeader(name = "X-Data-Management-Token", required = false) String securityToken
+    );
 
     @PostMapping("/backups")
     Mono<ApiResponse<DataTransferDtos.BackupCreateResponse>> createBackup(

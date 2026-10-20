@@ -18,6 +18,7 @@ import java.util.function.BiFunction;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
+import org.springframework.http.HttpStatus;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.r2dbc.core.FetchSpec;
 import org.springframework.r2dbc.core.RowsFetchSpec;
@@ -502,6 +503,49 @@ class AdminUserServiceTest {
     }
 
     @Test
+    void aStaleBalanceEditIsRejectedWithConflictInsteadOfOverwritingTheLiveBalance() {
+        AdminUserRepository repository = mock(AdminUserRepository.class);
+        RegistrationSettingsService settingsService = mock(RegistrationSettingsService.class);
+        AdminUserEntity user = user("u-1", "normal-user", "user@example.com", "secret123456");
+        user.setRole("USER");
+        user.setBalance(new BigDecimal("150.000000"));
+        // The guarded UPDATE matches no row because the stored balance no longer equals the expected one.
+        SqlTemplateHarness sql = sqlTemplateReturning(user, true);
+        AdminUserService service = service(repository, settingsService, sql.template());
+        when(repository.findApplicationRoot()).thenReturn(Mono.empty());
+        when(repository.findByUserId("u-1")).thenReturn(Mono.just(user));
+
+        assertThatThrownBy(() -> service.update(principal("admin-1", "manager"), "u-1", new AdminDtos.UpdateAdminUserRequest(
+            null, null, null, new BigDecimal("100.000000"), null, new BigDecimal("100.000000")
+        )).block())
+            .isInstanceOfSatisfying(ApiException.class, error -> {
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                assertThat(error.getCode()).isEqualTo("ADMIN_USER_BALANCE_CHANGED");
+            });
+
+        assertThat(sql.sql()).contains("expectedBalance", "candidate.balance_before = CAST(:expectedBalance AS NUMERIC)");
+        assertThat(sql.bindings()).containsEntry("expectedBalance", new BigDecimal("100.000000"));
+    }
+
+    @Test
+    void updatingOtherFieldsNeverSendsAnExpectedBalance() {
+        AdminUserRepository repository = mock(AdminUserRepository.class);
+        RegistrationSettingsService settingsService = mock(RegistrationSettingsService.class);
+        AdminUserEntity user = user("u-1", "normal-user", "user@example.com", "secret123456");
+        user.setRole("USER");
+        SqlTemplateHarness sql = sqlTemplateReturning(user);
+        AdminUserService service = service(repository, settingsService, sql.template());
+        when(repository.findApplicationRoot()).thenReturn(Mono.empty());
+
+        service.update(principal("admin-1", "manager"), "u-1", new AdminDtos.UpdateAdminUserRequest(
+            null, "New name", null, null, null
+        )).block();
+
+        assertThat(sql.bindings()).containsEntry("setBalance", false);
+        assertThat(sql.bindings()).doesNotContainKey("expectedBalance");
+    }
+
+    @Test
     void roleOrEnablementChangesInvalidateAllExistingTargetSessions() {
         AdminUserRepository repository = mock(AdminUserRepository.class);
         RegistrationSettingsService settingsService = mock(RegistrationSettingsService.class);
@@ -860,6 +904,11 @@ class AdminUserServiceTest {
 
     @SuppressWarnings("unchecked")
     private SqlTemplateHarness sqlTemplateReturning(AdminUserEntity returned) {
+        return sqlTemplateReturning(returned, false);
+    }
+
+    @SuppressWarnings("unchecked")
+    private SqlTemplateHarness sqlTemplateReturning(AdminUserEntity returned, boolean emptyResult) {
         R2dbcEntityTemplate template = mock(R2dbcEntityTemplate.class);
         DatabaseClient databaseClient = mock(DatabaseClient.class);
         DatabaseClient.GenericExecuteSpec spec = mock(DatabaseClient.GenericExecuteSpec.class);
@@ -878,7 +927,7 @@ class AdminUserServiceTest {
         when(spec.bindNull(any(String.class), any())).thenReturn(spec);
         when(spec.map(org.mockito.ArgumentMatchers.<BiFunction<Row, RowMetadata, AdminUserEntity>>any()))
             .thenReturn(fetch);
-        when(fetch.one()).thenReturn(Mono.just(returned));
+        when(fetch.one()).thenReturn(emptyResult ? Mono.empty() : Mono.just(returned));
         return new SqlTemplateHarness(template, sql, bindings);
     }
 

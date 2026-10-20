@@ -13,7 +13,11 @@ import tech.starryapi.common.ApiResponse;
 public interface AdminAuthApi {
 
     @PostMapping("/login")
-    Mono<ApiResponse<AdminDtos.LoginResponse>> login(@Valid @RequestBody AdminDtos.LoginRequest request);
+    Mono<ApiResponse<AdminDtos.LoginResponse>> login(@Valid @RequestBody AdminDtos.LoginRequest request, ServerWebExchange exchange);
+
+    /** Ends the caller's session on the server. Always succeeds, so a stale token can still "log out". */
+    @PostMapping("/logout")
+    Mono<ApiResponse<Void>> logout(ServerWebExchange exchange);
 
     @GetMapping("/me")
     Mono<ApiResponse<AdminDtos.AdminUserResponse>> me(ServerWebExchange exchange);

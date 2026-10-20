@@ -45,13 +45,19 @@ public class AdminAuth {
         return principal;
     }
 
-    public AdminPrincipal verifyAllowFirstLogin(ServerWebExchange exchange) {
-        String configured = properties.getAdminToken();
+    /** The credential the caller presented, or null. */
+    public String presentedToken(ServerWebExchange exchange) {
         String provided = exchange.getRequest().getHeaders().getFirst("X-Admin-Token");
         String authorization = exchange.getRequest().getHeaders().getFirst(HttpHeaders.AUTHORIZATION);
         if (provided == null && authorization != null && authorization.startsWith("Bearer ")) {
             provided = authorization.substring("Bearer ".length());
         }
+        return provided == null || provided.isBlank() ? null : provided;
+    }
+
+    public AdminPrincipal verifyAllowFirstLogin(ServerWebExchange exchange) {
+        String configured = properties.getAdminToken();
+        String provided = presentedToken(exchange);
 
         if (provided != null && !provided.isBlank()) {
             if (configured != null && !configured.isBlank() && configured.equals(provided)) {

@@ -165,6 +165,45 @@ class DataManagementSecurityServiceTest {
     }
 
     @Test
+    void pageGrantRequiresKeyAndCannotAuthorizeOtherActionsOrSessions() {
+        MutableClock clock = new MutableClock(Instant.parse("2026-09-26T00:00:00Z"));
+        TestContext context = initializedContext(clock, null, List.of());
+        var action = DataManagementSecurityService.Action.VIEW_DATA_MANAGEMENT;
+        assertUnlockRequired(() -> context.service().authorize(context.rootPrincipal(), context.rootExchange(),
+            null, action, null, false).block());
+        assertApiError(() -> context.service().unlock(context.rootPrincipal(), context.rootExchange(),
+            "wrong-key", action.name(), null).block(), "DATA_MANAGEMENT_SECURITY_KEY_INVALID");
+
+        var grant = context.service().unlock(context.rootPrincipal(), context.rootExchange(),
+            context.securityKey(), action.name(), null).block();
+        assertThat(grant).isNotNull();
+        context.service().authorize(context.rootPrincipal(), context.rootExchange(),
+            grant.accessToken(), action, null, false).block();
+        context.service().authorize(context.rootPrincipal(), context.rootExchange(),
+            grant.accessToken(), action, null, false).block();
+        assertUnlockRequired(() -> context.service().authorize(context.rootPrincipal(), exchange("other-session"),
+            grant.accessToken(), action, null, false).block());
+        for (var operation : DataManagementSecurityService.Action.values()) {
+            if (operation == action) continue;
+            String target = operation == DataManagementSecurityService.Action.DOWNLOAD_BACKUP
+                || operation == DataManagementSecurityService.Action.DELETE_BACKUP ? "backup.zip" : null;
+            assertUnlockRequired(() -> context.service().authorize(context.rootPrincipal(), context.rootExchange(),
+                grant.accessToken(), operation, target, false).block());
+        }
+        var exportGrant = context.service().unlock(context.rootPrincipal(), context.rootExchange(),
+            context.securityKey(), "EXPORT_DATABASE", null).block();
+        assertThat(exportGrant).isNotNull();
+        assertUnlockRequired(() -> context.service().authorize(context.rootPrincipal(), context.rootExchange(),
+            exportGrant.accessToken(), action, null, false).block());
+        // Issuing a separate operation grant must not invalidate the page grant.
+        context.service().authorize(context.rootPrincipal(), context.rootExchange(),
+            grant.accessToken(), action, null, false).block();
+        clock.advance(Duration.ofMinutes(5));
+        assertUnlockRequired(() -> context.service().authorize(context.rootPrincipal(), context.rootExchange(),
+            grant.accessToken(), action, null, false).block());
+    }
+
+    @Test
     void issuingSameBindingReplacesOldGrantAndDestructiveGrantIsSingleUse() {
         TestContext context = initializedContext();
         DataTransferDtos.UnlockDataManagementResponse first = context.service().unlock(

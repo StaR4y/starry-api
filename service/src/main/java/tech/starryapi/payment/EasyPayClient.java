@@ -60,7 +60,22 @@ public class EasyPayClient {
             .retrieve()
             .bodyToMono(String.class)
             .timeout(REQUEST_TIMEOUT)
-            .map(body -> parseOrderQueryResponse(order.getOutTradeNo(), body));
+            .map(body -> parseOrderQueryResponse(order.getOutTradeNo(), body))
+            // The merchant key travels in this query string, and Spring puts the request URI into its exception
+            // messages. Replace the error so the key never reaches a log line.
+            .onErrorMap(error -> !(error instanceof IllegalStateException),
+                error -> new IllegalStateException("EasyPay order query failed: " + describeFailure(error)));
+    }
+
+    static String describeFailure(Throwable error) {
+        if (error instanceof org.springframework.web.reactive.function.client.WebClientResponseException response) {
+            return "HTTP " + response.getStatusCode().value();
+        }
+        return redact(error.getClass().getSimpleName() + (error.getMessage() == null ? "" : ": " + error.getMessage()));
+    }
+
+    static String redact(String text) {
+        return text == null ? null : text.replaceAll("(?i)([?&]key=)[^&\\s\"']*", "$1***");
     }
 
     public Notification verifyNotification(PaymentConfig config, Map<String, String> params, String rawBody) {
@@ -68,7 +83,9 @@ public class EasyPayClient {
         if (sign == null || sign.isBlank()) {
             throw new IllegalArgumentException("EasyPay notification signature is missing");
         }
-        if (!sign(config.easypayPkey(), params).equalsIgnoreCase(sign)) {
+        byte[] expected = sign(config.easypayPkey(), params).toLowerCase(java.util.Locale.ROOT).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] actual = sign.trim().toLowerCase(java.util.Locale.ROOT).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        if (!java.security.MessageDigest.isEqual(expected, actual)) {
             throw new IllegalArgumentException("EasyPay notification signature is invalid");
         }
         String status = params.getOrDefault("trade_status", "");

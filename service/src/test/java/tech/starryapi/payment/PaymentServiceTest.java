@@ -285,6 +285,25 @@ class PaymentServiceTest {
     }
 
     @Test
+    void anEasyPayNotificationIsRejectedWithoutTouchingAnyOrderWhenTheMerchantKeyIsNotConfigured() {
+        SqlHarness sql = new SqlHarness("CREATED", null, List.of(), 0L);
+        PaymentOrderRepository repository = mock(PaymentOrderRepository.class);
+        EasyPayClient easyPayClient = mock(EasyPayClient.class);
+        PaymentConfig blankKey = new PaymentConfig(
+            true, BigDecimal.ONE, new BigDecimal("1000.00"), new BigDecimal("100.00"), 30, 3,
+            List.of("alipay"), new BigDecimal("1.50"), BigDecimal.ONE, new BigDecimal("0.10"),
+            "", "", "", "", "https://payment.example.com", "pid-1", "", "popup", false, BigDecimal.ZERO, 10, null, null
+        );
+
+        String result = service(repository, mock(AdminUserRepository.class), sql, settings(blankKey), easyPayClient,
+            mock(InviteRebateService.class)).handleEasyPayNotification(Map.of("sign", "anything"), "paid").block();
+
+        assertThat(result).isEqualTo("fail");
+        verify(easyPayClient, never()).verifyNotification(any(), any(), anyString());
+        verify(repository, never()).findByOutTradeNo(anyString());
+    }
+
+    @Test
     void verifiedPaymentDoesNotAcknowledgeWhenCreditedStateCannotBeConfirmed() {
         SqlHarness sql = new SqlHarness("CREATED", null, List.of(), 0L);
         PaymentOrderRepository repository = mock(PaymentOrderRepository.class);

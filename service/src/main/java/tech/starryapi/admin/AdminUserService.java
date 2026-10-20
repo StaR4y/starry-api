@@ -60,7 +60,7 @@ public class AdminUserService {
     @Transactional
     public Mono<BootstrapAdmin> ensureDefaultAdmin() {
         return repository.findApplicationRootUserIdWithLock()
-            .switchIfEmpty(Mono.error(new IllegalStateException(
+            .switchIfEmpty(Mono.error(() -> new IllegalStateException(
                 "The application Root identity marker is missing; Flyway V6 must be applied"
             )))
             .flatMap(rootUserId -> rootUserId == null || rootUserId.isBlank()
@@ -105,7 +105,7 @@ public class AdminUserService {
         existingRootBootstrap(candidate);
         return repository.assignApplicationRoot(candidate.getUserId())
             .filter(updated -> updated == 1)
-            .switchIfEmpty(Mono.error(new IllegalStateException(
+            .switchIfEmpty(Mono.error(() -> new IllegalStateException(
                 "The application Root identity marker could not be assigned"
             )))
             .then();
@@ -117,7 +117,7 @@ public class AdminUserService {
 
     public Mono<AdminUserEntity> currentUser(AdminPrincipal principal) {
         return repository.findByUserId(principal.userId())
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.UNAUTHORIZED, "ADMIN_UNAUTHORIZED", "Invalid or expired admin session")))
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.UNAUTHORIZED, "ADMIN_UNAUTHORIZED", "Invalid or expired admin session")))
             .flatMap(entity -> {
                 if (Boolean.FALSE.equals(entity.getEnabled())) {
                     return Mono.error(new ApiException(HttpStatus.UNAUTHORIZED, "ADMIN_UNAUTHORIZED", "Account is disabled"));
@@ -260,6 +260,7 @@ public class AdminUserService {
                 FROM candidate
                 WHERE :setBalance
                   AND :balance <> candidate.balance_before
+                  AND (CAST(:expectedBalance AS NUMERIC) IS NULL OR candidate.balance_before = CAST(:expectedBalance AS NUMERIC))
                 ON CONFLICT (idempotency_key) DO NOTHING
                 RETURNING user_id
             )
@@ -273,6 +274,9 @@ public class AdminUserService {
             FROM candidate
             LEFT JOIN ledger_entry ON ledger_entry.user_id = candidate.user_id
             WHERE u.user_id = candidate.user_id
+              AND (NOT :setBalance
+                   OR CAST(:expectedBalance AS NUMERIC) IS NULL
+                   OR candidate.balance_before = CAST(:expectedBalance AS NUMERIC))
             RETURNING u.*
             """;
         GenericExecuteSpec spec = template.getDatabaseClient().sql(sql)
@@ -289,10 +293,21 @@ public class AdminUserService {
         spec = bindNullable(spec, "email", setEmail ? RegistrationEmailPolicy.normalizeEmail(request.email()) : null);
         spec = bindNullable(spec, "displayName", request.displayName());
         spec = bindNullable(spec, "role", normalizedRole);
+        spec = request.expectedBalance() == null
+            ? spec.bindNull("expectedBalance", BigDecimal.class)
+            : spec.bind("expectedBalance", normalizeBalance(request.expectedBalance()));
         return spec
             .map((row, metadata) -> template.getConverter().read(AdminUserEntity.class, row, metadata))
             .one()
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ADMIN_USER_NOT_FOUND", "Admin user not found")))
+            .switchIfEmpty(Mono.defer(() -> setBalance && request.expectedBalance() != null
+                ? repository.findByUserId(userId)
+                    .flatMap(current -> Mono.<AdminUserEntity>error(new ApiException(
+                        HttpStatus.CONFLICT,
+                        "ADMIN_USER_BALANCE_CHANGED",
+                        "The balance changed after this form was opened. Reload the user and try again."
+                    )))
+                    .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "ADMIN_USER_NOT_FOUND", "Admin user not found")))
+                : Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ADMIN_USER_NOT_FOUND", "Admin user not found"))))
             .onErrorMap(
                 DuplicateKeyException.class,
                 error -> new ApiException(HttpStatus.CONFLICT, "ADMIN_USER_EXISTS", "Username or email already exists")
@@ -378,7 +393,7 @@ public class AdminUserService {
                 password
             ))
             .one()
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ADMIN_USER_NOT_FOUND", "Admin user not found")))
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "ADMIN_USER_NOT_FOUND", "Admin user not found")))
             .doOnNext(response -> sessionService.invalidateUserSessions(response.userId()));
     }
 
@@ -438,12 +453,17 @@ public class AdminUserService {
 
     public Mono<AdminDtos.LoginResponse> login(AdminDtos.LoginRequest request) {
         return findLoginUser(request.username())
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.UNAUTHORIZED, "LOGIN_FAILED", "Invalid username or password")))
+            // Hash a throwaway salt for unknown usernames so the response time does not reveal which accounts exist.
+            .switchIfEmpty(Mono.defer(() -> Mono.fromCallable(() -> passwordHasher.hash(request.password(), passwordHasher.newSalt()))
+                .subscribeOn(Schedulers.boundedElastic())
+                .then(Mono.<AdminUserEntity>error(new ApiException(HttpStatus.UNAUTHORIZED, "LOGIN_FAILED", "Invalid username or password")))))
+            // PBKDF2 is CPU-bound (tens of milliseconds): never run it on a Netty event-loop thread.
+            .flatMap(entity -> Mono.fromCallable(() -> passwordHasher.matches(request.password(), entity.getPasswordSalt(), entity.getPasswordHash()))
+                .subscribeOn(Schedulers.boundedElastic())
+                .map(matches -> matches && !Boolean.FALSE.equals(entity.getEnabled()))
+                .flatMap(authenticated -> authenticated ? Mono.just(entity)
+                    : Mono.<AdminUserEntity>error(new ApiException(HttpStatus.UNAUTHORIZED, "LOGIN_FAILED", "Invalid username or password"))))
             .flatMap(entity -> {
-                if (Boolean.FALSE.equals(entity.getEnabled())
-                    || !passwordHasher.matches(request.password(), entity.getPasswordSalt(), entity.getPasswordHash())) {
-                    return Mono.error(new ApiException(HttpStatus.UNAUTHORIZED, "LOGIN_FAILED", "Invalid username or password"));
-                }
                 String sql = """
                     UPDATE admin_users
                     SET last_login_at = :now,
@@ -457,20 +477,27 @@ public class AdminUserService {
                     .bind("userId", entity.getUserId())
                     .map((row, metadata) -> template.getConverter().read(AdminUserEntity.class, row, metadata))
                     .one()
-                    .switchIfEmpty(Mono.error(new ApiException(HttpStatus.UNAUTHORIZED, "LOGIN_FAILED", "Invalid username or password")))
+                    .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.UNAUTHORIZED, "LOGIN_FAILED", "Invalid username or password")))
                     .map(this::loginResponse);
             });
+    }
+
+    public void logout(String token) {
+        sessionService.invalidateSession(token);
     }
 
     public Mono<Void> changePassword(AdminPrincipal principal, AdminDtos.ChangePasswordRequest request) {
         validateNewPassword(request.newPassword());
         return repository.findByUserId(principal.userId())
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ADMIN_USER_NOT_FOUND", "Admin user not found")))
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "ADMIN_USER_NOT_FOUND", "Admin user not found")))
+            .flatMap(entity -> Mono.fromCallable(() -> {
+                    if (!passwordHasher.matches(request.oldPassword(), entity.getPasswordSalt(), entity.getPasswordHash())) {
+                        throw new ApiException(HttpStatus.BAD_REQUEST, "OLD_PASSWORD_INVALID", "Old password is invalid");
+                    }
+                    applyPassword(entity, request.newPassword());
+                    return entity;
+                }).subscribeOn(Schedulers.boundedElastic()))
             .flatMap(entity -> {
-                if (!passwordHasher.matches(request.oldPassword(), entity.getPasswordSalt(), entity.getPasswordHash())) {
-                    return Mono.error(new ApiException(HttpStatus.BAD_REQUEST, "OLD_PASSWORD_INVALID", "Old password is invalid"));
-                }
-                applyPassword(entity, request.newPassword());
                 String sql = """
                     UPDATE admin_users
                     SET password_hash = :passwordHash,
@@ -486,7 +513,7 @@ public class AdminUserService {
                     .fetch()
                     .rowsUpdated()
                     .filter(rows -> rows > 0)
-                    .switchIfEmpty(Mono.error(new ApiException(
+                    .switchIfEmpty(Mono.error(() -> new ApiException(
                         HttpStatus.NOT_FOUND,
                         "ADMIN_USER_NOT_FOUND",
                         "Admin user not found"
@@ -499,7 +526,7 @@ public class AdminUserService {
     private Mono<BootstrapAdmin> existingBootstrap(String rootUserId) {
         return repository.findByUserId(rootUserId)
             .map(this::existingRootBootstrap)
-            .switchIfEmpty(Mono.error(new IllegalStateException(
+            .switchIfEmpty(Mono.error(() -> new IllegalStateException(
                 "The application Root identity marker references a missing account"
             )));
     }

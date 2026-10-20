@@ -15,7 +15,7 @@ public final class AdminDtos {
     }
 
     public record LoginRequest(
-        @NotBlank String username,
+        @NotBlank @Size(max = 64) String username,
         @NotBlank @Size(max = 128) String password
     ) {
     }
@@ -86,13 +86,22 @@ public final class AdminDtos {
     ) {
     }
 
+    /**
+     * {@code expectedBalance} is the balance the editor was looking at. When {@code balance} is sent, the update
+     * only applies if the stored balance still equals it, so a stale form can never overwrite credits that were
+     * added or reserved in the meantime. Omit both to leave the balance alone.
+     */
     public record UpdateAdminUserRequest(
         @Email String email,
         String displayName,
         String role,
         BigDecimal balance,
-        Boolean enabled
+        Boolean enabled,
+        BigDecimal expectedBalance
     ) {
+        public UpdateAdminUserRequest(String email, String displayName, String role, BigDecimal balance, Boolean enabled) {
+            this(email, displayName, role, balance, enabled, null);
+        }
     }
 
     public record AdminUserCreatedResponse(

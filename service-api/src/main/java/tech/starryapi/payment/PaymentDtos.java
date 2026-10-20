@@ -1,9 +1,12 @@
 package tech.starryapi.payment;
 
+import jakarta.validation.constraints.DecimalMax;
 import jakarta.validation.constraints.DecimalMin;
+import jakarta.validation.constraints.Digits;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
@@ -71,9 +74,10 @@ public final class PaymentDtos {
     }
 
     public record CreatePaymentOrderRequest(
-        @DecimalMin(value = "0.01") BigDecimal amount,
+        // Bounded so a value such as 1e999999999 is rejected up front instead of reaching BigDecimal arithmetic.
+        @DecimalMin(value = "0.01") @DecimalMax(value = "100000000") @Digits(integer = 9, fraction = 2) BigDecimal amount,
         @NotBlank String paymentType,
-        String returnUrl,
+        @Size(max = 2000) String returnUrl,
         Boolean mobile
     ) {
     }
@@ -125,7 +129,7 @@ public final class PaymentDtos {
     }
 
     public record CreateRedemptionCodeRequest(
-        @DecimalMin(value = "0.000001") BigDecimal balance,
+        @DecimalMin(value = "0.000001") @DecimalMax(value = "100000000") @Digits(integer = 9, fraction = 6) BigDecimal balance,
         String planId,
         @Min(1) @Max(100) Integer count,
         Instant expiresAt

@@ -182,7 +182,7 @@ public class PaymentService {
         return user(principal)
             .flatMap(user -> repository.findByOrderId(orderId)
                 .filter(order -> user.getUserId().equals(order.getUserId()))
-                .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "PAYMENT_ORDER_NOT_FOUND", "Payment order not found"))))
+                .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "PAYMENT_ORDER_NOT_FOUND", "Payment order not found"))))
             .flatMap(this::syncOrderWithProviderIfNeeded)
             .map(PaymentOrderMapper::toResponse);
     }
@@ -191,7 +191,7 @@ public class PaymentService {
         return user(principal)
             .flatMap(user -> repository.findByOrderId(orderId)
                 .filter(order -> user.getUserId().equals(order.getUserId()))
-                .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "PAYMENT_ORDER_NOT_FOUND", "Payment order not found"))))
+                .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "PAYMENT_ORDER_NOT_FOUND", "Payment order not found"))))
             .flatMap(order -> {
                 if (!STATUS_PENDING.equals(order.getStatus())) {
                     return Mono.error(new ApiException(HttpStatus.BAD_REQUEST, "PAYMENT_ORDER_NOT_PENDING", "Only pending orders can be cancelled"));
@@ -213,7 +213,7 @@ public class PaymentService {
 
     public Mono<PaymentOrderResponse> getAdminOrder(String orderId) {
         return repository.findByOrderId(orderId)
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "PAYMENT_ORDER_NOT_FOUND", "Payment order not found")))
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "PAYMENT_ORDER_NOT_FOUND", "Payment order not found")))
             .flatMap(this::syncOrderWithProviderIfNeeded)
             .map(PaymentOrderMapper::toResponse);
     }
@@ -221,6 +221,11 @@ public class PaymentService {
     public Mono<String> handleEasyPayNotification(Map<String, String> params, String rawBody) {
         return settingsService.config()
             .flatMap(config -> {
+                // Without a merchant key the signature is a plain MD5 of the parameters, which anyone can compute.
+                if (!config.easypayConfigured()) {
+                    log.warn("Ignoring an EasyPay notification because EasyPay is not configured");
+                    return Mono.just("fail");
+                }
                 Notification notification = easyPayClient.verifyNotification(config, params, rawBody);
                 if (!notification.paid()) {
                     return Mono.just("fail");
@@ -395,7 +400,7 @@ public class PaymentService {
         spec = bindNullable(spec, "email", order.getEmail());
         return spec.map((row, metadata) -> row.get("decision", String.class))
             .one()
-            .switchIfEmpty(Mono.error(new IllegalStateException("Payment order reservation returned no decision")))
+            .switchIfEmpty(Mono.error(() -> new IllegalStateException("Payment order reservation returned no decision")))
             .flatMap(decision -> switch (decision) {
                 case "CREATED" -> Mono.just(order);
                 case "PENDING_LIMIT" -> Mono.error(new ApiException(
@@ -514,7 +519,7 @@ public class PaymentService {
             return Mono.error(new ApiException(HttpStatus.BAD_REQUEST, "PAYMENT_NOTIFY_INVALID", "out_trade_no is required"));
         }
         return repository.findByOutTradeNo(notification.outTradeNo())
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "PAYMENT_ORDER_NOT_FOUND", "Payment order not found")))
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "PAYMENT_ORDER_NOT_FOUND", "Payment order not found")))
             .flatMap(order -> {
                 if (notification.amount().compareTo(order.getPayAmount().setScale(2, RoundingMode.HALF_UP)) < 0) {
                     return Mono.error(new ApiException(HttpStatus.BAD_REQUEST, "PAYMENT_AMOUNT_MISMATCH", "Paid amount is lower than order amount"));
@@ -532,7 +537,7 @@ public class PaymentService {
                 }
                 Instant now = Instant.now();
                 return completeAndCreditPaidOrder(notification, config, now)
-                    .switchIfEmpty(Mono.error(new ApiException(
+                    .switchIfEmpty(Mono.error(() -> new ApiException(
                         HttpStatus.SERVICE_UNAVAILABLE,
                         "PAYMENT_CREDIT_PENDING",
                         "Payment was verified but balance credit is not confirmed"
@@ -540,6 +545,34 @@ public class PaymentService {
                     .flatMap(inviteRebateService::processPending)
                     .then();
             });
+    }
+
+    private static final long PROVIDER_QUERY_MIN_INTERVAL_MILLIS = 10_000;
+    private static final int PROVIDER_QUERY_TRACKED_ORDERS = 5_000;
+    private final java.util.Map<String, Long> lastProviderQuery = new java.util.LinkedHashMap<>() {
+        @Override
+        protected boolean removeEldestEntry(java.util.Map.Entry<String, Long> eldest) {
+            return size() > PROVIDER_QUERY_TRACKED_ORDERS;
+        }
+    };
+
+    /**
+     * Reading an order can trigger a query to the payment provider. Without a limit, repeatedly opening or
+     * polling one unpaid order sends the provider a request each time, using the merchant's credentials.
+     */
+    private boolean providerQueryAllowed(String orderId) {
+        if (orderId == null) {
+            return true;
+        }
+        long now = System.currentTimeMillis();
+        synchronized (lastProviderQuery) {
+            Long last = lastProviderQuery.get(orderId);
+            if (last != null && now - last < PROVIDER_QUERY_MIN_INTERVAL_MILLIS) {
+                return false;
+            }
+            lastProviderQuery.put(orderId, now);
+            return true;
+        }
     }
 
     private Mono<PaymentOrderEntity> syncOrderWithProviderIfNeeded(PaymentOrderEntity order) {
@@ -558,7 +591,7 @@ public class PaymentService {
             return recovery
                 .then(reloadOrder(order));
         }
-        if (!shouldQueryProvider(order)) {
+        if (!shouldQueryProvider(order) || !providerQueryAllowed(order.getOrderId())) {
             return Mono.just(order);
         }
         return settingsService.config()
@@ -1048,7 +1081,7 @@ public class PaymentService {
             return Mono.error(new ApiException(HttpStatus.FORBIDDEN, "USER_ROLE_REQUIRED", "Payment is only available to ordinary users"));
         }
         return userRepository.findByUserId(principal.userId())
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.UNAUTHORIZED, "ADMIN_UNAUTHORIZED", "Invalid or expired session")))
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.UNAUTHORIZED, "ADMIN_UNAUTHORIZED", "Invalid or expired session")))
             .flatMap(entity -> Boolean.FALSE.equals(entity.getEnabled())
                 ? Mono.error(new ApiException(HttpStatus.UNAUTHORIZED, "ADMIN_UNAUTHORIZED", "Account is disabled"))
                 : Mono.just(entity));
@@ -1090,10 +1123,14 @@ public class PaymentService {
     }
 
     private String returnUrl(ServerWebExchange exchange, String requested) {
-        if (requested != null && !requested.isBlank()) {
+        String site = origin(exchange);
+        // The payment provider sends the buyer to this address afterwards, so only same-site addresses are honoured;
+        // anything else would turn the payment page into an open redirect.
+        if (requested != null && !requested.isBlank()
+            && (requested.trim().equals(site) || requested.trim().startsWith(site + "/"))) {
             return requested.trim();
         }
-        return origin(exchange) + "/#/payment";
+        return site + "/#/payment";
     }
 
     private String origin(ServerWebExchange exchange) {

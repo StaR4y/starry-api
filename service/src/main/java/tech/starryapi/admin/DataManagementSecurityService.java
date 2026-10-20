@@ -54,6 +54,7 @@ public class DataManagementSecurityService {
     public static final int MAX_FAILED_ATTEMPTS = 5;
 
     public enum Action {
+        VIEW_DATA_MANAGEMENT(false, true),
         EXPORT_DATABASE(false, false),
         EXPORT_BACKUP(false, false),
         CREATE_BACKUP(false, false),
@@ -359,7 +360,7 @@ public class DataManagementSecurityService {
 
     private Mono<Void> requireApplicationRoot(AdminUserEntity caller) {
         return repository.findApplicationRoot()
-            .switchIfEmpty(Mono.error(new ApiException(
+            .switchIfEmpty(Mono.error(() -> new ApiException(
                 HttpStatus.FORBIDDEN,
                 "DATA_MANAGEMENT_ROOT_REQUIRED",
                 "Only the initial application administrator can perform this Root-only data management action"

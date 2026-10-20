@@ -20,6 +20,7 @@ public class AdminUserController implements AdminUserApi {
     private final RegistrationSettingsService registrationSettingsService;
     private final InviteCodeService inviteCodeService;
     private final SmtpVerificationService smtpVerificationService;
+    private tech.starryapi.config.PublicSiteUrl publicSiteUrl;
 
     public AdminUserController(
         AdminUserService adminUserService,
@@ -103,7 +104,19 @@ public class AdminUserController implements AdminUserApi {
             .map(ApiResponse::ok);
     }
 
+    @Autowired(required = false)
+    void setPublicSiteUrl(tech.starryapi.config.PublicSiteUrl publicSiteUrl) {
+        this.publicSiteUrl = publicSiteUrl;
+    }
+
     private String smtpVerifyBaseUrl(ServerWebExchange exchange) {
+        if (publicSiteUrl != null) {
+            String configured = publicSiteUrl.configuredBase();
+            if (configured != null) {
+                return configured + "/#/smtp-verify";
+            }
+            publicSiteUrl.warnHeaderFallback();
+        }
         String proto = firstHeader(exchange, "X-Forwarded-Proto", exchange.getRequest().getURI().getScheme());
         String host = firstHeader(exchange, "X-Forwarded-Host", exchange.getRequest().getHeaders().getFirst(HttpHeaders.HOST));
         if (host == null || host.isBlank()) {

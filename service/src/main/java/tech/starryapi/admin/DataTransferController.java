@@ -39,10 +39,16 @@ public class DataTransferController implements DataTransferApi {
     }
 
     @Override
-    public Mono<ApiResponse<DataTransferDtos.DataTransferStatusResponse>> status(ServerWebExchange exchange) {
+    public Mono<ApiResponse<DataTransferDtos.DataTransferStatusResponse>> status(
+        ServerWebExchange exchange,
+        String securityToken
+    ) {
         AdminPrincipal principal = adminAuth.verifyAdmin(exchange);
-        return securityService.requireDatabaseAdmin(principal)
-            .then(service.status())
+        return securityService.authorize(
+                principal, exchange, securityToken,
+                DataManagementSecurityService.Action.VIEW_DATA_MANAGEMENT, null, false
+            )
+            .then(Mono.defer(service::status))
             .map(ApiResponse::ok);
     }
 
@@ -114,10 +120,16 @@ public class DataTransferController implements DataTransferApi {
     }
 
     @Override
-    public Mono<ApiResponse<DataTransferDtos.BackupListResponse>> backups(ServerWebExchange exchange) {
+    public Mono<ApiResponse<DataTransferDtos.BackupListResponse>> backups(
+        ServerWebExchange exchange,
+        String securityToken
+    ) {
         AdminPrincipal principal = adminAuth.verifyAdmin(exchange);
-        return securityService.requireDatabaseAdmin(principal)
-            .then(service.backups())
+        return securityService.authorize(
+                principal, exchange, securityToken,
+                DataManagementSecurityService.Action.VIEW_DATA_MANAGEMENT, null, false
+            )
+            .then(Mono.defer(service::backups))
             .map(ApiResponse::ok);
     }
 

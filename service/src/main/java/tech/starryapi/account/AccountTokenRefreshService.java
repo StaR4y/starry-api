@@ -76,9 +76,19 @@ public class AccountTokenRefreshService {
         if (accountId == null) {
             return Mono.error(refreshError("Account ID is empty"));
         }
-        return inFlightRefreshes.computeIfAbsent(accountId, ignored -> refreshInternal(account)
-            .cache()
-            .doFinally(signal -> inFlightRefreshes.remove(accountId)));
+        // Single flight per account: concurrent callers share one refresh. Several callers refreshing the same
+        // single-use refresh token would make all but the first fail with "refresh token already used", and the
+        // scheduled job treats that as a dead credential. The entry is removed when the refresh itself finishes
+        // (doFinally sits BEFORE cache(), so one caller cancelling cannot drop it while it is still running) and
+        // only if it is still this refresh that is registered.
+        return inFlightRefreshes.computeIfAbsent(accountId, ignored -> {
+            java.util.concurrent.atomic.AtomicReference<Mono<ProxyAccountEntity>> self = new java.util.concurrent.atomic.AtomicReference<>();
+            Mono<ProxyAccountEntity> shared = refreshInternal(account)
+                .doFinally(signal -> inFlightRefreshes.remove(accountId, self.get()))
+                .cache();
+            self.set(shared);
+            return shared;
+        });
     }
 
     @Scheduled(
@@ -196,7 +206,14 @@ public class AccountTokenRefreshService {
             });
     }
 
+    private static final java.util.regex.Pattern AWS_REGION = java.util.regex.Pattern.compile("^[a-z]{2}(-[a-z]+)+-\\d{1,2}$");
+
     private Mono<TokenRefreshResult> refreshOidcToken(ProxyAccountEntity account, String refreshToken) {
+        // The host name is built from the account's region and receives the client secret and refresh token, so a
+        // value such as "evil.example/x" must never be accepted.
+        if (!AWS_REGION.matcher(region(account)).matches()) {
+            return Mono.error(refreshError("Invalid AWS region on the account"));
+        }
         ObjectNode body = objectMapper.createObjectNode();
         body.put("clientId", account.getClientId());
         body.put("clientSecret", account.getClientSecret());
@@ -257,16 +274,15 @@ public class AccountTokenRefreshService {
         String accountId = account.getAccountId();
         return repository.findByAccountId(accountId)
             .switchIfEmpty(Mono.error(refreshError("Account not found while saving refreshed token")))
-            .flatMap(entity -> {
-                entity.setAccessToken(result.accessToken());
-                entity.setRefreshToken(firstNonBlank(result.refreshToken(), entity.getRefreshToken()));
-                entity.setIdToken(firstNonBlank(result.idToken(), entity.getIdToken()));
-                entity.setClientId(firstNonBlank(result.clientId(), entity.getClientId()));
-                if (result.tokenExpiresAt() != null) {
-                    entity.setTokenExpiresAt(result.tokenExpiresAt());
-                }
-                return repository.save(entity);
-            })
+            .flatMap(entity -> repository.updateCredentials(
+                    accountId,
+                    result.accessToken(),
+                    firstNonBlank(result.refreshToken(), entity.getRefreshToken()),
+                    firstNonBlank(result.idToken(), entity.getIdToken()),
+                    firstNonBlank(result.clientId(), entity.getClientId()),
+                    result.tokenExpiresAt()
+                )
+                .then(repository.findByAccountId(accountId)))
             .flatMap(saved -> accountPoolService.refreshCache().thenReturn(saved));
     }
 

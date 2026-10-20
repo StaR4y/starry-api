@@ -29,6 +29,23 @@ import tech.starryapi.admin.SystemMaintenanceTaskGate;
 
 class AccountTokenRefreshServiceTest {
 
+    /** Applies the targeted credential UPDATE to the entity the (mocked) repository hands out next. */
+    private static void stubCredentialUpdate(ProxyAccountRepository repository, ProxyAccountEntity entity) {
+        when(repository.updateCredentials(
+            org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(),
+            org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.any()
+        )).thenAnswer(invocation -> {
+            entity.setAccessToken(invocation.getArgument(1));
+            entity.setRefreshToken(invocation.getArgument(2));
+            entity.setIdToken(invocation.getArgument(3));
+            entity.setClientId(invocation.getArgument(4));
+            if (invocation.getArgument(5) != null) {
+                entity.setTokenExpiresAt(invocation.getArgument(5));
+            }
+            return Mono.just(1);
+        });
+    }
+
     @Test
     void scheduledRefreshSkipsRepositoryAndUpstreamWorkDuringMaintenance() {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
@@ -64,7 +81,7 @@ class AccountTokenRefreshServiceTest {
         ProxyAccountEntity account = account();
 
         when(repository.findByAccountId("kiro-main")).thenReturn(Mono.just(account));
-        when(repository.save(account)).thenReturn(Mono.just(account));
+        stubCredentialUpdate(repository, account);
         when(accountPoolService.refreshCache()).thenReturn(Mono.empty());
 
         AccountTokenRefreshService service = new AccountTokenRefreshService(
@@ -81,6 +98,62 @@ class AccountTokenRefreshServiceTest {
         assertThat(refreshed.getAccessToken()).isEqualTo("new-access");
         assertThat(refreshed.getRefreshToken()).isEqualTo("new-refresh");
         verify(accountPoolService).refreshCache();
+    }
+
+    @Test
+    void concurrentRefreshesShareOneUpstreamCallEvenWhenOneCallerCancels() {
+        java.util.concurrent.atomic.AtomicInteger upstreamCalls = new java.util.concurrent.atomic.AtomicInteger();
+        reactor.core.publisher.Sinks.One<ClientResponse> gate = reactor.core.publisher.Sinks.one();
+        ExchangeFunction exchange = request -> {
+            upstreamCalls.incrementAndGet();
+            return gate.asMono();
+        };
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        ProxyAccountEntity account = account();
+        when(repository.findByAccountId("kiro-main")).thenReturn(Mono.just(account));
+        stubCredentialUpdate(repository, account);
+        when(accountPoolService.refreshCache()).thenReturn(Mono.empty());
+        AccountTokenRefreshService service = new AccountTokenRefreshService(
+            new ObjectMapper(), WebClient.builder().exchangeFunction(exchange).build(), repository, accountPoolService
+        );
+
+        reactor.core.Disposable first = service.refresh(account).subscribe();
+        AtomicReference<ProxyAccountEntity> second = new AtomicReference<>();
+        service.refresh(account).subscribe(second::set);
+        first.dispose(); // one caller gives up while the refresh is still running
+        AtomicReference<ProxyAccountEntity> third = new AtomicReference<>();
+        service.refresh(account).subscribe(third::set);
+
+        // Before the fix the cancelled caller removed the shared refresh, so the third caller started a second one.
+        assertThat(upstreamCalls.get()).isEqualTo(1);
+        gate.tryEmitValue(ClientResponse.create(HttpStatus.OK)
+            .header("Content-Type", "application/json")
+            .body("{\"accessToken\":\"new-access\",\"refreshToken\":\"new-refresh\",\"expiresIn\":3600}")
+            .build());
+        assertThat(second.get()).isNotNull();
+        assertThat(third.get()).isNotNull();
+        assertThat(upstreamCalls.get()).isEqualTo(1);
+    }
+
+    @Test
+    void anAccountRegionThatIsNotAnAwsRegionNeverReceivesTheClientSecret() {
+        java.util.concurrent.atomic.AtomicInteger upstreamCalls = new java.util.concurrent.atomic.AtomicInteger();
+        ExchangeFunction exchange = request -> {
+            upstreamCalls.incrementAndGet();
+            return Mono.error(new AssertionError("must not contact " + request.url()));
+        };
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity account = account();
+        account.setRegion("attacker.example/x");
+        when(repository.findByAccountId("kiro-main")).thenReturn(Mono.just(account));
+        AccountTokenRefreshService service = new AccountTokenRefreshService(
+            new ObjectMapper(), WebClient.builder().exchangeFunction(exchange).build(), repository, mock(AccountPoolService.class)
+        );
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> service.refresh(account).block())
+            .hasMessageContaining("Invalid AWS region");
+        assertThat(upstreamCalls.get()).isZero();
     }
 
     @Test
@@ -104,7 +177,7 @@ class AccountTokenRefreshServiceTest {
 
         when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(eligible, missingRefresh, missingCredentials));
         when(repository.findByAccountId("kiro-main")).thenReturn(Mono.just(eligible));
-        when(repository.save(eligible)).thenReturn(Mono.just(eligible));
+        stubCredentialUpdate(repository, eligible);
         when(accountPoolService.refreshCache()).thenReturn(Mono.empty());
 
         AccountTokenRefreshService service = new AccountTokenRefreshService(
@@ -150,7 +223,7 @@ class AccountTokenRefreshServiceTest {
         account.setClientId("codex-client-id");
 
         when(repository.findByAccountId("codex-main")).thenReturn(Mono.just(account));
-        when(repository.save(account)).thenReturn(Mono.just(account));
+        stubCredentialUpdate(repository, account);
         when(accountPoolService.refreshCache()).thenReturn(Mono.empty());
 
         AccountTokenRefreshService service = new AccountTokenRefreshService(

@@ -18,6 +18,8 @@ public class AdminAuthController implements AdminAuthApi {
     private final RegistrationSettingsService registrationSettingsService;
     private final EmailVerificationService emailVerificationService;
     private final SmtpVerificationService smtpVerificationService;
+    private final LoginThrottle loginThrottle;
+    private tech.starryapi.config.PublicSiteUrl publicSiteUrl;
 
     public AdminAuthController(
         AdminUserService adminUserService,
@@ -25,7 +27,17 @@ public class AdminAuthController implements AdminAuthApi {
         RegistrationSettingsService registrationSettingsService,
         EmailVerificationService emailVerificationService
     ) {
-        this(adminUserService, adminAuth, registrationSettingsService, emailVerificationService, null);
+        this(adminUserService, adminAuth, registrationSettingsService, emailVerificationService, null, null);
+    }
+
+    public AdminAuthController(
+        AdminUserService adminUserService,
+        AdminAuth adminAuth,
+        RegistrationSettingsService registrationSettingsService,
+        EmailVerificationService emailVerificationService,
+        SmtpVerificationService smtpVerificationService
+    ) {
+        this(adminUserService, adminAuth, registrationSettingsService, emailVerificationService, smtpVerificationService, null);
     }
 
     @Autowired
@@ -34,8 +46,10 @@ public class AdminAuthController implements AdminAuthApi {
         AdminAuth adminAuth,
         RegistrationSettingsService registrationSettingsService,
         EmailVerificationService emailVerificationService,
-        SmtpVerificationService smtpVerificationService
+        SmtpVerificationService smtpVerificationService,
+        LoginThrottle loginThrottle
     ) {
+        this.loginThrottle = loginThrottle;
         this.adminUserService = adminUserService;
         this.adminAuth = adminAuth;
         this.registrationSettingsService = registrationSettingsService;
@@ -44,8 +58,20 @@ public class AdminAuthController implements AdminAuthApi {
     }
 
     @Override
-    public Mono<ApiResponse<AdminDtos.LoginResponse>> login(@Valid @RequestBody AdminDtos.LoginRequest request) {
+    public Mono<ApiResponse<AdminDtos.LoginResponse>> login(
+        @Valid @RequestBody AdminDtos.LoginRequest request,
+        ServerWebExchange exchange
+    ) {
+        if (loginThrottle != null) {
+            loginThrottle.check(exchange);
+        }
         return adminUserService.login(request).map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<Void>> logout(ServerWebExchange exchange) {
+        adminUserService.logout(adminAuth.presentedToken(exchange));
+        return Mono.just(ApiResponse.ok(null));
     }
 
     @Override
@@ -112,7 +138,19 @@ public class AdminAuthController implements AdminAuthApi {
         return adminUserService.changePassword(principal, request).thenReturn(ApiResponse.ok(null));
     }
 
+    @Autowired(required = false)
+    void setPublicSiteUrl(tech.starryapi.config.PublicSiteUrl publicSiteUrl) {
+        this.publicSiteUrl = publicSiteUrl;
+    }
+
     private String registrationBaseUrl(ServerWebExchange exchange) {
+        if (publicSiteUrl != null) {
+            String configured = publicSiteUrl.configuredBase();
+            if (configured != null) {
+                return configured + "/#/login";
+            }
+            publicSiteUrl.warnHeaderFallback();
+        }
         String proto = firstHeader(exchange, "X-Forwarded-Proto", exchange.getRequest().getURI().getScheme());
         String host = firstHeader(exchange, "X-Forwarded-Host", exchange.getRequest().getHeaders().getFirst("Host"));
         if (host.isBlank()) {
