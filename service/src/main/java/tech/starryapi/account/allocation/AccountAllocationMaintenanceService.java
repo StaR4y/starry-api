@@ -49,7 +49,7 @@ public class AccountAllocationMaintenanceService {
     }
 
     @Scheduled(
-        cron = "${starry.account-allocation.maintenance-cron:0 35 3 * * *}",
+        cron = "${starry.account-allocation.maintenance-cron:0 35 * * * *}",
         zone = "UTC"
     )
     public void scheduledMaintenance() {

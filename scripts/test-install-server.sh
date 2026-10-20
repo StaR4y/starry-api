@@ -240,6 +240,24 @@ grep -q '^STARRY_ACCOUNT_ALLOCATION_LEASE_RETENTION_DAYS=7$' "$first_case/.env" 
   || fail_test "first-install environment must include account-allocation retention defaults"
 grep -q 'STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_ENABLED:' "$first_case/docker-compose.artifact.yml" \
   || fail_test "first-install Compose must pass account-allocation maintenance settings"
+grep -q -- '- ./data/documentation:/app/documentation$' "$first_case/docker-compose.artifact.yml" \
+  || fail_test "first-install Compose must keep documentation attachments outside the container"
+grep -q 'STARRY_DOCUMENTATION_ATTACHMENT_DIR: /app/documentation$' "$first_case/docker-compose.artifact.yml" \
+  || fail_test "first-install Compose must point the service at the mounted documentation directory"
+
+# The installer writes this Compose file when it falls back to the single jar; the publisher ships its own copy in
+# the bundle. Both must describe the same stack, otherwise the result depends on which download path was taken.
+compose_template() {
+  awk -v fn="$2" '$0 ~ "^" fn "\\(\\)" { inside = 1; next }
+    inside && /<<.EOF.$/ { body = 1; next }
+    body && /^EOF$/ { exit }
+    body { print }' "$1"
+}
+cmp -s <(compose_template "$INSTALLER" write_compose_file) \
+  <(compose_template "${ROOT_DIR}/scripts/publish-artifact.sh" write_artifact_compose) \
+  || fail_test "install-server.sh and publish-artifact.sh must write the same Compose file"
+[[ -n "$(compose_template "$INSTALLER" write_compose_file)" ]] \
+  || fail_test "could not read the installer Compose template"
 first_rollback_commands="$(grep -Ec ' up -d --build --force-recreate --remove-orphans$' "$first_case/commands.log" || true)"
 [[ "$first_rollback_commands" -eq 0 ]] \
   || fail_test "first install must not attempt to restore a nonexistent previous stack"

@@ -11,7 +11,7 @@ public class ProxyProperties {
     private String adminToken = "";
     private String webuiUrl = "";
     private boolean allowAnonymousProxy;
-    private Duration requestTimeout = Duration.ofSeconds(90);
+    private Duration requestTimeout = Duration.ofSeconds(300);
     private Duration adminSessionTtl = Duration.ofHours(12);
     private int maxRetries = 2;
     private int rateLimitPerMinute = 120;

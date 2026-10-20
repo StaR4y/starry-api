@@ -10,6 +10,12 @@ server:
 spring:
   application:
     name: starryapi-service
+  task:
+    scheduling:
+      pool:
+        # There are ~26 @Scheduled jobs (billing recovery, payment reconciliation, aggregation, lock refresh...).
+        # Spring Boot's default is ONE thread, so a single slow job delays all of the others.
+        size: 4
   lifecycle:
     timeout-per-shutdown-phase: 20s
   r2dbc:
@@ -64,6 +70,8 @@ springdoc:
     path: /v3/api-docs
 
 starry:
+  documentation:
+    attachment-dir: ${STARRY_DOCUMENTATION_ATTACHMENT_DIR:${user.home}/.starry-api/documentation}
   plugins:
     directory: ${STARRY_PLUGIN_DIR:${user.home}/.starry-api/plugins}
     disabled: ${STARRY_PLUGINS_DISABLED:false}
@@ -86,7 +94,7 @@ starry:
     frontierbench-url: ${STARRY_MODEL_RANKING_FRONTIERBENCH_URL:https://raw.githubusercontent.com/StaR4y/ai-benchmark-ranking/main/data/frontierbench.json}
   account-allocation:
     maintenance-enabled: ${STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_ENABLED:true}
-    maintenance-cron: ${STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_CRON:0 35 3 * * *}
+    maintenance-cron: ${STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_CRON:0 35 * * * *}
     lease-retention-days: ${STARRY_ACCOUNT_ALLOCATION_LEASE_RETENTION_DAYS:7}
     event-retention-days: ${STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS:90}
     delete-batch-size: ${STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE:10000}
@@ -123,7 +131,7 @@ starry:
     hourly-delete-max-batches: ${STARRY_STATS_HOURLY_DELETE_MAX_BATCHES:20}
     usage-event-retention-days: ${STARRY_STATS_USAGE_EVENT_RETENTION_DAYS:400}
     usage-event-delete-batch-size: ${STARRY_STATS_USAGE_EVENT_DELETE_BATCH_SIZE:10000}
-    usage-event-delete-max-batches: ${STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES:20}
+    usage-event-delete-max-batches: ${STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES:100}
   payment:
     reconciliation-interval: ${STARRY_PAYMENT_RECONCILIATION_INTERVAL:PT30S}
     reconciliation-initial-delay: ${STARRY_PAYMENT_RECONCILIATION_INITIAL_DELAY:PT30S}
@@ -136,7 +144,7 @@ kiro:
     webui-url: ${KIRO_WEBUI_URL:}
     admin-session-ttl: ${KIRO_ADMIN_SESSION_TTL:12h}
     allow-anonymous-proxy: ${KIRO_ALLOW_ANONYMOUS_PROXY:false}
-    request-timeout: ${KIRO_REQUEST_TIMEOUT:90s}
+    request-timeout: ${KIRO_REQUEST_TIMEOUT:300s}
     max-retries: ${KIRO_MAX_RETRIES:2}
     rate-limit-per-minute: ${KIRO_RATE_LIMIT_PER_MINUTE:120}
     account-selection-strategy: ${KIRO_ACCOUNT_SELECTION_STRATEGY:round_robin}

@@ -64,6 +64,15 @@ services:
     image: star4y/starryapi-service:local
     container_name: starryapi-service
     restart: unless-stopped
+    # The JVM is capped (JAVA_OPTS) and the container too, so a runaway heap ends in an exit and a restart
+    # instead of a hung process. 2g leaves room for the 768m heap, direct buffers, metaspace and thread stacks.
+    mem_limit: ${SERVICE_MEM_LIMIT:-2g}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null --max-time 4 http://127.0.0.1:${SERVER_PORT:-8080}/health || exit 1"]
+      interval: 15s
+      timeout: 6s
+      retries: 4
+      start_period: 90s
     depends_on:
       postgres:
         condition: service_healthy
@@ -93,7 +102,7 @@ services:
       KIRO_ADMIN_SESSION_TTL: ${KIRO_ADMIN_SESSION_TTL:-12h}
       KIRO_RATE_LIMIT_PER_MINUTE: ${KIRO_RATE_LIMIT_PER_MINUTE:-120}
       KIRO_ACCOUNT_SELECTION_STRATEGY: ${KIRO_ACCOUNT_SELECTION_STRATEGY:-round_robin}
-      KIRO_REQUEST_TIMEOUT: ${KIRO_REQUEST_TIMEOUT:-90s}
+      KIRO_REQUEST_TIMEOUT: ${KIRO_REQUEST_TIMEOUT:-300s}
       KIRO_MAX_RETRIES: ${KIRO_MAX_RETRIES:-2}
       KIRO_BASE_COOLDOWN: ${KIRO_BASE_COOLDOWN:-60s}
       KIRO_QUOTA_RESET: ${KIRO_QUOTA_RESET:-1h}
@@ -109,6 +118,7 @@ services:
       KIRO_PREFERRED_ENDPOINT: ${KIRO_PREFERRED_ENDPOINT:-codewhisperer}
       STARRY_PLUGINS_DISABLED: ${STARRY_PLUGINS_DISABLED:-false}
       STARRY_PLUGIN_DIR: /app/plugins
+      STARRY_DOCUMENTATION_ATTACHMENT_DIR: /app/documentation
       STARRY_BACKUP_DIR: /app/backups
       STARRY_MAX_IMPORT_BYTES: ${STARRY_MAX_IMPORT_BYTES:-268435456}
       STARRY_DATA_TRANSFER_PROCESS_TIMEOUT: ${STARRY_DATA_TRANSFER_PROCESS_TIMEOUT:-30m}
@@ -147,18 +157,21 @@ services:
       STARRY_STATS_HOURLY_DELETE_MAX_BATCHES: ${STARRY_STATS_HOURLY_DELETE_MAX_BATCHES:-20}
       STARRY_STATS_USAGE_EVENT_RETENTION_DAYS: ${STARRY_STATS_USAGE_EVENT_RETENTION_DAYS:-400}
       STARRY_STATS_USAGE_EVENT_DELETE_BATCH_SIZE: ${STARRY_STATS_USAGE_EVENT_DELETE_BATCH_SIZE:-10000}
-      STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES: ${STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES:-20}
+      STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES: ${STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES:-100}
       STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_ENABLED: ${STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_ENABLED:-true}
-      STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_CRON: "${STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_CRON:-0 35 3 * * *}"
+      STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_CRON: "${STARRY_ACCOUNT_ALLOCATION_MAINTENANCE_CRON:-0 35 * * * *}"
       STARRY_ACCOUNT_ALLOCATION_LEASE_RETENTION_DAYS: ${STARRY_ACCOUNT_ALLOCATION_LEASE_RETENTION_DAYS:-7}
       STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS: ${STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS:-90}
       STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE: ${STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE:-10000}
       STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES: ${STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES:-20}
-      JAVA_OPTS: ${JAVA_OPTS:-}
+      # glibc keeps one malloc arena per thread by default, which inflates resident memory of a busy JVM.
+      MALLOC_ARENA_MAX: "2"
+      JAVA_OPTS: "${JAVA_OPTS:--Xms64m -Xmx768m -XX:MaxDirectMemorySize=256m -XX:+ExitOnOutOfMemoryError -XX:G1PeriodicGCInterval=300000 -XX:-G1PeriodicGCInvokesConcurrent -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=30}"
     volumes:
       - ./data/backups:/app/backups
       - ./data/security:/app/security
       - ./data/plugins:/app/plugins
+      - ./data/documentation:/app/documentation
       - ./data/model-ranking:/app/model-ranking
       - ./data/model-pricing:/app/model-pricing
     ports:
