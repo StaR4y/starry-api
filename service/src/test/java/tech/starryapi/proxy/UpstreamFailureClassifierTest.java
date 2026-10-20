@@ -117,6 +117,52 @@ class UpstreamFailureClassifierTest {
         assertThat(classification.type()).isEqualTo(AccountPoolService.UpstreamErrorType.FATAL);
     }
 
+    @Test
+    void aResponseTimeoutAfterTheRequestWasSentIsNotAnAccountFailureAndIsNeverRetriedElsewhere() {
+        UpstreamFailureClassifier.Classification timeout = UpstreamFailureClassifier.classify(
+            new RuntimeException("request failed", new io.netty.handler.timeout.ReadTimeoutException())
+        );
+
+        assertThat(timeout.retryable()).isFalse();
+        assertThat(timeout.crossAccountRetryAllowed()).isFalse();
+        assertThat(timeout.circuitFailure()).isFalse();
+        assertThat(timeout.scope()).isEqualTo(AccountFailureScope.REQUEST);
+        assertThat(UpstreamFailureClassifier.isResponseTimeoutAfterDispatch(
+            new RuntimeException(new io.netty.handler.timeout.ReadTimeoutException())
+        )).isTrue();
+        // A failed connect is different: nothing was sent, so another account may try.
+        assertCircuitFailure(new ConnectException("connection refused"), null);
+        assertThat(UpstreamFailureClassifier.neverReachedUpstream(new RuntimeException(new ConnectException("refused")))).isTrue();
+        assertThat(UpstreamFailureClassifier.neverReachedUpstream(new RuntimeException("reset by peer"))).isFalse();
+    }
+
+    @Test
+    void requestShapedClientErrorsAndModelAccessForbiddenDoNotQuarantineTheAccount() {
+        for (int status : new int[] {405, 411, 413, 414, 415, 431}) {
+            UpstreamFailureClassifier.Classification classification = UpstreamFailureClassifier.classify(
+                new UpstreamException(status, "client error", false)
+            );
+            assertThat(classification.scope()).as("status %s", status).isEqualTo(AccountFailureScope.REQUEST);
+            assertThat(classification.retryable()).isFalse();
+        }
+        UpstreamFailureClassifier.Classification modelAccess = UpstreamFailureClassifier.classify(
+            new UpstreamException(403, "The model `gpt-9` does not exist or you do not have access to it (model_not_found)", false)
+        );
+        assertThat(modelAccess.scope()).isEqualTo(AccountFailureScope.REQUEST);
+        assertThat(modelAccess.cooldown()).isEqualTo(java.time.Duration.ZERO);
+    }
+
+    @Test
+    void providerWideOverloadCoolsDownBrieflyInsteadOfTenMinutes() {
+        UpstreamFailureClassifier.Classification overloaded = UpstreamFailureClassifier.classify(
+            new UpstreamException(529, "overloaded_error", true)
+        );
+
+        assertThat(overloaded.scope()).isEqualTo(AccountFailureScope.PROVIDER_POOL);
+        assertThat(overloaded.cooldown()).isEqualTo(java.time.Duration.ofMinutes(1));
+        assertThat(overloaded.retryable()).isTrue();
+    }
+
     private void assertCircuitFailure(Throwable error, Integer statusCode) {
         UpstreamFailureClassifier.Classification classification = UpstreamFailureClassifier.classify(error);
 

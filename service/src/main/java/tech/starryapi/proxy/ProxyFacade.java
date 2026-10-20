@@ -37,6 +37,7 @@ import tech.starryapi.account.allocation.AccountFailureScope;
 import tech.starryapi.apikey.ApiKeyPrincipal;
 import tech.starryapi.apikey.ApiKeyService;
 import tech.starryapi.common.ApiException;
+import tech.starryapi.common.JsonNodes;
 import tech.starryapi.common.Hashing;
 import tech.starryapi.model.ModelCatalogProvider;
 import tech.starryapi.model.ModelDtos;
@@ -475,7 +476,11 @@ public class ProxyFacade {
                         : Mono.<ResponseEntity<?>>error(retryError)));
                 });
             }))
-            .doOnCancel(() -> accountPoolService.cancelCircuitProbe(poolContext));
+            .doOnCancel(() -> accountPoolService.cancelCircuitProbe(poolContext))
+            // A probe granted to this request must also be released when it fails before an outcome is recorded
+            // (no admission capacity, dispatch error, expired lease). Otherwise the half-open circuit waits for the
+            // probe lease to expire and then reopens, discarding the successes of the other probes.
+            .doOnError(error -> accountPoolService.cancelCircuitProbe(poolContext));
     }
 
     private Mono<ResponseEntity<?>> invokeResponses(
@@ -556,7 +561,8 @@ public class ProxyFacade {
     }
 
     private JsonNode boundedBillingRequest(JsonNode request, boolean responses) {
-        ObjectNode bounded = ((ObjectNode) request).deepCopy();
+        // Only top-level token limits change here, so share the (possibly multi-MB) children instead of deep-copying them.
+        ObjectNode bounded = JsonNodes.shallowCopy((ObjectNode) request);
         long limit = 0;
         for (String field : java.util.List.of("max_tokens", "max_completion_tokens", "max_output_tokens")) {
             JsonNode value = request.get(field);
@@ -572,11 +578,12 @@ public class ProxyFacade {
     }
 
     private static final Object BILLING_UNCERTAINTY = new Object();
+    private static final Object BILLING_SETTLED = new Object();
 
     private <T> Mono<T> withBilling(ApiKeyPrincipal principal, String requestId, String model, JsonNode request,
                                     boolean fastMode, Mono<T> operation) {
         if ("anonymous".equals(principal.keyId())) return operation;
-        long inputBound = request.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length + 1024L;
+        long inputBound = JsonNodes.utf8Length(request) + 1024L;
         // Server-side response chains and remote media can hide input tokens from the local request.
         if (request.hasNonNull("previous_response_id") || containsRemoteBillingInput(request)) {
             inputBound = Math.max(inputBound, 1_000_000L);
@@ -587,14 +594,20 @@ public class ProxyFacade {
         return paymentSettingsService.config().flatMap(config -> modelPricingService.billingQuote(model, fastMode, config.apiBillingMultiplier()))
             .flatMap(quote -> {
                 AtomicBoolean uncertainFailure = new AtomicBoolean();
+                AtomicBoolean settled = new AtomicBoolean();
                 ObjectNode pricing = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
                 pricing.put("model", model).put("input", quote.input()).put("output", quote.output())
                     .put("cacheRead", quote.cacheRead()).put("cacheWrite", quote.cacheWrite()).put("fallback", quote.fallback());
                 return Mono.usingWhen(
                     apiKeyService.reserveUsage(principal, requestId, quote.estimate(estimatedInput, outputBound), pricing.toString()).thenReturn(requestId),
                     ignored -> operation.contextWrite(context -> context.put(tech.starryapi.model.BillingQuote.class, quote)
-                        .put(BILLING_UNCERTAINTY, uncertainFailure)),
-                    ignored -> apiKeyService.releaseUsage(principal, requestId, true, "Completed without charge"),
+                        .put(BILLING_UNCERTAINTY, uncertainFailure)
+                        .put(BILLING_SETTLED, settled)),
+                    // Once the usage has been settled the reservation is closed; releasing it again would only take the
+                    // user and key row locks to find that out. Release only when nothing was charged.
+                    ignored -> settled.get()
+                        ? Mono.empty()
+                        : apiKeyService.releaseUsage(principal, requestId, true, "Completed without charge"),
                     (ignored, error) -> apiKeyService.releaseUsage(principal, requestId,
                         !uncertainFailure.get() && definitiveBillingFailure(error), "Request failed"),
                     ignored -> apiKeyService.releaseUsage(principal, requestId, false, "Client disconnected after dispatch")
@@ -602,15 +615,42 @@ public class ProxyFacade {
             });
     }
 
+    /**
+     * Whether a failed request is known not to have been billed by the upstream, so the reservation can simply be
+     * released. Anything uncertain (a response timeout after the request was sent, a reset mid-request) stays
+     * flagged for manual review, because the upstream may still have generated and charged for it.
+     */
     private boolean definitiveBillingFailure(Throwable error) {
         Throwable root = rootFailure(error);
         if (root instanceof ApiException api) {
             return java.util.Set.of(400, 401, 403, 404, 422, 429).contains(api.getStatus().value());
         }
-        if (root instanceof UpstreamException upstream) {
-            return java.util.Set.of(400, 401, 403, 404, 422, 429).contains(upstream.getStatusCode());
+        UpstreamException upstream = findUpstreamException(error);
+        if (upstream != null) {
+            int status = upstream.getStatusCode();
+            if (java.util.Set.of(400, 401, 403, 404, 422, 429).contains(status)) {
+                return true;
+            }
+            // A genuine provider error response (overloaded, unavailable, internal error) is not billed. A 502 that
+            // we synthesise for a 200 body we could not parse is not recoverable and stays uncertain.
+            return upstream.isRecoverable() && java.util.Set.of(500, 502, 503, 529).contains(status);
         }
-        return false;
+        return UpstreamFailureClassifier.neverReachedUpstream(error);
+    }
+
+    private static UpstreamException findUpstreamException(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            if (current instanceof UpstreamException upstream) {
+                return upstream;
+            }
+            Throwable cause = current.getCause();
+            if (cause == current) {
+                break;
+            }
+            current = cause;
+        }
+        return null;
     }
 
     private boolean containsRemoteBillingInput(JsonNode node) {
@@ -753,7 +793,11 @@ public class ProxyFacade {
                         : Mono.<ResponseEntity<?>>error(retryError)));
                 });
             }))
-            .doOnCancel(() -> accountPoolService.cancelCircuitProbe(poolContext));
+            .doOnCancel(() -> accountPoolService.cancelCircuitProbe(poolContext))
+            // A probe granted to this request must also be released when it fails before an outcome is recorded
+            // (no admission capacity, dispatch error, expired lease). Otherwise the half-open circuit waits for the
+            // probe lease to expire and then reopens, discarding the successes of the other probes.
+            .doOnError(error -> accountPoolService.cancelCircuitProbe(poolContext));
     }
 
     /**
@@ -952,7 +996,8 @@ public class ProxyFacade {
             requestId,
             request,
             endpointScope,
-            List.of()
+            List.of(),
+            estimatedInputTokens(request)
         );
     }
 
@@ -970,7 +1015,8 @@ public class ProxyFacade {
         String requestId,
         JsonNode request,
         String endpointScope,
-        List<String> admissionRejectedAccountIds
+        List<String> admissionRejectedAccountIds,
+        long estimatedInput
     ) {
         if (admissionRejectedAccountIds.size() >= 64) {
             return Mono.error(new ApiException(
@@ -1018,7 +1064,7 @@ public class ProxyFacade {
                 reliableSessionHint(sessionHint)
                     && route == UpstreamRoute.ANTHROPIC
                     && AccountPlatforms.isAnthropicApiKey(account),
-                estimatedInputTokens(request),
+                estimatedInput,
                 estimatedOutputTokens(request),
                 Duration.ofMinutes(10),
                 poolContext == null ? null : poolContext.upstreamModel(),
@@ -1056,7 +1102,8 @@ public class ProxyFacade {
                     requestId,
                     request,
                     endpointScope,
-                    List.copyOf(nextRejected)
+                    List.copyOf(nextRejected),
+                    estimatedInput
                 );
             }));
     }
@@ -1125,7 +1172,7 @@ public class ProxyFacade {
         if (request == null) {
             return 0;
         }
-        return Math.max(1, Math.min(1_000_000, (request.toString().length() + 3L) / 4L));
+        return Math.max(1, Math.min(1_000_000, (JsonNodes.charLength(request) + 3L) / 4L));
     }
 
     private long estimatedOutputTokens(JsonNode request) {
@@ -1342,7 +1389,7 @@ public class ProxyFacade {
 
     private JsonNode openAiFastRequest(JsonNode request) {
         if (request instanceof ObjectNode object) {
-            ObjectNode copy = object.deepCopy();
+            ObjectNode copy = JsonNodes.shallowCopy(object);
             copy.put("service_tier", "priority");
             copy.remove("serviceTier");
             copy.remove("fast");
@@ -1354,7 +1401,7 @@ public class ProxyFacade {
 
     private JsonNode deepSeekRequest(JsonNode request) {
         if (request instanceof ObjectNode object) {
-            ObjectNode copy = object.deepCopy();
+            ObjectNode copy = JsonNodes.shallowCopy(object);
             copy.remove(List.of("service_tier", "serviceTier", "fast", "fast_mode"));
             return copy;
         }
@@ -1454,7 +1501,12 @@ public class ProxyFacade {
                     credits,
                     usage.inputTokens(),
                     usage.outputTokens()
-                );
+                ).then(Mono.deferContextual(context -> {
+                    if (context.hasKey(BILLING_SETTLED)) {
+                        context.<AtomicBoolean>get(BILLING_SETTLED).set(true);
+                    }
+                    return Mono.<Void>empty();
+                }));
                 return keyAccounting
                     .onErrorResume(error -> recordAccountingFailure(
                         requestId,

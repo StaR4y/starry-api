@@ -27,6 +27,22 @@ final class UpstreamFailureClassifier {
         UpstreamException upstream = findCause(error, UpstreamException.class);
         Throwable failure = rootFailure(error);
         if (upstream == null) {
+            if (isResponseTimeoutAfterDispatch(error)) {
+                // The request was sent and the upstream simply did not answer within our timeout. That says
+                // nothing about the account's health, and sending the same request to another account would
+                // start (and bill) a second generation while the first may still be running.
+                return new Classification(
+                    failure,
+                    null,
+                    AccountPoolService.UpstreamErrorType.FATAL,
+                    false,
+                    false,
+                    false,
+                    AccountFailureScope.REQUEST,
+                    Duration.ZERO,
+                    false
+                );
+            }
             boolean retryable = isRecoverableTransportFailure(error);
             return new Classification(
                 failure,
@@ -46,7 +62,7 @@ final class UpstreamFailureClassifier {
         boolean openAi = account != null && (AccountPlatforms.isOpenAi(account) || AccountPlatforms.isDeepSeek(account));
         boolean anthropic = account != null && AccountPlatforms.isAnthropicApiKey(account);
         Classification policy = switch (status) {
-            case 400, 404, 422 -> classification(
+            case 400, 404, 405, 406, 411, 413, 414, 415, 422, 431 -> classification(
                 failure, status, AccountFailureScope.REQUEST, false, false, Duration.ZERO, false
             );
             case 401 -> credentialFailure(failure, status, message);
@@ -58,10 +74,7 @@ final class UpstreamFailureClassifier {
                 failure, status, AccountFailureScope.TRANSPORT, true, true, Duration.ofMinutes(1), false
             );
             case 429 -> rateLimitFailure(failure, status, message, openAi, anthropic);
-            case 529 -> classification(
-                failure, status, AccountFailureScope.CAPACITY_ACCOUNT, true, true, Duration.ofMinutes(10), false
-            );
-            case 500, 501, 503, 504 -> classification(
+            case 500, 501, 503, 504, 529 -> classification(
                 failure, status, AccountFailureScope.PROVIDER_POOL, true, true, Duration.ofMinutes(1), false
             );
             case 502 -> classification(
@@ -140,6 +153,21 @@ final class UpstreamFailureClassifier {
             return classification(
                 failure, status, AccountFailureScope.REGIONAL_POLICY, true, true, Duration.ofMinutes(15), false
             );
+        }
+        if (containsAny(
+            message,
+            "model_not_found",
+            "model not found",
+            "does not exist or you do not have access",
+            "do not have access to the model",
+            "does not have access to model",
+            "not allowed to use this model",
+            "not allowed to use model",
+            "access to this model",
+            "unsupported model",
+            "model is not supported"
+        )) {
+            return classification(failure, status, AccountFailureScope.REQUEST, true, true, Duration.ZERO, false);
         }
         Duration quarantine = anthropic ? Duration.ofMinutes(15) : Duration.ofMinutes(10);
         return classification(failure, status, AccountFailureScope.UNKNOWN, true, true, quarantine, false);
@@ -231,6 +259,49 @@ final class UpstreamFailureClassifier {
             current = cause;
         }
         return recoverableSignal || (transportEnvelope && !tlsFailure);
+    }
+
+    /** True when the failure is Netty's response/read timeout, i.e. the request had already been sent. */
+    static boolean isResponseTimeoutAfterDispatch(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            String name = current.getClass().getSimpleName();
+            if (name.equals("ReadTimeoutException") || name.equals("WriteTimeoutException")) {
+                return true;
+            }
+            Throwable cause = current.getCause();
+            if (cause == current) {
+                break;
+            }
+            current = cause;
+        }
+        return false;
+    }
+
+    /**
+     * True when the failure happened before the request could have reached the upstream (no route, refused or
+     * timed-out connect, failed TLS handshake, exhausted connection pool), so nothing was generated or billed.
+     */
+    static boolean neverReachedUpstream(Throwable error) {
+        Throwable current = error;
+        while (current != null) {
+            String name = current.getClass().getSimpleName();
+            if (current instanceof java.net.ConnectException
+                || current instanceof java.net.UnknownHostException
+                || current instanceof java.net.NoRouteToHostException
+                || name.equals("ConnectTimeoutException")
+                || name.startsWith("PoolAcquire")
+                || name.equals("SslHandshakeTimeoutException")
+                || current instanceof javax.net.ssl.SSLHandshakeException) {
+                return true;
+            }
+            Throwable cause = current.getCause();
+            if (cause == current) {
+                break;
+            }
+            current = cause;
+        }
+        return false;
     }
 
     private static boolean isConnectionTermination(String message) {

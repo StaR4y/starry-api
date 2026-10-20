@@ -214,6 +214,87 @@ class AnthropicUpstreamClientTest {
         }
     }
 
+    @Test
+    void cacheReadAndWriteTokensAreIncludedInTheBilledInput() throws Exception {
+        HttpServer server = streamServer("""
+            event: message_start
+            data: {"type":"message_start","message":{"usage":{"input_tokens":12,"cache_read_input_tokens":4000,"cache_creation_input_tokens":300,"output_tokens":1}}}
+
+            event: content_block_start
+            data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}
+
+            event: message_delta
+            data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":55}}
+
+            event: message_stop
+            data: {"type":"message_stop"}
+
+            """);
+        try {
+            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, WebClient.builder().build());
+            PlatformCompletionResult result = client.complete(
+                anthropicAccount("http://127.0.0.1:" + server.getAddress().getPort()),
+                objectMapper.readTree("{\"model\":\"anthropic/claude-sonnet-4.5\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"),
+                "anthropic/claude-sonnet-4.5"
+            ).block();
+
+            assertThat(result.content()).isEqualTo("hi");
+            // input_tokens (12) excludes the cached part; the platform convention is total input with cache subsets.
+            assertThat(result.usage().inputTokens()).isEqualTo(12 + 4000 + 300);
+            assertThat(result.usage().cacheReadTokens()).isEqualTo(4000);
+            assertThat(result.usage().cacheWriteTokens()).isEqualTo(300);
+            assertThat(result.usage().outputTokens()).isEqualTo(55);
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void anErrorEventInsideAnOkStreamIsAnUpstreamFailureNotASuccess() throws Exception {
+        HttpServer server = streamServer("""
+            event: message_start
+            data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}
+
+            event: error
+            data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}
+
+            """);
+        try {
+            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, WebClient.builder().build());
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> client.complete(
+                anthropicAccount("http://127.0.0.1:" + server.getAddress().getPort()),
+                objectMapper.readTree("{\"model\":\"anthropic/claude-sonnet-4.5\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"),
+                "anthropic/claude-sonnet-4.5"
+            ).block())
+                .isInstanceOfSatisfying(tech.starryapi.platform.upstream.UpstreamException.class, error -> {
+                    assertThat(error.getStatusCode()).isEqualTo(529);
+                    assertThat(error.isRecoverable()).isTrue();
+                });
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    private HttpServer streamServer(String sse) throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/messages", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            byte[] response = sse.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "text/event-stream");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+        return server;
+    }
+
     private ProxyAccountEntity anthropicAccount(String baseUrl) {
         ProxyAccountEntity account = new ProxyAccountEntity();
         account.setAccountId("anthropic-main");

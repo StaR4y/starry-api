@@ -317,6 +317,8 @@ public class AnthropicUpstreamClient {
                 }
                 try {
                     return Mono.just(parseResponse(rawBody));
+                } catch (UpstreamException error) {
+                    return Mono.error(error);
                 } catch (Exception error) {
                     return Mono.error(new UpstreamException(502, invalidResponseMessage(endpoint, rawBody), false));
                 }
@@ -353,7 +355,7 @@ public class AnthropicUpstreamClient {
         StringBuilder content = new StringBuilder();
         List<PlatformToolUse> toolUses = new ArrayList<>();
         Map<Integer, PendingToolUse> pendingToolUses = new LinkedHashMap<>();
-        long[] tokens = new long[2];
+        long[] tokens = new long[4];
 
         for (String payload : sseDataPayloads(rawBody)) {
             String data = payload.trim();
@@ -362,6 +364,11 @@ public class AnthropicUpstreamClient {
             }
             JsonNode event = objectMapper.readTree(data);
             String type = event.path("type").asText("");
+            if ("error".equals(type)) {
+                // A 200 response can still carry an error event (e.g. overloaded_error). Treating the partial
+                // text as a success would bill the user and report the account healthy.
+                throw inBandError(event.path("error"));
+            }
             if ("message_start".equals(type)) {
                 updateUsage(tokens, event.path("message").path("usage"));
             } else if ("message_delta".equals(type)) {
@@ -393,7 +400,28 @@ public class AnthropicUpstreamClient {
         return new PlatformCompletionResult(
             content.toString(),
             toolUses,
-            new PlatformUsage(tokens[0], tokens[1], BigDecimal.ZERO, 0, 0, 0)
+            usage(tokens[0], tokens[1], tokens[2], tokens[3])
+        );
+    }
+
+    private UpstreamException inBandError(JsonNode error) {
+        String errorType = error.path("type").asText("api_error");
+        String message = error.path("message").asText("");
+        int status = switch (errorType) {
+            case "overloaded_error" -> 529;
+            case "rate_limit_error" -> 429;
+            case "authentication_error" -> 401;
+            case "permission_error" -> 403;
+            case "not_found_error" -> 404;
+            case "request_too_large" -> 413;
+            case "invalid_request_error" -> 400;
+            case "timeout_error" -> 504;
+            default -> 500;
+        };
+        return new UpstreamException(
+            status,
+            "Anthropic upstream error " + status + " (" + errorType + "): " + message,
+            isRecoverableStatus(status)
         );
     }
 
@@ -442,9 +470,30 @@ public class AnthropicUpstreamClient {
         if (usage == null || usage.isMissingNode() || usage.isNull()) {
             return PlatformUsage.zero();
         }
-        long input = usage.path("input_tokens").asLong(0);
-        long output = usage.path("output_tokens").asLong(0);
-        return new PlatformUsage(input, output, BigDecimal.ZERO, 0, 0, 0);
+        return usage(
+            usage.path("input_tokens").asLong(0),
+            usage.path("output_tokens").asLong(0),
+            usage.path("cache_read_input_tokens").asLong(0),
+            usage.path("cache_creation_input_tokens").asLong(0)
+        );
+    }
+
+    /**
+     * Anthropic reports {@code input_tokens} WITHOUT the cached part. The platform convention (and
+     * {@code BillingQuote}) is that inputTokens is the total and the cache counters are subsets of it,
+     * so add them back; otherwise cache reads and writes would never be billed.
+     */
+    private static PlatformUsage usage(long uncachedInput, long output, long cacheRead, long cacheWrite) {
+        long cachedRead = Math.max(0, cacheRead);
+        long cachedWrite = Math.max(0, cacheWrite);
+        return new PlatformUsage(
+            Math.max(0, uncachedInput) + cachedRead + cachedWrite,
+            Math.max(0, output),
+            BigDecimal.ZERO,
+            cachedRead,
+            cachedWrite,
+            0
+        );
     }
 
     private void updateUsage(long[] tokens, JsonNode usage) {
@@ -456,6 +505,12 @@ public class AnthropicUpstreamClient {
         }
         if (usage.has("output_tokens")) {
             tokens[1] = usage.path("output_tokens").asLong(tokens[1]);
+        }
+        if (usage.has("cache_read_input_tokens")) {
+            tokens[2] = usage.path("cache_read_input_tokens").asLong(tokens[2]);
+        }
+        if (usage.has("cache_creation_input_tokens")) {
+            tokens[3] = usage.path("cache_creation_input_tokens").asLong(tokens[3]);
         }
     }
 

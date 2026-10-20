@@ -13,6 +13,7 @@ import org.springframework.stereotype.Component;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.core.PlatformToolUse;
 import tech.starryapi.platform.core.PlatformUsage;
+import tech.starryapi.platform.upstream.UpstreamException;
 
 @Component
 public class AwsEventStreamParser {
@@ -36,11 +37,20 @@ public class AwsEventStreamParser {
             }
             int payloadStart = offset + 12 + headersLength;
             int payloadEnd = offset + totalLength - 4;
+            String messageType = extractHeader(bytes, offset + 12, headersLength, ":message-type");
+            if ("exception".equals(messageType) || "error".equals(messageType)) {
+                throw frameError(bytes, offset, headersLength, payloadStart, payloadEnd, messageType);
+            }
             String eventType = extractEventType(bytes, offset + 12, headersLength);
             if (payloadStart >= 12 && payloadStart < payloadEnd && payloadEnd <= bytes.length) {
                 parsePayload(bytes, payloadStart, payloadEnd, content, toolUses, usage, fallbackModel, eventType);
             }
             offset += totalLength;
+        }
+        if (offset > 0 && offset < bytes.length) {
+            // At least one complete frame was read and then the stream stopped mid-frame. Returning what we
+            // have would bill a partial answer as a success.
+            throw new UpstreamException(502, "Kiro upstream event stream was truncated", true);
         }
         toolUses.finish();
         if (content.isEmpty()) {
@@ -58,6 +68,33 @@ public class AwsEventStreamParser {
             usage.outputTokens = Math.max(1, toolUses.items().size());
         }
         return new PlatformCompletionResult(content.toString(), toolUses.items(), usage.toUsage());
+    }
+
+    private UpstreamException frameError(
+        byte[] bytes,
+        int offset,
+        int headersLength,
+        int payloadStart,
+        int payloadEnd,
+        String messageType
+    ) {
+        String kind = firstNonBlank(
+            extractHeader(bytes, offset + 12, headersLength, ":exception-type"),
+            extractHeader(bytes, offset + 12, headersLength, ":error-code")
+        );
+        String detail = payloadStart >= 12 && payloadStart < payloadEnd && payloadEnd <= bytes.length
+            ? new String(bytes, payloadStart, Math.min(payloadEnd - payloadStart, 512), StandardCharsets.UTF_8)
+            : "";
+        String name = kind == null ? messageType : kind;
+        int status = switch (name) {
+            case "ThrottlingException", "ServiceQuotaExceededException" -> 429;
+            case "ValidationException" -> 400;
+            case "AccessDeniedException" -> 403;
+            case "ServiceUnavailableException" -> 503;
+            default -> 500;
+        };
+        boolean recoverable = status >= 500 || status == 429;
+        return new UpstreamException(status, "Kiro upstream " + messageType + " " + name + ": " + detail, recoverable);
     }
 
     private void parsePayload(
@@ -191,6 +228,10 @@ public class AwsEventStreamParser {
     }
 
     private String extractEventType(byte[] bytes, int headersStart, int headersLength) {
+        return extractHeader(bytes, headersStart, headersLength, ":event-type");
+    }
+
+    private String extractHeader(byte[] bytes, int headersStart, int headersLength, String headerName) {
         int offset = headersStart;
         int end = headersStart + headersLength;
         while (offset < end) {
@@ -215,7 +256,7 @@ public class AwsEventStreamParser {
                 }
                 String value = new String(bytes, offset, valueLength, StandardCharsets.UTF_8);
                 offset += valueLength;
-                if (":event-type".equals(name)) {
+                if (headerName.equals(name)) {
                     return value;
                 }
                 continue;

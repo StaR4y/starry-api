@@ -4,7 +4,6 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -65,7 +64,11 @@ public class KiroUpstreamClient {
             .timeout(properties.getRequestTimeout())
             .retryWhen(Retry.backoff(properties.getMaxRetries(), Duration.ofMillis(250))
                 .maxBackoff(Duration.ofSeconds(2))
-                .filter(error -> error instanceof UpstreamException upstream && upstream.isRecoverable())
+                .filter(error -> error instanceof UpstreamException upstream && upstream.isRecoverable()
+                    // Quota exhaustion (402) and rate limits (429) do not clear within a few hundred milliseconds. Retrying
+                    // the same account just multiplies the load on an account that is already refusing us; the proxy
+                    // moves on to another account instead.
+                    && !isRateOrQuotaFailure(upstream))
                 .onRetryExhaustedThrow((spec, signal) -> signal.failure()));
     }
 
@@ -224,6 +227,10 @@ public class KiroUpstreamClient {
             && (upstream.isRecoverable() || isInvalidModelId(upstream));
     }
 
+    private static boolean isRateOrQuotaFailure(UpstreamException error) {
+        return error.getStatusCode() == 402 || error.getStatusCode() == 429;
+    }
+
     private boolean isRecoverableStatus(int status) {
         return status == 402 || status == 429;
     }
@@ -245,7 +252,7 @@ public class KiroUpstreamClient {
     }
 
     private byte[] serialize(ObjectNode payload) {
-        return payload.toString().getBytes(StandardCharsets.UTF_8);
+        return tech.starryapi.common.JsonNodes.toUtf8Bytes(payload);
     }
 
     private Mono<String> resolveCodeWhispererModelId(

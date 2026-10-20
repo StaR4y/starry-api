@@ -272,7 +272,7 @@ public class AccountPoolService {
 
     public Mono<ProxyAccountEntity> update(String accountId, AccountDtos.UpdateAccountRequest request) {
         return repository.findByAccountId(accountId)
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND", "Account not found")))
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND", "Account not found")))
             .flatMap(entity -> updateManagedFields(entity, request))
             .onErrorMap(DuplicateKeyException.class, error -> accountEmailExists())
             .doOnNext(this::updateCachedAccount);
@@ -302,7 +302,7 @@ public class AccountPoolService {
 
     public Mono<ProxyAccountEntity> suspend(String accountId, String reason, String message) {
         return repository.findByAccountId(accountId)
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND", "Account not found")))
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND", "Account not found")))
             .flatMap(entity -> {
                 entity.setSuspendedAt(Instant.now());
                 entity.setSuspendReason(reason);
@@ -315,7 +315,7 @@ public class AccountPoolService {
 
     public Mono<ProxyAccountEntity> resetState(String accountId) {
         return repository.findByAccountId(accountId)
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND", "Account not found")))
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND", "Account not found")))
             .flatMap(entity -> {
                 entity.setEnabled(true);
                 entity.setErrorCount(0);
@@ -587,10 +587,10 @@ public class AccountPoolService {
                     }
                     return selectFromPool(routed, affinityKey, context);
                 }))
-                .switchIfEmpty(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", unavailableMessage)));
+                .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", unavailableMessage)));
         }
         return selectFromPool(accounts, affinityKey, context)
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", unavailableMessage)));
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", unavailableMessage)));
     }
 
     private Mono<ProxyAccountEntity> selectFromPool(
@@ -828,6 +828,13 @@ public class AccountPoolService {
             UPDATE proxy_accounts
             SET error_count = COALESCE(error_count, 0) + 1,
                 quota_exhausted_at = CASE WHEN :quotaError THEN CURRENT_TIMESTAMP ELSE quota_exhausted_at END,
+                -- Without a reset time the exhausted window never ends (NULL counts as "still active"), so the
+                -- account would stay out of rotation until someone re-enables it by hand.
+                quota_reset_at = CASE
+                    WHEN :quotaError AND (quota_reset_at IS NULL OR quota_reset_at <= CURRENT_TIMESTAMP)
+                        THEN :totalQuotaResetAt
+                    ELSE quota_reset_at
+                END,
                 last_used_at = CURRENT_TIMESTAMP,
                 updated_at = clock_timestamp()
             WHERE account_id = :accountId
@@ -836,6 +843,7 @@ public class AccountPoolService {
         boolean quotaError = isQuotaStatus(statusCode, rateLimitIsQuota);
         return template.getDatabaseClient().sql(sql)
             .bind("quotaError", quotaError)
+            .bind("totalQuotaResetAt", nextTotalQuotaResetAt())
             .bind("accountId", accountId)
             .map((row, metadata) -> template.getConverter().read(ProxyAccountEntity.class, row, metadata))
             .one()
@@ -903,6 +911,11 @@ public class AccountPoolService {
                     WHEN :authFailure THEN NULL
                     ELSE quota_exhausted_at
                 END,
+                quota_reset_at = CASE
+                    WHEN :quotaFailure AND (quota_reset_at IS NULL OR quota_reset_at <= :now)
+                        THEN :totalQuotaResetAt
+                    ELSE quota_reset_at
+                END,
                 suspended_at = CASE WHEN :suspended THEN :now ELSE suspended_at END,
                 suspend_reason = CASE
                     WHEN :quotaFailure THEN 'QUOTA_EXHAUSTED'
@@ -916,6 +929,7 @@ public class AccountPoolService {
             """;
         var spec = template.getDatabaseClient().sql(sql)
             .bind("now", now)
+            .bind("totalQuotaResetAt", nextTotalQuotaResetAt())
             .bind("suspended", suspended)
             .bind("quotaFailure", quotaFailure)
             .bind("authFailure", authFailure)
@@ -970,6 +984,11 @@ public class AccountPoolService {
                     WHEN :permanentCredentialFailure THEN NULL
                     ELSE quota_exhausted_at
                 END,
+                quota_reset_at = CASE
+                    WHEN :quotaFailure AND (quota_reset_at IS NULL OR quota_reset_at <= :now)
+                        THEN :totalQuotaResetAt
+                    ELSE quota_reset_at
+                END,
                 suspended_at = CASE WHEN :permanentCredentialFailure THEN :now ELSE suspended_at END,
                 suspend_reason = CASE
                     WHEN :quotaFailure THEN 'QUOTA_EXHAUSTED'
@@ -986,6 +1005,7 @@ public class AccountPoolService {
             """;
         var spec = template.getDatabaseClient().sql(sql)
             .bind("now", now)
+            .bind("totalQuotaResetAt", nextTotalQuotaResetAt())
             .bind("quotaFailure", quotaFailure)
             .bind("permanentCredentialFailure", permanentCredentialFailure)
             .bind("accountId", accountId);
@@ -1383,7 +1403,7 @@ public class AccountPoolService {
                 : importSuccess(index, "UPDATED", "Account updated", result.account()))
             .switchIfEmpty(Mono.defer(() -> findImportedEmail(request)
                 .map(existing -> importSuccess(index, "SKIPPED", "Account email already exists", existing))
-                .switchIfEmpty(Mono.error(new ApiException(
+                .switchIfEmpty(Mono.error(() -> new ApiException(
                     HttpStatus.CONFLICT,
                     "ACCOUNT_EMAIL_EXISTS",
                     "Account email already exists"
@@ -1665,7 +1685,7 @@ public class AccountPoolService {
         return spec
             .map((row, metadata) -> template.getConverter().read(ProxyAccountEntity.class, row, metadata))
             .one()
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND", "Account not found")));
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND", "Account not found")));
     }
 
     private static void putIfPresent(
