@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { locale, t } from '@/i18n';
   import { computed, onMounted, ref, watch } from 'vue';
   import { ElMessage, ElMessageBox } from 'element-plus';
   import { Check, Delete, Edit, Plus, Refresh, RefreshLeft, Search } from '@element-plus/icons-vue';
@@ -127,11 +128,36 @@
       .filter((rule): rule is EditableRule => Boolean(rule)),
   );
   const priceFields: { label: string; key: keyof ModelPublicPricing }[] = [
-    { label: '总量参考价', key: 'totalPricePerMillionTokens' },
-    { label: '输入', key: 'inputPricePerMillionTokens' },
-    { label: '输出', key: 'outputPricePerMillionTokens' },
-    { label: '缓存读取', key: 'cacheReadPricePerMillionTokens' },
-    { label: '缓存写入', key: 'cacheWritePricePerMillionTokens' },
+    {
+      get label() {
+        return t('总量参考价');
+      },
+      key: 'totalPricePerMillionTokens',
+    },
+    {
+      get label() {
+        return t('输入');
+      },
+      key: 'inputPricePerMillionTokens',
+    },
+    {
+      get label() {
+        return t('输出');
+      },
+      key: 'outputPricePerMillionTokens',
+    },
+    {
+      get label() {
+        return t('缓存读取');
+      },
+      key: 'cacheReadPricePerMillionTokens',
+    },
+    {
+      get label() {
+        return t('缓存写入');
+      },
+      key: 'cacheWritePricePerMillionTokens',
+    },
   ];
 
   function newRule(): EditableRule {
@@ -145,7 +171,7 @@
     };
   }
   function ruleLabel(rule: EditableRule) {
-    if (rule.scope === 'provider') return rule.provider + ' · 全部系列';
+    if (rule.scope === 'provider') return rule.provider + t(' · 全部系列');
     if (rule.scope === 'family') return rule.provider + ' · ' + rule.family;
     return rule.modelPattern;
   }
@@ -177,7 +203,7 @@
       return;
     }
     if (rules.value.length >= 200) {
-      ElMessage.warning('最多支持 200 条规则');
+      ElMessage.warning(t('最多支持 200 条规则'));
       return;
     }
     rules.value.push({
@@ -207,7 +233,7 @@
     const amount = Number(value);
     if (!Number.isFinite(amount)) return '—';
     if (amount > 0 && amount < 0.000001) return amount.toExponential(2);
-    return amount.toLocaleString(undefined, { maximumFractionDigits: 6 });
+    return amount.toLocaleString(locale.value, { maximumFractionDigits: 6 });
   }
   function rulePrice(rule: EditableRule) {
     if (!isLegacy(rule)) return number(rule.priceMultiplier) + ' ×';
@@ -248,7 +274,7 @@
   function commitDraft() {
     const next = { ...draft.value, modelPattern: draft.value.modelPattern.trim() };
     if (!next.modelPattern || next.modelPattern.length > 256) {
-      ElMessage.warning('请输入 1–256 个字符的模型匹配');
+      ElMessage.warning(t('请输入 1–256 个字符的模型匹配'));
       return;
     }
     if (
@@ -257,11 +283,11 @@
         Number(next.priceMultiplier) < 0.000001 ||
         Number(next.priceMultiplier) > 1000)
     ) {
-      ElMessage.warning('倍率范围为 0.000001–1000');
+      ElMessage.warning(t('倍率范围为 0.000001–1000'));
       return;
     }
     if (!Number.isInteger(next.priority) || next.priority < 0 || next.priority > 10000) {
-      ElMessage.warning('优先级范围为 0–10000');
+      ElMessage.warning(t('优先级范围为 0–10000'));
       return;
     }
     if (
@@ -274,23 +300,27 @@
           (rule) => rule.ruleId !== editingId.value && ruleIdentity(rule) === ruleIdentity(next),
         )
       ) {
-        ElMessage.warning('该模型匹配已存在');
+        ElMessage.warning(t('该模型匹配已存在'));
         return;
       }
       const index = rules.value.findIndex((rule) => rule.ruleId === editingId.value);
       if (index >= 0) rules.value[index] = next;
       else rules.value.push(next);
       dialogVisible.value = false;
-    } else ElMessage.warning('请填写有效的价格倍率');
+    } else ElMessage.warning(t('请填写有效的价格倍率'));
   }
   async function convertLegacy() {
     try {
       await ElMessageBox.confirm(
-        '固定单价将替换为官方价格 × 倍率，实际费用会改变。',
-        '改为倍率计费',
+        t('固定单价将替换为官方价格 × 倍率，实际费用会改变。'),
+        t('改为倍率计费'),
         {
-          confirmButtonText: '改为倍率',
-          cancelButtonText: '保留固定价',
+          get confirmButtonText() {
+            return t('改为倍率');
+          },
+          get cancelButtonText() {
+            return t('保留固定价');
+          },
           type: 'warning',
         },
       );
@@ -338,7 +368,7 @@
       billingMultiplier.value = payment.apiBillingMultiplier;
       ready.value = true;
     } catch {
-      ElMessage.error('价格设置加载失败');
+      ElMessage.error(t('价格设置加载失败'));
     } finally {
       loading.value = false;
     }
@@ -349,7 +379,7 @@
       const result = await modelPricingApi.update({ rules: payload });
       acceptRules(result.rules);
       emit('saved');
-      ElMessage.success('价格规则已保存');
+      ElMessage.success(t('价格规则已保存'));
     } catch {
       // The shared HTTP client reports the error; keep the draft intact.
     } finally {
@@ -359,11 +389,15 @@
   async function restoreDefault() {
     try {
       await ElMessageBox.confirm(
-        '全部覆盖规则（含旧固定价）将被删除，恢复默认计费倍率。',
-        '恢复默认',
+        t('全部覆盖规则（含旧固定价）将被删除，恢复默认计费倍率。'),
+        t('恢复默认'),
         {
-          confirmButtonText: '恢复默认',
-          cancelButtonText: '取消',
+          get confirmButtonText() {
+            return t('恢复默认');
+          },
+          get cancelButtonText() {
+            return t('取消');
+          },
           type: 'warning',
         },
       );
@@ -396,7 +430,7 @@
         checksumUrl: source.value.checksumUrl,
       });
       invalidatePreview();
-      ElMessage.success('数据源已保存');
+      ElMessage.success(t('数据源已保存'));
     } catch {
       // Keep source edits available for correction or retry.
     } finally {
@@ -415,9 +449,9 @@
       };
       invalidatePreview();
       emit('saved');
-      ElMessage.success('官方价格已同步');
+      ElMessage.success(t('官方价格已同步'));
     } catch {
-      ElMessage.error('同步失败，已保留当前规则草稿和上次成功价格');
+      ElMessage.error(t('同步失败，已保留当前规则草稿和上次成功价格'));
     } finally {
       syncing.value = false;
     }
@@ -427,20 +461,22 @@
 
 <template>
   <div v-loading="loading" class="pricing-panel">
-    <el-alert v-if="!loading && !ready" title="价格设置未加载" type="error" :closable="false">
-      <el-button link :icon="Refresh" @click="load">重新加载</el-button>
+    <el-alert v-if="!loading && !ready" :title="t('价格设置未加载')" type="error" :closable="false">
+      <el-button link :icon="Refresh" @click="load">{{ t('重新加载') }}</el-button>
     </el-alert>
     <div class="pricing-summary">
       <div>
-        <span class="eyebrow">默认计费</span>
-        <div class="default-price">官方价格 <span>×</span> {{ number(billingMultiplier) }}</div>
+        <span class="eyebrow">{{ t('默认计费') }}</span>
+        <div class="default-price">
+          {{ t('官方价格') }} <span>×</span> {{ number(billingMultiplier) }}
+        </div>
       </div>
       <div class="summary-meta">
-        <span>{{ enabledCount }} 条生效规则</span>
+        <span>{{ enabledCount }} {{ t('条生效规则') }}</span>
         <el-tag v-if="legacyCount" type="warning" effect="plain" size="small">
-          {{ legacyCount }} 条旧固定价
+          {{ legacyCount }} {{ t('条旧固定价') }}
         </el-tag>
-        <el-tag v-if="dirty" effect="plain" size="small">未保存</el-tag>
+        <el-tag v-if="dirty" effect="plain" size="small">{{ t('未保存') }}</el-tag>
         <el-button
           type="primary"
           :icon="Check"
@@ -448,19 +484,19 @@
           :loading="submitting"
           @click="save()"
         >
-          保存规则
+          {{ t('保存规则') }}
         </el-button>
       </div>
     </div>
 
-    <section class="scope-section" aria-label="厂商与系列倍率">
+    <section class="scope-section" :aria-label="t('厂商与系列倍率')">
       <div class="section-head">
-        <h3>厂商与系列</h3>
+        <h3>{{ t('厂商与系列') }}</h3>
         <el-select
           v-model="selectedProvider"
           class="provider-select"
           filterable
-          aria-label="定价厂商"
+          :aria-label="t('定价厂商')"
           :disabled="busy"
         >
           <el-option
@@ -476,14 +512,19 @@
           <div class="scope-identity">
             <ProviderLogo :provider="selectedProvider" :size="28" />
             <div>
-              <strong>{{ selectedProvider }} 默认倍率</strong>
-              <span>{{ families.length }} 个系列 · {{ providerModels.length }} 个模型</span>
+              <strong>{{ selectedProvider }} {{ t('默认倍率') }}</strong>
+              <span>{{ families.length }} {{ t('个系列 ·') }} {{ providerModels.length }}
+                {{ t('个模型') }}</span>
             </div>
           </div>
           <div class="scope-controls">
-            <el-tag v-if="!providerRule" size="small" type="info" effect="plain">继承全局</el-tag>
+            <el-tag v-if="!providerRule" size="small" type="info" effect="plain">
+              {{
+                t('继承全局')
+              }}
+            </el-tag>
             <el-tag v-else-if="!providerRule.enabled" size="small" type="warning" effect="plain">
-              已停用
+              {{ t('已停用') }}
             </el-tag>
             <el-input-number
               :model-value="scopedMultiplier()"
@@ -493,25 +534,25 @@
               :step="0.1"
               controls-position="right"
               :disabled="busy"
-              :aria-label="selectedProvider + ' 厂商倍率'"
+              :aria-label="selectedProvider + t(' 厂商倍率')"
               @update:model-value="setScopedMultiplier($event)"
             />
             <span class="rate-unit">×</span>
-            <el-tooltip content="优先级与启用状态">
+            <el-tooltip :content="t('优先级与启用状态')">
               <el-button
                 text
                 :icon="Edit"
                 :disabled="busy || !providerRule"
-                :aria-label="selectedProvider + ' 倍率高级设置'"
+                :aria-label="selectedProvider + t(' 倍率高级设置')"
                 @click="editRule(providerRule)"
               />
             </el-tooltip>
-            <el-tooltip content="恢复继承全局倍率">
+            <el-tooltip :content="t('恢复继承全局倍率')">
               <el-button
                 text
                 :icon="RefreshLeft"
                 :disabled="busy || !providerRule"
-                :aria-label="selectedProvider + ' 恢复全局倍率'"
+                :aria-label="selectedProvider + t(' 恢复全局倍率')"
                 @click="inheritScope()"
               />
             </el-tooltip>
@@ -520,12 +561,12 @@
         <div v-for="family in families" :key="family" class="scope-row family-rate">
           <div class="scope-identity">
             <div>
-              <strong>{{ family }}</strong><span>{{ familyCount(family) }} 个模型</span>
+              <strong>{{ family }}</strong><span>{{ familyCount(family) }} {{ t('个模型') }}</span>
             </div>
           </div>
           <div class="scope-controls">
             <el-tag v-if="!scopedRule(family)" size="small" type="info" effect="plain">
-              继承厂商
+              {{ t('继承厂商') }}
             </el-tag>
             <el-tag
               v-else-if="!scopedRule(family)?.enabled"
@@ -533,7 +574,7 @@
               type="warning"
               effect="plain"
             >
-              已停用
+              {{ t('已停用') }}
             </el-tag>
             <el-input-number
               :model-value="scopedMultiplier(family)"
@@ -543,25 +584,25 @@
               :step="0.1"
               controls-position="right"
               :disabled="busy"
-              :aria-label="selectedProvider + ' ' + family + ' 系列倍率'"
+              :aria-label="selectedProvider + ' ' + family + t(' 系列倍率')"
               @update:model-value="setScopedMultiplier($event, family)"
             />
             <span class="rate-unit">×</span>
-            <el-tooltip content="优先级与启用状态">
+            <el-tooltip :content="t('优先级与启用状态')">
               <el-button
                 text
                 :icon="Edit"
                 :disabled="busy || !scopedRule(family)"
-                :aria-label="family + ' 倍率高级设置'"
+                :aria-label="family + t(' 倍率高级设置')"
                 @click="editRule(scopedRule(family))"
               />
             </el-tooltip>
-            <el-tooltip content="恢复继承厂商倍率">
+            <el-tooltip :content="t('恢复继承厂商倍率')">
               <el-button
                 text
                 :icon="RefreshLeft"
                 :disabled="busy || !scopedRule(family)"
-                :aria-label="family + ' 恢复厂商倍率'"
+                :aria-label="family + t(' 恢复厂商倍率')"
                 @click="inheritScope(family)"
               />
             </el-tooltip>
@@ -570,12 +611,12 @@
       </template>
     </section>
 
-    <section class="rules-section" aria-label="价格覆盖规则">
+    <section class="rules-section" :aria-label="t('价格覆盖规则')">
       <div class="section-head">
-        <h3>模型单独规则</h3>
+        <h3>{{ t('模型单独规则') }}</h3>
         <div class="actions">
           <el-button :icon="Plus" :disabled="busy || rules.length >= 200" @click="editRule()">
-            新增规则
+            {{ t('新增规则') }}
           </el-button>
         </div>
       </div>
@@ -583,19 +624,23 @@
         <el-input
           v-model="keyword"
           :prefix-icon="Search"
-          placeholder="搜索模型匹配"
+          :placeholder="t('搜索模型匹配')"
           clearable
-          aria-label="搜索规则"
+          :aria-label="t('搜索规则')"
         />
         <el-tooltip
-          content="优先级数值越小越优先；同级按单个模型、系列、厂商、通配符排序。最终只使用一条规则的倍率，不会叠乘。"
+          :content="
+            t(
+              '优先级数值越小越优先；同级按单个模型、系列、厂商、通配符排序。最终只使用一条规则的倍率，不会叠乘。',
+            )
+          "
           placement="top"
         >
-          <span class="match-order" tabindex="0">同级：模型 → 系列 → 厂商 → 通配符</span>
+          <span class="match-order" tabindex="0">{{ t('同级：模型 → 系列 → 厂商 → 通配符') }}</span>
         </el-tooltip>
       </div>
       <div class="rule-grid rule-header" aria-hidden="true">
-        <span>模型匹配</span><span>价格</span><span>优先级</span><span>启用</span><span />
+        <span>{{ t('模型匹配') }}</span><span>{{ t('价格') }}</span><span>{{ t('优先级') }}</span><span>{{ t('启用') }}</span><span />
       </div>
       <div
         v-for="rule in filteredRules"
@@ -608,50 +653,50 @@
           <span>{{
             isLegacy(rule)
               ? rule.totalMultiplier
-                ? '固定总量价'
-                : '固定输入 / 输出价'
+                ? t('固定总量价')
+                : t('固定输入 / 输出价')
               : rule.modelPattern.includes('*')
-                ? '通配符'
-                : '精确匹配'
+                ? t('通配符')
+                : t('精确匹配')
           }}</span>
         </div>
         <strong class="rule-price">{{ rulePrice(rule) }}</strong>
-        <span class="rule-priority"><span class="mobile-label">优先级 </span>{{ rule.priority }}</span>
+        <span class="rule-priority"><span class="mobile-label">{{ t('优先级') }} </span>{{ rule.priority }}</span>
         <el-switch
           v-model="rule.enabled"
           :disabled="busy"
-          :aria-label="'启用 ' + rule.modelPattern"
+          :aria-label="t('启用 ') + rule.modelPattern"
         />
         <div class="row-actions">
-          <el-tooltip content="编辑规则">
+          <el-tooltip :content="t('编辑规则')">
             <el-button
               :icon="Edit"
               text
               :disabled="busy"
-              :aria-label="'编辑 ' + rule.modelPattern"
+              :aria-label="t('编辑 ') + rule.modelPattern"
               @click="editRule(rule)"
             />
           </el-tooltip>
-          <el-tooltip content="删除规则">
+          <el-tooltip :content="t('删除规则')">
             <el-button
               :icon="Delete"
               text
               type="danger"
               :disabled="busy"
-              :aria-label="'删除 ' + rule.modelPattern"
+              :aria-label="t('删除 ') + rule.modelPattern"
               @click="removeRule(rule.ruleId)"
             />
           </el-tooltip>
         </div>
       </div>
       <div v-if="!filteredRules.length" class="empty-state">
-        {{ keyword ? '没有匹配的规则' : '暂无模型单独规则' }}
+        {{ keyword ? t('没有匹配的规则') : t('暂无模型单独规则') }}
       </div>
       <div class="rule-footer">
         <span>{{ rules.length }} / 200</span>
         <div class="actions">
           <el-button v-if="dirty" :icon="RefreshLeft" text :disabled="busy" @click="discard">
-            撤销更改
+            {{ t('撤销更改') }}
           </el-button>
           <el-button
             v-if="rules.length"
@@ -660,15 +705,17 @@
             :disabled="busy"
             @click="restoreDefault"
           >
-            恢复默认
+            {{ t('恢复默认') }}
           </el-button>
         </div>
       </div>
     </section>
 
-    <section class="preview-section" aria-label="价格预览">
+    <section class="preview-section" :aria-label="t('价格预览')">
       <div class="section-head">
-        <h3>价格预览 <span v-if="dirty">当前草稿</span></h3>
+        <h3>
+          {{ t('价格预览') }} <span v-if="dirty">{{ t('当前草稿') }}</span>
+        </h3>
         <span class="unit">USD / MTok</span>
       </div>
       <div class="preview-controls">
@@ -677,8 +724,8 @@
           filterable
           allow-create
           default-first-option
-          aria-label="预览模型"
-          placeholder="模型 ID"
+          :aria-label="t('预览模型')"
+          :placeholder="t('模型 ID')"
         >
           <el-option v-for="id in modelIds" :key="id" :label="id" :value="id" />
         </el-select>
@@ -688,34 +735,38 @@
           :loading="previewing"
           @click="runPreview"
         >
-          预览价格
+          {{ t('预览价格') }}
         </el-button>
       </div>
       <template v-if="preview">
         <div class="preview-match">
-          <span>生效规则</span><code>{{ matchedRules[0] ? ruleLabel(matchedRules[0]) : '默认倍率' }}</code>
+          <span>{{ t('生效规则') }}</span><code>{{ matchedRules[0] ? ruleLabel(matchedRules[0]) : t('默认倍率') }}</code>
           <el-tag v-if="preview.multiplier != null" effect="plain" size="small">
             {{ number(preview.multiplier) }} ×
           </el-tag>
-          <el-tag v-else type="warning" effect="plain" size="small">固定价</el-tag>
+          <el-tag v-else type="warning" effect="plain" size="small">{{ t('固定价') }}</el-tag>
         </div>
         <p v-if="matchedRules.length > 1" class="conflict-note">
-          同时匹配但未生效：{{ matchedRules.slice(1).map(ruleLabel).join('、') }}
+          {{ t('同时匹配但未生效：') }}{{ matchedRules.slice(1).map(ruleLabel).join('、') }}
         </p>
         <el-alert
           v-if="preview.pricing.billingMode === 'unavailable'"
-          title="未找到可核实的官方价格，暂不可计费"
+          :title="t('未找到可核实的官方价格，暂不可计费')"
           type="warning"
           :closable="false"
         />
         <div class="price-table">
           <div class="price-line price-table-head">
-            <span>计费项</span><span>官方价格</span><span>当前价格</span>
+            <span>{{ t('计费项') }}</span><span>{{ t('官方价格') }}</span><span>{{ t('当前价格') }}</span>
           </div>
           <div v-for="field in priceFields" :key="field.key" class="price-line">
             <el-tooltip
               v-if="field.key === 'totalPricePerMillionTokens'"
-              content="输入、输出各占 50% 的总量参考价；实际按各项用量计费。固定总量价则按总 Token 数计费。"
+              :content="
+                t(
+                  '输入、输出各占 50% 的总量参考价；实际按各项用量计费。固定总量价则按总 Token 数计费。',
+                )
+              "
             >
               <span tabindex="0">{{ field.label }}</span>
             </el-tooltip>
@@ -725,7 +776,7 @@
           </div>
         </div>
         <div v-if="preview.matchedPriceModel" class="price-source">
-          官方价格模型 <code>{{ preview.matchedPriceModel }}</code>
+          {{ t('官方价格模型') }} <code>{{ preview.matchedPriceModel }}</code>
         </div>
       </template>
     </section>
@@ -734,13 +785,13 @@
       <el-collapse-item name="source">
         <template #title>
           <div class="source-title">
-            <span>官方价格数据源</span><el-tag :type="source.lastError ? 'warning' : 'info'" size="small" effect="plain">
-              {{ source.lastError ? '同步异常' : source.catalogEntries + ' 条价格' }}
+            <span>{{ t('官方价格数据源') }}</span><el-tag :type="source.lastError ? 'warning' : 'info'" size="small" effect="plain">
+              {{ source.lastError ? t('同步异常') : source.catalogEntries + t(' 条价格') }}
             </el-tag>
           </div>
         </template>
         <div class="source-status">
-          <span>{{ formatDateTime(source.refreshedAt, '当前使用打包快照') }}</span>
+          <span>{{ formatDateTime(source.refreshedAt, t('当前使用打包快照')) }}</span>
           <div class="actions">
             <el-button
               :icon="Refresh"
@@ -748,7 +799,7 @@
               :disabled="busy || savingSource"
               @click="syncNow"
             >
-              立即同步
+              {{ t('立即同步') }}
             </el-button>
             <el-button
               :icon="Check"
@@ -756,7 +807,7 @@
               :disabled="busy || syncing"
               @click="saveSource"
             >
-              保存数据源
+              {{ t('保存数据源') }}
             </el-button>
           </div>
         </div>
@@ -771,17 +822,21 @@
           :disabled="busy || savingSource || syncing"
           class="source-grid"
         >
-          <label class="switch-field"><span>远程自动同步</span><el-switch v-model="source.remoteRefreshEnabled" /></label>
-          <label class="switch-field"><span>同步新模型 ID</span><el-switch v-model="source.syncCatalogIds" /></label>
-          <el-form-item label="价格表地址"><el-input v-model="source.sourceUrl" /></el-form-item>
-          <el-form-item label="校验和地址"><el-input v-model="source.checksumUrl" /></el-form-item>
+          <label class="switch-field"><span>{{ t('远程自动同步') }}</span><el-switch v-model="source.remoteRefreshEnabled" /></label>
+          <label class="switch-field"><span>{{ t('同步新模型 ID') }}</span><el-switch v-model="source.syncCatalogIds" /></label>
+          <el-form-item :label="t('价格表地址')">
+            <el-input v-model="source.sourceUrl" />
+          </el-form-item>
+          <el-form-item :label="t('校验和地址')">
+            <el-input v-model="source.checksumUrl" />
+          </el-form-item>
         </el-form>
       </el-collapse-item>
     </el-collapse>
 
     <el-dialog
       v-model="dialogVisible"
-      :title="editingId ? '编辑价格规则' : '新增价格规则'"
+      :title="editingId ? t('编辑价格规则') : t('新增价格规则')"
       width="min(520px, 94vw)"
       append-to-body
       :close-on-click-modal="false"
@@ -789,17 +844,17 @@
       <el-form label-position="top" class="rule-form" @submit.prevent="commitDraft">
         <el-form-item
           v-if="draft.scope === 'provider' || draft.scope === 'family'"
-          label="计费范围"
+          :label="t('计费范围')"
         >
           <strong>{{ ruleLabel(draft) }}</strong>
         </el-form-item>
-        <el-form-item v-else label="模型 ID / 通配符">
+        <el-form-item v-else :label="t('模型 ID / 通配符')">
           <el-select
             v-model="draft.modelPattern"
             filterable
             allow-create
             default-first-option
-            placeholder="模型 ID 或 gpt-*"
+            :placeholder="t('模型 ID 或 gpt-*')"
           >
             <el-option v-for="id in modelOptions" :key="id" :label="id" :value="id" />
           </el-select>
@@ -809,16 +864,18 @@
           type="warning"
           :closable="false"
           class="pattern-warning"
-          :title="'未找到精确模型 ID：' + draft.modelPattern"
-          description="系列倍率可在厂商与系列中设置；按 ID 前缀匹配需使用 gpt-*、gpt-5* 等通配符。"
+          :title="t('未找到精确模型 ID：') + draft.modelPattern"
+          :description="
+            t('系列倍率可在厂商与系列中设置；按 ID 前缀匹配需使用 gpt-*、gpt-5* 等通配符。')
+          "
         />
         <div v-if="isLegacy(draft)" class="legacy-value">
           <div>
-            <span>旧固定价</span><strong>{{ rulePrice(draft) }}</strong>
+            <span>{{ t('旧固定价') }}</span><strong>{{ rulePrice(draft) }}</strong>
           </div>
-          <el-button text type="primary" @click="convertLegacy">改为倍率</el-button>
+          <el-button text type="primary" @click="convertLegacy">{{ t('改为倍率') }}</el-button>
         </div>
-        <el-form-item v-else label="官方价格倍率">
+        <el-form-item v-else :label="t('官方价格倍率')">
           <el-input-number
             :model-value="draft.priceMultiplier ?? undefined"
             :min="0.000001"
@@ -830,7 +887,7 @@
           />
         </el-form-item>
         <div class="form-options">
-          <el-form-item label="优先级（数值越小越优先）">
+          <el-form-item :label="t('优先级（数值越小越优先）')">
             <el-input-number
               v-model="draft.priority"
               :min="0"
@@ -839,11 +896,11 @@
               controls-position="right"
             />
           </el-form-item>
-          <el-form-item label="启用"><el-switch v-model="draft.enabled" /></el-form-item>
+          <el-form-item :label="t('启用')"><el-switch v-model="draft.enabled" /></el-form-item>
         </div>
       </el-form>
       <template #footer>
-        <el-button @click="dialogVisible = false">取消</el-button><el-button type="primary" @click="commitDraft">确定</el-button>
+        <el-button @click="dialogVisible = false">{{ t('取消') }}</el-button><el-button type="primary" @click="commitDraft">{{ t('确定') }}</el-button>
       </template>
     </el-dialog>
   </div>

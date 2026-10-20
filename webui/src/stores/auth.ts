@@ -1,3 +1,4 @@
+import { t } from '@/i18n';
 /**
  * 鉴权状态。
  *
@@ -54,10 +55,13 @@ export const useAuthStore = defineStore('auth', {
     isAuthenticated: (state) => Boolean(state.token),
     requirePasswordChange: (state) => Boolean(state.user?.firstLogin),
     isAdmin: (state) => state.user?.role === 'ADMIN',
-    isRoot: (state) => state.user?.role === 'ADMIN' && Boolean(state.token)
-      && state.permissionsToken === state.token && state.permissions?.root === true,
+    isRoot: (state) =>
+      state.user?.role === 'ADMIN' &&
+      Boolean(state.token) &&
+      state.permissionsToken === state.token &&
+      state.permissions?.root === true,
     defaultRouteName: (state) => (state.user?.role === 'ADMIN' ? 'dashboard' : 'welcome'),
-    displayName: (state) => state.user?.displayName || state.user?.username || '账号',
+    displayName: (state) => state.user?.displayName || state.user?.username || t('账号'),
   },
 
   actions: {
@@ -118,8 +122,15 @@ export const useAuthStore = defineStore('auth', {
       return user;
     },
 
-    /** 清空内存与持久化态。不主动跳转，由调用方决定路由行为。 */
-    logout() {
+    /**
+     * 清空内存与持久化态。不主动跳转，由调用方决定路由行为。
+     * 默认同时通知服务端作废该会话；令牌已被服务端判为失效（401）时传 `remote: false`。
+     */
+    logout(options: { remote?: boolean } = {}) {
+      const token = this.token;
+      if (token && options.remote !== false) {
+        void authApi.logout(token).catch(() => undefined);
+      }
       this.token = null;
       this.user = null;
       this.permissions = null;

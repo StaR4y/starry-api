@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
   import { Refresh, Tools } from '@element-plus/icons-vue';
   import { useRoute, useRouter } from 'vue-router';
@@ -17,9 +18,9 @@
 
   const message = computed(() => {
     if (status.value?.maintenance || status.value?.code === 'SYSTEM_MAINTENANCE') {
-      return '安全保护已触发，站内服务暂时停止';
+      return t('安全保护已触发，站内服务暂时停止');
     }
-    return checkFailed.value ? '暂时无法连接服务' : '系统正在维护中';
+    return checkFailed.value ? t('暂时无法连接服务') : t('系统正在维护中');
   });
 
   function recoveryTarget() {
@@ -66,10 +67,10 @@
     <section class="maintenance__panel glass-panel glass-panel--strong" aria-live="polite">
       <SiteBrandLogo class="maintenance__logo" />
       <el-icon class="maintenance__icon" :size="30"><Tools /></el-icon>
-      <h1>系统维护中</h1>
+      <h1>{{ t('系统维护中') }}</h1>
       <p>{{ message }}</p>
       <el-button type="primary" :icon="Refresh" :loading="checking" @click="checkStatus">
-        检查服务状态
+        {{ t('检查服务状态') }}
       </el-button>
     </section>
   </main>

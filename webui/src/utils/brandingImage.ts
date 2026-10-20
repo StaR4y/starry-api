@@ -1,3 +1,4 @@
+import { t } from '@/i18n';
 /** 外观资源上传前压缩，避免超大 PNG 直接打到 413。 */
 
 export type BrandingAssetKind = 'logo' | 'favicon' | 'background';
@@ -30,7 +31,7 @@ export async function prepareBrandingImage(file: File, kind: BrandingAssetKind):
       if (file.size <= maxBytes) {
         return file;
       }
-      throw new Error('图片过大，请压缩后再上传');
+      throw new Error(t('图片过大，请压缩后再上传'));
     }
     const preferJpeg = kind === 'background' || file.type === 'image/jpeg';
     let quality = 0.9;
@@ -43,13 +44,16 @@ export async function prepareBrandingImage(file: File, kind: BrandingAssetKind):
         (await canvasToBlob(canvas, preferJpeg ? 'image/jpeg' : 'image/webp', quality)) ??
         (await canvasToBlob(canvas, 'image/png'));
       if (blob && blob.size <= maxBytes) {
-        return new File([blob], rename(file.name, blob.type), { type: blob.type, lastModified: Date.now() });
+        return new File([blob], rename(file.name, blob.type), {
+          type: blob.type,
+          lastModified: Date.now(),
+        });
       }
       width = Math.max(64, Math.round(width * 0.75));
       height = Math.max(64, Math.round(height * 0.75));
       quality = Math.max(0.55, quality - 0.1);
     }
-    throw new Error('图片过大，请压缩后再上传');
+    throw new Error(t('图片过大，请压缩后再上传'));
   } finally {
     image.close();
   }
@@ -62,7 +66,11 @@ function rename(fileName: string, mime: string): string {
   return `${stem}.png`;
 }
 
-function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality?: number): Promise<Blob | null> {
+function canvasToBlob(
+  canvas: HTMLCanvasElement,
+  type: string,
+  quality?: number,
+): Promise<Blob | null> {
   return new Promise((resolve) => {
     canvas.toBlob((blob) => resolve(blob), type, quality);
   });
@@ -90,7 +98,7 @@ async function loadImage(file: File): Promise<LoadedImage> {
     const image = await new Promise<HTMLImageElement>((resolve, reject) => {
       const element = new Image();
       element.onload = () => resolve(element);
-      element.onerror = () => reject(new Error('无法读取图片'));
+      element.onerror = () => reject(new Error(t('无法读取图片')));
       element.src = objectUrl;
     });
     return {

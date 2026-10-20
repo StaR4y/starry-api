@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   /**
    * 账号池设置。
    *
@@ -84,7 +85,7 @@
       accountSettings.value = await accountsApi.settings();
       loadState.value = 'ready';
     } catch (err) {
-      loadError.value = err instanceof ApiError ? err.message : '服务暂时不可用';
+      loadError.value = err instanceof ApiError ? err.message : t('服务暂时不可用');
       loadState.value = 'error';
     }
   }
@@ -93,11 +94,17 @@
     const enabled = Boolean(value);
     if (enabled) {
       const confirmed = await ElMessageBox.confirm(
-        '该试验性策略可能出现误熔断、路由抖动或监控口径变化。启用后此处将展示模型路由健康快照，确认继续？',
-        '启用账号池分级熔断策略',
+        t(
+          '该试验性策略可能出现误熔断、路由抖动或监控口径变化。启用后此处将展示模型路由健康快照，确认继续？',
+        ),
+        t('启用账号池分级熔断策略'),
         {
-          confirmButtonText: '确认启用',
-          cancelButtonText: '取消',
+          get confirmButtonText() {
+            return t('确认启用');
+          },
+          get cancelButtonText() {
+            return t('取消');
+          },
           type: 'warning',
         },
       )
@@ -113,7 +120,9 @@
       });
       loadState.value = 'ready';
       ElMessage.success(
-        accountSettings.value.poolPolicy.enabled ? '已启用分级熔断策略' : '已关闭分级熔断策略',
+        accountSettings.value.poolPolicy.enabled
+          ? t('已启用分级熔断策略')
+          : t('已关闭分级熔断策略'),
       );
     } catch (err) {
       if (err instanceof ApiError) ElMessage.error(err.message);
@@ -136,9 +145,14 @@
   function handleTestCompleted(result: TestAccountsResult) {
     batchTestResult.value = result;
     batchTestVisible.value = true;
-    const message = `复检完成：总计 ${result.total}，成功 ${result.success}，失败 ${result.failed}，跳过 ${result.skipped}`;
+    const message = t('复检完成：总计 {p0}，成功 {p1}，失败 {p2}，跳过 {p3}', {
+      p0: result.total,
+      p1: result.success,
+      p2: result.failed,
+      p3: result.skipped,
+    });
     if (result.total === 0) {
-      ElMessage.warning('没有找到可测试账号，请检查平台过滤或单批额度配置');
+      ElMessage.warning(t('没有找到可测试账号，请检查平台过滤或单批额度配置'));
     } else {
       ElMessage.success(message);
     }
@@ -153,18 +167,18 @@
 </script>
 
 <template>
-  <PageSection title="账号池设置" subtitle="运行与安全" :icon="Monitor">
+  <PageSection :title="t('账号池设置')" :subtitle="t('运行与安全')" :icon="Monitor">
     <el-skeleton v-if="loadState === 'loading'" class="settings-state" :rows="6" animated />
 
     <el-result
       v-else-if="loadState === 'error'"
       class="settings-state"
       icon="warning"
-      title="设置加载失败"
+      :title="t('设置加载失败')"
       :sub-title="loadError"
     >
       <template #extra>
-        <el-button type="primary" @click="loadAccountSettings">重新加载</el-button>
+        <el-button type="primary" @click="loadAccountSettings">{{ t('重新加载') }}</el-button>
       </template>
     </el-result>
 
@@ -183,15 +197,15 @@
             </div>
             <div class="title-section">
               <div class="title-row">
-                <span class="title-text">账号池分级熔断策略</span>
-                <el-tag type="warning" size="small" effect="plain">试验性</el-tag>
+                <span class="title-text">{{ t('账号池分级熔断策略') }}</span>
+                <el-tag type="warning" size="small" effect="plain">{{ t('试验性') }}</el-tag>
                 <span class="status-badge" :class="{ 'is-enabled': poolPolicyEnabled }">
                   <span class="status-dot" />
-                  {{ poolPolicyEnabled ? '已启用' : '已关闭' }}
+                  {{ poolPolicyEnabled ? t('已启用') : t('已关闭') }}
                 </span>
               </div>
               <div class="desc-text">
-                按模型供应商与模型族监控账号池健康，窗口错误率超过阈值时自动切换账号池
+                {{ t('按模型供应商与模型族监控账号池健康，窗口错误率超过阈值时自动切换账号池') }}
               </div>
             </div>
           </div>
@@ -222,7 +236,11 @@
               type="warning"
               :closable="false"
               show-icon
-              title="该功能仍处于试验阶段，可能发生误熔断、路由抖动或监控数据口径调整，请勿在关键业务中无保护启用。"
+              :title="
+                t(
+                  '该功能仍处于试验阶段，可能发生误熔断、路由抖动或监控数据口径调整，请勿在关键业务中无保护启用。',
+                )
+              "
             />
             <PoolPolicyPanel
               v-if="poolPolicyEnabled"
@@ -232,7 +250,7 @@
             <el-empty
               v-else
               :image-size="72"
-              description="策略未启用，打开右上角开关后可查看模型路由健康快照"
+              :description="t('策略未启用，打开右上角开关后可查看模型路由健康快照')"
             />
           </div>
         </el-collapse-transition>

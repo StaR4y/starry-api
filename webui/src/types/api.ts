@@ -87,7 +87,10 @@ export interface UpdateAdminUserRequest {
   email?: string;
   displayName?: string;
   role?: AdminUserRole;
+  /** Only send when the balance was actually edited; the server rejects a stale value (409). */
   balance?: number;
+  /** The balance the form was opened with. Required together with `balance`. */
+  expectedBalance?: number;
   enabled?: boolean;
 }
 
@@ -209,6 +212,7 @@ export interface InitializeDataManagementSecurityResponse {
 }
 
 export type DataManagementAction =
+  | 'VIEW_DATA_MANAGEMENT'
   | 'EXPORT_DATABASE'
   | 'EXPORT_BACKUP'
   | 'CREATE_BACKUP'

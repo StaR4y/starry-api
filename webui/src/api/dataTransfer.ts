@@ -61,9 +61,7 @@ export function saveDownloadedFile(file: DownloadedFile) {
 export const dataTransferApi = {
   securityStatus() {
     return unwrap<DataManagementSecurityStatus>(
-      http.get<ApiResponse<DataManagementSecurityStatus>>(
-        '/admin/data-transfer/security/status',
-      ),
+      http.get<ApiResponse<DataManagementSecurityStatus>>('/admin/data-transfer/security/status'),
     );
   },
   initializeSecurity() {
@@ -75,15 +73,18 @@ export const dataTransferApi = {
   },
   unlockSecurity(securityKey: string, action: DataManagementAction, target: string | null = null) {
     return unwrap<UnlockDataManagementResponse>(
-      http.post<ApiResponse<UnlockDataManagementResponse>>(
-        '/admin/data-transfer/security/unlock',
-        { securityKey, action, target },
-      ),
+      http.post<ApiResponse<UnlockDataManagementResponse>>('/admin/data-transfer/security/unlock', {
+        securityKey,
+        action,
+        target,
+      }),
     );
   },
-  status() {
+  status(securityToken: string) {
     return unwrap<DataTransferStatus>(
-      http.get<ApiResponse<DataTransferStatus>>('/admin/data-transfer/status'),
+      http.get<ApiResponse<DataTransferStatus>>('/admin/data-transfer/status', {
+        headers: securityHeaders(securityToken),
+      }),
     );
   },
   exportDatabase(securityToken: string) {
@@ -96,9 +97,11 @@ export const dataTransferApi = {
   exportBackup(securityToken: string) {
     return download('/admin/data-transfer/backup.zip', 'starry-api-backup.zip', securityToken);
   },
-  backups() {
+  backups(securityToken: string) {
     return unwrap<BackupListResponse>(
-      http.get<ApiResponse<BackupListResponse>>('/admin/data-transfer/backups'),
+      http.get<ApiResponse<BackupListResponse>>('/admin/data-transfer/backups', {
+        headers: securityHeaders(securityToken),
+      }),
     );
   },
   createBackup(securityToken: string) {
@@ -123,7 +126,7 @@ export const dataTransferApi = {
       ),
     );
   },
-  importBackup(file: File, securityToken: string) {
+  importBackup(file: File, securityToken: string, onProgress?: (percent: number) => void) {
     const formData = new FormData();
     formData.append('file', file);
     return unwrap<ImportDataResult>(
@@ -133,6 +136,10 @@ export const dataTransferApi = {
         {
           timeout: 180_000,
           headers: securityHeaders(securityToken),
+          onUploadProgress: (event) => {
+            if (event.total)
+              onProgress?.(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+          },
         },
       ),
     );

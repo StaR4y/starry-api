@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   import { onMounted, ref } from 'vue';
   import { useRouter } from 'vue-router';
   import { ElMessage } from 'element-plus';
@@ -22,7 +23,7 @@
     retrying.value = id;
     try {
       await ticketApi.retryNotification(id);
-      ElMessage.success('已加入重试队列');
+      ElMessage.success(t('已加入重试队列'));
       snapshot.value = await ticketApi.settings();
     } catch {
       /* Shared HTTP client reports errors. */
@@ -49,7 +50,7 @@
     try {
       snapshot.value = await ticketApi.saveSettings(settings.value);
       settings.value = { ...snapshot.value.settings };
-      ElMessage.success('工单通知设置已保存');
+      ElMessage.success(t('工单通知设置已保存'));
     } catch {
       /* Retain unsaved settings. */
     } finally {
@@ -58,38 +59,46 @@
   }
   const reason = (value: string) =>
     ({
-      SMTP_NOT_CONFIGURED: 'SMTP 未配置',
-      NO_ADMIN_RECIPIENTS: '没有可用管理员邮箱',
-      TICKET_EMAIL_FAILED: 'SMTP 发送失败',
-      DELIVERY_FAILED: '发送超时或连接失败',
-    })[value] ?? '发送失败';
+      get SMTP_NOT_CONFIGURED() {
+        return t('SMTP 未配置');
+      },
+      get NO_ADMIN_RECIPIENTS() {
+        return t('没有可用管理员邮箱');
+      },
+      get TICKET_EMAIL_FAILED() {
+        return t('SMTP 发送失败');
+      },
+      get DELIVERY_FAILED() {
+        return t('发送超时或连接失败');
+      },
+    })[value] ?? t('发送失败');
   onMounted(load);
 </script>
 
 <template>
-  <PageSection title="工单通知" subtitle="访问与通知" :icon="Service">
+  <PageSection :title="t('工单通知')" :subtitle="t('访问与通知')" :icon="Service">
     <template #actions>
       <el-tag v-if="snapshot" :type="snapshot.settings.enabled ? 'success' : 'info'" effect="plain">
-        {{ snapshot.settings.enabled ? '通知已开启' : '通知已关闭' }}
+        {{ snapshot.settings.enabled ? t('通知已开启') : t('通知已关闭') }}
       </el-tag>
       <el-button
         :icon="Refresh"
         :loading="loading"
         :disabled="saving || !!retrying"
-        aria-label="重新加载通知设置"
+        :aria-label="t('重新加载通知设置')"
         @click="load"
       >
-        刷新
+        {{ t('刷新') }}
       </el-button>
       <el-button
         type="primary"
         :icon="Check"
         :loading="saving"
         :disabled="loading || !snapshot || !!retrying"
-        aria-label="保存设置"
+        :aria-label="t('保存设置')"
         @click="save"
       >
-        保存
+        {{ t('保存') }}
       </el-button>
     </template>
 
@@ -104,36 +113,36 @@
       @submit.prevent="save"
     >
       <section class="ticket-section">
-        <h3>邮件通知</h3>
+        <h3>{{ t('邮件通知') }}</h3>
         <div class="ticket-grid">
-          <el-form-item label="启用工单通知">
-            <el-switch v-model="settings.enabled" aria-label="启用工单邮件通知" />
+          <el-form-item :label="t('启用工单通知')">
+            <el-switch v-model="settings.enabled" :aria-label="t('启用工单邮件通知')" />
           </el-form-item>
-          <el-form-item label="邮件内容">
-            <el-radio-group v-model="settings.mode" class="ticket-mode" aria-label="邮件内容">
-              <el-radio-button value="SUMMARY">仅待处理提醒</el-radio-button>
-              <el-radio-button value="CONTENT">包含工单内容</el-radio-button>
+          <el-form-item :label="t('邮件内容')">
+            <el-radio-group v-model="settings.mode" class="ticket-mode" :aria-label="t('邮件内容')">
+              <el-radio-button value="SUMMARY">{{ t('仅待处理提醒') }}</el-radio-button>
+              <el-radio-button value="CONTENT">{{ t('包含工单内容') }}</el-radio-button>
             </el-radio-group>
           </el-form-item>
         </div>
         <div v-if="!snapshot.smtpConfigured" class="ticket-notice">
-          <span>尚未配置 SMTP</span>
+          <span>{{ t('尚未配置 SMTP') }}</span>
           <el-button link type="primary" @click="router.push({ name: 'settings-smtp' })">
-            前往配置
+            {{ t('前往配置') }}
           </el-button>
         </div>
       </section>
 
       <section class="ticket-section">
-        <h3>发送配置</h3>
+        <h3>{{ t('发送配置') }}</h3>
         <div class="ticket-grid">
-          <el-form-item label="收件管理员">
+          <el-form-item :label="t('收件管理员')">
             <el-select
               v-model="settings.recipients"
               multiple
               clearable
-              placeholder="全部已启用管理员的邮箱"
-              aria-label="收件管理员"
+              :placeholder="t('全部已启用管理员的邮箱')"
+              :aria-label="t('收件管理员')"
             >
               <el-option
                 v-for="email in snapshot.availableRecipients"
@@ -143,35 +152,31 @@
               />
             </el-select>
           </el-form-item>
-          <el-form-item label="提醒间隔（分钟）">
+          <el-form-item :label="t('提醒间隔（分钟）')">
             <el-input-number
               v-model="settings.reminderMinutes"
               :min="15"
               :max="10080"
               :step="15"
               controls-position="right"
-              aria-label="提醒间隔（分钟）"
+              :aria-label="t('提醒间隔（分钟）')"
             />
           </el-form-item>
-          <el-form-item label="控制台地址（邮件中的处理链接）" class="ticket-grid__full">
+          <el-form-item :label="t('控制台地址（邮件中的处理链接）')" class="ticket-grid__full">
             <el-input
               v-model="settings.consoleUrl"
               placeholder="https://api.example.com"
               :maxlength="1000"
-              aria-label="控制台地址"
+              :aria-label="t('控制台地址')"
             />
           </el-form-item>
         </div>
       </section>
 
       <section class="ticket-section">
-        <h3>发送异常</h3>
-        <p v-if="!snapshot.failures.length" class="ticket-empty">暂无发送异常</p>
-        <div
-          v-for="failure in snapshot.failures"
-          :key="failure.ticketId"
-          class="ticket-failure"
-        >
+        <h3>{{ t('发送异常') }}</h3>
+        <p v-if="!snapshot.failures.length" class="ticket-empty">{{ t('暂无发送异常') }}</p>
+        <div v-for="failure in snapshot.failures" :key="failure.ticketId" class="ticket-failure">
           <div class="ticket-failure__content">
             <el-button
               link
@@ -181,8 +186,9 @@
             >
               {{ failure.title }}
             </el-button>
-            <span>{{ reason(failure.reason) }} · 已尝试 {{ failure.attempts }} 次</span>
-            <small>下次重试 {{ formatDateTime(failure.nextAttemptAt) }}</small>
+            <span>{{ reason(failure.reason) }} {{ t('· 已尝试') }} {{ failure.attempts }}
+              {{ t('次') }}</span>
+            <small>{{ t('下次重试') }} {{ formatDateTime(failure.nextAttemptAt) }}</small>
           </div>
           <el-button
             :icon="Refresh"
@@ -190,13 +196,13 @@
             :disabled="!snapshot.settings.enabled || !!retrying || saving || loading"
             @click="retry(failure.ticketId)"
           >
-            立即重试
+            {{ t('立即重试') }}
           </el-button>
         </div>
       </section>
     </el-form>
-    <el-empty v-else-if="!loading" description="通知设置加载失败">
-      <el-button :icon="Refresh" @click="load">重新加载</el-button>
+    <el-empty v-else-if="!loading" :description="t('通知设置加载失败')">
+      <el-button :icon="Refresh" @click="load">{{ t('重新加载') }}</el-button>
     </el-empty>
   </PageSection>
 </template>

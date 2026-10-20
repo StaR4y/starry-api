@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   import { computed, onMounted, reactive, ref, watch } from 'vue';
   import { useRoute } from 'vue-router';
   import { ElMessage } from 'element-plus';
@@ -50,7 +51,7 @@
     saving.value = true;
     try {
       apply(await pluginsApi.saveModuleSettings(pluginId.value, { ...form }));
-      ElMessage.success('设置已保存');
+      ElMessage.success(t('设置已保存'));
     } catch {
       /* Retain unsaved settings. */
     } finally {
@@ -65,19 +66,38 @@
 </script>
 
 <template>
-  <PageSection :title="page?.title || '插件设置'" subtitle="内容与界面" :icon="Cpu">
+  <PageSection :title="page?.title || t('插件设置')" :subtitle="t('内容与界面')" :icon="Cpu">
     <template #actions>
-      <el-tooltip content="重新加载">
-        <el-button :icon="Refresh" aria-label="重新加载插件设置" :disabled="saving" @click="load" />
+      <el-tooltip :content="t('重新加载')">
+        <el-button
+          :icon="Refresh"
+          :aria-label="t('重新加载插件设置')"
+          :disabled="saving"
+          @click="load"
+        />
       </el-tooltip>
-      <el-button type="primary" :icon="Check" :loading="saving" :disabled="missing" @click="save">保存</el-button>
+      <el-button type="primary" :icon="Check" :loading="saving" :disabled="missing" @click="save">
+        {{
+          t('保存')
+        }}
+      </el-button>
     </template>
 
-    <p v-if="missing" class="hint">插件未启动或没有设置页。</p>
-    <el-form v-else v-loading="loading" label-position="top" :disabled="saving" @submit.prevent="save">
+    <p v-if="missing" class="hint">{{ t('插件未启动或没有设置页。') }}</p>
+    <el-form
+      v-else
+      v-loading="loading"
+      label-position="top"
+      :disabled="saving"
+      @submit.prevent="save"
+    >
       <p v-if="page?.hint" class="hint">{{ page.hint }}</p>
       <el-form-item v-for="field in page?.fields ?? []" :key="field.key" :label="field.label">
-        <el-switch v-if="field.type === 'switch'" v-model="form[field.key]" :aria-label="field.label" />
+        <el-switch
+          v-if="field.type === 'switch'"
+          v-model="form[field.key]"
+          :aria-label="field.label"
+        />
         <el-input
           v-else-if="field.type === 'textarea'"
           v-model="form[field.key]"
@@ -92,7 +112,7 @@
           filterable
           allow-create
           default-first-option
-          placeholder="选择模型"
+          :placeholder="t('选择模型')"
         >
           <el-option
             v-for="model in page?.models ?? []"

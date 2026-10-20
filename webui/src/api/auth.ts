@@ -17,6 +17,14 @@ export const authApi = {
   login(payload: LoginRequest) {
     return unwrap<LoginResponse>(http.post<ApiResponse<LoginResponse>>('/auth/login', payload));
   },
+  logout(token?: string) {
+    return unwrap<void>(
+      http.post<ApiResponse<void>>('/auth/logout', null, {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        timeout: 5_000,
+      }),
+    );
+  },
   me() {
     return unwrap<AdminUser>(http.get<ApiResponse<AdminUser>>('/auth/me'));
   },

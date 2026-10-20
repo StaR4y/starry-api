@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   /**
    * 普通用户余额充值。
    *
@@ -35,8 +36,12 @@
   });
 
   const paymentTypeLabels: Record<PaymentType, string> = {
-    alipay: '支付宝',
-    wxpay: '微信支付',
+    get alipay() {
+      return t('支付宝');
+    },
+    get wxpay() {
+      return t('微信支付');
+    },
   };
 
   const availableTypes = computed(() => settings.value?.enabledTypes ?? []);
@@ -67,48 +72,72 @@
   /* 顶部状态栏（统一 MetricsPanel 组件） */
   const summaryMetrics = computed<MetricPanelItem[]>(() => [
     {
-      label: '当前账户余额',
+      get label() {
+        return t('当前账户余额');
+      },
       value: formatNumber(currentBalance.value),
-      unit: '元',
+      get unit() {
+        return t('元');
+      },
       tone: 'primary',
     },
     {
-      label: '待支付订单数',
+      get label() {
+        return t('待支付订单数');
+      },
       value: pendingOrders.value.length,
-      unit: '笔',
+      get unit() {
+        return t('笔');
+      },
       tone: 'warning',
     },
     {
-      label: '最近一次充值入账',
-      value: latestCompleted.value ? formatDateTime(latestCompleted.value.completedAt) : '无充值记录',
+      get label() {
+        return t('最近一次充值入账');
+      },
+      value: latestCompleted.value
+        ? formatDateTime(latestCompleted.value.completedAt)
+        : t('无充值记录'),
       tone: 'success',
     },
   ]);
 
   function statusLabel(status: string) {
     const map: Record<string, string> = {
-      PENDING: '待支付',
-      PAID: '已支付',
-      COMPLETED: '已入账',
-      EXPIRED: '已过期',
-      CANCELLED: '已取消',
-      FAILED: '失败',
+      get PENDING() {
+        return t('待支付');
+      },
+      get PAID() {
+        return t('已支付');
+      },
+      get COMPLETED() {
+        return t('已入账');
+      },
+      get EXPIRED() {
+        return t('已过期');
+      },
+      get CANCELLED() {
+        return t('已取消');
+      },
+      get FAILED() {
+        return t('失败');
+      },
     };
     return map[status] ?? status;
   }
 
   function paymentTypeLabel(type: PaymentType | string) {
-    return type === 'wxpay' ? '微信支付' : '支付宝';
+    return type === 'wxpay' ? t('微信支付') : t('支付宝');
   }
 
   function amountRangeText(value: PaymentSettings) {
     return value.maxAmount > 0
       ? `${formatNumber(value.minAmount)} - ${formatNumber(value.maxAmount)}`
-      : `${formatNumber(value.minAmount)} 起`;
+      : t('{p0} 起', { p0: formatNumber(value.minAmount) });
   }
 
   function limitText(value: number) {
-    return value > 0 ? formatNumber(value) : '不限';
+    return value > 0 ? formatNumber(value) : t('不限');
   }
 
   function isQrCodeImage(value: string | null | undefined) {
@@ -143,14 +172,14 @@
   async function createOrder() {
     if (!settings.value) return;
     if (!isPaymentEnabled.value) {
-      ElMessage.warning('当前未开放在线充值');
+      ElMessage.warning(t('当前未开放在线充值'));
       return;
     }
     if (
       form.amount < settings.value.minAmount ||
       (settings.value.maxAmount > 0 && form.amount > settings.value.maxAmount)
     ) {
-      ElMessage.warning(`充值金额需在 ${amountRangeText(settings.value)} 范围内`);
+      ElMessage.warning(t('充值金额需在 {p0} 范围内', { p0: amountRangeText(settings.value) }));
       return;
     }
 
@@ -167,7 +196,7 @@
         result.order,
         ...orders.value.filter((order) => order.orderId !== result.order.orderId),
       ];
-      ElMessage.success('充值订单已创建');
+      ElMessage.success(t('充值订单已创建'));
       const target = result.payUrl || result.order.payUrl;
       if (target) window.open(target, '_blank', 'noopener,noreferrer');
     } finally {
@@ -177,28 +206,32 @@
 
   async function openPay(order: PaymentOrder) {
     if (!order.payUrl) {
-      ElMessage.warning('该订单没有可用支付链接');
+      ElMessage.warning(t('该订单没有可用支付链接'));
       return;
     }
     window.open(order.payUrl, '_blank', 'noopener,noreferrer');
   }
 
   async function cancelOrder(order: PaymentOrder) {
-    await ElMessageBox.confirm(`确认取消订单 ${order.outTradeNo}？`, '取消订单', {
-      confirmButtonText: '取消订单',
-      cancelButtonText: '关闭',
+    await ElMessageBox.confirm(t('确认取消订单 {p0}？', { p0: order.outTradeNo }), t('取消订单'), {
+      get confirmButtonText() {
+        return t('取消订单');
+      },
+      get cancelButtonText() {
+        return t('关闭');
+      },
       type: 'warning',
     }).catch(() => Promise.reject(new Error('cancel')));
     const updated = await paymentApi.cancelOrder(order.orderId);
     orders.value = orders.value.map((item) => (item.orderId === updated.orderId ? updated : item));
     if (activeOrder.value?.orderId === updated.orderId) activeOrder.value = null;
-    ElMessage.success('订单已取消');
+    ElMessage.success(t('订单已取消'));
   }
 
   async function redeemCode() {
     const code = redeemForm.code.trim();
     if (!code) {
-      ElMessage.warning('请输入兑换码');
+      ElMessage.warning(t('请输入兑换码'));
       return;
     }
     redeeming.value = true;
@@ -207,9 +240,11 @@
       redeemForm.code = '';
       await auth.refreshCurrentUser();
       if (result.subscriptionId) {
-        ElMessage.success('兑换成功，Coding 套餐订阅已开通');
+        ElMessage.success(t('兑换成功，Coding 套餐订阅已开通'));
       } else {
-        ElMessage.success(`兑换成功，已入账 ${formatNumber(result.redeemedBalance)} 余额`);
+        ElMessage.success(
+          t('兑换成功，已入账 {p0} 余额', { p0: formatNumber(result.redeemedBalance) }),
+        );
       }
     } finally {
       redeeming.value = false;
@@ -220,24 +255,23 @@
 </script>
 
 <template>
-  <PageSection title="余额充值" subtitle="账户资金" :icon="Wallet">
+  <PageSection :title="t('余额充值')" :subtitle="t('账户资金')" :icon="Wallet">
     <template #actions>
-      <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
+      <el-button :icon="Refresh" :loading="loading" @click="load">{{ t('刷新') }}</el-button>
     </template>
     <template #summary>
       <MetricsPanel :items="summaryMetrics" />
     </template>
 
     <div v-loading="loading" class="payment">
-
       <!-- 主要内容 -->
       <section class="payment__grid">
         <!-- 创建订单面板 -->
         <div class="payment__panel">
           <div class="payment__panel-header">
-            <h3 class="panel-header-title">创建充值订单</h3>
+            <h3 class="panel-header-title">{{ t('创建充值订单') }}</h3>
             <span class="custom-badge" :class="isPaymentEnabled ? 'completed' : 'cancelled'">
-              {{ isPaymentEnabled ? '在线支付已开通' : '未开放' }}
+              {{ isPaymentEnabled ? t('在线支付已开通') : t('未开放') }}
             </span>
           </div>
 
@@ -246,12 +280,12 @@
             type="info"
             :closable="false"
             show-icon
-            title="管理员尚未启用在线支付，目前无法进行余额充值。"
+            :title="t('管理员尚未启用在线支付，目前无法进行余额充值。')"
             style="margin-bottom: 16px"
           />
 
           <el-form v-if="settings" label-position="top" class="payment__form">
-            <el-form-item label="充值金额 (元)">
+            <el-form-item :label="t('充值金额 (元)')">
               <el-input-number
                 v-model="form.amount"
                 :min="settings.minAmount"
@@ -282,7 +316,7 @@
               </div>
             </el-form-item>
 
-            <el-form-item label="支付方式">
+            <el-form-item :label="t('支付方式')">
               <div class="payment-method-selector">
                 <div
                   v-for="type in availableTypes"
@@ -321,7 +355,7 @@
                   <div class="payment-method-card__info">
                     <span class="payment-method-card__title">{{ paymentTypeLabels[type] }}</span>
                     <span class="payment-method-card__desc">{{
-                      type === 'wxpay' ? '微信扫码完成支付' : '跳转支付宝网页支付'
+                      type === 'wxpay' ? t('微信扫码完成支付') : t('跳转支付宝网页支付')
                     }}</span>
                   </div>
                   <div v-if="form.paymentType === type" class="payment-method-card__badge">
@@ -333,15 +367,15 @@
 
             <div class="payment__quote">
               <div class="quote-item quote-item--credited">
-                <span class="quote-label">预计到账余额</span>
+                <span class="quote-label">{{ t('预计到账余额') }}</span>
                 <strong class="quote-val mono">+{{ formatNumber(creditedAmount) }}</strong>
               </div>
               <div class="quote-item quote-item--pay">
-                <span class="quote-label">实际应付金额</span>
+                <span class="quote-label">{{ t('实际应付金额') }}</span>
                 <strong class="quote-val mono">¥{{ formatNumber(payAmount) }}</strong>
               </div>
               <div class="quote-item">
-                <span class="quote-label">手续费率</span>
+                <span class="quote-label">{{ t('手续费率') }}</span>
                 <strong class="quote-val mono">{{ feeRateText }}</strong>
               </div>
             </div>
@@ -349,9 +383,9 @@
             <div class="payment__limits text-muted">
               <el-icon><Warning /></el-icon>
               <span>
-                交易规则：单笔金额 {{ amountRangeText(settings) }}，每日限额
-                {{ limitText(settings.dailyLimit) }}。每个账号最多允许保留
-                {{ formatNumber(settings.maxPendingOrders) }} 个未支付订单。
+                {{ t('交易规则：单笔金额') }} {{ amountRangeText(settings) }}{{ t('，每日限额') }}
+                {{ limitText(settings.dailyLimit) }}{{ t('。每个账号最多允许保留') }}
+                {{ formatNumber(settings.maxPendingOrders) }} {{ t('个未支付订单。') }}
               </span>
             </div>
 
@@ -363,7 +397,7 @@
               class="submit-btn"
               @click="createOrder"
             >
-              创建订单并支付
+              {{ t('创建订单并支付') }}
             </el-button>
           </el-form>
         </div>
@@ -371,15 +405,15 @@
         <!-- 兑换码充值面板 -->
         <div class="payment__panel">
           <div class="payment__panel-header">
-            <h3 class="panel-header-title">兑换码充值</h3>
-            <span class="custom-badge completed">即时入账</span>
+            <h3 class="panel-header-title">{{ t('兑换码充值') }}</h3>
+            <span class="custom-badge completed">{{ t('即时入账') }}</span>
           </div>
 
           <el-form label-position="top" class="payment__form">
-            <el-form-item label="兑换码">
+            <el-form-item :label="t('兑换码')">
               <el-input
                 v-model="redeemForm.code"
-                placeholder="输入管理员发放的余额兑换码"
+                :placeholder="t('输入管理员发放的余额兑换码')"
                 clearable
                 @keyup.enter="redeemCode"
               />
@@ -387,11 +421,11 @@
 
             <div class="payment__limits text-muted">
               <el-icon><Warning /></el-icon>
-              <span>兑换码为一次性使用，兑换成功后余额会直接加入当前账号。</span>
+              <span>{{ t('兑换码为一次性使用，兑换成功后余额会直接加入当前账号。') }}</span>
             </div>
 
             <el-button type="primary" :loading="redeeming" class="submit-btn" @click="redeemCode">
-              兑换余额
+              {{ t('兑换余额') }}
             </el-button>
           </el-form>
         </div>
@@ -399,7 +433,7 @@
         <!-- 当前未完成订单 -->
         <div class="payment__panel">
           <div class="payment__panel-header">
-            <h3 class="panel-header-title">当前待支付订单</h3>
+            <h3 class="panel-header-title">{{ t('当前待支付订单') }}</h3>
             <span v-if="activeOrder" class="custom-badge" :class="activeOrder.status.toLowerCase()">
               {{ statusLabel(activeOrder.status) }}
             </span>
@@ -408,27 +442,27 @@
           <div v-if="activeOrder" class="payment__active">
             <div class="active-info-list">
               <div class="payment__active-row">
-                <span class="text-muted">订单号</span>
+                <span class="text-muted">{{ t('订单号') }}</span>
                 <code class="mono-code">{{ activeOrder.outTradeNo }}</code>
               </div>
               <div class="payment__active-row">
-                <span class="text-muted">应付金额</span>
+                <span class="text-muted">{{ t('应付金额') }}</span>
                 <strong class="active-amount">¥{{ formatNumber(activeOrder.payAmount) }}</strong>
               </div>
               <div class="payment__active-row">
-                <span class="text-muted">过期自动取消</span>
+                <span class="text-muted">{{ t('过期自动取消') }}</span>
                 <span class="time-text">{{ formatDateTime(activeOrder.expiresAt) }}</span>
               </div>
             </div>
 
             <!-- 二维码显示 -->
             <div v-if="isQrCodeImage(activeOrder.qrCode)" class="qr-container">
-              <img class="payment__qr" :src="activeOrder.qrCode || ''" alt="支付二维码">
-              <span class="qr-tip">请使用微信或支付宝扫码支付</span>
+              <img class="payment__qr" :src="activeOrder.qrCode || ''" :alt="t('支付二维码')">
+              <span class="qr-tip">{{ t('请使用微信或支付宝扫码支付') }}</span>
             </div>
             <div v-else-if="activeOrder.qrCode" class="qr-container">
               <code class="payment__qr-text">{{ activeOrder.qrCode }}</code>
-              <span class="qr-tip">商户支付请求链接，请点击下方按钮支付</span>
+              <span class="qr-tip">{{ t('商户支付请求链接，请点击下方按钮支付') }}</span>
             </div>
 
             <div class="payment__actions">
@@ -438,7 +472,7 @@
                 class="action-pay-btn"
                 @click="openPay(activeOrder)"
               >
-                立即打开支付
+                {{ t('立即打开支付') }}
               </el-button>
               <el-button
                 v-if="activeOrder.status === 'PENDING'"
@@ -447,24 +481,24 @@
                 class="action-cancel-btn"
                 @click="cancelOrder(activeOrder)"
               >
-                取消充值订单
+                {{ t('取消充值订单') }}
               </el-button>
             </div>
           </div>
-          <el-empty v-else description="暂无待支付的充值订单" :image-size="120" />
+          <el-empty v-else :description="t('暂无待支付的充值订单')" :image-size="120" />
         </div>
       </section>
 
       <!-- 充值记录 -->
       <section class="payment__orders">
-        <h3 class="panel-header-title">充值历史记录</h3>
+        <h3 class="panel-header-title">{{ t('充值历史记录') }}</h3>
         <el-table :data="orders" stripe style="width: 100%">
-          <el-table-column label="订单号" min-width="190">
+          <el-table-column :label="t('订单号')" min-width="190">
             <template #default="{ row }">
               <span class="mono-code">{{ row.outTradeNo }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="支付方式" width="120">
+          <el-table-column :label="t('支付方式')" width="120">
             <template #default="{ row }">
               <div class="payment-type-badge" :class="row.paymentType">
                 <span class="dot" />
@@ -472,29 +506,29 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="充值余额" width="110" align="right">
+          <el-table-column :label="t('充值余额')" width="110" align="right">
             <template #default="{ row }">
               <span class="amount-val amount-val--credited">+{{ formatNumber(row.amount) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="实付金额" width="110" align="right">
+          <el-table-column :label="t('实付金额')" width="110" align="right">
             <template #default="{ row }">
               <span class="amount-val amount-val--pay">¥{{ formatNumber(row.payAmount) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="订单状态" width="110" align="center">
+          <el-table-column :label="t('订单状态')" width="110" align="center">
             <template #default="{ row }">
               <span class="custom-badge" :class="row.status.toLowerCase()">
                 {{ statusLabel(row.status) }}
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="创建时间" width="170">
+          <el-table-column :label="t('创建时间')" width="170">
             <template #default="{ row }">
               <span class="time-text">{{ formatDateTime(row.createdAt) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="入账时间" width="170">
+          <el-table-column :label="t('入账时间')" width="170">
             <template #default="{ row }">
               <span v-if="row.completedAt" class="time-text">{{
                 formatDateTime(row.completedAt)
@@ -502,7 +536,7 @@
               <span v-else class="text-muted">—</span>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="130" fixed="right" align="center">
+          <el-table-column :label="t('操作')" width="130" fixed="right" align="center">
             <template #default="{ row }">
               <el-button
                 v-if="row.status === 'PENDING'"
@@ -511,7 +545,7 @@
                 :disabled="!row.payUrl"
                 @click="openPay(row)"
               >
-                支付
+                {{ t('支付') }}
               </el-button>
               <el-button
                 v-if="row.status === 'PENDING'"
@@ -519,7 +553,7 @@
                 type="warning"
                 @click="cancelOrder(row)"
               >
-                取消
+                {{ t('取消') }}
               </el-button>
               <span v-else class="text-muted">—</span>
             </template>
@@ -555,7 +589,9 @@
       background: var(--kp-surface-strong);
       border-radius: 8px;
       padding: 24px;
-      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+      transition:
+        border-color 0.2s ease,
+        box-shadow 0.2s ease;
 
       &:hover {
         box-shadow: 0 8px 22px rgba(22, 35, 52, 0.06);

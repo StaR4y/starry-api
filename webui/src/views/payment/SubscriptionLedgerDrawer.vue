@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   import { ref, watch } from 'vue';
   import {
     adminCodingPlanApi,
@@ -47,23 +48,27 @@
   );
 </script>
 <template>
-  <el-drawer v-model="visible" :title="`${name} · 额度明细`" size="min(620px, 100vw)">
+  <el-drawer v-model="visible" :title="t('{p0} · 额度明细', { p0: name })" size="min(620px, 100vw)">
     <div v-loading="loading" class="ledger-list">
-      <el-alert v-if="failed" title="额度明细加载失败" type="error" :closable="false" />
-      <el-button v-if="failed" @click="load()">重新加载</el-button>
-      <el-empty v-if="!rows.length && !loading && !failed" description="暂无额度变动" />
+      <el-alert v-if="failed" :title="t('额度明细加载失败')" type="error" :closable="false" />
+      <el-button v-if="failed" @click="load()">{{ t('重新加载') }}</el-button>
+      <el-empty v-if="!rows.length && !loading && !failed" :description="t('暂无额度变动')" />
       <article v-for="row in rows" :key="row.id" class="ledger-row">
         <div>
           <strong>{{ ledgerLabel(row.entryType) }}</strong><time>{{ formatDateTime(row.createdAt) }}</time>
         </div>
         <b :class="{ debit: row.amount < 0 }">{{ row.amount > 0 ? '+' : '' }}{{ credits(row.amount) }}</b>
         <p v-if="row.reservedDelta">
-          预占变动 {{ row.reservedDelta > 0 ? '+' : '' }}{{ credits(row.reservedDelta) }}
+          {{ t('预占变动') }} {{ row.reservedDelta > 0 ? '+' : '' }}{{ credits(row.reservedDelta) }}
         </p>
         <p v-if="row.reason">{{ row.reason }}</p>
-        <small v-if="admin && row.actorId">操作人 {{ row.actorId }}</small>
+        <small v-if="admin && row.actorId">{{ t('操作人') }} {{ row.actorId }}</small>
       </article>
-      <el-button v-if="more" :loading="loading" @click="load(true)">加载更早记录</el-button>
+      <el-button v-if="more" :loading="loading" @click="load(true)">
+        {{
+          t('加载更早记录')
+        }}
+      </el-button>
     </div>
   </el-drawer>
 </template>

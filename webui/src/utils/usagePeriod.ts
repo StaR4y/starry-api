@@ -1,3 +1,4 @@
+import { t } from '@/i18n';
 /** Beijing peak/off-peak helpers, aligned with dsh-usage-plugin. */
 
 export const WEEKEND_FLAT_AT = Date.parse('2026-08-23T00:00:00+08:00');
@@ -50,11 +51,12 @@ export function isPeakAt(value: Date | string | number) {
 }
 
 export function currentPeriodLabel() {
-  return isPeakAt(Date.now()) ? '当前 · 高峰时段' : '当前 · 空闲时段';
+  return isPeakAt(Date.now()) ? t('当前 · 高峰时段') : t('当前 · 空闲时段');
 }
 
 export function rangeForPreset(preset: UsagePreset, from = '', to = '') {
-  if (preset === 'all') return { from: undefined as string | undefined, to: undefined as string | undefined };
+  if (preset === 'all')
+    return { from: undefined as string | undefined, to: undefined as string | undefined };
   const today = shanghaiDay(Date.now());
   if (preset === 'today') return { from: today, to: today };
   if (preset === '7d' || preset === '30d') {

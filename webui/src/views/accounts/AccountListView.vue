@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   /**
    * 上游账号管理。
    *
@@ -10,7 +11,7 @@
    * 各对话框已抽离至 ./components/（AccountFormDialog / ImportDialog /
    * TestDetailDialog），本组件只保留列表与调度逻辑。
    * 账号池分级熔断策略与停用账号定期复检已统一迁移至系统设置页（views/settings）。
-  */
+   */
   import { computed, onMounted, reactive, ref } from 'vue';
   import { ElMessage, ElMessageBox } from 'element-plus';
   import { CreditCard, MoreFilled, Plus, Refresh, Search } from '@element-plus/icons-vue';
@@ -35,12 +36,7 @@
     OpenAiQuotaResponse,
   } from '@/types/api';
   import { formatDateTime, formatNumber, shorten } from '@/utils/format';
-  import {
-    isCodexAccount,
-    isCustomOpenAiCompatibleProvider,
-    normalized,
-    statusOf,
-  } from './utils';
+  import { isCodexAccount, isCustomOpenAiCompatibleProvider, normalized, statusOf } from './utils';
 
   /* ============= 列表 ============= */
 
@@ -89,16 +85,33 @@
   });
 
   const accountMetrics = computed<MetricPanelItem[]>(() => [
-    { label: '总账号数', value: summary.value.total, tone: 'primary' },
-    { label: '正常运行', value: summary.value.active, tone: 'success', valueTone: 'success' },
     {
-      label: '异常 / 停用',
+      get label() {
+        return t('总账号数');
+      },
+      value: summary.value.total,
+      tone: 'primary',
+    },
+    {
+      get label() {
+        return t('正常运行');
+      },
+      value: summary.value.active,
+      tone: 'success',
+      valueTone: 'success',
+    },
+    {
+      get label() {
+        return t('异常 / 停用');
+      },
       value: summary.value.abnormal,
       tone: 'danger',
       valueTone: summary.value.abnormal > 0 ? 'danger' : undefined,
     },
     {
-      label: '累计请求 / 错误',
+      get label() {
+        return t('累计请求 / 错误');
+      },
       value: formatNumber(summary.value.totalRequests),
       unit: `/ ${formatNumber(summary.value.totalErrors)}`,
       tone: 'accent',
@@ -149,8 +162,8 @@
       if (loadQuotas) loadOpenAiQuotas(generation);
     } catch (err) {
       if (generation !== accountDataGeneration) return;
-      const message = err instanceof ApiError ? err.message : '服务暂时不可用';
-      ElMessage.error(`账号列表加载失败：${message}`);
+      const message = err instanceof ApiError ? err.message : t('服务暂时不可用');
+      ElMessage.error(t('账号列表加载失败：{p0}', { p0: message }));
     } finally {
       if (generation === accountDataGeneration) loading.value = false;
     }
@@ -187,56 +200,90 @@
 
   async function toggleEnabled(row: Account) {
     await accountsApi.update(row.accountId, { enabled: !row.enabled });
-    ElMessage.success(row.enabled ? '已停用' : '已启用');
+    ElMessage.success(row.enabled ? t('已停用') : t('已启用'));
     await loadAccounts();
   }
 
   async function suspend(row: Account) {
-    const result = await ElMessageBox.prompt('请输入挂起原因（如 RATE_LIMITED）', '挂起账号', {
-      confirmButtonText: '挂起',
-      cancelButtonText: '取消',
-      inputPlaceholder: 'TEMPORARILY_SUSPENDED',
-    }).catch(() => null);
+    const result = await ElMessageBox.prompt(
+      t('请输入挂起原因（如 RATE_LIMITED）'),
+      t('挂起账号'),
+      {
+        get confirmButtonText() {
+          return t('挂起');
+        },
+        get cancelButtonText() {
+          return t('取消');
+        },
+        inputPlaceholder: 'TEMPORARILY_SUSPENDED',
+      },
+    ).catch(() => null);
     if (!result) return;
     await accountsApi.suspend(row.accountId, {
       reason: result.value || 'TEMPORARILY_SUSPENDED',
-      message: '由控制台手动挂起',
+      get message() {
+        return t('由控制台手动挂起');
+      },
     });
-    ElMessage.success('已挂起');
+    ElMessage.success(t('已挂起'));
     await loadAccounts();
   }
 
   async function resetAccount(row: Account) {
-    await ElMessageBox.confirm(`确认重置账号 ${row.accountId} 状态？`, '确认操作', {
-      confirmButtonText: '重置',
-      cancelButtonText: '取消',
-      type: 'warning',
-    }).catch(() => Promise.reject(new Error('cancel')));
+    await ElMessageBox.confirm(
+      t('确认重置账号 {p0} 状态？', { p0: row.accountId }),
+      t('确认操作'),
+      {
+        get confirmButtonText() {
+          return t('重置');
+        },
+        get cancelButtonText() {
+          return t('取消');
+        },
+        type: 'warning',
+      },
+    ).catch(() => Promise.reject(new Error('cancel')));
     await accountsApi.reset(row.accountId);
-    ElMessage.success('已重置');
+    ElMessage.success(t('已重置'));
     await loadAccounts();
   }
 
   async function removeAccount(row: Account) {
-    await ElMessageBox.confirm(`确认删除账号 ${row.accountId}？操作不可恢复。`, '危险操作', {
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
-      type: 'error',
-    }).catch(() => Promise.reject(new Error('cancel')));
+    await ElMessageBox.confirm(
+      t('确认删除账号 {p0}？操作不可恢复。', { p0: row.accountId }),
+      t('危险操作'),
+      {
+        get confirmButtonText() {
+          return t('删除');
+        },
+        get cancelButtonText() {
+          return t('取消');
+        },
+        type: 'error',
+      },
+    ).catch(() => Promise.reject(new Error('cancel')));
     await accountsApi.remove(row.accountId);
-    ElMessage.success('已删除');
+    ElMessage.success(t('已删除'));
     await loadAccounts();
   }
 
   async function clearAllAccounts() {
     if (accounts.value.length === 0) {
-      ElMessage.info('当前没有账号可清空');
+      ElMessage.info(t('当前没有账号可清空'));
       return;
     }
     const confirmed = await ElMessageBox.confirm(
-      `确认清空全部 ${accounts.value.length} 个账号？该操作不可恢复。`,
-      '清空全部账号',
-      { confirmButtonText: '清空全部', cancelButtonText: '取消', type: 'error' },
+      t('确认清空全部 {p0} 个账号？该操作不可恢复。', { p0: accounts.value.length }),
+      t('清空全部账号'),
+      {
+        get confirmButtonText() {
+          return t('清空全部');
+        },
+        get cancelButtonText() {
+          return t('取消');
+        },
+        type: 'error',
+      },
     )
       .then(() => true)
       .catch(() => false);
@@ -247,7 +294,7 @@
       const result = await accountsApi.clearAll();
       latestTestResults.value = {};
       testDetail.value = null;
-      ElMessage.success(`已清空 ${result.deleted} 个账号`);
+      ElMessage.success(t('已清空 {p0} 个账号', { p0: result.deleted }));
       await loadAccounts();
     } catch (err) {
       if (err instanceof ApiError) ElMessage.error(err.message);
@@ -402,7 +449,7 @@
   function openTestDetail(row: Account) {
     const item = latestTest(row.accountId);
     if (!item) {
-      ElMessage.warning('该账号还没有测试结果');
+      ElMessage.warning(t('该账号还没有测试结果'));
       return;
     }
     testDetail.value = item;
@@ -426,7 +473,7 @@
         testDetail.value = item;
         testDetailVisible.value = true;
       }
-      ElMessage.success(`测试完成：${item?.status ?? 'UNKNOWN'}`);
+      ElMessage.success(t('测试完成：{p0}', { p0: item?.status ?? 'UNKNOWN' }));
       await loadAccounts();
     } catch (err) {
       if (err instanceof ApiError) ElMessage.error(err.message);
@@ -439,7 +486,8 @@
     try {
       testModelOptions.value = await accountsApi.testModels();
     } catch (err) {
-      if (err instanceof ApiError) ElMessage.warning(`测试模型列表加载失败：${err.message}`);
+      if (err instanceof ApiError)
+        ElMessage.warning(t('测试模型列表加载失败：{p0}', { p0: err.message }));
     }
   }
 
@@ -453,14 +501,14 @@
   }
 
   function formatLastUsed(value: string | null | undefined) {
-    if (!value) return '尚未使用';
+    if (!value) return t('尚未使用');
     const at = new Date(value);
-    if (Number.isNaN(at.getTime())) return '尚未使用';
+    if (Number.isNaN(at.getTime())) return t('尚未使用');
     const elapsed = Date.now() - at.getTime();
-    if (elapsed < 60_000) return '刚刚';
-    if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)} 分钟前`;
-    if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)} 小时前`;
-    if (elapsed < 7 * 86_400_000) return `${Math.floor(elapsed / 86_400_000)} 天前`;
+    if (elapsed < 60_000) return t('刚刚');
+    if (elapsed < 3_600_000) return t('{p0} 分钟前', { p0: Math.floor(elapsed / 60_000) });
+    if (elapsed < 86_400_000) return t('{p0} 小时前', { p0: Math.floor(elapsed / 3_600_000) });
+    if (elapsed < 7 * 86_400_000) return t('{p0} 天前', { p0: Math.floor(elapsed / 86_400_000) });
     return formatDateTime(value).slice(0, 16);
   }
 
@@ -485,10 +533,10 @@
 
 <template>
   <div class="account-list-view">
-    <PageSection title="账号管理" subtitle="上游资源" :icon="CreditCard">
+    <PageSection :title="t('账号管理')" :subtitle="t('上游资源')" :icon="CreditCard">
       <template #actions>
-        <el-button type="primary" :icon="Plus" @click="openCreate">新建账号</el-button>
-        <el-button @click="openImport">批量导入</el-button>
+        <el-button type="primary" :icon="Plus" @click="openCreate">{{ t('新建账号') }}</el-button>
+        <el-button @click="openImport">{{ t('批量导入') }}</el-button>
         <el-button
           type="danger"
           plain
@@ -496,7 +544,7 @@
           :disabled="loading || accounts.length === 0"
           @click="clearAllAccounts"
         >
-          清空全部
+          {{ t('清空全部') }}
         </el-button>
       </template>
       <template #summary>
@@ -506,24 +554,29 @@
         <el-input
           v-model="keyword"
           :prefix-icon="Search"
-          placeholder="搜索账号 ID / 邮箱 / 平台 / Base URL"
+          :placeholder="t('搜索账号 ID / 邮箱 / 平台 / Base URL')"
           clearable
           class="search-input"
         />
-        <el-select v-model="statusFilter" aria-label="筛选状态">
-          <el-option label="全部状态" value="all" />
-          <el-option label="正常运行" value="active" />
-          <el-option label="异常 / 停用" value="abnormal" />
+        <el-select v-model="statusFilter" :aria-label="t('筛选状态')">
+          <el-option :label="t('全部状态')" value="all" />
+          <el-option :label="t('正常运行')" value="active" />
+          <el-option :label="t('异常 / 停用')" value="abnormal" />
         </el-select>
         <span class="toolbar-count">
           {{
             hasFilter
-              ? `筛选 ${visibleAccounts.length} / ${accounts.length}`
-              : `${accounts.length} 个账号`
+              ? t('筛选 {p0} / {p1}', { p0: visibleAccounts.length, p1: accounts.length })
+              : t('{p0} 个账号', { p0: accounts.length })
           }}
         </span>
-        <el-tooltip content="刷新账号">
-          <el-button :icon="Refresh" aria-label="刷新账号" :loading="loading" @click="loadAccounts()" />
+        <el-tooltip :content="t('刷新账号')">
+          <el-button
+            :icon="Refresh"
+            :aria-label="t('刷新账号')"
+            :loading="loading"
+            @click="loadAccounts()"
+          />
         </el-tooltip>
       </template>
 
@@ -531,15 +584,19 @@
         <template #empty>
           <el-empty
             :image-size="88"
-            :description="hasFilter ? '没有匹配的账号，试试换个筛选条件' : '还没有上游账号'"
+            :description="hasFilter ? t('没有匹配的账号，试试换个筛选条件') : t('还没有上游账号')"
           >
             <template v-if="!hasFilter">
-              <el-button type="primary" :icon="Plus" @click="openCreate">新建账号</el-button>
-              <el-button @click="openImport">批量导入</el-button>
+              <el-button type="primary" :icon="Plus" @click="openCreate">
+                {{
+                  t('新建账号')
+                }}
+              </el-button>
+              <el-button @click="openImport">{{ t('批量导入') }}</el-button>
             </template>
           </el-empty>
         </template>
-        <el-table-column label="账号类型" min-width="168" width="180">
+        <el-table-column :label="t('账号类型')" min-width="168" width="180">
           <template #default="{ row }">
             <ProviderBadge
               :provider="row.provider"
@@ -549,11 +606,13 @@
             />
           </template>
         </el-table-column>
-        <el-table-column label="邮箱 / 账号 ID" min-width="180">
+        <el-table-column :label="t('邮箱 / 账号 ID')" min-width="180">
           <template #default="{ row }">
             <div class="email-id-cell">
               <strong class="email-text" :title="row.email">{{ row.email || '—' }}</strong>
-              <span class="id-subtext" :title="row.accountId">{{ shorten(row.accountId, 10, 6) }}</span>
+              <span class="id-subtext" :title="row.accountId">{{
+                shorten(row.accountId, 10, 6)
+              }}</span>
             </div>
           </template>
         </el-table-column>
@@ -562,19 +621,19 @@
             <span class="url-text">{{ row.baseUrl ? shorten(row.baseUrl, 24, 10) : '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="区域" width="88">
+        <el-table-column :label="t('区域')" width="88">
           <template #default="{ row }">
             <span class="region-text">{{ row.region || '—' }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="108">
+        <el-table-column :label="t('状态')" width="108">
           <template #default="{ row }">
             <span class="account-state" :class="`is-${statusOf(row).tone}`">
               <i />{{ statusOf(row).label }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="请求 / 错误" width="120">
+        <el-table-column :label="t('请求 / 错误')" width="120">
           <template #default="{ row }">
             <div class="req-cell">
               <b>{{ formatNumber(row.requestCount) }}</b>
@@ -584,7 +643,7 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="可用配额" width="180">
+        <el-table-column :label="t('可用配额')" width="180">
           <template #default="{ row }">
             <QuotaCell
               :account="row"
@@ -593,18 +652,18 @@
             />
           </template>
         </el-table-column>
-        <el-table-column label="最近使用" min-width="128">
+        <el-table-column :label="t('最近使用')" min-width="128">
           <template #default="{ row }">
             <span class="last-used" :title="row.lastUsedAt ? formatDateTime(row.lastUsedAt) : ''">
               {{ formatLastUsed(row.lastUsedAt) }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="168" fixed="right">
+        <el-table-column :label="t('操作')" width="168" fixed="right">
           <template #default="{ row }">
             <div class="row-actions">
-              <el-tooltip content="编辑">
-                <el-button text aria-label="编辑账号" @click="openEdit(row)">
+              <el-tooltip :content="t('编辑')">
+                <el-button text :aria-label="t('编辑账号')" @click="openEdit(row)">
                   <template #icon>
                     <AppIcon name="edit" width="13" height="13" />
                   </template>
@@ -623,21 +682,21 @@
                 @show-detail="openTestDetail(row)"
               />
               <el-dropdown trigger="click" @command="(cmd: string) => handleCommand(cmd, row)">
-                <button class="more-action" type="button" aria-label="更多操作">
+                <button class="more-action" type="button" :aria-label="t('更多操作')">
                   <el-icon><MoreFilled /></el-icon>
                 </button>
                 <template #dropdown>
                   <el-dropdown-menu>
                     <el-dropdown-item command="toggle">
-                      {{ row.enabled ? '停用' : '启用' }}
+                      {{ row.enabled ? t('停用') : t('启用') }}
                     </el-dropdown-item>
-                    <el-dropdown-item command="suspend">挂起</el-dropdown-item>
-                    <el-dropdown-item command="reset">重置</el-dropdown-item>
+                    <el-dropdown-item command="suspend">{{ t('挂起') }}</el-dropdown-item>
+                    <el-dropdown-item command="reset">{{ t('重置') }}</el-dropdown-item>
                     <el-dropdown-item v-if="isCodexAccount(row)" command="reauthorize">
-                      重新授权
+                      {{ t('重新授权') }}
                     </el-dropdown-item>
                     <el-dropdown-item command="remove" divided>
-                      <span class="dropdown-danger-text">删除</span>
+                      <span class="dropdown-danger-text">{{ t('删除') }}</span>
                     </el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
@@ -653,7 +712,12 @@
       v-model:visible="formVisible"
       :mode="formMode"
       :account="editingAccount"
-      @saved="() => { void loadAccounts(); void loadTestModelOptions(); }"
+      @saved="
+        () => {
+          void loadAccounts();
+          void loadTestModelOptions();
+        }
+      "
     />
 
     <!-- 批量导入对话框已抽离至 ./components/ImportDialog.vue -->

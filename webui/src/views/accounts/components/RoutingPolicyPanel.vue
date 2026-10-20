@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   /**
    * 账号路由策略：账号选择、会话亲和与失败换号上限。
    */
@@ -37,10 +38,16 @@
 
   const summary = computed(() => {
     const pool = form.isolateCodexPool
-      ? 'Codex 与 OpenAI API Key 分开调度'
-      : 'Codex 可回退到 OpenAI API Key';
-    const gpt = form.gptUsesCodexAccounts ? 'GPT 请求使用 Codex 账号' : 'GPT 请求使用 OpenAI API Key';
-    return `${pool} • ${gpt} • Codex 失败后最多尝试 ${form.codexMaxRetryAccounts} 个账号`;
+      ? t('Codex 与 OpenAI API Key 分开调度')
+      : t('Codex 可回退到 OpenAI API Key');
+    const gpt = form.gptUsesCodexAccounts
+      ? t('GPT 请求使用 Codex 账号')
+      : t('GPT 请求使用 OpenAI API Key');
+    return t('{p0} • {p1} • Codex 失败后最多尝试 {p2} 个账号', {
+      p0: pool,
+      p1: gpt,
+      p2: form.codexMaxRetryAccounts,
+    });
   });
 
   async function loadSettings() {
@@ -50,7 +57,7 @@
       Object.assign(form, defaultSettings(), settings.routingPolicy ?? {});
     } catch (err) {
       if (err instanceof ApiError) {
-        ElMessage.warning(`路由策略加载失败：${err.message}`);
+        ElMessage.warning(t('路由策略加载失败：{p0}', { p0: err.message }));
       }
     } finally {
       loading.value = false;
@@ -64,7 +71,7 @@
         routingPolicy: { ...form },
       });
       Object.assign(form, defaultSettings(), settings.routingPolicy ?? {});
-      ElMessage.success('路由策略已保存');
+      ElMessage.success(t('路由策略已保存'));
     } catch (err) {
       if (err instanceof ApiError) ElMessage.error(err.message);
     } finally {
@@ -92,7 +99,7 @@
         </div>
         <div class="title-section">
           <div class="title-row">
-            <span class="title-text">账号路由策略</span>
+            <span class="title-text">{{ t('账号路由策略') }}</span>
           </div>
           <div class="desc-text">{{ summary }}</div>
         </div>
@@ -112,22 +119,33 @@
             <div class="form-group-section">
               <div class="group-header">
                 <AppIcon name="split" class="group-icon" />
-                <span>账号选择</span>
+                <span>{{ t('账号选择') }}</span>
               </div>
               <div class="group-content checks-container">
                 <div class="check-card highlight" :class="{ 'is-checked': form.isolateCodexPool }">
                   <el-checkbox v-model="form.isolateCodexPool">
                     <div class="check-info">
-                      <span class="check-title text-primary">分开调度 Codex 与 OpenAI API Key</span>
-                      <span class="check-desc">Codex 请求只使用 Codex 账号；OpenAI API Key 请求不会选中 Codex 账号</span>
+                      <span class="check-title text-primary">{{
+                        t('分开调度 Codex 与 OpenAI API Key')
+                      }}</span>
+                      <span class="check-desc">{{
+                        t('Codex 请求只使用 Codex 账号；OpenAI API Key 请求不会选中 Codex 账号')
+                      }}</span>
                     </div>
                   </el-checkbox>
                 </div>
-                <div class="check-card highlight" :class="{ 'is-checked': form.gptUsesCodexAccounts }">
+                <div
+                  class="check-card highlight"
+                  :class="{ 'is-checked': form.gptUsesCodexAccounts }"
+                >
                   <el-checkbox v-model="form.gptUsesCodexAccounts">
                     <div class="check-info">
-                      <span class="check-title text-primary">GPT 请求使用 Codex 账号</span>
-                      <span class="check-desc">不含 openai-compatible 与 DeepSeek。仅配置 Codex 账号时请保持开启</span>
+                      <span class="check-title text-primary">{{
+                        t('GPT 请求使用 Codex 账号')
+                      }}</span>
+                      <span class="check-desc">{{
+                        t('不含 openai-compatible 与 DeepSeek。仅配置 Codex 账号时请保持开启')
+                      }}</span>
                     </div>
                   </el-checkbox>
                 </div>
@@ -137,22 +155,26 @@
             <div class="form-group-section">
               <div class="group-header">
                 <AppIcon name="lock" class="group-icon" />
-                <span>会话亲和</span>
+                <span>{{ t('会话亲和') }}</span>
               </div>
               <div class="group-content checks-container">
                 <div class="check-card" :class="{ 'is-checked': form.bindSessionOnAdmission }">
                   <el-checkbox v-model="form.bindSessionOnAdmission">
                     <div class="check-info">
-                      <span class="check-title">选中后保持会话亲和</span>
-                      <span class="check-desc">账号准入成功后立即绑定，后续同一会话优先使用该账号</span>
+                      <span class="check-title">{{ t('选中后保持会话亲和') }}</span>
+                      <span class="check-desc">{{
+                        t('账号准入成功后立即绑定，后续同一会话优先使用该账号')
+                      }}</span>
                     </div>
                   </el-checkbox>
                 </div>
                 <div class="check-card" :class="{ 'is-checked': form.bindSessionByApiKey }">
                   <el-checkbox v-model="form.bindSessionByApiKey">
                     <div class="check-info">
-                      <span class="check-title">无会话时按 API Key 保持亲和</span>
-                      <span class="check-desc">没有会话标识时，同一 API Key 优先使用同一上游账号</span>
+                      <span class="check-title">{{ t('无会话时按 API Key 保持亲和') }}</span>
+                      <span class="check-desc">{{
+                        t('没有会话标识时，同一 API Key 优先使用同一上游账号')
+                      }}</span>
                     </div>
                   </el-checkbox>
                 </div>
@@ -162,7 +184,7 @@
             <div class="form-group-section">
               <div class="group-header">
                 <AppIcon name="refresh" class="group-icon" />
-                <span>失败重试</span>
+                <span>{{ t('失败重试') }}</span>
               </div>
               <div class="group-content">
                 <div class="retry-grid">
@@ -175,12 +197,16 @@
                         controls-position="right"
                         class="w-full"
                       />
-                      <span class="unit-label">个</span>
+                      <span class="unit-label">{{ t('个') }}</span>
                     </div>
                   </el-form-item>
                 </div>
                 <p class="field-hint">
-                  表示本次请求失败后最多尝试几个账号。1 表示不再更换；账号不可用后的下一次请求仍可选择其他账号。
+                  {{
+                    t(
+                      '表示本次请求失败后最多尝试几个账号。1 表示不再更换；账号不可用后的下一次请求仍可选择其他账号。',
+                    )
+                  }}
                 </p>
               </div>
             </div>
@@ -193,8 +219,7 @@
               class="action-btn save-btn"
               @click="saveSettings"
             >
-              <AppIcon v-if="!saving" name="save" class="btn-icon" />
-              保存策略配置
+              <AppIcon v-if="!saving" name="save" class="btn-icon" /> {{ t('保存策略配置') }}
             </el-button>
           </div>
         </el-form>

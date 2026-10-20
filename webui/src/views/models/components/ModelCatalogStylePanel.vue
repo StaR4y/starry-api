@@ -1,32 +1,103 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   import { computed } from 'vue';
   import type { ModelCatalogDisplaySettings } from '@/types/api';
 
   const settings = defineModel<ModelCatalogDisplaySettings>({ required: true });
 
   const layoutOptions = [
-    { label: '卡片', value: 'cards' },
-    { label: '列表', value: 'list' },
-    { label: '紧凑', value: 'compact' },
+    {
+      get label() {
+        return t('卡片');
+      },
+      value: 'cards',
+    },
+    {
+      get label() {
+        return t('列表');
+      },
+      value: 'list',
+    },
+    {
+      get label() {
+        return t('紧凑');
+      },
+      value: 'compact',
+    },
   ];
   const densityOptions = [
-    { label: '舒适', value: 'comfortable' },
-    { label: '紧凑', value: 'compact' },
+    {
+      get label() {
+        return t('舒适');
+      },
+      value: 'comfortable',
+    },
+    {
+      get label() {
+        return t('紧凑');
+      },
+      value: 'compact',
+    },
   ];
   const groupOptions = [
-    { label: '按厂商', value: 'provider' },
-    { label: '平铺全部', value: 'none' },
+    {
+      get label() {
+        return t('按厂商');
+      },
+      value: 'provider',
+    },
+    {
+      get label() {
+        return t('平铺全部');
+      },
+      value: 'none',
+    },
   ];
   const columnOptions = [
-    { label: '自动', value: 0 },
-    { label: '2 列', value: 2 },
-    { label: '3 列', value: 3 },
-    { label: '4 列', value: 4 },
+    {
+      get label() {
+        return t('自动');
+      },
+      value: 0,
+    },
+    {
+      get label() {
+        return t('2 列');
+      },
+      value: 2,
+    },
+    {
+      get label() {
+        return t('3 列');
+      },
+      value: 3,
+    },
+    {
+      get label() {
+        return t('4 列');
+      },
+      value: 4,
+    },
   ];
   const styleOptions = [
-    { label: '默认', value: 'default' },
-    { label: '描边', value: 'outline' },
-    { label: '扁平', value: 'flat' },
+    {
+      get label() {
+        return t('默认');
+      },
+      value: 'default',
+    },
+    {
+      get label() {
+        return t('描边');
+      },
+      value: 'outline',
+    },
+    {
+      get label() {
+        return t('扁平');
+      },
+      value: 'flat',
+    },
   ];
 
   const showGridControls = computed(() => settings.value.layout !== 'list');
@@ -40,7 +111,7 @@
   <div class="style-panel">
     <div class="style-grid">
       <section class="style-block">
-        <h4>布局</h4>
+        <h4>{{ t('布局') }}</h4>
         <el-segmented
           :model-value="settings.layout"
           :options="layoutOptions"
@@ -49,7 +120,7 @@
         />
       </section>
       <section class="style-block">
-        <h4>密度</h4>
+        <h4>{{ t('密度') }}</h4>
         <el-segmented
           :model-value="settings.density"
           :options="densityOptions"
@@ -58,7 +129,7 @@
         />
       </section>
       <section class="style-block">
-        <h4>分组</h4>
+        <h4>{{ t('分组') }}</h4>
         <el-segmented
           :model-value="settings.groupBy"
           :options="groupOptions"
@@ -67,7 +138,7 @@
         />
       </section>
       <section v-if="showGridControls" class="style-block">
-        <h4>每行列数</h4>
+        <h4>{{ t('每行列数') }}</h4>
         <el-segmented
           :model-value="settings.columns"
           :options="columnOptions"
@@ -76,7 +147,7 @@
         />
       </section>
       <section v-if="showGridControls" class="style-block">
-        <h4>卡片样式</h4>
+        <h4>{{ t('卡片样式') }}</h4>
         <el-segmented
           :model-value="settings.cardStyle"
           :options="styleOptions"
@@ -87,26 +158,38 @@
     </div>
 
     <section class="style-block">
-      <h4>显示内容</h4>
+      <h4>{{ t('显示内容') }}</h4>
       <div class="toggle-list">
         <label>
-          <span>模型图标</span>
-          <el-switch :model-value="settings.showIcon" @change="patch({ showIcon: Boolean($event) })" />
+          <span>{{ t('模型图标') }}</span>
+          <el-switch
+            :model-value="settings.showIcon"
+            @change="patch({ showIcon: Boolean($event) })"
+          />
         </label>
         <label>
-          <span>模型系列</span>
-          <el-switch :model-value="settings.showFamily" @change="patch({ showFamily: Boolean($event) })" />
+          <span>{{ t('模型系列') }}</span>
+          <el-switch
+            :model-value="settings.showFamily"
+            @change="patch({ showFamily: Boolean($event) })"
+          />
         </label>
         <label>
-          <span>上下文窗口</span>
-          <el-switch :model-value="settings.showContext" @change="patch({ showContext: Boolean($event) })" />
+          <span>{{ t('上下文窗口') }}</span>
+          <el-switch
+            :model-value="settings.showContext"
+            @change="patch({ showContext: Boolean($event) })"
+          />
         </label>
         <label>
-          <span>内置 / 自定义</span>
-          <el-switch :model-value="settings.showOrigin" @change="patch({ showOrigin: Boolean($event) })" />
+          <span>{{ t('内置 / 自定义') }}</span>
+          <el-switch
+            :model-value="settings.showOrigin"
+            @change="patch({ showOrigin: Boolean($event) })"
+          />
         </label>
         <label>
-          <span>模型描述</span>
+          <span>{{ t('模型描述') }}</span>
           <el-switch
             :model-value="settings.showDescription"
             @change="patch({ showDescription: Boolean($event) })"

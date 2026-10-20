@@ -107,7 +107,8 @@
       color: var(--kp-text-secondary);
       overflow: hidden;
       text-overflow: ellipsis;
-      white-space: nowrap;
+      white-space: normal;
+      overflow-wrap: anywhere;
     }
 
     .metric-value {

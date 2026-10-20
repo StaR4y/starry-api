@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   /** 模型图标字段：紧凑的预览 + 上传/替换/移除，添加页与编辑弹窗共用。 */
   import { ref, watch } from 'vue';
   import { ElMessage, type UploadRawFile, type UploadRequestOptions } from 'element-plus';
@@ -28,11 +29,11 @@
   function validate(file: UploadRawFile) {
     const supportedTypes = ['image/png', 'image/jpeg', 'image/webp'];
     if (!supportedTypes.includes(file.type)) {
-      ElMessage.warning('请选择 PNG、JPEG 或 WebP 图片');
+      ElMessage.warning(t('请选择 PNG、JPEG 或 WebP 图片'));
       return false;
     }
     if (file.size > 2 * 1024 * 1024) {
-      ElMessage.warning('模型图标不能超过 2 MB');
+      ElMessage.warning(t('模型图标不能超过 2 MB'));
       return false;
     }
     return true;
@@ -44,10 +45,10 @@
       const uploaded = await modelsApi.uploadIcon(options.file);
       emit('update:icon', uploaded.url);
       options.onSuccess(uploaded);
-      ElMessage.success('模型图标已上传');
+      ElMessage.success(t('模型图标已上传'));
     } catch (error) {
       const uploadError = Object.assign(
-        new Error(error instanceof Error ? error.message : '图标上传失败'),
+        new Error(error instanceof Error ? error.message : t('图标上传失败')),
         { status: 0, method: 'POST', url: '/admin/models/icon' },
       );
       options.onError(uploadError);
@@ -83,21 +84,21 @@
           :disabled="uploading"
         >
           <el-button size="small" :icon="Upload" :loading="uploading">
-            {{ uploading ? '上传中…' : icon ? '替换图标' : '上传图标' }}
+            {{ uploading ? t('上传中…') : icon ? t('替换图标') : t('上传图标') }}
           </el-button>
         </el-upload>
-        <el-tooltip v-if="icon" content="移除图标" placement="top">
+        <el-tooltip v-if="icon" :content="t('移除图标')" placement="top">
           <el-button
             size="small"
             text
             type="danger"
             :icon="Delete"
-            aria-label="移除图标"
+            :aria-label="t('移除图标')"
             @click="remove"
           />
         </el-tooltip>
       </div>
-      <p class="tip">PNG / JPEG / WebP，不超过 2 MB；不上传则使用厂商默认图标</p>
+      <p class="tip">{{ t('PNG / JPEG / WebP，不超过 2 MB；不上传则使用厂商默认图标') }}</p>
     </div>
   </div>
 </template>

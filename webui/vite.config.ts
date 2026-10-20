@@ -61,7 +61,7 @@ export default defineConfig(({ mode }) => {
       port: 5173,
       proxy: {
         // 仅代理后端管理与代理 API 路径，避免拦截前端路由
-        '^/(auth|admin|system|payment|tickets|assistant|v1|health|models|chat|responses|messages|actuator|assets/model-icons|assets/branding|plugin-assets)':
+        '^/(auth|admin|system|payment|tickets|assistant|news|documentation|v1|health|models|chat|responses|messages|actuator|assets/model-icons|assets/branding|plugin-assets)':
           {
             target,
             changeOrigin: true,
@@ -78,6 +78,9 @@ export default defineConfig(({ mode }) => {
           // 优化 Chunk 拆包策略，将第三方库与核心代码分离，提升浏览器缓存利用率
           manualChunks(id) {
             if (id.includes('node_modules')) {
+              if (/node_modules\/(markdown-it|highlight.js|dompurify|linkify-it|uc.micro|mdurl|entities|argparse)\//.test(id)) {
+                return 'vendor-documentation';
+              }
               if (id.includes('element-plus')) {
                 return 'vendor-element-plus';
               }

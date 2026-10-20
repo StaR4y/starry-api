@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   /**
    * 普通用户欢迎面板。
    *
@@ -19,7 +20,7 @@
   const usageSummary = ref<UsageSummary | null>(null);
   const chartColors = ['#2563eb', '#10b981', '#f59e0b', '#ef5b6b', '#06b6d4'];
 
-  const displayName = computed(() => auth.user?.displayName || auth.user?.username || '用户');
+  const displayName = computed(() => auth.user?.displayName || auth.user?.username || t('用户'));
   const balance = computed(() => auth.user?.balance ?? 0);
   const activeKeys = computed(() => apiKeys.value.filter((key) => key.enabled).length);
   const totalRequests = computed(() =>
@@ -50,31 +51,47 @@
   /* 顶部状态栏（统一 MetricsPanel 组件） */
   const welcomeMetrics = computed<MetricPanelItem[]>(() => [
     {
-      label: '当前余额',
+      get label() {
+        return t('当前余额');
+      },
       value: formatNumber(balance.value),
       tone: 'primary',
-      sub: `最近使用：${latestUsedAt.value ? formatDateTime(latestUsedAt.value) : '无使用记录'}`,
+      get sub() {
+        return t('最近使用：{p0}', {
+          p0: latestUsedAt.value ? formatDateTime(latestUsedAt.value) : t('无使用记录'),
+        });
+      },
     },
     {
-      label: 'API Key 密钥',
+      get label() {
+        return t('API Key 密钥');
+      },
       value: formatNumber(activeKeys.value),
       unit: `/ ${formatNumber(apiKeys.value.length)}`,
       tone: 'success',
       valueTone: 'success',
-      sub: activeKeys.value > 0 ? '服务正常运行中' : '暂无启用密钥',
+      sub: activeKeys.value > 0 ? t('服务正常运行中') : t('暂无启用密钥'),
     },
     {
-      label: '累计调用',
+      get label() {
+        return t('累计调用');
+      },
       value: formatNumber(totalRequests.value),
       tone: 'accent',
-      sub: '次 API 请求',
+      get sub() {
+        return t('次 API 请求');
+      },
     },
     {
-      label: '已用 Token / 累计消耗',
+      get label() {
+        return t('已用 Token / 累计消耗');
+      },
       value: formatNumber(totalTokens.value),
       unit: `/ ${formatNumber(totalCredits.value)}`,
       tone: 'warning',
-      sub: 'Tokens / 累计消耗额度',
+      get sub() {
+        return t('Tokens / 累计消耗额度');
+      },
     },
   ]);
 
@@ -83,7 +100,7 @@
   }
 
   function modelName(model: ModelUsageSummary) {
-    return model.model?.trim() || '未指定模型';
+    return model.model?.trim() || t('未指定模型');
   }
 
   function barWidth(value: number, maxValue: number) {
@@ -111,27 +128,29 @@
 
 <template>
   <div class="welcome">
-    <PageSection :title="`欢迎，${displayName}`" subtitle="使用概览" :icon="DataAnalysis">
+    <PageSection
+      :title="t('欢迎，{p0}', { p0: displayName })"
+      :subtitle="t('使用概览')"
+      :icon="DataAnalysis"
+    >
       <template #actions>
-        <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
+        <el-button :icon="Refresh" :loading="loading" @click="load">{{ t('刷新') }}</el-button>
       </template>
       <template #summary>
         <MetricsPanel :items="welcomeMetrics" />
       </template>
 
       <div v-loading="loading" class="welcome__content">
-
         <!-- 2. Model Usage Card -->
         <section class="welcome__model-card surface-card">
           <div class="welcome__model-header">
             <div>
               <h3 class="welcome__model-title">
-                <span class="model-title-dot" />
-                模型使用情况
+                <span class="model-title-dot" /> {{ t('模型使用情况') }}
               </h3>
             </div>
             <div class="welcome__model-header-total text-secondary">
-              总 Token：<strong class="mono">{{ formatNumber(totalTokens) }}</strong>
+              {{ t('总 Token：') }}<strong class="mono">{{ formatNumber(totalTokens) }}</strong>
             </div>
           </div>
 
@@ -158,9 +177,9 @@
               </div>
               <div class="welcome__model-meta text-muted">
                 <span>
-                  <strong>{{ formatNumber(model.requestCount) }}</strong> 次调用
+                  <strong>{{ formatNumber(model.requestCount) }}</strong> {{ t('次调用') }}
                 </span>
-                <span>最近 {{ formatDateTime(model.lastUsedAt) }}</span>
+                <span>{{ t('最近') }} {{ formatDateTime(model.lastUsedAt) }}</span>
               </div>
             </div>
           </div>
@@ -181,7 +200,7 @@
               <polyline points="3.27 6.96 12 12.01 20.73 6.96" />
               <line x1="12" y1="22.08" x2="12" y2="12" />
             </svg>
-            <div>暂无模型使用数据</div>
+            <div>{{ t('暂无模型使用数据') }}</div>
           </div>
         </section>
       </div>

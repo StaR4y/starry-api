@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   /**
    * API Key 管理。
    *
@@ -63,10 +64,28 @@
     () => apiKeys.value.filter((key) => key.billingSource === 'CODING_PLAN').length,
   );
   const keyMetrics = computed<MetricPanelItem[]>(() => [
-    { label: '已启用', value: enabledCount.value, tone: 'success' },
-    { label: '余额计费', value: balanceCount.value, tone: 'primary' },
+    {
+      get label() {
+        return t('已启用');
+      },
+      value: enabledCount.value,
+      tone: 'success',
+    },
+    {
+      get label() {
+        return t('余额计费');
+      },
+      value: balanceCount.value,
+      tone: 'primary',
+    },
     { label: 'Coding Plan', value: planCount.value, tone: 'accent' },
-    { label: '全部密钥', value: apiKeys.value.length, tone: 'info' },
+    {
+      get label() {
+        return t('全部密钥');
+      },
+      value: apiKeys.value.length,
+      tone: 'info',
+    },
   ]);
   const hasFilter = computed(() => Boolean(keySearch.value.trim() || sourceFilter.value));
   const apiOrigin = computed(() => {
@@ -135,8 +154,24 @@
   });
 
   const rules: FormRules = {
-    name: [{ required: true, message: '请输入名称', trigger: 'blur' }],
-    modelProvider: [{ required: true, message: '请选择模型分类', trigger: 'change' }],
+    name: [
+      {
+        required: true,
+        get message() {
+          return t('请输入名称');
+        },
+        trigger: 'blur',
+      },
+    ],
+    modelProvider: [
+      {
+        required: true,
+        get message() {
+          return t('请选择模型分类');
+        },
+        trigger: 'change',
+      },
+    ],
   };
 
   watch(
@@ -221,24 +256,29 @@
     { label: 'Codex', value: apiBaseUrl.value },
     { label: 'Claude', value: apiOrigin.value },
     { label: 'OpenCode', value: apiBaseUrl.value },
-    { label: '端口', value: apiPort.value },
+    {
+      get label() {
+        return t('端口');
+      },
+      value: apiPort.value,
+    },
   ]);
 
-  async function copy(text: string, successMessage = '已复制') {
+  async function copy(text: string, successMessage = t('已复制')) {
     try {
       await navigator.clipboard.writeText(text);
       ElMessage.success(successMessage);
     } catch {
-      ElMessage.warning('请手动复制');
+      ElMessage.warning(t('请手动复制'));
     }
   }
 
   function scriptCopyMessage(block: SetupScriptBlock) {
-    return `已复制 ${block.clientLabel} / ${block.platformLabel} 配置`;
+    return t('已复制 {p0} / {p1} 配置', { p0: block.clientLabel, p1: block.platformLabel });
   }
 
   function setupFileCopyMessage(file: SetupFileBlock) {
-    return `已复制 ${file.path}`;
+    return t('已复制 {p0}', { p0: file.path });
   }
 
   function fullApiKeyOf(row?: ApiKey | null) {
@@ -263,7 +303,7 @@
   const configKey = ref<ApiKey | null>(null);
   const configFullApiKey = ref('');
   const configDialogTitle = computed(() =>
-    configKey.value ? `${configKey.value.name} 客户端配置` : '客户端配置',
+    configKey.value ? t('{p0} 客户端配置', { p0: configKey.value.name }) : t('客户端配置'),
   );
   const pastedConfigApiKey = computed(() => configFullApiKey.value.trim());
   const storedConfigApiKey = computed(() => fullApiKeyOf(configKey.value));
@@ -283,29 +323,31 @@
   const hasStoredConfigApiKey = computed(() => Boolean(storedConfigApiKey.value));
   const configKeyNotice = computed(() =>
     hasStoredConfigApiKey.value
-      ? '当前 API Key 可直接通过CC Switch进行客户端配置。'
-      : '此为旧版 API Key，数据库只保留哈希和前缀，无法反推完整密钥；请重新创建或手动粘贴完整密钥。',
+      ? t('当前 API Key 可直接通过CC Switch进行客户端配置。')
+      : t(
+          '此为旧版 API Key，数据库只保留哈希和前缀，无法反推完整密钥；请重新创建或手动粘贴完整密钥。',
+        ),
   );
   const configKeyNoticeType = computed(() => (hasStoredConfigApiKey.value ? 'success' : 'warning'));
   const configKeyHint = computed(() =>
     hasStoredConfigApiKey.value
-      ? '完整密钥已自动填入；复制配置会使用当前用户自己的 API Key。'
-      : '粘贴创建时保存的完整密钥；只含前缀的占位密钥不能用于客户端鉴权。',
+      ? t('完整密钥已自动填入；复制配置会使用当前用户自己的 API Key。')
+      : t('粘贴创建时保存的完整密钥；只含前缀的占位密钥不能用于客户端鉴权。'),
   );
 
   function fullConfigMissingMessage(action: string) {
     return hasStoredConfigApiKey.value
-      ? `当前 API Key 异常，无法${action}`
-      : `请先粘贴完整 API Key，否则无法${action}`;
+      ? t('当前 API Key 异常，无法{p0}', { p0: action })
+      : t('请先粘贴完整 API Key，否则无法{p0}', { p0: action });
   }
 
   async function copyRowApiKey(row: ApiKey) {
     const key = fullApiKeyOf(row);
     if (!key) {
-      ElMessage.warning('旧版 API Key 只保存哈希，无法直接复制完整密钥，请重新创建');
+      ElMessage.warning(t('旧版 API Key 只保存哈希，无法直接复制完整密钥，请重新创建'));
       return;
     }
-    await copy(key, '已复制 API Key');
+    await copy(key, t('已复制 API Key'));
   }
 
   const configConnectionText = computed(() =>
@@ -328,15 +370,15 @@
 
   async function copyConfigConnectionText() {
     if (!hasConfigFullApiKey.value) {
-      ElMessage.warning(fullConfigMissingMessage('复制连接信息'));
+      ElMessage.warning(fullConfigMissingMessage(t('复制连接信息')));
       return;
     }
-    await copy(configConnectionText.value, '已复制连接信息');
+    await copy(configConnectionText.value, t('已复制连接信息'));
   }
 
   async function copyConfigScript(block: SetupScriptBlock) {
     if (!hasConfigFullApiKey.value) {
-      ElMessage.warning(fullConfigMissingMessage('复制客户端配置'));
+      ElMessage.warning(fullConfigMissingMessage(t('复制客户端配置')));
       return;
     }
     await copy(block.script, scriptCopyMessage(block));
@@ -344,7 +386,7 @@
 
   async function copyConfigSetupFile(file: SetupFileBlock) {
     if (!hasConfigFullApiKey.value) {
-      ElMessage.warning(fullConfigMissingMessage('复制客户端配置文件'));
+      ElMessage.warning(fullConfigMissingMessage(t('复制客户端配置文件')));
       return;
     }
     await copy(file.content, setupFileCopyMessage(file));
@@ -352,15 +394,15 @@
 
   async function copyConfigCcSwitch(link: CcSwitchLink) {
     if (!hasConfigFullApiKey.value) {
-      ElMessage.warning(fullConfigMissingMessage('复制 CC Switch 链接'));
+      ElMessage.warning(fullConfigMissingMessage(t('复制 CC Switch 链接')));
       return;
     }
-    await copy(link.url, `已复制 ${link.label} CC Switch 链接`);
+    await copy(link.url, t('已复制 {p0} CC Switch 链接', { p0: link.label }));
   }
 
   function openConfigCcSwitch(link: CcSwitchLink) {
     if (!hasConfigFullApiKey.value) {
-      ElMessage.warning(fullConfigMissingMessage('打开 CC Switch 链接'));
+      ElMessage.warning(fullConfigMissingMessage(t('打开 CC Switch 链接')));
       return;
     }
     window.location.href = link.url;
@@ -397,7 +439,7 @@
           modelProvider: form.modelProvider,
           enabled: form.enabled,
         });
-        ElMessage.success('已更新');
+        ElMessage.success(t('已更新'));
         formVisible.value = false;
       }
       await loadKeys();
@@ -408,18 +450,22 @@
 
   async function toggleEnabled(row: ApiKey) {
     await apiKeysApi.update(row.keyId, { enabled: !row.enabled });
-    ElMessage.success(row.enabled ? '已停用' : '已启用');
+    ElMessage.success(row.enabled ? t('已停用') : t('已启用'));
     await loadKeys();
   }
 
   async function removeKey(row: ApiKey) {
-    await ElMessageBox.confirm(`确认删除 ${row.name}？`, '危险操作', {
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
+    await ElMessageBox.confirm(t('确认删除 {p0}？', { p0: row.name }), t('危险操作'), {
+      get confirmButtonText() {
+        return t('删除');
+      },
+      get cancelButtonText() {
+        return t('取消');
+      },
       type: 'error',
     }).catch(() => Promise.reject(new Error('cancel')));
     await apiKeysApi.remove(row.keyId);
-    ElMessage.success('已删除');
+    ElMessage.success(t('已删除'));
     await loadKeys();
   }
 
@@ -438,18 +484,18 @@
   }
 
   function providerLabel(provider?: string | null) {
-    return !provider || provider === '*' ? '全部厂商' : provider;
+    return !provider || provider === '*' ? t('全部厂商') : provider;
   }
 
   function formatLastUsed(value: string | null | undefined) {
-    if (!value) return '尚未使用';
+    if (!value) return t('尚未使用');
     const at = new Date(value);
-    if (Number.isNaN(at.getTime())) return '尚未使用';
+    if (Number.isNaN(at.getTime())) return t('尚未使用');
     const elapsed = Date.now() - at.getTime();
-    if (elapsed < 60_000) return '刚刚';
-    if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)} 分钟前`;
-    if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)} 小时前`;
-    if (elapsed < 7 * 86_400_000) return `${Math.floor(elapsed / 86_400_000)} 天前`;
+    if (elapsed < 60_000) return t('刚刚');
+    if (elapsed < 3_600_000) return t('{p0} 分钟前', { p0: Math.floor(elapsed / 60_000) });
+    if (elapsed < 86_400_000) return t('{p0} 小时前', { p0: Math.floor(elapsed / 3_600_000) });
+    if (elapsed < 7 * 86_400_000) return t('{p0} 天前', { p0: Math.floor(elapsed / 86_400_000) });
     return formatDateTime(value).slice(0, 16);
   }
 
@@ -465,10 +511,18 @@
 
 <template>
   <div class="api-keys-view">
-    <PageSection title="API Key" subtitle="访问与计费" :icon="Key">
+    <PageSection title="API Key" :subtitle="t('访问与计费')" :icon="Key">
       <template #actions>
-        <el-button :icon="CopyDocument" @click="copy(apiBaseUrl)">复制 API 地址</el-button>
-        <el-button type="primary" :icon="Plus" @click="openCreate">新建 API Key</el-button>
+        <el-button :icon="CopyDocument" @click="copy(apiBaseUrl)">
+          {{
+            t('复制 API 地址')
+          }}
+        </el-button>
+        <el-button type="primary" :icon="Plus" @click="openCreate">
+          {{
+            t('新建 API Key')
+          }}
+        </el-button>
       </template>
       <template #summary>
         <MetricsPanel :items="keyMetrics" />
@@ -477,40 +531,49 @@
         <el-input
           v-model="keySearch"
           :prefix-icon="Search"
-          placeholder="搜索名称或模型分类"
+          :placeholder="t('搜索名称或模型分类')"
           clearable
         />
-        <el-select v-model="sourceFilter" aria-label="筛选计费途径">
-          <el-option label="全部计费途径" value="" />
-          <el-option label="余额计费" value="BALANCE" />
+        <el-select v-model="sourceFilter" :aria-label="t('筛选计费途径')">
+          <el-option :label="t('全部计费途径')" value="" />
+          <el-option :label="t('余额计费')" value="BALANCE" />
           <el-option label="Coding Plan" value="CODING_PLAN" />
         </el-select>
         <span class="toolbar-count">
-          {{ hasFilter ? `筛选 ${filteredKeys.length} / ${apiKeys.length}` : `${apiKeys.length} 个密钥` }}
+          {{
+            hasFilter
+              ? t('筛选 {p0} / {p1}', { p0: filteredKeys.length, p1: apiKeys.length })
+              : t('{p0} 个密钥', { p0: apiKeys.length })
+          }}
         </span>
-        <el-tooltip content="刷新密钥">
-          <el-button :icon="Refresh" aria-label="刷新密钥" :loading="loading" @click="loadKeys" />
+        <el-tooltip :content="t('刷新密钥')">
+          <el-button
+            :icon="Refresh"
+            :aria-label="t('刷新密钥')"
+            :loading="loading"
+            @click="loadKeys"
+          />
         </el-tooltip>
       </template>
       <el-table v-loading="loading" class="api-key-table" :data="filteredKeys">
         <template #empty>
           <el-empty
             :image-size="88"
-            :description="hasFilter ? '没有匹配的密钥，试试换个筛选条件' : '还没有 API Key'"
+            :description="hasFilter ? t('没有匹配的密钥，试试换个筛选条件') : t('还没有 API Key')"
           >
             <el-button v-if="!hasFilter" type="primary" :icon="Plus" @click="openCreate">
-              新建 API Key
+              {{ t('新建 API Key') }}
             </el-button>
           </el-empty>
         </template>
-        <el-table-column label="密钥" min-width="220">
+        <el-table-column :label="t('密钥')" min-width="220">
           <template #default="{ row }">
             <div class="key-identity">
               <strong class="key-row-name">{{ row.name }}</strong>
               <button
                 type="button"
                 class="key-prefix"
-                :title="fullApiKeyOf(row) ? '复制完整密钥' : row.keyPrefix"
+                :title="fullApiKeyOf(row) ? t('复制完整密钥') : row.keyPrefix"
                 @click="copyRowApiKey(row)"
               >
                 {{ row.keyPrefix }}…
@@ -518,21 +581,18 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="计费途径" min-width="132">
+        <el-table-column :label="t('计费途径')" min-width="132">
           <template #default="{ row }">
-            <span
-              class="billing-chip"
-              :class="{ 'is-plan': row.billingSource === 'CODING_PLAN' }"
-            >
+            <span class="billing-chip" :class="{ 'is-plan': row.billingSource === 'CODING_PLAN' }">
               <el-icon>
                 <Monitor v-if="row.billingSource === 'CODING_PLAN'" />
                 <Wallet v-else />
               </el-icon>
-              {{ row.billingSource === 'CODING_PLAN' ? 'Coding Plan' : '余额计费' }}
+              {{ row.billingSource === 'CODING_PLAN' ? 'Coding Plan' : t('余额计费') }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="模型分类" min-width="150">
+        <el-table-column :label="t('模型分类')" min-width="150">
           <template #default="{ row }">
             <div class="provider-cell">
               <ProviderLogo :provider="providerLabel(row.modelProvider)" :size="22" />
@@ -540,24 +600,26 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column v-if="auth.isAdmin" label="归属用户" min-width="140">
+        <el-table-column v-if="auth.isAdmin" :label="t('归属用户')" min-width="140">
           <template #default="{ row }">
             <span class="mono-id" :title="row.userId || ''">{{ shorten(row.userId, 8, 6) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="状态" width="100">
+        <el-table-column :label="t('状态')" width="100">
           <template #default="{ row }">
             <span class="key-state" :class="{ active: row.enabled }">
-              <i />{{ row.enabled ? '已启用' : '已停用' }}
+              <i />{{ row.enabled ? t('已启用') : t('已停用') }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="用量 / 上限" min-width="168">
+        <el-table-column :label="t('用量 / 上限')" min-width="168">
           <template #default="{ row }">
             <div class="usage-cell">
               <div class="usage-cell__nums">
                 <b>{{ formatNumber(row.totalCredits ?? 0) }}</b>
-                <span>{{ row.creditsLimit == null ? '不限' : formatNumber(row.creditsLimit) }}</span>
+                <span>{{
+                  row.creditsLimit == null ? t('不限') : formatNumber(row.creditsLimit)
+                }}</span>
               </div>
               <div v-if="usagePercent(row) != null" class="usage-bar" aria-hidden="true">
                 <i :style="{ width: `${usagePercent(row)}%` }" />
@@ -565,33 +627,58 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="最近使用" min-width="128">
+        <el-table-column :label="t('最近使用')" min-width="128">
           <template #default="{ row }">
-            <span class="key-last-used" :title="row.lastUsedAt ? formatDateTime(row.lastUsedAt) : ''">
+            <span
+              class="key-last-used"
+              :title="row.lastUsedAt ? formatDateTime(row.lastUsedAt) : ''"
+            >
               {{ formatLastUsed(row.lastUsedAt) }}
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="操作" width="160" fixed="right">
+        <el-table-column :label="t('操作')" width="160" fixed="right">
           <template #default="{ row }">
             <div class="row-actions">
-              <el-tooltip content="复制密钥">
-                <el-button :icon="CopyDocument" text aria-label="复制密钥" @click="copyRowApiKey(row)" />
+              <el-tooltip :content="t('复制密钥')">
+                <el-button
+                  :icon="CopyDocument"
+                  text
+                  :aria-label="t('复制密钥')"
+                  @click="copyRowApiKey(row)"
+                />
               </el-tooltip>
-              <el-tooltip content="编辑">
-                <el-button :icon="EditPen" text aria-label="编辑密钥" @click="openEdit(row)" />
+              <el-tooltip :content="t('编辑')">
+                <el-button
+                  :icon="EditPen"
+                  text
+                  :aria-label="t('编辑密钥')"
+                  @click="openEdit(row)"
+                />
               </el-tooltip>
-              <el-tooltip content="客户端配置">
-                <el-button :icon="Setting" text aria-label="客户端配置" @click="openShellConfig(row)" />
+              <el-tooltip :content="t('客户端配置')">
+                <el-button
+                  :icon="Setting"
+                  text
+                  :aria-label="t('客户端配置')"
+                  @click="openShellConfig(row)"
+                />
               </el-tooltip>
-              <el-dropdown trigger="click" @command="(command: string) => handleRowCommand(command, row)">
-                <button class="more-action" type="button" aria-label="更多操作">
+              <el-dropdown
+                trigger="click"
+                @command="(command: string) => handleRowCommand(command, row)"
+              >
+                <button class="more-action" type="button" :aria-label="t('更多操作')">
                   <el-icon><MoreFilled /></el-icon>
                 </button>
                 <template #dropdown>
                   <el-dropdown-menu>
-                    <el-dropdown-item command="toggle">{{ row.enabled ? '停用' : '启用' }}</el-dropdown-item>
-                    <el-dropdown-item command="remove" divided>删除</el-dropdown-item>
+                    <el-dropdown-item command="toggle">
+                      {{
+                        row.enabled ? t('停用') : t('启用')
+                      }}
+                    </el-dropdown-item>
+                    <el-dropdown-item command="remove" divided>{{ t('删除') }}</el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
@@ -604,30 +691,38 @@
     <el-dialog
       v-model="formVisible"
       class="api-key-form-dialog"
-      :title="formMode === 'create' ? '新建 API Key' : '编辑 API Key'"
+      :title="formMode === 'create' ? t('新建 API Key') : t('编辑 API Key')"
       width="min(480px, calc(100vw - 24px))"
     >
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" class="api-key-form">
-        <el-form-item label="名称" prop="name">
-          <el-input v-model="form.name" maxlength="64" placeholder="例如 Claude Code、Codex" />
+        <el-form-item :label="t('名称')" prop="name">
+          <el-input
+            v-model="form.name"
+            maxlength="64"
+            :placeholder="t('例如 Claude Code、Codex')"
+          />
         </el-form-item>
-        <el-form-item label="计费途径" prop="billingSource">
-          <el-radio-group v-model="form.billingSource" class="billing-choice" aria-label="计费途径">
+        <el-form-item :label="t('计费途径')" prop="billingSource">
+          <el-radio-group
+            v-model="form.billingSource"
+            class="billing-choice"
+            :aria-label="t('计费途径')"
+          >
             <el-radio-button label="BALANCE" value="BALANCE">
-              <el-icon><Wallet /></el-icon>余额计费
+              <el-icon><Wallet /></el-icon>{{ t('余额计费') }}
             </el-radio-button>
             <el-radio-button label="CODING_PLAN" value="CODING_PLAN">
               <el-icon><Monitor /></el-icon>Coding Plan
             </el-radio-button>
           </el-radio-group>
         </el-form-item>
-        <el-form-item label="模型分类" prop="modelProvider">
+        <el-form-item :label="t('模型分类')" prop="modelProvider">
           <el-select
             v-model="form.modelProvider"
-            placeholder="选择可访问的厂商"
-            no-data-text="暂无可用厂商"
+            :placeholder="t('选择可访问的厂商')"
+            :no-data-text="t('暂无可用厂商')"
             class="provider-select"
-            aria-label="选择 API Key 模型分类"
+            :aria-label="t('选择 API Key 模型分类')"
           >
             <template v-if="form.modelProvider" #prefix>
               <ProviderLogo :provider="form.modelProvider" :size="18" />
@@ -641,7 +736,7 @@
               <div class="provider-option">
                 <ProviderLogo :provider="provider.name" :size="24" />
                 <strong>{{ provider.name }}</strong>
-                <span>{{ provider.count }} 个可用模型</span>
+                <span>{{ provider.count }} {{ t('个可用模型') }}</span>
               </div>
             </el-option>
           </el-select>
@@ -657,17 +752,17 @@
           </el-icon>
           <div>
             <span>{{
-              form.billingSource === 'CODING_PLAN' ? '当前分类套餐可用额度' : '可用余额'
+              form.billingSource === 'CODING_PLAN' ? t('当前分类套餐可用额度') : t('可用余额')
             }}</span>
             <strong>
               {{
                 form.billingSource === 'CODING_PLAN' && selectedPlanBalance === null
-                  ? '暂不可用'
+                  ? t('暂不可用')
                   : formatNumber(
-                      form.billingSource === 'CODING_PLAN'
-                        ? Number(selectedPlanBalance)
-                        : (auth.user?.balance ?? 0),
-                    )
+                    form.billingSource === 'CODING_PLAN'
+                      ? Number(selectedPlanBalance)
+                      : (auth.user?.balance ?? 0),
+                  )
               }}
               <small>credits</small>
             </strong>
@@ -676,32 +771,32 @@
         <p class="billing-contract">
           {{
             form.billingSource === 'CODING_PLAN'
-              ? '仅扣 Coding Plan 额度，套餐额度不足时停止调用。'
-              : '仅扣钱包余额，余额不足时停止调用。'
+              ? t('仅扣 Coding Plan 额度，套餐额度不足时停止调用。')
+              : t('仅扣钱包余额，余额不足时停止调用。')
           }}
         </p>
-        <el-form-item label="累计额度上限（可选）">
+        <el-form-item :label="t('累计额度上限（可选）')">
           <el-input-number
             v-model="form.creditsLimit"
             :min="0"
             :step="100"
             controls-position="right"
-            placeholder="不限制"
+            :placeholder="t('不限制')"
             style="width: 100%"
           />
-          <p class="field-hint">留空表示不限制累计调用额度</p>
+          <p class="field-hint">{{ t('留空表示不限制累计调用额度') }}</p>
         </el-form-item>
-        <el-form-item v-if="formMode === 'edit'" label="状态" class="status-field">
+        <el-form-item v-if="formMode === 'edit'" :label="t('状态')" class="status-field">
           <div class="status-switch">
             <el-switch v-model="form.enabled" />
-            <span>{{ form.enabled ? '可用' : '已停用' }}</span>
+            <span>{{ form.enabled ? t('可用') : t('已停用') }}</span>
           </div>
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="formVisible = false">取消</el-button>
+        <el-button @click="formVisible = false">{{ t('取消') }}</el-button>
         <el-button type="primary" :loading="formSubmitting" @click="submitForm">
-          {{ formMode === 'create' ? '创建密钥' : '保存修改' }}
+          {{ formMode === 'create' ? t('创建密钥') : t('保存修改') }}
         </el-button>
       </template>
     </el-dialog>
@@ -723,7 +818,7 @@
         <section v-if="configKey" class="secret-panel">
           <div class="secret-panel__head">
             <div>
-              <h3>连接信息</h3>
+              <h3>{{ t('连接信息') }}</h3>
               <p>{{ configKeyHint }}</p>
             </div>
             <el-button
@@ -731,17 +826,17 @@
               :disabled="!hasConfigFullApiKey"
               @click="copyConfigConnectionText"
             >
-              复制连接信息
+              {{ t('复制连接信息') }}
             </el-button>
           </div>
 
           <div class="full-key-input">
-            <span class="full-key-input__label">完整 API Key</span>
+            <span class="full-key-input__label">{{ t('完整 API Key') }}</span>
             <el-input
               v-model="configFullApiKey"
               clearable
               show-password
-              placeholder="完整 sk-... 密钥"
+              :placeholder="t('完整 sk-... 密钥')"
             />
           </div>
 
@@ -749,26 +844,27 @@
             <div class="secret-field secret-field--key">
               <span class="secret-field__label">API Key</span>
               <code class="secret-field__value mono" :title="configApiKey">{{ configApiKey }}</code>
-              <el-button size="small" type="primary" :disabled="!hasConfigFullApiKey" @click="copy(configApiKey)">
-                复制
+              <el-button
+                size="small"
+                type="primary"
+                :disabled="!hasConfigFullApiKey"
+                @click="copy(configApiKey)"
+              >
+                {{ t('复制') }}
               </el-button>
             </div>
             <div class="secret-field">
-              <span class="secret-field__label">名称</span>
+              <span class="secret-field__label">{{ t('名称') }}</span>
               <code class="secret-field__value" :title="configKey.name">{{ configKey.name }}</code>
             </div>
             <div class="secret-field">
-              <span class="secret-field__label">模型分类</span>
+              <span class="secret-field__label">{{ t('模型分类') }}</span>
               <code class="secret-field__value">{{ providerLabel(configKey.modelProvider) }}</code>
             </div>
-            <div
-              v-for="field in connectionEndpoints"
-              :key="field.label"
-              class="secret-field"
-            >
+            <div v-for="field in connectionEndpoints" :key="field.label" class="secret-field">
               <span class="secret-field__label">{{ field.label }}</span>
               <code class="secret-field__value mono" :title="field.value">{{ field.value }}</code>
-              <el-button size="small" @click="copy(field.value)">复制</el-button>
+              <el-button size="small" @click="copy(field.value)">{{ t('复制') }}</el-button>
             </div>
           </div>
         </section>
@@ -776,8 +872,8 @@
         <section class="secret-panel setup-scripts">
           <div class="secret-panel__head">
             <div>
-              <h3>客户端配置</h3>
-              <p>将以下配置添加到对应客户端；Claude Code 可直接在终端运行。</p>
+              <h3>{{ t('客户端配置') }}</h3>
+              <p>{{ t('将以下配置添加到对应客户端；Claude Code 可直接在终端运行。') }}</p>
             </div>
             <el-button
               size="small"
@@ -785,13 +881,13 @@
               :disabled="!hasConfigFullApiKey"
               @click="copyConfigScript(configScriptBlock)"
             >
-              复制当前配置
+              {{ t('复制当前配置') }}
             </el-button>
           </div>
 
           <div class="setup-controls">
             <div class="setup-control">
-              <span class="setup-control__label">客户端</span>
+              <span class="setup-control__label">{{ t('客户端') }}</span>
               <el-radio-group v-model="configSetupClient" size="small">
                 <el-radio-button v-for="item in setupClients" :key="item.value" :label="item.value">
                   {{ item.label }}
@@ -799,7 +895,7 @@
               </el-radio-group>
             </div>
             <div class="setup-control">
-              <span class="setup-control__label">平台</span>
+              <span class="setup-control__label">{{ t('平台') }}</span>
               <el-radio-group v-model="configSetupPlatform" size="small">
                 <el-radio-button
                   v-for="item in setupPlatforms"
@@ -829,7 +925,7 @@
                   :disabled="!hasConfigFullApiKey"
                   @click="copyConfigSetupFile(file)"
                 >
-                  复制
+                  {{ t('复制') }}
                 </el-button>
               </div>
               <p v-if="file.hint" class="setup-file__hint">{{ file.hint }}</p>
@@ -841,8 +937,8 @@
         <section class="secret-panel cc-switch-panel">
           <div class="secret-panel__head">
             <div>
-              <h3>CC Switch 一键连接</h3>
-              <p>打开 CC Switch 后会导入 Starry API 供应商配置。</p>
+              <h3>{{ t('CC Switch 一键连接') }}</h3>
+              <p>{{ t('打开 CC Switch 后会导入 Starry API 供应商配置。') }}</p>
             </div>
           </div>
 
@@ -859,14 +955,14 @@
                   :disabled="!hasConfigFullApiKey"
                   @click="openConfigCcSwitch(link)"
                 >
-                  打开
+                  {{ t('打开') }}
                 </el-button>
                 <el-button
                   size="small"
                   :disabled="!hasConfigFullApiKey"
                   @click="copyConfigCcSwitch(link)"
                 >
-                  复制链接
+                  {{ t('复制链接') }}
                 </el-button>
               </div>
             </div>
@@ -875,21 +971,21 @@
       </div>
 
       <template #footer>
-        <el-button type="primary" @click="configVisible = false">完成</el-button>
+        <el-button type="primary" @click="configVisible = false">{{ t('完成') }}</el-button>
       </template>
     </el-dialog>
 
     <!-- 创建后密钥展示 -->
     <el-dialog
       v-model="newKeyVisible"
-      title="保存你的新密钥"
+      :title="t('保存你的新密钥')"
       width="760px"
       :close-on-click-modal="false"
     >
       <div class="secret-dialog-body">
         <el-alert
           class="secret-alert"
-          title="此密钥已按当前用户独立保存，后续可在列表中直接复制。"
+          :title="t('此密钥已按当前用户独立保存，后续可在列表中直接复制。')"
           type="success"
           :closable="false"
           show-icon
@@ -898,30 +994,30 @@
         <section v-if="newKey" class="secret-panel">
           <div class="secret-panel__head">
             <div>
-              <h3>连接信息</h3>
-              <p>客户端使用下面的 Base URL 和 API Key 调用代理服务。</p>
+              <h3>{{ t('连接信息') }}</h3>
+              <p>{{ t('客户端使用下面的 Base URL 和 API Key 调用代理服务。') }}</p>
             </div>
-            <el-button size="small" @click="copy(connectionText)">复制全部</el-button>
+            <el-button size="small" @click="copy(connectionText)">{{ t('复制全部') }}</el-button>
           </div>
 
           <div class="secret-fields">
             <div class="secret-field secret-field--key">
               <span class="secret-field__label">API Key</span>
               <code class="secret-field__value mono" :title="newKey.key">{{ newKey.key }}</code>
-              <el-button size="small" type="primary" @click="copy(newKey.key)">复制</el-button>
+              <el-button size="small" type="primary" @click="copy(newKey.key)">
+                {{
+                  t('复制')
+                }}
+              </el-button>
             </div>
             <div class="secret-field">
-              <span class="secret-field__label">模型分类</span>
+              <span class="secret-field__label">{{ t('模型分类') }}</span>
               <code class="secret-field__value">{{ providerLabel(newKey.modelProvider) }}</code>
             </div>
-            <div
-              v-for="field in connectionEndpoints"
-              :key="field.label"
-              class="secret-field"
-            >
+            <div v-for="field in connectionEndpoints" :key="field.label" class="secret-field">
               <span class="secret-field__label">{{ field.label }}</span>
               <code class="secret-field__value mono" :title="field.value">{{ field.value }}</code>
-              <el-button size="small" @click="copy(field.value)">复制</el-button>
+              <el-button size="small" @click="copy(field.value)">{{ t('复制') }}</el-button>
             </div>
           </div>
         </section>
@@ -929,21 +1025,21 @@
         <section v-if="newKey" class="secret-panel setup-scripts">
           <div class="secret-panel__head">
             <div>
-              <h3>客户端配置</h3>
-              <p>将以下配置添加到对应客户端；新密钥会直接写入配置内容。</p>
+              <h3>{{ t('客户端配置') }}</h3>
+              <p>{{ t('将以下配置添加到对应客户端；新密钥会直接写入配置内容。') }}</p>
             </div>
             <el-button
               size="small"
               type="primary"
               @click="copy(setupScriptBlock.script, scriptCopyMessage(setupScriptBlock))"
             >
-              复制当前配置
+              {{ t('复制当前配置') }}
             </el-button>
           </div>
 
           <div class="setup-controls">
             <div class="setup-control">
-              <span class="setup-control__label">客户端</span>
+              <span class="setup-control__label">{{ t('客户端') }}</span>
               <el-radio-group v-model="newSetupClient" size="small">
                 <el-radio-button v-for="item in setupClients" :key="item.value" :label="item.value">
                   {{ item.label }}
@@ -951,7 +1047,7 @@
               </el-radio-group>
             </div>
             <div class="setup-control">
-              <span class="setup-control__label">平台</span>
+              <span class="setup-control__label">{{ t('平台') }}</span>
               <el-radio-group v-model="newSetupPlatform" size="small">
                 <el-radio-button
                   v-for="item in setupPlatforms"
@@ -977,7 +1073,7 @@
               <div class="setup-file__head">
                 <span class="mono">{{ file.path }}</span>
                 <el-button size="small" @click="copy(file.content, setupFileCopyMessage(file))">
-                  复制
+                  {{ t('复制') }}
                 </el-button>
               </div>
               <p v-if="file.hint" class="setup-file__hint">{{ file.hint }}</p>
@@ -989,8 +1085,8 @@
         <section v-if="newKey" class="secret-panel cc-switch-panel">
           <div class="secret-panel__head">
             <div>
-              <h3>CC Switch 一键连接</h3>
-              <p>打开 CC Switch 后会导入 Starry API 供应商配置。</p>
+              <h3>{{ t('CC Switch 一键连接') }}</h3>
+              <p>{{ t('打开 CC Switch 后会导入 Starry API 供应商配置。') }}</p>
             </div>
           </div>
 
@@ -1001,12 +1097,16 @@
                 <span>{{ link.description }}</span>
               </div>
               <div class="cc-switch-item__actions">
-                <el-button size="small" type="primary" @click="openCcSwitch(link)">打开</el-button>
+                <el-button size="small" type="primary" @click="openCcSwitch(link)">
+                  {{
+                    t('打开')
+                  }}
+                </el-button>
                 <el-button
                   size="small"
-                  @click="copy(link.url, `已复制 ${link.label} CC Switch 链接`)"
+                  @click="copy(link.url, t('已复制 {p0} CC Switch 链接', { p0: link.label }))"
                 >
-                  复制链接
+                  {{ t('复制链接') }}
                 </el-button>
               </div>
             </div>
@@ -1014,7 +1114,7 @@
         </section>
       </div>
       <template #footer>
-        <el-button type="primary" @click="newKeyVisible = false">已妥善保存</el-button>
+        <el-button type="primary" @click="newKeyVisible = false">{{ t('已妥善保存') }}</el-button>
       </template>
     </el-dialog>
   </div>
@@ -1054,7 +1154,11 @@
     background: transparent;
     color: var(--kp-text-muted);
     cursor: pointer;
-    font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    font:
+      11px/1.4 ui-monospace,
+      SFMono-Regular,
+      Menlo,
+      monospace;
     text-align: left;
     text-overflow: ellipsis;
     white-space: nowrap;

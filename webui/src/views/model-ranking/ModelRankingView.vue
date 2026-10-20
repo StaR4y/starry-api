@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   import { computed, ref, watch, type CSSProperties } from 'vue';
   import { Trophy } from '@element-plus/icons-vue';
   import PageSection from '@/components/PageSection.vue';
@@ -32,8 +33,10 @@
   const isProgramBench = computed(() => props.benchmark === 'programbench');
 
   const chartMax = computed(() => {
-    const scores =
-      snapshot.value?.entries.flatMap((entry) => [entry.score, entry.secondaryScore ?? 0]) ?? [0];
+    const scores = snapshot.value?.entries.flatMap((entry) => [
+      entry.score,
+      entry.secondaryScore ?? 0,
+    ]) ?? [0];
     return Math.max(10, Math.ceil(Math.max(...scores) / 10) * 10);
   });
   const axisTicks = computed(() =>
@@ -43,10 +46,7 @@
     '--grid-size': `${100 / Math.max(1, axisTicks.value.length - 1)}%`,
   }));
   const benchmarkTitle = computed(() =>
-    (snapshot.value?.title || benchmarkConfig.value.fallbackTitle).replace(
-      /\s+Leaderboard$/i,
-      '',
-    ),
+    (snapshot.value?.title || benchmarkConfig.value.fallbackTitle).replace(/\s+Leaderboard$/i, ''),
   );
 
   async function loadRanking() {
@@ -63,7 +63,7 @@
       };
       chartKey.value += 1;
     } catch {
-      error.value = '天梯数据暂时无法载入';
+      error.value = t('天梯数据暂时无法载入');
     } finally {
       loading.value = false;
     }
@@ -96,9 +96,9 @@
 
 <template>
   <section class="ranking-page">
-    <PageSection :title="benchmarkConfig.label" subtitle="每日更新" :icon="Trophy">
+    <PageSection :title="benchmarkConfig.label" :subtitle="t('每日更新')" :icon="Trophy">
       <template #actions>
-        <nav class="ranking-page__benchmarks" aria-label="模型基准榜单">
+        <nav class="ranking-page__benchmarks" :aria-label="t('模型基准榜单')">
           <router-link :to="{ name: 'model-ranking-programbench' }">ProgramBench</router-link>
           <router-link :to="{ name: 'model-ranking-frontierbench' }">FrontierBench</router-link>
         </nav>
@@ -107,77 +107,81 @@
         {{ benchmarkTitle }}
       </p>
 
-    <div class="ranking-chart">
-      <div v-if="loading && !snapshot" class="ranking-chart__skeleton" aria-label="正在载入天梯">
-        <div v-for="index in 9" :key="index" class="skeleton-row">
-          <span />
-          <span />
-          <span :style="{ width: `${88 - index * 6}%` }" />
-        </div>
-      </div>
-
-      <div v-else-if="error && !snapshot" class="ranking-chart__error">
-        <span>{{ error }}</span>
-        <el-button text @click="loadRanking">重试</el-button>
-      </div>
-
-      <div v-else-if="snapshot" :key="chartKey" class="ranking-chart__content">
-        <div v-if="isProgramBench" class="chart-legend" aria-label="ProgramBench 指标">
-          <span><i class="is-primary" aria-hidden="true" />已解决</span>
-          <span><i class="is-secondary" aria-hidden="true" />接近解决</span>
-        </div>
-
-        <div class="chart-head">
-          <span class="chart-head__rank">排名</span>
-          <span>模型 / Agent</span>
-          <div class="chart-axis">
-            <span v-for="tick in axisTicks" :key="tick">{{ tick }}%</span>
+      <div class="ranking-chart">
+        <div
+          v-if="loading && !snapshot"
+          class="ranking-chart__skeleton"
+          :aria-label="t('正在载入天梯')"
+        >
+          <div v-for="index in 9" :key="index" class="skeleton-row">
+            <span />
+            <span />
+            <span :style="{ width: `${88 - index * 6}%` }" />
           </div>
         </div>
 
-        <div class="chart-rows">
-          <article
-            v-for="(entry, index) in snapshot.entries"
-            :key="`${entry.rank}-${entry.model}`"
-            class="chart-row"
-            :style="barStyle(entry, index)"
-          >
-            <span class="chart-row__rank" :class="`is-rank-${Math.min(entry.rank, 4)}`">
-              {{ String(entry.rank).padStart(2, '0') }}
-            </span>
+        <div v-else-if="error && !snapshot" class="ranking-chart__error">
+          <span>{{ error }}</span>
+          <el-button text @click="loadRanking">{{ t('重试') }}</el-button>
+        </div>
 
-            <div class="chart-row__identity">
-              <strong>{{ entry.model }}</strong>
-              <span>{{ entry.organization }} · {{ entry.agent }}</span>
+        <div v-else-if="snapshot" :key="chartKey" class="ranking-chart__content">
+          <div v-if="isProgramBench" class="chart-legend" :aria-label="t('ProgramBench 指标')">
+            <span><i class="is-primary" aria-hidden="true" />{{ t('已解决') }}</span>
+            <span><i class="is-secondary" aria-hidden="true" />{{ t('接近解决') }}</span>
+          </div>
+
+          <div class="chart-head">
+            <span class="chart-head__rank">{{ t('排名') }}</span>
+            <span>{{ t('模型 / Agent') }}</span>
+            <div class="chart-axis">
+              <span v-for="tick in axisTicks" :key="tick">{{ tick }}%</span>
             </div>
+          </div>
 
-            <div class="chart-row__mobile-scores">
-              <strong class="is-primary">{{ scoreText(entry.score) }}</strong>
-              <strong v-if="hasSecondaryScore(entry)" class="is-secondary">
-                {{ scoreText(entry.secondaryScore ?? 0) }}
-              </strong>
-            </div>
-
-            <div
-              class="chart-row__plot"
-              :class="{ 'is-dual': hasSecondaryScore(entry) }"
-              :style="gridStyle"
+          <div class="chart-rows">
+            <article
+              v-for="(entry, index) in snapshot.entries"
+              :key="`${entry.rank}-${entry.model}`"
+              class="chart-row"
+              :style="barStyle(entry, index)"
             >
-              <div class="chart-row__metric is-primary">
-                <div class="chart-row__bar" />
-                <strong class="chart-row__score is-primary">{{ scoreText(entry.score) }}</strong>
+              <span class="chart-row__rank" :class="`is-rank-${Math.min(entry.rank, 4)}`">
+                {{ String(entry.rank).padStart(2, '0') }}
+              </span>
+
+              <div class="chart-row__identity">
+                <strong>{{ entry.model }}</strong>
+                <span>{{ entry.organization }} · {{ entry.agent }}</span>
               </div>
-              <div v-if="hasSecondaryScore(entry)" class="chart-row__metric is-secondary">
-                <div class="chart-row__bar is-secondary" />
-                <strong class="chart-row__score is-secondary">
+
+              <div class="chart-row__mobile-scores">
+                <strong class="is-primary">{{ scoreText(entry.score) }}</strong>
+                <strong v-if="hasSecondaryScore(entry)" class="is-secondary">
                   {{ scoreText(entry.secondaryScore ?? 0) }}
                 </strong>
               </div>
-            </div>
-          </article>
+
+              <div
+                class="chart-row__plot"
+                :class="{ 'is-dual': hasSecondaryScore(entry) }"
+                :style="gridStyle"
+              >
+                <div class="chart-row__metric is-primary">
+                  <div class="chart-row__bar" />
+                  <strong class="chart-row__score is-primary">{{ scoreText(entry.score) }}</strong>
+                </div>
+                <div v-if="hasSecondaryScore(entry)" class="chart-row__metric is-secondary">
+                  <div class="chart-row__bar is-secondary" />
+                  <strong class="chart-row__score is-secondary">
+                    {{ scoreText(entry.secondaryScore ?? 0) }}
+                  </strong>
+                </div>
+              </div>
+            </article>
+          </div>
         </div>
       </div>
-    </div>
     </PageSection>
   </section>
 </template>

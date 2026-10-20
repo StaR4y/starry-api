@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   /**
    * 登录账号管理。
    *
@@ -37,6 +38,8 @@
   const formSubmitting = ref(false);
   const editingId = ref<string | null>(null);
   const editingRoot = ref(false);
+  /** Balance shown when the edit form was opened; used to send the balance only when it was changed. */
+  const originalBalance = ref(0);
 
   const form = reactive<{
     username: string;
@@ -57,8 +60,24 @@
   });
 
   const rules: FormRules = {
-    username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
-    email: [{ type: 'email', message: '邮箱格式不正确', trigger: 'blur' }],
+    username: [
+      {
+        required: true,
+        get message() {
+          return t('请输入用户名');
+        },
+        trigger: 'blur',
+      },
+    ],
+    email: [
+      {
+        type: 'email',
+        get message() {
+          return t('邮箱格式不正确');
+        },
+        trigger: 'blur',
+      },
+    ],
     password: [
       {
         validator: (_, value, callback) => {
@@ -66,7 +85,7 @@
             callback();
             return;
           }
-          callback(new Error('密码长度须为 12–128 位，或留空自动生成'));
+          callback(new Error(t('密码长度须为 12–128 位，或留空自动生成')));
         },
         trigger: 'blur',
       },
@@ -95,7 +114,7 @@
 
   function openEdit(row: AdminUser) {
     if (!canManageAccount(row)) {
-      ElMessage.warning('仅系统 Root 可操作此账号');
+      ElMessage.warning(t('仅系统 Root 可操作此账号'));
       return;
     }
     formMode.value = 'edit';
@@ -110,11 +129,12 @@
       password: '',
       enabled: row.enabled,
     });
+    originalBalance.value = row.balance ?? 0;
     formVisible.value = true;
   }
 
   function roleLabel(role: string) {
-    return role === 'ADMIN' ? '管理员' : '用户';
+    return role === 'ADMIN' ? t('管理员') : t('用户');
   }
 
   function roleTagType(role: string) {
@@ -156,13 +176,13 @@
     credInfo.value = null;
     if (!shouldLogout) return;
     auth.logout();
-    ElMessage.info('当前账号的全部后台会话已撤销，请使用新密码重新登录');
+    ElMessage.info(t('当前账号的全部后台会话已撤销，请使用新密码重新登录'));
     router.replace({ name: 'login' });
   }
 
   function closeCredentialDialog() {
     if (!credentialAcknowledged.value) {
-      ElMessage.warning('请先确认一次性密码已妥善保存');
+      ElMessage.warning(t('请先确认一次性密码已妥善保存'));
       return;
     }
     credVisible.value = false;
@@ -181,9 +201,9 @@
   async function copy(text: string) {
     try {
       await navigator.clipboard.writeText(text);
-      ElMessage.success('已复制');
+      ElMessage.success(t('已复制'));
     } catch {
-      ElMessage.warning('请手动复制');
+      ElMessage.warning(t('请手动复制'));
     }
   }
 
@@ -194,7 +214,7 @@
 
   async function copyAffiliateLink(row: AdminUser) {
     if (!row.affiliateCode) {
-      ElMessage.warning('该账号暂无推广码');
+      ElMessage.warning(t('该账号暂无推广码'));
       return;
     }
     await copy(affiliateRegisterUrl(row.affiliateCode));
@@ -225,13 +245,17 @@
           credInfo.value = { username: result.user.username, password: result.password };
           credVisible.value = true;
         } else {
-          ElMessage.success('已创建');
+          ElMessage.success(t('已创建'));
         }
       } else if (editingId.value) {
+        // Sending the unchanged balance back would overwrite credits added or reserved since the form opened.
+        const balanceEdited = form.role === 'USER' && Number(form.balance ?? 0) !== Number(originalBalance.value);
         const payload = {
           email: form.email,
           displayName: form.displayName || undefined,
-          balance: balancePayload(),
+          ...(balanceEdited
+            ? { balance: balancePayload(), expectedBalance: originalBalance.value }
+            : {}),
           ...(editingRoot.value
             ? {}
             : {
@@ -240,7 +264,7 @@
               }),
         };
         await usersApi.update(editingId.value, payload);
-        ElMessage.success('已更新');
+        ElMessage.success(t('已更新'));
         formVisible.value = false;
       }
       await loadUsers();
@@ -251,24 +275,32 @@
 
   async function toggleEnabled(row: AdminUser) {
     if (isApplicationRoot(row)) {
-      ElMessage.warning('最高管理员权限 不能被停用');
+      ElMessage.warning(t('最高管理员权限 不能被停用'));
       return;
     }
     await usersApi.update(row.userId, { enabled: !row.enabled });
-    ElMessage.success(row.enabled ? '已停用' : '已启用');
+    ElMessage.success(row.enabled ? t('已停用') : t('已启用'));
     await loadUsers();
   }
 
   async function resetPassword(row: AdminUser) {
     if (!canManageAccount(row)) {
-      ElMessage.warning('仅最高管理员 可重置此账号密码');
+      ElMessage.warning(t('仅最高管理员 可重置此账号密码'));
       return;
     }
-    await ElMessageBox.confirm(`确认重置 ${row.username} 的密码？将生成新随机密码。`, '重置密码', {
-      confirmButtonText: '重置',
-      cancelButtonText: '取消',
-      type: 'warning',
-    }).catch(() => Promise.reject(new Error('cancel')));
+    await ElMessageBox.confirm(
+      t('确认重置 {p0} 的密码？将生成新随机密码。', { p0: row.username }),
+      t('重置密码'),
+      {
+        get confirmButtonText() {
+          return t('重置');
+        },
+        get cancelButtonText() {
+          return t('取消');
+        },
+        type: 'warning',
+      },
+    ).catch(() => Promise.reject(new Error('cancel')));
     const result = await usersApi.resetPassword(row.userId);
     const resetsCurrentSession = auth.user?.userId === row.userId;
     logoutAfterCredentialClose.value = resetsCurrentSession;
@@ -291,19 +323,19 @@
 
   onBeforeRouteLeave(() => {
     if (!hasUnacknowledgedCredential()) return true;
-    return window.confirm('一次性密码尚未确认保存。确定离开当前页面？');
+    return window.confirm(t('一次性密码尚未确认保存。确定离开当前页面？'));
   });
 </script>
 
 <template>
   <div class="user-list-view">
-    <PageSection title="账号" subtitle="身份与权限" :icon="User">
+    <PageSection :title="t('账号')" :subtitle="t('身份与权限')" :icon="User">
       <template #actions>
-        <el-button type="primary" :icon="Plus" @click="openCreate">添加账号</el-button>
+        <el-button type="primary" :icon="Plus" @click="openCreate">{{ t('添加账号') }}</el-button>
       </template>
 
       <el-table v-loading="loading" :data="users">
-        <el-table-column label="用户名" min-width="180">
+        <el-table-column :label="t('用户名')" min-width="180">
           <template #default="{ row }">
             <div class="account-identity">
               <span>{{ row.username }}</span>
@@ -313,70 +345,78 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="推广码" min-width="170">
+        <el-table-column :label="t('推广码')" min-width="170">
           <template #default="{ row }">
             <div v-if="row.affiliateCode" class="invite-code-cell">
               <span class="mono-code">{{ row.affiliateCode }}</span>
               <el-button link type="primary" size="small" @click.stop="copyAffiliateLink(row)">
-                复制链接
+                {{ t('复制链接') }}
               </el-button>
             </div>
             <span v-else class="text-muted">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="邮箱" min-width="220">
+        <el-table-column :label="t('邮箱')" min-width="220">
           <template #default="{ row }">{{ row.email || '—' }}</template>
         </el-table-column>
-        <el-table-column prop="displayName" label="显示名" min-width="160">
+        <el-table-column prop="displayName" :label="t('显示名')" min-width="160">
           <template #default="{ row }">{{ row.displayName || '—' }}</template>
         </el-table-column>
-        <el-table-column label="账号类型" width="120">
+        <el-table-column :label="t('账号类型')" width="120">
           <template #default="{ row }">
             <el-tag :type="roleTagType(row.role)" effect="light" round>
               {{ roleLabel(row.role) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="余额" width="140" align="right">
+        <el-table-column :label="t('余额')" width="140" align="right">
           <template #default="{ row }">
             <span v-if="row.role === 'USER'">{{ formatNumber(row.balance) }}</span>
             <span v-else class="text-muted">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="启用" width="80">
+        <el-table-column :label="t('启用')" width="80">
           <template #default="{ row }">
             <el-tag :type="row.enabled ? 'success' : 'info'" effect="light" round>
-              {{ row.enabled ? '启用' : '停用' }}
+              {{ row.enabled ? t('启用') : t('停用') }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="首次登录" width="100">
+        <el-table-column :label="t('首次登录')" width="100">
           <template #default="{ row }">
-            <el-tag v-if="row.firstLogin" type="warning" effect="light" round>需改密</el-tag>
+            <el-tag v-if="row.firstLogin" type="warning" effect="light" round>
+              {{
+                t('需改密')
+              }}
+            </el-tag>
             <span v-else class="text-muted">—</span>
           </template>
         </el-table-column>
-        <el-table-column label="最近登录" width="180">
+        <el-table-column :label="t('最近登录')" width="180">
           <template #default="{ row }">{{ formatDateTime(row.lastLoginAt) }}</template>
         </el-table-column>
-        <el-table-column label="创建时间" width="180">
+        <el-table-column :label="t('创建时间')" width="180">
           <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="240" fixed="right">
+        <el-table-column :label="t('操作')" width="240" fixed="right">
           <template #default="{ row }">
             <template v-if="canManageAccount(row)">
-              <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+              <el-button link type="primary" @click="openEdit(row)">{{ t('编辑') }}</el-button>
               <el-button
                 v-if="!isApplicationRoot(row)"
                 link
                 type="primary"
                 @click="toggleEnabled(row)"
               >
-                {{ row.enabled ? '停用' : '启用' }}
+                {{ row.enabled ? t('停用') : t('启用') }}
               </el-button>
-              <el-button link type="warning" @click="resetPassword(row)">重置密码</el-button>
+              <el-button link type="warning" @click="resetPassword(row)">
+                {{
+                  t('重置密码')
+                }}
+              </el-button>
             </template>
-            <span v-else class="text-muted">Root 保护</span>
+            <span v-else class="text-muted">{{ t('Root 保护') }}</span>
           </template>
         </el-table-column>
       </el-table>
@@ -384,26 +424,26 @@
 
     <el-dialog
       v-model="formVisible"
-      :title="formMode === 'create' ? '添加账号' : '编辑账号'"
+      :title="formMode === 'create' ? t('添加账号') : t('编辑账号')"
       width="min(480px, calc(100vw - 32px))"
     >
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top">
-        <el-form-item label="用户名" prop="username">
+        <el-form-item :label="t('用户名')" prop="username">
           <el-input v-model="form.username" :disabled="formMode === 'edit'" />
         </el-form-item>
-        <el-form-item label="邮箱" prop="email">
+        <el-form-item :label="t('邮箱')" prop="email">
           <el-input v-model="form.email" placeholder="user@example.com" />
         </el-form-item>
-        <el-form-item label="显示名">
+        <el-form-item :label="t('显示名')">
           <el-input v-model="form.displayName" />
         </el-form-item>
-        <el-form-item label="账号类型">
+        <el-form-item :label="t('账号类型')">
           <el-select v-model="form.role" :disabled="editingRoot" style="width: 100%">
-            <el-option label="普通用户" value="USER" />
-            <el-option label="管理员" value="ADMIN" />
+            <el-option :label="t('普通用户')" value="USER" />
+            <el-option :label="t('管理员')" value="ADMIN" />
           </el-select>
         </el-form-item>
-        <el-form-item v-if="form.role === 'USER'" label="账号余额">
+        <el-form-item v-if="form.role === 'USER'" :label="t('账号余额')">
           <el-input-number
             v-model="form.balance"
             :min="0"
@@ -415,25 +455,29 @@
         </el-form-item>
         <el-form-item
           v-if="formMode === 'create'"
-          label="初始密码（留空则后端生成）"
+          :label="t('初始密码（留空则后端生成）')"
           prop="password"
         >
           <el-input v-model="form.password" type="password" maxlength="128" show-password />
         </el-form-item>
-        <el-form-item v-if="formMode === 'edit' && !editingRoot" label="启用">
+        <el-form-item v-if="formMode === 'edit' && !editingRoot" :label="t('启用')">
           <el-switch v-model="form.enabled" />
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="formVisible = false">取消</el-button>
-        <el-button type="primary" :loading="formSubmitting" @click="submitForm">提交</el-button>
+        <el-button @click="formVisible = false">{{ t('取消') }}</el-button>
+        <el-button type="primary" :loading="formSubmitting" @click="submitForm">
+          {{
+            t('提交')
+          }}
+        </el-button>
       </template>
     </el-dialog>
 
     <!-- 一次性密码弹窗 -->
     <el-dialog
       v-model="credVisible"
-      title="保存随机密码"
+      :title="t('保存随机密码')"
       width="min(480px, calc(100vw - 32px))"
       :close-on-click-modal="false"
       :close-on-press-escape="false"
@@ -443,8 +487,8 @@
       <el-alert
         :title="
           logoutAfterCredentialClose
-            ? 'Root 的全部后台会话已撤销；关闭后必须使用此新密码重新登录。'
-            : '此密码只会显示一次，请立即妥善保存或安全交付。'
+            ? t('Root 的全部后台会话已撤销；关闭后必须使用此新密码重新登录。')
+            : t('此密码只会显示一次，请立即妥善保存或安全交付。')
         "
         type="warning"
         :closable="false"
@@ -452,17 +496,21 @@
       />
       <div v-if="credInfo" class="cred-block glass-panel mt-16">
         <div>
-          <div class="text-muted">用户名</div>
+          <div class="text-muted">{{ t('用户名') }}</div>
           <code class="mono">{{ credInfo.username }}</code>
         </div>
         <div>
-          <div class="text-muted">密码</div>
+          <div class="text-muted">{{ t('密码') }}</div>
           <code class="mono">{{ credInfo.password }}</code>
         </div>
-        <el-button size="small" type="primary" @click="copy(credInfo.password)">复制密码</el-button>
+        <el-button size="small" type="primary" @click="copy(credInfo.password)">
+          {{
+            t('复制密码')
+          }}
+        </el-button>
       </div>
       <el-checkbox v-model="credentialAcknowledged" class="mt-16">
-        我已将此一次性密码保存到受控密码管理器或完成安全交付，知悉关闭后无法再次查看
+        {{ t('我已将此一次性密码保存到受控密码管理器或完成安全交付，知悉关闭后无法再次查看') }}
       </el-checkbox>
       <template #footer>
         <el-button
@@ -470,7 +518,7 @@
           :disabled="!credentialAcknowledged"
           @click="closeCredentialDialog"
         >
-          已妥善保存
+          {{ t('已妥善保存') }}
         </el-button>
       </template>
     </el-dialog>

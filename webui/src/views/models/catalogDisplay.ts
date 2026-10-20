@@ -1,3 +1,4 @@
+import { locale, t } from '@/i18n';
 import type {
   ModelCatalogCardStyle,
   ModelCatalogDensity,
@@ -33,7 +34,7 @@ function pick<T extends string>(value: string | undefined, allowed: T[], fallbac
 export function formatContextWindow(value: number) {
   if (value >= 1_000_000) return `${Number((value / 1_000_000).toFixed(1))}M`;
   if (value >= 1000) return `${Number((value / 1000).toFixed(1))}K`;
-  return value.toLocaleString();
+  return value.toLocaleString(locale.value);
 }
 
 const TOKENS_PER_MILLION = 1_000_000;
@@ -62,7 +63,7 @@ function effectivePrice(exact: number | null | undefined, capacity: number | nul
 function formatTokenPrice(value: number) {
   return value > 0 && value < 0.000001
     ? value.toExponential(2)
-    : value.toLocaleString(undefined, { maximumFractionDigits: 6 });
+    : value.toLocaleString(locale.value, { maximumFractionDigits: 6 });
 }
 
 export function pricingFromPublicModel(model: ModelInfo): ModelPublicPricing | null {
@@ -94,7 +95,14 @@ export function pricingFromPublicModel(model: ModelInfo): ModelPublicPricing | n
 export function modelPriceChip(pricing: ModelPublicPricing | null | undefined) {
   if (!pricing) return null;
   if (pricing.billingMode === 'unavailable')
-    return { text: '待定价', title: '价格未配置，暂不可调用' };
+    return {
+      get text() {
+        return t('待定价');
+      },
+      get title() {
+        return t('价格未配置，暂不可调用');
+      },
+    };
   const input = effectivePrice(
     pricing.inputPricePerMillionTokens,
     pricing.inputTokensPer100Balance,
@@ -111,8 +119,11 @@ export function modelPriceChip(pricing: ModelPublicPricing | null | undefined) {
     text: `${formatTokenPrice(total)} / MTok`,
     title:
       input !== null && output !== null
-        ? `参考总价（输入 / 输出各占 50%）；实际按输入 ${formatTokenPrice(input)}、输出 ${formatTokenPrice(output)} / MTok 及缓存用量计费`
-        : '每百万 token 固定总量余额价',
+        ? t('参考总价（输入 / 输出各占 50%）；实际按输入 {p0}、输出 {p1} / MTok 及缓存用量计费', {
+            p0: formatTokenPrice(input),
+            p1: formatTokenPrice(output),
+          })
+        : t('每百万 token 固定总量余额价'),
   };
 }
 

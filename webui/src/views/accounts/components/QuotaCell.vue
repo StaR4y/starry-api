@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   /**
    * 账号列表「可用配额」列。
    *
@@ -72,7 +73,9 @@
         hasData: false,
         percentage: 100,
         status: 'success' as const,
-        label: '未知',
+        get label() {
+          return t('未知');
+        },
         activeWindow: null,
       };
     }
@@ -93,7 +96,9 @@
         hasData: false,
         percentage: 100,
         status: 'success' as const,
-        label: '无限制',
+        get label() {
+          return t('无限制');
+        },
         activeWindow: null,
       };
     }
@@ -110,7 +115,7 @@
       hasData: true,
       percentage,
       status,
-      label: activeWindow.label || (activeWindow.key === '5h' ? '5小时' : '7天'),
+      label: activeWindow.label || (activeWindow.key === '5h' ? t('5小时') : t('7天')),
       activeWindow,
     };
   }
@@ -121,8 +126,7 @@
     <template v-if="quotaState?.loading">
       <div class="quota-meta mono">
         <span class="quota-loading-text">
-          <span class="quota-spinner" />
-          正在获取官方配额...
+          <span class="quota-spinner" /> {{ t('正在获取官方配额...') }}
         </span>
       </div>
       <div class="quota-loading-bar" />
@@ -130,7 +134,7 @@
     <template v-else-if="quotaState?.error">
       <div class="quota-meta mono">
         <el-tooltip :content="quotaState.error" placement="top" effect="dark">
-          <span class="quota-error-text">获取失败</span>
+          <span class="quota-error-text">{{ t('获取失败') }}</span>
         </el-tooltip>
         <el-button
           link
@@ -140,7 +144,7 @@
           @click.stop="emit('refresh', account.accountId)"
         >
           <AppIcon name="refresh" class="icon-refresh icon-gap" width="10" height="10" />
-          重试
+          {{ t('重试') }}
         </el-button>
       </div>
       <el-progress
@@ -158,26 +162,24 @@
         <template #content>
           <div class="quota-tooltip-content mono">
             <div v-if="quotaState?.data?.fiveHour">
-              <strong>5小时窗口:</strong>
-              已用 {{ quotaState?.data?.fiveHour?.usedPercent }}%, 剩余
+              <strong>{{ t('5小时窗口:') }}</strong> {{ t('已用') }}
+              {{ quotaState?.data?.fiveHour?.usedPercent }}{{ t('%, 剩余') }}
               {{ quotaState?.data?.fiveHour?.remainingPercent }}%
               <span v-if="quotaState?.data?.fiveHour?.resetAt">
-                (重置:
-                {{ formatDateTime(quotaState?.data?.fiveHour?.resetAt) }})
+                {{ t('(重置:') }} {{ formatDateTime(quotaState?.data?.fiveHour?.resetAt) }})
               </span>
             </div>
             <div v-if="quotaState?.data?.sevenDay" class="quota-tooltip-window">
-              <strong>7天窗口:</strong>
-              已用 {{ quotaState?.data?.sevenDay?.usedPercent }}%, 剩余
+              <strong>{{ t('7天窗口:') }}</strong> {{ t('已用') }}
+              {{ quotaState?.data?.sevenDay?.usedPercent }}{{ t('%, 剩余') }}
               {{ quotaState?.data?.sevenDay?.remainingPercent }}%
               <span v-if="quotaState?.data?.sevenDay?.resetAt">
-                (重置:
-                {{ formatDateTime(quotaState?.data?.sevenDay?.resetAt) }})
+                {{ t('(重置:') }} {{ formatDateTime(quotaState?.data?.sevenDay?.resetAt) }})
               </span>
             </div>
             <div class="quota-tooltip-source">
-              数据源: {{ quotaState?.data?.source }}<br>
-              更新时间: {{ formatDateTime(quotaState?.data?.checkedAt) }}
+              {{ t('数据源:') }} {{ quotaState?.data?.source }}<br>
+              {{ t('更新时间:') }} {{ formatDateTime(quotaState?.data?.checkedAt) }}
             </div>
           </div>
         </template>
@@ -187,8 +189,8 @@
               class="quota-remaining"
               :class="'is-' + getOpenAiQuotaInfo(quotaState?.data).status"
             >
-              {{ getOpenAiQuotaInfo(quotaState?.data).percentage }}% 剩余
-              ({{ getOpenAiQuotaInfo(quotaState?.data).label }})
+              {{ getOpenAiQuotaInfo(quotaState?.data).percentage }}{{ t('% 剩余 (')
+              }}{{ getOpenAiQuotaInfo(quotaState?.data).label }})
             </span>
             <el-button
               link
@@ -212,7 +214,7 @@
     </template>
     <template v-else>
       <div class="quota-meta mono">
-        <span class="quota-fallback-label">未获取官方配额</span>
+        <span class="quota-fallback-label">{{ t('未获取官方配额') }}</span>
         <el-button
           link
           type="primary"
@@ -221,7 +223,7 @@
           @click.stop="emit('refresh', account.accountId)"
         >
           <AppIcon name="refresh" class="icon-refresh icon-gap" width="10" height="10" />
-          获取
+          {{ t('获取') }}
         </el-button>
       </div>
       <el-progress
@@ -240,7 +242,7 @@
     <template v-if="getQuotaInfo(account).hasLimit">
       <div class="quota-meta mono">
         <span class="quota-remaining" :class="'is-' + getQuotaInfo(account).status">
-          {{ formatNumber(getQuotaInfo(account).remaining) }} 剩余
+          {{ formatNumber(getQuotaInfo(account).remaining) }} {{ t('剩余') }}
         </span>
         <span class="quota-divider">/</span>
         <span class="quota-limit">{{ formatNumber(getQuotaInfo(account).limit) }}</span>
@@ -255,9 +257,9 @@
     </template>
     <template v-else>
       <div class="quota-meta mono">
-        <span class="quota-used">{{ formatNumber(getQuotaInfo(account).used) }} 已用</span>
+        <span class="quota-used">{{ formatNumber(getQuotaInfo(account).used) }} {{ t('已用') }}</span>
         <span class="quota-divider">/</span>
-        <span class="quota-limit-unlimited">无限制</span>
+        <span class="quota-limit-unlimited">{{ t('无限制') }}</span>
       </div>
       <div class="quota-unlimited-bar" />
     </template>

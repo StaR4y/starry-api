@@ -114,7 +114,7 @@ export function applyAppearance(appearance: Appearance) {
   root.style.setProperty('--kp-bg-blur', `${appearance.backgroundBlurPx}px`);
   root.dataset.uiChrome = normalizeChrome(appearance.chrome);
   delete root.dataset.appearancePreset;
-  setFavicon(appearance.faviconUrl || appearance.logoUrl || '/logo.svg');
+  setFavicon(appearance.faviconUrl || appearance.logoUrl || '/favicon.svg');
   const themeColor = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
   if (themeColor) themeColor.content = appearance.primary;
 }

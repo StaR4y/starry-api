@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   /**
    * 管理员支付设置。
    *
@@ -44,7 +45,7 @@
     apiBillingMultiplier: 1,
     rechargeFeeRate: 0,
     productNamePrefix: 'Starry API',
-    productNameSuffix: '余额充值',
+    productNameSuffix: t('余额充值'),
     helpImageUrl: '',
     helpText: '',
     easypayApiBase: '',
@@ -62,7 +63,7 @@
     const index = form.enabledTypes.indexOf(type);
     if (index > -1) {
       if (form.enabledTypes.length === 1) {
-        ElMessage.warning('至少启用一种支付方式');
+        ElMessage.warning(t('至少启用一种支付方式'));
         return;
       }
       form.enabledTypes.splice(index, 1);
@@ -112,21 +113,47 @@
 
   const orderMetrics = computed<MetricPanelItem[]>(() => [
     {
-      label: '已入账订单',
+      get label() {
+        return t('已入账订单');
+      },
       value: orderStats.value.completed,
-      unit: '笔',
+      get unit() {
+        return t('笔');
+      },
       tone: 'success',
       valueTone: 'success',
     },
     {
-      label: '待处理订单',
+      get label() {
+        return t('待处理订单');
+      },
       value: orderStats.value.pending,
-      unit: '笔',
+      get unit() {
+        return t('笔');
+      },
       tone: 'warning',
       valueTone: 'warning',
     },
-    { label: '实际收入', value: orderStats.value.actualIncome, unit: '元', tone: 'primary' },
-    { label: '发放余额', value: orderStats.value.creditedAmount, unit: '元', tone: 'accent' },
+    {
+      get label() {
+        return t('实际收入');
+      },
+      value: orderStats.value.actualIncome,
+      get unit() {
+        return t('元');
+      },
+      tone: 'primary',
+    },
+    {
+      get label() {
+        return t('发放余额');
+      },
+      value: orderStats.value.creditedAmount,
+      get unit() {
+        return t('元');
+      },
+      tone: 'accent',
+    },
   ]);
 
   function applySettings(settings: PaymentSettings) {
@@ -174,23 +201,23 @@
 
   async function submit() {
     if (form.minAmount <= 0 || (form.maxAmount > 0 && form.maxAmount < form.minAmount)) {
-      ElMessage.warning('请检查单笔充值金额范围');
+      ElMessage.warning(t('请检查单笔充值金额范围'));
       return;
     }
     if (form.enabledTypes.length === 0) {
-      ElMessage.warning('至少启用一种支付方式');
+      ElMessage.warning(t('至少启用一种支付方式'));
       return;
     }
     if (form.apiBillingMultiplier <= 0) {
-      ElMessage.warning('模型计费倍率必须大于 0');
+      ElMessage.warning(t('模型计费倍率必须大于 0'));
       return;
     }
     if (form.inviteRebateRate < 0.1 || form.inviteRebateRate > 0.2) {
-      ElMessage.warning('邀请返利比例必须在 10% 到 20% 之间');
+      ElMessage.warning(t('邀请返利比例必须在 10% 到 20% 之间'));
       return;
     }
     if (form.inviteRebateMaxOrders < 1) {
-      ElMessage.warning('邀请返利订单数必须大于 0');
+      ElMessage.warning(t('邀请返利订单数必须大于 0'));
       return;
     }
     if (
@@ -198,7 +225,7 @@
       form.inviteRebateEndAt &&
       form.inviteRebateStartAt >= form.inviteRebateEndAt
     ) {
-      ElMessage.warning('返利活动开始时间必须早于结束时间');
+      ElMessage.warning(t('返利活动开始时间必须早于结束时间'));
       return;
     }
 
@@ -231,7 +258,7 @@
       if (form.easypayPkey) payload.easypayPkey = form.easypayPkey;
       const next = await adminPaymentApi.updateSettings(payload);
       applySettings(next);
-      ElMessage.success('支付设置已保存');
+      ElMessage.success(t('支付设置已保存'));
     } finally {
       submitting.value = false;
     }
@@ -239,18 +266,30 @@
 
   function statusLabel(status: string) {
     const map: Record<string, string> = {
-      PENDING: '待支付',
-      PAID: '已支付',
-      COMPLETED: '已入账',
-      EXPIRED: '已过期',
-      CANCELLED: '已取消',
-      FAILED: '失败',
+      get PENDING() {
+        return t('待支付');
+      },
+      get PAID() {
+        return t('已支付');
+      },
+      get COMPLETED() {
+        return t('已入账');
+      },
+      get EXPIRED() {
+        return t('已过期');
+      },
+      get CANCELLED() {
+        return t('已取消');
+      },
+      get FAILED() {
+        return t('失败');
+      },
     };
     return map[status] ?? status;
   }
 
   function paymentTypeLabel(type: PaymentType) {
-    return type === 'wxpay' ? '微信支付' : '支付宝';
+    return type === 'wxpay' ? t('微信支付') : t('支付宝');
   }
 
   function parseDate(value?: string | null) {
@@ -290,38 +329,41 @@
 </script>
 
 <template>
-  <PageSection title="支付设置" subtitle="业务配置" :icon="CreditCard">
+  <PageSection :title="t('支付设置')" :subtitle="t('业务配置')" :icon="CreditCard">
     <template #actions>
-      <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-      <el-button type="primary" :loading="submitting" @click="submit">保存设置</el-button>
+      <el-button :icon="Refresh" :loading="loading" @click="load">{{ t('刷新') }}</el-button>
+      <el-button type="primary" :loading="submitting" @click="submit">
+        {{
+          t('保存设置')
+        }}
+      </el-button>
     </template>
     <template #summary>
       <MetricsPanel :items="orderMetrics" />
     </template>
 
     <div v-loading="loading" class="payment-admin">
-
       <!-- 配置区域 -->
       <section class="payment-admin__grid">
         <!-- 基础配置 -->
         <div class="payment-admin__panel">
           <div class="payment-admin__panel-header">
             <el-icon class="panel-header-icon"><Setting /></el-icon>
-            <span class="panel-header-title">基础交易配置</span>
+            <span class="panel-header-title">{{ t('基础交易配置') }}</span>
           </div>
 
           <el-form label-position="top">
             <div class="payment-admin__row payment-admin__row--switch">
               <div class="switch-info">
-                <span class="switch-title">启用在线充值</span>
+                <span class="switch-title">{{ t('启用在线充值') }}</span>
                 <p class="switch-desc text-muted">
-                  关闭后用户无法创建新的支付订单，历史订单仍可查看。
+                  {{ t('关闭后用户无法创建新的支付订单，历史订单仍可查看。') }}
                 </p>
               </div>
               <el-switch v-model="form.enabled" />
             </div>
 
-            <el-form-item label="支付方式">
+            <el-form-item :label="t('支付方式')">
               <div class="payment-method-selector">
                 <div
                   class="payment-method-card alipay"
@@ -341,8 +383,8 @@
                     </svg>
                   </div>
                   <div class="payment-method-card__info">
-                    <span class="payment-method-card__title">支付宝 (Alipay)</span>
-                    <span class="payment-method-card__desc">使用支付宝快捷支付接口</span>
+                    <span class="payment-method-card__title">{{ t('支付宝 (Alipay)') }}</span>
+                    <span class="payment-method-card__desc">{{ t('使用支付宝快捷支付接口') }}</span>
                   </div>
                   <div
                     v-if="form.enabledTypes.includes('alipay')"
@@ -373,8 +415,10 @@
                     </svg>
                   </div>
                   <div class="payment-method-card__info">
-                    <span class="payment-method-card__title">微信支付 (WeChat Pay)</span>
-                    <span class="payment-method-card__desc">使用微信扫码/内置公众号支付</span>
+                    <span class="payment-method-card__title">{{ t('微信支付 (WeChat Pay)') }}</span>
+                    <span class="payment-method-card__desc">{{
+                      t('使用微信扫码/内置公众号支付')
+                    }}</span>
                   </div>
                   <div
                     v-if="form.enabledTypes.includes('wxpay')"
@@ -387,7 +431,7 @@
             </el-form-item>
 
             <div class="payment-admin__form-grid">
-              <el-form-item label="单笔最小金额 (元)">
+              <el-form-item :label="t('单笔最小金额 (元)')">
                 <el-input-number
                   v-model="form.minAmount"
                   :min="0.01"
@@ -396,7 +440,7 @@
                   style="width: 100%"
                 />
               </el-form-item>
-              <el-form-item label="单笔最大金额 (元, 0为不限)">
+              <el-form-item :label="t('单笔最大金额 (元, 0为不限)')">
                 <el-input-number
                   v-model="form.maxAmount"
                   :min="0"
@@ -405,7 +449,7 @@
                   style="width: 100%"
                 />
               </el-form-item>
-              <el-form-item label="每日最高交易总额 (元)">
+              <el-form-item :label="t('每日最高交易总额 (元)')">
                 <el-input-number
                   v-model="form.dailyLimit"
                   :min="0"
@@ -414,7 +458,7 @@
                   style="width: 100%"
                 />
               </el-form-item>
-              <el-form-item label="最大待支付订单数 (个)">
+              <el-form-item :label="t('最大待支付订单数 (个)')">
                 <el-input-number
                   v-model="form.maxPendingOrders"
                   :min="1"
@@ -423,7 +467,7 @@
                   style="width: 100%"
                 />
               </el-form-item>
-              <el-form-item label="订单超时自动取消 (分钟)">
+              <el-form-item :label="t('订单超时自动取消 (分钟)')">
                 <el-input-number
                   v-model="form.orderTimeoutMinutes"
                   :min="1"
@@ -432,7 +476,7 @@
                   style="width: 100%"
                 />
               </el-form-item>
-              <el-form-item label="余额到账倍率 (1元兑换多少余额)">
+              <el-form-item :label="t('余额到账倍率 (1元兑换多少余额)')">
                 <el-input-number
                   v-model="form.balanceRechargeMultiplier"
                   :min="0.000001"
@@ -441,7 +485,7 @@
                   style="width: 100%"
                 />
               </el-form-item>
-              <el-form-item label="模型官方价格计费倍率">
+              <el-form-item :label="t('模型官方价格计费倍率')">
                 <el-input-number
                   v-model="form.apiBillingMultiplier"
                   :min="0.0001"
@@ -451,10 +495,10 @@
                   style="width: 100%"
                 />
                 <p class="field-hint text-muted">
-                  1.0 按模型官方美元成本计费；2.0 为官方成本的 2 倍。
+                  {{ t('1.0 按模型官方美元成本计费；2.0 为官方成本的 2 倍。') }}
                 </p>
               </el-form-item>
-              <el-form-item label="充值手续费率 (例如 0.006)">
+              <el-form-item :label="t('充值手续费率 (例如 0.006)')">
                 <el-input-number
                   v-model="form.rechargeFeeRate"
                   :min="0"
@@ -473,48 +517,56 @@
         <div class="payment-admin__panel">
           <div class="payment-admin__panel-header">
             <el-icon class="panel-header-icon"><Connection /></el-icon>
-            <span class="panel-header-title">EasyPay 接口参数</span>
+            <span class="panel-header-title">{{ t('EasyPay 接口参数') }}</span>
           </div>
 
           <el-form label-position="top">
-            <el-form-item label="接口网关地址 (ApiBase)">
+            <el-form-item :label="t('接口网关地址 (ApiBase)')">
               <el-input v-model="form.easypayApiBase" placeholder="https://pay.example.com/" />
             </el-form-item>
-            <el-form-item label="商户 ID (PID)">
-              <el-input v-model="form.easypayPid" placeholder="请输入商户 PID" />
+            <el-form-item :label="t('商户 ID (PID)')">
+              <el-input v-model="form.easypayPid" :placeholder="t('请输入商户 PID')" />
             </el-form-item>
-            <el-form-item label="商户通讯密钥 (Pkey)">
+            <el-form-item :label="t('商户通讯密钥 (Pkey)')">
               <el-input
                 v-model="form.easypayPkey"
                 type="password"
                 show-password
-                :placeholder="pkeyConfigured ? '已配置，留空保持不变' : '请输入商户通讯密钥'"
+                :placeholder="pkeyConfigured ? t('已配置，留空保持不变') : t('请输入商户通讯密钥')"
                 autocomplete="new-password"
               />
             </el-form-item>
-            <el-form-item label="收银台支付模式">
+            <el-form-item :label="t('收银台支付模式')">
               <el-radio-group v-model="form.easypayPaymentMode" class="payment-mode-radios">
-                <el-radio-button label="popup" value="popup">跳转官方收银台</el-radio-button>
-                <el-radio-button label="qrcode" value="qrcode">直接输出二维码</el-radio-button>
+                <el-radio-button label="popup" value="popup">
+                  {{
+                    t('跳转官方收银台')
+                  }}
+                </el-radio-button>
+                <el-radio-button label="qrcode" value="qrcode">
+                  {{
+                    t('直接输出二维码')
+                  }}
+                </el-radio-button>
               </el-radio-group>
             </el-form-item>
             <div class="payment-admin__form-grid">
-              <el-form-item label="商品名称前缀">
-                <el-input v-model="form.productNamePrefix" placeholder="例如: Starry API" />
+              <el-form-item :label="t('商品名称前缀')">
+                <el-input v-model="form.productNamePrefix" :placeholder="t('例如: Starry API')" />
               </el-form-item>
-              <el-form-item label="商品名称后缀">
-                <el-input v-model="form.productNameSuffix" placeholder="例如: 余额充值" />
+              <el-form-item :label="t('商品名称后缀')">
+                <el-input v-model="form.productNameSuffix" :placeholder="t('例如: 余额充值')" />
               </el-form-item>
             </div>
-            <el-form-item label="充值指南图片 (帮助图片 URL)">
+            <el-form-item :label="t('充值指南图片 (帮助图片 URL)')">
               <el-input v-model="form.helpImageUrl" placeholder="https://example.com/help.png" />
             </el-form-item>
-            <el-form-item label="充值帮助说明 (Markdown 或纯文本)">
+            <el-form-item :label="t('充值帮助说明 (Markdown 或纯文本)')">
               <el-input
                 v-model="form.helpText"
                 type="textarea"
                 :rows="3"
-                placeholder="请输入在充值界面展示的提示信息"
+                :placeholder="t('请输入在充值界面展示的提示信息')"
               />
             </el-form-item>
           </el-form>
@@ -524,22 +576,26 @@
         <div class="payment-admin__panel payment-admin__panel--wide">
           <div class="payment-admin__panel-header">
             <el-icon class="panel-header-icon"><Setting /></el-icon>
-            <span class="panel-header-title">邀请返利活动</span>
+            <span class="panel-header-title">{{ t('邀请返利活动') }}</span>
           </div>
 
           <el-form label-position="top">
             <div class="payment-admin__row payment-admin__row--switch">
               <div class="switch-info">
-                <span class="switch-title">启用充值返利</span>
+                <span class="switch-title">{{ t('启用充值返利') }}</span>
                 <p class="switch-desc text-muted">
-                  用户通过 register?aff=推广码 注册后，前 N 笔成功充值按到账余额返还给邀请人。
+                  {{
+                    t(
+                      '用户通过 register?aff=推广码 注册后，前 N 笔成功充值按到账余额返还给邀请人。',
+                    )
+                  }}
                 </p>
               </div>
               <el-switch v-model="form.inviteRebateEnabled" />
             </div>
 
             <div class="payment-admin__form-grid">
-              <el-form-item label="返利比例 (%)">
+              <el-form-item :label="t('返利比例 (%)')">
                 <el-input-number
                   v-model="inviteRebateRatePercent"
                   :min="10"
@@ -549,9 +605,9 @@
                   controls-position="right"
                   style="width: 100%"
                 />
-                <p class="field-hint text-muted">默认 10%，可在 10% 到 20% 之间调整。</p>
+                <p class="field-hint text-muted">{{ t('默认 10%，可在 10% 到 20% 之间调整。') }}</p>
               </el-form-item>
-              <el-form-item label="每个被邀请用户返利订单数">
+              <el-form-item :label="t('每个被邀请用户返利订单数')">
                 <el-input-number
                   v-model="form.inviteRebateMaxOrders"
                   :min="1"
@@ -559,22 +615,22 @@
                   controls-position="right"
                   style="width: 100%"
                 />
-                <p class="field-hint text-muted">默认前 10 笔成功充值参与返利。</p>
+                <p class="field-hint text-muted">{{ t('默认前 10 笔成功充值参与返利。') }}</p>
               </el-form-item>
-              <el-form-item label="活动开始时间">
+              <el-form-item :label="t('活动开始时间')">
                 <el-date-picker
                   v-model="inviteRebateStartDate"
                   type="datetime"
-                  placeholder="不限制开始时间"
+                  :placeholder="t('不限制开始时间')"
                   clearable
                   style="width: 100%"
                 />
               </el-form-item>
-              <el-form-item label="活动结束时间">
+              <el-form-item :label="t('活动结束时间')">
                 <el-date-picker
                   v-model="inviteRebateEndDate"
                   type="datetime"
-                  placeholder="不限制结束时间"
+                  :placeholder="t('不限制结束时间')"
                   clearable
                   style="width: 100%"
                 />
@@ -582,8 +638,9 @@
             </div>
 
             <p class="field-hint text-muted">
-              当前已记录 {{ formatNumber(rebateStats.count) }} 笔返利，共发放
-              {{ formatNumber(rebateStats.total) }} 余额。返利只会在订单首次真实入账时执行一次。
+              {{ t('当前已记录') }} {{ formatNumber(rebateStats.count) }} {{ t('笔返利，共发放') }}
+              {{ formatNumber(rebateStats.total) }}
+              {{ t('余额。返利只会在订单首次真实入账时执行一次。') }}
             </p>
           </el-form>
         </div>
@@ -593,43 +650,45 @@
       <section class="payment-admin__orders">
         <div class="payment-admin__panel-header">
           <el-icon class="panel-header-icon"><Setting /></el-icon>
-          <span class="panel-header-title">近期邀请返利</span>
+          <span class="panel-header-title">{{ t('近期邀请返利') }}</span>
         </div>
-        <el-table :data="rebates" stripe style="width: 100%" empty-text="暂无返利记录">
-          <el-table-column label="推广码" width="120">
+        <el-table :data="rebates" stripe style="width: 100%" :empty-text="t('暂无返利记录')">
+          <el-table-column :label="t('推广码')" width="120">
             <template #default="{ row }">
               <span class="mono-code">{{ row.affiliateCode }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="邀请人" min-width="170">
+          <el-table-column :label="t('邀请人')" min-width="170">
             <template #default="{ row }">
               <span class="mono-code">{{ row.inviterUserId }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="被邀请用户" min-width="170">
+          <el-table-column :label="t('被邀请用户')" min-width="170">
             <template #default="{ row }">
               <span class="mono-code">{{ row.invitedUserId }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="充值余额" width="120" align="right">
+          <el-table-column :label="t('充值余额')" width="120" align="right">
             <template #default="{ row }">
               {{ formatNumber(row.baseAmount) }}
             </template>
           </el-table-column>
-          <el-table-column label="比例" width="90" align="right">
+          <el-table-column :label="t('比例')" width="90" align="right">
             <template #default="{ row }"> {{ formatNumber(row.rebateRate * 100) }}% </template>
           </el-table-column>
-          <el-table-column label="返利余额" width="120" align="right">
+          <el-table-column :label="t('返利余额')" width="120" align="right">
             <template #default="{ row }">
               <span class="amount-val amount-val--credited">
                 +{{ formatNumber(row.rebateAmount) }}
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="第几笔" width="90" align="center">
-            <template #default="{ row }">第 {{ row.rebateOrderNo }} 笔</template>
+          <el-table-column :label="t('第几笔')" width="90" align="center">
+            <template #default="{ row }">
+              {{ t('第') }} {{ row.rebateOrderNo }} {{ t('笔') }}
+            </template>
           </el-table-column>
-          <el-table-column label="返利时间" width="170">
+          <el-table-column :label="t('返利时间')" width="170">
             <template #default="{ row }">
               <span class="time-text">{{ formatDateTime(row.createdAt) }}</span>
             </template>
@@ -641,15 +700,15 @@
       <section class="payment-admin__orders">
         <div class="payment-admin__panel-header">
           <el-icon class="panel-header-icon"><Setting /></el-icon>
-          <span class="panel-header-title">近期充值订单</span>
+          <span class="panel-header-title">{{ t('近期充值订单') }}</span>
         </div>
         <el-table :data="orders" stripe style="width: 100%">
-          <el-table-column label="订单号" min-width="190">
+          <el-table-column :label="t('订单号')" min-width="190">
             <template #default="{ row }">
               <span class="mono-code">{{ row.outTradeNo }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="充值用户" min-width="180">
+          <el-table-column :label="t('充值用户')" min-width="180">
             <template #default="{ row }">
               <div class="user-cell">
                 <div
@@ -664,7 +723,7 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="支付方式" width="120">
+          <el-table-column :label="t('支付方式')" width="120">
             <template #default="{ row }">
               <div class="payment-type-badge" :class="row.paymentType">
                 <span class="dot" />
@@ -672,35 +731,35 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="到账余额" width="110" align="right">
+          <el-table-column :label="t('到账余额')" width="110" align="right">
             <template #default="{ row }">
               <span class="amount-val amount-val--credited">+{{ formatNumber(row.amount) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="实付金额" width="110" align="right">
+          <el-table-column :label="t('实付金额')" width="110" align="right">
             <template #default="{ row }">
               <span class="amount-val amount-val--pay">¥{{ formatNumber(row.payAmount) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="订单状态" width="110" align="center">
+          <el-table-column :label="t('订单状态')" width="110" align="center">
             <template #default="{ row }">
               <span class="custom-badge" :class="row.status.toLowerCase()">
                 {{ statusLabel(row.status) }}
               </span>
             </template>
           </el-table-column>
-          <el-table-column label="三方支付流水号" min-width="160">
+          <el-table-column :label="t('三方支付流水号')" min-width="160">
             <template #default="{ row }">
               <span v-if="row.paymentTradeNo" class="mono-code">{{ row.paymentTradeNo }}</span>
               <span v-else class="text-muted">—</span>
             </template>
           </el-table-column>
-          <el-table-column label="创建时间" width="170">
+          <el-table-column :label="t('创建时间')" width="170">
             <template #default="{ row }">
               <span class="time-text">{{ formatDateTime(row.createdAt) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="入账时间" width="170">
+          <el-table-column :label="t('入账时间')" width="170">
             <template #default="{ row }">
               <span v-if="row.completedAt" class="time-text">{{
                 formatDateTime(row.completedAt)
@@ -722,18 +781,21 @@
 
     &__grid {
       display: grid;
-      grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr);
+      grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr));
       gap: 20px;
       align-items: start;
     }
 
     &__panel,
     &__orders {
+      min-width: 0;
       border: 1px solid var(--el-border-color);
       background: var(--kp-surface-strong);
       border-radius: 8px;
       padding: 24px;
-      transition: border-color 0.2s ease, box-shadow 0.2s ease;
+      transition:
+        border-color 0.2s ease,
+        box-shadow 0.2s ease;
 
       &:hover {
         box-shadow: 0 8px 22px rgba(22, 35, 52, 0.06);
@@ -1094,7 +1156,7 @@
   @media (max-width: 1200px) {
     .payment-admin {
       &__grid {
-        grid-template-columns: 1fr;
+        grid-template-columns: minmax(0, 1fr);
       }
     }
   }

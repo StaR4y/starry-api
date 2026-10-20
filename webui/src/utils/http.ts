@@ -1,3 +1,4 @@
+import { t } from '@/i18n';
 /**
  * 全局 HTTP 客户端。
  *
@@ -119,15 +120,25 @@ http.interceptors.response.use(
     const apiError = await errorPayload(err.response?.data);
     const code = apiError?.code ?? 'NETWORK_ERROR';
     const url = err.config?.url ?? '';
-    const message = payloadTooLargeMessage(status, code, url, apiError?.message)
-      ?? apiError?.message
-      ?? err.message
-      ?? '请求失败';
+    const message = t(
+      payloadTooLargeMessage(status, code, url, apiError?.message) ??
+        apiError?.message ??
+        err.message ??
+        t('请求失败'),
+    );
 
     if (code === MAINTENANCE_ERROR_CODE) {
       redirectToMaintenance();
     } else if (status === 401) {
       setStoredToken(null);
+      // 同步清掉内存里的登录态，否则路由守卫仍认为已登录，会把 #/login 又弹回首页，形成 401 死循环。
+      // 动态引入以避开 store → api → http 的循环依赖。
+      try {
+        const { useAuthStore } = await import('@/stores/auth');
+        useAuthStore().logout({ remote: false });
+      } catch {
+        /* 即使 store 不可用，下面的跳转仍然生效 */
+      }
       // 用 hash 跳转，避免与 router 强耦合
       if (!location.hash.startsWith('#/login')) {
         location.hash = '#/login';
@@ -158,7 +169,7 @@ export async function unwrap<T>(promise: Promise<{ data: ApiResponse<T> }>): Pro
     if (data.error?.code === MAINTENANCE_ERROR_CODE) {
       redirectToMaintenance();
     }
-    throw new ApiError(data.error?.code ?? 'UNKNOWN', data.error?.message ?? '请求失败');
+    throw new ApiError(data.error?.code ?? 'UNKNOWN', t(data.error?.message ?? '请求失败'));
   }
   return data.data;
 }
@@ -170,19 +181,22 @@ function payloadTooLargeMessage(
   apiMessage: string | undefined,
 ): string | undefined {
   if (code === 'MODEL_RANKING_REFRESH_FAILED' || code === 'MODEL_PRICE_REFRESH_FAILED') {
-    return '同步失败，请检查数据源地址或服务器网络';
+    return t('同步失败，请检查数据源地址或服务器网络');
   }
   if (code === 'MODEL_RANKING_REFRESH_IN_PROGRESS' || code === 'MODEL_PRICE_REFRESH_IN_PROGRESS') {
-    return '正在同步，请稍候';
+    return t('正在同步，请稍候');
   }
-  if (code === 'MODEL_RANKING_URL_INVALID') return '数据源地址必须是 http 或 https';
-  if (code === 'MODEL_RANKING_MAX_ENTRIES_INVALID') return '展示条数必须在 1 到 30 之间';
+  if (code === 'MODEL_RANKING_URL_INVALID') return t('数据源地址必须是 http 或 https');
+  if (code === 'MODEL_RANKING_MAX_ENTRIES_INVALID') return t('展示条数必须在 1 到 30 之间');
   const brandingUpload = url.includes('/admin/appearance/');
-  if (code === 'BRANDING_FILE_TOO_LARGE' || (brandingUpload && (status === 413 || code === 'PAYLOAD_TOO_LARGE'))) {
-    return '图片过大，请压缩后再上传';
+  if (
+    code === 'BRANDING_FILE_TOO_LARGE' ||
+    (brandingUpload && (status === 413 || code === 'PAYLOAD_TOO_LARGE'))
+  ) {
+    return t('图片过大，请压缩后再上传');
   }
   if (status === 413 && (code === 'PAYLOAD_TOO_LARGE' || code === 'NETWORK_ERROR' || !apiMessage)) {
-    return '上传内容过大';
+    return t('上传内容过大');
   }
   return undefined;
 }

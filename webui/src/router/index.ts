@@ -10,7 +10,6 @@
 import { createRouter, createWebHashHistory, type RouteRecordRaw } from 'vue-router';
 import { systemApi } from '@/api';
 import { useAuthStore } from '@/stores/auth';
-import { useAppearanceStore } from '@/stores/appearance';
 import { useRankingStore } from '@/stores/ranking';
 import { ApiError } from '@/utils/http';
 
@@ -51,6 +50,12 @@ const routes: RouteRecordRaw[] = [
     meta: { requiresAuth: true },
     redirect: { name: 'dashboard' },
     children: [
+      {
+        path: 'documentation/:id?',
+        name: 'documentation',
+        component: () => import('@/views/documentation/DocumentationView.vue'),
+        meta: { title: '使用文档', menuName: 'documentation' },
+      },
       {
         path: 'tickets/new',
         name: 'ticket-create',
@@ -150,6 +155,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '模型 ID' },
       },
       {
+        path: 'news',
+        name: 'news',
+        component: () => import('@/views/news/NewsView.vue'),
+        meta: { title: '新闻' },
+      },
+      {
         path: 'logs',
         name: 'logs',
         component: () => import('@/views/logs/LogListView.vue'),
@@ -186,6 +197,12 @@ const routes: RouteRecordRaw[] = [
         redirect: { name: 'settings-payment' },
         meta: { title: '系统设置', adminOnly: true, menuName: 'settings' },
         children: [
+          {
+            path: 'documentation',
+            name: 'settings-documentation',
+            component: () => import('@/views/settings/DocumentationSettingsView.vue'),
+            meta: { title: '文档管理' },
+          },
           {
             path: 'tickets',
             name: 'settings-tickets',
@@ -348,12 +365,6 @@ router.beforeEach(async (to) => {
   }
 
   return true;
-});
-
-router.afterEach((to) => {
-  const title = (to.meta.title as string | undefined) ?? '';
-  const siteName = useAppearanceStore().siteName;
-  document.title = title ? `${title} · ${siteName}` : `${siteName} 控制台`;
 });
 
 export default router;

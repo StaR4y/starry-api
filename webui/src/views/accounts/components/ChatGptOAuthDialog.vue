@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   import { computed } from 'vue';
   import type { Account } from '@/types/api';
   import ChatGptOAuthFlow from './ChatGptOAuthFlow.vue';
@@ -18,7 +19,9 @@
     set: (value: boolean) => emit('update:visible', value),
   });
 
-  const title = computed(() => (props.accountId ? '重新授权 ChatGPT 账号' : '授权 ChatGPT 账号'));
+  const title = computed(() =>
+    props.accountId ? t('重新授权 ChatGPT 账号') : t('授权 ChatGPT 账号'),
+  );
 </script>
 
 <template>
@@ -36,7 +39,7 @@
     />
 
     <template #footer>
-      <el-button @click="visibleValue = false">关闭</el-button>
+      <el-button @click="visibleValue = false">{{ t('关闭') }}</el-button>
     </template>
   </el-dialog>
 </template>

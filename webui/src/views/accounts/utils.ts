@@ -1,3 +1,4 @@
+import { t } from '@/i18n';
 /**
  * 账号管理页共享小函数。
  *
@@ -46,7 +47,7 @@ export function normalizedPoolTier(value: string | null | undefined) {
 }
 
 export function poolTierLabel(value: string | null | undefined) {
-  return normalizedPoolTier(value) === 'secondary' ? '二级号池' : '一级号池';
+  return normalizedPoolTier(value) === 'secondary' ? t('二级号池') : t('一级号池');
 }
 
 export function poolTierTagType(value: string | null | undefined) {
@@ -54,10 +55,33 @@ export function poolTierTagType(value: string | null | undefined) {
 }
 
 export function statusOf(account: Account) {
-  if (!account.enabled) return { label: '已停用', tone: 'info' as const };
-  if (account.suspendedAt) return { label: '挂起', tone: 'danger' as const };
-  if (account.quotaExhaustedAt) return { label: '配额用尽', tone: 'warning' as const };
-  return { label: '可用', tone: 'success' as const };
+  if (!account.enabled)
+    return {
+      get label() {
+        return t('已停用');
+      },
+      tone: 'info' as const,
+    };
+  if (account.suspendedAt)
+    return {
+      get label() {
+        return t('挂起');
+      },
+      tone: 'danger' as const,
+    };
+  if (account.quotaExhaustedAt)
+    return {
+      get label() {
+        return t('配额用尽');
+      },
+      tone: 'warning' as const,
+    };
+  return {
+    get label() {
+      return t('可用');
+    },
+    tone: 'success' as const,
+  };
 }
 
 export function isCodexAccount(row: Account) {
@@ -177,8 +201,8 @@ export function testStatusType(status: TestAccountItem['status']) {
 export async function copy(text: string) {
   try {
     await navigator.clipboard.writeText(text);
-    ElMessage.success('已复制');
+    ElMessage.success(t('已复制'));
   } catch {
-    ElMessage.warning('请手动复制');
+    ElMessage.warning(t('请手动复制'));
   }
 }

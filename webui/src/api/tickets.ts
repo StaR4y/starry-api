@@ -1,19 +1,40 @@
+import { t } from '@/i18n';
 import http, { unwrap } from '@/utils/http';
 
 export type TicketStatus = 'OPEN' | 'IN_PROGRESS' | 'WAITING_USER' | 'RESOLVED' | 'CLOSED';
 export const ticketStatuses: Record<TicketStatus, string> = {
-  OPEN: '待处理',
-  IN_PROGRESS: '处理中',
-  WAITING_USER: '等待用户',
-  RESOLVED: '已解决',
-  CLOSED: '已关闭',
+  get OPEN() {
+    return t('待处理');
+  },
+  get IN_PROGRESS() {
+    return t('处理中');
+  },
+  get WAITING_USER() {
+    return t('等待用户');
+  },
+  get RESOLVED() {
+    return t('已解决');
+  },
+  get CLOSED() {
+    return t('已关闭');
+  },
 };
 export const ticketCategories: Record<string, string> = {
-  GENERAL: '一般咨询',
-  API: 'API 调用',
-  BILLING: '计费与支付',
-  ACCOUNT: '账号问题',
-  BUG: '问题反馈',
+  get GENERAL() {
+    return t('一般咨询');
+  },
+  get API() {
+    return t('API 调用');
+  },
+  get BILLING() {
+    return t('计费与支付');
+  },
+  get ACCOUNT() {
+    return t('账号问题');
+  },
+  get BUG() {
+    return t('问题反馈');
+  },
 };
 export interface Ticket {
   id: string;

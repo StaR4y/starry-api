@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   import { computed, onMounted, reactive, ref, watch } from 'vue';
   import { useRoute, useRouter } from 'vue-router';
   import { ElMessage, ElCollapseTransition, type FormInstance, type FormRules } from 'element-plus';
@@ -8,7 +9,12 @@
   import ContextWindowField from './components/ContextWindowField.vue';
   import ModelIconField from './components/ModelIconField.vue';
   import { modelsApi } from '@/api';
-  import { canonicalCatalogProvider, getProviderOrder, inferModelFamily, orderOf } from '@/platforms/models';
+  import {
+    canonicalCatalogProvider,
+    getProviderOrder,
+    inferModelFamily,
+    orderOf,
+  } from '@/platforms/models';
   import type { ManagedModel, UpsertManagedModelRequest } from '@/types/api';
   import { badgeColorFromName, isFirstClassAccountProvider } from '@/views/accounts/utils';
 
@@ -51,19 +57,67 @@
   });
 
   const rules: FormRules = {
-    provider: [{ required: true, message: '请输入厂商名称', trigger: 'blur' }],
-    family: [{ required: true, message: '请输入模型分类', trigger: 'blur' }],
-    id: [
-      { required: true, message: '请输入模型 ID', trigger: 'blur' },
+    provider: [
       {
-        pattern: /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$/,
-        message: '仅支持字母、数字及 . _ : / -',
+        required: true,
+        get message() {
+          return t('请输入厂商名称');
+        },
         trigger: 'blur',
       },
     ],
-    name: [{ required: true, message: '请输入模型名称', trigger: 'blur' }],
-    endpoint: [{ required: true, message: '请输入 endpoint', trigger: 'blur' }],
-    contextWindow: [{ required: true, message: '请输入上下文窗口', trigger: 'change' }],
+    family: [
+      {
+        required: true,
+        get message() {
+          return t('请输入模型分类');
+        },
+        trigger: 'blur',
+      },
+    ],
+    id: [
+      {
+        required: true,
+        get message() {
+          return t('请输入模型 ID');
+        },
+        trigger: 'blur',
+      },
+      {
+        pattern: /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,254}$/,
+        get message() {
+          return t('仅支持字母、数字及 . _ : / -');
+        },
+        trigger: 'blur',
+      },
+    ],
+    name: [
+      {
+        required: true,
+        get message() {
+          return t('请输入模型名称');
+        },
+        trigger: 'blur',
+      },
+    ],
+    endpoint: [
+      {
+        required: true,
+        get message() {
+          return t('请输入 endpoint');
+        },
+        trigger: 'blur',
+      },
+    ],
+    contextWindow: [
+      {
+        required: true,
+        get message() {
+          return t('请输入上下文窗口');
+        },
+        trigger: 'change',
+      },
+    ],
     badgeColor: [
       {
         validator: (_rule, value, callback) => {
@@ -72,7 +126,7 @@
             return;
           }
           if (!/^#[0-9A-Fa-f]{6}$/.test(typeof value === 'string' ? value : '')) {
-            callback(new Error('请为该厂商选择配色'));
+            callback(new Error(t('请为该厂商选择配色')));
             return;
           }
           callback();
@@ -197,9 +251,7 @@
     familyDirty.value = false;
     if (provider === CUSTOM_VALUE) {
       form.provider = customProvider.value;
-      form.badgeColor = customProvider.value.trim()
-        ? badgeColorFromName(customProvider.value)
-        : '';
+      form.badgeColor = customProvider.value.trim() ? badgeColorFromName(customProvider.value) : '';
       chooseFamily(CUSTOM_VALUE);
       return;
     }
@@ -237,7 +289,8 @@
     catalogLoading.value = true;
     try {
       models.value = await modelsApi.list();
-      const preferredProvider = canonicalCatalogProvider(queryValue('provider')) || queryValue('provider');
+      const preferredProvider =
+        canonicalCatalogProvider(queryValue('provider')) || queryValue('provider');
       const preferredFamily = queryValue('family');
       const initialProvider = providerOptions.value.some(
         (provider) => provider.name === preferredProvider,
@@ -279,7 +332,7 @@
         description: form.description?.trim() || null,
         badgeColor: isCustomCatalogVendor.value ? form.badgeColor : undefined,
       });
-      ElMessage.success('模型已添加');
+      ElMessage.success(t('模型已添加'));
       await router.push({ name: 'settings-models' });
     } finally {
       saving.value = false;
@@ -290,11 +343,15 @@
 </script>
 
 <template>
-  <PageSection title="添加模型" subtitle="业务配置" :icon="Cpu">
+  <PageSection :title="t('添加模型')" :subtitle="t('业务配置')" :icon="Cpu">
     <template #actions>
-      <el-button :icon="ArrowLeft" @click="router.push({ name: 'settings-models' })">返回</el-button>
+      <el-button :icon="ArrowLeft" @click="router.push({ name: 'settings-models' })">
+        {{
+          t('返回')
+        }}
+      </el-button>
       <el-button type="primary" :icon="Check" :loading="saving" @click="submitForm">
-        保存模型
+        {{ t('保存模型') }}
       </el-button>
     </template>
 
@@ -324,16 +381,20 @@
               <template v-else>1</template>
             </span>
             <div class="accordion-card__title">
-              <h3>厂商与分类</h3>
-              <p v-if="openSection === 'provider'">选择模型所属厂商，以及要归入的系列分类</p>
-              <p v-else>{{ form.provider || '未设置厂商' }} / {{ form.family || '未设置分类' }}</p>
+              <h3>{{ t('厂商与分类') }}</h3>
+              <p v-if="openSection === 'provider'">
+                {{ t('选择模型所属厂商，以及要归入的系列分类') }}
+              </p>
+              <p v-else>
+                {{ form.provider || t('未设置厂商') }} / {{ form.family || t('未设置分类') }}
+              </p>
             </div>
             <el-icon class="toggle-arrow"><ArrowDown /></el-icon>
           </header>
 
           <el-collapse-transition>
             <div v-show="openSection === 'provider'" class="accordion-card__body">
-              <div class="provider-grid" role="listbox" aria-label="选择模型厂商">
+              <div class="provider-grid" role="listbox" :aria-label="t('选择模型厂商')">
                 <button
                   v-for="provider in providerOptions"
                   :key="provider.name"
@@ -346,7 +407,8 @@
                   <ProviderLogo :provider="provider.name" :size="36" />
                   <span>
                     <strong>{{ provider.name }}</strong>
-                    <small>{{ provider.modelCount }} 模型 · {{ provider.familyCount }} 分类</small>
+                    <small>{{ provider.modelCount }} {{ t('模型 ·') }} {{ provider.familyCount }}
+                      {{ t('分类') }}</small>
                   </span>
                   <el-icon v-if="selectedProvider === provider.name"><Check /></el-icon>
                 </button>
@@ -363,8 +425,8 @@
                     </el-icon>
                   </span>
                   <span>
-                    <strong>自定义厂商</strong>
-                    <small>创建新的厂商分组</small>
+                    <strong>{{ t('自定义厂商') }}</strong>
+                    <small>{{ t('创建新的厂商分组') }}</small>
                   </span>
                   <el-icon v-if="selectedProvider === CUSTOM_VALUE"><Check /></el-icon>
                 </button>
@@ -372,23 +434,26 @@
 
               <el-form-item
                 v-if="selectedProvider === CUSTOM_VALUE"
-                label="厂商名称"
+                :label="t('厂商名称')"
                 prop="provider"
                 class="inline-field"
               >
-                <el-input v-model="customProvider" maxlength="64" placeholder="例如 Mistral AI" />
+                <el-input
+                  v-model="customProvider"
+                  maxlength="64"
+                  :placeholder="t('例如 Mistral AI')"
+                />
               </el-form-item>
 
               <el-form-item
                 v-if="isCustomCatalogVendor"
-                label="厂商配色"
+                :label="t('厂商配色')"
                 prop="badgeColor"
                 class="inline-field"
               >
                 <div class="vendor-color-row">
                   <el-color-picker
                     :model-value="form.badgeColor || undefined"
-                    @update:model-value="form.badgeColor = $event || ''"
                     color-format="hex"
                     :predefine="[
                       '#4D6BFE',
@@ -400,14 +465,15 @@
                       '#CA8A04',
                       '#0F766E',
                     ]"
+                    @update:model-value="form.badgeColor = $event || ''"
                   />
-                  <span class="vendor-color-row__hint">账号类型会使用这个颜色</span>
+                  <span class="vendor-color-row__hint">{{ t('账号类型会使用这个颜色') }}</span>
                 </div>
               </el-form-item>
 
               <div class="family-area">
-                <label>模型分类</label>
-                <div class="family-options" role="listbox" aria-label="选择模型分类">
+                <label>{{ t('模型分类') }}</label>
+                <div class="family-options" role="listbox" :aria-label="t('选择模型分类')">
                   <button
                     v-for="family in familyOptions"
                     :key="family"
@@ -424,8 +490,7 @@
                     :aria-selected="selectedFamily === CUSTOM_VALUE"
                     @click="chooseFamily(CUSTOM_VALUE, true)"
                   >
-                    <el-icon><Plus /></el-icon>
-                    新建分类
+                    <el-icon><Plus /></el-icon> {{ t('新建分类') }}
                   </button>
                 </div>
                 <el-form-item
@@ -433,13 +498,13 @@
                   prop="family"
                   class="inline-field family-input"
                 >
-                  <el-input v-model="customFamily" maxlength="128" placeholder="例如 Large" />
+                  <el-input v-model="customFamily" maxlength="128" :placeholder="t('例如 Large')" />
                 </el-form-item>
               </div>
 
               <div class="accordion-card__actions">
                 <el-button type="primary" plain :icon="ArrowRight" @click="setSection('info')">
-                  下一步：模型信息
+                  {{ t('下一步：模型信息') }}
                 </el-button>
               </div>
             </div>
@@ -463,9 +528,11 @@
               <template v-else>2</template>
             </span>
             <div class="accordion-card__title">
-              <h3>模型信息</h3>
-              <p v-if="openSection === 'info'">模型 ID 用于客户端调用，名称与分类会自动填充</p>
-              <p v-else>{{ form.name || form.id || '未命名模型' }}</p>
+              <h3>{{ t('模型信息') }}</h3>
+              <p v-if="openSection === 'info'">
+                {{ t('模型 ID 用于客户端调用，名称与分类会自动填充') }}
+              </p>
+              <p v-else>{{ form.name || form.id || t('未命名模型') }}</p>
             </div>
             <el-icon class="toggle-arrow"><ArrowDown /></el-icon>
           </header>
@@ -473,30 +540,30 @@
           <el-collapse-transition>
             <div v-show="openSection === 'info'" class="accordion-card__body">
               <div class="form-grid">
-                <el-form-item label="模型 ID" prop="id" class="form-grid__wide">
-                  <el-input v-model="form.id" placeholder="例如 gpt-4.1" />
+                <el-form-item :label="t('模型 ID')" prop="id" class="form-grid__wide">
+                  <el-input v-model="form.id" :placeholder="t('例如 gpt-4.1')" />
                   <p v-if="existingModel" class="field-hint field-hint--warning">
-                    该 ID 已存在（{{ existingModel.name }}），保存后将更新原模型
+                    {{ t('该 ID 已存在（') }}{{ existingModel.name
+                    }}{{ t('），保存后将更新原模型') }}
                   </p>
-                  <p v-else class="field-hint">客户端调用时使用的唯一标识，名称与分类会自动填充</p>
+                  <p v-else class="field-hint">
+                    {{ t('客户端调用时使用的唯一标识，名称与分类会自动填充') }}
+                  </p>
                 </el-form-item>
-                <el-form-item label="模型名称" prop="name">
+                <el-form-item :label="t('模型名称')" prop="name">
                   <el-input v-model="form.name" placeholder="GPT-4.1" @input="nameDirty = true" />
                 </el-form-item>
-                <el-form-item label="状态" class="status-field">
-                  <el-switch
-                    v-model="form.enabled"
-                    inline-prompt
-                  />
+                <el-form-item :label="t('状态')" class="status-field">
+                  <el-switch v-model="form.enabled" inline-prompt />
                 </el-form-item>
-                <el-form-item label="上下文窗口" prop="contextWindow" class="form-grid__wide">
+                <el-form-item :label="t('上下文窗口')" prop="contextWindow" class="form-grid__wide">
                   <ContextWindowField v-model="form.contextWindow" />
                 </el-form-item>
               </div>
 
               <div class="accordion-card__actions">
                 <el-button text type="primary" :icon="ArrowRight" @click="setSection('advanced')">
-                  高级设置（可选）
+                  {{ t('高级设置（可选）') }}
                 </el-button>
               </div>
             </div>
@@ -514,8 +581,8 @@
           >
             <span class="step-badge">3</span>
             <div class="accordion-card__title">
-              <h3>高级设置</h3>
-              <p>上游映射、图标、Endpoint 与描述（可选）</p>
+              <h3>{{ t('高级设置') }}</h3>
+              <p>{{ t('上游映射、图标、Endpoint 与描述（可选）') }}</p>
             </div>
             <el-icon class="toggle-arrow"><ArrowDown /></el-icon>
           </header>
@@ -523,36 +590,39 @@
           <el-collapse-transition>
             <div v-show="openSection === 'advanced'" class="accordion-card__body">
               <div class="form-grid">
-                <el-form-item label="目标模型 ID" class="form-grid__wide">
-                  <el-input v-model="form.targetModelId" :placeholder="form.id || '上游模型 ID'" />
+                <el-form-item :label="t('目标模型 ID')" class="form-grid__wide">
+                  <el-input
+                    v-model="form.targetModelId"
+                    :placeholder="form.id || t('上游模型 ID')"
+                  />
                   <p class="field-hint">
-                    留空则与模型 ID 相同；仅当对外 ID 需要映射到上游真实模型时填写
+                    {{ t('留空则与模型 ID 相同；仅当对外 ID 需要映射到上游真实模型时填写') }}
                   </p>
                 </el-form-item>
-                <el-form-item label="模型图标" class="form-grid__wide">
+                <el-form-item :label="t('模型图标')" class="form-grid__wide">
                   <ModelIconField v-model:icon="form.icon" :provider="form.provider" />
                 </el-form-item>
                 <el-form-item label="Endpoint" prop="endpoint" class="form-grid__wide">
                   <el-input v-model="form.endpoint" placeholder="/v1/chat/completions" />
                   <p class="field-hint">
-                    OpenAI Chat Completions 兼容端点，默认为 /v1/chat/completions
+                    {{ t('OpenAI Chat Completions 兼容端点，默认为 /v1/chat/completions') }}
                   </p>
                 </el-form-item>
-                <el-form-item label="描述" class="form-grid__wide">
+                <el-form-item :label="t('描述')" class="form-grid__wide">
                   <el-input
                     v-model="form.description"
                     type="textarea"
                     :rows="3"
                     maxlength="1024"
                     show-word-limit
-                    placeholder="可选，向调用方展示在模型列表中"
+                    :placeholder="t('可选，向调用方展示在模型列表中')"
                   />
                 </el-form-item>
               </div>
 
               <div class="accordion-card__actions">
                 <el-button type="primary" :icon="Check" :loading="saving" @click="submitForm">
-                  保存模型
+                  {{ t('保存模型') }}
                 </el-button>
               </div>
             </div>

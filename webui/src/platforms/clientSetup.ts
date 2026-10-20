@@ -1,3 +1,4 @@
+import { t } from '@/i18n';
 import { normalizedApiKey, psQuote, shQuote } from './setupShared';
 import type {
   CcSwitchLink,
@@ -28,22 +29,50 @@ const OPENCODE_MODEL = 'starry/gpt-5.5';
 const OPENCODE_SMALL_MODEL = 'starry/gpt-5.4-mini';
 
 export const setupClients: Array<SetupOption<SetupClient>> = [
-  { value: 'codex', label: 'Codex CLI', description: '使用 API Key 的 Codex HTTP Responses 配置' },
+  {
+    value: 'codex',
+    label: 'Codex CLI',
+    get description() {
+      return t('使用 API Key 的 Codex HTTP Responses 配置');
+    },
+  },
   {
     value: 'claude',
     label: 'Claude Code',
-    description: '使用 Anthropic 兼容环境变量连接 Claude Code',
+    get description() {
+      return t('使用 Anthropic 兼容环境变量连接 Claude Code');
+    },
   },
-  { value: 'opencode', label: 'OpenCode', description: '生成项目级 opencode.json 配置' },
+  {
+    value: 'opencode',
+    label: 'OpenCode',
+    get description() {
+      return t('生成项目级 opencode.json 配置');
+    },
+  },
 ];
 
 export const setupPlatforms: Array<SetupOption<SetupPlatform>> = [
-  { value: 'unix', label: 'macOS / Linux', description: '适用于 bash、zsh、fish 等类 Unix 终端' },
-  { value: 'cmd', label: 'Windows CMD', description: '适用于 Windows Command Prompt' },
+  {
+    value: 'unix',
+    label: 'macOS / Linux',
+    get description() {
+      return t('适用于 bash、zsh、fish 等类 Unix 终端');
+    },
+  },
+  {
+    value: 'cmd',
+    label: 'Windows CMD',
+    get description() {
+      return t('适用于 Windows Command Prompt');
+    },
+  },
   {
     value: 'powershell',
     label: 'PowerShell',
-    description: '适用于 Windows PowerShell 或 PowerShell Core',
+    get description() {
+      return t('适用于 Windows PowerShell 或 PowerShell Core');
+    },
   },
 ];
 
@@ -83,7 +112,9 @@ export function createCcSwitchLinks(context: SetupContext): CcSwitchLink[] {
     {
       client: 'claude',
       label: 'Claude Code',
-      description: '导入 Claude Code 的 Anthropic 兼容供应商',
+      get description() {
+        return t('导入 Claude Code 的 Anthropic 兼容供应商');
+      },
       url: ccSwitchProviderUrl({
         app: 'claude',
         name: 'Starry API Claude',
@@ -101,7 +132,9 @@ export function createCcSwitchLinks(context: SetupContext): CcSwitchLink[] {
     {
       client: 'codex',
       label: 'Codex CLI',
-      description: '导入 Codex CLI 的 OpenAI Responses 供应商',
+      get description() {
+        return t('导入 Codex CLI 的 OpenAI Responses 供应商');
+      },
       url: codexCcSwitchProviderUrl({
         name: 'Starry API Codex',
         homepage: context.apiOrigin,
@@ -113,7 +146,9 @@ export function createCcSwitchLinks(context: SetupContext): CcSwitchLink[] {
     {
       client: 'opencode',
       label: 'OpenCode',
-      description: '导入 OpenCode 的 OpenAI-compatible 供应商',
+      get description() {
+        return t('导入 OpenCode 的 OpenAI-compatible 供应商');
+      },
       url: ccSwitchProviderUrl({
         app: 'opencode',
         name: 'Starry API OpenCode',
@@ -156,12 +191,20 @@ function codexFiles(platform: SetupPlatform, context: SetupContext): SetupFileBl
   return [
     {
       path: joinConfigPath(dir, 'config.toml', platform),
-      hint: '保存到 Codex 用户级配置；不要放在项目 .codex/config.toml 中。配置会直接使用 Starry API Key，避免触发 ChatGPT token 刷新。',
+      get hint() {
+        return t(
+          '保存到 Codex 用户级配置；不要放在项目 .codex/config.toml 中。配置会直接使用 Starry API Key，避免触发 ChatGPT token 刷新。',
+        );
+      },
       content: codexConfigToml(context),
     },
     {
       path: joinConfigPath(dir, 'auth.json', platform),
-      hint: '覆盖旧的 ChatGPT OAuth token，避免 refresh token already used。原文件如需保留请先备份。',
+      get hint() {
+        return t(
+          '覆盖旧的 ChatGPT OAuth token，避免 refresh token already used。原文件如需保留请先备份。',
+        );
+      },
       content: JSON.stringify({ OPENAI_API_KEY: normalizedApiKey(context.apiKey) }, null, 2),
     },
   ];
@@ -190,7 +233,9 @@ function openCodeFiles(context: SetupContext): SetupFileBlock[] {
   return [
     {
       path: 'opencode.json',
-      hint: '放在当前项目根目录；文件内包含 API Key。',
+      get hint() {
+        return t('放在当前项目根目录；文件内包含 API Key。');
+      },
       content: openCodeJson(context),
     },
   ];

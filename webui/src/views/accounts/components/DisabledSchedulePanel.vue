@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   import { ref, reactive, onMounted, computed } from 'vue';
   import { ElMessage, ElCollapseTransition } from 'element-plus';
   import AppIcon from './AppIcon.vue';
@@ -66,7 +67,7 @@
       Object.assign(form, normalized);
     } catch (err) {
       if (err instanceof ApiError) {
-        ElMessage.warning(`复检策略加载失败：${err.message}`);
+        ElMessage.warning(t('复检策略加载失败：{p0}', { p0: err.message }));
       }
     } finally {
       loading.value = false;
@@ -94,7 +95,7 @@
       };
       Object.assign(form, normalized);
       if (showMessage) {
-        ElMessage.success('复检策略已成功保存');
+        ElMessage.success(t('复检策略已成功保存'));
       }
       return true;
     } catch (err) {
@@ -111,7 +112,7 @@
   async function handleEnabledChange(value: boolean | number | string) {
     const success = await saveSettings(false);
     if (success) {
-      ElMessage.success(value ? '已开启定时复检' : '已关闭定时复检');
+      ElMessage.success(value ? t('已开启定时复检') : t('已关闭定时复检'));
     } else {
       // Revert if failed
       form.enabled = !value;
@@ -145,13 +146,15 @@
 
   // Summary helper text
   const scheduleSummary = computed(() => {
-    if (!form.enabled) return '已关闭定时复检策略';
+    if (!form.enabled) return t('已关闭定时复检策略');
     const modeText =
       form.scheduleMode === 'interval'
-        ? `每 ${form.intervalMinutes} 分钟`
+        ? t('每 {p0} 分钟', { p0: form.intervalMinutes })
         : `Cron: "${form.cronExpression}"`;
     const filterText =
-      form.providers.length > 0 ? `过滤: ${form.providers.join(', ')}` : '全部平台';
+      form.providers.length > 0
+        ? t('过滤: {p0}', { p0: form.providers.join(', ') })
+        : t('全部平台');
     return `Running (${modeText} • ${filterText})`;
   });
 
@@ -174,10 +177,10 @@
         </div>
         <div class="title-section">
           <div class="title-row">
-            <span class="title-text">停用账号定期复检</span>
+            <span class="title-text">{{ t('停用账号定期复检') }}</span>
             <span class="status-badge" :class="{ 'is-enabled': form.enabled }">
               <span class="status-dot" />
-              {{ form.enabled ? '已开启' : '已关闭' }}
+              {{ form.enabled ? t('已开启') : t('已关闭') }}
             </span>
           </div>
           <div class="desc-text">
@@ -206,21 +209,26 @@
             <div class="form-group-section">
               <div class="group-header">
                 <AppIcon name="clock" class="group-icon" />
-                <span>调度触发</span>
+                <span>{{ t('调度触发') }}</span>
               </div>
               <div class="group-content">
-                <el-form-item label="调度方式">
+                <el-form-item :label="t('调度方式')">
                   <el-segmented
                     v-model="form.scheduleMode"
                     :options="[
-                      { label: '固定间隔', value: 'interval' },
+                      {
+                        get label() {
+                          return t('固定间隔');
+                        },
+                        value: 'interval',
+                      },
                       { label: 'Cron', value: 'cron' },
                     ]"
                     class="w-full"
                   />
                 </el-form-item>
 
-                <el-form-item v-if="form.scheduleMode !== 'cron'" label="间隔时间">
+                <el-form-item v-if="form.scheduleMode !== 'cron'" :label="t('间隔时间')">
                   <div class="input-with-unit">
                     <el-input-number
                       v-model="form.intervalMinutes"
@@ -229,15 +237,15 @@
                       controls-position="right"
                       class="w-full"
                     />
-                    <span class="unit-label">分钟</span>
+                    <span class="unit-label">{{ t('分钟') }}</span>
                   </div>
                 </el-form-item>
 
-                <el-form-item v-else label="Cron 表达式">
+                <el-form-item v-else :label="t('Cron 表达式')">
                   <el-input v-model="form.cronExpression" placeholder="0 */30 * * * *" />
                 </el-form-item>
 
-                <el-form-item label="时区">
+                <el-form-item :label="t('时区')">
                   <el-input v-model="form.timezone" placeholder="Asia/Shanghai" />
                 </el-form-item>
               </div>
@@ -247,15 +255,15 @@
             <div class="form-group-section">
               <div class="group-header">
                 <AppIcon name="monitor" class="group-icon" />
-                <span>运行限制</span>
+                <span>{{ t('运行限制') }}</span>
               </div>
               <div class="group-content">
-                <el-form-item label="测试模型">
+                <el-form-item :label="t('测试模型')">
                   <el-input v-model="form.model" placeholder="auto" />
                 </el-form-item>
 
                 <div class="grid-2-cols">
-                  <el-form-item label="最大并发">
+                  <el-form-item :label="t('最大并发')">
                     <el-input-number
                       v-model="form.maxConcurrency"
                       :min="1"
@@ -264,7 +272,7 @@
                       class="w-full"
                     />
                   </el-form-item>
-                  <el-form-item label="定时单批额度">
+                  <el-form-item :label="t('定时单批额度')">
                     <el-input-number
                       v-model="form.maxAccountsPerRun"
                       :min="1"
@@ -275,7 +283,7 @@
                   </el-form-item>
                 </div>
 
-                <el-form-item label="启动延迟">
+                <el-form-item :label="t('启动延迟')">
                   <div class="input-with-unit">
                     <el-input-number
                       v-model="form.initialDelayMinutes"
@@ -284,16 +292,16 @@
                       controls-position="right"
                       class="w-full"
                     />
-                    <span class="unit-label">分钟</span>
+                    <span class="unit-label">{{ t('分钟') }}</span>
                   </div>
                 </el-form-item>
 
-                <el-form-item label="停用过滤阀值">
+                <el-form-item :label="t('停用过滤阀值')">
                   <template #label>
                     <span class="custom-label">
-                      停用多久后测试
+                      {{ t('停用多久后测试') }}
                       <el-tooltip
-                        content="账号变更状态后需要等待多少分钟才进行复检，避免频繁测试"
+                        :content="t('账号变更状态后需要等待多少分钟才进行复检，避免频繁测试')"
                         placement="top"
                       >
                         <span class="info-icon">?</span>
@@ -308,7 +316,7 @@
                       controls-position="right"
                       class="w-full"
                     />
-                    <span class="unit-label">分钟</span>
+                    <span class="unit-label">{{ t('分钟') }}</span>
                   </div>
                 </el-form-item>
               </div>
@@ -318,14 +326,14 @@
             <div class="form-group-section">
               <div class="group-header">
                 <AppIcon name="check-circle" class="group-icon" />
-                <span>范围与策略</span>
+                <span>{{ t('范围与策略') }}</span>
               </div>
               <div class="group-content checks-container">
                 <div class="check-card" :class="{ 'is-checked': form.includeDisabled }">
                   <el-checkbox v-model="form.includeDisabled">
                     <div class="check-info">
-                      <span class="check-title">包含手动停用</span>
-                      <span class="check-desc">检测因管理员手动设置停用的账号</span>
+                      <span class="check-title">{{ t('包含手动停用') }}</span>
+                      <span class="check-desc">{{ t('检测因管理员手动设置停用的账号') }}</span>
                     </div>
                   </el-checkbox>
                 </div>
@@ -333,8 +341,10 @@
                 <div class="check-card" :class="{ 'is-checked': form.includeSuspended }">
                   <el-checkbox v-model="form.includeSuspended">
                     <div class="check-info">
-                      <span class="check-title">包含挂起账号</span>
-                      <span class="check-desc">检测被系统自动挂起（Suspended）的账号</span>
+                      <span class="check-title">{{ t('包含挂起账号') }}</span>
+                      <span class="check-desc">{{
+                        t('检测被系统自动挂起（Suspended）的账号')
+                      }}</span>
                     </div>
                   </el-checkbox>
                 </div>
@@ -342,8 +352,8 @@
                 <div class="check-card" :class="{ 'is-checked': form.includeQuotaExhausted }">
                   <el-checkbox v-model="form.includeQuotaExhausted">
                     <div class="check-info">
-                      <span class="check-title">包含配额耗尽</span>
-                      <span class="check-desc">包含检测原配额耗尽异常状态的账号</span>
+                      <span class="check-title">{{ t('包含配额耗尽') }}</span>
+                      <span class="check-desc">{{ t('包含检测原配额耗尽异常状态的账号') }}</span>
                     </div>
                   </el-checkbox>
                 </div>
@@ -351,8 +361,10 @@
                 <div class="check-card highlight" :class="{ 'is-checked': form.updateStatus }">
                   <el-checkbox v-model="form.updateStatus">
                     <div class="check-info">
-                      <span class="check-title text-primary">成功后恢复账号</span>
-                      <span class="check-desc">测试成功后，自动将账号状态变更为正常</span>
+                      <span class="check-title text-primary">{{ t('成功后恢复账号') }}</span>
+                      <span class="check-desc">{{
+                        t('测试成功后，自动将账号状态变更为正常')
+                      }}</span>
                     </div>
                   </el-checkbox>
                 </div>
@@ -363,8 +375,10 @@
                 >
                   <el-checkbox v-model="form.autoRunWhenNoAvailableAccounts">
                     <div class="check-info">
-                      <span class="check-title text-primary">账号不可用时自动复查</span>
-                      <span class="check-desc">当前请求没有可用账号时，自动复查一次对应平台账号并重新选择</span>
+                      <span class="check-title text-primary">{{ t('账号不可用时自动复查') }}</span>
+                      <span class="check-desc">{{
+                        t('当前请求没有可用账号时，自动复查一次对应平台账号并重新选择')
+                      }}</span>
                     </div>
                   </el-checkbox>
                 </div>
@@ -374,14 +388,14 @@
 
           <!-- Filters & Advanced Inputs (Full Width) -->
           <div class="form-fullwidth-section">
-            <el-form-item label="平台过滤">
+            <el-form-item :label="t('平台过滤')">
               <el-select
                 v-model="form.providers"
                 multiple
                 filterable
                 allow-create
                 default-first-option
-                placeholder="留空表示全部平台"
+                :placeholder="t('留空表示全部平台')"
                 class="w-full"
               >
                 <el-option
@@ -393,12 +407,12 @@
               </el-select>
             </el-form-item>
 
-            <el-form-item label="自定义测试提示词">
+            <el-form-item :label="t('自定义测试提示词')">
               <el-input
                 v-model="form.prompt"
                 type="textarea"
                 :rows="2"
-                placeholder="留空使用系统默认测试提示词 (e.g. Say hello to verify connection)"
+                :placeholder="t('留空使用系统默认测试提示词 (e.g. Say hello to verify connection)')"
               />
             </el-form-item>
           </div>
@@ -406,8 +420,7 @@
           <!-- Action Buttons -->
           <div class="form-actions">
             <el-button :loading="running" class="action-btn run-btn" @click="runNow">
-              <AppIcon v-if="!running" name="play" class="btn-icon" />
-              立即测试全部账号
+              <AppIcon v-if="!running" name="play" class="btn-icon" /> {{ t('立即测试全部账号') }}
             </el-button>
 
             <el-button
@@ -416,8 +429,7 @@
               class="action-btn save-btn"
               @click="saveSettings(true)"
             >
-              <AppIcon v-if="!saving" name="save" class="btn-icon" />
-              保存策略配置
+              <AppIcon v-if="!saving" name="save" class="btn-icon" /> {{ t('保存策略配置') }}
             </el-button>
           </div>
         </el-form>

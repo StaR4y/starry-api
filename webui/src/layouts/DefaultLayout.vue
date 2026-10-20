@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { locale, t } from '@/i18n';
   /**
    * 主布局：侧边栏 + 顶栏 + 内容区。磨砂玻璃 / 线框由外观设置切换。
    *
@@ -22,6 +23,7 @@
   import { useRankingStore } from '@/stores/ranking';
   import { usePluginWidgetStore } from '@/stores/pluginWidgets';
   import SiteBrandLogo from '@/components/SiteBrandLogo.vue';
+  import LanguageSelect from '@/components/LanguageSelect.vue';
   import UsageMaidAssistant from '@/components/UsageMaidAssistant.vue';
   import PluginScriptHost from '@/components/PluginScriptHost.vue';
   import { ElMessageBox } from 'element-plus';
@@ -35,6 +37,8 @@
     Connection,
     Cpu,
     Document,
+    Notebook,
+    Reading,
     User,
     Present,
     FolderOpened,
@@ -62,22 +66,133 @@
 
   /** 主菜单：分组在此集中维护，便于二次开发新增模块 */
   const rawMenus: MenuItem[] = [
-    { name: 'welcome', label: '数据统计', icon: DataAnalysis, userOnly: true },
-    { name: 'dashboard', label: '仪表盘', icon: Odometer, adminOnly: true },
-    { name: 'accounts', label: '账号管理', icon: CreditCard, adminOnly: true },
+    {
+      name: 'welcome',
+      get label() {
+        return t('数据统计');
+      },
+      icon: DataAnalysis,
+      userOnly: true,
+    },
+    {
+      name: 'dashboard',
+      get label() {
+        return t('仪表盘');
+      },
+      icon: Odometer,
+      adminOnly: true,
+    },
+    {
+      name: 'accounts',
+      get label() {
+        return t('账号管理');
+      },
+      icon: CreditCard,
+      adminOnly: true,
+    },
     { name: 'api-keys', label: 'API Key', icon: Key },
-    { name: 'payment', label: '余额充值', icon: Wallet, userOnly: true },
+    {
+      name: 'payment',
+      get label() {
+        return t('余额充值');
+      },
+      icon: Wallet,
+      userOnly: true,
+    },
     { name: 'coding-plans', label: 'Coding Plan', icon: Monitor, userOnly: true },
-    { name: 'model-mappings', label: '模型映射', icon: Connection, adminOnly: true },
-    { name: 'model-ranking', label: '模型天梯', icon: Trophy },
-    { name: 'models', label: '模型 ID', icon: Cpu },
-    { name: 'tickets', label: '我的工单', icon: Service, userOnly: true },
-    { name: 'tickets', label: '工单管理', icon: Service, adminOnly: true },
-    { name: 'logs', label: '请求日志', icon: Document, adminOnly: true },
-    { name: 'users', label: '用户管理', icon: User, adminOnly: true },
-    { name: 'redemption-codes', label: '兑换码', icon: Present, adminOnly: true },
-    { name: 'data-transfer', label: '数据管理', icon: FolderOpened, adminOnly: true, rootOnly: true },
-    { name: 'settings', label: '系统设置', icon: Operation, adminOnly: true },
+    {
+      name: 'model-mappings',
+      get label() {
+        return t('模型映射');
+      },
+      icon: Connection,
+      adminOnly: true,
+    },
+    {
+      name: 'model-ranking',
+      get label() {
+        return t('模型天梯');
+      },
+      icon: Trophy,
+    },
+    {
+      name: 'models',
+      get label() {
+        return t('模型 ID');
+      },
+      icon: Cpu,
+    },
+    {
+      name: 'news',
+      get label() {
+        return t('新闻');
+      },
+      icon: Notebook,
+    },
+    {
+      name: 'documentation',
+      get label() {
+        return t('使用文档');
+      },
+      icon: Reading,
+    },
+    {
+      name: 'tickets',
+      get label() {
+        return t('我的工单');
+      },
+      icon: Service,
+      userOnly: true,
+    },
+    {
+      name: 'tickets',
+      get label() {
+        return t('工单管理');
+      },
+      icon: Service,
+      adminOnly: true,
+    },
+    {
+      name: 'logs',
+      get label() {
+        return t('请求日志');
+      },
+      icon: Document,
+      adminOnly: true,
+    },
+    {
+      name: 'users',
+      get label() {
+        return t('用户管理');
+      },
+      icon: User,
+      adminOnly: true,
+    },
+    {
+      name: 'redemption-codes',
+      get label() {
+        return t('兑换码');
+      },
+      icon: Present,
+      adminOnly: true,
+    },
+    {
+      name: 'data-transfer',
+      get label() {
+        return t('数据管理');
+      },
+      icon: FolderOpened,
+      adminOnly: true,
+      rootOnly: true,
+    },
+    {
+      name: 'settings',
+      get label() {
+        return t('系统设置');
+      },
+      icon: Operation,
+      adminOnly: true,
+    },
   ];
 
   const menus = computed(() =>
@@ -92,7 +207,7 @@
   const activeMenu = computed(
     () => (route.meta.menuName as string | undefined) ?? (route.name as string) ?? 'dashboard',
   );
-  const currentTitle = computed(() => (route.meta.title as string) ?? '');
+  const currentTitle = computed(() => t((route.meta.title as string) ?? ''));
   const balanceText = computed(() => formatNumber(auth.user?.balance ?? 0));
   const menuRef = ref<HTMLElement | null>(null);
   const menuIndicatorReady = ref(false);
@@ -161,11 +276,20 @@
   }
 
   async function handleLogout() {
-    await ElMessageBox.confirm('确认退出当前账号？', '提示', {
-      confirmButtonText: '退出',
-      cancelButtonText: '取消',
-      type: 'warning',
-    }).catch(() => null);
+    try {
+      await ElMessageBox.confirm(t('确认退出当前账号？'), t('提示'), {
+        get confirmButtonText() {
+          return t('退出');
+        },
+        get cancelButtonText() {
+          return t('取消');
+        },
+        type: 'warning',
+      });
+    } catch {
+      // 点了“取消”或关闭弹窗：保持登录，不要退出
+      return;
+    }
     auth.logout();
     router.push({ name: 'login' });
   }
@@ -185,7 +309,7 @@
   }
 
   watch(
-    [activeMenu, menuSignature],
+    [activeMenu, menuSignature, locale],
     () => {
       syncMenuIndicator();
       revealActiveMenu();
@@ -244,44 +368,58 @@
     <main class="layout__main">
       <header class="layout__topbar" :class="{ 'glass-panel': !appearance.isEditorial }">
         <div class="layout__crumbs">
-          <span class="text-muted">控制台</span>
+          <span class="text-muted">{{ t('控制台') }}</span>
           <span class="layout__crumbs-sep">/</span>
           <span>{{ currentTitle }}</span>
         </div>
-        <el-dropdown trigger="click" popper-class="layout-user-dropdown" @command="handleUserCommand">
-          <span class="layout__user">
-            <span v-if="!auth.isAdmin" class="layout__balance">余额 {{ balanceText }}</span>
-            <el-avatar :size="32" class="layout__avatar">
-              {{ auth.displayName?.charAt(0) }}
-            </el-avatar>
-            <span>{{ auth.displayName }}</span>
-          </span>
-          <template #dropdown>
-            <el-dropdown-menu>
-              <template v-if="pluginWidgets.available.length">
-                <el-dropdown-item disabled class="layout__widget-heading">桌面挂件</el-dropdown-item>
-                <el-dropdown-item
-                  v-for="widget in pluginWidgets.available"
-                  :key="widget.pluginId"
-                  @click.stop
-                >
-                  <div class="layout__widget-pref" @click.stop>
-                    <span>{{ widget.title }}</span>
-                    <el-switch
-                      :model-value="pluginWidgets.isEnabled(widget.pluginId)"
-                      @change="(value: string | number | boolean) => pluginWidgets.setEnabled(widget.pluginId, Boolean(value))"
-                      @click.stop
-                    />
-                  </div>
+        <div class="layout__topbar-actions">
+          <LanguageSelect />
+          <el-dropdown
+            trigger="click"
+            popper-class="layout-user-dropdown"
+            @command="handleUserCommand"
+          >
+            <span class="layout__user">
+              <span v-if="!auth.isAdmin" class="layout__balance">{{ t('余额') }} {{ balanceText }}</span>
+              <el-avatar :size="32" class="layout__avatar">
+                {{ auth.displayName?.charAt(0) }}
+              </el-avatar>
+              <span>{{ auth.displayName }}</span>
+            </span>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <template v-if="pluginWidgets.available.length">
+                  <el-dropdown-item disabled class="layout__widget-heading">
+                    {{
+                      t('桌面挂件')
+                    }}
+                  </el-dropdown-item>
+                  <el-dropdown-item
+                    v-for="widget in pluginWidgets.available"
+                    :key="widget.pluginId"
+                    @click.stop
+                  >
+                    <div class="layout__widget-pref" @click.stop>
+                      <span>{{ widget.title }}</span>
+                      <el-switch
+                        :model-value="pluginWidgets.isEnabled(widget.pluginId)"
+                        @change="
+                          (value: string | number | boolean) =>
+                            pluginWidgets.setEnabled(widget.pluginId, Boolean(value))
+                        "
+                        @click.stop
+                      />
+                    </div>
+                  </el-dropdown-item>
+                </template>
+                <el-dropdown-item command="password" :divided="pluginWidgets.available.length > 0">
+                  {{ t('修改密码') }}
                 </el-dropdown-item>
-              </template>
-              <el-dropdown-item command="password" :divided="pluginWidgets.available.length > 0">
-                修改密码
-              </el-dropdown-item>
-              <el-dropdown-item command="logout" divided>退出登录</el-dropdown-item>
-            </el-dropdown-menu>
-          </template>
-        </el-dropdown>
+                <el-dropdown-item command="logout" divided>{{ t('退出登录') }}</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
+        </div>
       </header>
 
       <section class="layout__content">
@@ -302,6 +440,24 @@
 </template>
 
 <style scoped lang="scss">
+  .layout__topbar-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .layout__crumbs {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  @media (max-width: 720px) {
+    .layout__topbar-actions {
+      gap: 4px;
+    }
+    .layout__balance {
+      display: none;
+    }
+  }
   .layout {
     display: flex;
     min-height: 100vh;
@@ -409,7 +565,11 @@
       left: 0;
       z-index: 0;
       border-radius: 12px;
-      background: linear-gradient(135deg, var(--kp-primary-soft), color-mix(in srgb, var(--kp-accent) 18%, transparent));
+      background: linear-gradient(
+        135deg,
+        var(--kp-primary-soft),
+        color-mix(in srgb, var(--kp-accent) 18%, transparent)
+      );
       box-shadow: 0 4px 12px var(--kp-primary-soft);
       opacity: 0;
       pointer-events: none;

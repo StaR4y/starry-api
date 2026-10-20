@@ -17,3 +17,4 @@ export { paymentApi, adminPaymentApi } from './payment';
 export { codingPlanApi, adminCodingPlanApi } from './codingPlans';
 export { dataTransferApi, saveDownloadedFile } from './dataTransfer';
 export { assistantApi } from './assistant';
+export { newsApi } from './news';

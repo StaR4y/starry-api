@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
   import { ElMessage } from 'element-plus';
   import { CopyDocument, Cpu, Refresh, Search } from '@element-plus/icons-vue';
@@ -12,7 +13,12 @@
     pricingFromPublicModel,
   } from './catalogDisplay';
   import { systemApi } from '@/api';
-  import { canonicalCatalogProvider, getFamilyOrder, getProviderOrder, orderOf } from '@/platforms/models';
+  import {
+    canonicalCatalogProvider,
+    getFamilyOrder,
+    getProviderOrder,
+    orderOf,
+  } from '@/platforms/models';
   import type { ManagedModel, ModelCatalogDisplaySettings, ModelInfo } from '@/types/api';
 
   interface ProviderGroup {
@@ -69,7 +75,7 @@
         catalogOrder.value = view.modelIds ?? [];
       }
     } catch {
-      ElMessage.error('模型列表加载失败');
+      ElMessage.error(t('模型列表加载失败'));
     } finally {
       loading.value = false;
     }
@@ -77,16 +83,21 @@
 
   const summary = computed(() => {
     const providers = new Set(models.value.map((model) => model.provider)).size;
-    return `${models.value.length} 个模型 · ${providers} 个厂商`;
+    return t('{p0} 个模型 · {p1} 个厂商', { p0: models.value.length, p1: providers });
   });
 
   const filteredModels = computed(() => {
     const query = keyword.value.trim().toLowerCase();
     if (!query) return models.value;
     return models.value.filter((model) =>
-      [model.id, model.name, model.provider, model.family, model.targetModelId, model.endpoint].some(
-        (value) => value.toLowerCase().includes(query),
-      ),
+      [
+        model.id,
+        model.name,
+        model.provider,
+        model.family,
+        model.targetModelId,
+        model.endpoint,
+      ].some((value) => value.toLowerCase().includes(query)),
     );
   });
 
@@ -153,7 +164,10 @@
     [providerGroups, () => display.value.groupBy],
     ([groups, groupBy]) => {
       if (groupBy === 'none') {
-        if (activeProvider.value && !groups.some((group) => group.provider === activeProvider.value)) {
+        if (
+          activeProvider.value &&
+          !groups.some((group) => group.provider === activeProvider.value)
+        ) {
           activeProvider.value = '';
         }
         return;
@@ -222,14 +236,14 @@
       await navigator.clipboard.writeText(text);
       ElMessage.success(message);
     } catch {
-      ElMessage.warning('复制失败，请手动复制');
+      ElMessage.warning(t('复制失败，请手动复制'));
     }
   }
 
   function copyAllIds() {
     return copyText(
       selectedModels.value.map((model) => model.id).join('\n'),
-      '已复制当前分组中的模型 ID',
+      t('已复制当前分组中的模型 ID'),
     );
   }
 
@@ -249,16 +263,21 @@
 
 <template>
   <div class="model-page-root">
-    <PageSection title="模型 ID" subtitle="模型目录" :icon="Cpu">
+    <PageSection :title="t('模型 ID')" :subtitle="t('模型目录')" :icon="Cpu">
       <template #summary>
         <span>{{ summary }}</span>
       </template>
       <template #actions>
-        <el-tooltip content="复制当前分组模型 ID" placement="bottom">
-          <el-button :icon="CopyDocument" aria-label="复制模型 ID" @click="copyAllIds" />
+        <el-tooltip :content="t('复制当前分组模型 ID')" placement="bottom">
+          <el-button :icon="CopyDocument" :aria-label="t('复制模型 ID')" @click="copyAllIds" />
         </el-tooltip>
-        <el-tooltip content="刷新" placement="bottom">
-          <el-button :icon="Refresh" :loading="loading" aria-label="刷新" @click="loadModels" />
+        <el-tooltip :content="t('刷新')" placement="bottom">
+          <el-button
+            :icon="Refresh"
+            :loading="loading"
+            :aria-label="t('刷新')"
+            @click="loadModels"
+          />
         </el-tooltip>
       </template>
       <template #toolbar>
@@ -267,11 +286,11 @@
           class="catalog-search"
           :prefix-icon="Search"
           clearable
-          placeholder="搜索名称、ID、系列或 endpoint"
+          :placeholder="t('搜索名称、ID、系列或 endpoint')"
         />
       </template>
 
-      <nav v-if="providerGroups.length" class="provider-chips" aria-label="模型厂商">
+      <nav v-if="providerGroups.length" class="provider-chips" :aria-label="t('模型厂商')">
         <button
           v-if="display.groupBy === 'none'"
           type="button"
@@ -280,7 +299,7 @@
           :aria-current="!activeProvider ? 'true' : undefined"
           @click="selectProvider('')"
         >
-          <strong>全部</strong>
+          <strong>{{ t('全部') }}</strong>
           <span>{{ filteredModels.length }}</span>
         </button>
         <button
@@ -303,7 +322,7 @@
           v-if="activeGroup && !showingAllProviders"
           class="family-chips"
           role="tablist"
-          aria-label="模型系列"
+          :aria-label="t('模型系列')"
         >
           <button
             type="button"
@@ -312,7 +331,7 @@
             :class="{ 'is-active': activeFamily === 'all' }"
             @click="selectFamily('all')"
           >
-            全部 <span>{{ activeGroup.models.length }}</span>
+            {{ t('全部') }} <span>{{ activeGroup.models.length }}</span>
           </button>
           <button
             v-for="family in familyOptions"
@@ -353,8 +372,8 @@
                 <button
                   type="button"
                   class="model-card__id"
-                  :title="`复制 ${model.id}`"
-                  @click="copyText(model.id, '已复制模型 ID')"
+                  :title="t('复制 {p0}', { p0: model.id })"
+                  @click="copyText(model.id, t('已复制模型 ID'))"
                 >
                   <code>{{ model.id }}</code>
                   <el-icon><CopyDocument /></el-icon>
@@ -365,10 +384,12 @@
               </div>
             </header>
             <footer class="model-card__foot">
-              <span v-if="display.showFamily" class="meta-chip" :title="`系列：${model.family}`">{{
-                model.family
-              }}</span>
-              <span v-if="display.showContext" class="meta-chip" title="上下文窗口">
+              <span
+                v-if="display.showFamily"
+                class="meta-chip"
+                :title="t('系列：{p0}', { p0: model.family })"
+              >{{ model.family }}</span>
+              <span v-if="display.showContext" class="meta-chip" :title="t('上下文窗口')">
                 {{ formatContextWindow(model.contextWindow) }}
               </span>
               <span
@@ -379,22 +400,22 @@
                 {{ priceChip(model)?.text }}
               </span>
               <span v-if="display.showOrigin" class="meta-chip meta-chip--muted">{{
-                model.builtIn ? '内置' : '自定义'
+                model.builtIn ? t('内置') : t('自定义')
               }}</span>
             </footer>
           </article>
           <el-empty
             v-if="!loading && !pagedModels.length"
             class="gallery-empty"
-            description="没有符合条件的模型"
+            :description="t('没有符合条件的模型')"
             :image-size="72"
           />
         </div>
 
-        <el-empty v-else-if="!loading" description="没有符合条件的模型" :image-size="72" />
+        <el-empty v-else-if="!loading" :description="t('没有符合条件的模型')" :image-size="72" />
 
         <div v-if="activeGroup || showingAllProviders" class="catalog-pagination">
-          <span>当前分组共 {{ selectedModels.length }} 项</span>
+          <span>{{ t('当前分组共') }} {{ selectedModels.length }} {{ t('项') }}</span>
           <el-pagination
             v-model:current-page="page"
             v-model:page-size="pageSize"

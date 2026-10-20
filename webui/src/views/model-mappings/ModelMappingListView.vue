@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   /**
    * 模型映射管理。
    *
@@ -54,8 +55,24 @@
   });
 
   const rules: FormRules = {
-    name: [{ required: true, message: '请输入名称', trigger: 'blur' }],
-    sourceModel: [{ required: true, message: '请输入源模型', trigger: 'blur' }],
+    name: [
+      {
+        required: true,
+        get message() {
+          return t('请输入名称');
+        },
+        trigger: 'blur',
+      },
+    ],
+    sourceModel: [
+      {
+        required: true,
+        get message() {
+          return t('请输入源模型');
+        },
+        trigger: 'blur',
+      },
+    ],
   };
 
   function resetForm() {
@@ -118,7 +135,7 @@
 
     const targetModels = form.targetModels.map((s) => s.trim()).filter(Boolean);
     if (!targetModels.length) {
-      ElMessage.error('至少配置一个目标模型');
+      ElMessage.error(t('至少配置一个目标模型'));
       return;
     }
     const apiKeyIds = form.apiKeyIds.map((s) => s.trim()).filter(Boolean);
@@ -139,10 +156,10 @@
     try {
       if (formMode.value === 'create') {
         await modelMappingsApi.create(payload);
-        ElMessage.success('已创建');
+        ElMessage.success(t('已创建'));
       } else if (editingId.value) {
         await modelMappingsApi.update(editingId.value, { ...payload, enabled: form.enabled });
-        ElMessage.success('已更新');
+        ElMessage.success(t('已更新'));
       }
       formVisible.value = false;
       await loadMappings();
@@ -157,13 +174,17 @@
   }
 
   async function removeMapping(row: ModelMapping) {
-    await ElMessageBox.confirm(`确认删除映射 ${row.name}？`, '危险操作', {
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
+    await ElMessageBox.confirm(t('确认删除映射 {p0}？', { p0: row.name }), t('危险操作'), {
+      get confirmButtonText() {
+        return t('删除');
+      },
+      get cancelButtonText() {
+        return t('取消');
+      },
       type: 'error',
     }).catch(() => Promise.reject(new Error('cancel')));
     await modelMappingsApi.remove(row.mappingId);
-    ElMessage.success('已删除');
+    ElMessage.success(t('已删除'));
     await loadMappings();
   }
 
@@ -172,126 +193,134 @@
 
 <template>
   <div class="model-mapping-view">
-  <PageSection title="模型映射" subtitle="路由规则" :icon="Connection">
-    <template #actions>
-      <el-button type="primary" :icon="Plus" @click="openCreate">新建映射</el-button>
-    </template>
+    <PageSection :title="t('模型映射')" :subtitle="t('路由规则')" :icon="Connection">
+      <template #actions>
+        <el-button type="primary" :icon="Plus" @click="openCreate">{{ t('新建映射') }}</el-button>
+      </template>
 
-    <el-table v-loading="loading" :data="mappings">
-      <el-table-column prop="name" label="名称" min-width="160" />
-      <el-table-column label="类型" width="120">
-        <template #default="{ row }">
-          <el-tag effect="light" round>{{ row.mappingType }}</el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column prop="sourceModel" label="源模型" min-width="160" />
-      <el-table-column label="目标模型" min-width="220">
-        <template #default="{ row }">
-          <span class="mono">{{ row.targetModels.join(', ') }}</span>
-        </template>
-      </el-table-column>
-      <el-table-column label="权重" width="140">
-        <template #default="{ row }">
-          {{ row.weights?.length ? row.weights.join(' / ') : '—' }}
-        </template>
-      </el-table-column>
-      <el-table-column prop="priority" label="优先级" width="90" />
-      <el-table-column label="启用" width="80">
-        <template #default="{ row }">
-          <el-tag :type="row.enabled ? 'success' : 'info'" effect="light" round>
-            {{ row.enabled ? '启用' : '停用' }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="更新时间" width="180">
-        <template #default="{ row }">{{ formatDateTime(row.updatedAt) }}</template>
-      </el-table-column>
-      <el-table-column label="操作" width="220" fixed="right">
-        <template #default="{ row }">
-          <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-          <el-button link type="primary" @click="toggleEnabled(row)">
-            {{ row.enabled ? '停用' : '启用' }}
-          </el-button>
-          <el-button link type="danger" @click="removeMapping(row)">删除</el-button>
-        </template>
-      </el-table-column>
-    </el-table>
-  </PageSection>
-
-  <el-dialog
-    v-model="formVisible"
-    :title="formMode === 'create' ? '新建映射' : '编辑映射'"
-    width="640px"
-  >
-    <el-form ref="formRef" :model="form" :rules="rules" label-position="top">
-      <el-form-item label="名称" prop="name">
-        <el-input v-model="form.name" />
-      </el-form-item>
-      <el-row :gutter="12">
-        <el-col :span="12">
-          <el-form-item label="类型">
-            <el-select v-model="form.mappingType" style="width: 100%" @change="onTypeChange">
-              <el-option label="replace（替换）" value="replace" />
-              <el-option label="alias（别名）" value="alias" />
-              <el-option label="loadbalance（按权重分流）" value="loadbalance" />
-            </el-select>
-          </el-form-item>
-        </el-col>
-        <el-col :span="12">
-          <el-form-item label="优先级（数值越小越优先）">
-            <el-input-number v-model="form.priority" :min="0" :step="10" style="width: 100%" />
-          </el-form-item>
-        </el-col>
-      </el-row>
-      <el-form-item label="源模型（支持通配符如 gpt-*）" prop="sourceModel">
-        <el-input v-model="form.sourceModel" />
-      </el-form-item>
-
-      <el-form-item label="目标模型">
-        <div class="target-list">
-          <div v-for="(_, idx) in form.targetModels" :key="idx" class="target-list__row">
-            <el-input v-model="form.targetModels[idx]" placeholder="claude-sonnet-4.5" />
-            <el-input-number
-              v-if="form.mappingType === 'loadbalance'"
-              v-model="form.weights[idx]"
-              :min="1"
-              :step="1"
-              style="width: 120px"
-              placeholder="权重"
-            />
-            <el-button
-              link
-              type="danger"
-              :disabled="form.targetModels.length === 1"
-              @click="removeTarget(idx)"
-            >
-              移除
+      <el-table v-loading="loading" :data="mappings">
+        <el-table-column prop="name" :label="t('名称')" min-width="160" />
+        <el-table-column :label="t('类型')" width="120">
+          <template #default="{ row }">
+            <el-tag effect="light" round>{{ row.mappingType }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="sourceModel" :label="t('源模型')" min-width="160" />
+        <el-table-column :label="t('目标模型')" min-width="220">
+          <template #default="{ row }">
+            <span class="mono">{{ row.targetModels.join(', ') }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column :label="t('权重')" width="140">
+          <template #default="{ row }">
+            {{ row.weights?.length ? row.weights.join(' / ') : '—' }}
+          </template>
+        </el-table-column>
+        <el-table-column prop="priority" :label="t('优先级')" width="90" />
+        <el-table-column :label="t('启用')" width="80">
+          <template #default="{ row }">
+            <el-tag :type="row.enabled ? 'success' : 'info'" effect="light" round>
+              {{ row.enabled ? t('启用') : t('停用') }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column :label="t('更新时间')" width="180">
+          <template #default="{ row }">{{ formatDateTime(row.updatedAt) }}</template>
+        </el-table-column>
+        <el-table-column :label="t('操作')" width="220" fixed="right">
+          <template #default="{ row }">
+            <el-button link type="primary" @click="openEdit(row)">{{ t('编辑') }}</el-button>
+            <el-button link type="primary" @click="toggleEnabled(row)">
+              {{ row.enabled ? t('停用') : t('启用') }}
             </el-button>
+            <el-button link type="danger" @click="removeMapping(row)">{{ t('删除') }}</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </PageSection>
+
+    <el-dialog
+      v-model="formVisible"
+      :title="formMode === 'create' ? t('新建映射') : t('编辑映射')"
+      width="640px"
+    >
+      <el-form ref="formRef" :model="form" :rules="rules" label-position="top">
+        <el-form-item :label="t('名称')" prop="name">
+          <el-input v-model="form.name" />
+        </el-form-item>
+        <el-row :gutter="12">
+          <el-col :span="12">
+            <el-form-item :label="t('类型')">
+              <el-select v-model="form.mappingType" style="width: 100%" @change="onTypeChange">
+                <el-option :label="t('replace（替换）')" value="replace" />
+                <el-option :label="t('alias（别名）')" value="alias" />
+                <el-option :label="t('loadbalance（按权重分流）')" value="loadbalance" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item :label="t('优先级（数值越小越优先）')">
+              <el-input-number v-model="form.priority" :min="0" :step="10" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-form-item :label="t('源模型（支持通配符如 gpt-*）')" prop="sourceModel">
+          <el-input v-model="form.sourceModel" />
+        </el-form-item>
+
+        <el-form-item :label="t('目标模型')">
+          <div class="target-list">
+            <div v-for="(_, idx) in form.targetModels" :key="idx" class="target-list__row">
+              <el-input v-model="form.targetModels[idx]" placeholder="claude-sonnet-4.5" />
+              <el-input-number
+                v-if="form.mappingType === 'loadbalance'"
+                v-model="form.weights[idx]"
+                :min="1"
+                :step="1"
+                style="width: 120px"
+                :placeholder="t('权重')"
+              />
+              <el-button
+                link
+                type="danger"
+                :disabled="form.targetModels.length === 1"
+                @click="removeTarget(idx)"
+              >
+                {{ t('移除') }}
+              </el-button>
+            </div>
+            <el-button size="small" @click="addTarget">{{ t('添加') }}</el-button>
           </div>
-          <el-button size="small" @click="addTarget">添加</el-button>
-        </div>
-      </el-form-item>
+        </el-form-item>
 
-      <el-form-item label="作用 API Key（留空表示全部）">
-        <div class="target-list">
-          <div v-for="(_, idx) in form.apiKeyIds" :key="idx" class="target-list__row">
-            <el-input v-model="form.apiKeyIds[idx]" placeholder="API Key ID" />
-            <el-button link type="danger" @click="form.apiKeyIds.splice(idx, 1)">移除</el-button>
+        <el-form-item :label="t('作用 API Key（留空表示全部）')">
+          <div class="target-list">
+            <div v-for="(_, idx) in form.apiKeyIds" :key="idx" class="target-list__row">
+              <el-input v-model="form.apiKeyIds[idx]" placeholder="API Key ID" />
+              <el-button link type="danger" @click="form.apiKeyIds.splice(idx, 1)">
+                {{
+                  t('移除')
+                }}
+              </el-button>
+            </div>
+            <el-button size="small" @click="form.apiKeyIds.push('')">{{ t('添加') }}</el-button>
           </div>
-          <el-button size="small" @click="form.apiKeyIds.push('')">添加</el-button>
-        </div>
-      </el-form-item>
+        </el-form-item>
 
-      <el-form-item v-if="formMode === 'edit'" label="启用">
-        <el-switch v-model="form.enabled" />
-      </el-form-item>
-    </el-form>
+        <el-form-item v-if="formMode === 'edit'" :label="t('启用')">
+          <el-switch v-model="form.enabled" />
+        </el-form-item>
+      </el-form>
 
-    <template #footer>
-      <el-button @click="formVisible = false">取消</el-button>
-      <el-button type="primary" :loading="formSubmitting" @click="submitForm">提交</el-button>
-    </template>
-  </el-dialog>
+      <template #footer>
+        <el-button @click="formVisible = false">{{ t('取消') }}</el-button>
+        <el-button type="primary" :loading="formSubmitting" @click="submitForm">
+          {{
+            t('提交')
+          }}
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 

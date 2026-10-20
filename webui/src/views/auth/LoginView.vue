@@ -1,4 +1,6 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
+  import LanguageSelect from '@/components/LanguageSelect.vue';
   /**
    * 登录页。
    *
@@ -80,29 +82,86 @@
   });
 
   const rules: FormRules = {
-    username: [{ required: true, message: '请输入用户名或邮箱', trigger: 'blur' }],
-    password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
+    username: [
+      {
+        required: true,
+        get message() {
+          return t('请输入用户名或邮箱');
+        },
+        trigger: 'blur',
+      },
+    ],
+    password: [
+      {
+        required: true,
+        get message() {
+          return t('请输入密码');
+        },
+        trigger: 'blur',
+      },
+    ],
   };
 
   const registerRules: FormRules = {
-    username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
+    username: [
+      {
+        required: true,
+        get message() {
+          return t('请输入用户名');
+        },
+        trigger: 'blur',
+      },
+    ],
     email: [
-      { required: true, message: '请输入邮箱', trigger: 'blur' },
-      { type: 'email', message: '邮箱格式不正确', trigger: 'blur' },
+      {
+        required: true,
+        get message() {
+          return t('请输入邮箱');
+        },
+        trigger: 'blur',
+      },
+      {
+        type: 'email',
+        get message() {
+          return t('邮箱格式不正确');
+        },
+        trigger: 'blur',
+      },
     ],
     password: [
-      { required: true, message: '请输入密码', trigger: 'blur' },
-      { min: 12, max: 128, message: '密码长度须为 12–128 位', trigger: 'blur' },
+      {
+        required: true,
+        get message() {
+          return t('请输入密码');
+        },
+        trigger: 'blur',
+      },
+      {
+        min: 12,
+        max: 128,
+        get message() {
+          return t('密码长度须为 12–128 位');
+        },
+        trigger: 'blur',
+      },
     ],
-    confirm: [{ required: true, message: '请确认密码', trigger: 'blur' }],
+    confirm: [
+      {
+        required: true,
+        get message() {
+          return t('请确认密码');
+        },
+        trigger: 'blur',
+      },
+    ],
   };
 
   const registrationHint = computed(() => {
     if (inviteCodeEnabled.value && !registrationEnabled.value) {
-      return '当前仅允许凭邀请码注册';
+      return t('当前仅允许凭邀请码注册');
     }
-    if (allowedEmailSuffixes.value.length === 0) return '当前允许任意邮箱注册';
-    return `允许邮箱后缀：${allowedEmailSuffixes.value.join('、')}`;
+    if (allowedEmailSuffixes.value.length === 0) return t('当前允许任意邮箱注册');
+    return t('允许邮箱后缀：{p0}', { p0: allowedEmailSuffixes.value.join('、') });
   });
 
   const showRegisterDetails = computed(() => {
@@ -154,15 +213,15 @@
 
   async function sendVerifyCode() {
     if (!registerForm.email) {
-      ElMessage.warning('请先填写邮箱');
+      ElMessage.warning(t('请先填写邮箱'));
       return;
     }
     if (showTurnstile.value && !turnstileSiteKey.value) {
-      ElMessage.warning('管理员尚未配置 Cloudflare Turnstile Site Key');
+      ElMessage.warning(t('管理员尚未配置 Cloudflare Turnstile Site Key'));
       return;
     }
     if (showTurnstile.value && !turnstileToken.value) {
-      ElMessage.warning('请先完成人机验证');
+      ElMessage.warning(t('请先完成人机验证'));
       await renderTurnstileWhenReady();
       return;
     }
@@ -176,9 +235,9 @@
       verifyCodeCountdown.value = result.countdown || 60;
       tickVerifyCodeCountdown();
       resetTurnstile();
-      ElMessage.success('注册链接已发送，请查看邮箱');
+      ElMessage.success(t('注册链接已发送，请查看邮箱'));
     } catch (err) {
-      await handleTurnstileError(err, '验证码发送失败');
+      await handleTurnstileError(err, t('验证码发送失败'));
     } finally {
       verifyCodeSending.value = false;
     }
@@ -192,7 +251,7 @@
     loading.value = true;
     try {
       const result = await auth.login(form);
-      ElMessage.success('登录成功');
+      ElMessage.success(t('登录成功'));
 
       if (result.user.firstLogin) {
         router.replace({ name: 'change-password' });
@@ -203,7 +262,7 @@
       router.replace(redirect);
     } catch (err) {
       // 全局拦截器已对非静默接口提示，这里登录页 silent，所以补一次
-      ElMessage.error((err as Error).message || '登录失败');
+      ElMessage.error((err as Error).message || t('登录失败'));
     } finally {
       loading.value = false;
     }
@@ -214,7 +273,7 @@
     const valid = await registerFormRef.value.validate().catch(() => false);
     if (!valid) return;
     if (registerForm.password !== registerForm.confirm) {
-      ElMessage.error('两次输入的密码不一致');
+      ElMessage.error(t('两次输入的密码不一致'));
       return;
     }
     if (
@@ -223,15 +282,15 @@
       !registerForm.inviteCode &&
       !registerForm.affiliateCode
     ) {
-      ElMessage.warning('请输入邀请码或使用推荐链接');
+      ElMessage.warning(t('请输入邀请码或使用推荐链接'));
       return;
     }
     if (showTurnstile.value && !turnstileSiteKey.value) {
-      ElMessage.warning('管理员尚未配置 Cloudflare Turnstile Site Key');
+      ElMessage.warning(t('管理员尚未配置 Cloudflare Turnstile Site Key'));
       return;
     }
     if (showTurnstile.value && !turnstileToken.value) {
-      ElMessage.warning('请先完成人机验证');
+      ElMessage.warning(t('请先完成人机验证'));
       await renderTurnstileWhenReady();
       return;
     }
@@ -251,7 +310,7 @@
           ? undefined
           : turnstileToken.value || undefined,
       });
-      ElMessage.success('注册成功');
+      ElMessage.success(t('注册成功'));
       registerVisible.value = false;
       window.localStorage.removeItem(AFFILIATE_STORAGE_KEY);
 
@@ -263,7 +322,7 @@
       const redirect = (route.query.redirect as string) || '/';
       router.replace(redirect);
     } catch (err) {
-      await handleTurnstileError(err, '注册失败');
+      await handleTurnstileError(err, t('注册失败'));
       resetTurnstile();
     } finally {
       registerLoading.value = false;
@@ -313,7 +372,7 @@
         existing.remove();
       }
       const timeoutId = window.setTimeout(() => {
-        reject(new Error('Cloudflare Turnstile 加载超时'));
+        reject(new Error(t('Cloudflare Turnstile 加载超时')));
       }, 10000);
       const resolveReady = () => {
         window.clearTimeout(timeoutId);
@@ -321,7 +380,7 @@
       };
       const rejectFailed = () => {
         window.clearTimeout(timeoutId);
-        reject(new Error('Cloudflare Turnstile 加载失败'));
+        reject(new Error(t('Cloudflare Turnstile 加载失败')));
       };
       window.__starryTurnstileOnLoad = resolveReady;
       const script = document.createElement('script');
@@ -365,7 +424,7 @@
         },
       });
     } catch (err) {
-      ElMessage.error((err as Error).message || 'Cloudflare Turnstile 加载失败');
+      ElMessage.error((err as Error).message || t('Cloudflare Turnstile 加载失败'));
     }
   }
 
@@ -377,7 +436,7 @@
         removeTurnstile();
         await loadRegistrationSettings();
         await renderTurnstileWhenReady();
-        ElMessage.warning('请先完成 Cloudflare Turnstile 人机验证');
+        ElMessage.warning(t('请先完成 Cloudflare Turnstile 人机验证'));
         return;
       }
       if (REGISTRATION_POLICY_ERROR_CODES.has(err.code)) {
@@ -438,9 +497,10 @@
 <template>
   <div class="login">
     <div class="login__panel glass-panel glass-panel--strong">
+      <div class="login__language"><LanguageSelect /></div>
       <div class="login__header">
         <SiteBrandLogo class="login__brand-logo" />
-        <h1 class="login__title">{{ appearance.siteName }} 登录</h1>
+        <h1 class="login__title">{{ appearance.siteName }} {{ t('登录') }}</h1>
         <p class="login__hint text-secondary" />
       </div>
 
@@ -452,10 +512,10 @@
         size="large"
         @submit.prevent="submit"
       >
-        <el-form-item label="用户名或邮箱" prop="username">
+        <el-form-item :label="t('用户名或邮箱')" prop="username">
           <el-input v-model="form.username" autocomplete="username" />
         </el-form-item>
-        <el-form-item label="密码" prop="password">
+        <el-form-item :label="t('密码')" prop="password">
           <el-input
             v-model="form.password"
             type="password"
@@ -466,7 +526,7 @@
           />
         </el-form-item>
         <div class="login__options">
-          <el-checkbox v-model="form.remember">记住登录状态</el-checkbox>
+          <el-checkbox v-model="form.remember">{{ t('记住登录状态') }}</el-checkbox>
         </div>
 
         <el-button
@@ -476,17 +536,21 @@
           size="large"
           @click="submit"
         >
-          登录
+          {{ t('登录') }}
         </el-button>
       </el-form>
 
       <div v-if="registrationEnabled || inviteCodeEnabled" class="login__register">
-        <span class="text-secondary">没有账号？</span>
-        <el-button link type="primary" @click="openRegister">注册</el-button>
+        <span class="text-secondary">{{ t('没有账号？') }}</span>
+        <el-button link type="primary" @click="openRegister">{{ t('注册') }}</el-button>
       </div>
     </div>
 
-    <el-dialog v-model="registerVisible" :title="`注册 ${appearance.siteName} 账号`" width="460px">
+    <el-dialog
+      v-model="registerVisible"
+      :title="t('注册 {p0} 账号', { p0: appearance.siteName })"
+      width="460px"
+    >
       <el-form
         ref="registerFormRef"
         :model="registerForm"
@@ -494,7 +558,7 @@
         label-position="top"
         @submit.prevent="showRegisterDetails ? submitRegister : sendVerifyCode"
       >
-        <el-form-item label="邮箱" prop="email">
+        <el-form-item :label="t('邮箱')" prop="email">
           <el-input
             v-model="registerForm.email"
             :disabled="Boolean(registerForm.emailVerificationToken)"
@@ -502,9 +566,9 @@
           />
           <div class="login__register-hint">{{ registrationHint }}</div>
         </el-form-item>
-        <el-form-item v-if="inviteCodeEnabled" label="邀请码">
+        <el-form-item v-if="inviteCodeEnabled" :label="t('邀请码')">
           <el-input v-model="registerForm.inviteCode" placeholder="INV-XXXX-XXXX-XXXX" />
-          <div class="login__register-hint">填写有效邀请码可直接注册。</div>
+          <div class="login__register-hint">{{ t('填写有效邀请码可直接注册。') }}</div>
         </el-form-item>
         <el-alert
           v-if="registerForm.affiliateCode"
@@ -512,7 +576,7 @@
           type="info"
           :closable="false"
           show-icon
-          :title="`已使用推荐码 ${registerForm.affiliateCode}`"
+          :title="t('已使用推荐码 {p0}', { p0: registerForm.affiliateCode })"
         />
         <el-alert
           v-if="registerForm.emailVerificationToken"
@@ -520,22 +584,22 @@
           type="success"
           :closable="false"
           show-icon
-          title="邮箱链接已验证，请补全账号信息完成注册。"
+          :title="t('邮箱链接已验证，请补全账号信息完成注册。')"
         />
-        <el-form-item v-if="showTurnstile" label="人机验证">
+        <el-form-item v-if="showTurnstile" :label="t('人机验证')">
           <div ref="turnstileContainerRef" class="login__turnstile" />
           <div v-if="!turnstileSiteKey" class="login__register-hint">
-            管理员尚未配置 Cloudflare Turnstile Site Key。
+            {{ t('管理员尚未配置 Cloudflare Turnstile Site Key。') }}
           </div>
         </el-form-item>
         <template v-if="showRegisterDetails">
-          <el-form-item label="用户名" prop="username">
+          <el-form-item :label="t('用户名')" prop="username">
             <el-input v-model="registerForm.username" autocomplete="username" />
           </el-form-item>
-          <el-form-item label="显示名">
+          <el-form-item :label="t('显示名')">
             <el-input v-model="registerForm.displayName" />
           </el-form-item>
-          <el-form-item label="密码" prop="password">
+          <el-form-item :label="t('密码')" prop="password">
             <el-input
               v-model="registerForm.password"
               type="password"
@@ -544,7 +608,7 @@
               autocomplete="new-password"
             />
           </el-form-item>
-          <el-form-item label="确认密码" prop="confirm">
+          <el-form-item :label="t('确认密码')" prop="confirm">
             <el-input
               v-model="registerForm.confirm"
               type="password"
@@ -557,7 +621,7 @@
         </template>
       </el-form>
       <template #footer>
-        <el-button @click="registerVisible = false">取消</el-button>
+        <el-button @click="registerVisible = false">{{ t('取消') }}</el-button>
         <el-button
           v-if="!showRegisterDetails"
           type="primary"
@@ -565,10 +629,10 @@
           :loading="verifyCodeSending"
           @click="sendVerifyCode"
         >
-          {{ verifyCodeCountdown > 0 ? `${verifyCodeCountdown}s` : '发送注册链接' }}
+          {{ verifyCodeCountdown > 0 ? `${verifyCodeCountdown}s` : t('发送注册链接') }}
         </el-button>
         <el-button v-else type="primary" :loading="registerLoading" @click="submitRegister">
-          注册
+          {{ t('注册') }}
         </el-button>
       </template>
     </el-dialog>
@@ -579,6 +643,11 @@
 </template>
 
 <style scoped lang="scss">
+  .login__language {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 12px;
+  }
   .login {
     min-height: 100vh;
     display: flex;

@@ -10,6 +10,7 @@
 import { createApp } from 'vue';
 import { createPinia } from 'pinia';
 import './assets/styles/global.scss';
+import './assets/styles/locale.scss';
 
 import App from './App.vue';
 import router from './router';

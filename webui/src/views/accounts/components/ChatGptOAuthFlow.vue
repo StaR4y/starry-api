@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   import { computed, onBeforeUnmount, ref, watch } from 'vue';
   import { ElMessage } from 'element-plus';
   import {
@@ -81,7 +82,7 @@
     } catch (error) {
       if (currentGeneration !== generation) return;
       phase.value = 'error';
-      errorMessage.value = error instanceof ApiError ? error.message : '无法发起 ChatGPT 授权';
+      errorMessage.value = error instanceof ApiError ? error.message : t('无法发起 ChatGPT 授权');
     }
   }
 
@@ -117,15 +118,15 @@
         return;
       }
       phase.value = 'error';
-      errorMessage.value = result.message || '授权未完成，请重新发起';
+      errorMessage.value = result.message || t('授权未完成，请重新发起');
     } catch (error) {
       if (currentGeneration !== generation || !props.active) return;
       if (error instanceof ApiError && error.code === 'CHATGPT_OAUTH_LOGIN_NOT_FOUND') {
         phase.value = 'error';
-        errorMessage.value = '授权会话已过期，请重新发起';
+        errorMessage.value = t('授权会话已过期，请重新发起');
         return;
       }
-      pollMessage.value = '状态检查暂时失败，将自动重试';
+      pollMessage.value = t('状态检查暂时失败，将自动重试');
       schedulePoll(3);
     }
   }
@@ -140,7 +141,7 @@
       }
       window.open(url.toString(), '_blank', 'noopener,noreferrer');
     } catch {
-      ElMessage.error('授权地址校验失败');
+      ElMessage.error(t('授权地址校验失败'));
     }
   }
 
@@ -149,9 +150,9 @@
     if (!code) return;
     try {
       await navigator.clipboard.writeText(code);
-      ElMessage.success('授权码已复制');
+      ElMessage.success(t('授权码已复制'));
     } catch {
-      ElMessage.error('复制失败，请手动选择授权码');
+      ElMessage.error(t('复制失败，请手动选择授权码'));
     }
   }
 
@@ -186,26 +187,35 @@
   <div class="chatgpt-oauth-flow">
     <div v-if="phase === 'prerequisite'" class="oauth-prerequisite">
       <el-icon class="oauth-prerequisite__icon" :size="32"><Lock /></el-icon>
-      <h3>通过 OpenAI 官方页面登录</h3>
+      <h3>{{ t('通过 OpenAI 官方页面登录') }}</h3>
       <p>
-        Starry API 使用 Codex 设备授权连接 ChatGPT。账号登录、密码和六位验证码都只在 auth.openai.com
-        完成。
+        {{
+          t(
+            'Starry API 使用 Codex 设备授权连接 ChatGPT。账号登录、密码和六位验证码都只在 auth.openai.com 完成。',
+          )
+        }}
       </p>
       <ol class="oauth-guide">
         <li>
-          <strong>登录 ChatGPT</strong>
-          <span>若 OpenAI 向邮箱发送六位验证码，请在随后打开的 OpenAI 官方页面填写。</span>
+          <strong>{{ t('登录 ChatGPT') }}</strong>
+          <span>{{
+            t('若 OpenAI 向邮箱发送六位验证码，请在随后打开的 OpenAI 官方页面填写。')
+          }}</span>
         </li>
         <li>
-          <strong>批准设备授权</strong>
-          <span>登录完成后，再输入本页面生成的设备授权码并确认授权。</span>
+          <strong>{{ t('批准设备授权') }}</strong>
+          <span>{{ t('登录完成后，再输入本页面生成的设备授权码并确认授权。') }}</span>
         </li>
       </ol>
       <el-alert
         type="info"
         :closable="false"
         show-icon
-        title="开始前，请在 ChatGPT「设置 → 安全」中开启 Codex 设备代码授权；工作区账号需由管理员开启。"
+        :title="
+          t(
+            '开始前，请在 ChatGPT「设置 → 安全」中开启 Codex 设备代码授权；工作区账号需由管理员开启。',
+          )
+        "
       />
       <div class="oauth-prerequisite__actions">
         <el-link
@@ -213,30 +223,30 @@
           target="_blank"
           rel="noopener noreferrer"
         >
-          查看 OpenAI 官方说明
+          {{ t('查看 OpenAI 官方说明') }}
         </el-link>
-        <el-button type="primary" @click="begin">已开启，获取设备授权码</el-button>
+        <el-button type="primary" @click="begin">{{ t('已开启，获取设备授权码') }}</el-button>
       </div>
     </div>
 
     <div v-else-if="phase === 'starting'" class="oauth-loading" aria-live="polite">
       <el-icon class="is-loading" :size="30"><Loading /></el-icon>
-      <span>正在向 OpenAI 申请设备授权码</span>
+      <span>{{ t('正在向 OpenAI 申请设备授权码') }}</span>
     </div>
 
     <div v-else-if="startResult && isPolling" class="oauth-flow">
       <div class="oauth-origin">
-        <span class="oauth-origin__label">授权站点</span>
+        <span class="oauth-origin__label">{{ t('授权站点') }}</span>
         <strong>auth.openai.com</strong>
       </div>
 
       <div class="oauth-browser-guide">
-        <strong>请在打开的 OpenAI 页面完成登录</strong>
-        <span>如收到六位验证码，请先在该页面填写；登录后再输入下方设备授权码。</span>
+        <strong>{{ t('请在打开的 OpenAI 页面完成登录') }}</strong>
+        <span>{{ t('如收到六位验证码，请先在该页面填写；登录后再输入下方设备授权码。') }}</span>
       </div>
 
-      <span class="oauth-code-label">设备授权码</span>
-      <button class="oauth-code" type="button" title="复制授权码" @click="copyCode">
+      <span class="oauth-code-label">{{ t('设备授权码') }}</span>
+      <button class="oauth-code" type="button" :title="t('复制授权码')" @click="copyCode">
         <span>{{ startResult.userCode }}</span>
         <el-icon :size="17"><CopyDocument /></el-icon>
       </button>
@@ -248,7 +258,7 @@
               <Link />
             </el-icon>
           </template>
-          打开 OpenAI 授权页面
+          {{ t('打开 OpenAI 授权页面') }}
         </el-button>
         <el-button :loading="phase === 'completing'" @click="poll()">
           <template #icon>
@@ -256,36 +266,40 @@
               <Refresh />
             </el-icon>
           </template>
-          检查授权状态
+          {{ t('检查授权状态') }}
         </el-button>
       </div>
 
       <div class="oauth-status" aria-live="polite">
         <el-icon class="is-loading"><Loading /></el-icon>
-        <span>{{ statusResult?.message || pollMessage || '等待完成浏览器授权' }}</span>
+        <span>{{ statusResult?.message || pollMessage || t('等待完成浏览器授权') }}</span>
       </div>
 
       <el-alert
         type="warning"
         :closable="false"
         show-icon
-        title="六位登录验证码与设备授权码不是同一个代码。两者都只应填写在 auth.openai.com；Starry API 不会要求你提交密码或六位验证码。"
+        :title="
+          t(
+            '六位登录验证码与设备授权码不是同一个代码。两者都只应填写在 auth.openai.com；Starry API 不会要求你提交密码或六位验证码。',
+          )
+        "
       />
     </div>
 
     <div v-else-if="phase === 'success'" class="oauth-result oauth-result--success">
       <el-icon :size="38"><CircleCheckFilled /></el-icon>
-      <h3>{{ statusResult?.message || '授权完成' }}</h3>
+      <h3>{{ statusResult?.message || t('授权完成') }}</h3>
       <p>{{ statusResult?.account?.email || statusResult?.account?.accountId }}</p>
     </div>
 
     <div v-else-if="phase === 'error'" class="oauth-result oauth-result--error">
       <el-icon :size="34"><WarningFilled /></el-icon>
-      <h3>授权未完成</h3>
+      <h3>{{ t('授权未完成') }}</h3>
       <p>{{ errorMessage }}</p>
       <div class="oauth-result__actions">
-        <el-button @click="showPrerequisite">查看授权说明</el-button>
-        <el-button type="primary" plain @click="begin">重新获取设备授权码</el-button>
+        <el-button @click="showPrerequisite">{{ t('查看授权说明') }}</el-button>
+        <el-button type="primary" plain @click="begin">{{ t('重新获取设备授权码') }}</el-button>
       </div>
     </div>
   </div>

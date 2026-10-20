@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   /**
    * 批量导入账号对话框。
    *
@@ -64,17 +65,19 @@
       );
       const invalid = parsed.find((item) => !isImportPayload(item.payload));
       if (invalid) {
-        throw new Error(`${invalid.name} 不是可识别的账号导入 JSON`);
+        throw new Error(t('{p0} 不是可识别的账号导入 JSON', { p0: invalid.name }));
       }
       const next = [...importFilePayloads.value, ...parsed];
       importFilePayloads.value = next;
       importFileNames.value = next.map((item) => item.name);
       importContent.value = next.length === 1 ? JSON.stringify(next[0].payload, null, 2) : '';
       importResult.value = null;
-      ElMessage.success(`已加入 ${files.length} 个 JSON 文件，待导入 ${next.length} 个`);
+      ElMessage.success(
+        t('已加入 {p0} 个 JSON 文件，待导入 {p1} 个', { p0: files.length, p1: next.length }),
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      ElMessage.error(`JSON 文件解析失败：${message}`);
+      ElMessage.error(t('JSON 文件解析失败：{p0}', { p0: message }));
     }
   }
 
@@ -101,7 +104,7 @@
       (file) => file.type === 'application/json' || file.name.endsWith('.json'),
     );
     if (files.length === 0) {
-      ElMessage.warning('请拖拽有效的 JSON 配置文件');
+      ElMessage.warning(t('请拖拽有效的 JSON 配置文件'));
       return;
     }
     await processFiles(files);
@@ -123,7 +126,7 @@
     try {
       parsed = JSON.parse(importContent.value);
     } catch {
-      ElMessage.error('JSON 格式错误');
+      ElMessage.error(t('JSON 格式错误'));
       return;
     }
     const payload = Array.isArray(parsed)
@@ -132,7 +135,7 @@
         ? { ...(parsed as Record<string, unknown>), upsert: importUpsert.value }
         : null;
     if (!isImportPayload(payload)) {
-      ElMessage.error('数据应为 Kiro / OpenAI Codex / OpenAI-API / Anthropic 导入 JSON');
+      ElMessage.error(t('数据应为 Kiro / OpenAI Codex / OpenAI-API / Anthropic 导入 JSON'));
       return;
     }
 
@@ -141,7 +144,12 @@
     try {
       importResult.value = await accountsApi.importBatch(importPayload);
       ElMessage.success(
-        `导入完成：新建 ${importResult.value.created} / 更新 ${importResult.value.updated} / 跳过 ${importResult.value.skipped} / 失败 ${importResult.value.failed}`,
+        t('导入完成：新建 {p0} / 更新 {p1} / 跳过 {p2} / 失败 {p3}', {
+          p0: importResult.value.created,
+          p1: importResult.value.updated,
+          p2: importResult.value.skipped,
+          p3: importResult.value.failed,
+        }),
       );
       emit('imported');
     } catch (err) {
@@ -195,7 +203,12 @@
         failed,
         items,
       };
-      const message = `导入完成：新建 ${created} / 更新 ${updated} / 跳过 ${skipped} / 失败 ${failed}`;
+      const message = t('导入完成：新建 {p0} / 更新 {p1} / 跳过 {p2} / 失败 {p3}', {
+        p0: created,
+        p1: updated,
+        p2: skipped,
+        p3: failed,
+      });
       if (failed > 0) {
         ElMessage.warning(message);
       } else {
@@ -255,13 +268,16 @@
 <template>
   <el-dialog
     :model-value="visible"
-    title="批量导入账号"
+    :title="t('批量导入账号')"
     width="720px"
     @update:model-value="handleVisibleChange"
   >
     <div class="text-secondary mt-8 mb-8">
-      上传或粘贴 Kiro Account Manager、OpenAI Codex token、OpenAI-compatible / Anthropic API Key
-      配置 JSON，或账号数组 /
+      {{
+        t(
+          '上传或粘贴 Kiro Account Manager、OpenAI Codex token、OpenAI-compatible / Anthropic API Key 配置 JSON，或账号数组 /',
+        )
+      }}
       <span class="mono">{ "accounts": [...] }</span>
     </div>
 
@@ -285,14 +301,20 @@
 
       <div v-if="importFileNames.length === 0" class="drop-zone-prompt">
         <AppIcon name="upload" width="36" height="36" class="drop-icon" />
-        <div class="prompt-text">将 JSON 配置文件拖拽到此处，或<span>点击上传</span></div>
-        <div class="prompt-hint">支持单个或多个 .json 配置文件</div>
+        <div class="prompt-text">
+          {{ t('将 JSON 配置文件拖拽到此处，或') }}<span>{{ t('点击上传') }}</span>
+        </div>
+        <div class="prompt-hint">{{ t('支持单个或多个 .json 配置文件') }}</div>
       </div>
       <div v-else class="drop-zone-files" @click.stop>
         <div class="files-header">
           <AppIcon name="check-circle" width="18" height="18" class="success-icon" />
-          <span class="files-title">已选择 {{ importFileNames.length }} 个 JSON 文件</span>
-          <el-button size="small" type="danger" link @click="clearImportFiles">清除文件</el-button>
+          <span class="files-title">{{ t('已选择') }} {{ importFileNames.length }} {{ t('个 JSON 文件') }}</span>
+          <el-button size="small" type="danger" link @click="clearImportFiles">
+            {{
+              t('清除文件')
+            }}
+          </el-button>
         </div>
         <div class="files-list">
           <div v-for="name in importFileNames" :key="name" class="file-item">
@@ -303,9 +325,7 @@
       </div>
     </div>
 
-    <div class="text-secondary mt-16 mb-8">
-      或者，在此直接粘贴 JSON 文本：
-    </div>
+    <div class="text-secondary mt-16 mb-8">{{ t('或者，在此直接粘贴 JSON 文本：') }}</div>
     <el-input
       v-model="importContent"
       type="textarea"
@@ -314,29 +334,29 @@
       @input="clearImportFiles"
     />
     <el-checkbox v-model="importUpsert" class="mt-16">
-      已存在邮箱时覆盖更新旧账号（谨慎开启）
+      {{ t('已存在邮箱时覆盖更新旧账号（谨慎开启）') }}
     </el-checkbox>
 
     <div v-if="importResult" class="import-summary glass-panel mt-16">
       <div class="flex gap-16">
-        <div>总计 {{ importResult.total }}</div>
-        <div>新建 {{ importResult.created }}</div>
-        <div>更新 {{ importResult.updated }}</div>
-        <div>跳过 {{ importResult.skipped }}</div>
-        <div>失败 {{ importResult.failed }}</div>
+        <div>{{ t('总计') }} {{ importResult.total }}</div>
+        <div>{{ t('新建') }} {{ importResult.created }}</div>
+        <div>{{ t('更新') }} {{ importResult.updated }}</div>
+        <div>{{ t('跳过') }} {{ importResult.skipped }}</div>
+        <div>{{ t('失败') }} {{ importResult.failed }}</div>
       </div>
       <el-table :data="importResult.items" size="small" class="mt-8" max-height="240">
         <el-table-column prop="index" label="#" width="60" />
-        <el-table-column prop="accountId" label="账号 ID" min-width="180" />
-        <el-table-column prop="status" label="结果" width="100" />
-        <el-table-column prop="message" label="信息" />
+        <el-table-column prop="accountId" :label="t('账号 ID')" min-width="180" />
+        <el-table-column prop="status" :label="t('结果')" width="100" />
+        <el-table-column prop="message" :label="t('信息')" />
       </el-table>
     </div>
 
     <template #footer>
-      <el-button @click="visibleValue = false">关闭</el-button>
+      <el-button @click="visibleValue = false">{{ t('关闭') }}</el-button>
       <el-button type="primary" :loading="importSubmitting" @click="submitImport">
-        开始导入
+        {{ t('开始导入') }}
       </el-button>
     </template>
   </el-dialog>

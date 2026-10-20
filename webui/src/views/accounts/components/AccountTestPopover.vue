@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   /**
    * 账号列表操作列内嵌的单账号测试弹层。
    *
@@ -55,24 +56,24 @@
         <template #icon>
           <AppIcon name="play" width="12" height="12" class="trigger-icon" />
         </template>
-        测试
+        {{ t('测试') }}
       </el-button>
     </template>
     <div class="row-test-panel">
       <div class="row-test-panel__title">
-        <span>账号测试</span>
+        <span>{{ t('账号测试') }}</span>
         <el-tag v-if="latestTest" :type="testStatusType(latestTest.status)" effect="light" round>
           {{ latestTest.status }}
         </el-tag>
       </div>
       <el-form label-position="top" size="small">
-        <el-form-item label="模型">
+        <el-form-item :label="t('模型')">
           <el-select
             v-model="modelValue"
             filterable
             allow-create
             default-first-option
-            placeholder="选择或输入模型 ID"
+            :placeholder="t('选择或输入模型 ID')"
             class="w-full"
             @focus="emit('ensure-model')"
           >
@@ -84,20 +85,20 @@
             />
           </el-select>
         </el-form-item>
-        <el-form-item label="提示词">
+        <el-form-item :label="t('提示词')">
           <el-input v-model="promptValue" />
         </el-form-item>
         <div class="row-test-panel__checks">
-          <el-checkbox v-model="onlyEnabledValue">仅测试当前可用账号</el-checkbox>
-          <el-checkbox v-model="updateStatusValue">测试后自动更新账号状态</el-checkbox>
+          <el-checkbox v-model="onlyEnabledValue">{{ t('仅测试当前可用账号') }}</el-checkbox>
+          <el-checkbox v-model="updateStatusValue">{{ t('测试后自动更新账号状态') }}</el-checkbox>
         </div>
       </el-form>
       <div class="row-test-panel__actions">
         <el-button size="small" type="primary" :loading="testing" @click="emit('test')">
-          自动测试
+          {{ t('自动测试') }}
         </el-button>
         <el-button size="small" :disabled="!latestTest" @click="emit('show-detail')">
-          查看结果
+          {{ t('查看结果') }}
         </el-button>
       </div>
     </div>

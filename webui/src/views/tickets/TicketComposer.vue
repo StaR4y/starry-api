@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   import { computed, ref } from 'vue';
   import { ElMessage } from 'element-plus';
   import { Paperclip, Close, Promotion } from '@element-plus/icons-vue';
@@ -31,9 +32,9 @@
       return;
     }
     const selected = Array.from(input.files ?? []);
-    if (selected.length + files.value.length > 3) ElMessage.warning('每次最多上传 3 个附件');
+    if (selected.length + files.value.length > 3) ElMessage.warning(t('每次最多上传 3 个附件'));
     else if (selected.some((file) => file.size === 0 || file.size > 2 * 1024 * 1024))
-      ElMessage.warning('每个附件需大于 0 字节且不超过 2 MB');
+      ElMessage.warning(t('每个附件需大于 0 字节且不超过 2 MB'));
     else files.value.push(...selected);
     input.value = '';
   }
@@ -67,18 +68,18 @@
     @submit.prevent="submit"
   >
     <div v-if="creating" class="composer__fields">
-      <el-form-item label="标题" required>
+      <el-form-item :label="t('标题')" required>
         <el-input
           v-model="title"
-          aria-label="工单标题"
-          placeholder="简要概括遇到的问题"
+          :aria-label="t('工单标题')"
+          :placeholder="t('简要概括遇到的问题')"
           :maxlength="160"
           show-word-limit
           :disabled="busy"
         />
       </el-form-item>
-      <el-form-item label="问题分类">
-        <el-select v-model="category" aria-label="问题分类" :disabled="busy">
+      <el-form-item :label="t('问题分类')">
+        <el-select v-model="category" :aria-label="t('问题分类')" :disabled="busy">
           <el-option
             v-for="(label, value) in ticketCategories"
             :key="value"
@@ -88,43 +89,43 @@
         </el-select>
       </el-form-item>
     </div>
-    <el-form-item :label="creating ? '问题描述' : '回复内容'" required>
+    <el-form-item :label="creating ? t('问题描述') : t('回复内容')" required>
       <el-input
         v-model="body"
         type="textarea"
-        :aria-label="creating ? '问题描述' : '回复内容'"
+        :aria-label="creating ? t('问题描述') : t('回复内容')"
         :autosize="creating ? { minRows: 12, maxRows: 24 } : { minRows: 6, maxRows: 18 }"
         :placeholder="
-          creating ? '问题发生时间、相关请求与错误信息…' : '补充问题详情或回复处理结果…'
+          creating ? t('问题发生时间、相关请求与错误信息…') : t('补充问题详情或回复处理结果…')
         "
         :maxlength="20000"
         show-word-limit
         :disabled="busy"
       />
     </el-form-item>
-    <div v-if="files.length" class="composer__files" aria-label="待上传附件">
+    <div v-if="files.length" class="composer__files" :aria-label="t('待上传附件')">
       <div v-for="(file, index) in files" :key="index" class="composer__file">
         <el-icon><Paperclip /></el-icon><span>{{ file.name }}</span><small>{{ Math.ceil(file.size / 1024) }} KB</small><el-button
           :icon="Close"
           text
           :disabled="busy"
-          :aria-label="`移除 ${file.name}`"
+          :aria-label="t('移除 {p0}', { p0: file.name })"
           @click="files.splice(index, 1)"
         />
       </div>
     </div>
     <div class="composer__actions">
       <input ref="picker" type="file" multiple hidden @change="addFiles">
-      <el-tooltip content="最多 3 个附件，每个不超过 2 MB">
+      <el-tooltip :content="t('最多 3 个附件，每个不超过 2 MB')">
         <el-button :icon="Paperclip" :disabled="busy || files.length >= 3" @click="picker?.click()">
-          添加附件
+          {{ t('添加附件') }}
         </el-button>
       </el-tooltip>
       <div class="composer__send">
         <el-select
           v-if="admin && !creating"
           v-model="status"
-          aria-label="回复后的状态"
+          :aria-label="t('回复后的状态')"
           :disabled="busy"
         >
           <el-option
@@ -141,7 +142,7 @@
           :disabled="busy || !body.trim() || (creating && !title.trim())"
           native-type="submit"
         >
-          {{ creating ? '提交工单' : '发送回复' }}
+          {{ creating ? t('提交工单') : t('发送回复') }}
         </el-button>
       </div>
     </div>

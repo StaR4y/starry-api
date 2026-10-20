@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   /** 站点品牌、主题色与控制台背景。 */
   import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
   import { ElMessage, ElMessageBox } from 'element-plus';
@@ -77,7 +78,7 @@
         }),
         chrome,
       );
-      ElMessage.success('外观设置已保存');
+      ElMessage.success(t('外观设置已保存'));
     } finally {
       saving.value = false;
     }
@@ -86,9 +87,17 @@
   async function resetAll() {
     try {
       await ElMessageBox.confirm(
-        '将恢复站点名称、Logo、配色、背景和玻璃参数为出厂默认，已上传的图片会被移除。',
-        '恢复默认主题',
-        { type: 'warning', confirmButtonText: '恢复默认', cancelButtonText: '取消' },
+        t('将恢复站点名称、Logo、配色、背景和玻璃参数为出厂默认，已上传的图片会被移除。'),
+        t('恢复默认主题'),
+        {
+          type: 'warning',
+          get confirmButtonText() {
+            return t('恢复默认');
+          },
+          get cancelButtonText() {
+            return t('取消');
+          },
+        },
       );
     } catch {
       return;
@@ -96,18 +105,21 @@
     resetting.value = true;
     try {
       applyForm(await appearanceApi.reset());
-      ElMessage.success('已恢复为默认主题');
+      ElMessage.success(t('已恢复为默认主题'));
     } finally {
       resetting.value = false;
     }
   }
 
-  async function uploadAsset(kind: 'logo' | 'favicon' | 'background', options: UploadRequestOptions) {
+  async function uploadAsset(
+    kind: 'logo' | 'favicon' | 'background',
+    options: UploadRequestOptions,
+  ) {
     uploading.value = kind;
     try {
       const file = await prepareBrandingImage(options.file as File, kind);
       applyForm(await appearanceApi.upload(kind, file));
-      ElMessage.success(kind === 'background' ? '背景图已更新' : '图片已更新');
+      ElMessage.success(kind === 'background' ? t('背景图已更新') : t('图片已更新'));
     } catch (error) {
       if (error instanceof Error && error.message && !('status' in error)) {
         ElMessage.error(error.message);
@@ -132,22 +144,35 @@
 </script>
 
 <template>
-  <PageSection title="UI 自定义" subtitle="内容与界面" :icon="Brush">
+  <PageSection :title="t('UI 自定义')" :subtitle="t('内容与界面')" :icon="Brush">
     <template #actions>
-      <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-      <el-button :icon="RefreshLeft" :loading="resetting" @click="resetAll">恢复默认</el-button>
-      <el-button type="primary" :icon="Check" :loading="saving" @click="save">保存</el-button>
+      <el-button :icon="Refresh" :loading="loading" @click="load">{{ t('刷新') }}</el-button>
+      <el-button :icon="RefreshLeft" :loading="resetting" @click="resetAll">
+        {{
+          t('恢复默认')
+        }}
+      </el-button>
+      <el-button type="primary" :icon="Check" :loading="saving" @click="save">
+        {{
+          t('保存')
+        }}
+      </el-button>
     </template>
 
     <el-skeleton v-if="loading" :rows="8" animated />
     <el-form v-else :model="form" label-position="top" class="smtp-form">
       <section class="smtp-section">
-        <h3>站点信息</h3>
+        <h3>{{ t('站点信息') }}</h3>
         <div class="smtp-grid">
-          <el-form-item label="站点名称">
-            <el-input v-model="form.siteName" maxlength="40" show-word-limit placeholder="Starry API" />
+          <el-form-item :label="t('站点名称')">
+            <el-input
+              v-model="form.siteName"
+              maxlength="40"
+              show-word-limit
+              placeholder="Starry API"
+            />
           </el-form-item>
-          <el-form-item label="站点 Logo">
+          <el-form-item :label="t('站点 Logo')">
             <div class="asset-field">
               <SiteBrandLogo class="asset-field__thumb" />
               <el-upload
@@ -155,18 +180,18 @@
                 accept="image/png,image/jpeg,image/webp"
                 :http-request="(options: UploadRequestOptions) => uploadAsset('logo', options)"
               >
-                <el-button :loading="uploading === 'logo'">上传</el-button>
+                <el-button :loading="uploading === 'logo'">{{ t('上传') }}</el-button>
               </el-upload>
               <el-button
                 v-if="form.logoUrl"
                 :disabled="uploading === 'logo'"
                 @click="removeAsset('logo')"
               >
-                清除
+                {{ t('清除') }}
               </el-button>
             </div>
           </el-form-item>
-          <el-form-item label="浏览器图标">
+          <el-form-item :label="t('浏览器图标')">
             <div class="asset-field">
               <img
                 v-if="form.faviconUrl"
@@ -179,14 +204,14 @@
                 accept="image/png,image/jpeg,image/webp"
                 :http-request="(options: UploadRequestOptions) => uploadAsset('favicon', options)"
               >
-                <el-button :loading="uploading === 'favicon'">上传</el-button>
+                <el-button :loading="uploading === 'favicon'">{{ t('上传') }}</el-button>
               </el-upload>
               <el-button
                 v-if="form.faviconUrl"
                 :disabled="uploading === 'favicon'"
                 @click="removeAsset('favicon')"
               >
-                清除
+                {{ t('清除') }}
               </el-button>
             </div>
           </el-form-item>
@@ -194,9 +219,9 @@
       </section>
 
       <section class="smtp-section">
-        <h3>界面风格</h3>
-        <p class="chrome-hint">控制台列表页的页眉与卡片语言。登录页不受此项影响。</p>
-        <div class="chrome-picker" role="radiogroup" aria-label="界面风格">
+        <h3>{{ t('界面风格') }}</h3>
+        <p class="chrome-hint">{{ t('控制台列表页的页眉与卡片语言。登录页不受此项影响。') }}</p>
+        <div class="chrome-picker" role="radiogroup" :aria-label="t('界面风格')">
           <button
             type="button"
             class="chrome-option"
@@ -208,8 +233,8 @@
             <span class="chrome-option__preview is-classic" aria-hidden="true">
               <i /><i /><i />
             </span>
-            <strong>磨砂玻璃</strong>
-            <span>原来的卡片页眉、玻璃面板与指标条</span>
+            <strong>{{ t('磨砂玻璃') }}</strong>
+            <span>{{ t('原来的卡片页眉、玻璃面板与指标条') }}</span>
           </button>
           <button
             type="button"
@@ -222,30 +247,30 @@
             <span class="chrome-option__preview is-editorial" aria-hidden="true">
               <i /><b /><b />
             </span>
-            <strong>线框编辑</strong>
-            <span>API Key 同款图标页眉、分割指标条与通透表格</span>
+            <strong>{{ t('线框编辑') }}</strong>
+            <span>{{ t('API Key 同款图标页眉、分割指标条与通透表格') }}</span>
           </button>
         </div>
       </section>
 
       <section class="smtp-section">
-        <h3>三色渐变</h3>
+        <h3>{{ t('三色渐变') }}</h3>
         <div class="smtp-grid smtp-grid--3">
-          <el-form-item label="起始色">
+          <el-form-item :label="t('起始色')">
             <el-input v-model="form.primary" maxlength="7">
               <template #prefix>
                 <el-color-picker v-model="form.primary" color-format="hex" />
               </template>
             </el-input>
           </el-form-item>
-          <el-form-item label="中间色">
+          <el-form-item :label="t('中间色')">
             <el-input v-model="form.primaryMid" maxlength="7">
               <template #prefix>
                 <el-color-picker v-model="form.primaryMid" color-format="hex" />
               </template>
             </el-input>
           </el-form-item>
-          <el-form-item label="结束色">
+          <el-form-item :label="t('结束色')">
             <el-input v-model="form.accent" maxlength="7">
               <template #prefix>
                 <el-color-picker v-model="form.accent" color-format="hex" />
@@ -263,57 +288,57 @@
           :aria-expanded="detailColorsOpen"
           @click="detailColorsOpen = !detailColorsOpen"
         >
-          <h3>详细配色</h3>
-          <span class="section-toggle__hint">{{ detailColorsOpen ? '收起' : '展开' }}</span>
+          <h3>{{ t('详细配色') }}</h3>
+          <span class="section-toggle__hint">{{ detailColorsOpen ? t('收起') : t('展开') }}</span>
           <el-icon class="section-toggle__arrow" :class="{ 'is-open': detailColorsOpen }">
             <ArrowDown />
           </el-icon>
         </button>
         <el-collapse-transition>
           <div v-show="detailColorsOpen" class="smtp-grid smtp-grid--3">
-            <el-form-item label="成功">
+            <el-form-item :label="t('成功')">
               <el-input v-model="form.success" maxlength="7">
                 <template #prefix>
                   <el-color-picker v-model="form.success" color-format="hex" />
                 </template>
               </el-input>
             </el-form-item>
-            <el-form-item label="警告">
+            <el-form-item :label="t('警告')">
               <el-input v-model="form.warning" maxlength="7">
                 <template #prefix>
                   <el-color-picker v-model="form.warning" color-format="hex" />
                 </template>
               </el-input>
             </el-form-item>
-            <el-form-item label="危险">
+            <el-form-item :label="t('危险')">
               <el-input v-model="form.danger" maxlength="7">
                 <template #prefix>
                   <el-color-picker v-model="form.danger" color-format="hex" />
                 </template>
               </el-input>
             </el-form-item>
-            <el-form-item label="顶栏">
+            <el-form-item :label="t('顶栏')">
               <el-input v-model="form.header" maxlength="7">
                 <template #prefix>
                   <el-color-picker v-model="form.header" color-format="hex" />
                 </template>
               </el-input>
             </el-form-item>
-            <el-form-item label="正文">
+            <el-form-item :label="t('正文')">
               <el-input v-model="form.text" maxlength="7">
                 <template #prefix>
                   <el-color-picker v-model="form.text" color-format="hex" />
                 </template>
               </el-input>
             </el-form-item>
-            <el-form-item label="次要文字">
+            <el-form-item :label="t('次要文字')">
               <el-input v-model="form.textSecondary" maxlength="7">
                 <template #prefix>
                   <el-color-picker v-model="form.textSecondary" color-format="hex" />
                 </template>
               </el-input>
             </el-form-item>
-            <el-form-item label="弱化文字">
+            <el-form-item :label="t('弱化文字')">
               <el-input v-model="form.textMuted" maxlength="7">
                 <template #prefix>
                   <el-color-picker v-model="form.textMuted" color-format="hex" />
@@ -325,27 +350,29 @@
       </section>
 
       <section class="smtp-section">
-        <h3>背景与玻璃</h3>
+        <h3>{{ t('背景与玻璃') }}</h3>
         <div class="smtp-grid">
-          <el-form-item label="控制台背景图">
+          <el-form-item :label="t('控制台背景图')">
             <div class="asset-field">
               <el-upload
                 :show-file-list="false"
                 accept="image/png,image/jpeg,image/webp"
-                :http-request="(options: UploadRequestOptions) => uploadAsset('background', options)"
+                :http-request="
+                  (options: UploadRequestOptions) => uploadAsset('background', options)
+                "
               >
-                <el-button :loading="uploading === 'background'">上传</el-button>
+                <el-button :loading="uploading === 'background'">{{ t('上传') }}</el-button>
               </el-upload>
               <el-button
                 v-if="form.backgroundImageUrl"
                 :disabled="uploading === 'background'"
                 @click="removeAsset('background')"
               >
-                清除
+                {{ t('清除') }}
               </el-button>
             </div>
           </el-form-item>
-          <el-form-item :label="`背景模糊 ${form.backgroundBlurPx}px`">
+          <el-form-item :label="t('背景模糊 {p0}px', { p0: form.backgroundBlurPx })">
             <el-slider
               v-model="form.backgroundBlurPx"
               :min="0"
@@ -353,13 +380,17 @@
               :disabled="!form.backgroundImageUrl"
             />
           </el-form-item>
-          <el-form-item :label="`左侧分类栏透明度 ${Math.round(form.sidebarOpacity * 100)}%`">
+          <el-form-item
+            :label="t('左侧分类栏透明度 {p0}%', { p0: Math.round(form.sidebarOpacity * 100) })"
+          >
             <el-slider v-model="form.sidebarOpacity" :min="0.15" :max="1" :step="0.01" />
           </el-form-item>
-          <el-form-item :label="`面板透明度 ${Math.round(form.surfaceOpacity * 100)}%`">
+          <el-form-item
+            :label="t('面板透明度 {p0}%', { p0: Math.round(form.surfaceOpacity * 100) })"
+          >
             <el-slider v-model="form.surfaceOpacity" :min="0.2" :max="0.95" :step="0.01" />
           </el-form-item>
-          <el-form-item :label="`模糊程度 ${form.blurPx}px`">
+          <el-form-item :label="t('模糊程度 {p0}px', { p0: form.blurPx })">
             <el-slider v-model="form.blurPx" :min="4" :max="48" />
           </el-form-item>
         </div>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { locale, t } from '@/i18n';
   /**
    * 新建 / 编辑账号对话框。
    *
@@ -60,8 +61,18 @@
   let allocationPolicyRequest = 0;
 
   const createMethodOptions = [
-    { label: '手动凭证', value: 'credentials' },
-    { label: 'ChatGPT 浏览器授权', value: 'chatgpt' },
+    {
+      get label() {
+        return t('手动凭证');
+      },
+      value: 'credentials',
+    },
+    {
+      get label() {
+        return t('ChatGPT 浏览器授权');
+      },
+      value: 'chatgpt',
+    },
   ];
 
   // 与后端 DTO 字段一致；可选字段使用空字符串占位，提交时再清洗
@@ -132,36 +143,32 @@
   );
   const usesSessionLimit = computed(() => {
     const provider = normalized(form.provider);
-    return !(
-      isOpenAiApiKeyForm.value ||
-      isDeepSeekApiKeyForm.value ||
-      provider === 'codex'
-    );
+    return !(isOpenAiApiKeyForm.value || isDeepSeekApiKeyForm.value || provider === 'codex');
   });
   const accessTokenLabel = computed(() => {
-    const suffix = props.mode === 'edit' ? '（留空则不修改）' : '';
+    const suffix = props.mode === 'edit' ? t('（留空则不修改）') : '';
     return isApiKeyForm.value ? `API Key${suffix}` : `Access Token${suffix}`;
   });
   const accessTokenPlaceholder = computed(() => {
-    if (isDeepSeekApiKeyForm.value) return '输入 DeepSeek API Key，如 sk-...';
-    if (isAnthropicApiKeyForm.value) return '输入 Anthropic / Claude API Key，如 sk-ant-...';
-    return isOpenAiApiKeyForm.value ? '输入上游网站 API Key，如 sk-...' : '输入 Access Token';
+    if (isDeepSeekApiKeyForm.value) return t('输入 DeepSeek API Key，如 sk-...');
+    if (isAnthropicApiKeyForm.value) return t('输入 Anthropic / Claude API Key，如 sk-ant-...');
+    return isOpenAiApiKeyForm.value ? t('输入上游网站 API Key，如 sk-...') : t('输入 Access Token');
   });
   const baseUrlLabel = computed(() => {
     if (isDeepSeekApiKeyForm.value) return 'DeepSeek API Base URL';
-    if (isOpenAiCompatibleForm.value) return '第三方 Base URL';
+    if (isOpenAiCompatibleForm.value) return t('第三方 Base URL');
     if (isAnthropicApiKeyForm.value) return 'Anthropic Base URL';
     return 'Base URL';
   });
   const baseUrlPlaceholder = computed(() => {
-    if (isDeepSeekApiKeyForm.value) return `默认 ${DEEPSEEK_DEFAULT_BASE_URL}`;
+    if (isDeepSeekApiKeyForm.value) return t('默认 {p0}', { p0: DEEPSEEK_DEFAULT_BASE_URL });
     if (isOpenAiCompatibleForm.value) {
-      return '例如 https://joystar.cc、https://api.deepseek.com 或 https://openrouter.ai/api/v1';
+      return t('例如 https://joystar.cc、https://api.deepseek.com 或 https://openrouter.ai/api/v1');
     }
     if (isAnthropicApiKeyForm.value) {
-      return '默认 https://api.anthropic.com/v1，也可填第三方 Anthropic 兼容地址';
+      return t('默认 https://api.anthropic.com/v1，也可填第三方 Anthropic 兼容地址');
     }
-    return '默认 https://api.openai.com/v1';
+    return t('默认 https://api.openai.com/v1');
   });
 
   const rules: FormRules = {
@@ -170,7 +177,7 @@
         validator: (_rule, value, callback) => {
           const text = typeof value === 'string' ? value.trim() : '';
           if (props.mode === 'create' && !text) {
-            callback(new Error('API Key / accessToken 必填'));
+            callback(new Error(t('API Key / accessToken 必填')));
             return;
           }
           callback();
@@ -183,11 +190,11 @@
         validator: (_rule, value, callback) => {
           const text = typeof value === 'string' ? value.trim() : '';
           if (isOpenAiCompatibleForm.value && !text) {
-            callback(new Error('第三方 API Key 账号必须填写 Base URL'));
+            callback(new Error(t('第三方 API Key 账号必须填写 Base URL')));
             return;
           }
           if (text && !/^https?:\/\//i.test(text)) {
-            callback(new Error('Base URL 必须以 http:// 或 https:// 开头'));
+            callback(new Error(t('Base URL 必须以 http:// 或 https:// 开头')));
             return;
           }
           callback();
@@ -199,7 +206,7 @@
       {
         validator: (_rule, _value, callback) => {
           if (isOpenAiCompatibleForm.value && !form.catalogVendor.trim()) {
-            callback(new Error('请选择支持 OpenAI 兼容协议的厂商分类'));
+            callback(new Error(t('请选择支持 OpenAI 兼容协议的厂商分类')));
             return;
           }
           callback();
@@ -266,7 +273,7 @@
       });
     } catch {
       if (request === allocationPolicyRequest) {
-        ElMessage.error('账号分配策略加载失败');
+        ElMessage.error(t('账号分配策略加载失败'));
       }
     } finally {
       if (request === allocationPolicyRequest) {
@@ -284,8 +291,18 @@
 
   const providerOptions = [
     { label: 'BuilderID / Kiro', value: 'BuilderID' },
-    { label: 'OpenAI 官方 API Key', value: 'OpenAI' },
-    { label: '第三方 OpenAI 兼容 API Key', value: OPENAI_COMPATIBLE_PROVIDER },
+    {
+      get label() {
+        return t('OpenAI 官方 API Key');
+      },
+      value: 'OpenAI',
+    },
+    {
+      get label() {
+        return t('第三方 OpenAI 兼容 API Key');
+      },
+      value: OPENAI_COMPATIBLE_PROVIDER,
+    },
     { label: 'Anthropic / Claude API Key', value: ANTHROPIC_PROVIDER },
     { label: 'DeepSeek API Key', value: DEEPSEEK_PROVIDER },
   ];
@@ -484,7 +501,7 @@
         const { catalogVendor: _catalogVendor, ...createFields } = form;
         const payload = compact({ ...createFields }) as CreateAccountRequest;
         await accountsApi.create(payload);
-        ElMessage.success('账号已创建');
+        ElMessage.success(t('账号已创建'));
       } else if (props.account) {
         const {
           accessToken,
@@ -515,7 +532,7 @@
             policyPayload,
           );
         }
-        ElMessage.success('账号已更新');
+        ElMessage.success(t('账号已更新'));
       }
       visibleValue.value = false;
       emit('saved');
@@ -530,12 +547,24 @@
 
   function lifecycleLabel(state: string | null | undefined) {
     const labels: Record<string, string> = {
-      WARMING: '预热中',
-      HEALTHY: '健康',
-      DEGRADED: '性能下降',
-      COOLDOWN: '冷却中',
-      QUARANTINED: '已隔离',
-      DISABLED: '已停用',
+      get WARMING() {
+        return t('预热中');
+      },
+      get HEALTHY() {
+        return t('健康');
+      },
+      get DEGRADED() {
+        return t('性能下降');
+      },
+      get COOLDOWN() {
+        return t('冷却中');
+      },
+      get QUARANTINED() {
+        return t('已隔离');
+      },
+      get DISABLED() {
+        return t('已停用');
+      },
     };
     return labels[state ?? ''] ?? state ?? '-';
   }
@@ -548,9 +577,10 @@
   }
 
   function compactNumber(value: number | null | undefined) {
-    return new Intl.NumberFormat('zh-CN', { notation: 'compact', maximumFractionDigits: 1 }).format(
-      value ?? 0,
-    );
+    return new Intl.NumberFormat(locale.value, {
+      notation: 'compact',
+      maximumFractionDigits: 1,
+    }).format(value ?? 0);
   }
 </script>
 
@@ -558,12 +588,12 @@
   <el-dialog
     v-model="visibleValue"
     class="account-form-dialog"
-    :title="mode === 'create' ? '新建账号' : '编辑账号'"
+    :title="mode === 'create' ? t('新建账号') : t('编辑账号')"
     width="min(780px, calc(100vw - 32px))"
     destroy-on-close
   >
     <div v-if="mode === 'create'" class="create-method-switch">
-      <span class="create-method-switch__label">添加方式</span>
+      <span class="create-method-switch__label">{{ t('添加方式') }}</span>
       <el-segmented v-model="createMethod" :options="createMethodOptions" />
     </div>
 
@@ -580,7 +610,11 @@
         type="info"
         show-icon
         :closable="false"
-        title="请先选择你在模型管理中自行添加、且使用 OpenAI 兼容协议的厂商。账号类型会显示该厂商当时配置的图标、名称和配色，测试时只能选择该厂商已配置的模型 ID。填写站点根地址时会自动使用 /v1。"
+        :title="
+          t(
+            '请先选择你在模型管理中自行添加、且使用 OpenAI 兼容协议的厂商。账号类型会显示该厂商当时配置的图标、名称和配色，测试时只能选择该厂商已配置的模型 ID。填写站点根地址时会自动使用 /v1。',
+          )
+        "
       />
       <el-alert
         v-else-if="isDeepSeekApiKeyForm"
@@ -588,7 +622,11 @@
         type="info"
         show-icon
         :closable="false"
-        title="DeepSeek API Key 账号使用官方 OpenAI 兼容接口；系统已配置 https://api.deepseek.com/v1，无需手动填写 Base URL。可直接使用 deepseek-v4-flash 或 deepseek-v4-pro 模型 ID。"
+        :title="
+          t(
+            'DeepSeek API Key 账号使用官方 OpenAI 兼容接口；系统已配置 https://api.deepseek.com/v1，无需手动填写 Base URL。可直接使用 deepseek-v4-flash 或 deepseek-v4-pro 模型 ID。',
+          )
+        "
       />
       <el-alert
         v-else-if="isAnthropicApiKeyForm"
@@ -596,27 +634,31 @@
         type="info"
         show-icon
         :closable="false"
-        title="Anthropic API Key 账号会按原生 Messages API 调用 Base URL；模型映射目标建议写成 anthropic/真实模型ID，例如 anthropic/claude-sonnet-4.5。"
+        :title="
+          t(
+            'Anthropic API Key 账号会按原生 Messages API 调用 Base URL；模型映射目标建议写成 anthropic/真实模型ID，例如 anthropic/claude-sonnet-4.5。',
+          )
+        "
       />
 
       <el-tabs v-model="activeFormTab" class="account-form-tabs">
         <!-- Tab 1: Basic Info -->
-        <el-tab-pane label="基本配置" name="basic">
+        <el-tab-pane :label="t('基本配置')" name="basic">
           <div class="tab-pane-content">
             <el-row :gutter="20">
               <el-col v-if="mode === 'create'" :span="12" :xs="24">
-                <el-form-item label="账号 ID（可选）">
-                  <el-input v-model="form.accountId" placeholder="留空时自动生成" />
+                <el-form-item :label="t('账号 ID（可选）')">
+                  <el-input v-model="form.accountId" :placeholder="t('留空时自动生成')" />
                 </el-form-item>
               </el-col>
               <el-col :span="mode === 'create' ? 12 : 24" :xs="24">
-                <el-form-item label="邮箱">
-                  <el-input v-model="form.email" placeholder="如 email@example.com" />
+                <el-form-item :label="t('邮箱')">
+                  <el-input v-model="form.email" :placeholder="t('如 email@example.com')" />
                 </el-form-item>
               </el-col>
 
               <el-col :span="12" :xs="24">
-                <el-form-item label="账号协议">
+                <el-form-item :label="t('账号协议')">
                   <el-select
                     v-model="protocol"
                     filterable
@@ -633,7 +675,7 @@
                 </el-form-item>
               </el-col>
               <el-col :span="12" :xs="24">
-                <el-form-item label="认证方式">
+                <el-form-item :label="t('认证方式')">
                   <el-select
                     v-model="form.authMethod"
                     allow-create
@@ -653,13 +695,13 @@
 
               <template v-if="isOpenAiCompatibleForm">
                 <el-col :span="12" :xs="24">
-                  <el-form-item label="厂商分类" prop="catalogVendor">
+                  <el-form-item :label="t('厂商分类')" prop="catalogVendor">
                     <el-select
                       v-model="form.catalogVendor"
                       filterable
                       class="w-full"
                       :loading="vendorsLoading"
-                      placeholder="选择已添加的 OpenAI 兼容厂商"
+                      :placeholder="t('选择已添加的 OpenAI 兼容厂商')"
                       @change="handleVendorChange"
                     >
                       <el-option
@@ -674,36 +716,40 @@
                             class="vendor-option__icon"
                             :src="vendor.icon"
                             alt=""
-                          />
+                          >
                           <span v-else class="vendor-option__icon vendor-option__icon--fallback">
                             {{ vendor.name.slice(0, 1).toUpperCase() }}
                           </span>
                           <span class="vendor-option__name">{{ vendor.name }}</span>
-                          <span class="vendor-option__count">{{ vendor.modelCount }} 个模型</span>
+                          <span class="vendor-option__count">{{ vendor.modelCount }} {{ t('个模型') }}</span>
                         </span>
                       </el-option>
                     </el-select>
                     <p v-if="!vendorsLoading && compatibleVendors.length === 0" class="form-hint">
-                      还没有第三方 OpenAI 兼容厂商。
-                      <el-button link type="primary" @click="goAddVendorModel">去添加模型</el-button>
+                      {{ t('还没有第三方 OpenAI 兼容厂商。') }}
+                      <el-button link type="primary" @click="goAddVendorModel">
+                        {{
+                          t('去添加模型')
+                        }}
+                      </el-button>
                     </p>
                   </el-form-item>
                 </el-col>
                 <el-col v-if="form.catalogVendor" :span="12" :xs="24">
-                  <el-form-item label="账号类型预览">
+                  <el-form-item :label="t('账号类型预览')">
                     <ProviderBadge
                       :provider="form.catalogVendor"
                       auth-method="api-key"
                       :color="selectedVendor?.color"
                       :icon="selectedVendor?.icon"
                     />
-                    <p class="form-hint">图标和配色来自该厂商在模型管理中的设置。</p>
+                    <p class="form-hint">{{ t('图标和配色来自该厂商在模型管理中的设置。') }}</p>
                   </el-form-item>
                 </el-col>
               </template>
 
               <el-col :span="24">
-                <el-form-item label="出站代理 URL">
+                <el-form-item :label="t('出站代理 URL')">
                   <el-input v-model="form.proxyUrl" placeholder="http://user:pass@host:port" />
                 </el-form-item>
               </el-col>
@@ -712,7 +758,7 @@
         </el-tab-pane>
 
         <!-- Tab 2: Credentials -->
-        <el-tab-pane label="凭证配置" name="credentials">
+        <el-tab-pane :label="t('凭证配置')" name="credentials">
           <div class="tab-pane-content">
             <el-row :gutter="20">
               <el-col :span="24">
@@ -728,7 +774,10 @@
 
               <el-col :span="24">
                 <el-form-item label="Refresh Token">
-                  <el-input v-model="form.refreshToken" placeholder="输入 Refresh Token，可选" />
+                  <el-input
+                    v-model="form.refreshToken"
+                    :placeholder="t('输入 Refresh Token，可选')"
+                  />
                 </el-form-item>
               </el-col>
 
@@ -738,14 +787,14 @@
                     v-model="form.idToken"
                     type="textarea"
                     :rows="2"
-                    placeholder="Codex id_token，可选"
+                    :placeholder="t('Codex id_token，可选')"
                   />
                 </el-form-item>
               </el-col>
 
               <el-col :span="24">
                 <el-form-item label="Profile ARN">
-                  <el-input v-model="form.profileArn" placeholder="AWS Profile ARN，可选" />
+                  <el-input v-model="form.profileArn" :placeholder="t('AWS Profile ARN，可选')" />
                 </el-form-item>
               </el-col>
             </el-row>
@@ -753,48 +802,55 @@
         </el-tab-pane>
 
         <!-- Tab 3: Advanced & Routing -->
-        <el-tab-pane label="高级与路由" name="advanced">
+        <el-tab-pane :label="t('高级与路由')" name="advanced">
           <div class="tab-pane-content">
             <el-row :gutter="20">
               <el-col :span="24">
                 <el-form-item :label="baseUrlLabel" prop="baseUrl">
                   <el-input v-model="form.baseUrl" :placeholder="baseUrlPlaceholder" />
                   <p v-if="isOpenAiCompatibleForm" class="form-hint">
-                    填到兼容 OpenAI 的 API 根路径，通常以 /v1 结尾；服务会自动追加 /chat/completions
-                    或 /responses。
+                    {{
+                      t(
+                        '填到兼容 OpenAI 的 API 根路径，通常以 /v1 结尾；服务会自动追加 /chat/completions 或 /responses。',
+                      )
+                    }}
                   </p>
                   <p v-else-if="isDeepSeekApiKeyForm" class="form-hint">
-                    已自动使用 DeepSeek 官方 API 地址；仅在接入兼容网关时需要修改。
+                    {{ t('已自动使用 DeepSeek 官方 API 地址；仅在接入兼容网关时需要修改。') }}
                   </p>
                   <p v-else-if="isAnthropicApiKeyForm" class="form-hint">
-                    填到 Anthropic Messages API 根路径，通常以 /v1 结尾；服务会自动追加 /messages。
+                    {{
+                      t(
+                        '填到 Anthropic Messages API 根路径，通常以 /v1 结尾；服务会自动追加 /messages。',
+                      )
+                    }}
                   </p>
                 </el-form-item>
               </el-col>
 
               <el-col :span="12" :xs="24">
-                <el-form-item label="上游账号 ID">
+                <el-form-item :label="t('上游账号 ID')">
                   <el-input
                     v-model="form.upstreamAccountId"
-                    placeholder="Codex ChatGPT Account ID，可选"
+                    :placeholder="t('Codex ChatGPT Account ID，可选')"
                   />
                 </el-form-item>
               </el-col>
               <el-col :span="12" :xs="24">
                 <el-form-item label="Machine ID">
-                  <el-input v-model="form.machineId" placeholder="机器 ID，可选" />
+                  <el-input v-model="form.machineId" :placeholder="t('机器 ID，可选')" />
                 </el-form-item>
               </el-col>
 
               <el-col :span="12" :xs="24">
-                <el-form-item label="区域">
-                  <el-input v-model="form.region" placeholder="如 us-east-1" />
+                <el-form-item :label="t('区域')">
+                  <el-input v-model="form.region" :placeholder="t('如 us-east-1')" />
                 </el-form-item>
               </el-col>
               <el-col :span="12" :xs="24">
                 <el-row :gutter="12">
                   <el-col :span="mode === 'edit' ? 16 : 24" :xs="24">
-                    <el-form-item label="配额上限">
+                    <el-form-item :label="t('配额上限')">
                       <el-input-number
                         v-model="form.quotaLimit"
                         :min="0"
@@ -804,7 +860,7 @@
                     </el-form-item>
                   </el-col>
                   <el-col v-if="mode === 'edit'" :span="8" :xs="24">
-                    <el-form-item label="启用">
+                    <el-form-item :label="t('启用')">
                       <el-switch v-model="form.enabled" class="switch-offset" />
                     </el-form-item>
                   </el-col>
@@ -814,43 +870,46 @@
           </div>
         </el-tab-pane>
 
-        <el-tab-pane v-if="mode === 'edit'" label="分配策略" name="allocation">
+        <el-tab-pane v-if="mode === 'edit'" :label="t('分配策略')" name="allocation">
           <div v-loading="allocationPolicyLoading" class="tab-pane-content allocation-pane">
             <template v-if="allocationPolicy">
               <div class="allocation-runtime">
                 <div class="runtime-state">
-                  <span class="runtime-label">运行状态</span>
+                  <span class="runtime-label">{{ t('运行状态') }}</span>
                   <el-tag :type="lifecycleTagType(allocationPolicy.lifecycleState)" effect="light">
                     {{ lifecycleLabel(allocationPolicy.lifecycleState) }}
                   </el-tag>
                 </div>
                 <div class="runtime-metric">
-                  <span>预热阶段</span>
+                  <span>{{ t('预热阶段') }}</span>
                   <strong>{{ allocationPolicy.warmupStage }}/4</strong>
                 </div>
                 <div class="runtime-metric">
-                  <span>当前并发</span>
-                  <strong>{{ allocationPolicy.activeConcurrency }}/{{ policyForm.safeConcurrency }}</strong>
+                  <span>{{ t('当前并发') }}</span>
+                  <strong>{{ allocationPolicy.activeConcurrency }}/{{
+                    policyForm.safeConcurrency
+                  }}</strong>
                 </div>
                 <div class="runtime-metric">
-                  <span>预留令牌</span>
+                  <span>{{ t('预留令牌') }}</span>
                   <strong>
                     {{
                       compactNumber(
-                        allocationPolicy.reservedInputTokens + allocationPolicy.reservedOutputTokens,
+                        allocationPolicy.reservedInputTokens +
+                          allocationPolicy.reservedOutputTokens,
                       )
                     }}
                   </strong>
                 </div>
                 <div class="runtime-metric">
-                  <span>近期错误率</span>
+                  <span>{{ t('近期错误率') }}</span>
                   <strong>{{ (allocationPolicy.recentErrorRate * 100).toFixed(1) }}%</strong>
                 </div>
               </div>
 
               <el-row :gutter="20">
                 <el-col :span="12" :xs="24">
-                  <el-form-item label="分配优先级">
+                  <el-form-item :label="t('分配优先级')">
                     <el-input-number
                       v-model="policyForm.allocationPriority"
                       :min="1"
@@ -858,11 +917,11 @@
                       controls-position="right"
                       class="w-full"
                     />
-                    <p class="form-hint">数值越小，账号越优先。</p>
+                    <p class="form-hint">{{ t('数值越小，账号越优先。') }}</p>
                   </el-form-item>
                 </el-col>
                 <el-col :span="12" :xs="24">
-                  <el-form-item label="安全并发数">
+                  <el-form-item :label="t('安全并发数')">
                     <el-input-number
                       v-model="policyForm.safeConcurrency"
                       :min="1"
@@ -873,7 +932,7 @@
                   </el-form-item>
                 </el-col>
                 <el-col :span="12" :xs="24">
-                  <el-form-item label="每分钟请求数（RPM）">
+                  <el-form-item :label="t('每分钟请求数（RPM）')">
                     <el-input-number
                       v-model="policyForm.safeRpm"
                       :min="1"
@@ -884,7 +943,7 @@
                   </el-form-item>
                 </el-col>
                 <el-col :span="12" :xs="24">
-                  <el-form-item label="突发容量">
+                  <el-form-item :label="t('突发容量')">
                     <el-input-number
                       v-model="policyForm.burstCapacity"
                       :min="1"
@@ -895,7 +954,7 @@
                   </el-form-item>
                 </el-col>
                 <el-col :span="12" :xs="24">
-                  <el-form-item label="最大活跃会话数">
+                  <el-form-item :label="t('最大活跃会话数')">
                     <el-input-number
                       v-model="policyForm.maxSessions"
                       :min="0"
@@ -907,7 +966,7 @@
                   </el-form-item>
                 </el-col>
                 <el-col :span="12" :xs="24">
-                  <el-form-item label="会话空闲时间（秒）">
+                  <el-form-item :label="t('会话空闲时间（秒）')">
                     <el-input-number
                       v-model="policyForm.sessionIdleSeconds"
                       :min="60"
@@ -919,7 +978,7 @@
                   </el-form-item>
                 </el-col>
                 <el-col :span="24">
-                  <el-form-item label="最大在途令牌数">
+                  <el-form-item :label="t('最大在途令牌数')">
                     <el-input-number
                       v-model="policyForm.maxInflightTokens"
                       :min="1"
@@ -932,7 +991,7 @@
                 </el-col>
               </el-row>
             </template>
-            <el-empty v-else :image-size="72" description="暂无分配策略" />
+            <el-empty v-else :image-size="72" :description="t('暂无分配策略')" />
           </div>
         </el-tab-pane>
       </el-tabs>
@@ -940,7 +999,7 @@
 
     <template #footer>
       <el-button @click="visibleValue = false">
-        {{ isChatGptCreate ? '关闭' : '取消' }}
+        {{ isChatGptCreate ? t('关闭') : t('取消') }}
       </el-button>
       <el-button
         v-if="!isChatGptCreate"
@@ -948,7 +1007,7 @@
         :loading="formSubmitting"
         @click="submitForm"
       >
-        提交
+        {{ t('提交') }}
       </el-button>
     </template>
   </el-dialog>

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   /**
    * 单账号测试结果对话框。
    *
@@ -30,7 +31,7 @@
 </script>
 
 <template>
-  <el-dialog v-model="visibleValue" title="账号测试结果" width="760px">
+  <el-dialog v-model="visibleValue" :title="t('账号测试结果')" width="760px">
     <div v-if="detail" class="test-detail">
       <div class="test-detail__head">
         <div class="test-detail__title">
@@ -40,38 +41,34 @@
           <span class="mono">{{ detail.accountId }}</span>
         </div>
         <div class="test-detail__actions">
-          <el-button size="small" @click="copy(testDetailJson)">复制完整结果</el-button>
+          <el-button size="small" @click="copy(testDetailJson)">{{ t('复制完整结果') }}</el-button>
           <el-button
             size="small"
             type="primary"
             @click="copy(detail.detail || detail.message || '')"
           >
-            {{ detail.status === 'FAILED' ? '复制报错信息' : '复制返回信息' }}
+            {{ detail.status === 'FAILED' ? t('复制报错信息') : t('复制返回信息') }}
           </el-button>
         </div>
       </div>
 
       <el-descriptions :column="2" border size="small">
-        <el-descriptions-item label="邮箱">{{ detail.email || '—' }}</el-descriptions-item>
-        <el-descriptions-item label="模型">{{ detail.model || '—' }}</el-descriptions-item>
+        <el-descriptions-item :label="t('邮箱')">{{ detail.email || '—' }}</el-descriptions-item>
+        <el-descriptions-item :label="t('模型')">{{ detail.model || '—' }}</el-descriptions-item>
         <el-descriptions-item label="HTTP">{{ detail.statusCode ?? '—' }}</el-descriptions-item>
-        <el-descriptions-item label="耗时">
+        <el-descriptions-item :label="t('耗时')">
           {{ detail.latencyMs == null ? '—' : `${detail.latencyMs}ms` }}
         </el-descriptions-item>
-        <el-descriptions-item label="测试时间" :span="2">
+        <el-descriptions-item :label="t('测试时间')" :span="2">
           {{ formatDateTime(detail.testedAt) }}
         </el-descriptions-item>
       </el-descriptions>
 
       <div class="test-detail__section">
         <div class="test-detail__section-head">
-          <span>{{ detail.status === 'FAILED' ? '完整报错信息' : '完整返回信息' }}</span>
-          <el-button
-            link
-            type="primary"
-            @click="copy(detail.detail || detail.message || '')"
-          >
-            复制
+          <span>{{ detail.status === 'FAILED' ? t('完整报错信息') : t('完整返回信息') }}</span>
+          <el-button link type="primary" @click="copy(detail.detail || detail.message || '')">
+            {{ t('复制') }}
           </el-button>
         </div>
         <pre class="test-detail__pre mono">{{ detail.detail || detail.message || '—' }}</pre>
@@ -79,8 +76,8 @@
 
       <div class="test-detail__section">
         <div class="test-detail__section-head">
-          <span>完整 JSON</span>
-          <el-button link type="primary" @click="copy(testDetailJson)">复制</el-button>
+          <span>{{ t('完整 JSON') }}</span>
+          <el-button link type="primary" @click="copy(testDetailJson)">{{ t('复制') }}</el-button>
         </div>
         <pre class="test-detail__pre mono">{{ testDetailJson }}</pre>
       </div>

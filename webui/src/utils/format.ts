@@ -1,3 +1,4 @@
+import { locale } from '@/i18n';
 /**
  * 通用格式化工具。所有视图共用，避免在 template 中写复杂表达式。
  */
@@ -7,6 +8,16 @@ export function formatDateTime(value: string | null | undefined, fallback = '—
   if (!value) return fallback;
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return fallback;
+  if (locale.value === 'en-US')
+    return d.toLocaleString('en-US', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
@@ -14,7 +25,7 @@ export function formatDateTime(value: string | null | undefined, fallback = '—
 /** 仅展示数字，null 用占位符 */
 export function formatNumber(value: number | null | undefined, fallback = '—'): string {
   if (value === null || value === undefined) return fallback;
-  return value.toLocaleString();
+  return value.toLocaleString(locale.value);
 }
 
 /** 用于 mono 字段的截断显示 */

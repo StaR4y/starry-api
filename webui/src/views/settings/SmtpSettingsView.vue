@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   /** 注册邮件 SMTP 发送服务配置。 */
   import { computed, onMounted, reactive, ref } from 'vue';
   import { ElMessage } from 'element-plus';
@@ -29,10 +30,20 @@
   });
 
   const securityOptions: Array<{ label: string; value: SmtpSecurityMode }> = [
-    { label: '自动', value: 'auto' },
+    {
+      get label() {
+        return t('自动');
+      },
+      value: 'auto',
+    },
     { label: 'SSL / TLS', value: 'ssl' },
     { label: 'STARTTLS', value: 'starttls' },
-    { label: '不加密', value: 'none' },
+    {
+      get label() {
+        return t('不加密');
+      },
+      value: 'none',
+    },
   ];
 
   function normalizeSecurity(
@@ -78,15 +89,15 @@
   const verifyLabel = computed(() => {
     switch (verifyStatus.value) {
       case 'VERIFIED':
-        return '已验证';
+        return t('已验证');
       case 'PENDING':
-        return '待验证';
+        return t('待验证');
       case 'FAILED':
-        return '发送失败';
+        return t('发送失败');
       case 'SKIPPED':
-        return '已跳过';
+        return t('已跳过');
       default:
-        return '未配置';
+        return t('未配置');
     }
   });
 
@@ -124,19 +135,19 @@
       });
       apply(settings);
       if (!form.smtpVerifyEnabled) {
-        ElMessage.success('SMTP 设置已保存，已跳过验证步骤');
+        ElMessage.success(t('SMTP 设置已保存，已跳过验证步骤'));
       } else if (settings.smtpVerifyStatus === 'VERIFIED') {
-        ElMessage.success('SMTP 设置已保存');
+        ElMessage.success(t('SMTP 设置已保存'));
       } else if (settings.smtpVerifyStatus === 'PENDING') {
         ElMessage.success(
           settings.smtpVerifySentTo
-            ? `SMTP 设置已保存，验证邮件已发送至 ${settings.smtpVerifySentTo}`
-            : 'SMTP 设置已保存，正在等待验证',
+            ? t('SMTP 设置已保存，验证邮件已发送至 {p0}', { p0: settings.smtpVerifySentTo })
+            : t('SMTP 设置已保存，正在等待验证'),
         );
       } else if (settings.smtpVerifyStatus === 'FAILED') {
-        ElMessage.warning(settings.smtpVerifyLastError || '验证邮件发送失败');
+        ElMessage.warning(settings.smtpVerifyLastError || t('验证邮件发送失败'));
       } else {
-        ElMessage.success('SMTP 设置已保存');
+        ElMessage.success(t('SMTP 设置已保存'));
       }
     } finally {
       busy.value = false;
@@ -147,25 +158,29 @@
 </script>
 
 <template>
-  <PageSection title="SMTP 设置" subtitle="访问与通知" :icon="Message">
+  <PageSection :title="t('SMTP 设置')" :subtitle="t('访问与通知')" :icon="Message">
     <template #actions>
       <el-tag :type="passwordConfigured ? 'success' : 'info'" effect="plain">
-        {{ passwordConfigured ? '凭据已配置' : '凭据未配置' }}
+        {{ passwordConfigured ? t('凭据已配置') : t('凭据未配置') }}
       </el-tag>
       <el-tag :type="verifyTagType" effect="plain">{{ verifyLabel }}</el-tag>
-      <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-      <el-button type="primary" :icon="Check" :loading="saving" @click="save()">保存</el-button>
+      <el-button :icon="Refresh" :loading="loading" @click="load">{{ t('刷新') }}</el-button>
+      <el-button type="primary" :icon="Check" :loading="saving" @click="save()">
+        {{
+          t('保存')
+        }}
+      </el-button>
     </template>
 
     <el-skeleton v-if="loading" :rows="6" animated />
     <el-form v-else :model="form" label-position="top" class="smtp-form">
       <section class="smtp-section">
-        <h3>服务器</h3>
+        <h3>{{ t('服务器') }}</h3>
         <div class="smtp-grid smtp-grid--host">
-          <el-form-item label="SMTP 主机">
+          <el-form-item :label="t('SMTP 主机')">
             <el-input v-model="form.smtpHost" placeholder="smtp.example.com" />
           </el-form-item>
-          <el-form-item label="端口">
+          <el-form-item :label="t('端口')">
             <el-input-number
               v-model="form.smtpPort"
               :min="1"
@@ -173,7 +188,7 @@
               controls-position="right"
             />
           </el-form-item>
-          <el-form-item label="加密方式">
+          <el-form-item :label="t('加密方式')">
             <el-select v-model="form.smtpSecurity" @change="handleSecurityChange">
               <el-option
                 v-for="option in securityOptions"
@@ -187,54 +202,67 @@
       </section>
 
       <section class="smtp-section">
-        <h3>身份凭据</h3>
+        <h3>{{ t('身份凭据') }}</h3>
         <div class="smtp-grid">
-          <el-form-item label="SMTP 用户名">
+          <el-form-item :label="t('SMTP 用户名')">
             <el-input
               v-model="form.smtpUsername"
               autocomplete="username"
               placeholder="user@example.com"
             />
           </el-form-item>
-          <el-form-item label="SMTP 密码">
+          <el-form-item :label="t('SMTP 密码')">
             <el-input
               v-model="form.smtpPassword"
               type="password"
               show-password
               autocomplete="new-password"
-              :placeholder="passwordConfigured ? '已配置，留空保持不变' : '请输入密码'"
+              :placeholder="passwordConfigured ? t('已配置，留空保持不变') : t('请输入密码')"
             />
           </el-form-item>
         </div>
       </section>
 
       <section class="smtp-section">
-        <h3>发件信息</h3>
+        <h3>{{ t('发件信息') }}</h3>
         <div class="smtp-grid">
-          <el-form-item label="发件邮箱">
-            <el-input v-model="form.smtpFromEmail" placeholder="与 SMTP 用户名相同，如 user@company.com" />
-            <p class="smtp-verify__hint">腾讯企业邮、QQ 邮箱要求发件邮箱与 SMTP 用户名完全一致。</p>
+          <el-form-item :label="t('发件邮箱')">
+            <el-input
+              v-model="form.smtpFromEmail"
+              :placeholder="t('与 SMTP 用户名相同，如 user@company.com')"
+            />
+            <p class="smtp-verify__hint">
+              {{ t('腾讯企业邮、QQ 邮箱要求发件邮箱与 SMTP 用户名完全一致。') }}
+            </p>
           </el-form-item>
-          <el-form-item label="发件名称">
+          <el-form-item :label="t('发件名称')">
             <el-input v-model="form.smtpFromName" placeholder="Starry API" />
           </el-form-item>
         </div>
       </section>
 
       <section class="smtp-section">
-        <h3>SMTP 验证</h3>
+        <h3>{{ t('SMTP 验证') }}</h3>
         <div class="smtp-verify">
           <el-switch v-model="form.smtpVerifyEnabled" />
           <p v-if="adminEmail" class="smtp-verify__hint">
-            开启后，保存时会用上面的发件邮箱，向你的管理员邮箱 {{ adminEmail }} 发送验证链接。
-            请打开该邮箱点链接，用来确认 SMTP 能发出信。关闭则跳过验证，保存即可使用 SMTP。
+            {{ t('开启后，保存时会用上面的发件邮箱，向你的管理员邮箱') }} {{ adminEmail }}
+            {{
+              t(
+                '发送验证链接。 请打开该邮箱点链接，用来确认 SMTP 能发出信。关闭则跳过验证，保存即可使用 SMTP。',
+              )
+            }}
           </p>
           <p v-else class="smtp-verify__hint">
-            验证信会发到当前登录管理员能打开的邮箱，不会发到发件邮箱。
-            当前账号没有绑定邮箱，请先绑定管理员邮箱，或关闭此项后保存。
+            {{
+              t(
+                '验证信会发到当前登录管理员能打开的邮箱，不会发到发件邮箱。 当前账号没有绑定邮箱，请先绑定管理员邮箱，或关闭此项后保存。',
+              )
+            }}
           </p>
           <p v-if="verifyStatus === 'PENDING' && verifySentTo" class="smtp-verify__hint">
-            已发送至 {{ verifySentTo }}，请打开邮件中的链接完成验证。链接 30 分钟内有效。
+            {{ t('已发送至') }} {{ verifySentTo
+            }}{{ t('，请打开邮件中的链接完成验证。链接 30 分钟内有效。') }}
           </p>
           <p v-if="verifyStatus === 'FAILED' && verifyLastError" class="smtp-verify__error">
             {{ verifyLastError }}
@@ -244,7 +272,7 @@
             :loading="resending"
             @click="save(true)"
           >
-            重新发送验证邮件
+            {{ t('重新发送验证邮件') }}
           </el-button>
         </div>
       </section>

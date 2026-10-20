@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { locale, t } from '@/i18n';
   import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
   import { useRoute, useRouter } from 'vue-router';
   import { ElMessage, ElMessageBox } from 'element-plus';
@@ -57,12 +58,12 @@
   const total = computed(() =>
     Object.values(data.value?.counts ?? {}).reduce((sum, n) => sum + (n ?? 0), 0),
   );
-  const listTitle = computed(() => (auth.isAdmin ? '工单管理' : '我的工单'));
+  const listTitle = computed(() => (auth.isAdmin ? t('工单管理') : t('我的工单')));
   const title = computed(() =>
-    id.value ? thread.value?.ticket.title || '工单详情' : listTitle.value,
+    id.value ? thread.value?.ticket.title || t('工单详情') : listTitle.value,
   );
   const date = (value: string) =>
-    new Date(value).toLocaleString('zh-CN', {
+    new Date(value).toLocaleString(locale.value, {
       month: '2-digit',
       day: '2-digit',
       hour: '2-digit',
@@ -135,7 +136,7 @@
       );
       composer.value?.clear();
       await load();
-      ElMessage.success('回复已发送');
+      ElMessage.success(t('回复已发送'));
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) await load();
     } finally {
@@ -147,9 +148,13 @@
       return;
     const currentId = id.value;
     if (next === 'CLOSED') {
-      const confirmed = await ElMessageBox.confirm('确认关闭此工单？', '关闭工单', {
-        confirmButtonText: '关闭工单',
-        cancelButtonText: '取消',
+      const confirmed = await ElMessageBox.confirm(t('确认关闭此工单？'), t('关闭工单'), {
+        get confirmButtonText() {
+          return t('关闭工单');
+        },
+        get cancelButtonText() {
+          return t('取消');
+        },
       })
         .then(() => true)
         .catch(() => false);
@@ -160,7 +165,7 @@
     try {
       thread.value.ticket = await ticketApi.status(currentId, next, thread.value.ticket.version);
       await load();
-      ElMessage.success('工单状态已更新');
+      ElMessage.success(t('工单状态已更新'));
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) await load();
     } finally {
@@ -194,7 +199,7 @@
 <template>
   <PageSection
     :title="title"
-    :subtitle="id ? '工单 #' + id.slice(0, 8) : '支持中心'"
+    :subtitle="id ? t('工单 #') + id.slice(0, 8) : t('支持中心')"
     :icon="Service"
     class="tickets"
   >
@@ -205,19 +210,19 @@
         :disabled="saving"
         @click="router.push({ name: 'tickets' })"
       >
-        返回工单列表
+        {{ t('返回工单列表') }}
       </el-button>
-      <el-tooltip v-else-if="auth.isAdmin" content="工单通知设置">
+      <el-tooltip v-else-if="auth.isAdmin" :content="t('工单通知设置')">
         <el-button
           :icon="Setting"
-          aria-label="工单通知设置"
+          :aria-label="t('工单通知设置')"
           @click="router.push({ name: 'settings-tickets' })"
         />
       </el-tooltip>
-      <el-tooltip content="刷新">
+      <el-tooltip :content="t('刷新')">
         <el-button
           :icon="Refresh"
-          aria-label="刷新工单"
+          :aria-label="t('刷新工单')"
           :loading="loading"
           :disabled="saving || olderLoading"
           @click="load"
@@ -229,7 +234,7 @@
         :icon="Plus"
         @click="router.push({ name: 'ticket-create' })"
       >
-        新建工单
+        {{ t('新建工单') }}
       </el-button>
       <el-button
         v-else-if="thread && !ended"
@@ -238,14 +243,14 @@
         :disabled="saving || loading"
         @click="focusReply"
       >
-        {{ auth.isAdmin ? '回复工单' : '补充回复' }}
+        {{ auth.isAdmin ? t('回复工单') : t('补充回复') }}
       </el-button>
     </template>
 
     <template v-if="!id">
       <div class="tickets__filters">
         <el-tabs v-model="status" @tab-change="filter">
-          <el-tab-pane name="" :label="'全部 ' + total" />
+          <el-tab-pane name="" :label="t('全部 ') + total" />
           <el-tab-pane
             v-for="(label, value) in ticketStatuses"
             :key="value"
@@ -255,8 +260,8 @@
         </el-tabs>
         <el-input
           v-model="search"
-          aria-label="搜索工单"
-          :placeholder="auth.isAdmin ? '搜索标题、编号或用户' : '搜索标题或编号'"
+          :aria-label="t('搜索工单')"
+          :placeholder="auth.isAdmin ? t('搜索标题、编号或用户') : t('搜索标题或编号')"
           :prefix-icon="Search"
           clearable
           :maxlength="160"
@@ -264,13 +269,13 @@
           @clear="filter"
         />
       </div>
-      <div v-loading="loading" class="ticket-list" aria-label="工单列表">
-        <el-empty v-if="failed" description="工单加载失败" :image-size="80">
-          <el-button :icon="Refresh" @click="load">重新加载</el-button>
+      <div v-loading="loading" class="ticket-list" :aria-label="t('工单列表')">
+        <el-empty v-if="failed" :description="t('工单加载失败')" :image-size="80">
+          <el-button :icon="Refresh" @click="load">{{ t('重新加载') }}</el-button>
         </el-empty>
         <template v-else-if="data?.items.length">
           <div class="ticket-list__heading">
-            <span>工单</span><span>状态</span><span>最近更新</span><span />
+            <span>{{ t('工单') }}</span><span>{{ t('状态') }}</span><span>{{ t('最近更新') }}</span><span />
           </div>
           <button
             v-for="ticket in data.items"
@@ -300,7 +305,7 @@
         </template>
         <el-empty
           v-else-if="!loading"
-          :description="status || search ? '没有匹配的工单' : '暂无工单'"
+          :description="status || search ? t('没有匹配的工单') : t('暂无工单')"
           :image-size="80"
         />
       </div>
@@ -316,19 +321,18 @@
     </template>
 
     <template v-else>
-      <el-empty v-if="failed && !thread" description="无法读取工单" :image-size="80">
-        <el-button :icon="Refresh" @click="load">重新加载</el-button>
+      <el-empty v-if="failed && !thread" :description="t('无法读取工单')" :image-size="80">
+        <el-button :icon="Refresh" @click="load">{{ t('重新加载') }}</el-button>
       </el-empty>
       <div v-else-if="thread" v-loading="loading" class="ticket-detail">
         <div class="ticket-detail__main">
           <div class="ticket-section-heading">
-            <h2>沟通记录</h2>
-            <span>{{ thread.ticket.messageCount }} 条记录</span>
+            <h2>{{ t('沟通记录') }}</h2>
+            <span>{{ thread.ticket.messageCount }} {{ t('条记录') }}</span>
           </div>
           <div v-if="failed" class="ticket-refresh-error" role="status">
-            更新失败，当前显示上次加载的记录。<el-button link type="primary" @click="load">
-              重试
-            </el-button>
+            {{ t('更新失败，当前显示上次加载的记录。')
+            }}<el-button link type="primary" @click="load"> {{ t('重试') }} </el-button>
           </div>
           <div class="ticket-thread">
             <el-button
@@ -339,12 +343,13 @@
               :disabled="saving || loading"
               @click="older"
             >
-              查看更早的记录
+              {{ t('查看更早的记录') }}
             </el-button>
             <template v-for="message in thread.messages" :key="message.id">
               <div v-if="message.kind === 'STATUS'" class="ticket-event">
                 <el-icon><CircleCheck /></el-icon>
-                <span>{{ message.actorName }} 将状态改为 {{ ticketStatuses[message.status] }}</span>
+                <span>{{ message.actorName }} {{ t('将状态改为') }}
+                  {{ ticketStatuses[message.status] }}</span>
                 <time :datetime="message.createdAt">{{ date(message.createdAt) }}</time>
               </div>
               <article v-else class="ticket-message" :class="{ 'is-admin': message.admin }">
@@ -355,7 +360,7 @@
                   <header>
                     <strong>{{ message.actorName }}</strong>
                     <span class="ticket-message__role">{{
-                      message.admin ? '管理员' : '用户'
+                      message.admin ? t('管理员') : t('用户')
                     }}</span>
                     <time :datetime="message.createdAt">{{ date(message.createdAt) }}</time>
                   </header>
@@ -366,7 +371,7 @@
                       :key="file.id"
                       type="button"
                       :disabled="!!downloading"
-                      :aria-label="'下载 ' + file.filename"
+                      :aria-label="t('下载 ') + file.filename"
                       @click="download(file)"
                     >
                       <el-icon><Paperclip /></el-icon><span>{{ file.filename }}</span><small>{{ Math.ceil(file.sizeBytes / 1024) }} KB</small><el-icon><Download /></el-icon>
@@ -378,8 +383,8 @@
           </div>
           <section ref="replyArea" class="ticket-detail__reply">
             <div class="ticket-section-heading">
-              <h2>{{ auth.isAdmin ? '回复工单' : '补充回复' }}</h2>
-              <span v-if="dirty">有未提交内容</span>
+              <h2>{{ auth.isAdmin ? t('回复工单') : t('补充回复') }}</h2>
+              <span v-if="dirty">{{ t('有未提交内容') }}</span>
             </div>
             <div v-if="ended" class="ticket-detail__closed">
               <span class="ticket-status" :class="'is-' + thread.ticket.status.toLowerCase()"><i />{{ ticketStatuses[thread.ticket.status] }}</span>
@@ -389,7 +394,7 @@
                 :disabled="loading"
                 @click="changeStatus('OPEN')"
               >
-                重新打开工单
+                {{ t('重新打开工单') }}
               </el-button>
             </div>
             <TicketComposer
@@ -402,14 +407,16 @@
             />
           </section>
         </div>
-        <aside class="ticket-detail__aside" aria-label="工单信息">
-          <div class="ticket-section-heading"><h2>工单信息</h2></div>
+        <aside class="ticket-detail__aside" :aria-label="t('工单信息')">
+          <div class="ticket-section-heading">
+            <h2>{{ t('工单信息') }}</h2>
+          </div>
           <div class="ticket-detail__state">
             <span class="ticket-status" :class="'is-' + thread.ticket.status.toLowerCase()"><i />{{ ticketStatuses[thread.ticket.status] }}</span>
             <el-select
               v-if="auth.isAdmin"
               :model-value="thread.ticket.status"
-              aria-label="工单状态"
+              :aria-label="t('工单状态')"
               :disabled="saving || loading"
               @change="changeStatus"
             >
@@ -423,15 +430,15 @@
           </div>
           <dl class="ticket-metadata">
             <div>
-              <dt>问题分类</dt>
+              <dt>{{ t('问题分类') }}</dt>
               <dd>{{ ticketCategories[thread.ticket.category] }}</dd>
             </div>
             <div>
-              <dt>提交人</dt>
+              <dt>{{ t('提交人') }}</dt>
               <dd>{{ thread.ticket.username }}</dd>
             </div>
             <div>
-              <dt>创建时间</dt>
+              <dt>{{ t('创建时间') }}</dt>
               <dd>
                 <time :datetime="thread.ticket.createdAt">{{
                   formatDateTime(thread.ticket.createdAt)
@@ -439,7 +446,7 @@
               </dd>
             </div>
             <div>
-              <dt>最近更新</dt>
+              <dt>{{ t('最近更新') }}</dt>
               <dd>
                 <time :datetime="thread.ticket.updatedAt">{{
                   formatDateTime(thread.ticket.updatedAt)
@@ -447,7 +454,7 @@
               </dd>
             </div>
             <div class="ticket-metadata__number">
-              <dt>工单编号</dt>
+              <dt>{{ t('工单编号') }}</dt>
               <dd>{{ thread.ticket.id }}</dd>
             </div>
           </dl>
@@ -458,7 +465,7 @@
             :disabled="loading"
             @click="changeStatus('CLOSED')"
           >
-            关闭工单
+            {{ t('关闭工单') }}
           </el-button>
         </aside>
       </div>

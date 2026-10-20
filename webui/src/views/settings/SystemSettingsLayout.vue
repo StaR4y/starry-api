@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { locale, t } from '@/i18n';
   /** 系统设置二级导航。业务设置保留各自页面组件，此处只负责分类与路由。 */
   import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
   import type { Component as VueComponent, CSSProperties } from 'vue';
@@ -7,6 +8,7 @@
   import { useAuthStore } from '@/stores/auth';
   import {
     Brush,
+    Reading,
     Cpu,
     CreditCard,
     Connection,
@@ -43,33 +45,103 @@
 
   const builtinGroups: SettingsGroup[] = [
     {
-      label: '业务配置',
+      get label() {
+        return t('业务配置');
+      },
       items: [
-        { name: 'settings-payment', label: '支付设置', icon: CreditCard },
+        {
+          name: 'settings-payment',
+          get label() {
+            return t('支付设置');
+          },
+          icon: CreditCard,
+        },
         { name: 'settings-coding-plans', label: 'Coding Plan', icon: SetUp },
-        { name: 'settings-models', label: '模型管理', icon: Cpu },
+        {
+          name: 'settings-models',
+          get label() {
+            return t('模型管理');
+          },
+          icon: Cpu,
+        },
       ],
     },
     {
-      label: '访问与通知',
+      get label() {
+        return t('访问与通知');
+      },
       items: [
-        { name: 'settings-registration', label: '注册设置', icon: Postcard },
-        { name: 'settings-smtp', label: 'SMTP 设置', icon: Message },
-        { name: 'settings-tickets', label: '工单通知', icon: Service },
+        {
+          name: 'settings-registration',
+          get label() {
+            return t('注册设置');
+          },
+          icon: Postcard,
+        },
+        {
+          name: 'settings-smtp',
+          get label() {
+            return t('SMTP 设置');
+          },
+          icon: Message,
+        },
+        {
+          name: 'settings-tickets',
+          get label() {
+            return t('工单通知');
+          },
+          icon: Service,
+        },
       ],
     },
     {
-      label: '运行与安全',
+      get label() {
+        return t('运行与安全');
+      },
       items: [
-        { name: 'settings-account-pool', label: '账号池设置', icon: Monitor },
-        { name: 'settings-plugins', label: '插件开发', icon: Connection, rootOnly: true },
+        {
+          name: 'settings-account-pool',
+          get label() {
+            return t('账号池设置');
+          },
+          icon: Monitor,
+        },
+        {
+          name: 'settings-plugins',
+          get label() {
+            return t('插件开发');
+          },
+          icon: Connection,
+          rootOnly: true,
+        },
       ],
     },
     {
-      label: '内容与界面',
+      get label() {
+        return t('内容与界面');
+      },
       items: [
-        { name: 'settings-appearance', label: 'UI 自定义', icon: Brush },
-        { name: 'settings-model-ranking', label: '模型天梯', icon: Trophy },
+        {
+          name: 'settings-documentation',
+          get label() {
+            return t('文档管理');
+          },
+          icon: Reading,
+        },
+        {
+          name: 'settings-appearance',
+          get label() {
+            return t('UI 自定义');
+          },
+          icon: Brush,
+        },
+        {
+          name: 'settings-model-ranking',
+          get label() {
+            return t('模型天梯');
+          },
+          icon: Trophy,
+        },
       ],
     },
   ];
@@ -87,7 +159,7 @@
         icon: Operation,
         pluginId: page.pluginId,
       };
-      const group = next.find((entry) => entry.label === page.group) ?? next[next.length - 1];
+      const group = next.find((entry) => entry.label === t(page.group)) ?? next[next.length - 1];
       if (!group.items.some((existing) => existing.pluginId === page.pluginId)) {
         group.items.push(item);
       }
@@ -99,14 +171,19 @@
   const orderedNames = computed(() =>
     groups.value.flatMap((group) =>
       group.items.flatMap((item) =>
-        item.name === 'settings-models' ? ['settings-models', 'settings-model-create'] : [item.name],
+        item.name === 'settings-models'
+          ? ['settings-models', 'settings-model-create']
+          : [item.name],
       ),
     ),
   );
 
   function isItemActive(item: SettingsItem) {
     if (item.pluginId) {
-      return activeName.value === 'settings-plugin' && String(route.params.pluginId ?? '') === item.pluginId;
+      return (
+        activeName.value === 'settings-plugin' &&
+        String(route.params.pluginId ?? '') === item.pluginId
+      );
     }
     if (item.name === 'settings-models') {
       return activeName.value === 'settings-models' || activeName.value === 'settings-model-create';
@@ -119,7 +196,10 @@
 
   function navigate(item: SettingsItem) {
     if (item.pluginId) {
-      if (route.name !== 'settings-plugin' || String(route.params.pluginId ?? '') !== item.pluginId) {
+      if (
+        route.name !== 'settings-plugin' ||
+        String(route.params.pluginId ?? '') !== item.pluginId
+      ) {
         void router.push({ name: 'settings-plugin', params: { pluginId: item.pluginId } });
       }
       return;
@@ -148,6 +228,7 @@
       }
     });
   }
+  watch(locale, syncActiveIndicator);
 
   watch(
     activeName,
@@ -195,14 +276,14 @@
 
 <template>
   <div class="settings-layout" :class="`is-${appearance.chrome}`">
-    <aside class="settings-nav" aria-label="系统设置分类">
+    <aside class="settings-nav" :aria-label="t('系统设置分类')">
       <header class="settings-nav__header">
         <span class="settings-nav__symbol">
           <el-icon><SetUp /></el-icon>
         </span>
         <div>
-          <p>配置中心</p>
-          <h1>系统设置</h1>
+          <p>{{ t('配置中心') }}</p>
+          <h1>{{ t('系统设置') }}</h1>
         </div>
       </header>
 
@@ -234,7 +315,10 @@
     <section class="settings-layout__content">
       <router-view v-slot="{ Component, route: settingsRoute }">
         <transition :name="transitionName">
-          <div :key="`${String(settingsRoute.name)}:${String(settingsRoute.params.pluginId || '')}`" class="settings-page-shell">
+          <div
+            :key="`${String(settingsRoute.name)}:${String(settingsRoute.params.pluginId || '')}`"
+            class="settings-page-shell"
+          >
             <component :is="Component" />
           </div>
         </transition>

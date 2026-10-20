@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   import { computed, onMounted, ref } from 'vue';
   import { Monitor, Refresh } from '@element-plus/icons-vue';
   import { ElMessage } from 'element-plus';
@@ -139,10 +140,10 @@
   );
 
   function activeTierLabel(value: string) {
-    if (value === 'secondary') return '二级池接管';
-    if (value === 'primary') return '一级池';
-    if (value === 'mixed') return '模型池混合路由';
-    return '全部账号';
+    if (value === 'secondary') return t('二级池接管');
+    if (value === 'primary') return t('一级池');
+    if (value === 'mixed') return t('模型池混合路由');
+    return t('全部账号');
   }
 
   function activeTierType(value: string) {
@@ -153,9 +154,26 @@
   }
 
   function stateMeta(state: ModelPoolCircuitState) {
-    if (state === 'OPEN') return { label: '已熔断', type: 'danger' as const };
-    if (state === 'HALF_OPEN') return { label: '半开探测', type: 'warning' as const };
-    return { label: '闭合正常', type: 'success' as const };
+    if (state === 'OPEN')
+      return {
+        get label() {
+          return t('已熔断');
+        },
+        type: 'danger' as const,
+      };
+    if (state === 'HALF_OPEN')
+      return {
+        get label() {
+          return t('半开探测');
+        },
+        type: 'warning' as const,
+      };
+    return {
+      get label() {
+        return t('闭合正常');
+      },
+      type: 'success' as const,
+    };
   }
 
   function tierAccountLabel(tier: TierSnapshot) {
@@ -187,9 +205,9 @@
         });
       }
     } catch (err) {
-      snapshotError.value = err instanceof ApiError ? err.message : '服务暂时不可用';
+      snapshotError.value = err instanceof ApiError ? err.message : t('服务暂时不可用');
       if (poolStatus.value) {
-        ElMessage.warning(`分级熔断快照刷新失败：${snapshotError.value}`);
+        ElMessage.warning(t('分级熔断快照刷新失败：{p0}', { p0: snapshotError.value }));
       }
     } finally {
       refreshing.value = false;
@@ -200,23 +218,23 @@
 </script>
 
 <template>
-  <section v-loading="refreshing" class="pool-monitor" aria-label="账号池分级熔断监控">
+  <section v-loading="refreshing" class="pool-monitor" :aria-label="t('账号池分级熔断监控')">
     <header class="pool-monitor__header">
       <div class="monitor-heading">
         <el-icon class="monitor-heading__icon"><Monitor /></el-icon>
         <div>
-          <div class="monitor-heading__title">模型路由健康快照</div>
+          <div class="monitor-heading__title">{{ t('模型路由健康快照') }}</div>
           <div v-if="poolStatus" class="monitor-heading__meta">
-            <span>数据口径：模型池原生快照</span>
-            <span>更新于 {{ formatDateTime(snapshot.generatedAt) }}</span>
+            <span>{{ t('数据口径：模型池原生快照') }}</span>
+            <span>{{ t('更新于') }} {{ formatDateTime(snapshot.generatedAt) }}</span>
             <span v-if="snapshot.lastEvaluatedAt">
-              评估于 {{ formatDateTime(snapshot.lastEvaluatedAt) }}
+              {{ t('评估于') }} {{ formatDateTime(snapshot.lastEvaluatedAt) }}
             </span>
           </div>
         </div>
       </div>
       <el-button :icon="Refresh" :loading="refreshing" @click="loadPoolStatus">
-        刷新快照
+        {{ t('刷新快照') }}
       </el-button>
     </header>
 
@@ -226,11 +244,15 @@
       v-else-if="snapshotError && !poolStatus"
       class="snapshot-state"
       icon="warning"
-      title="熔断快照不可用"
+      :title="t('熔断快照不可用')"
       :sub-title="snapshotError"
     >
       <template #extra>
-        <el-button type="primary" :loading="refreshing" @click="loadPoolStatus">重新加载</el-button>
+        <el-button type="primary" :loading="refreshing" @click="loadPoolStatus">
+          {{
+            t('重新加载')
+          }}
+        </el-button>
       </template>
     </el-result>
 
@@ -238,28 +260,28 @@
       <el-alert
         v-if="snapshotError"
         type="warning"
-        :title="`快照刷新失败，当前显示上次成功结果：${snapshotError}`"
+        :title="t('快照刷新失败，当前显示上次成功结果：{p0}', { p0: snapshotError })"
         :closable="false"
         show-icon
       />
 
       <div class="monitor-summary">
         <div class="summary-item">
-          <span class="summary-item__label">当前路由</span>
+          <span class="summary-item__label">{{ t('当前路由') }}</span>
           <el-tag :type="activeTierType(snapshot.activeTier)" effect="light" round>
             {{ activeTierLabel(snapshot.activeTier) }}
           </el-tag>
         </div>
         <div class="summary-item">
-          <span class="summary-item__label">供应商 / 模型族</span>
+          <span class="summary-item__label">{{ t('供应商 / 模型族') }}</span>
           <strong class="mono">{{ summary.groupCount }}</strong>
         </div>
         <div class="summary-item">
-          <span class="summary-item__label">可用账号</span>
+          <span class="summary-item__label">{{ t('可用账号') }}</span>
           <strong class="mono">{{ summary.availableCount }} / {{ summary.accountCount }}</strong>
         </div>
         <div class="summary-item">
-          <span class="summary-item__label">异常分组</span>
+          <span class="summary-item__label">{{ t('异常分组') }}</span>
           <strong class="mono" :class="{ 'is-danger': summary.abnormalGroupCount > 0 }">
             {{ summary.abnormalGroupCount }}
           </strong>
@@ -267,9 +289,9 @@
       </div>
 
       <div class="group-list__head" aria-hidden="true">
-        <span>模型供应商 / 模型族</span>
-        <span>分级账号池</span>
-        <span>窗口健康指标</span>
+        <span>{{ t('模型供应商 / 模型族') }}</span>
+        <span>{{ t('分级账号池') }}</span>
+        <span>{{ t('窗口健康指标') }}</span>
       </div>
 
       <div v-if="snapshot.groups.length" class="group-list">
@@ -291,40 +313,40 @@
             <div class="tier-snapshot">
               <div class="tier-snapshot__head">
                 <span class="tier-dot is-primary" />
-                <span>一级池</span>
+                <span>{{ t('一级池') }}</span>
                 <el-tag
                   v-if="group.activeTier === 'primary'"
                   size="small"
                   type="success"
                   effect="plain"
                 >
-                  当前
+                  {{ t('当前') }}
                 </el-tag>
                 <strong class="mono">{{ tierAccountLabel(group.primary) }}</strong>
               </div>
               <div class="tier-snapshot__meta">
-                {{ formatNumber(group.primary.requests) }} 请求 ·
-                {{ formatNumber(group.primary.failures) }} 失败 ·
+                {{ formatNumber(group.primary.requests) }} {{ t('请求 ·') }}
+                {{ formatNumber(group.primary.failures) }} {{ t('失败 ·') }}
                 {{ group.primary.failureRatePercent }}%
               </div>
             </div>
             <div class="tier-snapshot">
               <div class="tier-snapshot__head">
                 <span class="tier-dot is-secondary" />
-                <span>二级池</span>
+                <span>{{ t('二级池') }}</span>
                 <el-tag
                   v-if="group.activeTier === 'secondary'"
                   size="small"
                   type="warning"
                   effect="plain"
                 >
-                  当前
+                  {{ t('当前') }}
                 </el-tag>
                 <strong class="mono">{{ tierAccountLabel(group.secondary) }}</strong>
               </div>
               <div class="tier-snapshot__meta">
-                {{ formatNumber(group.secondary.requests) }} 请求 ·
-                {{ formatNumber(group.secondary.failures) }} 失败 ·
+                {{ formatNumber(group.secondary.requests) }} {{ t('请求 ·') }}
+                {{ formatNumber(group.secondary.failures) }} {{ t('失败 ·') }}
                 {{ group.secondary.failureRatePercent }}%
               </div>
             </div>
@@ -333,7 +355,7 @@
           <div class="health-metrics">
             <div class="health-metrics__rate">
               <strong class="mono">{{ activeTierOf(group).failureRatePercent }}%</strong>
-              <span> {{ activeTierLabel(group.activeTier) }}窗口错误率 </span>
+              <span> {{ activeTierLabel(group.activeTier) }}{{ t('窗口错误率') }} </span>
             </div>
             <el-progress
               :percentage="activeTierOf(group).failureRatePercent"
@@ -342,25 +364,25 @@
               :status="healthProgressStatus(group)"
             />
             <div class="health-metrics__detail">
-              {{ formatNumber(activeTierOf(group).failures) }} 失败 /
-              {{ formatNumber(activeTierOf(group).requests) }} 请求 · 熔断阈值
+              {{ formatNumber(activeTierOf(group).failures) }} {{ t('失败 /') }}
+              {{ formatNumber(activeTierOf(group).requests) }} {{ t('请求 · 熔断阈值') }}
               {{ failoverThreshold }}%
             </div>
             <div v-if="group.state === 'HALF_OPEN'" class="health-metrics__detail">
-              探测 {{ group.halfOpenSucceeded }}/{{ group.halfOpenCompleted }} 成功 ·
-              {{ group.halfOpenInFlight }} 进行中
+              {{ t('探测') }} {{ group.halfOpenSucceeded }}/{{ group.halfOpenCompleted }}
+              {{ t('成功 ·') }} {{ group.halfOpenInFlight }} {{ t('进行中') }}
             </div>
             <div v-else-if="group.lastTransitionAt" class="health-metrics__detail">
-              状态变更 {{ formatDateTime(group.lastTransitionAt) }}
+              {{ t('状态变更') }} {{ formatDateTime(group.lastTransitionAt) }}
             </div>
             <div v-if="group.nextProbeAt" class="health-metrics__detail">
-              下次探测 {{ formatDateTime(group.nextProbeAt) }}
+              {{ t('下次探测') }} {{ formatDateTime(group.nextProbeAt) }}
             </div>
           </div>
         </article>
       </div>
 
-      <el-empty v-else :image-size="84" description="暂无可监控的模型路由分组" />
+      <el-empty v-else :image-size="84" :description="t('暂无可监控的模型路由分组')" />
     </template>
   </section>
 </template>

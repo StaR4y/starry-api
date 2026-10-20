@@ -1,9 +1,17 @@
 <script setup lang="ts">
+  import { locale, t } from '@/i18n';
   /** DSH-style usage tracker: overview, calendar, call list, prices, balance, export. */
   import { computed, onMounted, ref, watch } from 'vue';
   import { apiKeysApi, codingPlanApi, logsApi, systemApi } from '@/api';
   import { useAuthStore } from '@/stores/auth';
-  import type { ApiKey, ModelInfo, ModelUsageSummary, RequestLog, UsageDay, UsageTracker } from '@/types/api';
+  import type {
+    ApiKey,
+    ModelInfo,
+    ModelUsageSummary,
+    RequestLog,
+    UsageDay,
+    UsageTracker,
+  } from '@/types/api';
   import { formatNumber } from '@/utils/format';
   import {
     currentPeriodLabel,
@@ -24,7 +32,7 @@
   type SubTab = 'overview' | 'calendar' | 'calls' | 'prices';
   type HeatDim = 'cost' | 'calls';
 
-  const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日'];
+  const WEEKDAYS = computed(() => [t('一'), t('二'), t('三'), t('四'), t('五'), t('六'), t('日')]);
 
   const auth = useAuthStore();
   const mainTab = ref<MainTab>('usage');
@@ -70,17 +78,20 @@
     if (amount === 0) return '0';
     if (Math.abs(amount) < 0.0001) return amount.toExponential(2);
     if (Math.abs(amount) < 1) return amount.toFixed(4);
-    return amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return amount.toLocaleString(locale.value, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    });
   }
 
   function providerOf(modelId: string | null | undefined) {
-    if (!modelId) return '未指定服务商';
+    if (!modelId) return t('未指定服务商');
     const found = models.value.find((item) => item.id === modelId);
-    return found?.provider || found?.owned_by || '未指定服务商';
+    return found?.provider || found?.owned_by || t('未指定服务商');
   }
 
   function modelLabel(modelId: string | null | undefined) {
-    if (!modelId) return '未指定模型';
+    if (!modelId) return t('未指定模型');
     const found = models.value.find((item) => item.id === modelId);
     return found?.name || found?.modelName || modelId;
   }
@@ -92,7 +103,10 @@
   });
 
   const providerGroups = computed(() => {
-    const groups = new Map<string, { provider: string; calls: number; credits: number; models: ModelUsageSummary[] }>();
+    const groups = new Map<
+      string,
+      { provider: string; calls: number; credits: number; models: ModelUsageSummary[] }
+    >();
     for (const row of overviewModels.value) {
       const provider = providerOf(row.model);
       const current = groups.get(provider) ?? { provider, calls: 0, credits: 0, models: [] };
@@ -101,7 +115,9 @@
       current.models.push(row);
       groups.set(provider, current);
     }
-    return [...groups.values()].sort((a, b) => b.credits - a.credits || a.provider.localeCompare(b.provider));
+    return [...groups.values()].sort(
+      (a, b) => b.credits - a.credits || a.provider.localeCompare(b.provider),
+    );
   });
 
   const calendarDays = computed(() => {
@@ -128,7 +144,10 @@
     let max = 0;
     for (const cell of calendarCells.value) {
       if (!cell.day) continue;
-      max = Math.max(max, calendarDim.value === 'cost' ? num(cell.day.credits) : cell.day.requestCount);
+      max = Math.max(
+        max,
+        calendarDim.value === 'cost' ? num(cell.day.credits) : cell.day.requestCount,
+      );
     }
     return max;
   });
@@ -180,7 +199,7 @@
     } catch (error) {
       tracker.value = null;
       logItems.value = [];
-      errorMessage.value = error instanceof Error ? error.message : '暂时读不到用量';
+      errorMessage.value = error instanceof Error ? error.message : t('暂时读不到用量');
     } finally {
       loading.value = false;
     }
@@ -200,7 +219,7 @@
         logCursors.value = cursors;
       }
     } catch (error) {
-      errorMessage.value = error instanceof Error ? error.message : '调用明细加载失败';
+      errorMessage.value = error instanceof Error ? error.message : t('调用明细加载失败');
     } finally {
       loading.value = false;
     }
@@ -299,7 +318,9 @@
   });
 
   function stamp() {
-    return shanghaiDateTime(Date.now()).replace(/[-: ]/g, '').replace(/(\d{8})(\d{6})/, '$1-$2');
+    return shanghaiDateTime(Date.now())
+      .replace(/[-: ]/g, '')
+      .replace(/(\d{8})(\d{6})/, '$1-$2');
   }
 
   function downloadBlob(name: string, blob: Blob) {
@@ -325,10 +346,22 @@
   }
 
   async function exportCsv() {
-    exportMessage.value = '导出中…';
+    exportMessage.value = t('导出中…');
     try {
       const rows = await collectExportLogs();
-      const header = ['时间(北京)', '模型', '路径', '成功', '输入token', '输出token', '消耗', '耗时ms', '时段', '状态码', '错误'];
+      const header = [
+        t('时间(北京)'),
+        t('模型'),
+        t('路径'),
+        t('成功'),
+        t('输入token'),
+        t('输出token'),
+        t('消耗'),
+        t('耗时ms'),
+        t('时段'),
+        t('状态码'),
+        t('错误'),
+      ];
       const lines = [
         header.join(','),
         ...rows.map((row) =>
@@ -341,7 +374,7 @@
             row.outputTokens ?? 0,
             num(row.credits),
             row.latencyMs ?? 0,
-            isPeakAt(row.createdAt) ? '峰' : '谷',
+            isPeakAt(row.createdAt) ? t('峰') : t('谷'),
             row.statusCode ?? '',
             (row.errorMessage ?? '').replaceAll('"', '""'),
           ]
@@ -349,32 +382,36 @@
             .join(','),
         ),
       ];
-      downloadBlob(`starry-usage-${stamp()}.csv`, new Blob([`\ufeff${lines.join('\n')}`], { type: 'text/csv;charset=utf-8' }));
-      exportMessage.value = `已导出 CSV · ${rows.length} 条`;
+      downloadBlob(
+        `starry-usage-${stamp()}.csv`,
+        new Blob([`\ufeff${lines.join('\n')}`], { type: 'text/csv;charset=utf-8' }),
+      );
+      exportMessage.value = t('已导出 CSV · {p0} 条', { p0: rows.length });
     } catch (error) {
-      exportMessage.value = error instanceof Error ? `导出失败：${error.message}` : '导出失败';
+      exportMessage.value =
+        error instanceof Error ? t('导出失败：{p0}', { p0: error.message }) : t('导出失败');
     }
   }
 
   async function exportJson() {
-    exportMessage.value = '导出中…';
+    exportMessage.value = t('导出中…');
     try {
       const rows = await collectExportLogs();
       downloadBlob(
         `starry-usage-${stamp()}.json`,
-        new Blob(
-          [JSON.stringify({ tracker: tracker.value, records: rows }, null, 2)],
-          { type: 'application/json' },
-        ),
+        new Blob([JSON.stringify({ tracker: tracker.value, records: rows }, null, 2)], {
+          type: 'application/json',
+        }),
       );
-      exportMessage.value = `已导出 JSON · ${rows.length} 条`;
+      exportMessage.value = t('已导出 JSON · {p0} 条', { p0: rows.length });
     } catch (error) {
-      exportMessage.value = error instanceof Error ? `导出失败：${error.message}` : '导出失败';
+      exportMessage.value =
+        error instanceof Error ? t('导出失败：{p0}', { p0: error.message }) : t('导出失败');
     }
   }
 
   async function exportPng() {
-    exportMessage.value = '生成图片中…';
+    exportMessage.value = t('生成图片中…');
     try {
       const rows = await collectExportLogs();
       const canvas = document.createElement('canvas');
@@ -386,36 +423,51 @@
       canvas.height = header + (overviewModels.value.length + tableRows + 8) * line;
       const ctx = canvas.getContext('2d');
       if (!ctx) {
-        exportMessage.value = '画布不可用';
+        exportMessage.value = t('画布不可用');
         return;
       }
       ctx.fillStyle = '#0f1728';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.fillStyle = '#f3f6ff';
       ctx.font = '600 22px sans-serif';
-      ctx.fillText('用量与消耗报告', 28, 40);
+      ctx.fillText(t('用量与消耗报告'), 28, 40);
       ctx.font = '13px sans-serif';
       ctx.fillStyle = 'rgba(243,246,255,.72)';
       const summary = tracker.value;
       ctx.fillText(
-        `生成时间 ${shanghaiDateTime(Date.now())}（北京） · 共 ${fmtInt(summary?.totalRequests)} 条调用 · 合计 ${fmtMoney(summary?.totalCredits)}`,
+        t('生成时间 {p0}（北京） · 共 {p1} 条调用 · 合计 {p2}', {
+          p0: shanghaiDateTime(Date.now()),
+          p1: fmtInt(summary?.totalRequests),
+          p2: fmtMoney(summary?.totalCredits),
+        }),
         28,
         68,
       );
       ctx.fillText(
-        `输入 ${fmtInt(summary?.totalInputTokens)} · 输出 ${fmtInt(summary?.totalOutputTokens)} · 高峰 ${fmtMoney(summary?.peakCredits)} · 空闲 ${fmtMoney(summary?.offPeakCredits)}`,
+        t('输入 {p0} · 输出 {p1} · 高峰 {p2} · 空闲 {p3}', {
+          p0: fmtInt(summary?.totalInputTokens),
+          p1: fmtInt(summary?.totalOutputTokens),
+          p2: fmtMoney(summary?.peakCredits),
+          p3: fmtMoney(summary?.offPeakCredits),
+        }),
         28,
         90,
       );
       ctx.fillStyle = '#f3f6ff';
       ctx.font = '600 14px sans-serif';
-      ctx.fillText('按模型', 28, 128);
+      ctx.fillText(t('按模型'), 28, 128);
       ctx.font = '12px sans-serif';
       let y = 154;
       for (const model of overviewModels.value.slice(0, 20)) {
         ctx.fillStyle = 'rgba(243,246,255,.88)';
         ctx.fillText(
-          `${modelLabel(model.model)}  ${fmtInt(model.requestCount)} 次  ${fmtInt(model.inputTokens)} / ${fmtInt(model.outputTokens)}  ${fmtMoney(model.credits)}`,
+          t('{p0}  {p1} 次  {p2} / {p3}  {p4}', {
+            p0: modelLabel(model.model),
+            p1: fmtInt(model.requestCount),
+            p2: fmtInt(model.inputTokens),
+            p3: fmtInt(model.outputTokens),
+            p4: fmtMoney(model.credits),
+          }),
           28,
           y,
         );
@@ -424,13 +476,13 @@
       y += 12;
       ctx.fillStyle = '#f3f6ff';
       ctx.font = '600 14px sans-serif';
-      ctx.fillText(`调用明细（最近 ${tableRows} 条）`, 28, y);
+      ctx.fillText(t('调用明细（最近 {p0} 条）', { p0: tableRows }), 28, y);
       y += 24;
       ctx.font = '12px sans-serif';
       for (const row of rows.slice(0, tableRows)) {
         ctx.fillStyle = row.success ? 'rgba(243,246,255,.88)' : '#ef5b6b';
         ctx.fillText(
-          `${shanghaiDateTime(row.createdAt)}  ${modelLabel(row.model)}  ${fmtInt(row.inputTokens)} / ${fmtInt(row.outputTokens)}  ${fmtMoney(row.credits)}  ${isPeakAt(row.createdAt) ? '峰' : '谷'}`,
+          `${shanghaiDateTime(row.createdAt)}  ${modelLabel(row.model)}  ${fmtInt(row.inputTokens)} / ${fmtInt(row.outputTokens)}  ${fmtMoney(row.credits)}  ${isPeakAt(row.createdAt) ? t('峰') : t('谷')}`,
           28,
           y,
         );
@@ -439,16 +491,20 @@
       await new Promise<void>((resolve, reject) => {
         canvas.toBlob((blob) => {
           if (!blob) {
-            reject(new Error('生成图片失败'));
+            reject(new Error(t('生成图片失败')));
             return;
           }
           downloadBlob(`starry-usage-${stamp()}.png`, blob);
           resolve();
         }, 'image/png');
       });
-      exportMessage.value = rows.length > 2000 ? '已导出 PNG · 报告仅含最近 2000 条' : `已导出 PNG · ${rows.length} 条`;
+      exportMessage.value =
+        rows.length > 2000
+          ? t('已导出 PNG · 报告仅含最近 2000 条')
+          : t('已导出 PNG · {p0} 条', { p0: rows.length });
     } catch (error) {
-      exportMessage.value = error instanceof Error ? `生成图片失败：${error.message}` : '生成图片失败';
+      exportMessage.value =
+        error instanceof Error ? t('生成图片失败：{p0}', { p0: error.message }) : t('生成图片失败');
     }
   }
 
@@ -485,108 +541,169 @@
     <header class="maid-panel__head">
       <div>
         <p class="maid-panel__kicker">{{ title }}</p>
-        <h2>{{ mainTab === 'usage' ? '用量与消耗' : '剩余余额查询' }}</h2>
+        <h2>{{ mainTab === 'usage' ? t('用量与消耗') : t('剩余余额查询') }}</h2>
         <p class="maid-panel__sub">
-          {{ mainTab === 'usage' ? '当前账号在 Starry 的实扣用量与调用记录' : '钱包、套餐与 API Key 额度' }}
+          {{
+            mainTab === 'usage'
+              ? t('当前账号在 Starry 的实扣用量与调用记录')
+              : t('钱包、套餐与 API Key 额度')
+          }}
         </p>
       </div>
       <div class="maid-panel__head-actions">
-        <span class="badge" :class="periodNow.includes('高峰') ? 'is-peak' : 'is-off'">{{ periodNow }}</span>
-        <button type="button" class="ghost" @click="refresh">刷新</button>
-        <button type="button" class="ghost" aria-label="关闭" @click="emit('close')">关闭</button>
+        <span class="badge" :class="periodNow.includes(t('高峰')) ? 'is-peak' : 'is-off'">{{
+          periodNow
+        }}</span>
+        <button type="button" class="ghost" @click="refresh">{{ t('刷新') }}</button>
+        <button type="button" class="ghost" :aria-label="t('关闭')" @click="emit('close')">
+          {{ t('关闭') }}
+        </button>
       </div>
     </header>
 
     <div class="tabs">
-      <button type="button" :class="{ 'is-on': mainTab === 'usage' }" @click="mainTab = 'usage'">用量与消耗</button>
-      <button type="button" :class="{ 'is-on': mainTab === 'balance' }" @click="mainTab = 'balance'">剩余余额查询</button>
+      <button type="button" :class="{ 'is-on': mainTab === 'usage' }" @click="mainTab = 'usage'">
+        {{ t('用量与消耗') }}
+      </button>
+      <button
+        type="button"
+        :class="{ 'is-on': mainTab === 'balance' }"
+        @click="mainTab = 'balance'"
+      >
+        {{ t('剩余余额查询') }}
+      </button>
     </div>
 
     <p v-if="errorMessage" class="status">{{ errorMessage }}</p>
-    <p v-else-if="loading" class="status">正在查看用量…</p>
+    <p v-else-if="loading" class="status">{{ t('正在查看用量…') }}</p>
 
     <template v-if="mainTab === 'usage'">
       <div class="subtabs">
-        <button type="button" :class="{ 'is-on': subTab === 'overview' }" @click="subTab = 'overview'">概览</button>
-        <button type="button" :class="{ 'is-on': subTab === 'calendar' }" @click="subTab = 'calendar'">用量日历</button>
-        <button type="button" :class="{ 'is-on': subTab === 'calls' }" @click="subTab = 'calls'">调用明细</button>
-        <button type="button" :class="{ 'is-on': subTab === 'prices' }" @click="subTab = 'prices'">价格表</button>
+        <button
+          type="button"
+          :class="{ 'is-on': subTab === 'overview' }"
+          @click="subTab = 'overview'"
+        >
+          {{ t('概览') }}
+        </button>
+        <button
+          type="button"
+          :class="{ 'is-on': subTab === 'calendar' }"
+          @click="subTab = 'calendar'"
+        >
+          {{ t('用量日历') }}
+        </button>
+        <button type="button" :class="{ 'is-on': subTab === 'calls' }" @click="subTab = 'calls'">
+          {{ t('调用明细') }}
+        </button>
+        <button type="button" :class="{ 'is-on': subTab === 'prices' }" @click="subTab = 'prices'">
+          {{ t('价格表') }}
+        </button>
       </div>
 
       <div v-if="subTab !== 'prices' && subTab !== 'calendar'" class="toolbar">
         <div class="seg">
-          <button type="button" :class="{ 'is-on': preset === 'today' }" @click="setPreset('today')">今天</button>
-          <button type="button" :class="{ 'is-on': preset === '7d' }" @click="setPreset('7d')">近7天</button>
-          <button type="button" :class="{ 'is-on': preset === '30d' }" @click="setPreset('30d')">近30天</button>
-          <button type="button" :class="{ 'is-on': preset === 'all' }" @click="setPreset('all')">全部</button>
+          <button
+            type="button"
+            :class="{ 'is-on': preset === 'today' }"
+            @click="setPreset('today')"
+          >
+            {{ t('今天') }}
+          </button>
+          <button type="button" :class="{ 'is-on': preset === '7d' }" @click="setPreset('7d')">
+            {{ t('近7天') }}
+          </button>
+          <button type="button" :class="{ 'is-on': preset === '30d' }" @click="setPreset('30d')">
+            {{ t('近30天') }}
+          </button>
+          <button type="button" :class="{ 'is-on': preset === 'all' }" @click="setPreset('all')">
+            {{ t('全部') }}
+          </button>
         </div>
-        <span class="note">自定义区间：</span>
+        <span class="note">{{ t('自定义区间：') }}</span>
         <input v-model="customFrom" type="date" @change="setCustom">
-        <span class="note">至</span>
+        <span class="note">{{ t('至') }}</span>
         <input v-model="customTo" type="date" @change="setCustom">
-        <button v-if="preset !== 'all'" type="button" class="ghost" @click="setPreset('all')">清除筛选</button>
+        <button v-if="preset !== 'all'" type="button" class="ghost" @click="setPreset('all')">
+          {{ t('清除筛选') }}
+        </button>
       </div>
 
       <div class="banner">
-        <strong>与官方后台的差异</strong>
-        <p>本面板统计的是当前账号在 Starry 实扣的调用（请求日志 + 日/小时聚合）。消耗单位是额度，不是 DeepSeek 官方峰谷价。</p>
-        <p>高峰 / 空闲按时段拆分：工作日北京时间 9:00–12:00、14:00–18:00 为高峰，其余为空闲；自 2026-08-23 起周末全天空闲。已滚入日汇总的历史调用只计入总消耗，高峰/空闲可能小于合计。</p>
+        <strong>{{ t('与官方后台的差异') }}</strong>
+        <p>
+          {{
+            t(
+              '本面板统计的是当前账号在 Starry 实扣的调用（请求日志 + 日/小时聚合）。消耗单位是额度，不是 DeepSeek 官方峰谷价。',
+            )
+          }}
+        </p>
+        <p>
+          {{
+            t(
+              '高峰 / 空闲按时段拆分：工作日北京时间 9:00–12:00、14:00–18:00 为高峰，其余为空闲；自 2026-08-23 起周末全天空闲。已滚入日汇总的历史调用只计入总消耗，高峰/空闲可能小于合计。',
+            )
+          }}
+        </p>
         <p v-if="tracker && tracker.failedRequests > 0" class="warn">
-          当前范围有 {{ fmtInt(tracker.failedRequests) }} 次失败调用——Starry 仍可能已按实际 token 计费。
+          {{ t('当前范围有') }} {{ fmtInt(tracker.failedRequests) }}
+          {{ t('次失败调用——Starry 仍可能已按实际 token 计费。') }}
         </p>
       </div>
 
       <template v-if="subTab === 'overview' && tracker">
         <p class="note">
-          当前范围：共 {{ fmtInt(tracker.totalRequests) }} 条
-          {{ preset === 'all' ? '（全部记录）' : '' }}
-          · 总消耗 {{ fmtMoney(tracker.totalCredits) }}
+          {{ t('当前范围：共') }} {{ fmtInt(tracker.totalRequests) }} {{ t('条') }}
+          {{ preset === 'all' ? t('（全部记录）') : '' }} {{ t('· 总消耗') }}
+          {{ fmtMoney(tracker.totalCredits) }}
         </p>
         <div class="cards">
           <article>
-            <span>调用次数</span>
+            <span>{{ t('调用次数') }}</span>
             <strong>{{ fmtInt(tracker.totalRequests) }}</strong>
-            <small>高峰 {{ fmtInt(tracker.peakRequests) }} · 空闲 {{ fmtInt(tracker.offPeakRequests) }} · 失败 {{ fmtInt(tracker.failedRequests) }}</small>
+            <small>{{ t('高峰') }} {{ fmtInt(tracker.peakRequests) }} {{ t('· 空闲') }}
+              {{ fmtInt(tracker.offPeakRequests) }} {{ t('· 失败') }}
+              {{ fmtInt(tracker.failedRequests) }}</small>
           </article>
           <article>
-            <span>输入</span>
+            <span>{{ t('输入') }}</span>
             <strong>{{ fmtInt(tracker.totalInputTokens) }}</strong>
             <small>token</small>
           </article>
           <article>
-            <span>输出</span>
+            <span>{{ t('输出') }}</span>
             <strong>{{ fmtInt(tracker.totalOutputTokens) }}</strong>
             <small>token</small>
           </article>
           <article>
-            <span>高峰消耗</span>
+            <span>{{ t('高峰消耗') }}</span>
             <strong class="is-peak">{{ fmtMoney(tracker.peakCredits) }}</strong>
-            <small>工作日高峰 9:00–12:00、14:00–18:00</small>
+            <small>{{ t('工作日高峰 9:00–12:00、14:00–18:00') }}</small>
           </article>
           <article>
-            <span>空闲消耗</span>
+            <span>{{ t('空闲消耗') }}</span>
             <strong class="is-off">{{ fmtMoney(tracker.offPeakCredits) }}</strong>
-            <small>其余空闲时段</small>
+            <small>{{ t('其余空闲时段') }}</small>
           </article>
           <article>
-            <span>总消耗</span>
+            <span>{{ t('总消耗') }}</span>
             <strong>{{ fmtMoney(tracker.totalCredits) }}</strong>
-            <small>Starry 实扣额度</small>
+            <small>{{ t('Starry 实扣额度') }}</small>
           </article>
         </div>
 
-        <h3>消耗表（按模型）</h3>
+        <h3>{{ t('消耗表（按模型）') }}</h3>
         <div class="scroll">
           <table>
             <thead>
               <tr>
-                <th>模型</th>
-                <th>API 服务商</th>
-                <th>调用</th>
-                <th>成功 / 失败</th>
-                <th>输入</th>
-                <th>输出</th>
-                <th>总消耗</th>
+                <th>{{ t('模型') }}</th>
+                <th>{{ t('API 服务商') }}</th>
+                <th>{{ t('调用') }}</th>
+                <th>{{ t('成功 / 失败') }}</th>
+                <th>{{ t('输入') }}</th>
+                <th>{{ t('输出') }}</th>
+                <th>{{ t('总消耗') }}</th>
               </tr>
             </thead>
             <tbody>
@@ -600,10 +717,12 @@
                 <td>{{ fmtMoney(row.credits) }}</td>
               </tr>
               <tr class="is-total">
-                <td>合计</td>
-                <td>{{ providerGroups.length }} 个服务商</td>
+                <td>{{ t('合计') }}</td>
+                <td>{{ providerGroups.length }} {{ t('个服务商') }}</td>
                 <td>{{ fmtInt(tracker.totalRequests) }}</td>
-                <td>{{ fmtInt(tracker.successfulRequests) }} / {{ fmtInt(tracker.failedRequests) }}</td>
+                <td>
+                  {{ fmtInt(tracker.successfulRequests) }} / {{ fmtInt(tracker.failedRequests) }}
+                </td>
                 <td>{{ fmtInt(tracker.totalInputTokens) }}</td>
                 <td>{{ fmtInt(tracker.totalOutputTokens) }}</td>
                 <td>{{ fmtMoney(tracker.totalCredits) }}</td>
@@ -612,30 +731,30 @@
           </table>
         </div>
 
-        <h3>消耗明细（按 API 服务商 × 模型）</h3>
+        <h3>{{ t('消耗明细（按 API 服务商 × 模型）') }}</h3>
         <div class="scroll">
           <table>
             <thead>
               <tr>
-                <th>API 服务商</th>
-                <th>模型</th>
-                <th>调用</th>
-                <th>输入</th>
-                <th>输出</th>
-                <th>总消耗</th>
+                <th>{{ t('API 服务商') }}</th>
+                <th>{{ t('模型') }}</th>
+                <th>{{ t('调用') }}</th>
+                <th>{{ t('输入') }}</th>
+                <th>{{ t('输出') }}</th>
+                <th>{{ t('总消耗') }}</th>
               </tr>
             </thead>
             <tbody>
               <template v-for="group in providerGroups" :key="group.provider">
                 <tr class="is-group">
                   <td>{{ group.provider }}</td>
-                  <td>（{{ group.models.length }} 个模型）</td>
+                  <td>（{{ group.models.length }} {{ t('个模型）') }}</td>
                   <td>{{ fmtInt(group.calls) }}</td>
-                  <td colspan="2"></td>
+                  <td colspan="2" />
                   <td>{{ fmtMoney(group.credits) }}</td>
                 </tr>
                 <tr v-for="row in group.models" :key="`${group.provider}-${row.model}`">
-                  <td></td>
+                  <td />
                   <td>{{ modelLabel(row.model) }}</td>
                   <td>{{ fmtInt(row.requestCount) }}</td>
                   <td>{{ fmtInt(row.inputTokens) }}</td>
@@ -644,8 +763,8 @@
                 </tr>
               </template>
               <tr class="is-total">
-                <td>总费用合计</td>
-                <td>{{ providerGroups.length }} 个服务商</td>
+                <td>{{ t('总费用合计') }}</td>
+                <td>{{ providerGroups.length }} {{ t('个服务商') }}</td>
                 <td>{{ fmtInt(tracker.totalRequests) }}</td>
                 <td>{{ fmtInt(tracker.totalInputTokens) }}</td>
                 <td>{{ fmtInt(tracker.totalOutputTokens) }}</td>
@@ -658,13 +777,25 @@
 
       <template v-else-if="subTab === 'calendar'">
         <div class="toolbar">
-          <button type="button" class="ghost" @click="prevMonth">‹ 上月</button>
+          <button type="button" class="ghost" @click="prevMonth">{{ t('‹ 上月') }}</button>
           <strong>{{ calendarYear }}-{{ pad2(calendarMonth + 1) }}</strong>
-          <button type="button" class="ghost" @click="nextMonth">下月 ›</button>
-          <button type="button" class="ghost" @click="goToday">今天</button>
+          <button type="button" class="ghost" @click="nextMonth">{{ t('下月 ›') }}</button>
+          <button type="button" class="ghost" @click="goToday">{{ t('今天') }}</button>
           <div class="seg">
-            <button type="button" :class="{ 'is-on': calendarDim === 'cost' }" @click="calendarDim = 'cost'">按消耗</button>
-            <button type="button" :class="{ 'is-on': calendarDim === 'calls' }" @click="calendarDim = 'calls'">按调用数</button>
+            <button
+              type="button"
+              :class="{ 'is-on': calendarDim === 'cost' }"
+              @click="calendarDim = 'cost'"
+            >
+              {{ t('按消耗') }}
+            </button>
+            <button
+              type="button"
+              :class="{ 'is-on': calendarDim === 'calls' }"
+              @click="calendarDim = 'calls'"
+            >
+              {{ t('按调用数') }}
+            </button>
           </div>
         </div>
         <div class="cal">
@@ -677,49 +808,78 @@
             :class="{ 'is-empty': !cell.label, 'is-on': selectedDay === cell.key }"
             :style="{ background: cell.label ? heatBackground(cell.day) : 'transparent' }"
             :disabled="!cell.label"
-            :title="cell.day
-              ? `${cell.key}\n调用 ${cell.day.requestCount} 次（高峰 ${cell.day.peakRequests} / 空闲 ${cell.day.offPeakRequests}）\n输入 ${cell.day.inputTokens} · 输出 ${cell.day.outputTokens}\n高峰消耗 ${fmtMoney(cell.day.peakCredits)} · 空闲消耗 ${fmtMoney(cell.day.offPeakCredits)} · 合计 ${fmtMoney(cell.day.credits)}`
-              : cell.label ? `${cell.key}\n无记录` : ''"
+            :title="
+              cell.day
+                ? t(
+                  '{p0}\n调用 {p1} 次（高峰 {p2} / 空闲 {p3}）\n输入 {p4} · 输出 {p5}\n高峰消耗 {p6} · 空闲消耗 {p7} · 合计 {p8}',
+                  {
+                    p0: cell.key,
+                    p1: cell.day.requestCount,
+                    p2: cell.day.peakRequests,
+                    p3: cell.day.offPeakRequests,
+                    p4: cell.day.inputTokens,
+                    p5: cell.day.outputTokens,
+                    p6: fmtMoney(cell.day.peakCredits),
+                    p7: fmtMoney(cell.day.offPeakCredits),
+                    p8: fmtMoney(cell.day.credits),
+                  },
+                )
+                : cell.label
+                  ? t('{p0}\n无记录', { p0: cell.key })
+                  : ''
+            "
             @click="cell.label && selectDay(cell.key)"
           >
             <span>{{ cell.label }}</span>
-            <small v-if="cell.day">{{ calendarDim === 'cost' ? fmtMoney(cell.day.credits) : fmtInt(cell.day.requestCount) }}</small>
+            <small v-if="cell.day">{{
+              calendarDim === 'cost' ? fmtMoney(cell.day.credits) : fmtInt(cell.day.requestCount)
+            }}</small>
             <small v-else-if="cell.label">—</small>
           </button>
         </div>
-        <p class="note">热力：低 → 高（{{ calendarDim === 'cost' ? '当日消耗' : '当日调用数' }}）· 悬停查看详情，点击某天查看当日调用</p>
+        <p class="note">
+          {{ t('热力：低 → 高（') }}{{ calendarDim === 'cost' ? t('当日消耗') : t('当日调用数')
+          }}{{ t('）· 悬停查看详情，点击某天查看当日调用') }}
+        </p>
         <div class="cards">
           <article>
-            <span>本月调用</span>
+            <span>{{ t('本月调用') }}</span>
             <strong>{{ fmtInt(calendarTracker?.totalRequests) }}</strong>
-            <small>高峰 {{ fmtInt(calendarTracker?.peakRequests) }} · 空闲 {{ fmtInt(calendarTracker?.offPeakRequests) }}</small>
+            <small>{{ t('高峰') }} {{ fmtInt(calendarTracker?.peakRequests) }} {{ t('· 空闲') }}
+              {{ fmtInt(calendarTracker?.offPeakRequests) }}</small>
           </article>
           <article>
-            <span>本月消耗</span>
+            <span>{{ t('本月消耗') }}</span>
             <strong>{{ fmtMoney(calendarTracker?.totalCredits) }}</strong>
-            <small>高峰 {{ fmtMoney(calendarTracker?.peakCredits) }} · 空闲 {{ fmtMoney(calendarTracker?.offPeakCredits) }}</small>
+            <small>{{ t('高峰') }} {{ fmtMoney(calendarTracker?.peakCredits) }} {{ t('· 空闲') }}
+              {{ fmtMoney(calendarTracker?.offPeakCredits) }}</small>
           </article>
         </div>
-        <h3>{{ calendarYear }}年{{ calendarMonth + 1 }}月每日统计</h3>
-        <p v-if="!monthRows.length" class="status">本月暂无记录。</p>
+        <h3>{{ calendarYear }}{{ t('年') }}{{ calendarMonth + 1 }}{{ t('月每日统计') }}</h3>
+        <p v-if="!monthRows.length" class="status">{{ t('本月暂无记录。') }}</p>
         <div v-else class="scroll">
           <table>
             <thead>
               <tr>
-                <th>日期</th>
-                <th>调用</th>
-                <th>高峰/空闲</th>
-                <th>输入</th>
-                <th>输出</th>
-                <th>高峰消耗</th>
-                <th>空闲消耗</th>
-                <th>总消耗</th>
+                <th>{{ t('日期') }}</th>
+                <th>{{ t('调用') }}</th>
+                <th>{{ t('高峰/空闲') }}</th>
+                <th>{{ t('输入') }}</th>
+                <th>{{ t('输出') }}</th>
+                <th>{{ t('高峰消耗') }}</th>
+                <th>{{ t('空闲消耗') }}</th>
+                <th>{{ t('总消耗') }}</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="row in monthRows" :key="row.day">
                 <td>
-                  <button type="button" class="link" :class="{ 'is-on': selectedDay === row.day }" @click="selectDay(row.day)">
+                  <button
+                    type="button"
+                    class="link"
+                    :class="{ 'is-on': selectedDay === row.day }"
+                    @click="selectDay(row.day)"
+                  >
                     {{ row.day }}
                   </button>
                 </td>
@@ -739,20 +899,20 @@
           </table>
         </div>
         <template v-if="selectedDay">
-          <h3>{{ selectedDay }} 调用明细</h3>
-          <p v-if="selectedLoading" class="status">加载当日调用…</p>
-          <p v-else-if="!selectedLogs.length" class="status">该日无记录。</p>
+          <h3>{{ selectedDay }} {{ t('调用明细') }}</h3>
+          <p v-if="selectedLoading" class="status">{{ t('加载当日调用…') }}</p>
+          <p v-else-if="!selectedLogs.length" class="status">{{ t('该日无记录。') }}</p>
           <div v-else class="scroll">
             <table>
               <thead>
                 <tr>
-                  <th>时间(北京)</th>
-                  <th>模型</th>
-                  <th>输入</th>
-                  <th>输出</th>
-                  <th>时段</th>
-                  <th>结束</th>
-                  <th>消耗</th>
+                  <th>{{ t('时间(北京)') }}</th>
+                  <th>{{ t('模型') }}</th>
+                  <th>{{ t('输入') }}</th>
+                  <th>{{ t('输出') }}</th>
+                  <th>{{ t('时段') }}</th>
+                  <th>{{ t('结束') }}</th>
+                  <th>{{ t('消耗') }}</th>
                 </tr>
               </thead>
               <tbody>
@@ -760,17 +920,19 @@
                   <td>{{ shanghaiDateTime(row.createdAt) }}</td>
                   <td>
                     {{ modelLabel(row.model) }}
-                    <span v-if="!row.success" class="badge is-warn">失败</span>
+                    <span v-if="!row.success" class="badge is-warn">{{ t('失败') }}</span>
                   </td>
                   <td>{{ fmtInt(row.inputTokens) }}</td>
                   <td>{{ fmtInt(row.outputTokens) }}</td>
                   <td>
                     <span class="badge" :class="isPeakAt(row.createdAt) ? 'is-peak' : 'is-off'">
-                      {{ isPeakAt(row.createdAt) ? '峰' : '谷' }}
+                      {{ isPeakAt(row.createdAt) ? t('峰') : t('谷') }}
                     </span>
                   </td>
-                  <td>{{ row.success ? '完成' : (row.errorMessage || '错误') }}</td>
-                  <td :class="isPeakAt(row.createdAt) ? 'is-peak' : 'is-off'">{{ fmtMoney(row.credits) }}</td>
+                  <td>{{ row.success ? t('完成') : row.errorMessage || t('错误') }}</td>
+                  <td :class="isPeakAt(row.createdAt) ? 'is-peak' : 'is-off'">
+                    {{ fmtMoney(row.credits) }}
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -780,43 +942,62 @@
 
       <template v-else-if="subTab === 'calls'">
         <p class="note">
-          当前范围：共本页 {{ fmtInt(logItems.length) }} 条
-          · 第 {{ logPage + 1 }} 页 · 每页 100 条
+          {{ t('当前范围：共本页') }} {{ fmtInt(logItems.length) }} {{ t('条 · 第') }}
+          {{ logPage + 1 }} {{ t('页 · 每页 100 条') }}
         </p>
         <div class="toolbar">
-          <button type="button" class="ghost" :disabled="logPage <= 0" @click="loadLogPage(logPage - 1)">‹ 上一页</button>
-          <button type="button" class="ghost" :disabled="!logHasMore" @click="loadLogPage(logPage + 1)">下一页 ›</button>
+          <button
+            type="button"
+            class="ghost"
+            :disabled="logPage <= 0"
+            @click="loadLogPage(logPage - 1)"
+          >
+            {{ t('‹ 上一页') }}
+          </button>
+          <button
+            type="button"
+            class="ghost"
+            :disabled="!logHasMore"
+            @click="loadLogPage(logPage + 1)"
+          >
+            {{ t('下一页 ›') }}
+          </button>
         </div>
-        <p v-if="!logItems.length" class="status">该时间范围内没有记录。</p>
+        <p v-if="!logItems.length" class="status">{{ t('该时间范围内没有记录。') }}</p>
         <div v-else class="scroll">
           <table>
             <thead>
               <tr>
-                <th>时间(北京)</th>
-                <th>模型</th>
-                <th>输入</th>
-                <th>输出</th>
-                <th>时段</th>
-                <th>结束</th>
-                <th>消耗</th>
+                <th>{{ t('时间(北京)') }}</th>
+                <th>{{ t('模型') }}</th>
+                <th>{{ t('输入') }}</th>
+                <th>{{ t('输出') }}</th>
+                <th>{{ t('时段') }}</th>
+                <th>{{ t('结束') }}</th>
+                <th>{{ t('消耗') }}</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="row in logItems" :key="row.requestId">
                 <td>{{ shanghaiDateTime(row.createdAt) }}</td>
                 <td>
-                  <div>{{ modelLabel(row.model) }} <span v-if="!row.success" class="badge is-warn">失败</span></div>
+                  <div>
+                    {{ modelLabel(row.model) }}
+                    <span v-if="!row.success" class="badge is-warn">{{ t('失败') }}</span>
+                  </div>
                   <div class="note">{{ row.path }}</div>
                 </td>
                 <td>{{ fmtInt(row.inputTokens) }}</td>
                 <td>{{ fmtInt(row.outputTokens) }}</td>
                 <td>
                   <span class="badge" :class="isPeakAt(row.createdAt) ? 'is-peak' : 'is-off'">
-                    {{ isPeakAt(row.createdAt) ? '峰' : '谷' }}
+                    {{ isPeakAt(row.createdAt) ? t('峰') : t('谷') }}
                   </span>
                 </td>
-                <td>{{ row.success ? '完成' : (row.errorMessage || '错误') }}</td>
-                <td :class="isPeakAt(row.createdAt) ? 'is-peak' : 'is-off'">{{ fmtMoney(row.credits) }}</td>
+                <td>{{ row.success ? t('完成') : row.errorMessage || t('错误') }}</td>
+                <td :class="isPeakAt(row.createdAt) ? 'is-peak' : 'is-off'">
+                  {{ fmtMoney(row.credits) }}
+                </td>
               </tr>
             </tbody>
           </table>
@@ -824,20 +1005,26 @@
       </template>
 
       <template v-else-if="subTab === 'prices'">
-        <p class="note">价格来自当前账号可见的模型目录，单位：额度 / 百万 tokens。这不是 DeepSeek 官方峰谷价。</p>
-        <p v-if="!models.length" class="status">暂时没有可展示的价格。</p>
+        <p class="note">
+          {{
+            t(
+              '价格来自当前账号可见的模型目录，单位：额度 / 百万 tokens。这不是 DeepSeek 官方峰谷价。',
+            )
+          }}
+        </p>
+        <p v-if="!models.length" class="status">{{ t('暂时没有可展示的价格。') }}</p>
         <div v-else class="scroll">
           <table>
             <thead>
               <tr>
-                <th>模型</th>
-                <th>服务商</th>
-                <th>计费</th>
-                <th>输入</th>
-                <th>输出</th>
-                <th>缓存写入</th>
-                <th>缓存命中</th>
-                <th>合计</th>
+                <th>{{ t('模型') }}</th>
+                <th>{{ t('服务商') }}</th>
+                <th>{{ t('计费') }}</th>
+                <th>{{ t('输入') }}</th>
+                <th>{{ t('输出') }}</th>
+                <th>{{ t('缓存写入') }}</th>
+                <th>{{ t('缓存命中') }}</th>
+                <th>{{ t('合计') }}</th>
               </tr>
             </thead>
             <tbody>
@@ -845,11 +1032,41 @@
                 <td>{{ model.name || model.modelName || model.id }}</td>
                 <td>{{ model.provider || model.owned_by || '—' }}</td>
                 <td>{{ model.billingMode || '—' }}</td>
-                <td>{{ model.inputPricePerMillionTokens == null ? '—' : fmtMoney(model.inputPricePerMillionTokens) }}</td>
-                <td>{{ model.outputPricePerMillionTokens == null ? '—' : fmtMoney(model.outputPricePerMillionTokens) }}</td>
-                <td>{{ model.cacheWritePricePerMillionTokens == null ? '—' : fmtMoney(model.cacheWritePricePerMillionTokens) }}</td>
-                <td>{{ model.cacheReadPricePerMillionTokens == null ? '—' : fmtMoney(model.cacheReadPricePerMillionTokens) }}</td>
-                <td>{{ model.totalPricePerMillionTokens == null ? '—' : fmtMoney(model.totalPricePerMillionTokens) }}</td>
+                <td>
+                  {{
+                    model.inputPricePerMillionTokens == null
+                      ? '—'
+                      : fmtMoney(model.inputPricePerMillionTokens)
+                  }}
+                </td>
+                <td>
+                  {{
+                    model.outputPricePerMillionTokens == null
+                      ? '—'
+                      : fmtMoney(model.outputPricePerMillionTokens)
+                  }}
+                </td>
+                <td>
+                  {{
+                    model.cacheWritePricePerMillionTokens == null
+                      ? '—'
+                      : fmtMoney(model.cacheWritePricePerMillionTokens)
+                  }}
+                </td>
+                <td>
+                  {{
+                    model.cacheReadPricePerMillionTokens == null
+                      ? '—'
+                      : fmtMoney(model.cacheReadPricePerMillionTokens)
+                  }}
+                </td>
+                <td>
+                  {{
+                    model.totalPricePerMillionTokens == null
+                      ? '—'
+                      : fmtMoney(model.totalPricePerMillionTokens)
+                  }}
+                </td>
               </tr>
             </tbody>
           </table>
@@ -857,9 +1074,9 @@
       </template>
 
       <div class="toolbar">
-        <button type="button" class="ghost" @click="exportCsv">导出 CSV</button>
-        <button type="button" class="ghost" @click="exportJson">导出 JSON</button>
-        <button type="button" class="ghost" @click="exportPng">导出图片 (PNG)</button>
+        <button type="button" class="ghost" @click="exportCsv">{{ t('导出 CSV') }}</button>
+        <button type="button" class="ghost" @click="exportJson">{{ t('导出 JSON') }}</button>
+        <button type="button" class="ghost" @click="exportPng">{{ t('导出图片 (PNG)') }}</button>
         <span v-if="exportMessage" class="note">{{ exportMessage }}</span>
       </div>
     </template>
@@ -867,43 +1084,48 @@
     <template v-else>
       <div class="cards">
         <article>
-          <span>钱包余额</span>
+          <span>{{ t('钱包余额') }}</span>
           <strong>{{ fmtMoney(auth.user?.balance) }}</strong>
-          <small>当前账号</small>
+          <small>{{ t('当前账号') }}</small>
         </article>
         <article>
-          <span>套餐剩余</span>
+          <span>{{ t('套餐剩余') }}</span>
           <strong>{{ planAvailable }}</strong>
-          <small>预占 {{ planReserved }}</small>
+          <small>{{ t('预占') }} {{ planReserved }}</small>
         </article>
         <article>
-          <span>有效订阅</span>
+          <span>{{ t('有效订阅') }}</span>
           <strong>{{ planActive }}</strong>
         </article>
         <article>
-          <span>API Key 已用</span>
+          <span>{{ t('API Key 已用') }}</span>
           <strong>{{ fmtMoney(keyUsed) }}</strong>
-          <small>/ {{ keyLimit == null ? '不限' : fmtMoney(keyLimit) }}</small>
+          <small>/ {{ keyLimit == null ? t('不限') : fmtMoney(keyLimit) }}</small>
         </article>
       </div>
       <h3>API Key</h3>
-      <p v-if="!keys.length" class="status">还没有 API Key。</p>
+      <p v-if="!keys.length" class="status">{{ t('还没有 API Key。') }}</p>
       <div v-else class="scroll">
         <table>
           <thead>
             <tr>
-              <th>名称</th>
-              <th>计费</th>
-              <th>已用额度</th>
-              <th>调用</th>
-              <th>最近使用</th>
+              <th>{{ t('名称') }}</th>
+              <th>{{ t('计费') }}</th>
+              <th>{{ t('已用额度') }}</th>
+              <th>{{ t('调用') }}</th>
+              <th>{{ t('最近使用') }}</th>
             </tr>
           </thead>
           <tbody>
             <tr v-for="key in keys" :key="key.keyId">
-              <td>{{ key.name }} <span class="note">{{ key.keyPrefix }}</span></td>
-              <td>{{ key.billingSource === 'CODING_PLAN' ? 'Coding Plan' : '余额' }}</td>
-              <td>{{ fmtMoney(key.totalCredits) }}{{ key.creditsLimit ? ` / ${fmtMoney(key.creditsLimit)}` : '' }}</td>
+              <td>
+                {{ key.name }} <span class="note">{{ key.keyPrefix }}</span>
+              </td>
+              <td>{{ key.billingSource === 'CODING_PLAN' ? 'Coding Plan' : t('余额') }}</td>
+              <td>
+                {{ fmtMoney(key.totalCredits)
+                }}{{ key.creditsLimit ? ` / ${fmtMoney(key.creditsLimit)}` : '' }}
+              </td>
               <td>{{ fmtInt(key.totalRequests) }}</td>
               <td>{{ key.lastUsedAt ? shanghaiDateTime(key.lastUsedAt) : '—' }}</td>
             </tr>

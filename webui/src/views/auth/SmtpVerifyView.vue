@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   import { computed, onMounted, ref } from 'vue';
   import { useRoute, useRouter } from 'vue-router';
   import { authApi } from '@/api';
@@ -12,7 +13,7 @@
 
   const loading = ref(true);
   const verified = ref(false);
-  const message = ref('正在验证 SMTP 发信…');
+  const message = ref(t('正在验证 SMTP 发信…'));
 
   const token = computed(() => {
     const value = route.query.token;
@@ -23,16 +24,16 @@
     if (!token.value) {
       loading.value = false;
       verified.value = false;
-      message.value = '验证链接无效，缺少 token。';
+      message.value = t('验证链接无效，缺少 token。');
       return;
     }
     try {
       const result = await authApi.verifySmtp(token.value);
       verified.value = Boolean(result.verified);
-      message.value = result.message || (verified.value ? 'SMTP 发信已验证。' : '验证失败。');
+      message.value = result.message || (verified.value ? t('SMTP 发信已验证。') : t('验证失败。'));
     } catch (error) {
       verified.value = false;
-      message.value = error instanceof ApiError ? error.message : '验证链接无效或已过期。';
+      message.value = error instanceof ApiError ? error.message : t('验证链接无效或已过期。');
     } finally {
       loading.value = false;
     }
@@ -44,13 +45,17 @@
     <div class="smtp-verify__panel glass-panel glass-panel--strong">
       <SiteBrandLogo class="smtp-verify__logo" />
       <h1>{{ appearance.siteName }}</h1>
-      <p class="smtp-verify__kicker">SMTP 发信验证</p>
-      <p class="smtp-verify__message">{{ loading ? '正在验证 SMTP 发信…' : message }}</p>
+      <p class="smtp-verify__kicker">{{ t('SMTP 发信验证') }}</p>
+      <p class="smtp-verify__message">{{ loading ? t('正在验证 SMTP 发信…') : message }}</p>
       <el-tag v-if="!loading" :type="verified ? 'success' : 'danger'" effect="light">
-        {{ verified ? '已验证' : '未完成' }}
+        {{ verified ? t('已验证') : t('未完成') }}
       </el-tag>
-      <el-button class="smtp-verify__action" type="primary" @click="router.replace({ name: 'login' })">
-        前往登录
+      <el-button
+        class="smtp-verify__action"
+        type="primary"
+        @click="router.replace({ name: 'login' })"
+      >
+        {{ t('前往登录') }}
       </el-button>
     </div>
   </div>

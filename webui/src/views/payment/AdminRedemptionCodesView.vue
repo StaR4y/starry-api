@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   import { computed, onMounted, reactive, ref } from 'vue';
   import { ElMessage, ElMessageBox } from 'element-plus';
   import { Present, Refresh } from '@element-plus/icons-vue';
@@ -64,15 +65,15 @@
 
   async function createCodes() {
     if (form.kind === 'balance' && (!Number.isFinite(form.balance) || form.balance <= 0)) {
-      ElMessage.warning('请填写大于 0 的兑换余额');
+      ElMessage.warning(t('请填写大于 0 的兑换余额'));
       return;
     }
     if (form.kind === 'plan' && !form.planId) {
-      ElMessage.warning('请选择要兑换的套餐');
+      ElMessage.warning(t('请选择要兑换的套餐'));
       return;
     }
     if (!Number.isInteger(form.count) || form.count < 1 || form.count > 100) {
-      ElMessage.warning('生成数量需在 1 到 100 之间');
+      ElMessage.warning(t('生成数量需在 1 到 100 之间'));
       return;
     }
     creating.value = true;
@@ -89,29 +90,35 @@
       } else {
         await copy(result.codes.map((code) => code.code).join('\n'), false);
       }
-      ElMessage.success(`已生成 ${formatNumber(result.total)} 个兑换码，并复制到剪贴板`);
+      ElMessage.success(
+        t('已生成 {p0} 个兑换码，并复制到剪贴板', { p0: formatNumber(result.total) }),
+      );
     } finally {
       creating.value = false;
     }
   }
 
   async function revoke(row: RedemptionCode) {
-    await ElMessageBox.confirm(`确认停用兑换码 ${row.code}？`, '停用兑换码', {
-      confirmButtonText: '停用',
-      cancelButtonText: '取消',
+    await ElMessageBox.confirm(t('确认停用兑换码 {p0}？', { p0: row.code }), t('停用兑换码'), {
+      get confirmButtonText() {
+        return t('停用');
+      },
+      get cancelButtonText() {
+        return t('取消');
+      },
       type: 'warning',
     }).catch(() => Promise.reject(new Error('cancel')));
     const updated = await adminPaymentApi.revokeRedemptionCode(row.codeId);
     codes.value = codes.value.map((item) => (item.codeId === updated.codeId ? updated : item));
-    ElMessage.success('兑换码已停用');
+    ElMessage.success(t('兑换码已停用'));
   }
 
   async function copy(value: string, toast = true) {
     try {
       await navigator.clipboard.writeText(value);
-      if (toast) ElMessage.success('已复制');
+      if (toast) ElMessage.success(t('已复制'));
     } catch {
-      if (toast) ElMessage.warning('请手动复制');
+      if (toast) ElMessage.warning(t('请手动复制'));
     }
   }
 
@@ -120,10 +127,10 @@
   }
 
   function statusLabel(row: RedemptionCode) {
-    if (row.used) return '已使用';
-    if (!row.enabled) return '已停用';
-    if (isExpired(row)) return '已过期';
-    return '可用';
+    if (row.used) return t('已使用');
+    if (!row.enabled) return t('已停用');
+    if (isExpired(row)) return t('已过期');
+    return t('可用');
   }
 
   function statusType(row: RedemptionCode) {
@@ -136,41 +143,41 @@
 </script>
 
 <template>
-  <PageSection title="兑换码" subtitle="业务配置" :icon="Present">
+  <PageSection :title="t('兑换码')" :subtitle="t('业务配置')" :icon="Present">
     <template #actions>
-      <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
+      <el-button :icon="Refresh" :loading="loading" @click="load">{{ t('刷新') }}</el-button>
     </template>
 
     <div v-loading="loading" class="redemption">
       <section class="redemption__metrics">
         <div class="metric">
-          <span>兑换码总数</span>
+          <span>{{ t('兑换码总数') }}</span>
           <strong>{{ formatNumber(stats.total) }}</strong>
         </div>
         <div class="metric">
-          <span>可用数量</span>
+          <span>{{ t('可用数量') }}</span>
           <strong>{{ formatNumber(stats.available) }}</strong>
         </div>
         <div class="metric">
-          <span>已使用</span>
+          <span>{{ t('已使用') }}</span>
           <strong>{{ formatNumber(stats.used) }}</strong>
         </div>
         <div class="metric">
-          <span>未兑换余额</span>
+          <span>{{ t('未兑换余额') }}</span>
           <strong>{{ formatNumber(stats.availableBalance) }}</strong>
         </div>
       </section>
 
       <section class="redemption__panel">
-        <div class="redemption__panel-title">生成兑换码</div>
+        <div class="redemption__panel-title">{{ t('生成兑换码') }}</div>
         <el-form label-position="top" class="redemption__form">
-          <el-form-item label="兑换类型">
+          <el-form-item :label="t('兑换类型')">
             <el-radio-group v-model="form.kind">
-              <el-radio-button label="balance">余额</el-radio-button>
-              <el-radio-button label="plan">套餐订阅</el-radio-button>
+              <el-radio-button label="balance">{{ t('余额') }}</el-radio-button>
+              <el-radio-button label="plan">{{ t('套餐订阅') }}</el-radio-button>
             </el-radio-group>
           </el-form-item>
-          <el-form-item v-if="form.kind === 'balance'" label="每个兑换码到账余额">
+          <el-form-item v-if="form.kind === 'balance'" :label="t('每个兑换码到账余额')">
             <el-input-number
               v-model="form.balance"
               :min="0.000001"
@@ -180,17 +187,27 @@
               style="width: 100%"
             />
           </el-form-item>
-          <el-form-item v-else label="兑换套餐">
-            <el-select v-model="form.planId" placeholder="选择要开通的套餐" style="width: 100%">
+          <el-form-item v-else :label="t('兑换套餐')">
+            <el-select
+              v-model="form.planId"
+              :placeholder="t('选择要开通的套餐')"
+              style="width: 100%"
+            >
               <el-option
                 v-for="plan in enabledPlans"
                 :key="plan.planId"
-                :label="`${plan.name}（${plan.durationDays} 天 / 配额 ${credits(plan.quotaCredits)}）`"
+                :label="
+                  t('{p0}（{p1} 天 / 配额 {p2}）', {
+                    p0: plan.name,
+                    p1: plan.durationDays,
+                    p2: credits(plan.quotaCredits),
+                  })
+                "
                 :value="plan.planId"
               />
             </el-select>
           </el-form-item>
-          <el-form-item label="生成数量">
+          <el-form-item :label="t('生成数量')">
             <el-input-number
               v-model="form.count"
               :min="1"
@@ -201,57 +218,57 @@
               style="width: 100%"
             />
           </el-form-item>
-          <el-form-item label="过期时间">
+          <el-form-item :label="t('过期时间')">
             <el-date-picker
               v-model="form.expiresAt"
               type="datetime"
-              placeholder="不设置则长期有效"
+              :placeholder="t('不设置则长期有效')"
               style="width: 100%"
             />
           </el-form-item>
           <el-form-item label=" ">
             <el-button type="primary" :loading="creating" style="width: 100%" @click="createCodes">
-              生成并复制
+              {{ t('生成并复制') }}
             </el-button>
           </el-form-item>
         </el-form>
       </section>
 
       <section class="redemption__panel">
-        <div class="redemption__panel-title">兑换码列表</div>
+        <div class="redemption__panel-title">{{ t('兑换码列表') }}</div>
         <el-table :data="codes" stripe>
-          <el-table-column label="兑换码" min-width="220">
+          <el-table-column :label="t('兑换码')" min-width="220">
             <template #default="{ row }">
               <code class="mono">{{ row.code }}</code>
-              <el-button link type="primary" @click="copy(row.code)">复制</el-button>
+              <el-button link type="primary" @click="copy(row.code)">{{ t('复制') }}</el-button>
             </template>
           </el-table-column>
-          <el-table-column label="面值" width="150" align="right">
+          <el-table-column :label="t('面值')" width="150" align="right">
             <template #default="{ row }">
               <span v-if="row.planId">{{ planNameById.get(row.planId) || row.planId }}</span>
               <span v-else>{{ formatNumber(row.balance) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="状态" width="110" align="center">
+          <el-table-column :label="t('状态')" width="110" align="center">
             <template #default="{ row }">
               <el-tag :type="statusType(row)" effect="light" round>{{ statusLabel(row) }}</el-tag>
             </template>
           </el-table-column>
-          <el-table-column label="使用用户" min-width="160">
+          <el-table-column :label="t('使用用户')" min-width="160">
             <template #default="{ row }">
               {{ row.usedByUsername || row.usedByUserId || '—' }}
             </template>
           </el-table-column>
-          <el-table-column label="过期时间" width="170">
+          <el-table-column :label="t('过期时间')" width="170">
             <template #default="{ row }">{{ formatDateTime(row.expiresAt) }}</template>
           </el-table-column>
-          <el-table-column label="使用时间" width="170">
+          <el-table-column :label="t('使用时间')" width="170">
             <template #default="{ row }">{{ formatDateTime(row.usedAt) }}</template>
           </el-table-column>
-          <el-table-column label="创建时间" width="170">
+          <el-table-column :label="t('创建时间')" width="170">
             <template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="90" fixed="right" align="center">
+          <el-table-column :label="t('操作')" width="90" fixed="right" align="center">
             <template #default="{ row }">
               <el-button
                 link
@@ -259,7 +276,7 @@
                 :disabled="row.used || !row.enabled"
                 @click="revoke(row)"
               >
-                停用
+                {{ t('停用') }}
               </el-button>
             </template>
           </el-table-column>

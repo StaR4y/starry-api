@@ -5,6 +5,8 @@
   "type": "module",
   "description": "Starry API 管理后台",
   "scripts": {
+    "test:i18n": "node --test tests/i18n.test.mjs",
+    "test:documentation": "node --test tests/documentMarkdown.test.mjs",
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
@@ -13,26 +15,30 @@
   },
   "dependencies": {
     "axios": "1.7.7",
+    "dompurify": "3.4.16",
     "element-plus": "2.8.5",
+    "highlight.js": "11.11.1",
+    "markdown-it": "15.0.2",
     "pinia": "2.2.4",
     "vue": "3.5.12",
     "vue-router": "4.4.5"
   },
   "devDependencies": {
     "@types/node": "20.16.10",
-    "@typescript-eslint/parser": "^8.15.0",
+    "@typescript-eslint/parser": "8.15.0",
     "@vitejs/plugin-vue": "5.1.4",
     "@vue/tsconfig": "0.5.1",
     "eslint": "8.57.1",
     "eslint-plugin-vue": "9.28.0",
+    "jsdom": "26.1.0",
     "prettier": "3.3.3",
     "sass": "1.79.4",
     "typescript": "5.6.2",
     "unplugin-auto-import": "0.18.3",
-    "unplugin-element-plus": "^0.11.2",
+    "unplugin-element-plus": "0.11.2",
     "unplugin-vue-components": "0.27.4",
     "vite": "5.4.8",
-    "vite-plugin-compression": "^0.5.1",
+    "vite-plugin-compression": "0.5.1",
     "vue-tsc": "2.1.6"
   }
 }

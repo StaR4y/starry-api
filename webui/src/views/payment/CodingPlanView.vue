@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   import { computed, onMounted, ref } from 'vue';
   import { useRouter } from 'vue-router';
   import { ElMessage } from 'element-plus';
@@ -56,10 +57,7 @@
     loading.value = true;
     loadError.value = false;
     try {
-      const [products] = await Promise.all([
-        codingPlanApi.plans(),
-        loadSubscriptions(),
-      ]);
+      const [products] = await Promise.all([codingPlanApi.plans(), loadSubscriptions()]);
       plans.value = products;
     } catch {
       loadError.value = true;
@@ -82,7 +80,7 @@
       await codingPlanApi.purchase(plan.planId, plan.version, key);
       sessionStorage.removeItem(slot);
       checkout.value = false;
-      ElMessage.success('套餐已开通');
+      ElMessage.success(t('套餐已开通'));
       await Promise.all([load(), auth.refreshCurrentUser()]);
     } finally {
       purchasing.value = false;
@@ -101,30 +99,35 @@
 
 <template>
   <main v-loading="loading" class="plan-workspace" :class="`is-${appearance.chrome}`">
-    <PageSection title="Coding Plan" subtitle="开发者订阅" :icon="Monitor">
+    <PageSection title="Coding Plan" :subtitle="t('开发者订阅')" :icon="Monitor">
       <template #actions>
-        <el-tooltip content="更新额度">
-          <el-button :icon="Refresh" aria-label="更新额度" :loading="loading" @click="load" />
+        <el-tooltip :content="t('更新额度')">
+          <el-button :icon="Refresh" :aria-label="t('更新额度')" :loading="loading" @click="load" />
         </el-tooltip>
         <el-button :icon="Key" @click="router.push({ name: 'api-keys' })">
           API Key<el-icon class="trailing-icon"><ArrowRight /></el-icon>
         </el-button>
       </template>
-      <el-alert v-if="loadError" title="套餐加载失败，请重试" type="error" :closable="false" />
+      <el-alert
+        v-if="loadError"
+        :title="t('套餐加载失败，请重试')"
+        type="error"
+        :closable="false"
+      />
 
       <section class="plan-section">
         <div class="plan-section-heading">
           <h2>
-            我的订阅 <span>{{ total }}</span>
+            {{ t('我的订阅') }} <span>{{ total }}</span>
           </h2>
           <el-select
             v-model="filter"
-            aria-label="订阅状态"
-            placeholder="全部状态"
+            :aria-label="t('订阅状态')"
+            :placeholder="t('全部状态')"
             class="plan-status-filter"
             @change="changeFilter"
           >
-            <el-option label="全部状态" value="" /><el-option
+            <el-option :label="t('全部状态')" value="" /><el-option
               v-for="state in subscriptionStates"
               :key="state.value"
               :label="state.label"
@@ -134,7 +137,7 @@
         </div>
         <el-empty
           v-if="!subscriptions.length && !loading"
-          :description="filter ? '暂无符合条件的订阅' : '还没有 Coding Plan'"
+          :description="filter ? t('暂无符合条件的订阅') : t('还没有 Coding Plan')"
           :image-size="76"
         />
         <div v-else class="subscription-list">
@@ -149,7 +152,7 @@
                 <strong>{{ item.planName }}</strong><small>{{
                   item.allowedProviders.length
                     ? item.allowedProviders.join(' / ')
-                    : '全部模型分类'
+                    : t('全部模型分类')
                 }}
                   · v{{ item.planVersion }}</small>
               </div>
@@ -163,18 +166,21 @@
                 :show-text="false"
                 :stroke-width="4"
                 color="#268879"
-              /><small v-if="item.reservedCredits">预占 {{ credits(item.reservedCredits) }}</small>
+              /><small v-if="item.reservedCredits">{{ t('预占') }} {{ credits(item.reservedCredits) }}</small>
             </div>
             <div class="subscription-period">
               <el-tag :type="stateType(item.status)" effect="plain">
-                {{
-                  stateLabel(item.status)
-                }}
-              </el-tag><small>{{ formatDateTime(item.startsAt).slice(0, 10) }} 至
+                {{ stateLabel(item.status) }}
+              </el-tag><small>{{ formatDateTime(item.startsAt).slice(0, 10) }} {{ t('至') }}
                 {{ formatDateTime(item.endsAt).slice(0, 10) }}</small>
             </div>
-            <el-tooltip content="额度明细">
-              <el-button :icon="Document" text aria-label="额度明细" @click="openLedger(item)" />
+            <el-tooltip :content="t('额度明细')">
+              <el-button
+                :icon="Document"
+                text
+                :aria-label="t('额度明细')"
+                @click="openLedger(item)"
+              />
             </el-tooltip>
           </article>
         </div>
@@ -190,10 +196,14 @@
 
       <section class="plan-section">
         <div class="plan-section-heading">
-          <h2>选择套餐</h2>
-          <span class="plan-caption">{{ plans.length }} 款可用</span>
+          <h2>{{ t('选择套餐') }}</h2>
+          <span class="plan-caption">{{ plans.length }} {{ t('款可用') }}</span>
         </div>
-        <el-empty v-if="!plans.length && !loading" description="暂无在售套餐" :image-size="76" />
+        <el-empty
+          v-if="!plans.length && !loading"
+          :description="t('暂无在售套餐')"
+          :image-size="76"
+        />
         <div class="product-grid">
           <article
             v-for="(plan, index) in plans"
@@ -202,23 +212,23 @@
             :style="{ '--product-accent': ['#258573', '#426fa6', '#9b6c35'][index % 3] }"
           >
             <div class="product-top">
-              <span class="product-icon"><el-icon><Monitor /></el-icon></span><span class="product-term">{{ plan.durationDays }} 天</span>
+              <span class="product-icon"><el-icon><Monitor /></el-icon></span><span class="product-term">{{ plan.durationDays }} {{ t('天') }}</span>
             </div>
             <h3>{{ plan.name }}</h3>
             <p class="product-description">{{ plan.description || 'Coding Plan' }}</p>
             <div class="product-price">
-              {{ credits(plan.priceCredits) }}<span>credits / 期</span>
+              {{ credits(plan.priceCredits) }}<span>{{ t('credits / 期') }}</span>
             </div>
             <div class="product-entitlement">
-              <el-icon><Check /></el-icon><strong>{{ credits(plan.quotaCredits) }}</strong><span>调用额度</span>
+              <el-icon><Check /></el-icon><strong>{{ credits(plan.quotaCredits) }}</strong><span>{{ t('调用额度') }}</span>
             </div>
             <div class="product-providers">
               <template v-if="plan.allowedProviders.length">
                 <span v-for="provider in plan.allowedProviders" :key="provider"><ProviderLogo :provider="provider" :size="18" />{{ provider }}</span>
-              </template><span v-else>全部模型分类</span>
+              </template><span v-else>{{ t('全部模型分类') }}</span>
             </div>
             <el-button class="product-purchase" @click="selectPlan(plan)">
-              开通套餐<el-icon><ArrowRight /></el-icon>
+              {{ t('开通套餐') }}<el-icon><ArrowRight /></el-icon>
             </el-button>
           </article>
         </div>
@@ -226,7 +236,7 @@
 
       <el-dialog
         v-model="checkout"
-        title="开通 Coding Plan"
+        :title="t('开通 Coding Plan')"
         width="min(460px, calc(100vw - 32px))"
         :close-on-click-modal="!purchasing"
         :close-on-press-escape="!purchasing"
@@ -239,41 +249,46 @@
           </div>
           <dl>
             <div>
-              <dt>有效期</dt>
-              <dd>{{ selected.durationDays }} 天</dd>
+              <dt>{{ t('有效期') }}</dt>
+              <dd>{{ selected.durationDays }} {{ t('天') }}</dd>
             </div>
             <div>
-              <dt>调用额度</dt>
+              <dt>{{ t('调用额度') }}</dt>
               <dd>{{ credits(selected.quotaCredits) }} credits</dd>
             </div>
             <div>
-              <dt>适用分类</dt>
-              <dd>{{ selected.allowedProviders.join(' / ') || '全部模型分类' }}</dd>
+              <dt>{{ t('适用分类') }}</dt>
+              <dd>{{ selected.allowedProviders.join(' / ') || t('全部模型分类') }}</dd>
             </div>
             <div>
-              <dt>版本</dt>
+              <dt>{{ t('版本') }}</dt>
               <dd>v{{ selected.version }}</dd>
             </div>
             <div class="checkout-total">
-              <dt>应付余额</dt>
+              <dt>{{ t('应付余额') }}</dt>
               <dd>{{ credits(selected.priceCredits) }} credits</dd>
             </div>
           </dl>
           <p class="checkout-terms">
-            <el-icon><Clock /></el-icon>同套餐续购将在当前期到期或额度用尽后生效。
+            <el-icon><Clock /></el-icon>{{ t('同套餐续购将在当前期到期或额度用尽后生效。') }}
           </p>
-          <el-alert v-if="!canPurchase" title="钱包余额不足" type="warning" :closable="false" />
+          <el-alert
+            v-if="!canPurchase"
+            :title="t('钱包余额不足')"
+            type="warning"
+            :closable="false"
+          />
         </div>
         <template #footer>
-          <el-button :disabled="purchasing" @click="checkout = false">取消</el-button><el-button
+          <el-button :disabled="purchasing" @click="checkout = false">{{ t('取消') }}</el-button><el-button
             v-if="!canPurchase"
             :icon="Wallet"
             type="primary"
             @click="router.push({ name: 'payment' })"
           >
-            充值余额
+            {{ t('充值余额') }}
           </el-button><el-button v-else type="primary" :loading="purchasing" @click="purchase">
-            确认开通
+            {{ t('确认开通') }}
           </el-button>
         </template>
       </el-dialog>

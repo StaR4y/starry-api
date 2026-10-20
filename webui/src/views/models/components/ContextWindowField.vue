@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   /** 上下文窗口字段：常用档位快捷选择 + 自定义数值输入。 */
   const props = defineProps<{
     modelValue: number;
@@ -26,7 +27,7 @@
 
 <template>
   <div class="context-window-field">
-    <div class="presets" role="listbox" aria-label="常用上下文窗口">
+    <div class="presets" role="listbox" :aria-label="t('常用上下文窗口')">
       <button
         v-for="preset in presets"
         :key="preset.value"

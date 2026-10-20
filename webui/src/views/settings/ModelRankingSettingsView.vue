@@ -1,4 +1,5 @@
 <script setup lang="ts">
+  import { t } from '@/i18n';
   /** 模型天梯数据源、同步节奏与手动刷新。 */
   import { computed, onMounted, reactive, ref } from 'vue';
   import { ElMessage } from 'element-plus';
@@ -62,7 +63,7 @@
           frontierbenchUrl: form.frontierbenchUrl.trim(),
         }),
       );
-      ElMessage.success('天梯设置已保存');
+      ElMessage.success(t('天梯设置已保存'));
     } finally {
       saving.value = false;
     }
@@ -73,9 +74,9 @@
     try {
       apply(await modelRankingApi.refresh());
       if (settings.value?.lastError) {
-        ElMessage.warning('部分榜单同步失败，已保留可用数据');
+        ElMessage.warning(t('部分榜单同步失败，已保留可用数据'));
       } else {
-        ElMessage.success('天梯数据已同步');
+        ElMessage.success(t('天梯数据已同步'));
       }
     } finally {
       syncing.value = false;
@@ -88,33 +89,37 @@
   }
 
   function statusText(due: boolean, fetchedAt: string | null) {
-    if (!fetchedAt) return '内置快照';
-    return due ? '待同步' : '已同步';
+    if (!fetchedAt) return t('内置快照');
+    return due ? t('待同步') : t('已同步');
   }
 
   onMounted(load);
 </script>
 
 <template>
-  <PageSection title="模型天梯" subtitle="内容与界面" :icon="Trophy">
+  <PageSection :title="t('模型天梯')" :subtitle="t('内容与界面')" :icon="Trophy">
     <template #actions>
-      <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-      <el-button :icon="Upload" :loading="syncing" @click="syncNow">立即同步</el-button>
-      <el-button type="primary" :icon="Check" :loading="saving" @click="save">保存</el-button>
+      <el-button :icon="Refresh" :loading="loading" @click="load">{{ t('刷新') }}</el-button>
+      <el-button :icon="Upload" :loading="syncing" @click="syncNow">{{ t('立即同步') }}</el-button>
+      <el-button type="primary" :icon="Check" :loading="saving" @click="save">
+        {{
+          t('保存')
+        }}
+      </el-button>
     </template>
 
     <el-skeleton v-if="loading && !settings" :rows="8" animated />
     <el-form v-else :model="form" label-position="top" class="smtp-form">
       <section class="smtp-section">
         <div class="smtp-grid">
-          <el-form-item label="启用模型天梯">
-            <el-switch v-model="form.enabled"/>
+          <el-form-item :label="t('启用模型天梯')">
+            <el-switch v-model="form.enabled" />
           </el-form-item>
         </div>
       </section>
 
       <section class="smtp-section">
-        <h3>同步状态</h3>
+        <h3>{{ t('同步状态') }}</h3>
         <div class="status-grid">
           <article v-for="item in benchmarks" :key="item.benchmark" class="status-card">
             <div class="status-card__head">
@@ -125,7 +130,8 @@
             </div>
             <p>{{ item.title }}</p>
             <p class="text-secondary">
-              {{ formatDateTime(item.fetchedAt, '尚未从远程同步') }} · {{ item.entryCount }} 条
+              {{ formatDateTime(item.fetchedAt, t('尚未从远程同步')) }} · {{ item.entryCount }}
+              {{ t('条') }}
             </p>
           </article>
         </div>
@@ -133,28 +139,34 @@
       </section>
 
       <section class="smtp-section">
-        <h3>自动同步</h3>
+        <h3>{{ t('自动同步') }}</h3>
         <div class="smtp-grid">
-          <el-form-item label="每日自动拉取">
-            <el-switch v-model="form.remoteRefreshEnabled"/>
+          <el-form-item :label="t('每日自动拉取')">
+            <el-switch v-model="form.remoteRefreshEnabled" />
           </el-form-item>
-          <el-form-item :label="`展示条数 ${form.maxEntries}`">
+          <el-form-item :label="t('展示条数 {p0}', { p0: form.maxEntries })">
             <el-slider v-model="form.maxEntries" :min="5" :max="20" :step="1" />
           </el-form-item>
-          <el-form-item label="定时任务">
+          <el-form-item :label="t('定时任务')">
             <el-input :model-value="settings?.refreshCron || '0 40 4 * * *'" disabled />
           </el-form-item>
         </div>
       </section>
 
       <section class="smtp-section">
-        <h3>数据源</h3>
+        <h3>{{ t('数据源') }}</h3>
         <div class="smtp-grid smtp-grid--urls">
-          <el-form-item label="ProgramBench 地址">
-            <el-input v-model="form.programbenchUrl" placeholder="https://raw.githubusercontent.com/..." />
+          <el-form-item :label="t('ProgramBench 地址')">
+            <el-input
+              v-model="form.programbenchUrl"
+              placeholder="https://raw.githubusercontent.com/..."
+            />
           </el-form-item>
-          <el-form-item label="FrontierBench 地址">
-            <el-input v-model="form.frontierbenchUrl" placeholder="https://raw.githubusercontent.com/..." />
+          <el-form-item :label="t('FrontierBench 地址')">
+            <el-input
+              v-model="form.frontierbenchUrl"
+              placeholder="https://raw.githubusercontent.com/..."
+            />
           </el-form-item>
         </div>
       </section>
