@@ -4,6 +4,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -11,6 +12,7 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 @Testcontainers(disabledWithoutDocker = true)
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 public abstract class PostgreSqlIntegrationTestSupport {
 
     protected static final String MIGRATION_USERNAME = "starry_api_migration";
@@ -41,7 +43,7 @@ public abstract class PostgreSqlIntegrationTestSupport {
         registry.add("spring.r2dbc.pool.initial-size", () -> "0");
         registry.add("spring.r2dbc.pool.max-size", () -> "32");
         registry.add("spring.flyway.url", () -> POSTGRES.getJdbcUrl()
-            + "?currentSchema=starry_api&ApplicationName=starry-api-flyway-integration-test");
+            + "&currentSchema=starry_api&ApplicationName=starry-api-flyway-integration-test");
         registry.add("spring.flyway.user", () -> MIGRATION_USERNAME);
         registry.add("spring.flyway.password", () -> MIGRATION_PASSWORD);
         registry.add("spring.flyway.default-schema", () -> "starry_api");

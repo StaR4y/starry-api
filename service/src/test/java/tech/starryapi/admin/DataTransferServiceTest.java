@@ -199,7 +199,7 @@ class DataTransferServiceTest {
     }
 
     @Test
-    void requiresExactFlywayV19HistoryAndMatchingChecksumsForRestore() {
+    void requiresExactFlywayV20HistoryAndMatchingChecksumsForRestore() {
         List<DataTransferService.FlywayMigration> current = currentMigrationHistory();
 
         assertThatCode(() -> DataTransferService.validateMigrationHistory(current)).doesNotThrowAnyException();
@@ -208,19 +208,19 @@ class DataTransferServiceTest {
 
         assertThatThrownBy(() -> DataTransferService.validateMigrationHistory(current.subList(0, 9)))
             .isInstanceOf(SQLException.class)
-            .hasMessageContaining("V1-V19");
+            .hasMessageContaining("V1-V20");
 
         List<DataTransferService.FlywayMigration> future = new ArrayList<>(current);
         future.add(new DataTransferService.FlywayMigration(
-            "20",
-            "V20__unknown_future.sql",
+            "21",
+            "V21__unknown_future.sql",
             "SQL",
             8008,
             true
         ));
         assertThatThrownBy(() -> DataTransferService.validateMigrationHistory(future))
             .isInstanceOf(SQLException.class)
-            .hasMessageContaining("V1-V19");
+            .hasMessageContaining("V1-V20");
 
         List<DataTransferService.FlywayMigration> changedChecksum = new ArrayList<>(current);
         DataTransferService.FlywayMigration v5 = changedChecksum.get(4);
@@ -429,7 +429,8 @@ class DataTransferServiceTest {
             new DataTransferService.FlywayMigration("16", "V16__plugin_developer_mode.sql", "SQL", 1016, true),
             new DataTransferService.FlywayMigration("17", "V17__announcements.sql", "SQL", 1691840228, true),
             new DataTransferService.FlywayMigration("18", "V18__announcement_runtime_grants.sql", "SQL", 1273926045, true),
-            new DataTransferService.FlywayMigration("19", "V19__support_tickets.sql", "SQL", 1950034466, true)
+            new DataTransferService.FlywayMigration("19", "V19__support_tickets.sql", "SQL", 1950034466, true),
+            new DataTransferService.FlywayMigration("20", "V20__function_execute_privileges.sql", "SQL", 1880747977, true)
         );
     }
 }

@@ -538,7 +538,37 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
 
         assertThat(state).isNotNull();
         assertThat(state.currentUser()).isEqualTo("starry_api");
-        assertThat(state.allBoundariesEnforced()).isTrue();
+        assertThat(state.allBoundariesEnforced()).as("Runtime role boundaries: %s", state).isTrue();
+    }
+
+    @Test
+    void newOwnerFunctionsDoNotInheritPublicExecute() {
+        String functionName = "starry_api.test_private_function_" + randomSuffix();
+        executeAsDatabaseOwner("CREATE FUNCTION " + functionName
+            + "() RETURNS integer LANGUAGE sql AS 'SELECT 1'");
+        try {
+            Boolean publicExecute = databaseClient.sql("""
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM pg_catalog.pg_proc routine
+                        CROSS JOIN LATERAL pg_catalog.aclexplode(
+                            COALESCE(routine.proacl, pg_catalog.acldefault('f', routine.proowner))
+                        ) acl
+                        WHERE routine.oid = CAST(:functionName AS regprocedure)
+                          AND acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
+                    ) AS public_execute
+                    """)
+                .bind("functionName", functionName + "()")
+                .map((row, metadata) -> row.get("public_execute", Boolean.class))
+                .one()
+                .block();
+            assertThat(publicExecute).isFalse();
+            assertThatThrownBy(() -> databaseClient.sql("SELECT " + functionName + "()")
+                .fetch().one().block())
+                .isInstanceOf(org.springframework.dao.PermissionDeniedDataAccessException.class);
+        } finally {
+            executeAsDatabaseOwner("DROP FUNCTION " + functionName + "()");
+        }
     }
 
     @Test
@@ -1013,8 +1043,8 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
 
         assertThat(routedTable).endsWith(expectedCurrentPartition);
 
-        callPartitionFunction("SELECT starry_api.ensure_request_log_partitions(0, 4)");
-        YearMonth oldestMonth = YearMonth.now(ZoneOffset.UTC).minusMonths(4);
+        callPartitionFunction("SELECT starry_api.ensure_request_log_partitions(0, 5)");
+        YearMonth oldestMonth = YearMonth.now(ZoneOffset.UTC).minusMonths(5);
         String oldestPartition = "starry_api.request_logs_"
             + oldestMonth.format(DateTimeFormatter.ofPattern("'y'yyy'M'MM").withLocale(java.util.Locale.ROOT))
                 .toLowerCase(java.util.Locale.ROOT);
@@ -1022,7 +1052,7 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         assertThat(hasAppendOnlyRuntimePrivileges(oldestPartition)).isTrue();
 
         Integer droppedPartitions = databaseClient.sql(
-                "SELECT starry_api.drop_expired_request_log_partitions(3) AS dropped_count")
+                "SELECT starry_api.drop_expired_request_log_partitions(4) AS dropped_count")
             .map((row, metadata) -> row.get("dropped_count", Integer.class))
             .one()
             .block();
@@ -1677,52 +1707,39 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         Instant watermark = Instant.now().truncatedTo(ChronoUnit.DAYS).plus(12, ChronoUnit.HOURS);
         cleanupSegmentedUsage(userId);
         try {
-            databaseClient.sql("""
-                    INSERT INTO aggregation_watermarks (job_name, last_processed_at)
-                    VALUES ('request_usage', :watermark)
-                    """)
-                .bind("watermark", watermark)
-                .fetch()
-                .rowsUpdated()
-                .block();
-            databaseClient.sql("""
-                    INSERT INTO request_usage_daily (
+            // Derived tables are owner-managed; the runtime role must remain read-only.
+            executeAsDatabaseOwner(
+                "INSERT INTO starry_api.aggregation_watermarks (job_name, last_processed_at) "
+                    + "VALUES ('request_usage', '%s')".formatted(watermark),
+                """
+                    INSERT INTO starry_api.request_usage_daily (
                         usage_date, api_key_id, user_id, account_id, model,
                         request_count, successful_requests, failed_requests,
                         input_tokens, output_tokens, credits, total_latency_ms, max_latency_ms, last_request_at
                     )
                     VALUES (
-                        :usageDate, :keyId, :userId, '', :model,
-                        1, 1, 0, 10, 5, 0.10, 10, 10, :lastRequestAt
+                        '%s', '%s', '%s', '', '%s',
+                        1, 1, 0, 10, 5, 0.10, 10, 10, '%s'
                     )
-                    """)
-                .bind("usageDate", watermark.minus(1, ChronoUnit.DAYS).atZone(ZoneOffset.UTC).toLocalDate())
-                .bind("keyId", keyId)
-                .bind("userId", userId)
-                .bind("model", model)
-                .bind("lastRequestAt", watermark.minus(1, ChronoUnit.DAYS))
-                .fetch()
-                .rowsUpdated()
-                .block();
-            databaseClient.sql("""
-                    INSERT INTO request_usage_hourly (
+                    """.formatted(
+                        watermark.minus(1, ChronoUnit.DAYS).atZone(ZoneOffset.UTC).toLocalDate(),
+                        keyId, userId, model, watermark.minus(1, ChronoUnit.DAYS)
+                    ),
+                """
+                    INSERT INTO starry_api.request_usage_hourly (
                         bucket_start, api_key_id, user_id, account_id, model,
                         request_count, successful_requests, failed_requests,
                         input_tokens, output_tokens, credits, total_latency_ms, max_latency_ms, last_request_at
                     )
                     VALUES (
-                        :bucketStart, :keyId, :userId, '', :model,
-                        2, 1, 1, 20, 10, 0.20, 20, 15, :lastRequestAt
+                        '%s', '%s', '%s', '', '%s',
+                        2, 1, 1, 20, 10, 0.20, 20, 15, '%s'
                     )
-                    """)
-                .bind("bucketStart", watermark.minus(1, ChronoUnit.HOURS))
-                .bind("keyId", keyId)
-                .bind("userId", userId)
-                .bind("model", model)
-                .bind("lastRequestAt", watermark.minus(30, ChronoUnit.MINUTES))
-                .fetch()
-                .rowsUpdated()
-                .block();
+                    """.formatted(
+                        watermark.minus(1, ChronoUnit.HOURS), keyId, userId, model,
+                        watermark.minus(30, ChronoUnit.MINUTES)
+                    )
+            );
             databaseClient.sql("""
                     INSERT INTO request_logs (
                         request_id, api_key_id, user_id, path, model, status_code, success,
@@ -1823,7 +1840,7 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         insertRequestLog("aggregate-old-" + suffix, model, true, 10, 5, "0.10", aggregationBoundary.minus(2, ChronoUnit.HOURS).plusSeconds(600));
         insertRequestLog("aggregate-recent-" + suffix, model, false, 20, 10, "0.20", aggregationBoundary.minus(1, ChronoUnit.HOURS).plusSeconds(600));
 
-        callPartitionFunction("SELECT starry_api.refresh_request_usage_aggregates()");
+        callPartitionFunction("SELECT starry_api.refresh_request_usage_aggregates(168, 6)");
         Instant firstAggregateUpdate = hourlyAggregateUpdatedAt(model);
         callPartitionFunction("SELECT starry_api.refresh_request_usage_aggregates()");
 
@@ -2175,7 +2192,7 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
             userId,
             "RebateIneligible" + suffix,
             "rebate-ineligible-" + suffix + "@example.com",
-            "rebate-ineligible-code-" + suffix
+            "ineligible-code-" + suffix
         ).block();
         insertPaymentOrder(orderId, outTradeNo, userId, "5.00", "PENDING", null);
         PaymentSettingsService settingsService = mock(PaymentSettingsService.class);
@@ -2661,7 +2678,7 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         String suffix = randomSuffix();
         String inviterUserId = "out-of-order-inviter-" + suffix;
         String invitedUserId = "out-of-order-invited-" + suffix;
-        String affiliateCode = "out-of-order-affiliate-" + suffix;
+        String affiliateCode = "ooo-affiliate-" + suffix;
         String laterOrderId = "out-of-order-later-" + suffix;
         String earlierOrderId = "out-of-order-earlier-" + suffix;
         insertUser(inviterUserId, "OutOfOrderInviter" + suffix, "ooo-inviter-" + suffix + "@example.com", affiliateCode).block();
@@ -3148,7 +3165,9 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         assertThat(ledgerState(userId, "API_USAGE_RESERVE"))
             .isEqualTo(new LedgerState(2L, new BigDecimal("-0.500000")));
         assertThat(apiKeyBillingMinimum(keyId)).isEqualByComparingTo(BigDecimal.ZERO);
+        assertThat(brokenLedgerTransitions(userId, "API_USAGE_RESERVE")).isZero();
 
+        // This fixture top-up bypasses the ledger, so continuity is asserted before it.
         updateUserBalance(userId, "0.25");
         reserveAndAccountUsage(
             principal,
@@ -3160,7 +3179,8 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
 
         assertThat(userBalance(userId)).isEqualByComparingTo(BigDecimal.ZERO);
         assertThat(apiKeyBillingMinimum(keyId)).isEqualByComparingTo(BigDecimal.ZERO);
-        assertThat(brokenLedgerTransitions(userId, "API_USAGE_RESERVE")).isZero();
+        assertThat(ledgerState(userId, "API_USAGE_RESERVE"))
+            .isEqualTo(new LedgerState(3L, new BigDecimal("-0.750000")));
     }
 
     private Mono<Void> reserveAndAccountUsage(ApiKeyPrincipal principal, String requestId, BigDecimal credits, long input, long output) {

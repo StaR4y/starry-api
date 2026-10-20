@@ -34,7 +34,13 @@ assert_not_contains() {
 }
 
 file_mode() {
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+  local mode
+  # GNU stat -f can print filesystem data before failing; discard that output.
+  if mode=$(stat -c '%a' "$1" 2>/dev/null); then
+    printf '%s\n' "$mode"
+  else
+    stat -f '%Lp' "$1"
+  fi
 }
 
 prepare_security_directory() {

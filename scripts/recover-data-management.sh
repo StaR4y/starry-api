@@ -285,6 +285,10 @@ if [ -e "$RECOVERY_FILE" ] || [ -L "$RECOVERY_FILE" ]; then
   fail file_exists "$RECOVERY_FILE"
 fi
 if ! mv -n "$TEMPORARY_FILE" "$RECOVERY_FILE"; then
+  # GNU and BSD mv use different exit codes when -n refuses an existing target.
+  if [ -e "$RECOVERY_FILE" ] || [ -L "$RECOVERY_FILE" ]; then
+    fail file_exists "$RECOVERY_FILE"
+  fi
   fail stage_failed
 fi
 if [ -e "$TEMPORARY_FILE" ] || [ -L "$TEMPORARY_FILE" ]; then
