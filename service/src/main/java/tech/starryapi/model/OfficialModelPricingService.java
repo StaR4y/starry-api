@@ -73,7 +73,7 @@ public class OfficialModelPricingService {
     private volatile String lastError;
 
     public OfficialModelPricingService(
-        @Qualifier("kiroWebClient") WebClient webClient,
+        @Qualifier("upstreamWebClient") WebClient webClient,
         ObjectMapper objectMapper,
         OfficialModelPricingProperties properties
     ) {
@@ -82,7 +82,7 @@ public class OfficialModelPricingService {
 
     @Autowired
     public OfficialModelPricingService(
-        @Qualifier("kiroWebClient") WebClient webClient,
+        @Qualifier("upstreamWebClient") WebClient webClient,
         ObjectMapper objectMapper,
         OfficialModelPricingProperties properties,
         SystemSettingRepository repository,

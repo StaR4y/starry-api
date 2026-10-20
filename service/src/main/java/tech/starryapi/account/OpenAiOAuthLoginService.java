@@ -58,13 +58,13 @@ public class OpenAiOAuthLoginService {
     @Autowired
     public OpenAiOAuthLoginService(
         ObjectMapper objectMapper,
-        WebClient kiroWebClient,
+        WebClient upstreamWebClient,
         ProxyAccountRepository repository,
         AccountPoolService accountPoolService
     ) {
         this(
             objectMapper,
-            kiroWebClient,
+            upstreamWebClient,
             repository,
             accountPoolService,
             OpenAiOAuthConstants.AUTH_BASE_URL,

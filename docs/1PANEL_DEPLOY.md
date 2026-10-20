@@ -89,13 +89,13 @@ POSTGRES_POOL_INITIAL_SIZE=4
 POSTGRES_POOL_MAX_SIZE=20
 HOST_BIND_ADDR=0.0.0.0
 HOST_HTTP_PORT=18080
-KIRO_ALLOW_ANONYMOUS_PROXY=false
-KIRO_ADMIN_SESSION_TTL=12h
-KIRO_RATE_LIMIT_PER_MINUTE=120
-KIRO_WEBUI_URL=https://你的域名/#/login
+STARRY_ALLOW_ANONYMOUS_PROXY=false
+STARRY_ADMIN_SESSION_TTL=12h
+STARRY_RATE_LIMIT_PER_MINUTE=120
+STARRY_WEBUI_URL=https://你的域名/#/login
 ```
 
-⚠️ **公开服务绝对不要把 `KIRO_ALLOW_ANONYMOUS_PROXY` 设成 `true`**（那样不需要 API Key 就能调代理）。数据库文件持久化在 `./data/postgresql`；以上数据库默认值假定至少 2 GiB 可用内存，业务增长后再根据监控调整。
+⚠️ **公开服务绝对不要把 `STARRY_ALLOW_ANONYMOUS_PROXY` 设成 `true`**（那样不需要 API Key 就能调代理）。数据库文件持久化在 `./data/postgresql`；以上数据库默认值假定至少 2 GiB 可用内存，业务增长后再根据监控调整。
 
 ### 3. 启动
 
@@ -172,10 +172,10 @@ The password was printed only during first startup and will not be shown again.
 
 如果 OpenResty / Nginx 直接运行在宿主机上（不是容器），也可以把 `.env` 里的 `HOST_BIND_ADDR` 设成 `127.0.0.1`，然后代理到 `http://127.0.0.1:18080`。**对默认的容器化 OpenResty 用 `127.0.0.1` 通常会得到 `502 Bad Gateway`**。
 
-建议把 `KIRO_WEBUI_URL` 设成控制台登录页，这样启动日志里提示的就是浏览器登录地址，而不仅仅是 API 登录端点：
+建议把 `STARRY_WEBUI_URL` 设成控制台登录页，这样启动日志里提示的就是浏览器登录地址，而不仅仅是 API 登录端点：
 
 ```dotenv
-KIRO_WEBUI_URL=https://你的域名/#/login
+STARRY_WEBUI_URL=https://你的域名/#/login
 ```
 
 如果后面要使用「使用文档」里的大文件上传，反向代理的请求体上限至少要 **65 MiB**（Nginx：`client_max_body_size 65m;`），见 [用户文档系统](USER_DOCUMENTATION.md#图片视频与附件)。

@@ -76,7 +76,7 @@ class ProxyModelServiceTest {
                 "google/gemini-2.5-pro",
                 "google/gemini-3.7-flash"
             );
-        assertThat(model(data, "auto").path("owned_by").asText()).isEqualTo("kiro-api");
+        assertThat(model(data, "auto").path("owned_by").asText()).isEqualTo("anthropic");
         assertThat(model(data, "auto").path("description").asText()).isEqualTo("Auto select best model");
         assertThat(model(data, "simple-task").path("supportedInputTypes").get(0).asText()).isEqualTo("TEXT");
         assertThat(model(data, "simple-task").path("maxOutputTokens").asInt()).isEqualTo(4096);

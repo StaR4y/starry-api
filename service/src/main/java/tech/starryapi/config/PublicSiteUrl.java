@@ -7,7 +7,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
- * The address users reach this site on, taken from configuration ({@code KIRO_WEBUI_URL}) and not from the
+ * The address users reach this site on, taken from configuration ({@code STARRY_WEBUI_URL}) and not from the
  * request.
  *
  * <p>Links that are e-mailed to someone (registration, SMTP verification) used to be built from the
@@ -60,7 +60,7 @@ public class PublicSiteUrl {
     /** Logs once that links fall back to request headers because the site address is not configured. */
     public void warnHeaderFallback() {
         if (warned.compareAndSet(false, true)) {
-            log.warn("KIRO_WEBUI_URL is not set, so links in e-mails are built from the request's Host header, "
+            log.warn("STARRY_WEBUI_URL is not set, so links in e-mails are built from the request's Host header, "
                 + "which a client can forge. Set it to the public address, e.g. https://your-domain/#/login.");
         }
     }

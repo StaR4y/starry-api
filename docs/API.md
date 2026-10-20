@@ -47,7 +47,7 @@ Authorization: Bearer adm-...
 
 ### 旧版静态令牌
 
-配置了 `KIRO_ADMIN_TOKEN` 时，仍支持旧版的静态管理员令牌：
+配置了 `STARRY_ADMIN_TOKEN` 时，仍支持旧版的静态管理员令牌：
 
 ```http
 X-Admin-Token: change-me

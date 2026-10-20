@@ -59,9 +59,9 @@ public class AnthropicUpstreamClient {
     private final ObjectMapper objectMapper;
     private final WebClient webClient;
 
-    public AnthropicUpstreamClient(ObjectMapper objectMapper, WebClient kiroWebClient) {
+    public AnthropicUpstreamClient(ObjectMapper objectMapper, WebClient upstreamWebClient) {
         this.objectMapper = objectMapper;
-        this.webClient = kiroWebClient;
+        this.webClient = upstreamWebClient;
     }
 
     public Mono<PlatformCompletionResult> complete(ProxyAccountEntity account, JsonNode request, String model) {

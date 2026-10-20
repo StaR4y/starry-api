@@ -9,7 +9,7 @@ public interface ModelCatalogProvider {
     String DEFAULT_TARGET_MODEL_ID = "claude-sonnet-4.5";
     String FAST_TARGET_MODEL_ID = "claude-haiku-4.5";
     String STARRY_OWNER = "starryapi";
-    String UPSTREAM_OWNER = "kiro-api";
+    String ANTHROPIC_OWNER = "anthropic";
     int DEFAULT_INPUT_TOKENS = 200_000;
     int DEFAULT_OUTPUT_TOKENS = 64_000;
     List<String> TEXT_AND_IMAGE = List.of("TEXT", "IMAGE");

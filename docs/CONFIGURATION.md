@@ -2,7 +2,7 @@
 
 Starry API 的运行时配置主要来自**环境变量**，由 `service/src/main/resources/application.yml` 读取。控制台里「系统设置」下的内容（支付、注册、SMTP、模型目录……）则保存在数据库里，**不是**环境变量。
 
-> **关于 `KIRO_` 前缀**：平台化和多厂商路由早已完成，但部分共享的运行时变量为了部署兼容，仍沿用历史上的 `KIRO_` 前缀。请把它们当作 Starry API 代理的**通用设置**，而不是「服务只支持 Kiro」。
+> **旧的 `KIRO_` 变量名**：网关的通用设置以前沿用历史上的 `KIRO_` 前缀（如 `KIRO_WEBUI_URL`），现在统一为 `STARRY_` 前缀（如 `STARRY_WEBUI_URL`）；Kiro 专属的端点选择由 `KIRO_PREFERRED_ENDPOINT` 改名为 `STARRY_KIRO_PREFERRED_ENDPOINT`。旧名字**仍然有效**：新名字没有设置时，服务会读取对应的 `KIRO_` 变量，所以已有的 `.env` 不用改。两个都设置时以 `STARRY_` 为准。新部署请只用 `STARRY_` 名字。
 
 **目录**：[最常用的配置](#最常用的配置) · [服务器与 JVM](#服务器与-jvm) · [PostgreSQL 17](#postgresql-17) · [插件](#插件运行时) · [备份与恢复](#数据库备份与恢复) · [模型目录与价格](#模型目录与官方价格) · [上游运行时](#上游运行时与适配器) · [注册与 SMTP](#注册与-smtp-设置) · [支付与计费](#支付与计费) · [工单通知](#工单通知) · [请求分析与保留](#请求分析与保留) · [本地环境示例](#本地环境示例) · [生产环境建议](#生产环境建议)
 
@@ -17,10 +17,10 @@ Starry API 的运行时配置主要来自**环境变量**，由 `service/src/mai
 | `SERVER_PORT` | `8080` | 服务监听端口 |
 | `POSTGRES_HOST` / `POSTGRES_PORT` / `POSTGRES_DATABASE` | `localhost` / `5432` / `starry_api` | 数据库位置 |
 | `POSTGRES_PASSWORD`、`POSTGRES_MIGRATION_PASSWORD` | 空 | 运行 / 迁移角色的密码（可信的本机开发之外必填） |
-| `KIRO_ALLOW_ANONYMOUS_PROXY` | `false` | 是否允许**不带 API Key** 调用代理。公网服务请保持 `false` |
-| `KIRO_ADMIN_SESSION_TTL` | `12h` | 管理员会话有效期 |
-| `KIRO_RATE_LIMIT_PER_MINUTE` | `120` | 每个 API Key 每分钟请求上限，`0` 表示不限制 |
-| `KIRO_WEBUI_URL` | 空 | 控制台的**公开地址**，如 `https://你的域名/#/login`。启动日志会显示它，**注册验证邮件和 SMTP 验证邮件里的链接也用它生成**。不设置时会退回到请求里的 `Host` 头，而这个头可以被伪造（见下方说明） |
+| `STARRY_ALLOW_ANONYMOUS_PROXY` | `false` | 是否允许**不带 API Key** 调用代理。公网服务请保持 `false` |
+| `STARRY_ADMIN_SESSION_TTL` | `12h` | 管理员会话有效期 |
+| `STARRY_RATE_LIMIT_PER_MINUTE` | `120` | 每个 API Key 每分钟请求上限，`0` 表示不限制 |
+| `STARRY_WEBUI_URL` | 空 | 控制台的**公开地址**，如 `https://你的域名/#/login`。启动日志会显示它，**注册验证邮件和 SMTP 验证邮件里的链接也用它生成**。不设置时会退回到请求里的 `Host` 头，而这个头可以被伪造（见下方说明） |
 | `JAVA_OPTS` | `-Xms64m -Xmx768m -XX:MaxDirectMemorySize=256m -XX:+ExitOnOutOfMemoryError -XX:G1PeriodicGCInterval=300000 -XX:-G1PeriodicGCInvokesConcurrent -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=30`（Compose / 安装脚本） | JVM 参数，见下 |
 | `SERVICE_MEM_LIMIT` | `2g` | Compose 里服务容器的内存上限 |
 
@@ -204,29 +204,29 @@ OpenAI、Codex、Anthropic、DeepSeek 的凭据，作为上游账号记录**保�
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `KIRO_ADMIN_TOKEN` | 空 | 可选的旧版静态管理员令牌。**优先使用本地管理员登录** |
-| `KIRO_WEBUI_URL` | 空 | 启动日志里显示的控制台登录地址 |
-| `KIRO_ADMIN_SESSION_TTL` | `12h` | 本地管理员会话有效期 |
-| `KIRO_ALLOW_ANONYMOUS_PROXY` | `false` | 允许不带 API Key 调用代理。**公网请保持 `false`** |
-| `KIRO_REQUEST_TIMEOUT` | `300s` | 上游请求超时。目前向上游发的是**非流式**请求，要等整段回答生成完才有第一个字节，所以这个值就是单次生成的时间上限；推理模型较慢时不要调得太小 |
-| `KIRO_MAX_RETRIES` | `2` | 可恢复错误的上游重试次数 |
-| `KIRO_RATE_LIMIT_PER_MINUTE` | `120` | 每个 API Key 的固定窗口限流；`0` 关闭限流 |
-| `KIRO_ACCOUNT_SELECTION_STRATEGY` | `round_robin` | 旧版回退，仅在 PostgreSQL 分配排序器缺失时使用（如直接构造的测试）。生产选择使用感知生命周期的排序 |
-| `KIRO_SESSION_AFFINITY_ENABLED` | `true` | 同一会话提示尽量路由到同一个上游账号 |
-| `KIRO_SESSION_AFFINITY_TTL` | `10m` | 会话亲和有效期 |
-| `KIRO_SESSION_AFFINITY_MAXIMUM_SIZE` | `100000` | 每个应用实例最多保留的会话亲和条目数 |
-| `KIRO_BASE_COOLDOWN` | `60s` | 可恢复账号错误的基础冷却时间 |
-| `KIRO_QUOTA_RESET` | `1h` | 上游报告额度耗尽、而账号没有明确重置时间时，分配的默认总额度重置时长 |
-| `KIRO_PROBABILISTIC_RETRY` | `0.1` | 提前探测一个冷却中账号的概率 |
-| `KIRO_MAX_REQUEST_BODY_BYTES` | `10485760` | 单个入站请求体最大字节数（10 MiB） |
+| `STARRY_ADMIN_TOKEN` | 空 | 可选的旧版静态管理员令牌。**优先使用本地管理员登录** |
+| `STARRY_WEBUI_URL` | 空 | 启动日志里显示的控制台登录地址 |
+| `STARRY_ADMIN_SESSION_TTL` | `12h` | 本地管理员会话有效期 |
+| `STARRY_ALLOW_ANONYMOUS_PROXY` | `false` | 允许不带 API Key 调用代理。**公网请保持 `false`** |
+| `STARRY_REQUEST_TIMEOUT` | `300s` | 上游请求超时。目前向上游发的是**非流式**请求，要等整段回答生成完才有第一个字节，所以这个值就是单次生成的时间上限；推理模型较慢时不要调得太小 |
+| `STARRY_MAX_RETRIES` | `2` | 可恢复错误的上游重试次数 |
+| `STARRY_RATE_LIMIT_PER_MINUTE` | `120` | 每个 API Key 的固定窗口限流；`0` 关闭限流 |
+| `STARRY_ACCOUNT_SELECTION_STRATEGY` | `round_robin` | 旧版回退，仅在 PostgreSQL 分配排序器缺失时使用（如直接构造的测试）。生产选择使用感知生命周期的排序 |
+| `STARRY_SESSION_AFFINITY_ENABLED` | `true` | 同一会话提示尽量路由到同一个上游账号 |
+| `STARRY_SESSION_AFFINITY_TTL` | `10m` | 会话亲和有效期 |
+| `STARRY_SESSION_AFFINITY_MAXIMUM_SIZE` | `100000` | 每个应用实例最多保留的会话亲和条目数 |
+| `STARRY_BASE_COOLDOWN` | `60s` | 可恢复账号错误的基础冷却时间 |
+| `STARRY_QUOTA_RESET` | `1h` | 上游报告额度耗尽、而账号没有明确重置时间时，分配的默认总额度重置时长 |
+| `STARRY_PROBABILISTIC_RETRY` | `0.1` | 提前探测一个冷却中账号的概率 |
+| `STARRY_MAX_REQUEST_BODY_BYTES` | `10485760` | 单个入站请求体最大字节数（10 MiB） |
 | `STARRY_PROXY_MAX_INFLIGHT_BODY_BYTES` | 自动（最大堆的 1/4） | **同时在处理的**代理请求体字节数总上限。一个请求会被缓冲、解析成 JSON 树并保留到上游返回，慢模型可能是几分钟，所以并发 × 请求体大小会直接吃堆。超过上限的新请求立刻得到 `503 PROXY_OVERLOADED` 和 `Retry-After: 1`（SDK 会自动重试），而不是把整个服务拖到内存溢出。单个比整个上限还大的请求在没有其他请求时仍会放行 |
 | `STARRY_RESPONSES_STATE_MAX_TOTAL_BYTES` | `67108864`（64 MiB） | `/v1/responses` 为支持 `previous_response_id` 而保存的对话历史，**压缩后**占用的总字节上限，超出按最旧优先淘汰 |
 | `STARRY_RESPONSES_STATE_MAX_ENTRY_BYTES` | `8388608`（8 MiB） | 单条历史压缩后的上限，更大的不保存 |
 | `STARRY_AUTH_LOGIN_ATTEMPTS_PER_MINUTE` | `20` | 每个客户端地址每分钟允许的登录尝试次数，超出返回 `429 LOGIN_RATE_LIMITED`；`0` 关闭。不对用户名加锁，避免有人故意把真正的管理员锁在外面 |
 | `STARRY_AUTH_LOGIN_GLOBAL_ATTEMPTS_PER_MINUTE` | `600` | 全站每分钟登录尝试总数的兜底上限 |
-| `KIRO_TOKEN_REFRESH_INTERVAL_MS` | `3600000` | 符合条件的基于 Token 的账号（含 Kiro 和即将过期的 Codex 凭据）的后台刷新间隔 |
-| `KIRO_TOKEN_REFRESH_INITIAL_DELAY_MS` | `60000` | 第一次刷新前的延迟 |
-| `KIRO_PREFERRED_ENDPOINT` | `codewhisperer` | 首选 Kiro / AWS 端点：`codewhisperer`、`amazonq`、`amazonq-cli` |
+| `STARRY_TOKEN_REFRESH_INTERVAL_MS` | `3600000` | 符合条件的基于 Token 的账号（含 Kiro 和即将过期的 Codex 凭据）的后台刷新间隔 |
+| `STARRY_TOKEN_REFRESH_INITIAL_DELAY_MS` | `60000` | 第一次刷新前的延迟 |
+| `STARRY_KIRO_PREFERRED_ENDPOINT` | `codewhisperer` | 首选 Kiro / AWS 端点：`codewhisperer`、`amazonq`、`amazonq-cli` |
 
 ### ChatGPT 浏览器授权
 
@@ -243,7 +243,7 @@ OpenAI、Codex、Anthropic、DeepSeek 的凭据，作为上游账号记录**保�
 
 生产环境的选择**先隔离厂商 / 账号子类型**，再应用「模型族的主 / 备」熔断策略，并过滤不可用的生命周期状态。原生 Anthropic 池从最低分配优先级里选，再把健康和压力风险降到最小。OpenAI 家族的池会综合健康、延迟、并发、令牌压力、优先级、配置的权重和额度余量打分，再在**最好的三个**之间做带权随机。
 
-只有绑定的账号仍然可用时，才会在常规排序之前检查会话亲和。安全的默认路由：隔离 Codex 账号、普通 GPT 流量走官方 OpenAI API Key、仅在上游成功之后才绑定显式会话、不为裸 API Key 绑定。这些开关和「换账号次数上限」在「系统设置 → 账号池设置 → 账号路由策略」里管理。`KIRO_ACCOUNT_SELECTION_STRATEGY` 只在分配排序器不存在时作为兼容回退。
+只有绑定的账号仍然可用时，才会在常规排序之前检查会话亲和。安全的默认路由：隔离 Codex 账号、普通 GPT 流量走官方 OpenAI API Key、仅在上游成功之后才绑定显式会话、不为裸 API Key 绑定。这些开关和「换账号次数上限」在「系统设置 → 账号池设置 → 账号路由策略」里管理。`STARRY_ACCOUNT_SELECTION_STRATEGY` 只在分配排序器不存在时作为兼容回退。
 
 ---
 
@@ -424,10 +424,10 @@ export POSTGRES_MIGRATION_USERNAME=starry_api_migration
 export POSTGRES_MIGRATION_PASSWORD="$STARRY_POSTGRES_MIGRATION_PASSWORD"
 export POSTGRES_POOL_INITIAL_SIZE=4
 export POSTGRES_POOL_MAX_SIZE=20
-export KIRO_WEBUI_URL=http://127.0.0.1:5173/#/login
-export KIRO_ADMIN_SESSION_TTL=12h
-export KIRO_ALLOW_ANONYMOUS_PROXY=false
-export KIRO_RATE_LIMIT_PER_MINUTE=120
+export STARRY_WEBUI_URL=http://127.0.0.1:5173/#/login
+export STARRY_ADMIN_SESSION_TTL=12h
+export STARRY_ALLOW_ANONYMOUS_PROXY=false
+export STARRY_RATE_LIMIT_PER_MINUTE=120
 
 ./gradlew :service:bootRun
 ```
@@ -437,8 +437,8 @@ export KIRO_RATE_LIMIT_PER_MINUTE=120
 ## 生产环境建议
 
 - **首次启动后，立刻保存并修改 `admin` 初始密码。**
-- 日常管理用本地管理员登录；`KIRO_ADMIN_TOKEN` 只用于应急或自动化场景。
-- 保持 `KIRO_ALLOW_ANONYMOUS_PROXY=false`。
+- 日常管理用本地管理员登录；`STARRY_ADMIN_TOKEN` 只用于应急或自动化场景。
+- 保持 `STARRY_ALLOW_ANONYMOUS_PROXY=false`。
 - 把服务放在 **TLS** 后面。
 - 把专用的 `starry_api` 运行时角色和 `starry_api_migration` Flyway 角色分开，**不要给运行时角色 DDL 权限**。
 - 保持 `starry_api` schema 排在 `search_path` 第一位，并监控连接饱和、慢查询、autovacuum 和复制 / 备份健康。

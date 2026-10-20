@@ -14,7 +14,7 @@ export function isAnthropicModel(model: ModelInfo) {
   const lowerId = model.id.toLowerCase();
   const localId = anthropicLocalId(lowerId);
   return (
-    model.owned_by === 'kiro-api' ||
+    model.owned_by === 'anthropic' ||
     lowerId.startsWith('anthropic/') ||
     localId.startsWith('claude') ||
     model.id.startsWith('CLAUDE_') ||

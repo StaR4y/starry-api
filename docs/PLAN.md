@@ -32,7 +32,7 @@ The current baseline includes:
 
 Compatibility intentionally retained:
 
-- `KIRO_*` runtime variables remain the primary proxy configuration namespace.
+- Legacy `KIRO_*` runtime variables are still read when the matching `STARRY_*` variable is unset (2026-10-21 rename).
 - Kiro Account Manager import documents remain accepted.
 - Legacy API keys with `model_provider='*'` remain usable, but new keys must select an enabled catalog provider.
 
@@ -58,7 +58,6 @@ Compatibility intentionally retained:
 - Per-account `proxyUrl` is stored but is not wired into outbound `WebClient` dispatch.
 - Rate limiting and data-management unlock state are instance-local. Rate limiting is not distributed, and data-management security supports one active service instance only.
 - `/actuator/prometheus` is exposed, but domain metrics for providers, upstream latency/errors, account state, and circuit transitions are incomplete.
-- Most server configuration still uses `KIRO_*`; compatible `STARRY_*` aliases have not been introduced broadly.
 
 ## Workstream 1: Protocol Compatibility
 
@@ -105,7 +104,7 @@ Completed:
 
 - Per-account token refresh is single-flight and handles rotated Codex credentials.
 - Manual, scheduled-disabled, and failure-triggered account tests are available.
-- Total, 5-hour, and 7-day quota windows are tracked; `KIRO_QUOTA_RESET` supplies the fallback total-quota reset duration.
+- Total, 5-hour, and 7-day quota windows are tracked; `STARRY_QUOTA_RESET` supplies the fallback total-quota reset duration.
 - Official DeepSeek accounts and retries are isolated from OpenAI/Codex pools.
 - Experimental provider/model-family circuits reconcile from PostgreSQL request logs and support primary/secondary tiers.
 - API keys are restricted to one managed model provider, and both sides of model mappings are authorized.
@@ -131,7 +130,7 @@ Remaining:
 
 1. Add provider, upstream, account, billing, and circuit-specific Micrometer metrics and alerts.
 2. Propagate request IDs consistently through response headers and structured application logs; IDs are currently generated and persisted for proxy statistics.
-3. Add explicit production-profile defaults and a documented `KIRO_*` to `STARRY_*` migration path.
+3. Add explicit production-profile defaults.
 4. Design an external strongly consistent data-management state store before allowing service replicas when that feature is enabled.
 5. Add a separate backup/restore procedure for uploaded model icons, which are filesystem state rather than PostgreSQL data.
 

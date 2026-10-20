@@ -13,9 +13,13 @@ import reactor.netty.resources.ConnectionProvider;
 @Configuration
 public class HttpClientConfig {
 
+    /**
+     * The one outbound HTTP client: model upstreams of every platform, the payment provider, Turnstile and the
+     * ranking and pricing feeds all share its connection pool.
+     */
     @Bean
-    WebClient kiroWebClient(ProxyProperties properties) {
-        ConnectionProvider provider = ConnectionProvider.builder("kiro-upstream")
+    WebClient upstreamWebClient(ProxyProperties properties) {
+        ConnectionProvider provider = ConnectionProvider.builder("starry-upstream")
             .maxConnections(500)
             .pendingAcquireMaxCount(2_000)
             .pendingAcquireTimeout(Duration.ofSeconds(10))

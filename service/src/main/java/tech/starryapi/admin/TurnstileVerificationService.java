@@ -23,7 +23,7 @@ public class TurnstileVerificationService {
 
     public TurnstileVerificationService(
         RegistrationSettingsService registrationSettingsService,
-        @Qualifier("kiroWebClient") WebClient webClient
+        @Qualifier("upstreamWebClient") WebClient webClient
     ) {
         this.registrationSettingsService = registrationSettingsService;
         this.webClient = webClient;

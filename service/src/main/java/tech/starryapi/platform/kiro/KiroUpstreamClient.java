@@ -44,12 +44,12 @@ public class KiroUpstreamClient {
     private final AtomicLong modelCacheGeneration = new AtomicLong();
 
     public KiroUpstreamClient(
-        WebClient kiroWebClient,
+        WebClient upstreamWebClient,
         ProxyProperties properties,
         AwsEventStreamParser parser,
         AccountTokenRefreshService tokenRefreshService
     ) {
-        this.webClient = kiroWebClient;
+        this.webClient = upstreamWebClient;
         this.properties = properties;
         this.parser = parser;
         this.tokenRefreshService = tokenRefreshService;
@@ -210,13 +210,13 @@ public class KiroUpstreamClient {
     }
 
     private List<ProxyProperties.Endpoint> sortedEndpoints() {
-        String preferred = properties.getUpstream().getPreferredEndpoint();
+        String preferred = properties.getKiro().getPreferredEndpoint();
         if ("amazonq-cli".equalsIgnoreCase(preferred)) {
-            return properties.getUpstream().getEndpoints().stream()
+            return properties.getKiro().getEndpoints().stream()
                 .filter(KiroUpstreamClient::isAmazonQCliEndpoint)
                 .toList();
         }
-        return properties.getUpstream().getEndpoints().stream()
+        return properties.getKiro().getEndpoints().stream()
             .filter(endpoint -> !isAmazonQCliEndpoint(endpoint))
             .sorted(Comparator.comparing(endpoint -> preferred != null && preferred.equalsIgnoreCase(endpoint.getName()) ? 0 : 1))
             .toList();

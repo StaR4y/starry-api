@@ -79,7 +79,7 @@ public class ModelRankingService {
     private final Map<String, RankingSnapshot> snapshots = new ConcurrentHashMap<>();
 
     public ModelRankingService(
-        @Qualifier("kiroWebClient") WebClient webClient,
+        @Qualifier("upstreamWebClient") WebClient webClient,
         ObjectMapper objectMapper,
         ModelRankingProperties properties
     ) {
@@ -88,7 +88,7 @@ public class ModelRankingService {
 
     @Autowired
     public ModelRankingService(
-        @Qualifier("kiroWebClient") WebClient webClient,
+        @Qualifier("upstreamWebClient") WebClient webClient,
         ObjectMapper objectMapper,
         ModelRankingProperties properties,
         SystemSettingRepository repository

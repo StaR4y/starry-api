@@ -41,11 +41,11 @@ public class OpenAiUpstreamClient {
 
     public OpenAiUpstreamClient(
         ObjectMapper objectMapper,
-        WebClient kiroWebClient,
+        WebClient upstreamWebClient,
         AccountTokenRefreshService tokenRefreshService
     ) {
         this.objectMapper = objectMapper;
-        this.webClient = kiroWebClient;
+        this.webClient = upstreamWebClient;
         this.tokenRefreshService = tokenRefreshService;
     }
 

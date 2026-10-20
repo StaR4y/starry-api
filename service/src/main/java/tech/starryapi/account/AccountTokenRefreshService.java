@@ -43,13 +43,13 @@ public class AccountTokenRefreshService {
 
     public AccountTokenRefreshService(
         ObjectMapper objectMapper,
-        WebClient kiroWebClient,
+        WebClient upstreamWebClient,
         ProxyAccountRepository repository,
         AccountPoolService accountPoolService
     ) {
         this(
             objectMapper,
-            kiroWebClient,
+            upstreamWebClient,
             repository,
             accountPoolService,
             SystemMaintenanceTaskGate.alwaysOperationalForDirectConstruction()
@@ -59,13 +59,13 @@ public class AccountTokenRefreshService {
     @Autowired
     public AccountTokenRefreshService(
         ObjectMapper objectMapper,
-        WebClient kiroWebClient,
+        WebClient upstreamWebClient,
         ProxyAccountRepository repository,
         AccountPoolService accountPoolService,
         SystemMaintenanceTaskGate maintenanceTaskGate
     ) {
         this.objectMapper = objectMapper;
-        this.webClient = kiroWebClient;
+        this.webClient = upstreamWebClient;
         this.repository = repository;
         this.accountPoolService = accountPoolService;
         this.maintenanceTaskGate = maintenanceTaskGate;
@@ -92,8 +92,8 @@ public class AccountTokenRefreshService {
     }
 
     @Scheduled(
-        fixedDelayString = "${kiro.proxy.token-refresh-interval-ms:3600000}",
-        initialDelayString = "${kiro.proxy.token-refresh-initial-delay-ms:60000}"
+        fixedDelayString = "${starry.proxy.token-refresh-interval-ms:3600000}",
+        initialDelayString = "${starry.proxy.token-refresh-initial-delay-ms:60000}"
     )
     public void scheduledRefresh() {
         maintenanceTaskGate.whenOperational(this::refreshEligibleAccounts)

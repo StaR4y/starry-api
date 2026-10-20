@@ -30,7 +30,7 @@ createdb --username "$POSTGRES_USER" --encoding=UTF8 "$POSTGRES_DB"
 ```bash
 ./scripts/start-proxy.sh                      # 用 Gradle 启动
 SERVER_PORT=8081 ./scripts/start-proxy.sh      # 换端口
-KIRO_RUN_MODE=jar ./scripts/start-proxy.sh     # 用打好的 boot jar 启动
+STARRY_RUN_MODE=jar ./scripts/start-proxy.sh     # 用打好的 boot jar 启动
 ```
 
 **首次启动**时，从启动日志里读取生成的 `admin` 初始密码。服务只会在「Root 标记未分配、且 `admin_users` 表为空」时打印**一次**。

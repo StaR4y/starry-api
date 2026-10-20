@@ -163,10 +163,10 @@ class KiroUpstreamClientTest {
 
     private ProxyProperties properties(ProxyProperties.Endpoint endpoint) {
         ProxyProperties properties = new ProxyProperties();
-        ProxyProperties.Upstream upstream = new ProxyProperties.Upstream();
-        upstream.setPreferredEndpoint(endpoint.getName());
-        upstream.setEndpoints(List.of(endpoint));
-        properties.setUpstream(upstream);
+        ProxyProperties.Kiro kiro = new ProxyProperties.Kiro();
+        kiro.setPreferredEndpoint(endpoint.getName());
+        kiro.setEndpoints(List.of(endpoint));
+        properties.setKiro(kiro);
         properties.setMaxRetries(0);
         return properties;
     }

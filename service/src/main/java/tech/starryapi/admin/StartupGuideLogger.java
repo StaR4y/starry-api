@@ -64,7 +64,7 @@ public class StartupGuideLogger implements ApplicationRunner {
         }
 
         if (properties.getAdminToken() != null && !properties.getAdminToken().isBlank()) {
-            log.info("Legacy X-Admin-Token authentication is enabled from KIRO_ADMIN_TOKEN.");
+            log.info("Legacy X-Admin-Token authentication is enabled from STARRY_ADMIN_TOKEN.");
         }
 
         log.info("Open WebUI login page: {}", webuiUrl);

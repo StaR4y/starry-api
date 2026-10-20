@@ -38,11 +38,11 @@ public class OpenAiAccountTestClient {
 
     public OpenAiAccountTestClient(
         ObjectMapper objectMapper,
-        WebClient kiroWebClient,
+        WebClient upstreamWebClient,
         AccountTokenRefreshService tokenRefreshService
     ) {
         this.objectMapper = objectMapper;
-        this.webClient = kiroWebClient;
+        this.webClient = upstreamWebClient;
         this.tokenRefreshService = tokenRefreshService;
     }
 

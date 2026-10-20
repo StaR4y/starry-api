@@ -28,7 +28,7 @@ function launch(command, args, env, log, cwd = repo) {
     STARRY_MODEL_PRICING_REMOTE_REFRESH_ENABLED: 'false', STARRY_MODEL_RANKING_REMOTE_REFRESH_ENABLED: 'false',
     STARRY_MODEL_PRICING_DIR: `${output}/prices`, STARRY_MODEL_RANKING_DIR: `${output}/ranking`,
     STARRY_DATA_MANAGEMENT_SECURITY_FILE: `${output}/security.json`, STARRY_PLUGIN_DIR: `${output}/plugins`,
-    KIRO_ADMIN_TOKEN: '', STARRY_PLUGINS_DISABLED: 'false', KIRO_WEBUI_URL: 'http://127.0.0.1:5175' };
+    STARRY_ADMIN_TOKEN: '', STARRY_PLUGINS_DISABLED: 'false', STARRY_WEBUI_URL: 'http://127.0.0.1:5175' };
   const java = process.env.JAVA_HOME ? path.join(process.env.JAVA_HOME, 'bin/java') : 'java';
   const backend = launch(java, ['-Xms64m', '-Xmx256m', '-jar', 'service/build/libs/service-0.1.0-SNAPSHOT.jar'], env, 'backend.log');
   const web = launch(process.execPath, ['node_modules/vite/bin/vite.js', '--host', '127.0.0.1', '--port', '5175', '--strictPort'],

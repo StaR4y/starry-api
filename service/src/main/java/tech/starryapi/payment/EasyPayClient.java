@@ -29,7 +29,7 @@ public class EasyPayClient {
     private final WebClient webClient;
     private final ObjectMapper objectMapper;
 
-    public EasyPayClient(@Qualifier("kiroWebClient") WebClient webClient, ObjectMapper objectMapper) {
+    public EasyPayClient(@Qualifier("upstreamWebClient") WebClient webClient, ObjectMapper objectMapper) {
         this.webClient = webClient;
         this.objectMapper = objectMapper;
     }

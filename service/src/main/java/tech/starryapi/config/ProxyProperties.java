@@ -5,7 +5,7 @@ import java.util.ArrayList;
 import java.util.List;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
-@ConfigurationProperties(prefix = "kiro.proxy")
+@ConfigurationProperties(prefix = "starry.proxy")
 public class ProxyProperties {
 
     private String adminToken = "";
@@ -23,7 +23,7 @@ public class ProxyProperties {
     private Duration quotaReset = Duration.ofHours(1);
     private double probabilisticRetryChance = 0.1;
     private long maxRequestBodyBytes = 10 * 1024 * 1024;
-    private Upstream upstream = new Upstream();
+    private Kiro kiro = new Kiro();
 
     public enum AccountSelectionStrategy {
         ROUND_ROBIN,
@@ -150,15 +150,16 @@ public class ProxyProperties {
         this.maxRequestBodyBytes = maxRequestBodyBytes;
     }
 
-    public Upstream getUpstream() {
-        return upstream;
+    public Kiro getKiro() {
+        return kiro;
     }
 
-    public void setUpstream(Upstream upstream) {
-        this.upstream = upstream;
+    public void setKiro(Kiro kiro) {
+        this.kiro = kiro;
     }
 
-    public static class Upstream {
+    /** Amazon CodeWhisperer / Q endpoints that Kiro accounts are sent to. */
+    public static class Kiro {
         private String preferredEndpoint = "codewhisperer";
         private List<Endpoint> endpoints = new ArrayList<>();
 
