@@ -156,7 +156,7 @@ public class CodingPlanService {
         return spec
             .map((row, metadata) -> toResponse(row))
             .one()
-            .switchIfEmpty(Mono.error(new ApiException(
+            .switchIfEmpty(Mono.error(() -> new ApiException(
                 HttpStatus.NOT_FOUND,
                 "CODING_PLAN_NOT_FOUND",
                 "Coding plan not found"

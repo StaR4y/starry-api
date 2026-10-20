@@ -223,7 +223,7 @@ final class PluginHostContext implements PluginContext {
             if (!state.enabled()) return Mono.error(new IllegalStateException("Developer mode is disabled"));
             return host.getBean(AdminUserRepository.class).findApplicationRoot()
                 .filter(root -> Boolean.TRUE.equals(root.getEnabled()) && !Boolean.TRUE.equals(root.getFirstLogin()))
-                .switchIfEmpty(Mono.error(new IllegalStateException("Root identity unavailable")));
+                .switchIfEmpty(Mono.error(() -> new IllegalStateException("Root identity unavailable")));
         });
     }
 

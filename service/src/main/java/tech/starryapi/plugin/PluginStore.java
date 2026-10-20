@@ -35,7 +35,7 @@ public class PluginStore {
                 r.get("session_hash", String.class), r.get("identity_hash", String.class), instant(r, "expires_at"),
                 instant(r, "sent_at"), Boolean.TRUE.equals(r.get("delivered", Boolean.class)),
                 r.get("failures", Integer.class), instant(r, "locked_until")))
-            .one().switchIfEmpty(Mono.error(new IllegalStateException("Plugin security state is missing")));
+            .one().switchIfEmpty(Mono.error(() -> new IllegalStateException("Plugin security state is missing")));
     }
 
     public <T> Mono<T> locked(Function<SecurityState, Mono<T>> action) {

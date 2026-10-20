@@ -19,7 +19,11 @@ public class HttpClientConfig {
             .maxConnections(500)
             .pendingAcquireMaxCount(2_000)
             .pendingAcquireTimeout(Duration.ofSeconds(10))
-            .maxIdleTime(Duration.ofSeconds(45))
+            // Upstreams and their CDNs close idle keep-alive connections after as little as 5-30 s. Reusing one that
+            // is already closed fails the request with "connection reset", so retire idle connections early and
+            // check for dead ones in the background rather than only when a request picks one up.
+            .maxIdleTime(Duration.ofSeconds(20))
+            .evictInBackground(Duration.ofSeconds(15))
             .maxLifeTime(Duration.ofMinutes(10))
             .build();
 

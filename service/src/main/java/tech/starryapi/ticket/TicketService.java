@@ -70,9 +70,23 @@ public class TicketService {
             .bind("id", id).bind("before", before).bind("limit", limit).map((r, m) -> new Message(
                 r.get("id", Long.class), r.get("actor_name", String.class), Boolean.TRUE.equals(r.get("admin", Boolean.class)),
                 r.get("kind", String.class), r.get("body", String.class), r.get("status", String.class), r.get("created_at", Instant.class), List.of()))
-            .all().concatMap(msg -> db.sql("SELECT id, filename, size_bytes FROM support_ticket_attachments WHERE message_id = :id ORDER BY id")
-                .bind("id", msg.id()).map((r, m) -> new Attachment(r.get("id", String.class), r.get("filename", String.class), r.get("size_bytes", Integer.class)))
-                .all().collectList().map(files -> new Message(msg.id(), msg.actorName(), msg.admin(), msg.kind(), msg.body(), msg.status(), msg.createdAt(), files)));
+            .all().collectList().flatMapMany(page -> {
+                if (page.isEmpty()) return Flux.<Message>empty();
+                // One query for the whole page instead of one per message. The page is the newest N messages of this
+                // ticket, so every message of the ticket inside [min, max] is on it and the id range is exact.
+                long min = page.stream().mapToLong(Message::id).min().getAsLong();
+                long max = page.stream().mapToLong(Message::id).max().getAsLong();
+                return db.sql("SELECT id, message_id, filename, size_bytes FROM support_ticket_attachments WHERE ticket_id = :id AND message_id BETWEEN :min AND :max ORDER BY id")
+                    .bind("id", id).bind("min", min).bind("max", max)
+                    .map((r, m) -> java.util.Map.entry(r.get("message_id", Long.class),
+                        new Attachment(r.get("id", String.class), r.get("filename", String.class), r.get("size_bytes", Integer.class))))
+                    .all().collectList().flatMapMany(rows -> {
+                        java.util.Map<Long, List<Attachment>> byMessage = new java.util.HashMap<>();
+                        for (var row : rows) byMessage.computeIfAbsent(row.getKey(), key -> new ArrayList<>()).add(row.getValue());
+                        return Flux.fromIterable(page).map(msg -> new Message(msg.id(), msg.actorName(), msg.admin(), msg.kind(),
+                            msg.body(), msg.status(), msg.createdAt(), byMessage.getOrDefault(msg.id(), List.of())));
+                    });
+            });
     }
 
     Mono<List<Message>> notificationMessages(String id) {

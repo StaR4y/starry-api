@@ -58,6 +58,9 @@ public class ModelPricingService {
     private final DefaultModelCatalogProvider catalogProvider;
     private final AtomicLong cacheGeneration = new AtomicLong();
     private volatile List<ModelPricingRule> cachedRules;
+    private volatile long cachedRulesAtNanos;
+    /** Upper bound on how long rules changed outside this process (another instance, a manual SQL edit) stay unseen. */
+    private static final long RULES_CACHE_TTL_NANOS = java.time.Duration.ofSeconds(15).toNanos();
     private volatile CatalogIndex catalogIndex;
 
     public ModelPricingService(
@@ -171,7 +174,9 @@ public class ModelPricingService {
     }
 
     public Mono<BillingQuote> billingQuote(String model, boolean fastMode, BigDecimal multiplier) {
-        return readRules().map(rules -> quote(resolvePricing(rules, model, null, multiplier), fastMode));
+        // Runs for every proxied request. It used to query and re-parse the rules each time while cost() already
+        // used the snapshot; the snapshot is invalidated on every local change and expires after a few seconds.
+        return rulesSnapshot().map(rules -> quote(resolvePricing(rules, model, null, multiplier), fastMode));
     }
 
     BigDecimal cost(List<ModelPricingRule> rules, String model, PlatformUsage usage,
@@ -469,7 +474,7 @@ public class ModelPricingService {
         return Mono.defer(() -> {
             long generation = cacheGeneration.get();
             List<ModelPricingRule> snapshot = cachedRules;
-            if (snapshot != null) return Mono.just(snapshot);
+            if (snapshot != null && System.nanoTime() - cachedRulesAtNanos < RULES_CACHE_TTL_NANOS) return Mono.just(snapshot);
             return readRules().doOnNext(rules -> replaceCache(rules, generation));
         });
     }
@@ -706,6 +711,7 @@ public class ModelPricingService {
             return;
         }
         cachedRules = List.copyOf(rules == null ? List.of() : rules);
+        cachedRulesAtNanos = System.nanoTime();
     }
 
     private Comparator<ModelPricingRule> ruleComparator() {

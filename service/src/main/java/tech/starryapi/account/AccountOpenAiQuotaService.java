@@ -24,7 +24,7 @@ public class AccountOpenAiQuotaService {
 
     public Mono<AccountDtos.OpenAiQuotaResponse> quota(String accountId) {
         return repository.findByAccountId(accountId)
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND", "Account not found")))
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND", "Account not found")))
             .flatMap(account -> {
                 validateAccount(account);
                 return openAiAccountTestClient.quota(account).map(snapshot -> response(account, snapshot));

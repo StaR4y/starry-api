@@ -267,9 +267,28 @@ public final class AccountPlatforms {
         return null;
     }
 
+    /**
+     * Account selection calls this for every candidate account on every request, almost always with one of a few
+     * provider or auth-method names. Remembering those avoids a trim + lower-case allocation per account per request.
+     */
+    private static final java.util.concurrent.ConcurrentHashMap<String, String> KEY_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final java.util.concurrent.ConcurrentHashMap<String, Boolean> OFFICIAL_OPENAI_BASE_URL_CACHE = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int NORMALIZATION_CACHE_LIMIT = 512;
+
     public static String key(String value) {
+        if (value == null) {
+            return "";
+        }
+        String cached = KEY_CACHE.get(value);
+        if (cached != null) {
+            return cached;
+        }
         String cleaned = clean(value);
-        return cleaned == null ? "" : cleaned.toLowerCase(Locale.ROOT);
+        String key = cleaned == null ? "" : cleaned.toLowerCase(Locale.ROOT);
+        if (value.length() <= 64 && KEY_CACHE.size() < NORMALIZATION_CACHE_LIMIT) {
+            KEY_CACHE.put(value, key);
+        }
+        return key;
     }
 
     private static boolean isGoogleProvider(String providerKey) {
@@ -298,6 +317,21 @@ public final class AccountPlatforms {
     }
 
     private static boolean isOfficialOpenAiBaseUrl(String baseUrl) {
+        if (baseUrl == null) {
+            return true;
+        }
+        Boolean cached = OFFICIAL_OPENAI_BASE_URL_CACHE.get(baseUrl);
+        if (cached != null) {
+            return cached;
+        }
+        boolean official = computeOfficialOpenAiBaseUrl(baseUrl);
+        if (baseUrl.length() <= 512 && OFFICIAL_OPENAI_BASE_URL_CACHE.size() < NORMALIZATION_CACHE_LIMIT) {
+            OFFICIAL_OPENAI_BASE_URL_CACHE.put(baseUrl, official);
+        }
+        return official;
+    }
+
+    private static boolean computeOfficialOpenAiBaseUrl(String baseUrl) {
         String cleaned = clean(baseUrl);
         if (cleaned == null) {
             return true;

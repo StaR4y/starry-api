@@ -80,7 +80,7 @@ public class RegistrationPersistenceService {
         }
         return repository.findEnabledByAffiliateCodeForShare(affiliateCode)
             .map(inviter -> new AffiliateInvite(inviter.getUserId(), inviter.getAffiliateCode(), true))
-            .switchIfEmpty(Mono.error(new ApiException(
+            .switchIfEmpty(Mono.error(() -> new ApiException(
                 HttpStatus.BAD_REQUEST,
                 "INVALID_AFFILIATE_CODE",
                 "Affiliate code is invalid"

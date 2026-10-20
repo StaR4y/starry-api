@@ -19,6 +19,7 @@ import tech.starryapi.platform.catalog.PlatformModelCatalogSupport;
 @Service
 public class ApiKeyService {
 
+    private static final java.util.regex.Pattern PROVIDER_NAME = java.util.regex.Pattern.compile("[A-Za-z0-9._ -]+");
     private static final String KEY_PREFIX = "sk-";
     private static final String ADMIN_ROLE = "ADMIN";
 
@@ -108,7 +109,7 @@ public class ApiKeyService {
         return spec
             .map((row, metadata) -> template.getConverter().read(ApiKeyEntity.class, row, metadata))
             .one()
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "API_KEY_NOT_FOUND", "API key not found")))
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "API_KEY_NOT_FOUND", "API key not found")))
             .onErrorMap(ApiKeyService::mapBillingConstraint);
     }
 
@@ -146,7 +147,7 @@ public class ApiKeyService {
             return Mono.error(new ApiException(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED", "Missing API key"));
         }
         return repository.findByKeyHash(Hashing.sha256(key.get()))
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED", "Invalid API key")))
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED", "Invalid API key")))
             .flatMap(entity -> {
                 if (Boolean.FALSE.equals(entity.getEnabled())) {
                     return Mono.error(new ApiException(HttpStatus.UNAUTHORIZED, "API_KEY_DISABLED", "API key is disabled"));
@@ -228,7 +229,7 @@ public class ApiKeyService {
             """).bind("requestHash", usageHash(principal, requestId))
             .bind("credits", nonNegative(credits)).bind("inputTokens", Math.max(0, inputTokens))
             .bind("outputTokens", Math.max(0, outputTokens)).fetch().one()
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "USAGE_ACCOUNTING_FAILED", "Usage accounting did not return an outcome")))
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "USAGE_ACCOUNTING_FAILED", "Usage accounting did not return an outcome")))
             .flatMap(row -> billingOutcome(String.valueOf(row.get("accounting_status"))));
     }
 
@@ -328,7 +329,7 @@ public class ApiKeyService {
                 Boolean.TRUE.equals(row.get("has_active_subscription", Boolean.class))
             ))
             .one()
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.UNAUTHORIZED, "API_KEY_OWNER_NOT_FOUND", "API key owner does not exist")))
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.UNAUTHORIZED, "API_KEY_OWNER_NOT_FOUND", "API key owner does not exist")))
             .flatMap(user -> user.enabled()
                 ? Mono.just(user)
                 : Mono.error(new ApiException(HttpStatus.UNAUTHORIZED, "API_KEY_OWNER_DISABLED", "API key owner is disabled")));
@@ -341,7 +342,7 @@ public class ApiKeyService {
         } else {
             normalized = normalized.trim();
         }
-        if (normalized.isEmpty() || "*".equals(normalized) || !normalized.matches("[A-Za-z0-9._ -]+")) {
+        if (normalized.isEmpty() || "*".equals(normalized) || !PROVIDER_NAME.matcher(normalized).matches()) {
             return null;
         }
         return "[\"" + normalized + "\"]";

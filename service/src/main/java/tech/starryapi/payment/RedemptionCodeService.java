@@ -83,7 +83,7 @@ public class RedemptionCodeService {
             .bind("planId", planId)
             .map((row, metadata) -> row.get("plan_id", String.class))
             .one()
-            .switchIfEmpty(Mono.error(new ApiException(
+            .switchIfEmpty(Mono.error(() -> new ApiException(
                 HttpStatus.BAD_REQUEST,
                 "REDEMPTION_CODE_PLAN_UNAVAILABLE",
                 "Coding plan does not exist or is disabled"
@@ -102,7 +102,7 @@ public class RedemptionCodeService {
             .bind("codeId", clean(codeId))
             .map((row, metadata) -> template.getConverter().read(RedemptionCodeEntity.class, row, metadata))
             .one()
-            .switchIfEmpty(Mono.error(new ApiException(
+            .switchIfEmpty(Mono.error(() -> new ApiException(
                 HttpStatus.NOT_FOUND,
                 "REDEMPTION_CODE_NOT_FOUND",
                 "Redemption code not found"
@@ -120,7 +120,7 @@ public class RedemptionCodeService {
         }
         Instant now = Instant.now();
         return redeemOnce(principal.userId(), code, now)
-            .switchIfEmpty(Mono.error(new ApiException(
+            .switchIfEmpty(Mono.error(() -> new ApiException(
                 HttpStatus.BAD_REQUEST,
                 "INVALID_REDEMPTION_CODE",
                 "Redemption code is invalid, expired, or already used"

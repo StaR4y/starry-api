@@ -143,4 +143,57 @@ class OpenAiResponseStateStoreTest {
         assertThat(input.path(2).path("type").asText()).isEqualTo("custom_tool_call_output");
         assertThat(input.path(2).path("call_id").asText()).isEqualTo("call_patch");
     }
+
+    @Test
+    void retainedBytesStayWithinTheConfiguredBudgetNoMatterHowManyLargeContextsArrive() throws Exception {
+        OpenAiResponseStateStore bounded = new OpenAiResponseStateStore(objectMapper, 2L * 1024 * 1024, 1024 * 1024);
+        java.util.Random random = new java.util.Random(7);
+        for (int i = 0; i < 200; i++) {
+            // ~200 KB of poorly compressible text per request, so each history costs real bytes.
+            byte[] noise = new byte[150_000];
+            random.nextBytes(noise);
+            ObjectNode request = objectMapper.createObjectNode().put("model", "gpt-5.5")
+                .put("input", java.util.Base64.getEncoder().encodeToString(noise));
+            ObjectNode response = objectMapper.createObjectNode().put("id", "resp_" + i);
+            response.putArray("output");
+            bounded.remember(response, request, "account-1");
+            assertThat(bounded.retainedBytes()).isLessThanOrEqualTo(2L * 1024 * 1024);
+        }
+
+        assertThat(bounded.size()).isGreaterThan(0).isLessThan(200);
+        assertThat(bounded.canExpand("resp_0")).isFalse();
+        assertThat(bounded.canExpand("resp_199")).isTrue();
+    }
+
+    @Test
+    void aSingleHugeHistoryIsNotRetainedAtAll() throws Exception {
+        OpenAiResponseStateStore bounded = new OpenAiResponseStateStore(objectMapper, 64L * 1024 * 1024, 64 * 1024);
+        byte[] noise = new byte[300_000];
+        new java.util.Random(11).nextBytes(noise);
+        ObjectNode request = objectMapper.createObjectNode().put("input", java.util.Base64.getEncoder().encodeToString(noise));
+        ObjectNode response = objectMapper.createObjectNode().put("id", "resp_huge");
+        response.putArray("output");
+
+        bounded.remember(response, request, "account-1");
+
+        assertThat(bounded.size()).isZero();
+        assertThat(bounded.canExpand("resp_huge")).isFalse();
+        // An unknown previous_response_id is passed through untouched instead of failing the request.
+        ObjectNode expanded = bounded.expand(objectMapper.createObjectNode().put("previous_response_id", "resp_huge").put("input", "next"));
+        assertThat(expanded.path("previous_response_id").asText()).isEqualTo("resp_huge");
+    }
+
+    @Test
+    void expandedHistoryRoundTripsThroughCompression() throws Exception {
+        ObjectNode request = objectMapper.createObjectNode().put("input", "你好，请把这段中文也原样保存。".repeat(200));
+        ObjectNode response = objectMapper.createObjectNode().put("id", "resp_cn");
+        response.putArray("output").addObject().put("type", "message").put("role", "assistant");
+        store.remember(response, request, "account-1");
+
+        ObjectNode expanded = store.expand(objectMapper.createObjectNode().put("previous_response_id", "resp_cn").put("input", "继续"));
+
+        assertThat(expanded.path("input")).hasSize(3);
+        assertThat(expanded.path("input").path(0).path("content").path(0).path("text").asText())
+            .isEqualTo("你好，请把这段中文也原样保存。".repeat(200));
+    }
 }

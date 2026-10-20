@@ -73,7 +73,7 @@ public class ModelMappingService {
 
     public Mono<ModelDtos.MappingResponse> update(String mappingId, ModelDtos.UpdateMappingRequest request) {
         return repository.findByMappingId(mappingId)
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "MAPPING_NOT_FOUND", "Model mapping not found")))
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "MAPPING_NOT_FOUND", "Model mapping not found")))
             .flatMap(entity -> {
                 if (request.name() != null) entity.setName(request.name());
                 if (request.enabled() != null) entity.setEnabled(request.enabled());

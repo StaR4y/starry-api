@@ -147,7 +147,7 @@ public class DataManagementSecurityAuditStore {
             .bind("eventId", eventId)
             .map((row, metadata) -> new PersistResult(row.get("id", Long.class), false, false))
             .one()
-            .switchIfEmpty(Mono.error(new IllegalStateException(
+            .switchIfEmpty(Mono.error(() -> new IllegalStateException(
                 "Security audit persistence returned no durable event"
             )));
     }

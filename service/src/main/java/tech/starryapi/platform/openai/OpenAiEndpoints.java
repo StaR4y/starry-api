@@ -7,6 +7,7 @@ import tech.starryapi.account.AccountPlatforms;
 final class OpenAiEndpoints {
 
     private static final Pattern VERSION_SEGMENT = Pattern.compile("v\\d+(?:beta)?");
+    private static final Pattern TRAILING_SLASHES = Pattern.compile("/+$");
 
     private OpenAiEndpoints() {
     }
@@ -25,7 +26,7 @@ final class OpenAiEndpoints {
             base = fallback;
         }
 
-        String normalizedBase = base.replaceAll("/+$", "");
+        String normalizedBase = TRAILING_SLASHES.matcher(base).replaceAll("");
         String normalizedSuffix = suffix.startsWith("/") ? suffix : "/" + suffix;
         if (normalizedBase.endsWith(normalizedSuffix)) {
             return normalizedBase;
@@ -42,7 +43,7 @@ final class OpenAiEndpoints {
             if (path == null || path.isBlank() || "/".equals(path)) {
                 return false;
             }
-            String trimmed = path.replaceAll("/+$", "");
+            String trimmed = TRAILING_SLASHES.matcher(path).replaceAll("");
             int lastSlash = trimmed.lastIndexOf('/');
             String lastSegment = lastSlash >= 0 ? trimmed.substring(lastSlash + 1) : trimmed;
             return VERSION_SEGMENT.matcher(lastSegment.toLowerCase()).matches();

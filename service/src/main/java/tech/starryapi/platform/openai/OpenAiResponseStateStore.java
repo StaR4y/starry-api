@@ -4,24 +4,61 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.zip.Deflater;
+import java.util.zip.DeflaterOutputStream;
+import java.util.zip.InflaterInputStream;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+/**
+ * Keeps the conversation history behind recent Responses API calls so that a later request carrying
+ * {@code previous_response_id} can be expanded locally.
+ *
+ * <p>Every Responses request is remembered, whether or not a client ever chains from it, so the store has to
+ * be bounded by bytes and not only by entry count: a Codex-style client sends the whole context each time,
+ * and 512 retained contexts of a megabyte each would pin half a gigabyte of heap. Histories are therefore
+ * kept as compressed JSON bytes (not as JSON trees), capped per entry and in total, and evicted oldest first.
+ */
 @Component
 public class OpenAiResponseStateStore {
 
-    private static final int MAX_ENTRIES = 512;
+    private static final Logger log = LoggerFactory.getLogger(OpenAiResponseStateStore.class);
     private static final Duration ENTRY_TTL = Duration.ofHours(6);
+    private static final int MAX_ENTRIES = 512;
+    private static final long DEFAULT_MAX_TOTAL_BYTES = 64L * 1024 * 1024;
+    private static final long DEFAULT_MAX_ENTRY_BYTES = 8L * 1024 * 1024;
+    /** Rough per-entry bookkeeping cost on top of the compressed payload. */
+    private static final long ENTRY_OVERHEAD_BYTES = 256;
 
     private final ObjectMapper objectMapper;
+    private final long maxTotalBytes;
+    private final long maxEntryBytes;
     private final Map<String, Entry> entries = new LinkedHashMap<>();
+    private long totalBytes;
 
     public OpenAiResponseStateStore(ObjectMapper objectMapper) {
+        this(objectMapper, DEFAULT_MAX_TOTAL_BYTES, DEFAULT_MAX_ENTRY_BYTES);
+    }
+
+    @Autowired
+    public OpenAiResponseStateStore(
+        ObjectMapper objectMapper,
+        @Value("${starry.responses.state-max-total-bytes:67108864}") long maxTotalBytes,
+        @Value("${starry.responses.state-max-entry-bytes:8388608}") long maxEntryBytes
+    ) {
         this.objectMapper = objectMapper;
+        this.maxTotalBytes = Math.max(1, maxTotalBytes);
+        this.maxEntryBytes = Math.max(1, maxEntryBytes);
     }
 
     public ObjectNode expand(JsonNode request) {
@@ -31,9 +68,13 @@ public class OpenAiResponseStateStore {
         if (previous == null) {
             return copy;
         }
+        JsonNode history = inflate(previous);
+        if (history == null) {
+            return copy;
+        }
 
         ArrayNode input = objectMapper.createArrayNode();
-        appendAll(input, previous.history);
+        appendAll(input, history);
         appendInput(input, request.path("input"));
         copy.set("input", input);
         copy.remove("previous_response_id");
@@ -53,7 +94,11 @@ public class OpenAiResponseStateStore {
         ArrayNode history = objectMapper.createArrayNode();
         appendInput(history, request.path("input"));
         appendAll(history, response.path("output"));
-        put(responseId, history, clean(accountId));
+        byte[] packed = deflate(history);
+        if (packed == null) {
+            return;
+        }
+        put(responseId, new Entry(packed, clean(accountId), Instant.now()));
     }
 
     public String ownerAccountId(String responseId) {
@@ -65,21 +110,60 @@ public class OpenAiResponseStateStore {
         return clean(responseId) != null && get(responseId) != null;
     }
 
+    /** Number of bytes currently retained, for tests and diagnostics. */
+    public synchronized long retainedBytes() {
+        return totalBytes;
+    }
+
+    public synchronized int size() {
+        return entries.size();
+    }
+
+    private byte[] deflate(ArrayNode history) {
+        Deflater deflater = new Deflater(Deflater.BEST_SPEED);
+        try (ByteArrayOutputStream bytes = new ByteArrayOutputStream(8 * 1024);
+             DeflaterOutputStream out = new DeflaterOutputStream(bytes, deflater)) {
+            objectMapper.writeValue(out, history);
+            out.finish();
+            if (bytes.size() > maxEntryBytes) {
+                log.debug("Not remembering a Responses history of {} compressed bytes (limit {})", bytes.size(), maxEntryBytes);
+                return null;
+            }
+            return bytes.toByteArray();
+        } catch (IOException error) {
+            log.debug("Unable to remember a Responses history: {}", error.toString());
+            return null;
+        } finally {
+            deflater.end();
+        }
+    }
+
+    private JsonNode inflate(Entry entry) {
+        try (InflaterInputStream in = new InflaterInputStream(new java.io.ByteArrayInputStream(entry.packed))) {
+            return objectMapper.readTree(in);
+        } catch (IOException error) {
+            log.debug("Unable to read a remembered Responses history: {}", error.toString());
+            return null;
+        }
+    }
+
     private synchronized Entry get(String responseId) {
         pruneExpired();
         return entries.get(responseId);
     }
 
-    private synchronized void put(String responseId, ArrayNode history, String accountId) {
+    private synchronized void put(String responseId, Entry entry) {
         pruneExpired();
-        entries.remove(responseId);
-        entries.put(responseId, new Entry(history.deepCopy(), accountId, Instant.now()));
-        while (entries.size() > MAX_ENTRIES) {
-            Iterator<String> iterator = entries.keySet().iterator();
-            if (!iterator.hasNext()) {
-                return;
-            }
-            iterator.next();
+        Entry replaced = entries.remove(responseId);
+        if (replaced != null) {
+            totalBytes -= replaced.weight();
+        }
+        entries.put(responseId, entry);
+        totalBytes += entry.weight();
+        while ((entries.size() > MAX_ENTRIES || totalBytes > maxTotalBytes) && entries.size() > 1) {
+            Iterator<Map.Entry<String, Entry>> iterator = entries.entrySet().iterator();
+            Map.Entry<String, Entry> eldest = iterator.next();
+            totalBytes -= eldest.getValue().weight();
             iterator.remove();
         }
     }
@@ -114,9 +198,16 @@ public class OpenAiResponseStateStore {
         }
     }
 
-    private synchronized void pruneExpired() {
+    private void pruneExpired() {
         Instant cutoff = Instant.now().minus(ENTRY_TTL);
-        entries.entrySet().removeIf(entry -> entry.getValue().createdAt.isBefore(cutoff));
+        Iterator<Map.Entry<String, Entry>> iterator = entries.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Entry entry = iterator.next().getValue();
+            if (entry.createdAt.isBefore(cutoff)) {
+                totalBytes -= entry.weight();
+                iterator.remove();
+            }
+        }
     }
 
     private String clean(String value) {
@@ -127,6 +218,9 @@ public class OpenAiResponseStateStore {
         return trimmed.isEmpty() ? null : trimmed;
     }
 
-    private record Entry(ArrayNode history, String accountId, Instant createdAt) {
+    private record Entry(byte[] packed, String accountId, Instant createdAt) {
+        long weight() {
+            return packed.length + ENTRY_OVERHEAD_BYTES;
+        }
     }
 }

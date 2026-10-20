@@ -56,7 +56,7 @@ public class InviteCodeService {
 
     public Mono<AdminDtos.InviteCodeResponse> revoke(String codeId) {
         return repository.revokeByCodeId(clean(codeId))
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "INVITE_CODE_NOT_FOUND", "Invite code not found")))
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "INVITE_CODE_NOT_FOUND", "Invite code not found")))
             .map(InviteCodeMapper::toResponse);
     }
 

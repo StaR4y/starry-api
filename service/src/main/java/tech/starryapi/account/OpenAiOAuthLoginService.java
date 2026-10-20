@@ -152,7 +152,7 @@ public class OpenAiOAuthLoginService {
             return Mono.empty();
         }
         return repository.findByAccountId(accountId)
-            .switchIfEmpty(Mono.error(new ApiException(
+            .switchIfEmpty(Mono.error(() -> new ApiException(
                 HttpStatus.NOT_FOUND,
                 "ACCOUNT_NOT_FOUND",
                 "Account not found"
@@ -363,7 +363,7 @@ public class OpenAiOAuthLoginService {
         String stableAccountId = stableAccountId(identity);
         if (session.targetAccountId != null) {
             return repository.findByAccountId(session.targetAccountId)
-                .switchIfEmpty(Mono.error(new ApiException(
+                .switchIfEmpty(Mono.error(() -> new ApiException(
                     HttpStatus.NOT_FOUND,
                     "ACCOUNT_NOT_FOUND",
                     "Account was removed while authorization was in progress"
@@ -390,7 +390,7 @@ public class OpenAiOAuthLoginService {
     ) {
         return repository.findByAccountId(stableAccountId)
             .switchIfEmpty(findByEmail(identity))
-            .switchIfEmpty(Mono.error(new ApiException(
+            .switchIfEmpty(Mono.error(() -> new ApiException(
                 HttpStatus.CONFLICT,
                 "CHATGPT_OAUTH_ACCOUNT_CONFLICT",
                 "An account with the same ChatGPT identity already exists"

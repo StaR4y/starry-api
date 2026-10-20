@@ -17,7 +17,12 @@ import org.springframework.web.server.ResponseStatusException;
 @Component
 public class TicketRequestFilter implements WebFilter {
     private final AdminAuth auth;
-    private final java.util.concurrent.Semaphore submissions = new java.util.concurrent.Semaphore(4);
+    // A single global pool of 4 meant four slow uploads from one account made everyone's submissions fail with 429.
+    // Now each user gets 2 slots of a larger shared pool, and a stalled upload is cut off.
+    private final java.util.concurrent.Semaphore submissions = new java.util.concurrent.Semaphore(16);
+    private static final int PER_USER_SUBMISSIONS = 2;
+    private static final java.time.Duration UPLOAD_IDLE_TIMEOUT = java.time.Duration.ofSeconds(30);
+    private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger> perUser = new java.util.concurrent.ConcurrentHashMap<>();
     private final com.fasterxml.jackson.databind.ObjectMapper json;
     public TicketRequestFilter(AdminAuth auth, com.fasterxml.jackson.databind.ObjectMapper json) { this.auth = auth; this.json = json; }
 
@@ -27,7 +32,8 @@ public class TicketRequestFilter implements WebFilter {
         if (!(path.equals("/tickets") || path.startsWith("/tickets/"))) return chain.filter(exchange);
         exchange.getResponse().getHeaders().setCacheControl("no-store");
         // Authenticate before multipart parsing; count streamed bytes even without Content-Length.
-        try { auth.verify(exchange); }
+        tech.starryapi.admin.AdminPrincipal principal;
+        try { principal = auth.verify(exchange); }
         catch (tech.starryapi.common.ApiException error) {
             exchange.getResponse().setStatusCode(error.getStatus());
             exchange.getResponse().getHeaders().setContentType(org.springframework.http.MediaType.APPLICATION_JSON);
@@ -42,7 +48,7 @@ public class TicketRequestFilter implements WebFilter {
         var request = new ServerHttpRequestDecorator(exchange.getRequest()) {
             @Override public Flux<DataBuffer> getBody() {
                 AtomicLong bytes = new AtomicLong();
-                return super.getBody().<DataBuffer>handle((buffer, sink) -> {
+                return super.getBody().timeout(UPLOAD_IDLE_TIMEOUT).<DataBuffer>handle((buffer, sink) -> {
                     if (bytes.addAndGet(buffer.readableByteCount()) > limit) {
                         DataBufferUtils.release(buffer);
                         sink.error(tooLarge);
@@ -51,9 +57,31 @@ public class TicketRequestFilter implements WebFilter {
             }
         };
         boolean submission = exchange.getRequest().getMethod() == org.springframework.http.HttpMethod.POST;
-        if (submission && !submissions.tryAcquire())
+        String userId = principal == null || principal.userId() == null ? "unknown" : principal.userId();
+        if (submission && !tryAcquire(userId))
             return Mono.error(new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "工单提交繁忙，请稍后重试"));
         return Mono.defer(() -> chain.filter(exchange.mutate().request(request).build()))
-            .doFinally(signal -> { if (submission) submissions.release(); });
+            .doFinally(signal -> { if (submission) release(userId); });
+    }
+
+    private boolean tryAcquire(String userId) {
+        if (perUser.computeIfAbsent(userId, key -> new java.util.concurrent.atomic.AtomicInteger()).incrementAndGet() > PER_USER_SUBMISSIONS) {
+            releaseUser(userId);
+            return false;
+        }
+        if (!submissions.tryAcquire()) {
+            releaseUser(userId);
+            return false;
+        }
+        return true;
+    }
+
+    private void release(String userId) {
+        submissions.release();
+        releaseUser(userId);
+    }
+
+    private void releaseUser(String userId) {
+        perUser.computeIfPresent(userId, (key, count) -> count.decrementAndGet() <= 0 ? null : count);
     }
 }

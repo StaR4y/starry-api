@@ -156,7 +156,7 @@ public class CodingPlanSubscriptionService {
     private Mono<CodingPlanSubscriptionResponse> find(String id) {
         return db.sql(SELECT + " WHERE s.subscription_id = :id").bind("id", id)
             .map((row, metadata) -> response(row)).one()
-            .switchIfEmpty(Mono.error(new ApiException(HttpStatus.NOT_FOUND, "CODING_PLAN_SUBSCRIPTION_NOT_FOUND", "Subscription not found")));
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "CODING_PLAN_SUBSCRIPTION_NOT_FOUND", "Subscription not found")));
     }
 
     private CodingPlanSubscriptionResponse response(io.r2dbc.spi.Row row) {

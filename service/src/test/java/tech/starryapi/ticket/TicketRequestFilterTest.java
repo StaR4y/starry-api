@@ -46,17 +46,29 @@ class TicketRequestFilterTest {
         new TicketRequestFilter(auth, new ObjectMapper()).filter(exchange, e -> Mono.empty()).block();
         verifyNoInteractions(auth);
     }
-    @Test void concurrentMultipartAdmissionIsBoundedAndCancellationReleasesSlot() {
-        var filter = new TicketRequestFilter(mock(AdminAuth.class), new ObjectMapper());
+    @Test void concurrentMultipartAdmissionIsBoundedPerUserAndCancellationReleasesSlot() {
+        var auth = mock(AdminAuth.class);
+        var alice = new tech.starryapi.admin.AdminPrincipal("alice", "alice", "USER", null, false);
+        var bob = new tech.starryapi.admin.AdminPrincipal("bob", "bob", "USER", null, false);
+        when(auth.verify(any())).thenAnswer(invocation -> {
+            var exchange = (org.springframework.web.server.ServerWebExchange) invocation.getArgument(0);
+            return "bob".equals(exchange.getRequest().getHeaders().getFirst("X-Test-User")) ? bob : alice;
+        });
+        var filter = new TicketRequestFilter(auth, new ObjectMapper());
+        java.util.function.Function<String, MockServerWebExchange> post = user -> MockServerWebExchange.from(
+            MockServerHttpRequest.post("/tickets").header("X-Test-User", user).build());
         var subscriptions = new java.util.ArrayList<reactor.core.Disposable>();
         try {
-            for (int i = 0; i < 4; i++) subscriptions.add(filter.filter(
-                MockServerWebExchange.from(MockServerHttpRequest.post("/tickets")), e -> Mono.never()).subscribe());
-            StepVerifier.create(filter.filter(MockServerWebExchange.from(MockServerHttpRequest.post("/tickets")), e -> Mono.empty()))
+            // Alice may hold two submissions at once; a third is refused ...
+            for (int i = 0; i < 2; i++) subscriptions.add(filter.filter(post.apply("alice"), e -> Mono.never()).subscribe());
+            StepVerifier.create(filter.filter(post.apply("alice"), e -> Mono.empty()))
                 .expectErrorSatisfies(error -> assertThat(error).isInstanceOfSatisfying(ResponseStatusException.class,
                     e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS))).verify();
+            // ... without blocking anyone else (this used to be a single pool of 4 shared by every user).
+            StepVerifier.create(filter.filter(post.apply("bob"), e -> Mono.empty())).verifyComplete();
+            // Cancelling one of Alice's uploads frees her slot again.
             subscriptions.removeFirst().dispose();
-            StepVerifier.create(filter.filter(MockServerWebExchange.from(MockServerHttpRequest.post("/tickets")), e -> Mono.empty())).verifyComplete();
+            StepVerifier.create(filter.filter(post.apply("alice"), e -> Mono.empty())).verifyComplete();
         } finally { subscriptions.forEach(reactor.core.Disposable::dispose); }
     }
 }

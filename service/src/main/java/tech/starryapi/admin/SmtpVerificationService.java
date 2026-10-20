@@ -170,7 +170,7 @@ public class SmtpVerificationService {
             .switchIfEmpty(Mono.defer(() ->
                 adminUserRepository.findApplicationRootEmail().mapNotNull(SmtpVerificationService::usableEmail)
             ))
-            .switchIfEmpty(Mono.error(new ApiException(
+            .switchIfEmpty(Mono.error(() -> new ApiException(
                 HttpStatus.BAD_REQUEST,
                 "SMTP_VERIFY_RECIPIENT_MISSING",
                 "当前管理员账号未绑定邮箱，验证信无法发送。请先绑定管理员邮箱，或关闭 SMTP 验证后保存。"

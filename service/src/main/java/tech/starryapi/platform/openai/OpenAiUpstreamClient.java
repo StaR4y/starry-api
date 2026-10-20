@@ -20,6 +20,7 @@ import reactor.core.publisher.Mono;
 import tech.starryapi.account.AccountPlatforms;
 import tech.starryapi.account.AccountTokenRefreshService;
 import tech.starryapi.account.ProxyAccountEntity;
+import tech.starryapi.common.JsonNodes;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.core.PlatformToolUse;
 import tech.starryapi.platform.core.PlatformUsage;
@@ -80,7 +81,7 @@ public class OpenAiUpstreamClient {
         JsonNode request,
         String model
     ) {
-        ObjectNode body = request.deepCopy();
+        ObjectNode body = copyForUpstream(request);
         body.put("model", model);
         normalizeChatTokenLimit(body, model);
         forceNonStreaming(body);
@@ -122,7 +123,7 @@ public class OpenAiUpstreamClient {
     private ObjectNode codexRequestBody(JsonNode request, String model) {
         boolean responsesShape = request.has("input");
         ObjectNode body = responsesShape && request.isObject()
-            ? request.deepCopy()
+            ? copyForUpstream(request)
             : objectMapper.createObjectNode();
         body.put("model", codexCompatibleModel(model));
         body.put("store", false);
@@ -149,7 +150,7 @@ public class OpenAiUpstreamClient {
         JsonNode request,
         String model
     ) {
-        ObjectNode body = request.deepCopy();
+        ObjectNode body = copyForUpstream(request);
         body.put("model", model);
         normalizeResponsesApplyPatchTool(body);
         forceNonStreaming(body);
@@ -788,6 +789,14 @@ public class OpenAiUpstreamClient {
             body.set("max_completion_tokens", maxOutputTokens);
         }
         body.remove(List.of("max_tokens", "max_output_tokens"));
+    }
+
+    /**
+     * The upstream body only gets top-level fields added, replaced or removed, so the (possibly multi-MB)
+     * message tree is shared with the request instead of being deep-copied for every call.
+     */
+    private static ObjectNode copyForUpstream(JsonNode request) {
+        return request instanceof ObjectNode object ? JsonNodes.shallowCopy(object) : request.deepCopy();
     }
 
     private void forceNonStreaming(ObjectNode body) {
