@@ -199,7 +199,7 @@ class DataTransferServiceTest {
     }
 
     @Test
-    void requiresExactFlywayV20HistoryAndMatchingChecksumsForRestore() {
+    void requiresExactFlywayV24HistoryAndMatchingChecksumsForRestore() {
         List<DataTransferService.FlywayMigration> current = currentMigrationHistory();
 
         assertThatCode(() -> DataTransferService.validateMigrationHistory(current)).doesNotThrowAnyException();
@@ -208,19 +208,19 @@ class DataTransferServiceTest {
 
         assertThatThrownBy(() -> DataTransferService.validateMigrationHistory(current.subList(0, 9)))
             .isInstanceOf(SQLException.class)
-            .hasMessageContaining("V1-V20");
+            .hasMessageContaining("V1-V24");
 
         List<DataTransferService.FlywayMigration> future = new ArrayList<>(current);
         future.add(new DataTransferService.FlywayMigration(
-            "21",
-            "V21__unknown_future.sql",
+            "25",
+            "V25__unknown_future.sql",
             "SQL",
             8008,
             true
         ));
         assertThatThrownBy(() -> DataTransferService.validateMigrationHistory(future))
             .isInstanceOf(SQLException.class)
-            .hasMessageContaining("V1-V20");
+            .hasMessageContaining("V1-V24");
 
         List<DataTransferService.FlywayMigration> changedChecksum = new ArrayList<>(current);
         DataTransferService.FlywayMigration v5 = changedChecksum.get(4);
@@ -332,6 +332,8 @@ class DataTransferServiceTest {
             3; 2615 3 SCHEMA - starry_api starry_api_owner
             4; 0 0 ACL - SCHEMA starry_api starry_api_owner
             20; 1259 20 TABLE starry_api flyway_schema_history starry_api_owner
+            43; 1259 43 TABLE starry_api documentation_pages starry_api_owner
+            44; 1259 44 TABLE starry_api documentation_attachments starry_api_owner
             21; 1259 21 TABLE starry_api admin_users starry_api_owner
             22; 1259 22 TABLE starry_api system_settings starry_api_owner
             23; 1259 23 TABLE starry_api proxy_accounts starry_api_owner
@@ -430,7 +432,11 @@ class DataTransferServiceTest {
             new DataTransferService.FlywayMigration("17", "V17__announcements.sql", "SQL", 1691840228, true),
             new DataTransferService.FlywayMigration("18", "V18__announcement_runtime_grants.sql", "SQL", 1273926045, true),
             new DataTransferService.FlywayMigration("19", "V19__support_tickets.sql", "SQL", 1950034466, true),
-            new DataTransferService.FlywayMigration("20", "V20__function_execute_privileges.sql", "SQL", 1880747977, true)
+            new DataTransferService.FlywayMigration("20", "V20__function_execute_privileges.sql", "SQL", 1880747977, true),
+            new DataTransferService.FlywayMigration("21", "V21__documentation.sql", "SQL", 1021, true),
+            new DataTransferService.FlywayMigration("22", "V22__documentation_english.sql", "SQL", 1022, true),
+            new DataTransferService.FlywayMigration("23", "V23__documentation_tutorials.sql", "SQL", 1023, true),
+            new DataTransferService.FlywayMigration("24", "V24__documentation_user_focus.sql", "SQL", 1024, true)
         );
     }
 }

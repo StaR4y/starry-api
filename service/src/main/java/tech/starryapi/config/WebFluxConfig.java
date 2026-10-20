@@ -99,6 +99,16 @@ public class WebFluxConfig implements WebFluxConfigurer, WebFilter {
             .setCacheControl(CacheControl.maxAge(Duration.ofHours(1)).cachePublic());
     }
 
+    /** Same as matching "/admin/documentation/pages/[^/]+/attachments", without compiling a regex for every request. */
+    static boolean isDocumentationAttachmentPath(String path) {
+        String prefix = "/admin/documentation/pages/";
+        String suffix = "/attachments";
+        if (!path.startsWith(prefix) || !path.endsWith(suffix) || path.length() <= prefix.length() + suffix.length()) {
+            return false;
+        }
+        return path.indexOf('/', prefix.length()) == path.length() - suffix.length();
+    }
+
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
         long contentLength = exchange.getRequest().getHeaders().getContentLength();
@@ -106,6 +116,8 @@ public class WebFluxConfig implements WebFluxConfigurer, WebFilter {
         long maxBodyBytes;
         if (DATA_IMPORT_PATH.equals(requestPath)) {
             maxBodyBytes = maxDataImportRequestBytes;
+        } else if (isDocumentationAttachmentPath(requestPath)) {
+            maxBodyBytes = tech.starryapi.documentation.DocumentationStorage.REQUEST_LIMIT;
         } else if (MODEL_ICON_UPLOAD_PATH.equals(requestPath)) {
             maxBodyBytes = maxModelIconRequestBytes;
         } else if (APPEARANCE_LOGO_PATH.equals(requestPath) || APPEARANCE_FAVICON_PATH.equals(requestPath)) {
