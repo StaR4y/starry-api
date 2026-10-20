@@ -1,40 +1,75 @@
-# Server One-Click Install
+# 服务器一键安装
 
-This installer is for Linux servers. It deploys the checked-in prebuilt bundle with Docker Compose:
+这是**最省事的生产部署方式**：在一台 Linux 服务器上执行一条命令，脚本会自动装好 Docker、下载预构建好的程序包、生成数据库密码并把服务跑起来。服务器上**不需要**安装 Java、Gradle 或 Node.js，也不会在服务器上编译任何东西。
 
 ```text
-Nginx / 1Panel reverse proxy
-  -> server-ip:18080
-  -> starry-api service container with embedded WebUI
-  -> PostgreSQL 17 container
+你的域名（HTTPS）
+   │  Nginx / 1Panel 反向代理
+   ▼
+服务器IP:18080
+   │
+   ▼
+starry-api 服务容器（内嵌控制台）  ──►  PostgreSQL 17 容器
 ```
 
-The installer binds the service port to `0.0.0.0:${HOST_HTTP_PORT}` by default so Docker-based 1Panel/OpenResty can reach it through the host port. Restrict that port with your firewall/security group and expose the service publicly through HTTPS reverse proxy. If Nginx runs directly on the host instead of in Docker, you may set `HOST_BIND_ADDR=127.0.0.1`.
+## 开始前
 
-It downloads `artifacts/starry-api-bundle.tar.gz` and does not run Gradle or npm on the server. Compose builds only a small JRE runtime layer containing PostgreSQL 17 client tools, `jq`, and the checked recovery utility. See [Prebuilt Artifact Deployment](PREBUILT_ARTIFACTS.md) for the artifact publishing flow.
+| 需要 | 说明 |
+| --- | --- |
+| 一台 Linux 服务器 | 建议至少 **2 GiB 可用内存**、SSD 硬盘；有 root / sudo 权限 |
+| 能访问 GitHub | 脚本要从仓库下载预构建产物 |
+| （可选）一个域名 | 用于 HTTPS 访问；也可以先用 IP 试 |
 
-## One-Line Install
+> **安全提示**：`curl ... | sudo bash` 会直接以 root 执行下载到的脚本。习惯谨慎的话，先把脚本下载下来看一遍再执行：
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh -o install-server.sh
+> less install-server.sh        # 检查内容
+> sudo bash install-server.sh
+> ```
+
+---
+
+## 一、一行命令安装
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh | sudo bash
 ```
 
-With a public domain:
+如果你已经有域名，建议同时告诉它（只用于在日志里显示正确的登录地址）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
   | sudo env PUBLIC_BASE_URL=https://api.example.com bash
 ```
 
-For a private repository, GitHub raw URLs return `404` unless authenticated. Save a fine-grained token with read-only Contents permission once on the server:
+### 脚本会帮你做什么
+
+1. 如果缺少 `curl`、`openssl`、Docker、Docker Compose，自动安装。
+2. 下载 `artifacts/starry-api-bundle.tar.gz`，并用 `.sha256` 校验。
+3. 解压出：预构建好的 jar、控制台静态文件、Compose 文件、经校验的恢复工具、构建信息。
+4. 生成 `.env`，里面是三个**互不相同**的随机 PostgreSQL 密码（超级用户 / 迁移用 / 运行用）。
+5. 写出 `docker-compose.artifact.yml`。
+6. 用 Docker Compose 启动 PostgreSQL 17 和服务容器。
+7. 等待 `/actuator/health` 通过。
+8. 清理上一版 Compose 留下的孤儿容器（在新服务健康之后）。
+9. 打印最近的日志——**首次安装时，日志里有只出现一次的 admin 初始密码，请立刻保存**。
+
+默认安装目录是 `/opt/starry-api`，PostgreSQL 的数据在 `/opt/starry-api/data/postgresql`。
+
+---
+
+## 二、私有仓库怎么办
+
+私有仓库的 GitHub raw 地址不带认证会返回 `404`。在服务器上**一次性**保存一个只读的 GitHub Token（Fine-grained token，只给 Contents 的读权限）：
 
 ```bash
 sudo mkdir -p /opt/starry-api
 sudo install -m 600 /dev/null /opt/starry-api/.github-token
-sudo sh -c 'printf "%s" "replace-with-token" > /opt/starry-api/.github-token'
+sudo sh -c 'printf "%s" "把你的token粘在这里" > /opt/starry-api/.github-token'
 ```
 
-Then run updates without retyping the token:
+之后安装 / 更新就不用再手敲 Token：
 
 ```bash
 GITHUB_TOKEN="$(sudo cat /opt/starry-api/.github-token)"
@@ -44,25 +79,44 @@ curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
 sudo bash /tmp/install-server.sh
 ```
 
-If you already have a local checkout on the server, you can run `sudo bash scripts/install-server.sh`; it will read `/opt/starry-api/.github-token` automatically.
+如果服务器上已有仓库的本地副本，直接 `sudo bash scripts/install-server.sh` 也可以，它会自动读取 `/opt/starry-api/.github-token`。
 
-The installer will:
+---
 
-- install `curl`, `openssl`, Docker, and Docker Compose when missing
-- download `artifacts/starry-api-bundle.tar.gz` and verify `artifacts/starry-api-bundle.tar.gz.sha256`
-- extract the prebuilt jar, WebUI archive, Compose file, checksum-verified recovery utility, and metadata
-- create `.env` with distinct generated PostgreSQL bootstrap, migration, and runtime passwords
-- write `docker-compose.artifact.yml`
-- start PostgreSQL 17 and the service container with Docker Compose
-- wait for `/actuator/health`
-- remove containers orphaned by the previous Compose definition after the new service is healthy
-- print recent logs so the first admin password can be saved
+## 三、安装完成后做什么
 
-The installer pins the database container to `postgres:17-bookworm`, initializes database `starry_api`, and runs the application in schema `starry_api`. PostgreSQL data is stored under `/opt/starry-api/data/postgresql`.
+### 1. 保存 admin 初始密码
 
-## Configuration Variables
+```bash
+cd /opt/starry-api
+docker compose -f docker-compose.artifact.yml logs service | grep -A3 "Default admin user"
+```
 
-Set variables before running the installer:
+初始用户是 `admin`，密码**只在首次启动、且系统里还没有任何用户时打印一次**。错过了就找不回来，详见 [故障排查：首次启动密码丢了](TROUBLESHOOTING.md#首次启动密码丢了)。
+
+### 2. 配置反向代理，启用 HTTPS
+
+安装脚本默认把服务端口绑定在 `0.0.0.0:18080`，方便容器化的 1Panel / OpenResty 通过宿主机端口访问。**请用防火墙 / 安全组限制这个端口**，只通过 HTTPS 反向代理对外开放。
+
+以 1Panel 为例：「网站 → 创建网站 → 反向代理」：
+
+| 设置 | 值 |
+| --- | --- |
+| 代理地址 | `http://<服务器IP>:18080` |
+| 域名 | 你的域名 |
+| HTTPS | 在 1Panel 里启用 |
+
+> ⚠️ **如果 1Panel 的 OpenResty 跑在 Docker 里，不要用 `127.0.0.1`**：对它来说 `127.0.0.1` 是它自己的容器，会导致 `502 Bad Gateway`。请用安装脚本打印出来的服务器内网 / 公网 IP。只有 Nginx 直接运行在宿主机上时，才可以用 `http://127.0.0.1:18080`（并可以设置 `HOST_BIND_ADDR=127.0.0.1`）。
+
+### 3. 登录控制台
+
+打开 `https://你的域名/#/login`，用 `admin` 和初始密码登录，**立即改密码**。接着按 [快速开始指南](QUICKSTART.md) 继续。
+
+---
+
+## 配置变量
+
+所有变量都在命令前用 `env` 传入，例如：
 
 ```bash
 sudo env \
@@ -73,38 +127,40 @@ sudo env \
   bash scripts/install-server.sh
 ```
 
-Supported variables:
-
-| Variable | Default | Purpose |
+| 变量 | 默认值 | 作用 |
 | --- | --- | --- |
-| `REPO_URL` | `https://github.com/StaR4y/starry-api.git` | GitHub repository used to derive raw artifact URLs |
-| `BRANCH` | `main` | Branch used to derive raw artifact URLs |
-| `REPO_RAW_BASE` | derived from `REPO_URL` and `BRANCH` | Raw repository base used to download artifacts |
-| `BUNDLE_URL` | `${REPO_RAW_BASE}/artifacts/starry-api-bundle.tar.gz` | Direct full bundle URL |
-| `BUNDLE_CHECKSUM_URL` | `${BUNDLE_URL}.sha256` | Direct full bundle checksum URL |
-| `ARTIFACT_URL` | `${REPO_RAW_BASE}/artifacts/starry-api.jar` | Direct jar URL |
-| `CHECKSUM_URL` | `${REPO_RAW_BASE}/artifacts/starry-api.jar.sha256` | Direct checksum URL |
-| `BUILD_INFO_URL` | `${REPO_RAW_BASE}/artifacts/build-info.json` | Optional build metadata URL |
-| `RECOVERY_TOOL_URL` | `${REPO_RAW_BASE}/artifacts/runtime/recover-data-management.sh` | Direct recovery utility URL for the single-jar fallback |
-| `RECOVERY_TOOL_CHECKSUM_URL` | `${RECOVERY_TOOL_URL}.sha256` | Direct recovery utility checksum URL |
-| `INSTALL_DIR` | `/opt/starry-api` | Server install directory |
-| `HOST_BIND_ADDR` | `0.0.0.0` | Host address for compose port binding; use `127.0.0.1` only when reverse proxy runs on the host |
-| `HOST_HTTP_PORT` | `18080` | Local host port exposed by compose |
-| `SERVER_PORT` | `8080` | Internal Spring Boot port |
-| `PUBLIC_BASE_URL` | empty | Public HTTPS URL used in startup logs |
-| `FORCE_ENV` | `false` | Generate a new PostgreSQL `.env` before initialization, or reactivate credentials retained from a failed deployment retry |
-| `INSTALL_DOCKER` | `true` | Install Docker when missing |
-| `GITHUB_TOKEN` | empty | Optional token for private raw artifact downloads |
-| `GITHUB_TOKEN_FILE` | `${INSTALL_DIR}/.github-token` | Optional local token file used when `GITHUB_TOKEN` is empty |
+| `INSTALL_DIR` | `/opt/starry-api` | 安装目录 |
+| `HOST_BIND_ADDR` | `0.0.0.0` | 宿主机端口绑定地址。仅当反向代理跑在宿主机上时才设成 `127.0.0.1` |
+| `HOST_HTTP_PORT` | `18080` | 宿主机对外端口 |
+| `SERVER_PORT` | `8080` | 容器内 Spring Boot 端口 |
+| `PUBLIC_BASE_URL` | 空 | 公网 HTTPS 地址，用于启动日志里的提示 |
+| `FORCE_ENV` | `false` | 在数据库初始化**之前**重新生成 `.env`；或重新启用上次失败部署保留的凭据。已初始化的集群见下文 |
+| `INSTALL_DOCKER` | `true` | 缺少 Docker 时是否自动安装 |
+| `GITHUB_TOKEN` | 空 | 私有仓库下载用的 Token |
+| `GITHUB_TOKEN_FILE` | `${INSTALL_DIR}/.github-token` | `GITHUB_TOKEN` 为空时读取的 Token 文件 |
+| `REPO_URL` | `https://github.com/StaR4y/starry-api.git` | 用来推导 raw 下载地址的仓库 |
+| `BRANCH` | `main` | 用来推导 raw 下载地址的分支 |
 
-## PostgreSQL Configuration
+**高级：直接指定下载地址**（一般不用动，适合自建镜像源）
 
-The generated `.env` contains the production baseline:
+| 变量 | 默认值 |
+| --- | --- |
+| `REPO_RAW_BASE` | 由 `REPO_URL` 和 `BRANCH` 推导 |
+| `BUNDLE_URL` / `BUNDLE_CHECKSUM_URL` | `${REPO_RAW_BASE}/artifacts/starry-api-bundle.tar.gz` / 加 `.sha256` |
+| `ARTIFACT_URL` / `CHECKSUM_URL` | 单独的 jar 及校验和（仅在整包不可用时的回退） |
+| `BUILD_INFO_URL` | `${REPO_RAW_BASE}/artifacts/build-info.json` |
+| `RECOVERY_TOOL_URL` / `RECOVERY_TOOL_CHECKSUM_URL` | 恢复工具及校验和（仅回退路径使用） |
+
+---
+
+## 数据库配置
+
+脚本生成的 `.env` 里包含一份适合生产的基线：
 
 ```dotenv
-POSTGRES_BOOTSTRAP_PASSWORD=<generated-secret>
-POSTGRES_MIGRATION_PASSWORD=<generated-secret>
-POSTGRES_PASSWORD=<generated-secret>
+POSTGRES_BOOTSTRAP_PASSWORD=<随机生成>
+POSTGRES_MIGRATION_PASSWORD=<随机生成>
+POSTGRES_PASSWORD=<随机生成>
 POSTGRES_MAX_CONNECTIONS=100
 POSTGRES_SHARED_BUFFERS=256MB
 POSTGRES_EFFECTIVE_CACHE_SIZE=768MB
@@ -112,74 +168,41 @@ POSTGRES_POOL_INITIAL_SIZE=4
 POSTGRES_POOL_MAX_SIZE=20
 ```
 
-The database and schema are fixed as `starry_api`; Flyway uses `starry_api_migration` and application traffic uses `starry_api`. `starry_api_bootstrap` remains a PostgreSQL superuser for cluster ownership and database-level break-glass recovery, but it is not used by the service or published outside the internal Compose network. Protect and audit its password independently. The generated PostgreSQL profile assumes at least 2 GiB available memory and SSD-backed storage. Size every replica's `POSTGRES_POOL_MAX_SIZE` against `POSTGRES_MAX_CONNECTIONS`, leaving headroom for Flyway, maintenance, monitoring, and operator sessions. The installer refuses to generate new passwords after `data/postgresql/PG_VERSION` exists because changing `.env` alone cannot rotate credentials in an initialized cluster. The only automatic exception is a matching `.env.postgresql-retry` retained during rollback of a failed first PostgreSQL deployment; `FORCE_ENV=true` reactivates that file instead of generating new secrets. Otherwise, rotate roles in PostgreSQL and update `.env` manually.
+要知道的事：
 
-## 1Panel Reverse Proxy
+- 数据库和 schema 的名字固定是 `starry_api`；Flyway 用 `starry_api_migration` 角色迁移，应用日常用 `starry_api` 角色。
+- `starry_api_bootstrap` 是 PostgreSQL 的超级用户，只用于集群归属和数据库层面的应急恢复，**服务从不使用它**，也**不会**暴露在 Compose 内部网络之外。请单独保管并审计它的密码。
+- 上述数据库参数假定**至少 2 GiB 可用内存**和 SSD。每个服务副本的 `POSTGRES_POOL_MAX_SIZE` 加起来要小于 `POSTGRES_MAX_CONNECTIONS`，并为迁移、维护、监控、运维连接留出余量。
+- ⚠️ **集群一旦初始化（出现 `data/postgresql/PG_VERSION`），安装脚本就拒绝再生成新密码**，因为光改 `.env` 并不能改变已初始化集群里的角色密码。要轮换密码，请先在 PostgreSQL 里改角色密码，再手动改 `.env`。唯一的自动例外：首次部署失败回滚时保留下来的 `.env.postgresql-retry`，此时 `FORCE_ENV=true` 会重新启用那份凭据，而不是生成新的。
 
-After the installer finishes, create a 1Panel reverse proxy site:
+---
 
-```text
-Proxy address: http://<server-ip>:18080
-Domain:        your domain
-HTTPS:         enable in 1Panel
-```
-
-If your 1Panel OpenResty runs in Docker, `127.0.0.1` means the OpenResty container itself and usually causes `502 Bad Gateway`. Use the server intranet/public IP printed by the installer. Only use `http://127.0.0.1:18080` when Nginx runs directly on the host.
-
-Then open:
-
-```text
-https://your-domain.example/#/login
-```
-
-## First Login
-
-The initial admin user is:
-
-```text
-username: admin
-password: printed once in first startup logs
-```
-
-The password is printed only when the application Root marker is unassigned and `admin_users` is empty. Save it immediately, then log in and change it; it is not printed again.
-
-## Operations
+## 日常运维
 
 ```bash
 cd /opt/starry-api
-docker compose -f docker-compose.artifact.yml logs -f service
-docker compose -f docker-compose.artifact.yml restart service
-docker compose -f docker-compose.artifact.yml down
+
+docker compose -f docker-compose.artifact.yml logs -f service     # 看日志
+docker compose -f docker-compose.artifact.yml restart service     # 重启服务
+docker compose -f docker-compose.artifact.yml down                # 停止全部
 ```
 
-### Locked data-management recovery
+> ⚠️ **不要删除 `./data/postgresql`**，除非你打算永久清空数据库。
 
-The installed service image includes a bilingual interactive recovery utility. While the locked service is running in maintenance mode, execute it from a real terminal, enter the original `dmsk-...` key twice, then restart only the service:
+### 更新到最新版本
 
-```bash
-cd /opt/starry-api
-docker compose -f docker-compose.artifact.yml exec service \
-  /app/bin/recover-data-management --lang zh
-# Use --lang en for English prompts.
-
-docker compose -f docker-compose.artifact.yml restart service
-# Wait for the service to finish starting, then verify:
-docker compose -f docker-compose.artifact.yml exec service \
-  curl -fsS http://127.0.0.1:8080/system/status
-docker compose -f docker-compose.artifact.yml exec service \
-  sh -c 'test ! -e /app/security/recovery.key && test ! -e /app/security/.recovery.key.consuming && echo "recovery key files consumed"'
-```
-
-Do not use `docker compose exec -T`: the utility requires a TTY so it can hide and double-check the key. Recovery succeeds only when the response contains `"maintenance":false` and both recovery paths are absent. A normal readable, valid-format but nonmatching key is audited and consumed while maintenance remains active; run the utility again with the correct key. If cleanup fails, the service stays fail-closed and startup retries `/app/security/.recovery.key.consuming`; inspect storage and logs rather than staging another key or deleting files manually. The tool is shipped in the bundled runtime image at `/app/bin/recover-data-management`; do not download or pipe a cloud recovery script with `curl ... | sh`. See [Operations](OPERATIONS.md#recover-a-docker-compose-deployment) for the full cleanup-failure procedure and direct host/JAR recovery.
-
-Update:
+重新执行同一条安装命令即可：
 
 ```bash
-cd /opt/starry-api
 curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh | sudo bash
 ```
 
-The update path downloads the latest checked-in bundle and restarts the service. If the browser still shows an old UI, check that the artifact was refreshed and pushed before running the installer:
+更新会下载最新的整包并重启服务。**更新很安全**：脚本用原子重命名安装部署文件，更新前把 `.env`（权限 `0600`）、当前 jar 及校验和、`docker-compose.artifact.yml`、`postgres-init/001-starry-api-roles.sh`、恢复工具及校验和保存为相邻的 `.previous` 文件。之后任何一步失败，都会**恢复整套旧部署**；如果 Compose 已经开始改动容器，还会重建旧版本、移除新的孤儿容器并确认健康。自动回滚每次运行最多尝试一次。
+
+- 如果期间 PostgreSQL 在一次从旧部署的过渡中被初始化了，生成的凭据会保留为 `.env.postgresql-retry`，同时恢复旧 `.env`；之后用 `FORCE_ENV=true` 重试会复用这份凭据。
+- **首次安装**没有「上一版」可恢复。首次失败会原样保留生成的凭据、已校验的产物和恢复工具、Compose 文件和 PostgreSQL 数据，方便确定性地重试；它**不会**把一次部分安装冒充成「回滚成功」。
+
+**更新后界面还是旧的？**说明产物没有刷新。检查：
 
 ```bash
 cd /opt/starry-api
@@ -187,8 +210,24 @@ cat app/build-info.json
 docker compose -f docker-compose.artifact.yml logs --tail=160 service
 ```
 
-Deployment files are installed with atomic renames. Before an update, the installer preserves `.env` (mode `0600`), the current jar and checksum, `docker-compose.artifact.yml`, `postgres-init/001-starry-api-roles.sh`, and the recovery utility and checksum as adjacent `.previous` files. If any later deployment step fails, it restores that complete deployment unit. Once Compose has begun changing containers, the installer also recreates the previous stack, removes new orphan containers, and verifies its health. If PostgreSQL initialized during an attempted transition from an older deployment, its generated credentials are retained as `.env.postgresql-retry` while the previous `.env` is restored; a later `FORCE_ENV=true` retry reuses those exact credentials. Automatic rollback is attempted at most once per installer run.
+见 [故障排查：更新后控制台界面没变](TROUBLESHOOTING.md#更新后控制台界面没变)。
 
-On a first installation there is no previous deployment to restore. A failed first attempt keeps the generated credentials, verified artifact and recovery utility, Compose file, and PostgreSQL data in place for a deterministic retry; it never labels that partial installation as a successful rollback.
+### 数据管理被锁定了怎么办
 
-Do not delete `./data/postgresql` unless you intend to permanently reset the PostgreSQL cluster.
+安装的服务镜像里自带一个交互式（中英双语）恢复工具。服务处于维护模式时，在**真实终端**里执行，把原始 `dmsk-...` 密钥输入两遍，然后**只重启 `service`**：
+
+```bash
+cd /opt/starry-api
+docker compose -f docker-compose.artifact.yml exec service \
+  /app/bin/recover-data-management --lang zh
+# 英文提示用 --lang en
+
+docker compose -f docker-compose.artifact.yml restart service
+# 等服务起来后验证：
+docker compose -f docker-compose.artifact.yml exec service \
+  curl -fsS http://127.0.0.1:8080/system/status
+docker compose -f docker-compose.artifact.yml exec service \
+  sh -c 'test ! -e /app/security/recovery.key && test ! -e /app/security/.recovery.key.consuming && echo "恢复密钥文件已消耗"'
+```
+
+**不要加 `exec -T`**（工具需要 TTY 来隐藏并复核输入）。只有当响应里是 `"maintenance":false`，并且两个恢复文件都不存在时，才算恢复成功。**绝对不要**用 `curl ... | sh` 下载恢复脚本——工具已经内置在镜像的 `/app/bin/recover-data-management`。完整流程（含清理失败的处理）见 [运维手册：恢复被锁定的数据管理](OPERATIONS.md#恢复被锁定的数据管理)。

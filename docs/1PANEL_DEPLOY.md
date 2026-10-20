@@ -1,54 +1,42 @@
-# 1Panel Deployment
+# 1Panel / Docker Compose 部署
 
-This deployment uses Docker Compose in 1Panel:
+这份文档适合两类人：
+
+- 用 **1Panel** 管理服务器，想把 Starry API 放在 1Panel 的反向代理后面；
+- 想**从源码构建镜像**（而不是下载预构建产物）的人。
+
+如果你只想最快跑起来，直接用 [服务器一键安装](INSTALL_SERVER.md)，它已经包含了下面大部分步骤；装好后回到本文的「配置 1Panel 反向代理」即可。
 
 ```text
-1Panel reverse proxy / HTTPS
-  -> server-ip:18080
-  -> starry-api service container
-  -> PostgreSQL 17 container
+1Panel 反向代理 / HTTPS
+   ▼
+服务器IP:18080
+   ▼
+starry-api 服务容器  ──►  PostgreSQL 17 容器
 ```
 
-Docker-based 1Panel/OpenResty cannot use the host's `127.0.0.1` as an upstream. The installer binds the service to `0.0.0.0:${HOST_HTTP_PORT}` by default and prints a reverse proxy target using the server IP. Restrict `${HOST_HTTP_PORT}` with your firewall/security group and expose the service publicly through the 1Panel HTTPS site.
+> **为什么不能用 `127.0.0.1` 当上游**：容器化的 1Panel / OpenResty 看到的 `127.0.0.1` 是它**自己**，不是宿主机。所以服务默认绑定 `0.0.0.0:${HOST_HTTP_PORT}`，反向代理目标要用服务器 IP。请用防火墙 / 安全组限制 `${HOST_HTTP_PORT}`，只通过 1Panel 的 HTTPS 站点对外。
 
-## One-Click Server Install
+---
 
-On a fresh Linux server, you can let the installer prepare Docker, download the checked-in `artifacts/starry-api-bundle.tar.gz`, generate `.env`, and start the stack:
+## 方式一：一键安装（推荐）
+
+在全新的 Linux 服务器上：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
-  | sudo env PUBLIC_BASE_URL=https://your-domain.example bash
+  | sudo env PUBLIC_BASE_URL=https://你的域名 bash
 ```
 
-For a private repository, save a GitHub token with read-only Contents permission once on the server:
+私有仓库的做法见 [服务器一键安装：私有仓库](INSTALL_SERVER.md#二私有仓库怎么办)。装完后跳到 [配置 1Panel 反向代理](#配置-1panel-反向代理)。
 
-```bash
-sudo mkdir -p /opt/starry-api
-sudo install -m 600 /dev/null /opt/starry-api/.github-token
-sudo sh -c 'printf "%s" "replace-with-token" > /opt/starry-api/.github-token'
-```
+---
 
-Then run updates without retyping the token:
+## 方式二：从源码构建（手动 6 步）
 
-```bash
-GITHUB_TOKEN="$(sudo cat /opt/starry-api/.github-token)"
-curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-  https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
-  -o /tmp/install-server.sh
-sudo env PUBLIC_BASE_URL=https://your-domain.example bash /tmp/install-server.sh
-```
+### 1. 准备目录并拉代码
 
-After it finishes, create the 1Panel reverse proxy site with target:
-
-```text
-http://<server-ip>:18080
-```
-
-Manual source-build deployment steps are kept below for servers that build from the repository.
-
-## 1. Prepare Server Directory
-
-Open the 1Panel terminal or SSH into the server:
+打开 1Panel 终端或 SSH：
 
 ```bash
 mkdir -p /opt/starry-api
@@ -56,7 +44,7 @@ cd /opt/starry-api
 git clone https://github.com/StaR4y/starry-api.git .
 ```
 
-For future source-build updates:
+以后更新源码：
 
 ```bash
 cd /opt/starry-api
@@ -64,33 +52,34 @@ git pull
 docker compose up -d --build service
 ```
 
-The service image includes the current WebUI build. If 1Panel still shows the old page after an update, rebuild the service image without cache and then refresh the browser cache:
+> 服务镜像里已经包含最新构建的控制台。如果更新后 1Panel 里打开的还是旧页面，无缓存重建镜像并刷新浏览器缓存：
+>
+> ```bash
+> cd /opt/starry-api
+> docker compose build --no-cache service
+> docker compose up -d service
+> docker compose logs --tail=160 service
+> ```
 
-```bash
-cd /opt/starry-api
-docker compose build --no-cache service
-docker compose up -d service
-docker compose logs --tail=160 service
-```
-
-## 2. Configure Environment
-
-Create `.env`:
+### 2. 配置环境变量
 
 ```bash
 cp .env.example .env
 nano .env
 ```
 
-Set three distinct strong PostgreSQL passwords. `POSTGRES_BOOTSTRAP_PASSWORD` protects the database-level break-glass superuser and is never used by the application; restrict and audit access to it. The database and role names are fixed by the least-privilege bootstrap:
+**必须**设置三个**互不相同**的强密码：
 
 ```dotenv
-POSTGRES_BOOTSTRAP_PASSWORD=replace-with-strong-bootstrap-password
-POSTGRES_MIGRATION_PASSWORD=replace-with-strong-migration-password
-POSTGRES_PASSWORD=replace-with-strong-application-password
+POSTGRES_BOOTSTRAP_PASSWORD=换成强密码-超级用户
+POSTGRES_MIGRATION_PASSWORD=换成强密码-迁移用
+POSTGRES_PASSWORD=换成强密码-应用用
 ```
 
-Recommended defaults:
+- `POSTGRES_BOOTSTRAP_PASSWORD` 保护的是数据库层面的应急超级用户，应用**从不使用**它，请限制并审计对它的访问。
+- 数据库名和角色名由最小权限的初始化脚本固定，不用改。
+
+推荐的默认值：
 
 ```dotenv
 POSTGRES_MAX_CONNECTIONS=100
@@ -103,39 +92,29 @@ HOST_HTTP_PORT=18080
 KIRO_ALLOW_ANONYMOUS_PROXY=false
 KIRO_ADMIN_SESSION_TTL=12h
 KIRO_RATE_LIMIT_PER_MINUTE=120
-KIRO_WEBUI_URL=https://your-domain.example/#/login
+KIRO_WEBUI_URL=https://你的域名/#/login
 ```
 
-The Compose stack initializes database `starry_api`; Flyway creates and uses schema `starry_api`. Database files are persisted under `./data/postgresql`. These database defaults assume at least 2 GiB available memory; keep the sum of application pool maxima below the server connection ceiling and retune from production metrics when the workload grows.
+⚠️ **公开服务绝对不要把 `KIRO_ALLOW_ANONYMOUS_PROXY` 设成 `true`**（那样不需要 API Key 就能调代理）。数据库文件持久化在 `./data/postgresql`；以上数据库默认值假定至少 2 GiB 可用内存，业务增长后再根据监控调整。
 
-Do not enable `KIRO_ALLOW_ANONYMOUS_PROXY=true` on a public service.
-
-## 3. Start With Compose
-
-Run:
+### 3. 启动
 
 ```bash
 ./scripts/deploy-1panel.sh
 ```
 
-The script will:
+这个脚本会：检查 Docker Compose 是否可用、**拒绝使用默认数据库密码**、构建 Spring Boot 服务镜像、启动 PostgreSQL 17 和服务、打印最近的服务日志。
 
-- verify Docker Compose is available
-- refuse default database passwords
-- build the Spring Boot service image
-- start PostgreSQL 17 and the service
-- print recent service logs
-
-Manual equivalent:
+等价的手动命令：
 
 ```bash
 docker compose up -d --build
 docker compose logs -f service
 ```
 
-## 4. Save First Admin Password
+### 4. 保存 admin 初始密码
 
-On the first successful startup, service logs include:
+首次启动成功后，日志里会有：
 
 ```text
 Default admin user created. Save this password now.
@@ -143,104 +122,75 @@ Username: admin
 Password: ...
 ```
 
-The password is printed only when the application Root marker is unassigned and the
-`admin_users` table is empty. It is not printed again.
-
-If the second startup still sees `firstLogin=true`, logs only show a reminder:
+密码**只在 Root 标记未分配且 `admin_users` 表为空时打印一次**。如果第二次启动时发现 admin 仍是首次登录状态，日志只会提醒：
 
 ```text
 Default admin user already exists and still uses the first-login password.
 The password was printed only during first startup and will not be shown again.
 ```
 
-## 5. Configure 1Panel Reverse Proxy
+### 5. 配置 1Panel 反向代理
 
-In 1Panel:
+[→ 跳到下一节](#配置-1panel-反向代理)
+
+### 6. 登录并改密码
+
+在浏览器打开 `https://你的域名/#/login`，登录并按提示改密码。接着按 [快速开始指南](QUICKSTART.md) 添加账号和 Key。
+
+> 想用命令行？首次登录的会话**只允许改密码**，其他管理接口都返回 `403 FIRST_LOGIN_PASSWORD_CHANGE_REQUIRED`：
+>
+> ```bash
+> # 登录，取 data.accessToken
+> curl -X POST https://你的域名/auth/login -H 'Content-Type: application/json' \
+>   -d '{"username":"admin","password":"<首次启动密码>"}'
+>
+> # 改密码
+> curl -X POST https://你的域名/auth/password -H 'Content-Type: application/json' \
+>   -H "Authorization: Bearer $ADMIN_TOKEN" \
+>   -d '{"oldPassword":"<首次启动密码>","newPassword":"<新密码，12-128字符>"}'
+> ```
+>
+> 改密码会让该账号所有会话失效，需要用新密码重新登录。
+
+---
+
+## 配置 1Panel 反向代理
+
+在 1Panel：
 
 ```text
-Website -> Create Website -> Reverse Proxy
+网站 → 创建网站 → 反向代理
 ```
 
-Use:
+填写：
 
-```text
-Proxy target: http://<server-ip>:18080
-```
+| 设置 | 值 |
+| --- | --- |
+| 代理地址 | `http://<服务器IP>:18080` |
+| 域名 | 你的域名 |
+| HTTPS | 在 1Panel 里启用证书 |
 
-Then bind your domain and enable HTTPS in 1Panel.
+如果 OpenResty / Nginx 直接运行在宿主机上（不是容器），也可以把 `.env` 里的 `HOST_BIND_ADDR` 设成 `127.0.0.1`，然后代理到 `http://127.0.0.1:18080`。**对默认的容器化 OpenResty 用 `127.0.0.1` 通常会得到 `502 Bad Gateway`**。
 
-If OpenResty/Nginx runs directly on the host, you may instead set `HOST_BIND_ADDR=127.0.0.1` in `.env` and proxy to `http://127.0.0.1:18080`. For the default 1Panel containerized OpenResty, using `127.0.0.1` as the proxy target usually points to the OpenResty container itself and results in `502 Bad Gateway`.
-
-Recommended public base URL:
-
-```text
-https://your-domain.example
-```
-
-Set `KIRO_WEBUI_URL` in `.env` to the public WebUI login page, so startup logs point to the browser login page instead of only the API login endpoint:
+建议把 `KIRO_WEBUI_URL` 设成控制台登录页，这样启动日志里提示的就是浏览器登录地址，而不仅仅是 API 登录端点：
 
 ```dotenv
-KIRO_WEBUI_URL=https://your-domain.example/#/login
+KIRO_WEBUI_URL=https://你的域名/#/login
 ```
 
-## 6. Login and Change Admin Password
+如果后面要使用「使用文档」里的大文件上传，反向代理的请求体上限至少要 **65 MiB**（Nginx：`client_max_body_size 65m;`），见 [用户文档系统](USER_DOCUMENTATION.md#图片视频与附件)。
 
-Login:
+---
 
-```bash
-curl -X POST https://your-domain.example/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"<first-startup-password>"}'
-```
+## 导入上游账号（命令行方式）
 
-Export `data.accessToken`:
-
-```bash
-export ADMIN_TOKEN="adm-..."
-```
-
-First-login sessions can only change password. Other admin APIs return `403 FIRST_LOGIN_PASSWORD_CHANGE_REQUIRED`.
-
-Change password:
-
-```bash
-curl -X POST https://your-domain.example/auth/password \
-  -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{"oldPassword":"<first-startup-password>","newPassword":"<new-password>"}'
-```
-
-The change revokes every existing console session for the account. Sign in again with the new password before continuing.
-
-## Emergency Data-Management Recovery
-
-If five incorrect data-management security-key attempts lock the site, keep public traffic isolated and make sure only one service instance is active. The Docker image includes the reviewed recovery utility; from the 1Panel terminal or an interactive SSH session run:
-
-```bash
-cd /opt/starry-api
-docker compose -f docker-compose.artifact.yml exec service \
-  /app/bin/recover-data-management --lang zh
-# English prompts: use --lang en.
-
-docker compose -f docker-compose.artifact.yml restart service
-# Wait for the service to finish starting, then verify:
-docker compose -f docker-compose.artifact.yml exec service \
-  curl -fsS http://127.0.0.1:8080/system/status
-docker compose -f docker-compose.artifact.yml exec service \
-  sh -c 'test ! -e /app/security/recovery.key && test ! -e /app/security/.recovery.key.consuming && echo "recovery key files consumed"'
-```
-
-The utility hides the original `dmsk-...` key and requires identical double entry. Do not add `-T`, pass the key in an argument, or pipe a downloaded recovery script through `curl ... | sh`. A normal matching attempt returns the site to `"maintenance":false`; a normal readable, valid-format but nonmatching attempt is audited and consumed while maintenance remains enabled, so rerun the utility and restart with the correct key. If either recovery path remains, cleanup was not confirmed: do not stage another key or delete files manually, and follow the storage/log procedure in [Operations](OPERATIONS.md#recover-a-docker-compose-deployment). Source-build deployments using `docker-compose.yml` omit `-f docker-compose.artifact.yml`.
-
-## 7. Import Kiro Upstream Accounts
-
-Create an import file on the server:
+控制台的「账号管理 → 批量导入」是更方便的方式（见 [控制台手册](CONSOLE_GUIDE.md#批量导入)）。如果想用命令行，在服务器上准备导入文件：
 
 ```bash
 nano accounts.import.json
 ```
 
-Kiro Account Manager export format can be used directly:
+直接用 Kiro Account Manager 的导出格式：
 
 ```json
 {
@@ -266,65 +216,55 @@ Kiro Account Manager export format can be used directly:
 }
 ```
 
-Import:
+导入并检查：
 
 ```bash
-curl -X POST https://your-domain.example/admin/accounts/import \
+curl -X POST https://你的域名/admin/accounts/import \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   --data-binary @accounts.import.json
+
+curl https://你的域名/admin/accounts -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-Check:
+## 创建客户端 API Key（命令行方式）
 
 ```bash
-curl https://your-domain.example/admin/accounts \
-  -H "Authorization: Bearer $ADMIN_TOKEN"
-```
-
-## 8. Create Client API Key
-
-```bash
-curl -X POST https://your-domain.example/admin/api-keys \
+curl -X POST https://你的域名/admin/api-keys \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d '{"name":"default","creditsLimit":1000,"modelProvider":"OpenAI"}'
 ```
 
-Save `data.key`. Current keys are stored per owner and can also be copied later from the API Key page; legacy hash-only keys cannot be recovered.
-
-Client configuration:
+保存返回的 `data.key`。新建的 Key 保存在所有者名下，之后也可以在 API Key 页复制；很早以前只存了哈希的旧 Key 无法找回。客户端里这样配：
 
 ```text
-Base URL: https://your-domain.example/v1
+Base URL: https://你的域名/v1
 API Key:  sk-...
 ```
 
-## Operations
+---
 
-View logs:
-
-```bash
-docker compose logs -f service
-```
-
-Restart:
+## 日常运维
 
 ```bash
-docker compose restart service
+docker compose logs -f service       # 看日志
+docker compose restart service       # 重启
+git pull && ./scripts/deploy-1panel.sh   # 更新
+docker compose down                  # 停止
 ```
 
-Update:
+> ⚠️ 不要删除 `./data/postgresql`，除非这是可丢弃的部署。删掉它就永久删除了整个 PostgreSQL 集群。
+
+### 数据管理被锁定
+
+如果「数据管理」的安全密钥连续输错 5 次，整站会被锁定。保持公网流量隔离，确认只有一个 `service` 实例，然后从 1Panel 终端或交互式 SSH 里执行恢复工具：
 
 ```bash
-git pull
-./scripts/deploy-1panel.sh
+cd /opt/starry-api
+docker compose -f docker-compose.artifact.yml exec service \
+  /app/bin/recover-data-management --lang zh
+docker compose -f docker-compose.artifact.yml restart service
 ```
 
-Stop:
-
-```bash
-docker compose down
-```
-
-Do not delete `./data/postgresql` unless this is a disposable deployment. Removing it permanently deletes the PostgreSQL cluster.
+源码方式部署（用的是 `docker-compose.yml`）时去掉 `-f docker-compose.artifact.yml`。要点（必须交互终端、不要 `-T`、不要把密钥放进参数、不要 `curl | sh`）和验证步骤见 [运维手册：恢复被锁定的数据管理](OPERATIONS.md#恢复被锁定的数据管理)。

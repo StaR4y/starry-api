@@ -1,335 +1,345 @@
-# Architecture
+# 架构说明
 
-Starry API is organized around three separate concerns:
+这份文档讲 Starry API **内部是怎么运转的**：请求怎么流转、模块怎么划分、账号池怎么调度、数据存在哪里。适合想二次开发、排查疑难问题或评估部署方案的人阅读。只是想使用的话，请看 [快速开始](QUICKSTART.md)。
 
-- inbound platform protocols: OpenAI, Anthropic, Gemini
-- provider-neutral platform core records and model catalog metadata
-- upstream execution adapters: Kiro/AWS CodeWhisperer, official OpenAI/Codex, Anthropic API key, and official DeepSeek through the shared OpenAI HTTP transport
+**目录**：[整体设计](#整体设计) · [请求流程](#请求流程) · [模块与包布局](#模块与包布局) · [模型目录](#模型目录) · [持久化状态](#持久化状态) · [账号池行为](#账号池行为) · [会话亲和](#会话亲和) · [上游适配器](#上游适配器) · [信任边界与维护模式](#信任边界与维护模式)
 
-The core proxy layer should not contain platform-specific request conversion, response formatting, or model catalog data.
+---
 
-Detailed package ownership rules are maintained in [Package Guide](PACKAGE_GUIDE.md).
+## 整体设计
 
-## Administrative Trust and Maintenance Boundary
+Starry API 围绕**三个互相独立的关注点**组织：
 
-The default/initial database administrator is the application-level root of trust. Flyway V6 stores its immutable `user_id` in `system_settings.application_root_user_id`; database triggers prevent that account or marker from being renamed, replaced, disabled, demoted, or deleted. Bootstrap assigns this identity only when the database has no users, while a missing Root in a populated database aborts startup. A stolen root password or active root session is equivalent to compromise of the whole service. Data-management security adds action-bound, short-lived second verification for export, backup, delete, and restore operations; it is defense against accidental or opportunistic use of an authenticated session, not a boundary that survives root compromise.
+| 关注点 | 内容 |
+| --- | --- |
+| **入站平台协议** | OpenAI、Anthropic、Gemini——客户端用什么协议跟我们说话 |
+| **与厂商无关的核心记录 + 模型目录元数据** | 统一的补全结果、用量、工具调用结构，以及模型目录 |
+| **上游执行适配器** | Kiro / AWS CodeWhisperer、官方 OpenAI / Codex、Anthropic API Key、官方 DeepSeek（复用共享的 OpenAI HTTP 传输） |
 
-The security key is verified against a salted PBKDF2 value in an owner-only external state file. It is never persisted in PostgreSQL or copied into an incident. Each sanitized failure incident is appended to that same atomic state update as the consecutive-failure counter and lock flag; a durable dispatcher removes it only after the database audit/outbox enqueue succeeds. Five consecutive verification failures therefore set a permanent lock and invalidate data-management grants without waiting for PostgreSQL or SMTP. A highest-priority WebFlux filter then uses an in-memory fail-closed snapshot to return `503 SYSTEM_MAINTENANCE` for every service namespace while still serving static UI assets, public system status, and health probes. Readiness becomes `OUT_OF_SERVICE` while liveness remains `UP`. Locked recovery requires an explicitly configured writable owner-only key file at startup; recovery atomically stages the file, commits the unlocked state, and erases the staged key, with startup reconciliation for a crash between those steps.
+> 核心代理层**不应包含**任何平台专属的请求转换、响应格式化或模型目录数据。详细的包归属规则见 [包结构与扩展](PACKAGE_GUIDE.md)。
 
-Security incidents and their SMTP outbox live in the dedicated `starry_security` PostgreSQL schema, outside the `starry_api` backup/restore scope. Audit rows reject update/delete operations, and the runtime role receives only append/read access. Alerts reuse the shared system SMTP transport and prefer the application Root email captured with the event; if it was empty, each retry resolves the current email through the immutable Root marker, so adding an email later releases the pending alert. Delivery is retried with leases and exponential backoff. SMTP is necessarily at-least-once rather than exactly-once; a stable security event header lets receivers deduplicate the rare message repeated after a delivery/acknowledgement crash. Passwords, password hashes/salts, submitted security-key values, and session/access tokens are excluded from state incidents, audit rows, outbox rows, emails, and structured logs.
+---
 
-The verifier/lock file and short-lived grants are intentionally instance-local. Enabling data-management security therefore supports exactly one active service instance; do not deploy service replicas or rolling overlap. The whole configured security directory, including the adjacent initialization marker, must be on persistent owner-only storage. A missing/corrupt state file after initialization fails closed instead of allowing reinitialization; the post-initialization `require-initialized` deployment guard also detects total volume loss. HA requires moving the state machine and grants to an external strongly consistent security store and is not implemented by this boundary.
-
-## Gradle Modules
+## 请求流程
 
 ```text
-:service-api     Java API contracts and shared DTOs
-:service         Spring Boot server, persistence, proxy orchestration, platform adapters
-:webui           Vue/Vite management console
-:plugin-api      Full-trust Java plugin SDK and lifecycle contract
-:plugin-example  Buildable development plugin (not loaded by the server automatically)
+客户端
+  │  OpenAI（含 DeepSeek 模型）/ Anthropic / Gemini 端点
+  ▼
+ProxyController
+  ▼
+ProxyFacade
+  │
+  ├─ platform/<client>.RequestAdapter       把入站协议转成统一的对话结构
+  │
+  ├─ ApiKeyService.authenticate()           API Key 鉴权
+  ├─ RateLimiterService.check()             限流
+  ├─ ModelMappingService.apply()            模型映射
+  ├─ ModelPoolKeyResolver.resolve()         解析 厂商:模型族 的熔断键
+  ├─ AccountPoolPolicyService.applyTierPolicy()   主/备分层策略
+  ├─ AccountPoolService.selectAccount()     选一个上游账号
+  │
+  ├─ 上游路由
+  │   ├─ platform/kiro.KiroPayloadFactory / KiroUpstreamClient / AwsEventStreamParser
+  │   ├─ platform/openai.OpenAiUpstreamClient   （OpenAI、Codex、DeepSeek）
+  │   └─ platform/anthropic.AnthropicUpstreamClient
+  │       都返回 platform/core.PlatformCompletionResult
+  │
+  ├─ platform/<client>.ResponseFactory      格式化成客户端协议的响应
+  │
+  ├─ ApiKeyService.recordUsage()            记录用量并计费
+  ├─ AccountPoolService.recordSuccess()/recordRequestFailure()   账号健康反馈
+  └─ StatsService.log(...)                  写请求日志（含熔断键、层级、上游结果）
+  ▼
+客户端兼容的响应
 ```
 
-## Plugin Trust Boundary
+---
 
-Third-party PF4J plugins are disabled by default. The immutable application Root must
-verify its current password and a session-bound six-digit email challenge before
-enabling developer mode. Plugin code receives full host-service access; this is an
-installation consent boundary, not a security sandbox. No plugin marketplace or
-signing requirement is implemented. The `plugin` package owns installation, lifecycle,
-configuration/debug tools and auditing; `plugin-api` is the SDK. See [Plugins](PLUGINS.md)
-for compatibility, logging coverage, recovery and resource-cleanup limitations.
+## 模块与包布局
 
-`service-api` and `plugin-api` are independent library modules. The former retains
-the original business contracts and Java package names; the latter exposes generic
-host access, JSON/configuration, managed resources/tasks and streaming HTTP. The
-`service` module implements the SDK. Plugin-local JSON type caches, bounded resource
-registrations and lazy task workers are released with the context; no new database,
-message broker or external scheduling service is required.
+### Gradle 模块
 
-## Backend Package Layout
+| 模块 | 说明 |
+| --- | --- |
+| `:service-api` | Java API 契约和共享 DTO |
+| `:service` | Spring Boot 服务：持久化、代理编排、平台适配器 |
+| `:webui` | Vue / Vite 管理控制台（构建后嵌入 `service` 的 jar） |
+| `:plugin-api` | 全信任的 Java 插件 SDK 与生命周期契约 |
+
+`service-api` 和 `plugin-api` 是两个**独立的库模块**：前者保留原有的业务契约和 Java 包名；后者只暴露通用的宿主访问、JSON / 配置、托管资源 / 任务和流式 HTTP。`service` 模块实现这套 SDK。插件的类型缓存、有界的资源注册和懒创建的任务线程都随上下文释放；**不需要**新的数据库、消息中间件或外部调度服务。
+
+### 后端包布局
 
 ```text
 service/src/main/java/tech/starryapi
-├── admin              Local admin users, password hashing, sessions, startup guide
-├── account            Upstream account persistence, import, test, pool selection
-├── apikey             API key generation, hashing, auth, usage accounting
-├── common             Error handling, admin auth helpers, shared utilities
-├── config             Spring Boot, WebFlux, WebClient, OpenAPI, scheduling config
-├── model              Managed catalog, pricing, model mappings, and icon storage
-├── payment            Recharge orders, callbacks, balance ledger, and redemption codes
-├── proxy              Public proxy controller, core facade, rate limit, model list
-├── stats              Request log persistence and admin statistics
+├── admin              本地管理员、密码哈希、会话、启动引导
+├── account            上游账号的持久化、导入、测试、账号池选择
+├── apikey             API Key 生成、哈希、鉴权、用量计费
+├── common             错误处理、管理鉴权辅助、共享工具
+├── config             Spring Boot / WebFlux / WebClient / OpenAPI / 调度配置
+├── model              托管目录、定价、模型映射、图标存储
+├── payment            充值订单、回调、余额账本、兑换码
+├── proxy              对外代理控制器、核心 facade、限流、模型列表
+├── stats              请求日志持久化与管理端统计
 └── platform
-    ├── core           Provider-neutral completion result, usage, and tool-use records
-    ├── catalog        Unified model catalog and model metadata record
-    ├── openai         OpenAI Chat/Responses request and response module
-    ├── deepseek       DeepSeek model normalization and endpoint capability policy
-    ├── anthropic      Anthropic Messages request, response, and native upstream module
-    ├── gemini         Gemini GenerateContent request and response module
-    ├── kiro           Kiro/AWS payload factory, upstream client, event-stream parser
-    └── upstream       Shared upstream exception abstraction
+    ├── core           与厂商无关的补全结果、用量、工具调用记录
+    ├── catalog        统一模型目录与模型元数据
+    ├── openai         OpenAI Chat / Responses 的请求与响应
+    ├── deepseek       DeepSeek 模型规范化与端点能力策略
+    ├── anthropic      Anthropic Messages 的请求、响应与原生上游
+    ├── gemini         Gemini GenerateContent 的请求与响应
+    ├── kiro           Kiro / AWS payload、上游客户端、事件流解析
+    └── upstream       共享的上游异常抽象
 ```
 
-Package rules:
+**关键规则**（完整版见 [包结构与扩展](PACKAGE_GUIDE.md)）：
 
-- `proxy` may depend on `platform/*`.
-- `platform/openai`, `platform/anthropic`, and `platform/gemini` own inbound/outbound protocol shapes; `platform/openai` also provides the shared OpenAI-compatible HTTP transport.
-- `platform/openai`, `platform/anthropic`, and `platform/gemini` may depend on `platform/core` and `platform/catalog`, but must not import each other or `platform/kiro`.
-- `platform/deepseek` owns the official model IDs, model normalization, and Chat/Responses capability policy. It reuses `platform/openai.OpenAiUpstreamClient` for HTTP transport instead of duplicating a client.
-- `model/OfficialModelPricingService` owns the verified official USD price catalog. It starts from a bundled `Wei-Shaw/model-price-repo` snapshot and periodically replaces it only after the remote JSON matches the published SHA-256 checksum.
-- `platform/catalog/ModelPriceRepoModelIds` derives the built-in OpenAI, Anthropic, Gemini, and DeepSeek chat model IDs from that bundled snapshot. An entry must provide input/output token prices and a request endpoint compatible with the current proxy before it is advertised by default; Realtime-only entries are excluded.
-- `platform/core` contains provider-neutral records such as `PlatformCompletionResult`, `PlatformUsage`, and `PlatformToolUse`.
-- `service-api/model` contains the public model catalog REST contract, model DTOs, and `ModelCatalogProvider`. `platform/catalog` is a service-side aggregation detail used only by the provider implementation.
-- `platform/kiro` owns Kiro/AWS payloads, headers, upstream endpoint selection, model ID mapping, and AWS event-stream parsing.
-- Admin/account/API key/stat modules must not depend on OpenAI/Anthropic/Gemini response factories.
-- New client protocols should add a new `platform/<name>` package and register model metadata in `platform/catalog`.
+- `proxy` 可以依赖 `platform/*`。
+- `platform/openai`、`anthropic`、`gemini` 拥有各自的入站 / 出站协议形状，可以依赖 `platform/core` 和 `platform/catalog`，但**互相不能 import**，也不能 import `platform/kiro`。
+- `platform/openai` 同时提供共享的 OpenAI 兼容 HTTP 传输；`platform/deepseek` 拥有官方模型 ID、规范化和 Chat / Responses 能力策略，**复用** `OpenAiUpstreamClient` 做 HTTP 传输，而不是重复造一个客户端。
+- `model/OfficialModelPricingService` 拥有经验证的官方美元价格目录：从内置的 `Wei-Shaw/model-price-repo` 快照起步，仅当远程 JSON 与发布的 SHA-256 校验和匹配后才定期替换。
+- `platform/catalog/ModelPriceRepoModelIds` 从该快照派生内置的 OpenAI、Anthropic、Gemini、DeepSeek 聊天模型 ID。一个条目要被默认公布，必须有输入 / 输出 token 价格和与当前代理兼容的请求端点；仅 Realtime 的条目被排除。
+- `service-api/model` 包含公开的模型目录 REST 契约、模型 DTO 和 `ModelCatalogProvider`；`platform/catalog` 只是服务端聚合用的实现细节。
+- admin / account / apikey / stat 模块**不能**依赖 OpenAI / Anthropic / Gemini 的响应工厂。
 
-## Frontend Layout
+### 前端布局
 
 ```text
 webui/src
-├── api          TypeScript API clients aligned with backend endpoints
-├── components   Shared visual components
-├── layouts      Authenticated shell
-├── platforms    Frontend platform registry and platform-scoped setup modules
-│   ├── openai
-│   ├── deepseek
-│   ├── anthropic
-│   ├── gemini
-│   ├── opencode
+├── api          与后端端点对齐的 TypeScript API 客户端
+├── components   共享的可视化组件
+├── layouts      登录后的外壳
+├── platforms    前端平台注册表与各平台的安装片段
+│   ├── openai / deepseek / anthropic / gemini / opencode
 │   ├── registry.ts
 │   ├── clientSetup.ts
 │   └── types.ts
-├── router       Route table and auth guard
-├── stores       Pinia auth store
-├── types        API DTO types
-├── utils        HTTP and formatting helpers
-└── views        Dashboard/admin pages
+├── router       路由表与鉴权守卫
+├── stores       Pinia 鉴权状态
+├── types        API DTO 类型
+├── utils        HTTP 与格式化工具
+└── views        仪表盘 / 管理页面
 ```
 
-Frontend package rules:
+- `views` 渲染页面并持有页面状态。
+- `platforms/<provider>/index.ts` 拥有厂商展示元数据和模型 ID 推断；`setup.ts` 拥有厂商专属的环境变量块；`registry.ts` 拥有厂商 / 系列顺序和统一推断；`clientSetup.ts` 汇总 OpenAI、Anthropic、Gemini、OpenCode 的片段。
+- DeepSeek 模型与 OpenAI 共用 Starry API 的 OpenAI 兼容连接，所以不需要单独的客户端配置片段。
+- 视图组件**不应**硬编码厂商顺序或客户端环境变量块。
 
-- `views` render pages and hold page state.
-- `platforms/<provider>/index.ts` owns provider display metadata and model ID inference.
-- `platforms/<provider>/setup.ts` owns provider-specific environment variable blocks.
-- `platforms/registry.ts` owns provider/family ordering and unified inference.
-- `platforms/clientSetup.ts` aggregates OpenAI, Anthropic, Gemini, and OpenCode setup fragments. DeepSeek models use the same Starry API OpenAI-compatible client connection, so they do not require a separate client setup fragment.
-- View components should not hard-code provider order or client environment variable blocks.
+---
 
-## Request Flow
+## 模型目录
 
-```text
-Client
-  |
-  | OpenAI (including DeepSeek models) / Anthropic / Gemini endpoint
-  v
-ProxyController
-  |
-  v
-ProxyFacade
-  |
-  +-- platform/<client>.RequestAdapter
-  |
-  +-- ApiKeyService.authenticate()
-  +-- RateLimiterService.check()
-  +-- ModelMappingService.apply()
-  +-- ModelPoolKeyResolver.resolve()
-  +-- AccountPoolPolicyService.applyTierPolicy()
-  +-- AccountPoolService.selectAccount()
-  |
-  +-- upstream route
-  |   +-- platform/kiro.KiroPayloadFactory / KiroUpstreamClient / AwsEventStreamParser
-  |   +-- platform/openai.OpenAiUpstreamClient (OpenAI, Codex, DeepSeek)
-  |   +-- platform/anthropic.AnthropicUpstreamClient
-  |       returns platform/core.PlatformCompletionResult
-  |
-  +-- platform/<client>.ResponseFactory
-  |
-  +-- ApiKeyService.recordUsage()
-  +-- AccountPoolService.recordSuccess()/recordRequestFailure()
-  +-- StatsService.log(circuit key, tier, upstream outcome)
-  |
-  v
-Client-compatible response
-```
+`ProxyModelCatalog` 按这个顺序聚合各厂商目录：**Anthropic → OpenAI → Gemini → DeepSeek**。
 
-## Model Catalog
+每个模型记录暴露：
 
-`ProxyModelCatalog` aggregates provider catalogs in this order:
-
-1. Anthropic
-2. OpenAI
-3. Gemini
-4. DeepSeek
-
-Each model record exposes:
-
-- `id`: client-facing model ID
-- `provider`: platform group
-- `family`: platform-local family
-- `owned_by`: catalog owner shown to OpenAI-compatible clients
-- `targetModelId`: upstream model ID after alias mapping
-- token and input capability metadata
-- optional administrator icon, request format, and client endpoint metadata
-
-OpenAI, Google/Gemini, Anthropic, and DeepSeek built-ins are derived from the checked-in `model-price-repo` snapshot, plus a small set of compatibility routing aliases. Official USD prices refresh from the same repository at startup and every 10 minutes (checksum-verified, last-good disk cache). Catalog aliases resolve to official prices by exact ID, prefix strip, hyphen/dot normalization, then family/provider median — never via routing `targetModelId`. The 16.67 / MTok safety fallback remains only for IDs that are not in the managed catalog. Administrators can optionally enable `syncCatalogIds` in 系统设置 → 模型管理 → 价格倍率 so newly published first-class chat models are appended; disabled IDs are not resurrected. Administrators can add providers and models, override built-ins, disable entries, upload PNG/JPEG/WebP icons, and persist a global model-ID display order and gallery style through `/admin/models`. Catalog customizations, order, and display settings live in `system_settings`; icon files live in `STARRY_MODEL_ICON_DIR` and must be backed up separately from PostgreSQL exports.
-
-GPT/OpenAI IDs route to OpenAI API-key or Codex token accounts. `openai-compatible/<model>` selects a third-party OpenAI-compatible API-key account and is stripped before dispatch, but provider-scoped API keys can use it only when both the requested source ID and mapped prefixed target ID are enabled catalog entries under the key's provider. DeepSeek contributes `deepseek-chat`, `deepseek-reasoner`, `deepseek-v4-flash`, and `deepseek-v4-pro`; the built-in catalog reliably supports the bare and `starry/` forms. The lower-level route parser still recognizes `deepseek/`, but a provider-scoped key rejects that alias unless an administrator catalogs it under the same provider. Pricing canonicalization recognizes all three prefixes independently of route authorization. Claude/Kiro aliases continue to use `ModelCatalogProvider.resolveTargetModel`; `anthropic/` targets prefer native Anthropic API-key accounts. Shared default capabilities and routing targets are defined by the `service-api/model` contract, not a provider-specific catalog.
-
-Every newly created API key is bound to one enabled catalog provider through `api_keys.model_provider`. Authorization validates both the client-requested model and the resolved mapping target before selecting an upstream account. The wildcard provider is retained only for migrated legacy keys.
-
-## Persistent State
-
-PostgreSQL 17 is the persistence baseline. The database and application schema are both named `starry_api`; Flyway installs a fresh baseline into that schema. Identifiers that users treat case-insensitively use functional `lower(...)` indexes, while tokens, hashes, and IDs remain case-sensitive.
-
-Flyway creates these primary tables:
-
-| Table | Purpose |
+| 字段 | 含义 |
 | --- | --- |
-| `proxy_accounts` | Upstream account credentials, total/5h/7day quota windows, suspension, and metadata. |
-| `api_keys` | Per-user API key owner, provider scope, full key copy value for new keys, hashes, status, limits, and aggregate usage. |
-| `api_key_usage_daily` | Daily API key usage summary. |
-| `api_usage_events` | Hash-partitioned idempotency/settlement events used to update key usage and user balances exactly once. |
-| `model_mappings` | Model alias/replacement/load-balancing rules. |
-| `request_logs` | Monthly range-partitioned request history with time, API key, account, circuit key/tier, resolved upstream model, upstream outcome, and BRIN/partial covering indexes. |
-| `request_usage_hourly` / `request_usage_daily` | Long-range request/token/cost aggregates for analytics. |
-| `aggregation_watermarks` | Incremental aggregation progress. |
-| `performance_metrics` | Runtime CPU, memory, and network samples. |
-| `admin_users` | Local admin users, password hashes, roles, first-login state. |
-| `registration_email_tokens` | Hashed, expiring registration email verification tokens. |
-| `system_settings` | Runtime settings, managed catalog/pricing snapshots, payment settings, and the immutable application Root marker. |
-| `payment_orders` | Recharge order state and crediting status. |
-| `invite_codes` / `redemption_codes` | Registration invitation and balance redemption codes. |
-| `invite_rebate_records` | Idempotent invite rebate records. |
-| `balance_ledger` | Auditable, idempotent balance mutations. |
-| `flyway_schema_history` | Flyway migration history. |
+| `id` | 面向客户端的模型 ID |
+| `provider` | 平台分组 |
+| `family` | 平台内的系列 |
+| `owned_by` | 展示给 OpenAI 兼容客户端的目录所有者 |
+| `targetModelId` | 别名映射之后的上游模型 ID |
+| token 与输入能力元数据 | 上下文长度、支持的输入类型等 |
+| 可选的管理员图标、请求格式、客户端端点元数据 | |
 
-The separate `starry_security` schema contains append-only `data_management_security_audit_events` and the leased `data_management_security_alert_outbox`. It is intentionally excluded from normal `starry_api` application exports and restores.
+**价格**：OpenAI、Google / Gemini、Anthropic、DeepSeek 的内置模型来自随仓库提交的 `model-price-repo` 快照，外加少量兼容路由别名。官方美元价格在启动时和每 10 分钟刷新（经校验和验证，保留最近一次可用的磁盘缓存）。目录别名按这个顺序解析到官方价格：**精确 ID → 去前缀 → 连字符 / 点规范化 → 系列 / 厂商中位数**——**绝不会**通过路由用的 `targetModelId` 去取价。「16.67 / MTok」的安全兜底只保留给**不在托管目录里**的 ID。管理员可以在「系统设置 → 模型管理 → 价格倍率」里开启 `syncCatalogIds`，让新发布的一线聊天模型被追加进目录；已停用的 ID 不会被复活。
 
-## Account Pool Behavior
+**管理员能做什么**：增加厂商和模型、覆盖内置项、停用条目、上传 PNG / JPEG / WebP 图标，并通过 `/admin/models` 持久化全局的模型 ID 显示顺序和画廊样式。目录自定义、顺序和显示设置保存在 `system_settings` 里；图标文件在 `STARRY_MODEL_ICON_DIR` 里，**需要和 PostgreSQL 导出分开备份**。
 
-An account is skipped when:
+**路由规则**：
 
-- `enabled=false`
-- `suspendedAt` is set
-- total quota, 5-hour quota, or 7-day quota is exhausted and its reset window is still active
-- recoverable failures are still cooling down and probabilistic retry does not trigger
+- GPT / OpenAI 的 ID 路由到 OpenAI API Key 或 Codex Token 账号。
+- `openai-compatible/<model>` 选中第三方 OpenAI 兼容 API Key 账号，并在派发前去掉前缀；但厂商级的 API Key 只有在「请求的源 ID」和「映射后带前缀的目标 ID」**都**是该 Key 厂商下已启用的目录条目时，才能使用它。
+- DeepSeek 提供 `deepseek-chat`、`deepseek-reasoner`、`deepseek-v4-flash`、`deepseek-v4-pro`；内置目录可靠地支持裸名和 `starry/` 两种形式。底层路由解析器仍认识 `deepseek/`，但厂商级 Key 会拒绝这个别名，除非管理员把它登记到同一厂商下。价格规范化独立于路由授权，认识三种前缀。
+- Claude / Kiro 别名继续用 `ModelCatalogProvider.resolveTargetModel`；`anthropic/` 目标优先走原生 Anthropic API Key 账号。
+- 共享的默认能力和路由目标由 `service-api/model` 契约定义，而不是某个厂商专属的目录。
 
-The tiered account-pool circuit breaker is experimental and disabled by default. When disabled, `AccountPoolPolicyService` returns the provider-eligible account list unchanged, preserves the original session-affinity key, and omits circuit dimensions from request logs; account selection ignores circuit tiers, and the WebUI shows ordinary account management rather than circuit content. The persistent `poolTier` and `poolWeight` fields remain available to the account API so operators can prepare primary and secondary capacity before enabling the feature.
+**每把 API Key 都绑定一个厂商**：新建的 API Key 通过 `api_keys.model_provider` 绑定一个已启用的目录厂商。在选择上游账号之前，授权会同时校验**客户端请求的模型**和**解析后的映射目标**。通配厂商 `*` 只保留给迁移过来的旧 Key。
 
-When enabled, `ModelPoolKeyResolver` resolves every request after model mapping into a stable, bounded `provider:model-family` key. Catalog-backed models use their catalog provider and family, so model families under the same provider have independent circuits. Unknown IDs are collapsed into the relevant `provider:other` pool; arbitrary user model IDs therefore cannot create unbounded in-memory circuit cardinality. The same request-level key and token are retained across account retries.
+---
 
-Each model pool owns an independent, concurrency-safe sliding-window state machine:
+## 持久化状态
 
-| State | Routing behavior |
+PostgreSQL 17 是持久化基线。数据库和应用 schema 都叫 `starry_api`；Flyway 在这个 schema 里安装全新的基线。用户视为不区分大小写的标识符使用函数索引 `lower(...)`，而 Token、哈希和 ID 保持区分大小写。
+
+Flyway 创建这些主要的表：
+
+| 表 | 用途 |
 | --- | --- |
-| `CLOSED` | Prefer primary accounts and open only after the primary tier reaches both the minimum sample size and failure-rate threshold. The existing provider-list fallback remains available when no primary account is configured. |
-| `OPEN` | Route only through secondary accounts until the strict cooldown expires. |
-| `HALF_OPEN` | Admit a bounded number of real client requests to the primary tier as probes; keep all non-probe traffic on secondary accounts. |
+| `proxy_accounts` | 上游账号凭据、总额度 / 5 小时 / 7 天额度窗口、挂起状态和元数据 |
+| `api_keys` | 每用户的 API Key 所有者、厂商范围、新 Key 的完整副本、哈希、状态、限额、聚合用量 |
+| `api_key_usage_daily` | API Key 的日用量汇总 |
+| `api_usage_events` | 哈希分区的幂等 / 结算事件，用于**恰好一次**地更新 Key 用量和用户余额 |
+| `model_mappings` | 模型别名 / 替换 / 负载均衡规则 |
+| `request_logs` | 按月范围分区的请求历史：时间、API Key、账号、熔断键 / 层级、解析后的上游模型、上游结果，以及 BRIN / 部分覆盖索引 |
+| `request_usage_hourly` / `request_usage_daily` | 供分析使用的长区间请求 / token / 成本聚合 |
+| `aggregation_watermarks` | 增量聚合的进度 |
+| `performance_metrics` | 运行时 CPU、内存、网络样本 |
+| `admin_users` | 本地管理员用户、密码哈希、角色、首次登录状态 |
+| `registration_email_tokens` | 经哈希、会过期的注册邮箱验证令牌 |
+| `system_settings` | 运行时设置、托管目录 / 定价快照、支付设置，以及不可变的应用 Root 标记 |
+| `payment_orders` | 充值订单状态和入账状态 |
+| `invite_codes` / `redemption_codes` | 注册邀请码和余额兑换码 |
+| `invite_rebate_records` | 幂等的邀请返利记录 |
+| `balance_ledger` | 可审计、幂等的余额变更 |
+| `flyway_schema_history` | Flyway 迁移历史 |
 
-The cooldown and probe budget reuse the compatible settings fields `retestIntervalMinutes` and `retestMaxConcurrency`. Probe leases are bounded to 2-10 minutes and prevent abandoned requests from occupying slots forever: an expired probe reopens the circuit. Requests without a stable request token cannot become probes, and one request token can consume at most one probe slot across account retries. Once all allowed probes finish, reaching `recoveryThresholdPercent` closes the circuit and clears the primary window; an impossible or insufficient recovery rate reopens it. A post-recovery grace window prevents the same stale samples from immediately reopening the circuit. No synthetic probe request or all-account retest is generated by this state machine.
+另一个独立的 `starry_security` schema 包含只追加的 `data_management_security_audit_events` 和带租约的 `data_management_security_alert_outbox`。它被**故意排除**在普通 `starry_api` 应用的导出和恢复之外。
 
-Real request outcomes update the local window immediately. Every 30 seconds, `AccountPoolRetestService` reconciles each instance's circuit metrics from the shared `request_logs` PostgreSQL window. Each `false -> true` activation creates a new UUID circuit epoch and activation timestamp. Requests capture that epoch before routing, and reconciliation accepts only rows from the current epoch at or after the activation boundary, so requests spanning a disable/re-enable boundary and historical rows from an earlier activation cannot mutate the new circuit state. The time predicate also has an exclusive upper bound so PostgreSQL prunes past and future partitions.
+---
 
-Rows enter this window only when `upstream_success` explicitly marks a successful call or a circuit-countable failure: retryable transport failures and provider-declared retryable `408`, `409`, and `5xx` outcomes count, while account-scoped and non-retryable failures do not. The partial covering index `idx_request_logs_circuit_window` leads on `circuit_epoch`, then `created_at DESC` and `circuit_key`, includes the tier and upstream outcome, and uses matching non-null predicates for an index-only scan. An evaluation captures a persistence-confirmation generation before querying PostgreSQL. It replaces only local outcomes whose log commits were confirmed before that generation; commits completed during the query stay in the local delta until the next baseline, and failed log writes stay in a local-only minute bucket until window expiry. Confirmed outcomes are aggregated by minute and confirmation generation, while only actual in-flight writes retain per-request IDs. This prevents gaps and bounds retained state by in-flight writes plus window buckets instead of request volume. Pools absent from the newest result are explicitly reconciled to an empty external baseline instead of retaining stale metrics. Circuit state is local to each service instance and converges through the shared window; it is not distributed through PostgreSQL notifications.
+## 账号池行为
 
-`request_logs.success` is the final proxy/settlement outcome. The separate nullable `upstream_success` records whether a circuit-countable upstream call succeeded, so a successful upstream response followed by a local billing failure is not misclassified as an upstream failure. `circuit_epoch`, `circuit_key`, `circuit_tier`, and `upstream_model` preserve the reconciliation dimensions and are retained when rows move out of the default partition.
+这是 Starry API 最核心、也最容易产生疑问的部分。先看结论，再看细节。
 
-Account-global lifecycle and model-pool failure domains are deliberately separate. With the experimental policy enabled, circuit-countable primary-tier failures update only the affected model-family circuit and do not increment the compatibility `errorCount`. The same failure on a secondary account also increments `errorCount`. Every dispatched attempt is additionally reconciled into the PostgreSQL account lifecycle described below. A `401` or `403` disables an account only when the response contains structured permanent-revocation evidence; an ambiguous Anthropic `403` is quarantined instead. A normal upstream `429` does not set `quotaExhaustedAt` or disable the account. Model- and endpoint-scoped `429` outcomes create or extend a cooldown for only that account and matching upstream model or endpoint. They are audited without mutating the account-global lifecycle or compatibility `errorCount`, so unrelated traffic can continue using the credential.
+> **三句话版**：① 不同厂商的账号**互相隔离**，绝不串用；② 每个账号有自己的并发 / RPM 保护，新账号要经历**预热**；③ 出错会按错误类型决定「换账号重试 / 冷却 / 隔离 / 禁用」，而不是一出错就禁用。
 
-Pool settings, the activation epoch, and its start timestamp are persisted in `system_settings`. Each instance synchronously preloads the policy and indexed window before application readiness. Its PostgreSQL trigger then publishes changed keys on `starry_api_system_settings`; every instance keeps a dedicated `LISTEN` connection, invalidates the affected caches, and single-flights the policy reload plus immediate window reconciliation. Listener reconnects invalidate stale refresh generations but retain the last-known-good settings and circuit state until a complete replacement snapshot succeeds. Disabling resets local circuit state; re-enabling starts a fresh epoch and never restores metrics from an earlier activation.
+### 一个账号什么时候会被跳过
 
-Account selection is provider-isolated in both directions. DeepSeek model requests select only accounts whose provider is `DeepSeek` or whose official host is `api.deepseek.com`; ordinary OpenAI/Codex pools explicitly exclude those accounts. A depleted DeepSeek pool therefore returns no available account rather than falling back to another provider. Retries caused by a recoverable DeepSeek error remain inside the DeepSeek pool.
+- `enabled=false`；
+- 设置了 `suspendedAt`（被挂起）；
+- 总额度、5 小时额度或 7 天额度耗尽，且它的重置窗口还没过；
+- 可恢复的失败仍在冷却，并且概率性重试没有触发。
 
-Only retryable transport failures and provider-declared retryable `408`, `409`, and `5xx` outcomes enter the model-family circuit window. Account retries remain inside the selected provider pool and never reuse the same account. The original account counts toward the limit:
+### 分级熔断（实验性，默认关闭）
 
-| Failure | Cross-account behavior | Lifecycle result |
+关闭时，`AccountPoolPolicyService` 原样返回该厂商所有符合条件的账号、保持原有的会话亲和键，并在请求日志里省略熔断维度；账号选择忽略熔断层级，控制台显示普通的账号管理而不是熔断内容。持久的 `poolTier` 和 `poolWeight` 字段仍然可以通过账号 API 使用，所以运维可以**在启用这个功能之前**就把主 / 备容量准备好。
+
+启用时，`ModelPoolKeyResolver` 会把每个请求在模型映射之后，解析成一个稳定、有界的 `厂商:模型族` 键。目录里的模型使用它们的目录厂商和系列，所以**同一厂商下的不同模型系列有各自独立的熔断器**；未知 ID 归入对应的 `厂商:other`，所以任意的用户模型 ID **不会**造成无限的内存熔断基数。同一个请求级的键和令牌，在账号重试之间保持不变。
+
+每个模型池拥有一个独立的、并发安全的滑动窗口状态机：
+
+| 状态 | 路由行为 |
+| --- | --- |
+| `CLOSED` | 优先主账号；只有主层同时达到最小样本数和失败率阈值才打开。没有配置主账号时，仍可使用原有的「厂商列表」回退 |
+| `OPEN` | 严格的冷却期内，**只**走备用账号 |
+| `HALF_OPEN` | 放行有限数量的**真实客户端请求**去探测主层；所有非探测流量继续走备用 |
+
+- 冷却和探测额度复用兼容的设置字段 `retestIntervalMinutes` 和 `retestMaxConcurrency`。探测租约限制在 2–10 分钟，防止被放弃的请求永远占着名额：过期的探测会让熔断器重新打开。没有稳定请求令牌的请求不能成为探测，同一个请求令牌在账号重试之间最多消耗一个探测名额。
+- 所有允许的探测都结束后，达到 `recoveryThresholdPercent` 就关闭熔断器并清空主窗口；恢复率不可能达到或不足则重新打开。恢复后的宽限窗口防止同样的陈旧样本立刻把它重新打开。这个状态机**不会**生成合成的探测请求，也不会对所有账号复测。
+- 真实请求的结果会立刻更新本地窗口。每 **30 秒**，`AccountPoolRetestService` 从共享的 `request_logs` PostgreSQL 窗口，对每个实例的熔断指标做**对账**。每次 `false -> true` 的启用都会创建一个新的 UUID 熔断纪元和启用时间戳。请求在路由前捕获该纪元，对账只接受**当前纪元**且在启用边界之后的行，所以跨越禁用 / 重新启用边界的请求、以及更早启用留下的历史行，都不会改变新熔断器的状态。时间谓词还带有排他的上界，所以 PostgreSQL 会裁剪过去和未来的分区。
+- 只有 `upstream_success` 明确标记了「成功调用」或「会计入熔断的失败」的行才进入这个窗口：可重试的传输失败和上游声明可重试的 `408`、`409`、`5xx` 会计入；账号级的和不可重试的失败**不会**。部分覆盖索引 `idx_request_logs_circuit_window` 先按 `circuit_epoch`，再 `created_at DESC` 和 `circuit_key`，包含层级和上游结果，并使用匹配的非空谓词来做纯索引扫描。
+- 一次评估会在查询 PostgreSQL 之前，捕获一个「持久化确认代数」。它只替换那些在该代数之前**已确认提交**的本地结果；查询期间完成的提交留在本地增量里直到下一个基线，写日志失败的则留在仅本地的分钟桶里直到窗口过期。已确认的结果按分钟和确认代数聚合，只有真正在途的写入才保留单请求 ID。这样既不会出现空洞，保留的状态也受「在途写入 + 窗口桶数」限制，而不随请求量增长。不在最新结果里的池会被显式对账为空的外部基线，而不是保留陈旧的指标。熔断状态在每个服务实例本地，通过共享窗口收敛；它**不是**经由 PostgreSQL 通知分发的。
+- `request_logs.success` 是最终的代理 / 结算结果。单独的、可空的 `upstream_success` 记录一次会计入熔断的上游调用是否成功，所以「上游成功、但本地计费失败」不会被误判成上游失败。`circuit_epoch`、`circuit_key`、`circuit_tier`、`upstream_model` 保留了对账维度，行移出默认分区时也会保留。
+- 账号全局的生命周期和模型池的失败域是**刻意分开**的。启用该策略时，会计入熔断的主层失败只更新受影响的模型族熔断器，**不会**增加兼容的 `errorCount`；同样的失败发生在备用账号上，则**也会**增加 `errorCount`。每一次派发的尝试，还会被对账进下面的 PostgreSQL 账号生命周期。`401` / `403` 只有在响应里有结构化的「永久吊销」证据时才会禁用账号；有歧义的 Anthropic `403` 会被隔离。普通的上游 `429` **不会**设置 `quotaExhaustedAt` 或禁用账号。模型和端点范围的 `429` 只会为那个账号和匹配的上游模型或端点创建或延长冷却，它们被审计，但不改变账号全局的生命周期或兼容的 `errorCount`，所以不相关的流量可以继续使用这个凭据。
+- 策略设置、启用纪元及其开始时间戳保存在 `system_settings` 里。每个实例在就绪前同步预加载策略和带索引的窗口。随后它的 PostgreSQL 触发器在 `starry_api_system_settings` 通道上发布变更的键；每个实例保持一个专用的 `LISTEN` 连接，使受影响的缓存失效，并以单飞方式重新加载策略并立即对账。监听器重连会使过期的刷新代数失效，但在完整的替代快照成功之前，保留最近一次可用的设置和熔断状态。禁用会重置本地熔断状态；重新启用开启新的纪元，**绝不会**恢复更早启用留下的指标。
+
+### 提供者隔离
+
+账号选择在**两个方向上都是厂商隔离**的。DeepSeek 模型请求只选择 provider 为 `DeepSeek`、或官方主机为 `api.deepseek.com` 的账号；普通的 OpenAI / Codex 池则**明确排除**这些账号。所以 DeepSeek 池耗尽时返回「没有可用账号」，而不是回退到别的厂商；由可恢复的 DeepSeek 错误引起的重试，也留在 DeepSeek 池里。
+
+### 失败处理表
+
+只有可重试的传输失败，和上游声明可重试的 `408`、`409`、`5xx`，才会进入模型族熔断窗口。账号重试始终留在选定的厂商池内，**绝不重复使用同一个账号**；原始账号也计入上限：
+
+| 失败 | 跨账号行为 | 生命周期结果 |
 | --- | --- | --- |
-| `400`, `404`, `422` | No retry | Request-scoped; account health is unchanged. |
-| Unstructured `401` | No retry | Credential is quarantined; it is not permanently disabled without revocation evidence. |
-| Revoked credential `401`/`403` | At most 2 distinct accounts | Permanently disables and suspends only the rejected credential. |
-| `402` | At most 3 distinct accounts | Account-capacity cooldown, default 10 minutes. |
-| Proxy, regional, or ambiguous `403` | At most 2 distinct accounts | Quarantine, default 10-15 minutes. |
-| Transport, `408`, `409`, recoverable `502` | At most 2 distinct accounts | Degrade first; enter cooldown when the error EWMA reaches 0.50. |
-| `429` | At most 3 distinct accounts | Account scope cools down; model/endpoint scope degrades. It does not mark quota exhausted. |
-| `500`, `501`, `503`, `504` | At most 3 distinct accounts | Provider-pool cooldown, default 1 minute. |
-| `529` | At most 2 distinct accounts | Account-capacity cooldown, default 10 minutes. |
+| `400`、`404`、`422` | 不重试 | 请求级；账号健康不变 |
+| 无结构化证据的 `401` | 不重试 | 凭据被隔离；没有吊销证据就不会被永久禁用 |
+| 吊销了凭据的 `401` / `403` | 最多 2 个不同账号 | 永久禁用并挂起被拒绝的凭据 |
+| `402` | 最多 3 个不同账号 | 账号容量冷却，默认 10 分钟 |
+| 代理 / 区域 / 有歧义的 `403` | 最多 2 个不同账号 | 隔离，默认 10–15 分钟 |
+| 传输、`408`、`409`、可恢复的 `502` | 最多 2 个不同账号 | 先降级；错误 EWMA 达到 0.50 时进入冷却 |
+| `429` | 最多 3 个不同账号 | 账号范围冷却；模型 / 端点范围降级。**不会**标记额度耗尽 |
+| `500`、`501`、`503`、`504` | 最多 3 个不同账号 | 厂商池冷却，默认 1 分钟 |
+| `529` | 最多 2 个不同账号 | 账号容量冷却，默认 10 分钟 |
 
-### PostgreSQL Account Allocation
+### PostgreSQL 账号分配
 
-PostgreSQL 17 is the coordination authority for account admission; Redis is not required. `account_allocation_policies` stores operator limits, `account_allocation_states` stores lifecycle and EWMAs, `account_admission_states` stores hot counters and token buckets, and `account_scoped_cooldowns` stores model/endpoint-local blocks. `try_acquire_scoped_account_lease` serializes admission for one account and atomically checks matching scoped cooldowns, current lifecycle, effective concurrency, RPM, burst, in-flight token reservations, and optional Anthropic session capacity before creating a ten-minute lease. The proxy deliberately passes a null expected lifecycle version: the database transaction is authoritative, while a two-second ranking snapshot must not cause a false stale-version rejection. Dispatch marking occurs immediately before the upstream call. Success and upstream-failure reconciliation release reservations; cancellation and local pipeline failures abandon an open lease; failure before dispatch releases it without health impact. Expired leases are reclaimed and their counters persisted before any later admission decision for that account.
+**PostgreSQL 17 就是账号准入的协调者，不需要 Redis。**
 
-Default policies are conservative and provider-specific:
+- `account_allocation_policies` 保存运维设置的限额；`account_allocation_states` 保存生命周期和 EWMA；`account_admission_states` 保存热点计数器和令牌桶；`account_scoped_cooldowns` 保存模型 / 端点范围的局部封锁。
+- `try_acquire_scoped_account_lease` 对单个账号串行化准入：原子地检查匹配的作用域冷却、当前生命周期、有效并发、RPM、突发、在途令牌预留，以及可选的 Anthropic 会话容量，然后创建一个**十分钟**的租约。
+- 代理**故意传入空的期望生命周期版本**：数据库事务才是权威，而两秒的排名快照不应造成误报的「版本过期」拒绝。
+- 派发标记发生在**调用上游之前的一刻**。成功和上游失败的对账会释放预留；取消和本地管线失败会放弃已打开的租约；派发之前的失败释放租约，对健康没有影响。过期的租约会被回收，它们的计数器在该账号之后任何准入决定之前被持久化。
 
-| Account type | Safe concurrency | Safe RPM | Burst | Max sessions | Session idle | In-flight tokens |
+**默认策略是保守的，且按厂商区分**：
+
+| 账号类型 | 安全并发 | 安全 RPM | 突发 | 最大会话数 | 会话空闲 | 在途令牌 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Anthropic API key | 2 | 20 | 2 | 4 | 600 seconds | 1,000,000 |
-| OpenAI, Codex, DeepSeek, OpenAI-compatible | 4 | 60 | 4 | 0 (stateless) | 600 seconds | 1,000,000 |
-| Kiro/other | 2 | 30 | 2 | 4 | 600 seconds | 1,000,000 |
+| Anthropic API Key | 2 | 20 | 2 | 4 | 600 秒 | 1,000,000 |
+| OpenAI、Codex、DeepSeek、OpenAI 兼容 | 4 | 60 | 4 | 0（无状态） | 600 秒 | 1,000,000 |
+| Kiro / 其他 | 2 | 30 | 2 | 4 | 600 秒 | 1,000,000 |
 
-Every policy starts at allocation priority `100`; lower values are preferred. New accounts start in `WARMING` at stage 1. Stages admit 10%, 25%, 50%, and 100% of configured concurrency/RPM/burst, advancing after successful calls until `HEALTHY`. Existing accounts migrated by V8 start `HEALTHY` at stage 4. The lifecycle states are:
+每个策略的分配优先级默认都是 `100`，**数值越小越优先**。
 
-| State | Meaning |
+**生命周期与预热**：新账号以 `WARMING`（预热）开始，处于第 1 阶段。四个阶段分别放行配置的并发 / RPM / 突发的 **10%、25%、50%、100%**，随成功调用推进，直到 `HEALTHY`。V8 迁移带来的已有账号直接以 `HEALTHY`、第 4 阶段开始。
+
+| 状态 | 含义 |
 | --- | --- |
-| `WARMING` | Staged capacity after create, restore, or cooldown expiry. |
-| `HEALTHY` | Full configured capacity. |
-| `DEGRADED` | Selectable, but ranked below healthier/lower-pressure capacity. |
-| `COOLDOWN` | Temporarily unavailable until `cooldownUntil`, then returns to stage-1 warming. |
-| `QUARANTINED` | Temporarily isolated for uncertain credential, proxy, regional, or unknown failures. |
-| `DISABLED` | Administrator-disabled or permanently revoked credential. |
+| `WARMING` | 在创建、恢复或冷却到期之后的分阶段容量 |
+| `HEALTHY` | 完整的配置容量 |
+| `DEGRADED` | 仍可选，但排在更健康 / 压力更低的容量之后 |
+| `COOLDOWN` | 到 `cooldownUntil` 前暂时不可用，之后回到第 1 阶段预热 |
+| `QUARANTINED` | 因凭据、代理、区域或未知的不确定失败而被暂时隔离 |
+| `DISABLED` | 管理员禁用，或凭据被永久吊销 |
 
-Official OpenAI API keys, Codex OAuth accounts, DeepSeek accounts, and generic OpenAI-compatible accounts have separate selection paths. The safe default keeps Codex isolated and routes ordinary GPT requests only to official OpenAI API keys; administrators can explicitly opt into Codex routing or mixed fallback. Anthropic selection first restricts candidates to the lowest allocation-priority value, then favors lower error, latency, concurrency, and token pressure. OpenAI-family pools score all eligible accounts, take the best three, and perform weighted random selection among them to avoid concentrating traffic on one credential. Session capacity is enforced only for a reliable explicit Anthropic conversation identifier; a bare API key never consumes session capacity. Successful conversation affinity is written with `putIfAbsent` under the same model-pool key used for reads, preventing concurrent requests from oscillating the binding. Admission-time and API-key-wide binding remain opt-in compatibility settings.
+### 账号是怎么被选中的
 
-OpenAI Responses ownership is stored in `openai_response_owners` for six hours. A known chain prefers its producing account. A chain that can be rebuilt from the local response-state cache may move when necessary; an unknown or non-rebuildable chain is attempted on only one account and never fanned out across retries.
+官方 OpenAI API Key、Codex OAuth 账号、DeepSeek 账号、通用的 OpenAI 兼容账号，各有**独立的选择路径**。安全的默认值让 Codex 保持隔离，并让普通 GPT 请求只走官方 OpenAI API Key；管理员可以显式选择启用 Codex 路由或混合回退。
 
-Terminal admission leases are retained for seven days and allocation events for 90 days by default. A bounded UTC maintenance job also removes expired session rows, scoped cooldowns, and OpenAI response owners. Current feedback latency is total upstream attempt latency, not true time-to-first-token (TTFT). Account-specific HTTP connection pools, enforced proxy-exit/TLS identity baselines, and Anthropic OAuth/Setup Token accounts are not implemented yet.
+- **Anthropic**：先把候选限制在**分配优先级最低**的值，再偏好更低的错误、延迟、并发和令牌压力。
+- **OpenAI 家族的池**：给所有符合条件的账号打分，取最好的三个，再在它们之间做**带权随机**，避免流量集中在一个凭据上。
+- **会话容量**只对一个可靠的、显式的 Anthropic 会话标识才强制；单独一个 API Key **从不**占用会话容量。
+- 成功的会话亲和用 `putIfAbsent` 写入，使用与读取相同的模型池键，防止并发请求让绑定来回摆动。准入时的亲和和按 API Key 的亲和，仍然只是可选的兼容设置。
 
-## Session Affinity
+**OpenAI Responses 的归属**：保存在 `openai_response_owners` 里，保留 6 小时。已知的链优先选它的产生账号。能从本地响应状态缓存重建的链，必要时可以迁移；未知或不可重建的链，只在**一个**账号上尝试，绝不跨重试扇出。
 
-The service recognizes these headers:
+**保留与反馈**：终态准入租约默认保留 7 天、分配事件 90 天。一个有界的 UTC 维护任务还会清理过期的会话行、作用域冷却和 OpenAI 响应归属。当前的反馈延迟是整次上游尝试的延迟，不是真正的首字时间（TTFT）。账号专属的 HTTP 连接池、强制的代理出口 / TLS 身份基线，以及 Anthropic OAuth / Setup Token 账号，**尚未实现**。
+
+---
+
+## 会话亲和
+
+「会话亲和」让同一个会话尽量落在同一个上游账号上（利用上游缓存、保持上下文）。服务识别这些**请求头**：
 
 - `x-claude-code-session-id`
 - `x-opencode-session`
 - `x-session-affinity`
 - `x-conversation-id`
 
-It also recognizes these request fields:
+以及这些**请求字段**：`conversation_id`、`conversationId`、`thread_id`、`session_id`。
 
-- `conversation_id`
-- `conversationId`
-- `thread_id`
-- `session_id`
+亲和键以 API Key ID 为前缀，当经过账号池服务路由时，还带上解析出的模型池键。所以**不同的 API Key、不同的模型族，不会共享路由亲和**。
 
-The affinity key is prefixed by API key ID and, when routed through the account-pool service, by the resolved model-pool key. Different API keys and different model families therefore do not share routing affinity.
+---
 
-## Current Upstream Adapters
+## 上游适配器
 
-`platform/kiro` sends a Kiro/AWS-compatible payload to the configured upstream endpoint with:
+**`platform/kiro`** 向配置的上游端点发送 Kiro / AWS 兼容的 payload，带有：
 
-- `Authorization: Bearer <account.accessToken>`
-- Kiro/AWS user-agent headers
-- AWS SDK invocation headers
-- endpoint-specific origin and target settings
+- `Authorization: Bearer <account.accessToken>`；
+- Kiro / AWS 的 User-Agent 头、AWS SDK 的调用头；
+- 端点专属的 origin 和 target 设置。
 
-`AwsEventStreamParser` extracts:
+`AwsEventStreamParser` 提取：助手文本、工具调用事件、输入 token、输出 token、缓存读 / 写 token、计量积分。
 
-- assistant text
-- tool use events
-- input tokens
-- output tokens
-- cache read/write tokens
-- metering credits
+**`platform/openai.OpenAiUpstreamClient`** 为官方 OpenAI 和通用的 OpenAI 兼容 API Key 账号发送 Bearer 认证的 JSON 请求。Codex Token 账号使用 ChatGPT 后端的 Responses 端点，通过按账号的单飞刷新路径刷新即将过期的 OAuth 凭据，并在派发前规范化受支持的 GPT-5 模型 ID。
 
-`platform/openai.OpenAiUpstreamClient` sends Bearer-authenticated JSON requests for official OpenAI and generic OpenAI-compatible API-key accounts. Codex token accounts use the ChatGPT backend Responses endpoint, refresh expiring OAuth credentials through a per-account single-flight refresh path, and normalize supported GPT-5 model IDs before dispatch.
+**DeepSeek** 复用 OpenAI 传输和账号的官方 Base URL，而路由和策略由 `platform/deepseek` 拥有：
 
-DeepSeek reuses the OpenAI transport with the account's official base URL, while routing and policy remain owned by `platform/deepseek`:
+- Chat Completions 接受目录里全部四个 DeepSeek ID；
+- Responses **只接受** `deepseek-v4-flash`，Pro 会在调用不受支持的上游**之前**就被 `400` 拒绝；
+- DeepSeek 请求不会启用 GPT 的快速 / 优先模式；
+- 两种响应形状都会被解析成 `PlatformCompletionResult`，交给入站响应工厂。
 
-- Chat Completions accepts all four cataloged DeepSeek IDs.
-- Responses accepts only `deepseek-v4-flash`; Pro is rejected with `400` before an unsupported upstream call.
-- DeepSeek requests do not enable the GPT fast/priority mode.
-- Both response shapes are parsed into `PlatformCompletionResult` for the inbound response factory.
+**`platform/anthropic.AnthropicUpstreamClient`** 用 `x-api-key` 和 `anthropic-version` 头发送原生的 `/messages` 请求，转换工具和内容块，并把 JSON 或 Anthropic SSE 响应解析成 `PlatformCompletionResult`。Anthropic Messages 和 `anthropic/` 路由优先使用这些原生账号，再回退到兼容的 Kiro / AWS 容量。
 
-`platform/anthropic.AnthropicUpstreamClient` sends native `/messages` requests with `x-api-key` and `anthropic-version` headers, translates tools and content blocks, and parses JSON or Anthropic SSE responses into `PlatformCompletionResult`. Anthropic Messages and `anthropic/` routes prefer these native accounts, then fall back to compatible Kiro/AWS capacity.
+**Gemini** 目前**没有**直连 Google 的上游适配器。GenerateContent 是入站兼容协议，其内置别名解析到 Kiro 兼容的目标模型；直连 Google API Key 的账号测试和派发尚未实现。
 
-Gemini currently has no direct Google upstream adapter. GenerateContent is an inbound compatibility protocol whose built-in aliases resolve to Kiro-compatible target models; direct Google API-key account tests and dispatch remain unimplemented.
+---
+
+## 信任边界与维护模式
+
+**Root 是整个服务的信任根。**默认 / 初始的数据库管理员是应用层面的信任根。Flyway V6 把它不可变的 `user_id` 存进 `system_settings.application_root_user_id`；数据库触发器阻止该账号或标记被改名、替换、禁用、降级或删除。只有当数据库里没有用户时，启动引导才会分配这个身份；而**库里已有用户却缺失 Root，会让启动中止**。Root 密码被盗或 Root 会话被劫持，等同于整个服务被攻破。数据管理的安全机制增加了按动作绑定的、短期的二次验证（用于导出、备份、删除和恢复），它防的是「已认证会话被误用 / 被机会性利用」，**不是**一道能在 Root 被攻破后依然成立的边界。
+
+**数据管理的安全密钥**对照一个加盐的 PBKDF2 值校验，该值存放在仅属主可读的外部状态文件里；它**从不**保存在 PostgreSQL，也不会被复制进事件。每一次已脱敏的失败事件，都会和「连续失败计数 + 锁定标志」一起追加到同一次原子状态更新里；持久的分发器只有在数据库审计 / 发件箱入队成功后才移除它。所以连续 5 次验证失败会设置**永久锁定**，并使数据管理授权失效，**而不必等待 PostgreSQL 或 SMTP**。之后，一个最高优先级的 WebFlux 过滤器用一个内存中的、故障关闭的快照，对每个服务命名空间返回 `503 SYSTEM_MAINTENANCE`，同时仍提供静态界面资源、公开系统状态和健康探针。就绪探针变为 `OUT_OF_SERVICE`，存活探针保持 `UP`。从锁定中恢复，需要在启动时显式配置的、可写的仅属主密钥文件：恢复会原子地暂存该文件，提交解锁后的状态，再擦除暂存的密钥，并对「这两步之间崩溃」做启动时的对账。
+
+**安全事件和它的 SMTP 发件箱**存放在专用的 `starry_security` PostgreSQL schema 里，在 `starry_api` 的备份 / 恢复范围之外。审计行拒绝更新 / 删除操作，运行时角色只有追加 / 读取权限。告警复用共享的系统 SMTP 传输，优先使用事件里记录的应用 Root 邮箱；如果当时为空，则每次重试通过不可变的 Root 标记解析当前邮箱，所以之后补上邮箱就能放出待发的告警。投递带租约和指数退避重试。SMTP 必然是「至少一次」而不是「恰好一次」；稳定的安全事件头让接收方可以对「投递 / 确认崩溃后偶尔重复」的邮件去重。密码、密码哈希 / 盐、提交的安全密钥值、会话 / 访问令牌，都被排除在状态事件、审计行、发件箱行、邮件和结构化日志之外。
+
+**校验值 / 锁定文件和短期授权是有意只在实例本地的**。因此，启用数据管理安全机制**只支持恰好一个活动服务实例**；不要部署服务副本或滚动重叠。整个配置的安全目录（含相邻的初始化标记）必须在持久、仅属主的存储上。初始化之后缺失 / 损坏的状态文件会**故障关闭**，而不是允许重新初始化；初始化之后的 `require-initialized` 部署保护还能检测整卷丢失。高可用需要把状态机和授权移到外部的、强一致的安全存储里，这个边界**没有实现**。
+
+**插件的信任边界**：第三方 PF4J 插件**默认禁用**。不可变的应用 Root 必须校验它当前的密码和一个绑定会话的 6 位邮箱挑战，才能开启开发者模式。插件代码获得对宿主服务的完全访问；这是**安装同意边界**，不是安全沙箱。没有实现插件市场或签名要求。`plugin` 包拥有安装、生命周期、配置 / 调试工具和审计；`plugin-api` 是 SDK。兼容性、日志覆盖、恢复和资源清理的限制见 [插件开发](PLUGINS.md)。

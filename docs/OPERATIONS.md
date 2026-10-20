@@ -1,70 +1,74 @@
-# Account Import and Proxy Startup
+# 运维手册
 
-This service becomes a reverse proxy as soon as the `service` module starts. There is no separate proxy worker.
+这份手册面向**管理员和运维**，按「你要完成的任务」组织：启动服务、导入和测试上游账号、调度与熔断、备份恢复、日志保留、在线充值。每个任务都给出可以直接复制的命令；控制台里能点的操作，也会指向对应的 [控制台使用手册](CONSOLE_GUIDE.md) 章节。
 
-## Start the Reverse Proxy
+> Starry API 启动后**本身就是反向代理**，没有单独的「代理进程」要另外启动。
 
-On a fresh PostgreSQL 17 cluster, create the database and least-privilege roles once:
+**目录**：[启动服务](#启动服务) · [登录管理员](#登录管理员) · [导入账号](#导入单个账号) · [测试账号](#测试上游账号) · [账号分配控制](#账号分配控制) · [实验性分级熔断](#实验性分级熔断) · [创建 API Key 与客户端配置](#创建-api-key-与客户端配置) · [数据库备份与数据传输](#数据库备份与数据传输) · [请求日志的聚合与保留](#请求日志的聚合与保留) · [配置在线充值](#配置在线充值)
+
+---
+
+## 启动服务
+
+### 准备数据库（只需一次）
+
+在全新的 PostgreSQL 17 集群上创建数据库和最小权限角色：
 
 ```bash
 export POSTGRES_USER=postgres
 export POSTGRES_DB=starry_api
-export STARRY_POSTGRES_MIGRATION_PASSWORD='<strong-local-migration-password>'
-export STARRY_POSTGRES_APP_PASSWORD='<strong-local-application-password>'
+export STARRY_POSTGRES_MIGRATION_PASSWORD='<强密码-迁移用>'
+export STARRY_POSTGRES_APP_PASSWORD='<强密码-应用用>'
 createdb --username "$POSTGRES_USER" --encoding=UTF8 "$POSTGRES_DB"
 ./docker/postgresql/init/001-starry-api-roles.sh
 ```
 
-Before starting outside Compose, set `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DATABASE=starry_api`, `POSTGRES_USERNAME=starry_api`, `POSTGRES_PASSWORD`, `POSTGRES_MIGRATION_USERNAME=starry_api_migration`, and `POSTGRES_MIGRATION_PASSWORD`.
+在 Compose 之外启动时，还要设置：`POSTGRES_HOST`、`POSTGRES_PORT`、`POSTGRES_DATABASE=starry_api`、`POSTGRES_USERNAME=starry_api`、`POSTGRES_PASSWORD`、`POSTGRES_MIGRATION_USERNAME=starry_api_migration`、`POSTGRES_MIGRATION_PASSWORD`。
 
-Start with Gradle:
-
-```bash
-./scripts/start-proxy.sh
-```
-
-Start on another port:
+### 启动
 
 ```bash
-SERVER_PORT=8081 ./scripts/start-proxy.sh
+./scripts/start-proxy.sh                      # 用 Gradle 启动
+SERVER_PORT=8081 ./scripts/start-proxy.sh      # 换端口
+KIRO_RUN_MODE=jar ./scripts/start-proxy.sh     # 用打好的 boot jar 启动
 ```
 
-Start from the boot jar:
+**首次启动**时，从启动日志里读取生成的 `admin` 初始密码。服务只会在「Root 标记未分配、且 `admin_users` 表为空」时打印**一次**。
 
-```bash
-KIRO_RUN_MODE=jar ./scripts/start-proxy.sh
-```
+---
 
-On first startup, read the generated `admin` password from the startup logs. The service prints it only once when the application Root marker is unassigned and the `admin_users` table is empty.
+## 登录管理员
 
-## Login as Admin
+控制台里直接登录最方便（见 [快速开始](QUICKSTART.md#第-1-步登录并修改初始密码)）。用命令行的话：
 
 ```bash
 curl -X POST http://127.0.0.1:8080/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"<startup-password>"}'
+  -d '{"username":"admin","password":"<启动日志里的密码>"}'
+
+export ADMIN_TOKEN="adm-..."     # 取返回的 data.accessToken
 ```
 
-Export the returned `data.accessToken`:
-
-```bash
-export ADMIN_TOKEN="adm-..."
-```
-
-On first login, change the generated password before using other admin APIs:
+首次登录必须先改密码，才能用其他管理接口：
 
 ```bash
 curl -X POST http://127.0.0.1:8080/auth/password \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{"oldPassword":"<startup-password>","newPassword":"<new-password>"}'
+  -d '{"oldPassword":"<启动日志里的密码>","newPassword":"<新密码>"}'
 ```
 
-Password changes revoke every existing console session for that account. Log in again with the new password and replace `ADMIN_TOKEN` before continuing.
+改密码会让该账号**所有**控制台会话失效，请重新登录并替换 `ADMIN_TOKEN`。
 
-## Import One Account
+---
 
-Minimum payload:
+## 导入单个账号
+
+控制台里点「账号管理 → 新建账号」（[详见](CONSOLE_GUIDE.md#新建账号)）。命令行等价如下。
+
+### Kiro 账号
+
+最小请求体，只有 `accessToken` 必填，`region` 默认 `us-east-1`：
 
 ```bash
 curl -X POST http://127.0.0.1:8080/admin/accounts \
@@ -73,94 +77,95 @@ curl -X POST http://127.0.0.1:8080/admin/accounts \
   -d '{"email":"user@example.com","accessToken":"kiro-access-token","region":"us-east-1"}'
 ```
 
-Only `accessToken` is required. `region` defaults to `us-east-1`.
+### DeepSeek 官方账号
 
-To add an official DeepSeek account, set `provider=DeepSeek`. The service normalizes the authentication method to `api-key`, and a missing `baseUrl` defaults to `https://api.deepseek.com/v1`:
-
-```bash
-curl -X POST http://127.0.0.1:8080/admin/accounts \
-  -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{
-    "email":"deepseek@example.com",
-    "provider":"DeepSeek",
-    "authMethod":"api-key",
-    "accessToken":"sk-..."
-  }'
-```
-
-Use a cataloged `deepseek-chat`, `deepseek-reasoner`, `deepseek-v4-flash`, or `deepseek-v4-pro` ID for official routing; the `starry/` form is also accepted. All four support Chat Completions. Responses currently supports only `deepseek-v4-flash`; other DeepSeek IDs return `400` on that endpoint. A provider-scoped API key rejects model IDs that are absent from the enabled catalog, even when the lower-level route parser recognizes an older alias.
-
-DeepSeek requests are isolated to DeepSeek accounts and do not fall back to OpenAI or Codex. For compatibility, an existing account whose `baseUrl` host is `api.deepseek.com` is recognized as DeepSeek even if its stored provider is `OpenAI-compatible`; ordinary OpenAI/Codex selection excludes it.
-
-To add a native Anthropic API-key account, set `provider=Anthropic` and `authMethod=api-key`. A missing `baseUrl` defaults to `https://api.anthropic.com/v1`:
+设置 `provider=DeepSeek`。服务会把认证方式规范成 `api-key`，缺省的 `baseUrl` 是 `https://api.deepseek.com/v1`：
 
 ```bash
 curl -X POST http://127.0.0.1:8080/admin/accounts \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{
-    "email":"claude@example.com",
-    "provider":"Anthropic",
-    "authMethod":"api-key",
-    "accessToken":"sk-ant-..."
-  }'
+  -d '{"email":"deepseek@example.com","provider":"DeepSeek","authMethod":"api-key","accessToken":"sk-..."}'
 ```
 
-Anthropic Messages and `anthropic/` model routes prefer native Anthropic accounts, then fall back to compatible Kiro/AWS accounts. Bare Claude aliases on OpenAI-compatible endpoints continue to use the Kiro route unless a model mapping selects an `anthropic/` target.
+- 官方路由请用目录里的 `deepseek-chat`、`deepseek-reasoner`、`deepseek-v4-flash`、`deepseek-v4-pro`；`starry/` 前缀形式也接受。四个模型都支持 Chat Completions；**Responses 目前只支持 `deepseek-v4-flash`**，其它 DeepSeek 模型在该端点返回 `400`。
+- 厂商级的 API Key 会拒绝不在已启用目录里的模型 ID，即使底层路由解析器认识那个旧别名。
+- DeepSeek 请求**只在 DeepSeek 账号池内**调度，不会回退到 OpenAI 或 Codex。为了兼容，`baseUrl` 主机是 `api.deepseek.com` 的老账号，即使存的 provider 是 `OpenAI-compatible`，也会被识别成 DeepSeek，普通 OpenAI / Codex 选择会排除它。
 
-### Account allocation controls
+### Anthropic 原生账号
 
-Edit an account in the management console and open **分配策略** to inspect its lifecycle and change priority, concurrency, RPM, burst, session, and in-flight token limits. Lower priority values receive traffic first. Start with the provider defaults and increase capacity gradually; a newly created or restored account uses 10%, 25%, 50%, then 100% capacity while warming.
-
-The scheduler admits each attempt atomically in PostgreSQL. A request can be rejected before dispatch when concurrency, RPM, burst, session, in-flight token capacity, or a matching model/endpoint cooldown is active; the proxy then tries another eligible account without counting the rejected account as an upstream failure. Dispatched leases reserve capacity for at most ten minutes and are reconciled on success/failure. Cancellation and post-dispatch local failures abandon the lease immediately. If a process dies, expired reservations are reclaimed the next time that account is considered.
-
-Use `GET /admin/accounts/{accountId}/allocation-policy` for diagnosis. Check `lifecycleState`, `cooldownUntil`, `activeConcurrency`, and reserved tokens before raising limits. `DEGRADED` remains selectable, while `COOLDOWN`, `QUARANTINED`, and `DISABLED` do not admit traffic. Cooldown/quarantine expiry returns the account to stage-1 warming. A normal `429` does not permanently disable an account or set quota exhausted; only explicit credential-revocation evidence does so for `401/403`. For model/endpoint-local `429` diagnosis, query `account_scoped_cooldowns` and compare its `scope_key` with the upstream model ID or request endpoint.
-
-OpenAI/Codex/DeepSeek/OpenAI-compatible scheduling is stateless and forces `maxSessions=0`. Native Anthropic accounts enforce session capacity only when clients provide a reliable conversation/session identifier. Current latency feedback measures the full upstream attempt, not streaming TTFT. Account-specific connection pools, enforced proxy-exit/TLS identity baselines, and Anthropic OAuth/Setup Token credentials are not yet available.
-
-Codex routing is operator-tunable under 系统设置 -> 账号池设置 -> 账号路由策略. By default Codex accounts are isolated from official OpenAI API keys, ordinary GPT requests use official `sk-` accounts, admission does not create affinity, a bare API key is never treated as a session, and a dispatched Codex request is attempted on only one account. Explicit conversation affinity is committed after a successful upstream result. Enable `gptUsesCodexAccounts` only when ordinary GPT traffic should consume Codex accounts; disabling `isolateCodexPool` additionally permits mixed fallback. Default distinct-account limits are Codex 1, OpenAI/DeepSeek 3, and Anthropic/Kiro 2. Concurrency and RPM remain per-account allocation limits (OpenAI-family default 4/60).
-
-Account-allocation retention runs at `03:35 UTC` by default. Each transaction removes at most `STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE` rows from each supported table, and one run performs at most `STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES` transactions. Terminal leases are retained for seven days and allocation events for 90 days by default; expired session bindings, scoped cooldowns, and response-owner rows are eligible immediately. Monitor table growth and the `Failed account-allocation retention maintenance` warning before increasing either retention period or batch count.
-
-To add an API key from another OpenAI-compatible website, use `provider=OpenAI-compatible`, the site API key as `accessToken`, and the site API root as `baseUrl`:
+设置 `provider=Anthropic`、`authMethod=api-key`，缺省 `baseUrl` 是 `https://api.anthropic.com/v1`：
 
 ```bash
 curl -X POST http://127.0.0.1:8080/admin/accounts \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{
-    "email":"openrouter@example.com",
-    "provider":"OpenAI-compatible",
-    "authMethod":"api-key",
-    "baseUrl":"https://openrouter.ai/api/v1",
-    "accessToken":"sk-or-..."
-  }'
+  -d '{"email":"claude@example.com","provider":"Anthropic","authMethod":"api-key","accessToken":"sk-ant-..."}'
 ```
 
-For a third-party model, first register the public model ID and the `openai-compatible/<actual-model-id>` target in the managed model catalog under the same provider, then create an API key for that provider and add the mapping. For example, map `llama-3.3-70b` to `openai-compatible/meta-llama/llama-3.3-70b-instruct` after both IDs are enabled. Starry API strips the routing prefix before sending the request upstream. Provider-scoped keys validate both sides of a mapping and reject unknown or cross-provider targets. For generic OpenAI-compatible accounts, `baseUrl` can be the site origin (`https://joystar.cc`) or a versioned API base (`https://openrouter.ai/api/v1`). If the path does not already end in a version segment, the runtime and account tester automatically use `/v1/chat/completions` for chat-completion checks.
+Anthropic Messages 请求和 `anthropic/` 模型路由**优先**使用原生 Anthropic 账号，不可用时回退到兼容的 Kiro / AWS 账号。OpenAI 兼容端点上的裸 Claude 别名仍走 Kiro 路由，除非某条模型映射选择了 `anthropic/` 目标。
 
-## Batch Import Accounts
+### 第三方 OpenAI 兼容账号
 
-Edit the sample file:
-
-```text
-examples/accounts.import.json
-```
-
-Import it:
+用 `provider=OpenAI-compatible`，站点的 API Key 作为 `accessToken`，站点 API 根作为 `baseUrl`：
 
 ```bash
-ADMIN_TOKEN="$ADMIN_TOKEN" ./scripts/import-accounts.sh
+curl -X POST http://127.0.0.1:8080/admin/accounts \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -d '{"email":"openrouter@example.com","provider":"OpenAI-compatible","authMethod":"api-key","baseUrl":"https://openrouter.ai/api/v1","accessToken":"sk-or-..."}'
 ```
 
-Import another file:
+要使用第三方模型，需要三步配合：
+
+1. 在「系统设置 → 模型管理」里，把**公开模型 ID** 和 `openai-compatible/<真实模型名>` **目标模型**登记到**同一个厂商**下；
+2. 为该厂商创建一把 API Key；
+3. 添加映射。例如，两个 ID 都启用后，把 `llama-3.3-70b` 映射到 `openai-compatible/meta-llama/llama-3.3-70b-instruct`。
+
+Starry API 会在发往上游前去掉路由前缀。厂商级 Key 会校验映射的两端，拒绝未知或跨厂商的目标。`baseUrl` 可以是站点根（`https://joystar.cc`）或带版本的 API 根（`https://openrouter.ai/api/v1`）；路径没有以版本段结尾时，运行时和账号测试都会自动用 `/v1/chat/completions`。
+
+### OpenAI 官方 Key 与 Codex
+
+OpenAI 官方 Key 示例：
 
 ```bash
-ADMIN_TOKEN="$ADMIN_TOKEN" ./scripts/import-accounts.sh /path/to/accounts.import.json
+curl -X POST http://127.0.0.1:8080/admin/accounts \
+  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -d '{"email":"team@example.com","accessToken":"sk-...","authMethod":"api-key","provider":"OpenAI","baseUrl":"https://api.openai.com/v1"}'
 ```
 
-Request format. You can paste Kiro Account Manager JSON export directly:
+> ⚠️ 只有 `baseUrl` 主机为 `api.openai.com` 的才算「官方 OpenAI API Key」账号，才会服务普通 `gpt-*` 请求。
+
+Codex（ChatGPT 账号）推荐用控制台的「**账号管理 → 新建账号 → ChatGPT 浏览器授权**」，**不需要复制任何 Token**。使用前需要：
+
+- ChatGPT 个人账号在安全设置里**开启设备码登录**；工作区账号则由工作区管理员在权限里开启。
+- 服务器能访问 `auth.openai.com` 和 `chatgpt.com`。
+- 临时登录状态保存在内存里，与发起的管理员绑定，**15 分钟**过期，重启服务会作废未完成的登录（已保存的账号不受影响）。每个管理员最多同时 3 个登录。
+- 它只创建 `provider=OpenAI`、`authMethod=codex` 的账号，对应 `https://chatgpt.com/backend-api/codex`。它不会自动化 ChatGPT 网页，也不会创建 OpenAI API Key 账号。
+- OAuth 的 access / refresh / ID Token 是敏感的数据库凭据：保护好数据库备份，限制数据库访问，**不要**把账号行或 Token 放进日志和工单。重新授权时，如果无法确认新旧 ChatGPT 身份是同一个，会拒绝覆盖。
+- **只适合可信的私有部署**。面向公开、多租户、CI 等不可信的程序化场景，请用 OpenAI Platform API Key 账号。请只授权你有权操作的账号，并遵守 OpenAI 的条款。
+
+---
+
+## 批量导入账号
+
+控制台里：「账号管理 → 批量导入」（[详见](CONSOLE_GUIDE.md#批量导入)）。命令行方式：
+
+```bash
+ADMIN_TOKEN="$ADMIN_TOKEN" ./scripts/import-accounts.sh                       # 导入 examples/accounts.import.json
+ADMIN_TOKEN="$ADMIN_TOKEN" ./scripts/import-accounts.sh /path/to/accounts.json  # 导入别的文件
+```
+
+**支持的导入格式**：
+
+- Kiro Account Manager 的 JSON 导出；
+- 单个账号对象、账号数组，或 `{ "accounts": [...] }`；
+- 多个导入文档：`{ "documents": [...] }`，每个文档可以是任意受支持的格式；
+- Codex Token JSON：`type: "codex"`，`access_token`、`refresh_token`、`id_token`；
+- OpenAI 兼容配置块：`openai-compatibility[].api-key-entries[]`，含 `api-key`，可选 `base-url`、`proxy-url`。
+
+Kiro Account Manager 的格式可以直接粘贴：
 
 ```json
 {
@@ -184,9 +189,7 @@ Request format. You can paste Kiro Account Manager JSON export directly:
         "authMethod": "IdC",
         "provider": "BuilderId"
       },
-      "usage": {
-        "limit": 1000000
-      }
+      "usage": { "limit": 1000000 }
     }
   ],
   "groups": [],
@@ -194,92 +197,139 @@ Request format. You can paste Kiro Account Manager JSON export directly:
 }
 ```
 
-Import behavior:
+**导入规则**
 
-- `upsert=false` or omitted: imported entries with an existing email are skipped.
-- `upsert=true`: imported entries with an existing email update that account.
-- Kiro Account Manager `id` is accepted as an imported `accountId`, but duplicate detection is based on normalized email.
-- Missing or colliding `id/accountId`: the service generates a new internal `accountId`, so a different email is created as a separate account.
-- `credentials.accessToken` or top-level `accessToken` is required for import. Accounts with refresh credentials are refreshed in the background every hour by default; if Kiro still reports an invalid bearer token, the service refreshes once immediately and retries. IdC/BuilderId accounts also need `clientId` and `clientSecret`.
-- Each item returns `CREATED`, `UPDATED`, `SKIPPED`, or `FAILED`.
+| 情形 | 行为 |
+| --- | --- |
+| `upsert=false` 或省略 | 邮箱已存在的条目被**跳过** |
+| `upsert=true` | 邮箱已存在的条目**更新**那个账号 |
+| 重复判断依据 | **规范化后的邮箱**。Kiro 的 `id` 只当作外部 `accountId` 接受 |
+| `id` / `accountId` 缺失或与现有行冲突 | 服务生成新的内部 `accountId`，所以邮箱不同的会作为**另一个账号**创建 |
+| 必填 | `credentials.accessToken` 或顶层 `accessToken` |
+| 带刷新凭据的账号 | 默认每小时后台刷新一次；如果 Kiro 仍报 Token 无效，会立刻刷新一次并重试。IdC / BuilderId 账号还需要 `clientId` 和 `clientSecret` |
+| 每条的结果 | `CREATED`、`UPDATED`、`SKIPPED`、`FAILED` |
 
-## Test Upstream Accounts
+控制台可以一次上传多个 `.json` 文件，在浏览器里解析，每个文件提交一次导入请求，全部完成后汇总结果。
+
+---
+
+## 测试上游账号
+
+控制台里点账号行的「**测试**」。命令行批量测试：
 
 ```bash
 curl -X POST http://127.0.0.1:8080/admin/accounts/test \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{
-    "onlyEnabled": true,
-    "model": "simple-task",
-    "prompt": "Reply OK in one short sentence.",
-    "maxConcurrency": 3
-  }'
+  -d '{"onlyEnabled": true, "model": "simple-task", "prompt": "Reply OK in one short sentence.", "maxConcurrency": 3}'
 ```
 
-Add `accountIds` to test specific accounts only:
+只测指定账号时加 `accountIds`：
 
 ```json
-{
-  "accountIds": ["kiro-main"],
-  "onlyEnabled": true
-}
+{ "accountIds": ["kiro-main"], "onlyEnabled": true }
 ```
 
-DeepSeek account tests default to `deepseek-v4-flash`; the account row can also be tested with any other cataloged DeepSeek ID. For every provider, a normal `429` means transient capacity or rate limiting rather than a permanently exhausted quota. Manual and scheduled tests increment `errorCount` without setting `quotaExhaustedAt`, disabling, or suspending the account.
+要点：
 
-## Operate the Experimental Tiered Circuit Breaker
+- DeepSeek 账号测试默认用 `deepseek-v4-flash`，账号行也可以选别的目录里的 DeepSeek ID 来测。
+- 对所有厂商来说，普通的 `429` 表示**暂时的**容量或限流，不是永久额度耗尽。手动和定时测试会让 `errorCount` 加一，但**不会**设置 `quotaExhaustedAt`、禁用或挂起账号。
+- 测试方式：Kiro 走 Kiro 上游客户端；OpenAI 和 DeepSeek API Key 账号走 `/chat/completions`；Codex 走 `/responses`；Anthropic API Key 走 `/messages`。Google / Gemini 的 Key 记录可以存储，但直连测试目前对该账号返回 `501`（没有接 Google 上游客户端）。
+- `updateStatus` 默认 `true`；只有想让测试**不改变账号状态**时才设成 `false`。测试成功会重新启用账号并清除挂起 / 额度状态。
 
-The **tiered account-pool circuit-breaker policy** is experimental and disabled by default. The ordinary account page exposes an **Enable experimental feature** entry point; enabling it requires an instability confirmation. Keep it disabled for critical traffic until primary/secondary capacity, alerting, and rollback have been tested: false trips, routing oscillation, and monitoring-schema changes are still possible.
+---
 
-With the policy disabled, the account page remains in ordinary management mode and hides the circuit banner, circuit metrics, tier controls, and weights. Enabling it changes the entire page to read-only model-pool monitoring; account create, edit, import, test, reset, and delete actions are hidden until the policy is disabled again. The enabled layout keeps the experimental label, instability warning, and disable switch visible.
+## 账号分配控制
 
-Prepare tier assignments through the admin API before enabling the policy. Tier membership is stored per account and applies to all supported model families for that account's provider. Assign at least one healthy secondary account to every provider that must remain available during an open circuit:
+编辑账号 →「**分配策略**」标签页（[详见](CONSOLE_GUIDE.md#分配策略)）。下面是原理和运维建议。
+
+### 它做什么
+
+调度器在 PostgreSQL 里**原子地**决定每次尝试能不能被某个账号接收。请求在发往上游之前，可能因为并发、RPM、突发、会话、在途令牌容量，或匹配的模型 / 端点冷却而被拒绝；此时代理会**换一个**符合条件的账号，**不会**把被拒绝的账号算作上游失败。
+
+- 已派发的租约最多预留容量 **10 分钟**，并在成功 / 失败时核销。取消和派发后的本地失败会立刻放弃租约。进程意外退出时，过期的预留会在下次考虑该账号时被回收。
+- 数值**越小越优先**。从厂商默认值开始，逐步增加容量；新建或恢复的账号会按 10% → 25% → 50% → 100% 预热。
+
+### 诊断一个账号
+
+```bash
+curl http://127.0.0.1:8080/admin/accounts/<accountId>/allocation-policy -H "Authorization: Bearer $ADMIN_TOKEN"
+```
+
+调高限额之前，先看 `lifecycleState`、`cooldownUntil`、`activeConcurrency` 和预留令牌。`DEGRADED` 仍可被选中；`COOLDOWN`、`QUARANTINED`、`DISABLED` 不接收流量。冷却 / 隔离到期后回到第 1 阶段预热。普通的 `429` **不会**永久禁用账号，也不会设置额度耗尽；只有明确的凭据吊销证据才会让 `401/403` 禁用账号。诊断模型 / 端点级的 `429`，可以查询 `account_scoped_cooldowns`，把 `scope_key` 与上游模型 ID 或请求端点对比。
+
+### 无状态与会话
+
+OpenAI / Codex / DeepSeek / OpenAI 兼容账号的调度是**无状态**的，`maxSessions` 强制为 0。原生 Anthropic 账号只有在客户端提供可靠的会话标识时才会执行会话容量限制。目前的延迟反馈衡量的是**整次上游尝试**，不是流式的首字时间（TTFT）。账号级连接池、强制的代理出口 / TLS 身份基线、Anthropic OAuth / Setup Token 凭据暂未提供。
+
+### 账号路由策略
+
+「系统设置 → 账号池设置 → 账号路由策略」。默认：
+
+- Codex 账号与官方 OpenAI API Key **隔离**；普通 GPT 请求只用官方 `sk-` 账号；
+- 准入时**不**建立亲和；单独的 API Key **不会**被当成会话；已派发的 Codex 请求只尝试**一个**账号；
+- 显式的会话亲和在上游成功后才提交。
+
+只在普通 GPT 流量应该消耗 Codex 账号时，才开启 `gptUsesCodexAccounts`；再关闭 `isolateCodexPool` 就允许混合回退。默认的「换账号次数上限」：Codex 1、OpenAI / DeepSeek 3、Anthropic / Kiro 2。并发和 RPM 仍然是每个账号自己的分配限制（OpenAI 系默认 4 / 60）。
+
+### 保留与清理
+
+账号分配的清理默认在 **03:35 UTC** 运行。每个事务对每张支持的表最多删除 `STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE` 行，一次运行最多 `STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES` 个事务。默认保留终态租约 7 天、分配事件 90 天；过期的会话绑定、作用域冷却和响应归属行**立即**可清理。在调大保留期或批次数之前，请关注表的增长和 `Failed account-allocation retention maintenance` 警告。
+
+---
+
+## 实验性分级熔断
+
+「账号池设置」页里的「**账号池分级熔断策略**」是**实验性**功能，**默认关闭**。在关键业务上请先测试好主 / 备容量、告警和回滚再启用：误熔断、路由抖动和监控口径变化都仍有可能发生。
+
+- 关闭时，账号页保持普通管理模式，隐藏熔断横幅、指标、分层控件和权重。
+- 启用需要确认「不稳定」提示，并且会让**整个账号页变成只读的模型池监控**——新建、编辑、导入、测试、重置、删除都被隐藏，直到你再关闭它。
+
+### 启用前：先分好主 / 备
+
+分层是**按账号**存的，对该账号所属厂商的所有模型族生效。**每个需要在熔断期间保持可用的厂商，至少要有一个健康的备用（secondary）账号**：
 
 ```bash
 curl -X PATCH http://127.0.0.1:8080/admin/accounts/openai-secondary \
-  -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d '{"poolTier":"secondary","poolWeight":100}'
 ```
 
-Enable the policy only after assignments are complete. Each disabled-to-enabled transition creates a new circuit epoch and activation boundary, so the first 30-second reconciliation starts with a clean observation window and includes only requests captured after this activation:
+分层都配好之后再启用。每次从关到开都会创建**新的熔断纪元**和激活边界，所以第一次 30 秒对账从一个干净的观察窗口开始，只包含这次激活之后的请求：
 
 ```bash
 curl -X PATCH http://127.0.0.1:8080/admin/accounts/settings \
-  -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d '{"poolPolicy":{"enabled":true}}'
 ```
 
-Every resolved upstream model is assigned to a bounded `provider:model-family` circuit, such as `openai:gpt-5` or `deepseek:deepseek-v4`. Unknown models are grouped under `provider:other`, not allocated arbitrary keys. The states have these operational meanings:
+### 它怎么运转
 
-- `CLOSED`: primary accounts handle traffic; the circuit opens after the configured window reaches `minSampleSize` and `failoverThresholdPercent`.
-- `OPEN`: only secondary accounts handle traffic during the full `retestIntervalMinutes` cooldown.
-- `HALF_OPEN`: up to `retestMaxConcurrency` real client requests probe primary accounts; other requests continue on secondary. The pool closes at or above `recoveryThresholdPercent`, otherwise it reopens.
+每个解析后的上游模型被分到一个有界的 `厂商:模型族` 熔断器，如 `openai:gpt-5`、`deepseek:deepseek-v4`；未知模型归入 `厂商:other`，不会分配任意的键。三种状态：
 
-The field names `retestIntervalMinutes` and `retestMaxConcurrency` are retained for API compatibility but now mean half-open cooldown and probe budget. `retestThresholdPercent` is also retained for compatibility and does not independently transition a circuit. The state machine never fans synthetic tests out to all accounts. Manual account tests and the separately configured disabled-account test scheduler remain independent administrative features.
+| 状态 | 含义 |
+| --- | --- |
+| `CLOSED` | 主账号处理流量；窗口达到 `minSampleSize` 和 `failoverThresholdPercent` 后熔断器打开 |
+| `OPEN` | 在完整的 `retestIntervalMinutes` 冷却期内，只有备用账号处理流量 |
+| `HALF_OPEN` | 最多 `retestMaxConcurrency` 个**真实客户端请求**去探测主账号，其余流量仍走备用。达到 `recoveryThresholdPercent` 则关闭，否则重新打开 |
 
-Fetch the native per-model-family snapshot with:
+`retestIntervalMinutes` 和 `retestMaxConcurrency` 两个字段名为了 API 兼容而保留，现在的含义分别是「半开前的冷却」和「探测额度」；`retestThresholdPercent` 同样只为兼容，不会独立触发状态变化。状态机**从不**向所有账号群发合成测试。手动账号测试和单独配置的「禁用账号定时测试」仍然是独立的管理功能。
+
+### 监控
 
 ```bash
-curl http://127.0.0.1:8080/admin/accounts/pool-status \
-  -H "Authorization: Bearer $ADMIN_TOKEN"
+curl http://127.0.0.1:8080/admin/accounts/pool-status -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-Use `data.modelPools` as the source of truth. Alert on `state != CLOSED`, a missing `secondaryAccountCount` for a required provider, sustained secondary failures, and probes that repeatedly return to `OPEN`. `nextProbeAt`, `halfOpenInFlight`, `halfOpenCompleted`, and `halfOpenSucceeded` distinguish cooldown from active recovery. Aggregate fields such as `activeTier` and `primaryDisabled` are retained for older clients and may represent several model pools at once.
+以 `data.modelPools` 为准。建议告警：`state != CLOSED`；某个必须有备用的厂商缺少 `secondaryAccountCount`；备用账号持续失败；探测反复回到 `OPEN`。`nextProbeAt`、`halfOpenInFlight`、`halfOpenCompleted`、`halfOpenSucceeded` 可以区分是在冷却还是在主动恢复。`activeTier`、`primaryDisabled` 这类聚合字段只为老客户端保留，可能同时代表多个模型池。
 
-Each request log persists `circuit_epoch`, `circuit_key`, `circuit_tier`, `upstream_model`, and nullable `upstream_success`. `success` is the final client-visible outcome; `upstream_success=true` also covers an upstream success followed by local usage-settlement failure, preventing the circuit from blaming the provider. Each activation has a fresh UUID epoch, so inspect only the current epoch and activation boundary when diagnosing a transition:
+每条请求日志会持久化 `circuit_epoch`、`circuit_key`、`circuit_tier`、`upstream_model` 和可空的 `upstream_success`。`success` 是客户端看到的最终结果；`upstream_success=true` 还涵盖「上游成功但本地用量结算失败」的情况，避免把责任算到上游头上。诊断某次状态变化时，只看**当前纪元**和激活边界：
 
 ```sql
 WITH policy AS (
     SELECT
-        NULLIF(max(setting_value) FILTER (
-            WHERE setting_key = 'account_pool_policy_epoch'
-        ), '')::uuid AS circuit_epoch,
-        NULLIF(max(setting_value) FILTER (
-            WHERE setting_key = 'account_pool_policy_activation_started_at'
-        ), '')::timestamptz AS activation_started_at
+        NULLIF(max(setting_value) FILTER (WHERE setting_key = 'account_pool_policy_epoch'), '')::uuid AS circuit_epoch,
+        NULLIF(max(setting_value) FILTER (WHERE setting_key = 'account_pool_policy_activation_started_at'), '')::timestamptz AS activation_started_at
     FROM starry_api.system_settings
 )
 SELECT
@@ -287,18 +337,11 @@ SELECT
     circuit_tier,
     count(*) AS requests,
     count(*) FILTER (WHERE upstream_success IS FALSE) AS failures,
-    round(
-        100.0 * count(*) FILTER (WHERE upstream_success IS FALSE)
-        / NULLIF(count(*), 0),
-        2
-    ) AS failure_rate_percent
+    round(100.0 * count(*) FILTER (WHERE upstream_success IS FALSE) / NULLIF(count(*), 0), 2) AS failure_rate_percent
 FROM starry_api.request_logs
 CROSS JOIN policy
 WHERE request_logs.circuit_epoch = policy.circuit_epoch
-  AND created_at >= GREATEST(
-      CURRENT_TIMESTAMP - INTERVAL '5 minutes',
-      policy.activation_started_at
-  )
+  AND created_at >= GREATEST(CURRENT_TIMESTAMP - INTERVAL '5 minutes', policy.activation_started_at)
   AND created_at < CURRENT_TIMESTAMP
   AND circuit_key IS NOT NULL
   AND upstream_success IS NOT NULL
@@ -306,20 +349,23 @@ GROUP BY circuit_key, circuit_tier
 ORDER BY circuit_key, circuit_tier;
 ```
 
-Local outcomes update a circuit immediately. A non-overlapping reconciliation runs every 30 seconds and reads the indexed PostgreSQL window; policy-setting notifications also trigger an immediate reconciliation. The query filters by the current UUID epoch, explicit lower and upper time bounds, and the nullable `upstream_success` marker. Before the query, the instance captures a log-persistence confirmation generation. Only outcomes confirmed before that generation are replaced by the shared baseline; commits confirmed during the query remain as a local delta until the next pass, and failed log writes remain in local-only minute buckets until they age out. This can briefly double-count a just-committed outcome but cannot create a missing-sample gap. It counts successful calls, retryable transport failures, and provider-declared retryable `408`, `409`, and `5xx` outcomes; account-scoped `401`, `402`, `403`, and `429` outcomes and non-retryable parser failures remain `NULL` and are excluded. It does not call an upstream API. In multi-instance deployments, circuit state is instance-local and normally converges on the shared log window within one reconciliation interval. Route-level behavior may briefly differ across instances after a failure burst.
+**同步细节**：本地结果立刻更新熔断器；每 **30 秒**有一次不重叠的对账，读取带索引的 PostgreSQL 窗口，策略设置变更的通知也会触发一次立即对账。查询按当前 UUID 纪元、明确的上下时间边界和可空的 `upstream_success` 过滤。它统计成功调用、可重试的传输失败、上游声明可重试的 `408`、`409`、`5xx`；账号级的 `401`、`402`、`403`、`429` 和不可重试的解析失败是 `NULL`，被排除。它**不会**调用任何上游 API。多实例部署时，熔断状态是各实例本地的，通常会在一个对账周期内通过共享日志窗口收敛，故障突发后各实例的路由行为可能短暂不一致。
 
-Policy settings synchronize separately and immediately through PostgreSQL `LISTEN/NOTIFY` on `starry_api_system_settings`. Each service instance synchronously loads the policy and indexed window before application readiness, then uses a dedicated listener connection and a single-flight guard for matching `account_pool_policy_*` updates. Full invalidation after listener reconnect cancels stale refresh generations but retains the last-known-good policy and circuit state until the replacement query succeeds; a transient refresh failure therefore cannot silently restore all-tier routing. Monitor for `PostgreSQL setting notification listener disconnected; reconnecting` and confirm the listener recovers; its retry backoff is capped at 30 seconds.
+策略设置通过 PostgreSQL 的 `LISTEN/NOTIFY`（通道 `starry_api_system_settings`）单独、即时地同步。每个实例在就绪前同步加载策略和带索引的窗口，之后用专用的监听连接和单飞保护处理匹配的 `account_pool_policy_*` 更新。监听重连后的完全失效会取消过期的刷新，但保留最近一次可用的策略和熔断状态，直到替代查询成功，所以临时的刷新失败不会悄悄恢复成「所有层级都路由」。请监控 `PostgreSQL setting notification listener disconnected; reconnecting`，并确认它能恢复；重试退避上限 30 秒。
 
-To roll back circuit routing, disable the policy. This resets local circuit state and restores ordinary account management; all provider-eligible accounts are considered without circuit-tier filtering. A later re-enable creates a new epoch and does not restore the previous activation's window:
+**回滚**：关闭策略。这会重置本地熔断状态并恢复普通账号管理，所有厂商可用账号不再按熔断层级过滤。之后再次启用会创建新纪元，不会恢复上一次激活的窗口：
 
 ```bash
 curl -X PATCH http://127.0.0.1:8080/admin/accounts/settings \
-  -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" \
   -d '{"poolPolicy":{"enabled":false}}'
 ```
 
-## Create a Proxy API Key
+---
+
+## 创建 API Key 与客户端配置
+
+控制台里的操作见 [快速开始：创建 API Key](QUICKSTART.md#第-3-步创建一个-api-key)。命令行：
 
 ```bash
 curl -X POST http://127.0.0.1:8080/admin/api-keys \
@@ -328,234 +374,23 @@ curl -X POST http://127.0.0.1:8080/admin/api-keys \
   -d '{"name":"default","creditsLimit":1000,"modelProvider":"OpenAI"}'
 ```
 
-`modelProvider` must match an enabled provider returned by `/v1/models`. Both the requested model and any mapped target must exist in that provider's enabled catalog. Save the returned `data.key`, then call the proxy with it:
+`modelProvider` 必须匹配 `/v1/models` 返回的某个已启用厂商。**请求的模型和任何映射目标，都必须在该厂商已启用的目录里。**保存返回的 `data.key`，然后用它调用：
 
 ```bash
 export STARRY_API_KEY="sk-..."
-
-curl http://127.0.0.1:8080/v1/models \
-  -H "Authorization: Bearer $STARRY_API_KEY"
+curl http://127.0.0.1:8080/v1/models -H "Authorization: Bearer $STARRY_API_KEY"
 ```
 
-OpenAI-compatible clients should use:
+OpenAI 兼容客户端：
 
 ```text
 Base URL: http://127.0.0.1:8080/v1
 API Key:  sk-...
 ```
 
-OpenCode should use a project-level custom provider backed by the OpenAI-compatible endpoint:
+控制台的 API Key 页可以生成现成的客户端配置（[详见](CONSOLE_GUIDE.md#客户端配置)）。下面是它们的内容，方便你手动配置。
 
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "enabled_providers": ["starry"],
-  "model": "{env:OPENCODE_MODEL}",
-  "small_model": "{env:OPENCODE_SMALL_MODEL}",
-  "provider": {
-    "starry": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Starry API",
-      "options": {
-        "baseURL": "http://127.0.0.1:8080/v1",
-        "apiKey": "{env:OPENCODE_STARRY_API_KEY}"
-      },
-      "models": {
-        "gpt-5.5": { "name": "GPT-5.5" },
-        "gpt-5.4-mini": { "name": "GPT-5.4 Mini" }
-      }
-    }
-  }
-}
-```
-
-The `enabled_providers` entry prevents OpenCode from falling back to a local/global OpenAI credential when the Starry API key is selected in the WebUI.
-New API keys retain the full value for their owner and can be copied directly from the WebUI. Legacy hash-only keys retain only their prefix; paste the original full key into the setup dialog or recreate the key before copying an OpenCode script. A `REPLACE_REST_OF_KEY` placeholder will not authenticate.
-OpenCode may send a separate `small_model` request for lightweight tasks such as title generation. This is a second client request using the same API key/account affinity, not a fan-out to every upstream account.
-
-The WebUI API Key page can generate copy-ready scripts for generic shell variables, Claude Code, OpenCode, or all client settings at once.
-It now includes OpenAI, Anthropic, Gemini, OpenCode, and generic Starry API variables.
-
-## Database Backup and Data Transfer
-
-Log in as an administrator and open `数据管理`.
-
-Available operations:
-
-- `导出 DUMP`: downloads a PostgreSQL custom-format archive containing schema and data.
-- `下载 ZIP`: downloads a portable package containing `database.dump`, `metadata.json`, and a README.
-- `创建备份`: writes a `.zip` package containing `database.dump` and metadata to the server backup directory.
-- `导入并恢复`: uploads a PostgreSQL `.dump` or Starry API `.zip` package and restores it into the current database.
-
-The default/initial administrator is the application-level root. Protect its password and sessions as credentials for the entire service: if either leaks, assume full service compromise and rotate all affected credentials. The generated bootstrap password is printed once at first startup and must be changed immediately; outside that bootstrap handoff, the incident pipeline never records or emails login passwords, password hashes/salts, the data-management key, an incorrect submitted value, or session/data-management tokens. The data-management security key is an additional confirmation for high-risk database actions, not protection against an attacker who already controls the root account.
-
-Only the application root can access Data Management, including status, backup listing, exports, initialization and recovery imports. The console hides this module from ordinary administrators and direct API calls are rejected, even with a valid security key. Flyway V6 anchors its `user_id` in `application_root_user_id`; database triggers prevent replacement, rename, disablement, demotion, deletion, or marker changes. Other administrators cannot modify or reset Root, and only Root can obtain or use any data-management grant. Startup creates Root only in an empty user database, validates it synchronously before readiness, and aborts rather than recreating a missing Root in a populated database. The initialization response reveals the `dmsk-...` key once; copy it directly to a controlled password manager and keep an encrypted offline recovery copy. The WebUI intentionally does not download a plaintext key file. Before each protected action, request a five-minute action-bound grant from `/admin/data-transfer/security/unlock`, then pass its `dmt-...` value in `X-Data-Management-Token`. `DOWNLOAD_BACKUP` and `DELETE_BACKUP` grants are also bound to the exact filename. Delete and restore grants are single-use.
-
-Each wrong key attempt is first committed with the counter/lock state to the owner-only security file, then replayed idempotently into the append-only `starry_security` audit schema and durable SMTP outbox. The event contains the initiating account snapshot, root flag, direct remote address, validated forwarded IP literals, irreversible User-Agent/request-ID/session fingerprints, endpoint, attempt number, and lock state. It is queued even when Root has no email. If the system SMTP transport is configured, delivery prefers the captured Root email and otherwise resolves the current Root email on every retry, so binding an email later releases the pending alert. Failed or unavailable delivery is retried with exponential backoff and logged with `alert_delivery=NOT_DELIVERED`; standard SMTP is at-least-once, so a post-acceptance crash may repeat a message with the same `X-Starry-Security-Event-Id`. The fifth failure permanently locks data management and puts the entire site into maintenance without waiting for audit or SMTP: only static UI assets, `/system/status`, and health checks remain available; all auth, admin, proxy, and payment calls return `503 SYSTEM_MAINTENANCE`. Kubernetes-style readiness reports `OUT_OF_SERVICE`, while liveness stays `UP` so an automatic restart cannot bypass the lock.
-
-Maintenance mode also fails closed for business background work. Subsequent account token refreshes and account-pool evaluations, disabled-account tests, payment reconciliations, usage aggregation/retention, performance-metric writes, account-cache refreshes, and registration-token cleanup are skipped. Lock-state refresh, pending security-incident persistence, the SMTP security-alert outbox, health checks, and in-memory session/rate-limit cleanup continue running. A task that passed the gate before the fifth failure is not forcibly interrupted; isolate the deployment if immediate termination of already-running external calls is required.
-
-Run exactly one active service instance after enabling this feature. The verifier/lock state and short-lived grants are instance-local; replicas or rolling overlap are unsupported. Persist the entire directory containing `STARRY_DATA_MANAGEMENT_SECURITY_FILE`, including its adjacent `.initialized` marker, with owner-only permissions. After initialization and backup verification, set `STARRY_DATA_MANAGEMENT_REQUIRE_INITIALIZED=true` and restart. Never delete files to recover: a missing JSON with a surviving marker, or a completely missing volume while that deployment guard is enabled, fails closed.
-
-### Recover a Docker Compose deployment
-
-The runtime image contains the reviewed recovery utility at the fixed path `/app/bin/recover-data-management`; do not download a recovery script at incident time and never use `curl ... | sh` for this operation. The utility requires an interactive TTY, reads the original `dmsk-...` key twice with terminal echo disabled, and writes it only to the owner-only one-time file `/app/security/recovery.key`. It rejects command-line or piped secret input, so the key is not exposed through shell history, process arguments, or `docker inspect`.
-
-Stop normal traffic and make sure exactly one `service` container is active. For a server installed under `/opt/starry-api`, choose Chinese or English prompts and run:
-
-```bash
-cd /opt/starry-api
-docker compose -f docker-compose.artifact.yml exec service \
-  /app/bin/recover-data-management --lang zh
-# English prompts: replace "--lang zh" with "--lang en".
-
-docker compose -f docker-compose.artifact.yml restart service
-```
-
-Do not add Compose's `-T` option: the hidden, double-entry prompt deliberately requires a TTY. The utility verifies that the site is currently in maintenance before creating the fixed recovery file. It does not restart its own container, so the explicit restart is required. For a source deployment using the repository `docker-compose.yml`, use the same commands without `-f docker-compose.artifact.yml`.
-
-After the service finishes starting, verify both the public status and one-time-file consumption:
-
-```bash
-docker compose -f docker-compose.artifact.yml exec service \
-  curl -fsS http://127.0.0.1:8080/system/status
-docker compose -f docker-compose.artifact.yml exec service \
-  sh -c 'test ! -e /app/security/recovery.key && test ! -e /app/security/.recovery.key.consuming && echo "recovery key files consumed"'
-```
-
-A normal matching attempt produces `"maintenance":false`, resets the failed-attempt count, records `RECOVERY_SUCCEEDED`, and consumes both recovery paths. A normal readable, valid-format but nonmatching attempt records `RECOVERY_FAILED`, consumes both paths, and leaves the service running in maintenance; rerun the interactive utility with the correct key and restart once more.
-
-Do not declare recovery or consumption complete from an audit record alone. If truncating, deleting, or synchronizing the one-time file fails, the current process remains fail-closed even if the matching state commit and `RECOVERY_SUCCEEDED` record already exist. Inspect names and permissions without printing their contents:
-
-```bash
-docker compose -f docker-compose.artifact.yml exec service \
-  sh -c 'ls -ld /app/security; ls -l /app/security/recovery.key /app/security/.recovery.key.consuming 2>/dev/null || true'
-docker compose -f docker-compose.artifact.yml logs --tail=200 service
-```
-
-Do not stage another key or manually delete either file while cleanup is unresolved. Correct the security-volume ownership, permissions, free-space, or filesystem error, then restart `service`; startup retries cleanup of `/app/security/.recovery.key.consuming`. Recovery is complete only after `/system/status` reports `"maintenance":false` and both paths are absent. If the process stops before a valid recovery state commit rather than during cleanup, the next startup restores the staged file to `/app/security/recovery.key` and safely retries the transaction.
-
-### Recover a direct host/JAR deployment
-
-For a service running directly on the host, stop normal traffic and all service replicas, place the original key alone in a writable owner-only regular file (`chmod 600`), set `STARRY_DATA_MANAGEMENT_RECOVERY_KEY_FILE` to that absolute path, and start exactly one service instance. After validation succeeds, the service atomically stages the file, commits the recovered state, then truncates, deletes, and synchronizes the staged one-time key. Confirm the recovery audit event, `"maintenance":false`, and that both the configured file and its `.<file-name>.consuming` sibling are gone before unsetting the variable. A readable, valid-format but nonmatching key is normally recorded and consumed while maintenance remains active. A cleanup failure retains fail-closed maintenance and is retried at startup as described above. Do not use a symlink or read-only secret mount, and never leave a plaintext recovery key configured during ordinary operation.
-
-Importing data is intentionally guarded. The WebUI asks you to type:
-
-```text
-RESTORE_DATABASE
-```
-
-Before every import, the service validates the custom archive with `pg_restore` and then checks the archive TOC. Only PostgreSQL 17 archives for database/schema `starry_api` are accepted; after restore their Flyway V1-V19 scripts and checksums must exactly match the running application, the immutable Root marker must resolve to the one enabled `ADMIN` Root, and the core application tables must be present without objects from another schema. The separate `starry_security` audit/outbox schema is intentionally absent from archives and survives application restores. The runtime image includes PostgreSQL 17 client tools; hosts running the jar directly must provide PostgreSQL 17 `pg_dump` and `pg_restore` commands in `PATH`.
-
-Backups use a PostgreSQL session shared advisory lock and restores use the matching exclusive lock. These locks coordinate all service instances, not only threads in one JVM. After acquiring the exclusive lock, restore performs this sequence:
-
-1. Revoke database `CONNECT` from `starry_api_runtime` and terminate existing `starry_api` backends.
-2. Create a server-side rollback backup from the quiesced database.
-3. Run `pg_restore --clean --if-exists --single-transaction --exit-on-error` for schema `starry_api`.
-4. Verify that schema `starry_api`, all required core tables, the exact Flyway V1-V19 history/checksums, the V5 circuit-epoch column/index/settings, and exactly one enabled `admin` Root matching `application_root_user_id` exist. Also verify that `starry_security` retained its append-only trigger, least-privilege runtime ACL, and secret-free schema, then run `ANALYZE` while runtime access is still disabled. If validation or analysis fails after the incoming restore committed, automatically clean-restore the pre-restore dump and validate and analyze the rollback result before reopening access.
-5. Restore `CONNECT` in a `finally` path, then clear local sessions and database-derived caches even when restore failed after entering isolation.
-6. Let other instances reconnect their PostgreSQL notification listeners; every successful listener reconnect performs the same full local-state invalidation. Generation checks prevent pre-restore asynchronous cache loads from publishing stale state afterward.
-
-The restore window is intentionally disruptive. Route no new traffic to the deployment, expect in-flight API/database requests to fail, and expect administrators to sign in again afterward. Restore is destructive even though it is transactional, so retain an offline backup in addition to the automatically created rollback package.
-
-After either a successful or failed restore, verify runtime access and connection recovery with a migration/superuser session:
-
-```sql
-SELECT pg_catalog.has_database_privilege(
-    'starry_api_runtime',
-    'starry_api',
-    'CONNECT'
-) AS runtime_connect_restored;
-
-SELECT pid, usename, application_name, state
-FROM pg_catalog.pg_stat_activity
-WHERE datname = 'starry_api'
-ORDER BY pid;
-```
-
-`runtime_connect_restored` must be `true`. If both the primary and fallback `finally` connection failed during a database/network outage, restore access as the database owner or cluster administrator before restarting application instances:
-
-```sql
-GRANT CONNECT ON DATABASE starry_api TO starry_api_runtime;
-```
-
-Deployment notes:
-
-- Docker and prebuilt artifact deployments mount backups at `./data/backups:/app/backups`.
-- Override the backup directory with `STARRY_BACKUP_DIR`.
-- Override the upload/import size limit with `STARRY_MAX_IMPORT_BYTES` in bytes. The default is `268435456` bytes.
-
-Admin API examples:
-
-```bash
-curl -X POST http://127.0.0.1:8080/admin/data-transfer/security/init \
-  -H "Authorization: Bearer $ADMIN_TOKEN"
-
-curl -X POST http://127.0.0.1:8080/admin/data-transfer/security/unlock \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"securityKey":"<offline-data-management-key>","action":"EXPORT_DATABASE","target":null}'
-
-curl -OJ http://127.0.0.1:8080/admin/data-transfer/database.dump \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "X-Data-Management-Token: $DATA_MANAGEMENT_TOKEN"
-
-curl -X POST http://127.0.0.1:8080/admin/data-transfer/security/unlock \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H 'Content-Type: application/json' \
-  -d '{"securityKey":"<offline-data-management-key>","action":"RESTORE_DATABASE","target":null}'
-
-curl -X POST 'http://127.0.0.1:8080/admin/data-transfer/import?confirm=RESTORE_DATABASE' \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -H "X-Data-Management-Token: $DATA_MANAGEMENT_TOKEN" \
-  -F "file=@/path/to/starry-api-database.dump"
-```
-
-Read the `data.accessToken` from each unlock response into `DATA_MANAGEMENT_TOKEN`. Do not enable shell tracing or persist the security key or grant token in command history.
-
-## Request Log Aggregation and Retention
-
-The service aggregates only completed UTC hours into `request_usage_hourly`, then applies the affected deltas to `request_usage_daily`. `aggregation_watermarks` records progress, a configurable lookback window is rebuilt for late commits, and a PostgreSQL advisory lock prevents concurrent workers from duplicating maintenance. Every batch commits separately so catch-up work does not hold one long transaction.
-
-By default:
-
-- incremental aggregation runs every minute after a 30-second startup delay, advances one new hour per transaction, and performs at most six transactions per run
-- maintenance runs daily at 03:25 UTC
-- 12 future monthly `request_logs` partitions are pre-created
-- four calendar months of raw partitions are retained, guaranteeing at least 90 days; exceptional old rows in the default partition are pruned in bounded transactions
-- hourly aggregates are retained for 90 days and pruned in bounded transactions; daily aggregates serve longer-range queries
-- API billing idempotency events are retained for 400 days and pruned in bounded batches; the immutable balance ledger is retained indefinitely
-
-Raw `request_logs` partitions are dropped only after the aggregation watermark is fully caught up. After a long outage, monitor the watermark and disk usage while the bounded batches recover; retention resumes automatically once the backlog reaches the latest completed hour.
-
-Configure these policies with `STARRY_STATS_AGGREGATION_ENABLED`, `STARRY_STATS_AGGREGATION_INTERVAL`, `STARRY_STATS_AGGREGATION_INITIAL_DELAY`, the `STARRY_STATS_AGGREGATION_*_HOURS` and `STARRY_STATS_AGGREGATION_MAX_BATCHES_PER_RUN` controls, `STARRY_STATS_MAINTENANCE_CRON`, `STARRY_STATS_PARTITION_MONTHS_AHEAD`, and the `STARRY_STATS_RAW_*`, `STARRY_STATS_HOURLY_*`, and `STARRY_STATS_USAGE_EVENT_*` variables. Keep aggregation enabled in production because the same worker owns partition creation and retention cleanup.
-
-## Configure Online Recharge
-
-Log in as an administrator and open `系统设置 -> 支付设置`.
-
-Required EasyPay fields:
-
-- `接口地址`: gateway base URL, for example `https://pay.example.com`. Values ending in `/submit.php`, `/mapi.php`, or `/api.php` are normalized automatically.
-- `商户 PID`: EasyPay merchant ID.
-- `商户密钥`: EasyPay signing key. Leave it blank when editing if the key is already configured.
-- `支付模式`: `跳转收银台` uses `submit.php`; `二维码接口` uses `mapi.php`.
-
-After enabling online recharge, ordinary users can open `余额充值`, create one order per JSON/API request, and pay through the returned payment URL or QR code. EasyPay must be configured to call:
-
-```text
-https://<your-domain>/payment/webhook/easypay
-```
-
-When the webhook signature is valid and the upstream trade status is successful, the service marks the order as completed and increments the user's balance. Duplicate successful callbacks are ignored after the first completion.
-
-Proxy API calls deduct balance from itemized token usage. Without an enabled override rule, the service uses verified official USD prices from [`Wei-Shaw/model-price-repo`](https://github.com/Wei-Shaw/model-price-repo) and multiplies them by `系统设置 -> 支付设置 -> 模型官方价格计费倍率`. The default is `1.0`, which charges official cost without markup. Fast mode keeps its existing additional `2x` factor.
-
-The service starts with the bundled catalog and attempts a checksum-verified refresh at startup and every 10 minutes. A failed refresh never clears or partially replaces the active catalog. Exact and wildcard rules in `系统设置 -> 模型管理 -> 价格倍率` override the global billing multiplier with a direct official-price multiplier; `1.0` is the official price and `0.1` is 10% of it. If a requested model has no official entry, billing applies the effective multiplier to the legacy safety fallback of `16.6666666667` balance per 1M tokens.
-
-Use the WebUI API Key page to generate per-key client configuration. The current setup is API-key based and no longer writes shell profiles automatically.
-
-Codex CLI (`~/.codex/config.toml`):
+**Codex CLI**（`~/.codex/config.toml`）：
 
 ```toml
 model = "gpt-5.5"
@@ -574,17 +409,15 @@ experimental_bearer_token = "sk-REPLACE_ME"
 supports_websockets = false
 ```
 
-Codex CLI (`~/.codex/auth.json`):
+`~/.codex/auth.json`：
 
 ```json
-{
-  "OPENAI_API_KEY": "sk-REPLACE_ME"
-}
+{ "OPENAI_API_KEY": "sk-REPLACE_ME" }
 ```
 
-If Codex prints `Your access token could not be refreshed because your refresh token was already used`, the local `auth.json` still contains stale ChatGPT OAuth fields. Back up the file and replace it with the minimal API-key JSON above, or run `codex logout` before applying the Starry API-key configuration.
+> 如果 Codex 报 `Your access token could not be refreshed because your refresh token was already used`，说明本机 `auth.json` 里还留着旧的 ChatGPT OAuth 字段。备份后换成上面的最简 JSON，或者先运行 `codex logout`。
 
-Claude Code:
+**Claude Code**：
 
 ```bash
 export ANTHROPIC_BASE_URL='http://127.0.0.1:8080'
@@ -596,31 +429,9 @@ export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1'
 export CLAUDE_CODE_ATTRIBUTION_HEADER='0'
 ```
 
-Windows CMD:
+Windows CMD 把每行改成 `set "名称=值"`；PowerShell 改成 `$env:名称 = '值'`。
 
-```cmd
-set "ANTHROPIC_BASE_URL=http://127.0.0.1:8080"
-set "ANTHROPIC_API_KEY=sk-REPLACE_ME"
-set "ANTHROPIC_AUTH_TOKEN=sk-REPLACE_ME"
-set "ANTHROPIC_MODEL=claude-sonnet-4.5"
-set "ANTHROPIC_SMALL_FAST_MODEL=claude-haiku-4.5"
-set "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"
-set "CLAUDE_CODE_ATTRIBUTION_HEADER=0"
-```
-
-PowerShell:
-
-```powershell
-$env:ANTHROPIC_BASE_URL = 'http://127.0.0.1:8080'
-$env:ANTHROPIC_API_KEY = 'sk-REPLACE_ME'
-$env:ANTHROPIC_AUTH_TOKEN = 'sk-REPLACE_ME'
-$env:ANTHROPIC_MODEL = 'claude-sonnet-4.5'
-$env:ANTHROPIC_SMALL_FAST_MODEL = 'claude-haiku-4.5'
-$env:CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
-$env:CLAUDE_CODE_ATTRIBUTION_HEADER = '0'
-```
-
-OpenCode (`opencode.json`):
+**OpenCode**（`opencode.json`）：
 
 ```json
 {
@@ -631,32 +442,215 @@ OpenCode (`opencode.json`):
     "starry": {
       "npm": "@ai-sdk/openai-compatible",
       "name": "Starry API",
-      "options": {
-        "baseURL": "http://127.0.0.1:8080/v1",
-        "apiKey": "sk-REPLACE_ME"
-      }
+      "options": { "baseURL": "http://127.0.0.1:8080/v1", "apiKey": "sk-REPLACE_ME" }
     }
   }
 }
 ```
 
-CC Switch one-click imports use deep links like:
+控制台生成的 OpenCode 配置还会带上 `"enabled_providers": ["starry"]`，防止 OpenCode 在选中 Starry Key 时回退去用本机 / 全局的 OpenAI 凭据。老的、只保存了前缀的 Key 不能直接生成脚本（`REPLACE_REST_OF_KEY` 占位符无法通过认证），需要粘贴原始完整 Key 或重建。
+
+**CC Switch** 一键导入链接形如：
 
 ```text
 ccswitch://v1/import?resource=provider&app=claude&name=Starry+API+Claude&homepage=http%3A%2F%2F127.0.0.1%3A8080&endpoint=http%3A%2F%2F127.0.0.1%3A8080&apiKey=sk-REPLACE_ME&model=claude-sonnet-4.5&icon=claude&enabled=true&haikuModel=claude-haiku-4.5&sonnetModel=claude-sonnet-4.5&opusModel=claude-opus-4.5
 ```
 
-Chat completion test:
+**测试一次对话**：
 
 ```bash
 curl -X POST http://127.0.0.1:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $STARRY_API_KEY" \
-  -d '{
-    "model": "claude-sonnet-4.5",
-    "messages": [
-      {"role": "user", "content": "Say hello in one sentence."}
-    ],
-    "max_tokens": 256
-  }'
+  -H 'Content-Type: application/json' -H "Authorization: Bearer $STARRY_API_KEY" \
+  -d '{"model":"claude-sonnet-4.5","messages":[{"role":"user","content":"Say hello in one sentence."}],"max_tokens":256}'
 ```
+
+---
+
+## 数据库备份与数据传输
+
+**仅初始 Root 管理员**能使用「数据管理」。控制台操作见 [控制台手册：数据管理](CONSOLE_GUIDE.md#数据管理)（含完整截图流程）。本节讲背后的规则和命令行用法。
+
+### 安全模型一览
+
+- 页面一开始是**锁定**的：必须先输入数据管理安全密钥，才会加载任何数据库信息或备份文件。首次使用时 Root 可以生成并保存密钥，再验证进入。
+- 进入页面用的是单独的 `VIEW_DATA_MANAGEMENT` 授权，由 `/admin/data-transfer/security/unlock` 签发。`GET /admin/data-transfer/status` 和 `GET /admin/data-transfer/backups` 都要求在 `X-Data-Management-Token` 里带这个授权，它绑定 Root 会话，有效期为配置的解锁时长（默认 **5 分钟**）。**页面授权不能用来导出、下载、创建、删除或恢复**。控制台只把它放在页面内存里，到期、Root 手动锁定、离开或刷新页面时会清空显示的数据。
+- 受保护的操作各自要**动作绑定的授权**和确认。`DOWNLOAD_BACKUP` 和 `DELETE_BACKUP` 的授权还绑定**具体文件名**；**删除和恢复的授权是一次性的**。
+- 数据管理（含状态、备份列表、导出、初始化、恢复导入）**只有 Root 能用**。普通管理员在控制台里看不到这个模块，直接调接口也会被拒绝，即使他们有安全密钥。Root 的 `user_id` 被锚定在 `application_root_user_id`，数据库触发器阻止替换、改名、禁用、降级、删除或修改标记；其他管理员不能修改或重置 Root。
+- 启动时只在**空用户库**里创建 Root，就绪前同步校验；如果库里已有用户却缺少 Root，**启动会中止**，而不是悄悄重建。
+
+> **请把 Root 的密码和会话当作整个服务的凭据**保护：一旦泄露，就假定整个服务被攻破并轮换所有受影响的凭据。启动日志里的初始密码只在首次启动交接时出现一次，必须立即修改；除此之外，事件管线**从不**记录或邮件发送登录密码、密码哈希 / 盐、数据管理密钥、错误的提交值，或会话 / 数据管理令牌。数据管理密钥是高风险数据库操作的**额外确认**，并不能防住已经控制了 Root 账号的攻击者。
+
+### 初始化与保存密钥
+
+初始化返回形如 `dmsk-...` 的安全密钥，**只显示一次**。请直接复制到受控的密码管理器，并另存一份加密的离线副本。控制台**故意不提供明文下载**。服务只在「仅属主可读」的状态文件里保存一个加盐的 PBKDF2 校验值，不保存密钥本身。
+
+- 受保护操作前，用密钥在 `/security/unlock` 换取一个 `dmt-...` 短期令牌，它绑定当前管理员会话、请求的动作和可选的备份文件名；把它放在 `X-Data-Management-Token` 头里。
+- 支持的动作：`EXPORT_DATABASE`、`EXPORT_BACKUP`、`CREATE_BACKUP`、`DOWNLOAD_BACKUP`、`DELETE_BACKUP`、`RESTORE_DATABASE`。
+- **只运行一个服务实例**：校验值 / 锁定状态和授权都是实例本地的，不支持多副本或滚动重叠。持久化整个安全目录（含相邻的 `.initialized` 标记），保持仅属主权限，并在初始化和备份验证后设置 `STARRY_DATA_MANAGEMENT_REQUIRE_INITIALIZED=true` 再重启。**永远不要通过删文件来恢复**：JSON 缺失但标记还在、或整个卷丢失而该开关已开启，都会故障关闭。
+
+### 密钥输错 5 次会怎样
+
+每次输错都会先和计数 / 锁定状态一起提交到属主专有的安全文件，再幂等地同步到只追加的 `starry_security` 审计库和持久的 SMTP 发件箱。事件包含发起账号的快照、是否 Root、直连远端地址、校验过的转发 IP 字面量、不可逆的 User-Agent / 请求 ID / 会话指纹、端点、第几次尝试和锁定状态；**即使 Root 没有邮箱也会入队**。如果配置了系统 SMTP，会优先发给事件里记录的 Root 邮箱，否则每次重试都会解析当前 Root 邮箱，所以之后补上邮箱就能放出待发的告警。发送失败会指数退避重试，并以 `alert_delivery=NOT_DELIVERED` 记录日志；标准 SMTP 是「至少一次」，收件后崩溃可能重复一封带相同 `X-Starry-Security-Event-Id` 的邮件。
+
+**第 5 次失败会永久锁定数据管理，并让整个站点进入维护模式**，不等审计或 SMTP：只有静态控制台资源、`/system/status` 和健康检查可用；所有认证、管理、代理、支付调用都返回 `503 SYSTEM_MAINTENANCE`。Kubernetes 风格的就绪探针报告 `OUT_OF_SERVICE`，而存活探针保持 `UP`，避免自动重启绕过锁定。
+
+维护模式下业务后台任务也**故障关闭**：账号 Token 刷新、账号池评估、禁用账号测试、支付对账、用量聚合 / 保留、性能指标写入、账号缓存刷新、注册令牌清理都会被跳过。锁定状态刷新、待处理安全事件持久化、SMTP 安全告警发件箱、健康检查和内存里的会话 / 限流清理继续运行。已经通过闸门的任务不会被强行中断；如果需要立刻终止已在进行的外部调用，请隔离部署。
+
+### 恢复被锁定的数据管理
+
+#### Docker Compose 部署
+
+运行时镜像里在固定路径 `/app/bin/recover-data-management` 带有经过审查的恢复工具——**事故当天不要再去下载恢复脚本，更不要 `curl ... | sh`**。它要求交互式 TTY，在关闭回显的情况下读取原始 `dmsk-...` 密钥**两遍**，并且只把它写入仅属主可读的一次性文件 `/app/security/recovery.key`。它拒绝命令行或管道传入的密钥，所以密钥不会出现在 shell 历史、进程参数或 `docker inspect` 里。
+
+先停止正常流量，确认只有**一个** `service` 容器在运行。对于装在 `/opt/starry-api` 的服务器：
+
+```bash
+cd /opt/starry-api
+docker compose -f docker-compose.artifact.yml exec service \
+  /app/bin/recover-data-management --lang zh
+# 英文提示：把 --lang zh 换成 --lang en
+
+docker compose -f docker-compose.artifact.yml restart service
+```
+
+**不要加 Compose 的 `-T`**。工具会先确认站点当前确实处于维护状态，才创建固定的恢复文件；它不会重启自己的容器，所以需要显式重启。源码部署用仓库里的 `docker-compose.yml`，命令去掉 `-f docker-compose.artifact.yml`。
+
+服务启动完成后，验证公开状态和一次性文件是否被消耗：
+
+```bash
+docker compose -f docker-compose.artifact.yml exec service curl -fsS http://127.0.0.1:8080/system/status
+docker compose -f docker-compose.artifact.yml exec service \
+  sh -c 'test ! -e /app/security/recovery.key && test ! -e /app/security/.recovery.key.consuming && echo "恢复密钥文件已消耗"'
+```
+
+| 情形 | 结果 |
+| --- | --- |
+| 密钥匹配 | `"maintenance":false`，失败次数清零，记录 `RECOVERY_SUCCEEDED`，两个恢复路径都被消耗 |
+| 格式正确但不匹配 | 记录 `RECOVERY_FAILED`，两个路径都被消耗，服务**仍处于维护**——用正确的密钥重新运行工具并再重启一次 |
+
+**不要只凭一条审计记录就宣布恢复或消耗已完成。**如果截断、删除或同步一次性文件失败，那么即使匹配的状态提交和 `RECOVERY_SUCCEEDED` 记录已经存在，当前进程仍保持故障关闭。在**不打印内容**的情况下检查名称和权限：
+
+```bash
+docker compose -f docker-compose.artifact.yml exec service \
+  sh -c 'ls -ld /app/security; ls -l /app/security/recovery.key /app/security/.recovery.key.consuming 2>/dev/null || true'
+docker compose -f docker-compose.artifact.yml logs --tail=200 service
+```
+
+清理还没解决期间，**不要**再放另一个密钥，也不要手动删除任何一个文件。先修正安全卷的属主、权限、剩余空间或文件系统错误，再重启 `service`；启动时会重试清理 `/app/security/.recovery.key.consuming`。只有 `/system/status` 报告 `"maintenance":false` **并且**两个路径都不存在，恢复才算完成。如果进程在有效的恢复状态提交**之前**停止（而不是在清理期间），下次启动会把暂存文件恢复到 `/app/security/recovery.key` 并安全地重试事务。
+
+#### 直接在宿主机用 jar 运行时的恢复
+
+停止正常流量和所有服务副本，把原始密钥**单独**放在一个可写、仅属主可读（`chmod 600`）的普通文件里，把 `STARRY_DATA_MANAGEMENT_RECOVERY_KEY_FILE` 设成它的绝对路径，只启动**一个**服务实例。验证成功后，服务会原子地暂存该文件、提交恢复后的状态，再截断、删除并同步暂存的一次性密钥。**在取消该环境变量之前**，确认有恢复审计事件、`"maintenance":false`，以及配置的文件和它的 `.<文件名>.consuming` 兄弟文件都已消失。格式正确但不匹配的密钥通常会被记录并消耗，同时维护保持。清理失败会保持故障关闭维护，并在启动时重试，处理方式同上。**不要用符号链接或只读的 secret 挂载**，也**绝对不要**在日常运行时留着明文恢复密钥的配置。
+
+### 恢复流程
+
+导入数据是被刻意保护的：控制台要求你键入 `RESTORE_DATABASE`。每次导入前，服务都会用 `pg_restore` 校验自定义归档，再检查归档的目录（TOC）。**只接受 PostgreSQL 17、数据库 / schema 为 `starry_api` 的归档**；恢复后，它们的 Flyway V1–V24 脚本和校验和必须与正在运行的应用**完全一致**，不可变的 Root 标记必须解析到唯一一个已启用的 `ADMIN` Root，核心应用表必须存在，且不含其他 schema 的对象。独立的 `starry_security` 审计 / 发件箱 schema 故意不在归档里，也不会被应用恢复影响。运行时镜像已带 PostgreSQL 17 客户端工具；直接用 jar 运行的宿主机需要在 `PATH` 里提供 PostgreSQL 17 的 `pg_dump` 和 `pg_restore`。
+
+备份用 PostgreSQL **会话级共享咨询锁**，恢复用对应的**排他锁**。这些锁协调**所有服务实例**，而不只是一个 JVM 里的线程。获得排他锁后，恢复按这个顺序进行：
+
+1. 撤销 `starry_api_runtime` 的数据库 `CONNECT` 权限，并终止现有 `starry_api` 后端连接。
+2. 从已静默的数据库创建一份服务端**回滚备份**。
+3. 对 `starry_api` schema 运行 `pg_restore --clean --if-exists --single-transaction --exit-on-error`。
+4. 校验：schema `starry_api`、所有必需的核心表、精确的 Flyway V1–V24 历史和校验和、V5 熔断纪元的列 / 索引 / 设置、恰好一个与 `application_root_user_id` 匹配的已启用 `admin` Root；还要校验 `starry_security` 保留了只追加触发器、最小权限的运行时 ACL 和不含密钥的结构；然后在运行时访问**仍被禁用**时运行 `ANALYZE`。如果传入的恢复已提交，但校验或分析失败，会自动用恢复前的备份做一次干净恢复，并在重新开放访问前校验、分析回滚结果。
+5. 在 `finally` 里恢复 `CONNECT`，然后清空本地会话和所有源自数据库的缓存——即使恢复在进入隔离后失败也是如此。
+6. 让其他实例重连它们的 PostgreSQL 通知监听器；每次成功重连都会执行同样的本地状态整体失效。代数检查防止恢复前的异步缓存加载在之后发布过期状态。
+
+⚠️ **恢复窗口是故意有破坏性的。**不要给这个部署路由新流量；预期在途的 API / 数据库请求会失败，管理员之后需要重新登录。即使恢复是事务性的，它依然是破坏性的：除了自动生成的回滚包，请再保留一份**离线备份**。
+
+无论恢复成功还是失败，都应该用迁移 / 超级用户会话验证运行时访问和连接恢复：
+
+```sql
+SELECT pg_catalog.has_database_privilege('starry_api_runtime', 'starry_api', 'CONNECT') AS runtime_connect_restored;
+
+SELECT pid, usename, application_name, state
+FROM pg_catalog.pg_stat_activity
+WHERE datname = 'starry_api'
+ORDER BY pid;
+```
+
+`runtime_connect_restored` 必须是 `true`。如果主连接和兜底的 `finally` 连接都在数据库 / 网络故障期间失败了，请在重启应用实例之前，以数据库所有者或集群管理员身份恢复访问：
+
+```sql
+GRANT CONNECT ON DATABASE starry_api TO starry_api_runtime;
+```
+
+### 部署备注
+
+- Docker 与预构建产物部署把备份挂载到 `./data/backups:/app/backups`；用 `STARRY_BACKUP_DIR` 可以覆盖备份目录。
+- 用 `STARRY_MAX_IMPORT_BYTES`（字节）覆盖上传 / 导入的大小限制，默认 `268435456`（256 MiB）。
+- **文件不在数据库里**：用户文档附件目录（`STARRY_DOCUMENTATION_ATTACHMENT_DIR`）和模型图标目录（`STARRY_MODEL_ICON_DIR`）需要**单独备份**。
+
+### 命令行示例
+
+```bash
+# 1) 初始化（只返回一次密钥！）
+curl -X POST http://127.0.0.1:8080/admin/data-transfer/security/init -H "Authorization: Bearer $ADMIN_TOKEN"
+
+# 2) 用密钥换一个导出动作的令牌
+curl -X POST http://127.0.0.1:8080/admin/data-transfer/security/unlock \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"securityKey":"<离线保存的密钥>","action":"EXPORT_DATABASE","target":null}'
+
+# 3) 带令牌导出
+curl -OJ http://127.0.0.1:8080/admin/data-transfer/database.dump \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "X-Data-Management-Token: $DATA_MANAGEMENT_TOKEN"
+
+# 恢复：先换 RESTORE_DATABASE 的令牌，再带 confirm 导入
+curl -X POST http://127.0.0.1:8080/admin/data-transfer/security/unlock \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"securityKey":"<离线保存的密钥>","action":"RESTORE_DATABASE","target":null}'
+
+curl -X POST 'http://127.0.0.1:8080/admin/data-transfer/import?confirm=RESTORE_DATABASE' \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H "X-Data-Management-Token: $DATA_MANAGEMENT_TOKEN" \
+  -F "file=@/path/to/starry-api-database.dump"
+```
+
+从每次 unlock 响应的 `data.accessToken` 读出令牌放进 `DATA_MANAGEMENT_TOKEN`。**不要开启 shell 跟踪，也不要把安全密钥或授权令牌留在命令历史里。**
+
+---
+
+## 请求日志的聚合与保留
+
+服务只把**已完成的 UTC 小时**聚合进 `request_usage_hourly`，再把受影响的增量应用到 `request_usage_daily`。`aggregation_watermarks` 记录进度，一个可配置的回看窗口会重建以吸收延迟提交，PostgreSQL 咨询锁防止并发的维护重复执行。每个批次单独提交，所以追赶工作不会长时间占着一个事务。
+
+**默认行为**：
+
+- 增量聚合在启动后延迟 30 秒开始，之后**每分钟**一次；每个事务推进 1 个新小时，一次运行最多 6 个事务；
+- 维护任务每天 **03:25 UTC** 运行；
+- 预创建未来 **12 个月**的 `request_logs` 月分区；
+- 保留 **4 个整月**的原始分区（保证至少 90 天）；默认分区里偶发的过期旧行会在有界事务里清理；
+- 小时聚合保留 **90 天**，在有界事务里清理，更长的区间由日聚合承担；
+- API 计费的幂等事件保留 **400 天**，分批清理；不可变的**余额账本永久保留**。
+
+原始 `request_logs` 分区只有在聚合水位完全追上之后才会被丢弃。长时间故障后，请在有界批次恢复期间监控水位和磁盘使用；积压追到最新的已完成小时后，保留清理会自动恢复。
+
+配置项见 [配置参考：请求分析与保留](CONFIGURATION.md#请求分析与保留)。**请在生产环境保持聚合开启**——同一个工作线程还负责分区创建和保留清理。
+
+---
+
+## 配置在线充值
+
+管理员登录控制台，打开「**系统设置 → 支付设置**」（[截图](CONSOLE_GUIDE.md#支付设置)）。
+
+**必填的 EasyPay 字段**：
+
+| 字段 | 说明 |
+| --- | --- |
+| 接口地址 | 网关地址，如 `https://pay.example.com`。以 `/submit.php`、`/mapi.php`、`/api.php` 结尾的值会被自动规范化 |
+| 商户 PID | EasyPay 商户 ID |
+| 商户密钥 | EasyPay 签名密钥。已经配置过时，编辑时留空即可保持不变 |
+| 支付模式 | 「跳转收银台」用 `submit.php`；「二维码接口」用 `mapi.php` |
+
+启用在线充值后，普通用户可以在「余额充值」页创建订单，通过返回的支付链接或二维码支付。**EasyPay 需要配置回调地址**：
+
+```text
+https://<你的域名>/payment/webhook/easypay
+```
+
+回调签名有效、且上游交易状态成功时，服务把订单标记为完成，并给用户加上余额；**重复的成功回调在第一次完成后会被忽略**。
+
+**代理调用怎么扣钱**：按逐项 token 用量扣余额。没有生效的覆盖规则时，使用 [`Wei-Shaw/model-price-repo`](https://github.com/Wei-Shaw/model-price-repo) 里经过验证的官方美元价格，乘以「系统设置 → 支付设置 → **模型官方价格计费倍率**」。默认 `1.0`，即按官方成本、不加价。快速模式保留额外的 `2×` 系数。
+
+服务以内置目录启动，启动时以及之后每 10 分钟尝试一次**经校验和验证的刷新**；刷新失败**绝不会**清空或部分替换当前生效的目录。「系统设置 → 模型管理 → 价格倍率」里的精确 / 通配规则会用直接的官方价格倍率覆盖全局计费倍率。如果请求的模型**既没有官方价格、也没有显式的旧版固定价格**，它会在「模型 ID」页显示为「待定价」，计费请求会在预留余额和请求上游**之前**就返回 `503 MODEL_PRICE_UNAVAILABLE`——不会再用「估个中位数」或旧的兜底价去乱收费。
+
+价格与倍率的完整规则见 [配置参考：支付与计费](CONFIGURATION.md#支付与计费)。

@@ -1,48 +1,75 @@
+<p align="center">
+  <img src="docs/images/brand/logo.svg" width="96" height="96" alt="Starry API">
+</p>
+
 # Starry API
 
-Starry API is a Spring Boot + Vue management service for routing multiple LLM client protocols through a unified model and account layer.
+**一个自托管的大模型 API 网关与管理控制台。** 把你手里的各种上游模型账号（OpenAI、Anthropic、DeepSeek、Kiro 等）汇总成一个统一入口，对外提供 OpenAI、Anthropic、Gemini 三种兼容协议，并配有完整的账号池调度、API Key、计费、日志和后台管理界面。
 
-The current runtime supports OpenAI-compatible, Anthropic-compatible, and Gemini-compatible inbound APIs. GPT/OpenAI model requests can use OpenAI API-key or Codex token accounts directly, cataloged DeepSeek requests use an isolated DeepSeek API-key account pool, and Anthropic Messages requests prefer native Anthropic API-key accounts before falling back to compatible Kiro/AWS accounts. Bare Claude/Kiro-compatible model requests continue to use the Kiro/AWS CodeWhisperer upstream path isolated under `platform/kiro`. Provider-neutral response data lives in `platform/core`, so inbound protocol modules format a common completion result instead of depending on provider-specific records.
+![仪表盘](docs/images/dashboard.jpg)
 
-## Features
+## 它解决什么问题
 
-- OpenAI-compatible `GET /v1/models`
-- OpenAI-compatible `POST /v1/chat/completions`
-- OpenAI Responses-style `POST /v1/responses`
-- Anthropic Messages-style `POST /v1/messages`
-- Gemini GenerateContent-style `POST /v1beta/models/{model}:generateContent`
-- Default OpenAI, Anthropic, Gemini, and DeepSeek chat model IDs with verified official USD token prices sourced from `Wei-Shaw/model-price-repo`
-- Platform-scoped backend modules for OpenAI, DeepSeek, Anthropic, Gemini, Kiro upstream, shared core records, and shared model catalog
-- Platform-scoped frontend modules for provider registry, model grouping, and client setup scripts
-- Admin APIs for upstream accounts, API keys, model mappings, request logs, and local administrators
-- Account management supports Kiro, official DeepSeek, OpenAI API key, ChatGPT browser-authorized Codex OAuth, manual Codex token import, and Anthropic API-key import/testing/routing, automatic health testing after consecutive failures, and total/5h/7day quota progress.
-- Administrator-managed model catalog entries and icons, model-provider-scoped API keys, model pricing, user balances, recharge orders, redemption codes, and coding-plan subscriptions whose quota is consumed before the user balance
-- WebFlux, R2DBC PostgreSQL 17, Flyway migrations, API key accounting, rate limits, account failover, and session affinity
-- Vue/Vite management console embedded into the Spring Boot jar
-- OpenAPI UI at `/docs`
+| 你的场景 | Starry API 怎么帮你 |
+| --- | --- |
+| 手里有多个上游账号 / Key，想统一管理 | 账号池：自动轮询、限流保护、失败切换、健康检查 |
+| 想让团队或朋友共用，又不想泄露上游 Key | 给每个人发独立的 **API Key**，设置额度上限，随时停用 |
+| 客户端各不相同（Cursor、Claude Code、Codex CLI、OpenCode……） | 同时兼容 OpenAI / Anthropic / Gemini 协议，并能一键生成各客户端的配置 |
+| 想按用量收费或自己对账 | 官方价目表计费、余额与充值、兑换码、Coding Plan 订阅、完整请求日志 |
+| 想知道钱花在哪、哪个账号出了问题 | 仪表盘、请求日志、账号状态与分配策略一目了然 |
 
-## Requirements
+## 工作原理
 
-- Java 25
-- PostgreSQL 17 reachable by JDBC and R2DBC
-- Node.js/npm for WebUI builds
-- Gradle wrapper included in this repository
+```text
+你的客户端 (Cursor / Claude Code / Codex CLI / 自己的程序)
+        │   使用 Starry 发的 API Key，调用 /v1/chat/completions 等接口
+        ▼
+┌───────────────────────── Starry API ─────────────────────────┐
+│  鉴权 → 限流 → 模型映射 → 账号池选择 → 转发 → 计费与日志        │
+└───────────────────────────────────────────────────────────────┘
+        │   自动挑选一个健康的上游账号
+        ▼
+OpenAI · Anthropic · DeepSeek · Kiro(AWS) · 其他 OpenAI 兼容站点
+```
 
-## Quick Start
+## 主要功能
 
-For a fresh local PostgreSQL cluster, create the database and the same least-privilege roles used by Compose. Set `POSTGRES_USER` to a local PostgreSQL superuser; existing authentication can be supplied through the normal `PGHOST`, `PGPORT`, and `PGPASSWORD` variables:
+- **多协议入口**：`/v1/chat/completions`、`/v1/responses`（OpenAI），`/v1/messages`（Anthropic），`/v1beta/models/{model}:generateContent`（Gemini）。
+- **多种上游账号**：Kiro、OpenAI API Key、ChatGPT 浏览器授权（Codex）、手动 Codex Token、DeepSeek、Anthropic API Key，以及任意 OpenAI 兼容站点。
+- **智能账号池**：按厂商隔离、预热分级、并发与 RPM 保护、失败重试与冷却，可选实验性的分级熔断。
+- **API Key 与计费**：按用户发放、绑定模型厂商、额度上限、余额计费或 Coding Plan 订阅计费；内置官方价格目录并自动校验更新。
+- **完整的管理控制台**：仪表盘、请求日志、用户、兑换码、在线充值、工单、使用文档、模型目录与价格倍率、外观定制，中英文界面。
+- **数据安全**：Root 专属的「数据管理」（备份 / 导出 / 恢复），所有高危操作要二次验证。
+- **可扩展**：全信任的插件机制，示例见 [插件开发](docs/PLUGINS.md)。
+- **技术栈**：Java 25、Spring WebFlux、R2DBC、PostgreSQL 17、Flyway、Vue 3，控制台内嵌在同一个 jar 里。
+
+## 5 分钟快速开始
+
+选一种方式，把服务跑起来：
+
+| 方式 | 适合谁 | 文档 |
+| --- | --- | --- |
+| **服务器一键安装** | 有一台 Linux 服务器，想要最省事的生产部署 | [服务器一键安装](docs/INSTALL_SERVER.md) |
+| **1Panel / Docker Compose** | 习惯用 1Panel 面板，或想从源码构建镜像 | [1Panel 部署](docs/1PANEL_DEPLOY.md) |
+| **本机源码运行** | 想在自己电脑上试用或开发 | 往下看 ↓ |
+
+### 本机源码运行
+
+需要：Java 25、PostgreSQL 17、Node.js（构建控制台）。
+
+**① 准备数据库**（只需一次，`POSTGRES_USER` 填本机 PostgreSQL 的超级用户）：
 
 ```bash
 export POSTGRES_USER=postgres
 export POSTGRES_DB=starry_api
-export STARRY_POSTGRES_MIGRATION_PASSWORD='<strong-local-migration-password>'
-export STARRY_POSTGRES_APP_PASSWORD='<strong-local-application-password>'
+export STARRY_POSTGRES_MIGRATION_PASSWORD='换成一个强密码-迁移用'
+export STARRY_POSTGRES_APP_PASSWORD='换成另一个强密码-应用用'
 
 createdb --username "$POSTGRES_USER" --encoding=UTF8 "$POSTGRES_DB"
 ./docker/postgresql/init/001-starry-api-roles.sh
 ```
 
-Run the service:
+**② 启动服务**：
 
 ```bash
 export POSTGRES_HOST=localhost
@@ -56,294 +83,63 @@ export POSTGRES_MIGRATION_PASSWORD="$STARRY_POSTGRES_MIGRATION_PASSWORD"
 ./scripts/start-proxy.sh
 ```
 
-For a containerized local deployment, copy `.env.example`, replace all three `change-me-...` PostgreSQL passwords with distinct strong values, and run:
-
-```bash
-./scripts/deploy-1panel.sh
-```
-
-Check the service:
+**③ 确认服务正常**：
 
 ```bash
 curl http://127.0.0.1:8080/health
-curl http://127.0.0.1:8080/v1/models
 ```
 
-On first startup, the service creates a local admin account:
+**④ 登录控制台**：打开 <http://127.0.0.1:8080/#/login>，用户名 `admin`，密码是**首次启动时日志里打印的那一次**随机密码。第一次登录会强制你改密码。
+
+![登录页](docs/images/login.jpg)
+
+接下来按 [快速开始指南](docs/QUICKSTART.md) 一步步添加上游账号、创建 API Key，并发出第一个请求。
+
+## 文档导航
+
+| 我想…… | 看这里 |
+| --- | --- |
+| 从零到发出第一个请求 | [快速开始指南](docs/QUICKSTART.md) |
+| 了解控制台每个页面怎么用 | [控制台使用手册](docs/CONSOLE_GUIDE.md) |
+| 部署到服务器 | [一键安装](docs/INSTALL_SERVER.md) · [1Panel](docs/1PANEL_DEPLOY.md) · [预构建产物](docs/PREBUILT_ARTIFACTS.md) |
+| 查某个配置项 / 环境变量 | [配置参考](docs/CONFIGURATION.md) |
+| 日常运维：导入账号、备份恢复、日志保留 | [运维手册](docs/OPERATIONS.md) |
+| 调用接口 / 写集成 | [API 参考](docs/API.md) |
+| 遇到报错 | [故障排查](docs/TROUBLESHOOTING.md) |
+| 了解内部设计 | [架构说明](docs/ARCHITECTURE.md) · [包结构与扩展](docs/PACKAGE_GUIDE.md) |
+| 开发插件 | [插件开发](docs/PLUGINS.md) |
+| 完整目录 | [文档索引](docs/README.md) |
+
+## 项目结构
 
 ```text
-username: admin
-password: <random password printed in startup logs once>
+service-api/   接口契约与共享 DTO
+plugin-api/    插件 SDK
+service/       Spring Boot 服务：管理接口、账号池、代理转发、计费、统计
+  └─ platform/ 各厂商协议适配（openai / anthropic / gemini / deepseek / kiro）
+webui/         Vue 3 管理控制台（构建后嵌入 service 的 jar）
+docker/        PostgreSQL 初始化脚本
+scripts/       启动、部署、发布、恢复脚本
+docs/          文档（含 docs/images 截图）
 ```
 
-Open:
-
-```text
-http://127.0.0.1:8080/#/login
-http://127.0.0.1:8080/docs
-```
-
-## Minimal Setup Flow
-
-Login and export the returned admin token:
+## 开发与验证
 
 ```bash
-curl -X POST http://127.0.0.1:8080/auth/login \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"<startup-password>"}'
-
-export ADMIN_TOKEN="adm-..."
+./gradlew test                     # 后端测试
+npm --prefix webui run build       # 构建控制台
+./gradlew :service:bootJar         # 打包完整 jar（含控制台）
 ```
 
-If this is the first login, change the generated password:
+发布可部署产物的流程见 [预构建产物](docs/PREBUILT_ARTIFACTS.md)。
 
-```bash
-curl -X POST http://127.0.0.1:8080/auth/password \
-  -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{"oldPassword":"<startup-password>","newPassword":"<new-password>"}'
-```
+## 当前能力边界
 
-The change revokes all existing console sessions. Log in again with the new password before calling another authenticated endpoint.
+使用前请了解这些限制，免得踩坑：
 
-Optional: enable public admin registration with email verification:
-
-```bash
-curl -X PATCH http://127.0.0.1:8080/admin/users/registration-settings \
-  -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{
-    "registrationEnabled": true,
-    "emailVerifyEnabled": true,
-    "registrationEmailSuffixWhitelist": ["@example.com"],
-    "smtpHost": "smtp.example.com",
-    "smtpPort": 587,
-    "smtpUsername": "noreply@example.com",
-    "smtpPassword": "<smtp-password>",
-    "smtpFromEmail": "noreply@example.com",
-    "smtpFromName": "Starry API",
-    "smtpUseTls": true,
-    "smtpSecurity": "starttls"
-  }'
-```
-
-For Tencent Exmail, use `smtpHost=smtp.exmail.qq.com`, `smtpPort=465`, and
-`smtpSecurity=ssl`. Port `587` should use `smtpSecurity=starttls`.
-
-Create a client API key:
-
-```bash
-curl -X POST http://127.0.0.1:8080/admin/api-keys \
-  -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{"name":"default","creditsLimit":1000,"modelProvider":"OpenAI"}'
-```
-
-API keys are bound to the logged-in local user and one enabled model-catalog provider. Use the exact provider value returned by `/v1/models`, such as `OpenAI`, `Anthropic`, `Google`, or `DeepSeek`. Normal users only see and manage their own keys; administrators can see all keys with their owner. New keys can be copied later from the console because the owning key record stores the full `sk-...` value.
-
-Add an upstream Kiro account:
-
-```bash
-curl -X POST http://127.0.0.1:8080/admin/accounts \
-  -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{
-    "email": "user@example.com",
-    "accessToken": "kiro-access-token",
-    "region": "us-east-1",
-    "authMethod": "idc",
-    "provider": "BuilderID"
-  }'
-```
-
-Create an OpenAI account for account management tests:
-
-```bash
-curl -X POST http://127.0.0.1:8080/admin/accounts \
-  -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{
-    "email": "team@example.com",
-    "accessToken": "sk-...",
-    "authMethod": "api-key",
-    "provider": "OpenAI",
-    "baseUrl": "https://api.openai.com/v1"
-  }'
-```
-
-To add a ChatGPT-backed Codex account without copying tokens, open **账号管理**, select
-**新建账号 -> ChatGPT 授权**. Before requesting a code, enable device code login in the ChatGPT
-security settings for a personal account, or ask the workspace administrator to enable it in the
-workspace permissions. Then open the displayed `auth.openai.com` page and enter the one-time code.
-The server polls OpenAI's device authorization endpoint and stores the resulting credentials in
-the existing upstream account table. This account type is used only with the Codex backend at
-`https://chatgpt.com/backend-api/codex`; it does not automate or scrape the ChatGPT website.
-Device authorization can be unavailable for some accounts or regions. Only authorize accounts
-you are permitted to operate, and follow the applicable OpenAI terms and account policies. Keep
-this mode to trusted private deployments; use an OpenAI Platform API-key account for public or
-untrusted programmatic workloads, as recommended by the
-[official OpenAI authentication guidance](https://learn.chatgpt.com/docs/auth#mainContent).
-
-Add an official DeepSeek account:
-
-```bash
-curl -X POST http://127.0.0.1:8080/admin/accounts \
-  -H 'Content-Type: application/json' \
-  -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{
-    "email": "deepseek@example.com",
-    "accessToken": "sk-...",
-    "authMethod": "api-key",
-    "provider": "DeepSeek"
-  }'
-```
-
-When `baseUrl` is omitted, DeepSeek uses `https://api.deepseek.com/v1`. Use one of the cataloged `deepseek-chat`, `deepseek-reasoner`, `deepseek-v4-flash`, or `deepseek-v4-pro` IDs; the `starry/` prefix is also accepted. All four support Chat Completions, while the Responses API currently supports only `deepseek-v4-flash`. DeepSeek requests stay within the DeepSeek account pool and never fall back to OpenAI or Codex accounts. Legacy unrestricted keys can still reach route-only aliases, but provider-scoped keys require every requested and mapped model ID to exist in the enabled model catalog.
-
-Call through OpenAI-compatible Chat Completions:
-
-```bash
-curl -X POST http://127.0.0.1:8080/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer sk-REPLACE_ME' \
-  -d '{
-    "model": "gpt-4o",
-    "messages": [
-      {"role": "user", "content": "Say hello in one sentence."}
-    ],
-    "max_tokens": 256
-  }'
-```
-
-Call through Gemini-compatible GenerateContent:
-
-```bash
-curl -X POST http://127.0.0.1:8080/v1beta/models/gemini-2.5-pro:generateContent \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer sk-REPLACE_ME' \
-  -d '{
-    "contents": [
-      {"role": "user", "parts": [{"text": "Say hello in one sentence."}]}
-    ],
-    "generationConfig": {"maxOutputTokens": 256}
-  }'
-```
-
-## Module Layout
-
-```text
-service-api
-  Spring API contracts and shared DTOs
-
-plugin-api
-  Plugin SDK, host access, JSON, managed resources/tasks and streaming HTTP
-
-plugin-whale-widget
-  Local sibling plugin in ../whale-whidget-plugin
-
-service
-  admin / account / apikey / model / stats / config / common
-  proxy                     Core routing, auth, rate limit, accounting
-  platform/core             Provider-neutral completion result, usage, tool-use records
-  platform/catalog          Unified model catalog
-  platform/openai           OpenAI request/response/catalog module
-  platform/deepseek         DeepSeek model, pricing, and capability policy
-  platform/anthropic        Anthropic request/response/catalog module
-  platform/gemini           Gemini request/response/catalog module
-  platform/kiro             Kiro/AWS upstream adapter module
-  platform/upstream         Shared upstream error abstraction
-
-webui
-  src/api                   Typed admin/proxy API clients
-  src/platforms             Provider registry and platform-scoped setup modules
-    openai / deepseek / anthropic / gemini / opencode
-  src/views                 Management pages
-  src/stores                Pinia auth state
-```
-
-## Documentation
-
-- [API Reference](docs/API.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Plugin Developer Mode and SDK](docs/PLUGINS.md)
-- [Configuration](docs/CONFIGURATION.md)
-- [Package Guide](docs/PACKAGE_GUIDE.md)
-- [Platform Module Plan](docs/PLAN.md)
-- [Server One-Click Install](docs/INSTALL_SERVER.md)
-- [1Panel Deployment](docs/1PANEL_DEPLOY.md)
-- [Prebuilt Artifact Deployment](docs/PREBUILT_ARTIFACTS.md)
-- [Operations](docs/OPERATIONS.md)
-- [Performance and Memory Baseline](docs/PERFORMANCE.md)
-- [Account Allocation Security Fix Report](docs/ACCOUNT_ALLOCATION_SECURITY_FIX_REPORT.md)
-- [Troubleshooting](docs/TROUBLESHOOTING.md)
-
-## Verification
-
-```bash
-./gradlew test
-npm --prefix webui run build
-```
-
-For a full packaged jar:
-
-```bash
-./gradlew :service:bootJar
-```
-
-To update the checked-in deployable bundle after a source commit:
-
-```bash
-./scripts/publish-artifact.sh
-git add artifacts
-git commit -m "chore: publish prebuilt artifact"
-git push
-```
-
-Servers should not run this publishing script. To deploy the already checked-in bundle on a server:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh | sudo bash
-```
-
-For a private repository, save a read-only Contents GitHub token once on the server. The installer will reuse it automatically:
-
-```bash
-sudo mkdir -p /opt/starry-api
-sudo install -m 600 /dev/null /opt/starry-api/.github-token
-sudo sh -c 'printf "%s" "replace-with-token" > /opt/starry-api/.github-token'
-```
-
-Then update with:
-
-```bash
-GITHUB_TOKEN="$(sudo cat /opt/starry-api/.github-token)"
-curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-  https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
-  -o /tmp/install-server.sh
-sudo bash /tmp/install-server.sh
-```
-
-For a data-management hard lock, use the recovery utility already packaged in the service image. From an interactive terminal in a source Compose deployment:
-
-```bash
-docker compose exec service /app/bin/recover-data-management --lang zh
-# Use --lang en for English prompts.
-docker compose restart service
-# Wait for the service to finish starting, then verify:
-docker compose exec service curl -fsS http://127.0.0.1:8080/system/status
-docker compose exec service sh -c 'test ! -e /app/security/recovery.key && test ! -e /app/security/.recovery.key.consuming'
-```
-
-The prompt hides and double-checks the original key; never pass it as an argument or use a downloaded `curl ... | sh` recovery script. Installed artifact deployments add `-f docker-compose.artifact.yml` to each Compose command. See [Operations](docs/OPERATIONS.md#recover-a-docker-compose-deployment) for failure behavior and direct host/JAR recovery.
-
-## Current Boundaries
-
-- Ordinary OpenAI/GPT requests use official OpenAI API keys by default. Codex tokens are isolated unless an administrator explicitly enables Codex routing or mixed fallback.
-- Cataloged DeepSeek requests route only to official DeepSeek accounts; no cross-provider fallback is attempted.
-- Anthropic Messages requests and `anthropic/` model IDs prefer native Anthropic API-key accounts, with Kiro-compatible accounts as fallback capacity.
-- Bare Claude/Kiro-compatible requests route to the Kiro/AWS upstream adapter.
-- Gemini is currently an inbound compatibility module. Built-in Gemini aliases execute through the Kiro target mapping; direct Google API-key dispatch and account testing are not implemented.
-- Inbound protocol response factories consume `PlatformCompletionResult`; they should not import Kiro result records.
-- `stream=true` still emits SSE after upstream completion; true chunk passthrough is a later streaming milestone.
-- Image/document/file conversion is partial.
-- Distributed rate limiting is not implemented.
+- 普通 OpenAI / GPT 请求默认只走**官方 OpenAI API Key** 账号（Base URL 为 `api.openai.com`）；Codex 账号默认与之隔离，需要管理员显式开启才会混用。
+- DeepSeek 请求只会走 DeepSeek 账号，不会回退到别的厂商。
+- Anthropic Messages 请求优先使用原生 Anthropic API Key 账号，不可用时回退到兼容的 Kiro 账号。
+- Gemini 目前是**入站兼容协议**：内置 Gemini 别名通过 Kiro 目标模型执行；还不支持直连 Google API Key 和 `streamGenerateContent`。
+- `stream=true` 目前在上游完成后再以 SSE 输出，还不是真正的逐块透传。
+- 图片 / 文档 / 文件转换仅部分支持；尚未实现分布式限流。

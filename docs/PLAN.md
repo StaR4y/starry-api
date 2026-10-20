@@ -1,12 +1,16 @@
 # Project Plan
 
-Last reviewed against the worktree on 2026-09-20.
+Last reviewed against the worktree on 2026-10-06.
 
 ## Current Status
 
 Platform modularization is complete. The project is now in a reliability, security, billing, and operations phase.
 
 The current baseline includes:
+
+- English compatibility (2026-10-06): persistent Chinese/English selection across the console, reactive UI labels and component locales, unchanged client configuration payloads, bilingual documentation editing/default tutorials, and responsive English layouts. See [internationalization](INTERNATIONALIZATION.md).
+
+- User documentation (2026-10-06): administrator Markdown editor/templates, isolated drafts and publications, six beginner tutorials prioritizing CC Switch, searchable reader pages, signed image/video/file attachments, code highlighting/copy and configurable Apifox links. See [usage and operations](USER_DOCUMENTATION.md).
 
 - Support tickets (2026-09-20): user submissions/private attachments, administrator conversations/status workflow, durable SMTP reminders or content emails, retries, concurrency checks and responsive console pages. See [implementation and verification](SUPPORT_TICKETS.md).
 
@@ -118,6 +122,7 @@ Remaining:
 Completed:
 
 - PostgreSQL 17 integration tests are mandatory in the main CI job; a separate PostgreSQL 18 compatibility job runs the PostgreSQL test suite.
+- CI startup/portability fixes (2026-09-22): R2DBC clients wait for Flyway even with lazy initialization, container-backed test contexts are closed per class, GNU/BSD recovery-tool behavior is aligned, and V20 corrects function EXECUTE privileges. See [failure analysis and verification](CI_FIX_REPORT_2026-09-22.md).
 - PostgreSQL backup/restore, rollback validation, retention, aggregation, and capacity guidance are documented.
 - Application Root identity, data-management hard lock, maintenance health behavior, append-only audit/outbox, and interactive recovery tooling are implemented and tested.
 - Prometheus registry and `/actuator/prometheus` exposure are configured.

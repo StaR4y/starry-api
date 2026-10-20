@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Starry API mark</title>
+  <desc id="desc">The Starry API star on a transparent background, for use on light or dark surfaces.</desc>
+  <defs>
+    <linearGradient id="star" x1="40" y1="28" x2="216" y2="228" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3F7BFF" />
+      <stop offset="0.55" stop-color="#5E55F5" />
+      <stop offset="1" stop-color="#9A4DF0" />
+    </linearGradient>
+    <mask id="route">
+      <rect width="256" height="256" fill="#FFFFFF" />
+      <path d="M176 86C120 70 108 104 128 128S136 186 80 170" fill="none" stroke="#000000" stroke-width="15" stroke-linecap="round" />
+    </mask>
+  </defs>
+
+  <g transform="translate(128 128) scale(1.16) translate(-128 -128)">
+    <path
+      d="M128 26C137 81 175 119 230 128C175 137 137 175 128 230C119 175 81 137 26 128C81 119 119 81 128 26Z"
+      fill="url(#star)"
+      mask="url(#route)"
+    />
+  </g>
+</svg>

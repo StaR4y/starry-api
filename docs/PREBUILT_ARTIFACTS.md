@@ -1,36 +1,40 @@
-# Prebuilt Artifact Deployment
+# 预构建产物部署
 
-This project supports a source-build deployment and a prebuilt-artifact deployment.
+Starry API 支持两种部署方式：**源码构建**（在服务器上用 Docker 构建镜像）和**预构建产物**（服务器只下载仓库里打好的包并运行）。
 
-Use the prebuilt path when the server should only download and run the latest packaged bundle from the repository instead of compiling Java and WebUI assets on the server.
+这份文档讲预构建产物的**发布流程**（给开发者 / CI）和**服务器部署**（给运维）。如果你只想把服务装起来，请直接看 [服务器一键安装](INSTALL_SERVER.md)。
 
-There are two separate scripts:
+## 两个脚本，两个角色
 
-| Script | Where to run | What it does |
+| 脚本 | 在哪里运行 | 作用 |
 | --- | --- | --- |
-| `scripts/publish-artifact.sh` | Developer machine or CI | Builds the WebUI and boot jar, then writes the full deployment bundle under `artifacts/`. |
-| `scripts/install-server.sh` | Linux server | Downloads `artifacts/starry-api-bundle.tar.gz`, verifies SHA256, extracts it, and starts Docker Compose without running Gradle or npm. |
+| `scripts/publish-artifact.sh` | **开发机或 CI** | 构建控制台和 boot jar，把完整的部署包写到 `artifacts/` 目录 |
+| `scripts/install-server.sh` | **Linux 服务器** | 下载 `artifacts/starry-api-bundle.tar.gz`，校验 SHA256，解压，启动 Docker Compose——不跑 Gradle / npm |
 
-## Artifact Directory
+> 🚫 **服务器上不要运行 `publish-artifact.sh`。**
 
-The repository-level `artifacts/` directory stores the deployable output:
+## 产物目录
 
-| File | Purpose |
+仓库根目录的 `artifacts/` 存放可部署的产物：
+
+| 文件 | 用途 |
 | --- | --- |
-| `artifacts/starry-api-bundle.tar.gz` | Full server deployment bundle. |
-| `artifacts/starry-api-bundle.tar.gz.sha256` | Checksum used by the server deploy script. |
-| `artifacts/starry-api.jar` | Spring Boot executable jar with the WebUI embedded. |
-| `artifacts/starry-api.jar.sha256` | Jar checksum, also kept inside the bundle. |
-| `artifacts/starry-api-webui.tar.gz` | Standalone built WebUI dist archive for inspection or CDN use. |
-| `artifacts/docker-compose.artifact.yml` | Compose file that runs the jar with a JRE image. |
-| `artifacts/runtime/recover-data-management.sh` | Bilingual interactive recovery utility copied into the service image as `/app/bin/recover-data-management`. |
-| `artifacts/runtime/recover-data-management.sh.sha256` | Recovery utility checksum verified by the installer. |
-| `artifacts/sha256sums.txt` | Checksum manifest for deployable files. |
-| `artifacts/build-info.json` | Source commit, branch, version, build time, size, and checksum metadata. |
+| `artifacts/starry-api-bundle.tar.gz` | 完整的服务器部署包 |
+| `artifacts/starry-api-bundle.tar.gz.sha256` | 服务器脚本用的校验和 |
+| `artifacts/starry-api.jar` | 可执行的 Spring Boot jar（内嵌控制台） |
+| `artifacts/starry-api.jar.sha256` | jar 的校验和（也包含在整包里） |
+| `artifacts/starry-api-webui.tar.gz` | 单独的控制台静态文件包，用于检查或 CDN |
+| `artifacts/docker-compose.artifact.yml` | 用 JRE 镜像运行 jar 的 Compose 文件 |
+| `artifacts/runtime/recover-data-management.sh` | 双语交互恢复工具，会被复制进服务镜像的 `/app/bin/recover-data-management` |
+| `artifacts/runtime/recover-data-management.sh.sha256` | 恢复工具校验和，安装时会校验 |
+| `artifacts/sha256sums.txt` | 所有可部署文件的校验和清单 |
+| `artifacts/build-info.json` | 源码提交、分支、版本、构建时间、大小、校验和等元数据 |
 
-## Publish After Each Commit
+---
 
-After every source commit that should be deployable, run this on a developer machine or CI, not on the server:
+## 每次提交后发布
+
+每次想让某次源码提交**可被部署**，就在开发机 / CI 上（**不是服务器**）执行：
 
 ```bash
 ./scripts/publish-artifact.sh
@@ -39,124 +43,88 @@ git commit -m "chore: publish prebuilt artifact"
 git push
 ```
 
-The script runs `./gradlew test :service:bootJar`, verifies that the jar contains the built WebUI, then refreshes the jar, WebUI archive, Compose file, recovery utility, full bundle, checksums, and build metadata.
+脚本会运行 `./gradlew test :service:bootJar`，确认 jar 里确实包含构建好的控制台，然后刷新 jar、控制台包、Compose 文件、恢复工具、整包、校验和和构建元数据。
 
-The publish script needs either local Java 25 or Docker. If `java` is not available in `PATH`, it automatically falls back to Docker and builds through the project `Dockerfile`.
+**构建环境**：需要本机的 **Java 25**，或者 **Docker**。如果 `PATH` 里没有 `java`，脚本会自动退回用项目的 `Dockerfile` 在 Docker 里构建。
 
-Force Docker-based publishing:
+| 想要 | 命令 |
+| --- | --- |
+| 强制用 Docker 构建 | `BUILD_WITH_DOCKER=true ./scripts/publish-artifact.sh` |
+| 强制用本机 Java / Gradle | `BUILD_WITH_DOCKER=false ./scripts/publish-artifact.sh` |
+| 让脚本自动提交并推送「只含产物」的提交 | `COMMIT_ARTIFACTS=true PUSH_ARTIFACTS=true ./scripts/publish-artifact.sh` |
+| 测试已经通过、只想快速刷新 | `RUN_TESTS=false ./scripts/publish-artifact.sh` |
 
-```bash
-BUILD_WITH_DOCKER=true ./scripts/publish-artifact.sh
-```
+自动提交模式在**已经有暂存的改动**时会拒绝运行，防止把源码改动一起提交进去。
 
-Force local Java/Gradle publishing:
+---
 
-```bash
-BUILD_WITH_DOCKER=false ./scripts/publish-artifact.sh
-```
+## 在服务器上部署
 
-To let the script create and push the artifact-only commit:
-
-```bash
-COMMIT_ARTIFACTS=true PUSH_ARTIFACTS=true ./scripts/publish-artifact.sh
-```
-
-The auto-commit mode refuses to run when there are already staged changes, so it does not accidentally include source edits.
-
-If you need a faster local refresh after tests have already passed:
-
-```bash
-RUN_TESTS=false ./scripts/publish-artifact.sh
-```
-
-## One-Line Server Deploy
-
-Run this on a Linux server. This command downloads the checked-in bundle from the repository and does not run Gradle/npm:
+在 Linux 服务器上执行一行命令（只下载仓库里已提交的整包，不运行 Gradle / npm）：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh | sudo bash
 ```
 
-With a public domain:
+带域名：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
   | sudo env PUBLIC_BASE_URL=https://api.example.com bash
 ```
 
-For a private repository, GitHub raw URLs return `404` unless authenticated. Save a fine-grained token with read-only Contents permission once on the server:
+私有仓库需要先保存 GitHub Token，见 [服务器一键安装](INSTALL_SERVER.md#二私有仓库怎么办)。
 
-```bash
-sudo mkdir -p /opt/starry-api
-sudo install -m 600 /dev/null /opt/starry-api/.github-token
-sudo sh -c 'printf "%s" "replace-with-token" > /opt/starry-api/.github-token'
-```
+部署脚本会：
 
-Then run updates without retyping the token:
+- 缺少时安装 `curl`、`openssl`、Docker 和 Docker Compose；
+- 缺少时在 `/opt/starry-api/.env` 生成 PostgreSQL 凭据；
+- 下载 `artifacts/starry-api-bundle.tar.gz` 及其校验和；
+- 校验并解压到 `/opt/starry-api`；
+- 仅当整包不可用时，才回退到单独的 `artifacts/starry-api.jar`；
+- 安装经校验的恢复工具，并复制进服务镜像的 `/app/bin/recover-data-management`；
+- 启动 PostgreSQL 17 和服务运行时（含 PostgreSQL 17 客户端工具和 `jq`）；
+- 等待 `/actuator/health` 通过。
 
-```bash
-GITHUB_TOKEN="$(sudo cat /opt/starry-api/.github-token)"
-curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-  https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
-  -o /tmp/install-server.sh
-sudo bash /tmp/install-server.sh
-```
+它**不会**克隆仓库，也**不会**在服务器上运行 Gradle 或 npm。
 
-If you already have a local checkout on the server, you can run `sudo bash scripts/install-server.sh`; it will read `/opt/starry-api/.github-token` automatically.
+### 更新已有服务器
 
-The deploy script will:
+重新运行同一条命令即可。脚本会下载当前整包，原子地保留上一版的 `.env`、jar 及校验和、Compose 文件、PostgreSQL 引导脚本、恢复工具及其校验和；用新的部署单元重建服务；启动或健康检查失败时，**恢复整套旧部署并重建旧版本**后再报告失败。
 
-- install `curl`, `openssl`, Docker, and Docker Compose when missing
-- create `/opt/starry-api/.env` with generated PostgreSQL credentials when missing
-- download `artifacts/starry-api-bundle.tar.gz` and its checksum
-- verify and extract the bundle under `/opt/starry-api`
-- fall back to `artifacts/starry-api.jar` only when the bundle is not available
-- install the checksum-verified recovery utility and copy it into the service image at `/app/bin/recover-data-management`
-- start PostgreSQL 17 and the service runtime with PostgreSQL 17 client tools and `jq`
-- wait for `/actuator/health`
-
-It does not clone the repo and does not run Gradle or npm on the server.
-
-## Update Existing Server
-
-Rerun the same command. The script downloads the current bundle and atomically preserves the previous `.env`, jar and checksum, Compose file, PostgreSQL bootstrap script, recovery utility, and recovery checksum. It recreates the service with the new deployment unit; a startup or health failure restores the complete previous unit and recreates the prior stack before reporting failure.
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh | sudo bash
-```
-
-## Variables
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `REPO_URL` | `https://github.com/StaR4y/starry-api.git` | GitHub repository used to derive raw artifact URLs. |
-| `BRANCH` | `main` | Branch used to derive raw artifact URLs. |
-| `REPO_RAW_BASE` | derived from `REPO_URL` and `BRANCH` | Raw repository base used to download scripts and artifacts. |
-| `BUNDLE_URL` | `${REPO_RAW_BASE}/artifacts/starry-api-bundle.tar.gz` | Direct full bundle URL. |
-| `BUNDLE_CHECKSUM_URL` | `${BUNDLE_URL}.sha256` | Direct full bundle checksum URL. |
-| `ARTIFACT_URL` | `${REPO_RAW_BASE}/artifacts/starry-api.jar` | Direct jar URL. |
-| `CHECKSUM_URL` | `${REPO_RAW_BASE}/artifacts/starry-api.jar.sha256` | Direct checksum URL. |
-| `BUILD_INFO_URL` | `${REPO_RAW_BASE}/artifacts/build-info.json` | Optional build metadata URL. |
-| `RECOVERY_TOOL_URL` | `${REPO_RAW_BASE}/artifacts/runtime/recover-data-management.sh` | Direct recovery utility URL used only by the installer fallback path. |
-| `RECOVERY_TOOL_CHECKSUM_URL` | `${RECOVERY_TOOL_URL}.sha256` | Direct recovery utility checksum URL. |
-| `INSTALL_DIR` | `/opt/starry-api` | Server install directory. |
-| `HOST_BIND_ADDR` | `0.0.0.0` | Host address for Compose port binding. |
-| `HOST_HTTP_PORT` | `18080` | Host port exposed by Compose. |
-| `SERVER_PORT` | `8080` | Internal Spring Boot port. |
-| `PUBLIC_BASE_URL` | empty | Public HTTPS URL used in startup logs. |
-| `FORCE_ENV` | `false` | Regenerate `.env` only before PostgreSQL has initialized; initialized clusters require an in-database role-password rotation and a manual `.env` update. |
-| `INSTALL_DOCKER` | `true` | Install Docker when missing. |
-| `GITHUB_TOKEN` | empty | Optional token for private raw artifact downloads. |
-| `GITHUB_TOKEN_FILE` | `${INSTALL_DIR}/.github-token` | Optional local token file used when `GITHUB_TOKEN` is empty. |
-
-Deploy a non-main branch artifact by setting `BRANCH`:
+### 部署某个分支的产物
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
   | sudo env BRANCH=my-branch bash
 ```
 
-## Operations
+---
+
+## 变量
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `REPO_URL` | `https://github.com/StaR4y/starry-api.git` | 用来推导 raw 下载地址的 GitHub 仓库 |
+| `BRANCH` | `main` | 用来推导 raw 下载地址的分支 |
+| `REPO_RAW_BASE` | 由 `REPO_URL` 和 `BRANCH` 推导 | 下载脚本和产物的 raw 根地址 |
+| `BUNDLE_URL` / `BUNDLE_CHECKSUM_URL` | `${REPO_RAW_BASE}/artifacts/starry-api-bundle.tar.gz` / `${BUNDLE_URL}.sha256` | 完整整包及校验和地址 |
+| `ARTIFACT_URL` / `CHECKSUM_URL` | `${REPO_RAW_BASE}/artifacts/starry-api.jar` / `….jar.sha256` | 单独 jar 及校验和地址 |
+| `BUILD_INFO_URL` | `${REPO_RAW_BASE}/artifacts/build-info.json` | 可选的构建元数据地址 |
+| `RECOVERY_TOOL_URL` / `RECOVERY_TOOL_CHECKSUM_URL` | `${REPO_RAW_BASE}/artifacts/runtime/recover-data-management.sh` / `${RECOVERY_TOOL_URL}.sha256` | 恢复工具及校验和地址，**仅在回退路径使用** |
+| `INSTALL_DIR` | `/opt/starry-api` | 服务器安装目录 |
+| `HOST_BIND_ADDR` | `0.0.0.0` | Compose 端口绑定的宿主机地址 |
+| `HOST_HTTP_PORT` | `18080` | Compose 暴露的宿主机端口 |
+| `SERVER_PORT` | `8080` | 容器内 Spring Boot 端口 |
+| `PUBLIC_BASE_URL` | 空 | 用于启动日志的公网 HTTPS 地址 |
+| `FORCE_ENV` | `false` | 仅在 PostgreSQL 初始化**之前**重新生成 `.env`；已初始化的集群需要先在数据库里轮换角色密码，再手动更新 `.env` |
+| `INSTALL_DOCKER` | `true` | 缺少 Docker 时是否自动安装 |
+| `GITHUB_TOKEN` | 空 | 私有仓库下载用的 Token |
+| `GITHUB_TOKEN_FILE` | `${INSTALL_DIR}/.github-token` | `GITHUB_TOKEN` 为空时使用的本地 Token 文件 |
+
+---
+
+## 运维
 
 ```bash
 cd /opt/starry-api
@@ -165,21 +133,6 @@ docker compose -f docker-compose.artifact.yml restart service
 docker compose -f docker-compose.artifact.yml down
 ```
 
-For a data-management hard lock, keep exactly one service instance active and use an interactive terminal. The image-local utility supports Chinese and English prompts, hides and double-checks the original `dmsk-...` key, and writes only the fixed owner-only file `/app/security/recovery.key`:
+生成的环境使用数据库 `starry_api`、角色 `starry_api`、schema `starry_api`，同时安装一份可配置的 PostgreSQL OLTP 基线（连接数、内存、WAL / 检查点、规划器统计、autovacuum），默认值假定至少 2 GiB 可用内存。数据库文件在 `./data/postgresql` 下持久化，**除非这是可丢弃的部署，否则不要删除该目录**。
 
-```bash
-cd /opt/starry-api
-docker compose -f docker-compose.artifact.yml exec service \
-  /app/bin/recover-data-management --lang zh
-# Use --lang en for English prompts.
-docker compose -f docker-compose.artifact.yml restart service
-# Wait for startup, then verify status and one-time-file consumption:
-docker compose -f docker-compose.artifact.yml exec service \
-  curl -fsS http://127.0.0.1:8080/system/status
-docker compose -f docker-compose.artifact.yml exec service \
-  sh -c 'test ! -e /app/security/recovery.key && test ! -e /app/security/.recovery.key.consuming'
-```
-
-Do not add `exec -T`, pass or pipe the key, or download a recovery script with `curl ... | sh`. A normal matching attempt produces `"maintenance":false`; a normal readable, valid-format but nonmatching attempt records `RECOVERY_FAILED`, consumes both recovery paths, and keeps maintenance active. If either path remains, cleanup is incomplete and the service stays fail-closed; repair the security volume and restart so staged cleanup can retry. See [Operations](OPERATIONS.md#recover-a-docker-compose-deployment) for the full incident workflow and direct host/JAR recovery.
-
-The generated environment uses database `starry_api`, role `starry_api`, and schema `starry_api`. It also installs a configurable PostgreSQL OLTP baseline for connections, memory, WAL/checkpoints, planner statistics, and autovacuum; the defaults assume at least 2 GiB available memory. PostgreSQL files persist under `./data/postgresql`; do not delete that directory unless this is a disposable deployment.
+**数据管理被硬锁**时的恢复步骤：保持恰好一个服务实例运行，用交互式终端执行镜像里自带的双语工具，然后重启 `service` 并验证。完整流程见 [运维手册：恢复被锁定的数据管理](OPERATIONS.md#恢复被锁定的数据管理)。关键规则：不要加 `exec -T`、不要通过参数或管道传密钥、不要用 `curl ... | sh` 下载恢复脚本。
