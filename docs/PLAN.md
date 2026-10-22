@@ -8,6 +8,8 @@ Platform modularization is complete. The project is now in a reliability, securi
 
 The current baseline includes:
 
+- Spring Boot 4 (2026-10-23): Spring Boot 4.1 / Spring Framework 7 / Reactor Netty 1.3 / Netty 4.2 / Jackson 3 / Flyway 12 / Testcontainers 2, replacing Spring Boot 3.5, whose open-source support ended on 2026-06-30. `JacksonConfig` restores the Jackson 2 defaults that change what goes over the wire, and `WireFormatTest`, `ProxyWireFormatTest` and `JsonNodeWireFormatTest` pin the JSON recorded under Jackson 2. Branches started before the migration run `scripts/migrate-jackson3.py` before merging. Plugins built for the previous host load unchanged.
+
 - English compatibility (2026-10-06): persistent Chinese/English selection across the console, reactive UI labels and component locales, unchanged client configuration payloads, bilingual documentation editing/default tutorials, and responsive English layouts. See [internationalization](INTERNATIONALIZATION.md).
 
 - User documentation (2026-10-06): administrator Markdown editor/templates, isolated drafts and publications, six beginner tutorials prioritizing CC Switch, searchable reader pages, signed image/video/file attachments, code highlighting/copy and configurable Apifox links. See [usage and operations](USER_DOCUMENTATION.md).
