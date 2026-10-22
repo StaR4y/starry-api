@@ -521,59 +521,67 @@
           </div>
 
           <el-form label-position="top">
-            <el-form-item :label="t('接口网关地址 (ApiBase)')">
-              <el-input v-model="form.easypayApiBase" placeholder="https://pay.example.com/" />
-            </el-form-item>
-            <el-form-item :label="t('商户 ID (PID)')">
-              <el-input v-model="form.easypayPid" :placeholder="t('请输入商户 PID')" />
-            </el-form-item>
-            <el-form-item :label="t('商户通讯密钥 (Pkey)')">
-              <el-input
-                v-model="form.easypayPkey"
-                type="password"
-                show-password
-                :placeholder="pkeyConfigured ? t('已配置，留空保持不变') : t('请输入商户通讯密钥')"
-                autocomplete="new-password"
-              />
-            </el-form-item>
-            <el-form-item :label="t('收银台支付模式')">
-              <el-radio-group v-model="form.easypayPaymentMode" class="payment-mode-radios">
-                <el-radio-button label="popup" value="popup">
-                  {{
-                    t('跳转官方收银台')
-                  }}
-                </el-radio-button>
-                <el-radio-button label="qrcode" value="qrcode">
-                  {{
-                    t('直接输出二维码')
-                  }}
-                </el-radio-button>
-              </el-radio-group>
-            </el-form-item>
-            <div class="payment-admin__form-grid">
+            <div class="payment-admin__form-grid payment-admin__form-grid--cols-3">
+              <el-form-item :label="t('接口网关地址 (ApiBase)')">
+                <el-input v-model="form.easypayApiBase" placeholder="https://pay.example.com/" />
+              </el-form-item>
+              <el-form-item :label="t('商户 ID (PID)')">
+                <el-input v-model="form.easypayPid" :placeholder="t('请输入商户 PID')" />
+              </el-form-item>
+              <el-form-item :label="t('商户通讯密钥 (Pkey)')">
+                <el-input
+                  v-model="form.easypayPkey"
+                  type="password"
+                  show-password
+                  :placeholder="
+                    pkeyConfigured ? t('已配置，留空保持不变') : t('请输入商户通讯密钥')
+                  "
+                  autocomplete="new-password"
+                />
+              </el-form-item>
+              <el-form-item :label="t('收银台支付模式')">
+                <el-radio-group v-model="form.easypayPaymentMode" class="payment-mode-radios">
+                  <el-radio-button label="popup" value="popup">
+                    {{
+                      t('跳转官方收银台')
+                    }}
+                  </el-radio-button>
+                  <el-radio-button label="qrcode" value="qrcode">
+                    {{
+                      t('直接输出二维码')
+                    }}
+                  </el-radio-button>
+                </el-radio-group>
+              </el-form-item>
               <el-form-item :label="t('商品名称前缀')">
                 <el-input v-model="form.productNamePrefix" :placeholder="t('例如: Starry API')" />
               </el-form-item>
               <el-form-item :label="t('商品名称后缀')">
                 <el-input v-model="form.productNameSuffix" :placeholder="t('例如: 余额充值')" />
               </el-form-item>
+              <el-form-item
+                :label="t('充值指南图片 (帮助图片 URL)')"
+                class="payment-admin__field--full"
+              >
+                <el-input v-model="form.helpImageUrl" placeholder="https://example.com/help.png" />
+              </el-form-item>
+              <el-form-item
+                :label="t('充值帮助说明 (Markdown 或纯文本)')"
+                class="payment-admin__field--full"
+              >
+                <el-input
+                  v-model="form.helpText"
+                  type="textarea"
+                  :rows="3"
+                  :placeholder="t('请输入在充值界面展示的提示信息')"
+                />
+              </el-form-item>
             </div>
-            <el-form-item :label="t('充值指南图片 (帮助图片 URL)')">
-              <el-input v-model="form.helpImageUrl" placeholder="https://example.com/help.png" />
-            </el-form-item>
-            <el-form-item :label="t('充值帮助说明 (Markdown 或纯文本)')">
-              <el-input
-                v-model="form.helpText"
-                type="textarea"
-                :rows="3"
-                :placeholder="t('请输入在充值界面展示的提示信息')"
-              />
-            </el-form-item>
           </el-form>
         </div>
 
         <!-- 邀请返利配置 -->
-        <div class="payment-admin__panel payment-admin__panel--wide">
+        <div class="payment-admin__panel">
           <div class="payment-admin__panel-header">
             <el-icon class="panel-header-icon"><Setting /></el-icon>
             <span class="panel-header-title">{{ t('邀请返利活动') }}</span>
@@ -594,7 +602,7 @@
               <el-switch v-model="form.inviteRebateEnabled" />
             </div>
 
-            <div class="payment-admin__form-grid">
+            <div class="payment-admin__form-grid payment-admin__form-grid--cols-2">
               <el-form-item :label="t('返利比例 (%)')">
                 <el-input-number
                   v-model="inviteRebateRatePercent"
@@ -779,11 +787,11 @@
     flex-direction: column;
     gap: 24px;
 
+    /* 配置面板整行堆叠：双列并排时每列只剩约 450px，标签会折行、支付方式卡片会被挤窄。 */
     &__grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr));
-      gap: 20px;
-      align-items: start;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 24px;
     }
 
     &__panel,
@@ -801,10 +809,6 @@
         box-shadow: 0 8px 22px rgba(22, 35, 52, 0.06);
         border-color: rgba(91, 141, 239, 0.25);
       }
-    }
-
-    &__panel--wide {
-      grid-column: 1 / -1;
     }
 
     &__panel-header {
@@ -868,10 +872,72 @@
       }
     }
 
+    /*
+     * 表单栅格：列数随面板宽度自适应（每列至少 --min-col，至多 --max-cols 列，默认 4 列），
+     * 窄屏自然降为单列。
+     */
     &__form-grid {
+      --form-gap: 16px;
+      --min-col: 260px;
+      --max-cols: 4;
+      --col-min: max(
+        var(--min-col),
+        calc((100% - (var(--max-cols) - 1) * var(--form-gap)) / var(--max-cols))
+      );
+
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 16px;
+      grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--col-min)), 1fr));
+      gap: var(--form-gap);
+
+      &--cols-2 {
+        --max-cols: 2;
+      }
+
+      &--cols-3 {
+        --max-cols: 3;
+      }
+
+      :deep(.el-form-item) {
+        min-width: 0;
+        margin-bottom: 0;
+      }
+
+      :deep(.el-form-item__label) {
+        padding-right: 0;
+      }
+
+      :deep(.el-form-item__content) {
+        align-content: flex-start;
+        align-items: flex-start;
+      }
+
+      /*
+       * 同一行的表单项共用「标签行」与「控件行」：标签折成两行（如英文）时，
+       * 同行输入框依然上下对齐。不支持 subgrid 的浏览器退化为各自独立堆叠。
+       * 行间距改由控件行的 margin-bottom 提供，末行多出的一份用负 margin 抵消。
+       */
+      @supports (grid-template-rows: subgrid) {
+        row-gap: 0;
+        margin-bottom: calc(var(--form-gap) * -1);
+
+        :deep(.el-form-item) {
+          display: grid;
+          grid-row: span 2;
+          grid-template-rows: subgrid;
+        }
+
+        :deep(.el-form-item__label) {
+          align-self: end;
+        }
+
+        :deep(.el-form-item__content) {
+          margin-bottom: var(--form-gap);
+        }
+      }
+    }
+
+    &__field--full {
+      grid-column: 1 / -1;
     }
   }
 
@@ -885,7 +951,7 @@
   /* 支付方式定制卡片选择器 */
   .payment-method-selector {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
     gap: 14px;
     width: 100%;
     margin-top: 4px;
@@ -911,6 +977,7 @@
     }
 
     &__icon-brand {
+      flex: none;
       width: 40px;
       height: 40px;
       border-radius: 10px;
@@ -932,15 +999,14 @@
     &__title {
       font-size: 14px;
       font-weight: 600;
+      line-height: 1.4;
       color: var(--kp-text);
     }
 
     &__desc {
-      font-size: 11px;
+      font-size: 12px;
+      line-height: 1.4;
       color: var(--kp-text-secondary);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
     }
 
     &__badge {
@@ -1006,9 +1072,29 @@
 
   /* 支付模式收音单选美化 */
   .payment-mode-radios {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    gap: 8px;
+    width: 100%;
+    max-width: 100%;
+
+    :deep(.el-radio-button) {
+      display: flex;
+      min-width: 0;
+      flex: 1 1 auto;
+    }
+
     :deep(.el-radio-button__inner) {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      padding: 6px 12px;
+      line-height: 18px;
+      text-align: center;
+      white-space: normal;
       border-radius: 10px !important;
-      margin-right: 8px;
       border: 1px solid var(--kp-divider) !important;
       background: rgba(255, 255, 255, 0.6) !important;
       box-shadow: none !important;
@@ -1153,19 +1239,21 @@
     }
   }
 
-  @media (max-width: 1200px) {
+  @media (max-width: 640px) {
     .payment-admin {
-      &__grid {
-        grid-template-columns: minmax(0, 1fr);
-      }
-    }
-  }
+      gap: 16px;
 
-  @media (max-width: 600px) {
-    .payment-admin {
-      &__form-grid,
-      .payment-method-selector {
-        grid-template-columns: 1fr;
+      &__grid {
+        gap: 16px;
+      }
+
+      &__panel,
+      &__orders {
+        padding: 16px;
+      }
+
+      &__row {
+        padding: 14px 16px;
       }
     }
   }

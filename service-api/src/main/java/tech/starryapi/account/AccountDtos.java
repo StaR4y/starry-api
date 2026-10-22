@@ -37,7 +37,8 @@ public final class AccountDtos {
         Long quotaLimit,
         Long quota5hLimit,
         Long quota7dLimit,
-        String badgeColor
+        String badgeColor,
+        UUID proxyChannelId
     ) {
         public CreateAccountRequest(
             String accountId,
@@ -84,6 +85,7 @@ public final class AccountDtos {
                 quotaLimit,
                 quota5hLimit,
                 quota7dLimit,
+                null,
                 null
             );
         }
@@ -117,7 +119,8 @@ public final class AccountDtos {
         Long quota7dUsed,
         Long quota7dLimit,
         Instant quota7dResetAt,
-        String badgeColor
+        String badgeColor,
+        UUID proxyChannelId
     ) {
         public UpdateAccountRequest(
             String email,
@@ -176,6 +179,7 @@ public final class AccountDtos {
                 quota7dUsed,
                 quota7dLimit,
                 quota7dResetAt,
+                null,
                 null
             );
         }
@@ -542,7 +546,8 @@ public final class AccountDtos {
         Instant lastUsedAt,
         Instant createdAt,
         Instant updatedAt,
-        String badgeColor
+        String badgeColor,
+        UUID proxyChannelId
     ) {
         public AccountResponse(
             String accountId,
@@ -611,6 +616,7 @@ public final class AccountDtos {
                 lastUsedAt,
                 createdAt,
                 updatedAt,
+                null,
                 null
             );
         }
