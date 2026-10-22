@@ -22,6 +22,7 @@ curl http://127.0.0.1:8080/v1/models           # 模型目录是否正常
 | 调接口返回 `401` `403` `429` `503` | [调用接口报错](#调用接口报错) |
 | 整站返回 `503 SYSTEM_MAINTENANCE` | [整站维护锁定](#整站维护锁定503-system_maintenance) |
 | 更新后界面没变 | [部署与更新](#部署与更新) |
+| 某个上游报 `PKIX path building failed` | [部署与更新](#某个上游报-pkix-path-building-failed) |
 | 发邮件失败（验证码、工单通知） | [邮件发送](#邮件发送) |
 
 ---
@@ -332,6 +333,12 @@ docker compose -f docker-compose.artifact.yml logs --tail=160 service
 **原因**：1Panel 的 OpenResty 通常跑在 Docker 里，它眼中的 `127.0.0.1` 是**它自己的容器**，而不是宿主机。
 
 **解决**：反向代理目标用**服务器的内网 / 公网 IP**，如 `http://<服务器IP>:18080`。只有 Nginx 直接跑在宿主机上时，才能用 `http://127.0.0.1:18080`。
+
+### 某个上游报 `PKIX path building failed`
+
+**原因**：为应对 CVE-2026-91403（eMudhra 八个中间 CA 的私钥可被推算出来，而当前 JDK 仍然信任它们），镜像构建时从 JRE 信任库里删除了所有 emSign 根证书和 `AAA Certificate Services` 根证书。内置的上游（OpenAI、Anthropic、AWS/Kiro、DeepSeek、Cloudflare、GitHub 等）都不依赖这些根；使用 Sectigo 证书的站点会通过 USERTrust 根正常验证。只有证书链最终挂在 emSign 根上的自定义上游才会握手失败。
+
+**解决**：让该上游换用其他 CA 签发的证书（eMudhra 也在协助受影响的用户迁移）。不要把这些根证书加回信任库：在 JDK 发布修复之前，它们签发的任何证书都可能是伪造的。
 
 ---
 

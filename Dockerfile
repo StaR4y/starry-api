@@ -1,4 +1,4 @@
-FROM node:20-bookworm-slim AS webui-build
+FROM node:22-bookworm-slim AS webui-build
 
 WORKDIR /workspace/webui
 COPY webui/package*.json ./
@@ -29,6 +29,17 @@ RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends postgresql-client-17; \
     rm -rf /var/lib/apt/lists/*
+
+# CVE-2026-91403: eight eMudhra intermediate CAs whose private keys can be recomputed chain to emSign ECC Root CA - G3
+# and to AAA Certificate Services, and no JDK release distrusts them yet. None of the upstreams this gateway calls
+# chains to these roots (Sectigo sites validate through the USERTrust roots), so drop them from the JRE trust store.
+# Remove this step once the base image ships a JDK with the fix.
+RUN set -eu; \
+    list() { keytool -J-Duser.language=en -list -v -cacerts -storepass changeit; }; \
+    test "$(list | grep -c '^Alias name: ')" -gt 100; \
+    list | awk '/^Alias name: /{alias=substr($0,13)} /^Owner: .*(emSign|CN=AAA Certificate Services,)/{print alias}' \
+        | while IFS= read -r alias; do keytool -delete -noprompt -cacerts -storepass changeit -alias "$alias"; done; \
+    ! list | grep -E '^Owner: .*(emSign|CN=AAA Certificate Services,)'
 
 WORKDIR /app
 COPY --from=build /workspace/service/build/libs/service-0.1.0-SNAPSHOT.jar /app/app.jar

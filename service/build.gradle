@@ -25,7 +25,7 @@ dependencies {
     implementation 'io.r2dbc:r2dbc-pool'
     implementation 'org.flywaydb:flyway-core'
     implementation 'org.flywaydb:flyway-database-postgresql'
-    runtimeOnly 'io.netty:netty-resolver-dns-native-macos:4.1.132.Final:osx-aarch_64'
+    runtimeOnly "io.netty:netty-resolver-dns-native-macos:${nettyVersion}:osx-aarch_64"
     runtimeOnly 'org.postgresql:postgresql'
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'

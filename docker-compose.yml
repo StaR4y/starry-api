@@ -61,6 +61,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Always check for newer base images so JDK and CA-certificate fixes arrive with the next build.
+      pull: true
     image: star4y/starryapi-service:local
     container_name: starryapi-service
     restart: unless-stopped

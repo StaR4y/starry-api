@@ -1,6 +1,20 @@
 plugins {
-    id 'org.springframework.boot' version '3.5.14' apply false
+    id 'org.springframework.boot' version '3.5.16' apply false
     id 'io.spring.dependency-management' version '1.1.7' apply false
+}
+
+// Versions newer than the Spring Boot BOM pins, raised for security fixes (CVE review 2026-10-22).
+// Remove an entry once the BOM catches up with it.
+ext {
+    nettyVersion = '4.1.139.Final'
+    securityBomProperties = [
+        'netty.version'         : nettyVersion,
+        'jackson-bom.version'   : '2.21.8',
+        'logback.version'       : '1.5.38',
+        'postgresql.version'    : '42.7.14',
+        'commons-lang3.version' : '3.21.0',
+        'log4j2.version'        : '2.26.1',
+    ]
 }
 
 allprojects {
@@ -16,9 +30,16 @@ configure(subprojects.findAll { it.name in ['service-api', 'service', 'plugin-ap
     apply plugin: 'java'
     apply plugin: 'io.spring.dependency-management'
 
+    // Project properties override the BOM's version properties, including the BOM the Spring Boot plugin imports.
+    securityBomProperties.each { name, value -> ext[name] = value }
+
     dependencyManagement {
         imports {
-            mavenBom 'org.springframework.boot:spring-boot-dependencies:3.5.14'
+            mavenBom 'org.springframework.boot:spring-boot-dependencies:3.5.16'
+        }
+        dependencies {
+            // Pulled in by Testcontainers (tests only).
+            dependency 'org.apache.commons:commons-compress:1.28.0'
         }
     }
 
