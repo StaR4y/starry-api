@@ -20,8 +20,6 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-webflux'
     // Boot 4 moved the WebClient.Builder auto-configuration (used by NewsService) out of the webflux starter.
     implementation 'org.springframework.boot:spring-boot-starter-webclient'
-    // Phase 1 of the Boot 4 migration keeps Jackson 2 (com.fasterxml.jackson); Boot 4 itself defaults to Jackson 3.
-    implementation 'org.springframework.boot:spring-boot-jackson2'
     implementation 'org.springdoc:springdoc-openapi-starter-webflux-ui:3.1.1'
     implementation 'com.github.ben-manes.caffeine:caffeine'
     implementation 'org.postgresql:r2dbc-postgresql'

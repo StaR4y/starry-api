@@ -8,8 +8,6 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -26,6 +24,8 @@ import tech.starryapi.config.ProxyProperties;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.core.PlatformUsage;
 import tech.starryapi.platform.upstream.UpstreamException;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 class KiroUpstreamClientTest {
 
@@ -38,12 +38,12 @@ class KiroUpstreamClientTest {
 
         ObjectNode prepared = KiroUpstreamClient.preparePayloadForEndpoint(payload, endpoint);
 
-        assertThat(currentUserInput(prepared).path("origin").asText()).isEqualTo("AI_EDITOR");
-        assertThat(currentUserInput(prepared).path("modelId").asText()).isEqualTo("CLAUDE_SONNET_4_20250514_V1_0");
-        assertThat(historyUserInput(prepared).path("origin").asText()).isEqualTo("AI_EDITOR");
-        assertThat(historyUserInput(prepared).path("modelId").asText()).isEqualTo("CLAUDE_SONNET_4_20250514_V1_0");
-        assertThat(currentUserInput(payload).path("origin").asText()).isEqualTo("ADMIN_TEST");
-        assertThat(currentUserInput(payload).path("modelId").asText()).isEqualTo("claude-haiku-4.5");
+        assertThat(currentUserInput(prepared).path("origin").asString("")).isEqualTo("AI_EDITOR");
+        assertThat(currentUserInput(prepared).path("modelId").asString("")).isEqualTo("CLAUDE_SONNET_4_20250514_V1_0");
+        assertThat(historyUserInput(prepared).path("origin").asString("")).isEqualTo("AI_EDITOR");
+        assertThat(historyUserInput(prepared).path("modelId").asString("")).isEqualTo("CLAUDE_SONNET_4_20250514_V1_0");
+        assertThat(currentUserInput(payload).path("origin").asString("")).isEqualTo("ADMIN_TEST");
+        assertThat(currentUserInput(payload).path("modelId").asString("")).isEqualTo("claude-haiku-4.5");
     }
 
     @Test
@@ -55,8 +55,8 @@ class KiroUpstreamClientTest {
 
         assertThat(prepared.path("conversationState").has("agentContinuationId")).isFalse();
         assertThat(prepared.path("conversationState").has("agentTaskType")).isFalse();
-        assertThat(currentUserInput(prepared).path("origin").asText()).isEqualTo("CLI");
-        assertThat(currentUserInput(prepared).path("modelId").asText()).isEqualTo("claude-sonnet-4.5");
+        assertThat(currentUserInput(prepared).path("origin").asString("")).isEqualTo("CLI");
+        assertThat(currentUserInput(prepared).path("modelId").asString("")).isEqualTo("claude-sonnet-4.5");
         assertThat(payload.path("conversationState").has("agentContinuationId")).isTrue();
         assertThat(payload.path("conversationState").has("agentTaskType")).isTrue();
     }

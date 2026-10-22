@@ -4,7 +4,6 @@ import static org.assertj.core.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -23,6 +22,7 @@ import reactor.core.publisher.Mono;
 import tech.starryapi.admin.AdminPrincipal;
 import tech.starryapi.common.*;
 import tech.starryapi.documentation.DocumentationDtos.*;
+import tools.jackson.databind.ObjectMapper;
 
 class DocumentationControllerTest {
     @TempDir Path directory;
@@ -97,7 +97,7 @@ class DocumentationControllerTest {
 
     @Test void rejectsChunkedRequestsOverTheLimit() {
         var auth = mock(AdminAuth.class);
-        var filter = new DocumentationRequestFilter(auth, new ObjectMapper().findAndRegisterModules());
+        var filter = new DocumentationRequestFilter(auth, new ObjectMapper());
         var exchange = MockServerWebExchange.from(MockServerHttpRequest.post("/admin/documentation/pages"));
         var request = new org.springframework.http.server.reactive.ServerHttpRequestDecorator(exchange.getRequest()) {
             @Override public reactor.core.publisher.Flux<org.springframework.core.io.buffer.DataBuffer> getBody() {
@@ -132,6 +132,6 @@ class DocumentationControllerTest {
 
     private WebTestClient client(AdminAuth auth, DocumentationService service, DocumentationStorage storage) {
         return WebTestClient.bindToController(new DocumentationController(auth, service, storage))
-            .controllerAdvice(new GlobalExceptionHandler()).webFilter(new DocumentationRequestFilter(auth, new ObjectMapper().findAndRegisterModules())).build();
+            .controllerAdvice(new GlobalExceptionHandler()).webFilter(new DocumentationRequestFilter(auth, new ObjectMapper())).build();
     }
 }

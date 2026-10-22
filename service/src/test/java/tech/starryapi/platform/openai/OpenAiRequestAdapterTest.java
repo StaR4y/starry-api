@@ -2,10 +2,10 @@ package tech.starryapi.platform.openai;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import tech.starryapi.model.DefaultModelCatalogProvider;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 class OpenAiRequestAdapterTest {
 
@@ -33,9 +33,9 @@ class OpenAiRequestAdapterTest {
         JsonNode chat = adapter.responsesToChat(request);
 
         JsonNode message = chat.path("messages").path(0);
-        assertThat(message.path("role").asText()).isEqualTo("tool");
-        assertThat(message.path("tool_call_id").asText()).isEqualTo("call_1");
-        assertThat(message.path("content").asText()).isEqualTo("line one\nline two");
+        assertThat(message.path("role").asString("")).isEqualTo("tool");
+        assertThat(message.path("tool_call_id").asString("")).isEqualTo("call_1");
+        assertThat(message.path("content").asString("")).isEqualTo("line one\nline two");
     }
 
     @Test
@@ -58,9 +58,9 @@ class OpenAiRequestAdapterTest {
         JsonNode chat = adapter.responsesToChat(request);
 
         JsonNode message = chat.path("messages").path(0);
-        assertThat(message.path("role").asText()).isEqualTo("assistant");
-        assertThat(message.path("content").path(0).path("type").asText()).isEqualTo("text");
-        assertThat(message.path("content").path(0).path("text").asText()).isEqualTo("I cannot help with that.");
+        assertThat(message.path("role").asString("")).isEqualTo("assistant");
+        assertThat(message.path("content").path(0).path("type").asString("")).isEqualTo("text");
+        assertThat(message.path("content").path(0).path("text").asString("")).isEqualTo("I cannot help with that.");
     }
 
     @Test
@@ -75,7 +75,7 @@ class OpenAiRequestAdapterTest {
 
         JsonNode chat = adapter.responsesToChat(request);
 
-        assertThat(chat.path("previous_response_id").asText()).isEqualTo("resp_123");
+        assertThat(chat.path("previous_response_id").asString("")).isEqualTo("resp_123");
     }
 
     @Test
@@ -100,12 +100,12 @@ class OpenAiRequestAdapterTest {
         JsonNode chat = adapter.responsesToChat(request);
 
         JsonNode content = chat.path("messages").path(0).path("content");
-        assertThat(content.path(0).path("type").asText()).isEqualTo("text");
-        assertThat(content.path(0).path("text").asText()).isEqualTo("describe");
-        assertThat(content.path(1).path("type").asText()).isEqualTo("image_url");
-        assertThat(content.path(1).path("image_url").path("url").asText()).isEqualTo("data:image/png;base64,abc");
-        assertThat(content.path(1).path("image_url").path("detail").asText()).isEqualTo("high");
-        assertThat(content.path(2).path("type").asText()).isEqualTo("text");
-        assertThat(content.path(2).path("text").asText()).contains("notes.txt").contains("file_123");
+        assertThat(content.path(0).path("type").asString("")).isEqualTo("text");
+        assertThat(content.path(0).path("text").asString("")).isEqualTo("describe");
+        assertThat(content.path(1).path("type").asString("")).isEqualTo("image_url");
+        assertThat(content.path(1).path("image_url").path("url").asString("")).isEqualTo("data:image/png;base64,abc");
+        assertThat(content.path(1).path("image_url").path("detail").asString("")).isEqualTo("high");
+        assertThat(content.path(2).path("type").asString("")).isEqualTo("text");
+        assertThat(content.path(2).path("text").asString("")).contains("notes.txt").contains("file_123");
     }
 }

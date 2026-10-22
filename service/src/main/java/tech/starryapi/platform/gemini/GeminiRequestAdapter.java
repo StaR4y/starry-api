@@ -1,11 +1,11 @@
 package tech.starryapi.platform.gemini;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.stereotype.Component;
 import tech.starryapi.platform.core.ToolSchemaSanitizer;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
 
 @Component
 public class GeminiRequestAdapter {
@@ -44,7 +44,7 @@ public class GeminiRequestAdapter {
     }
 
     private void appendContent(ArrayNode messages, JsonNode content) {
-        String role = content.path("role").asText("user");
+        String role = content.path("role").asString("user");
         JsonNode parts = content.path("parts");
         String text = partsText(parts);
 
@@ -68,10 +68,10 @@ public class GeminiRequestAdapter {
             ArrayNode toolCalls = message.putArray("tool_calls");
             for (JsonNode call : functionCalls) {
                 ObjectNode toolCall = toolCalls.addObject();
-                toolCall.put("id", call.path("id").asText(call.path("name").asText()));
+                toolCall.put("id", call.path("id").asString(call.path("name").asString("")));
                 toolCall.put("type", "function");
                 ObjectNode function = toolCall.putObject("function");
-                function.put("name", call.path("name").asText());
+                function.put("name", call.path("name").asString(""));
                 function.put("arguments", call.path("args").toString());
             }
             return;
@@ -81,7 +81,7 @@ public class GeminiRequestAdapter {
             for (JsonNode response : functionResponses) {
                 ObjectNode message = messages.addObject();
                 message.put("role", "tool");
-                message.put("tool_call_id", response.path("id").asText(response.path("name").asText()));
+                message.put("tool_call_id", response.path("id").asString(response.path("name").asString("")));
                 message.put("content", response.path("response").toString());
             }
             if (!text.isBlank()) {
@@ -108,8 +108,8 @@ public class GeminiRequestAdapter {
                 ObjectNode wrapper = converted.addObject();
                 wrapper.put("type", "function");
                 ObjectNode function = wrapper.putObject("function");
-                function.put("name", declaration.path("name").asText());
-                function.put("description", declaration.path("description").asText(""));
+                function.put("name", declaration.path("name").asString(""));
+                function.put("description", declaration.path("description").asString(""));
                 JsonNode parameters = declaration.has("parameters")
                     ? declaration.path("parameters")
                     : objectMapper.createObjectNode();
@@ -129,7 +129,7 @@ public class GeminiRequestAdapter {
                 continue;
             }
             if (!builder.isEmpty()) builder.append("\n");
-            builder.append(part.path("text").asText(""));
+            builder.append(part.path("text").asString(""));
         }
         return builder.toString();
     }

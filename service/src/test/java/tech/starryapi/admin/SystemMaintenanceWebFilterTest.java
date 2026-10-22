@@ -6,8 +6,6 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -18,10 +16,12 @@ import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
 import org.springframework.mock.web.server.MockServerWebExchange;
 import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 class SystemMaintenanceWebFilterTest {
 
-    private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
     void runsAtTheHighestFilterPriority() {
@@ -143,7 +143,7 @@ class SystemMaintenanceWebFilterTest {
             .map(parts -> String.join("", parts))
             .block();
         JsonNode body = objectMapper.readTree(json);
-        return body.path("error").path("code").asText();
+        return body.path("error").path("code").asString("");
     }
 
     private String read(DataBuffer buffer) {

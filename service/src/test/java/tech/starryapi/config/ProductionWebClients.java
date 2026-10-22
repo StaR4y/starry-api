@@ -5,7 +5,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.http.codec.CodecCustomizer;
 import org.springframework.boot.http.codec.autoconfigure.CodecsAutoConfiguration;
-import org.springframework.boot.jackson2.autoconfigure.Jackson2AutoConfiguration;
+import org.springframework.boot.jackson.autoconfigure.JacksonAutoConfiguration;
 import org.springframework.boot.test.context.ConfigDataApplicationContextInitializer;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.web.reactive.function.client.ExchangeStrategies;
@@ -13,11 +13,10 @@ import org.springframework.web.reactive.function.client.WebClient;
 
 /**
  * WebClient builders for unit tests that wire the codecs the way production does. A bare {@code WebClient.builder()}
- * uses Spring Framework 7's Jackson 3 JSON codec, which cannot handle the Jackson 2 {@code JsonNode} types the
- * application sends and receives. The customizers come from Boot's own auto-configuration driven by the real
- * application.yml, so removing {@code spring.http.codecs.preferred-json-mapper} there fails the tests that use this.
+ * builds its own Jackson codec instead of the application's JsonMapper, so request bodies would not be written with
+ * {@link JacksonConfig}'s settings. The customizers come from Boot's own auto-configuration driven by the real
+ * application.yml, exactly as {@code HttpClientConfig} applies them to {@code upstreamWebClient}.
  */
-@SuppressWarnings("removal") // Jackson2AutoConfiguration is the Boot 4 bridge for the application's Jackson 2 ObjectMapper
 public final class ProductionWebClients {
 
     private static final List<CodecCustomizer> CODEC_CUSTOMIZERS = codecCustomizers();
@@ -40,7 +39,8 @@ public final class ProductionWebClients {
         AtomicReference<List<CodecCustomizer>> customizers = new AtomicReference<>();
         new ApplicationContextRunner()
             .withInitializer(new ConfigDataApplicationContextInitializer())
-            .withConfiguration(AutoConfigurations.of(Jackson2AutoConfiguration.class, CodecsAutoConfiguration.class))
+            .withConfiguration(AutoConfigurations.of(JacksonAutoConfiguration.class, CodecsAutoConfiguration.class))
+            .withUserConfiguration(JacksonConfig.class)
             .run(context -> customizers.set(context.getBeanProvider(CodecCustomizer.class).orderedStream().toList()));
         return customizers.get();
     }

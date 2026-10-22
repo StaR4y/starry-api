@@ -13,9 +13,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
@@ -62,6 +59,9 @@ import tech.starryapi.platform.upstream.UpstreamException;
 import tech.starryapi.payment.PaymentSettingsService;
 import tech.starryapi.payment.PaymentSettingsService.PaymentConfig;
 import tech.starryapi.stats.StatsService;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 class ProxyFacadeRoutingTest {
 
@@ -1370,7 +1370,7 @@ class ProxyFacadeRoutingTest {
 
         ArgumentCaptor<JsonNode> forwardedRequest = ArgumentCaptor.forClass(JsonNode.class);
         verify(openAiUpstreamClient).complete(eq(account), forwardedRequest.capture(), eq("gpt-5"));
-        assertThat(forwardedRequest.getValue().path("service_tier").asText()).isEqualTo("priority");
+        assertThat(forwardedRequest.getValue().path("service_tier").asString("")).isEqualTo("priority");
         verify(apiKeyService).accountUsage(any(ApiKeyPrincipal.class), anyString(), eq(credits("10")), eq(3L), eq(2L));
         verify(kiroUpstreamClient, never()).complete(any(), any(), any());
     }
@@ -1702,14 +1702,14 @@ class ProxyFacadeRoutingTest {
             .map(this::readJson)
             .toList();
         assertThat(jsonEvents)
-            .extracting(event -> event.path("object").asText())
+            .extracting(event -> event.path("object").asString(""))
             .doesNotContain("chat.completion.chunk");
         JsonNode completed = jsonEvents.stream()
-            .filter(event -> "response.completed".equals(event.path("type").asText()))
+            .filter(event -> "response.completed".equals(event.path("type").asString("")))
             .findFirst()
             .orElseThrow();
-        assertThat(completed.path("response").path("object").asText()).isEqualTo("response");
-        assertThat(completed.path("response").path("previous_response_id").asText()).isEqualTo("resp_prev");
+        assertThat(completed.path("response").path("object").asString("")).isEqualTo("response");
+        assertThat(completed.path("response").path("previous_response_id").asString("")).isEqualTo("resp_prev");
         verify(openAiUpstreamClient).completeResponses(eq(account), eq(billingRequest(request, true)), eq("gpt-5.4"));
     }
 
@@ -2336,7 +2336,7 @@ class ProxyFacadeRoutingTest {
         ResponseEntity<?> firstResponse = facade.responses(firstRequest, firstExchange).block();
         assertThat(firstResponse).isNotNull();
         JsonNode firstBody = (JsonNode) firstResponse.getBody();
-        String responseId = firstBody.path("id").asText();
+        String responseId = firstBody.path("id").asString("");
         secondRequest.put("previous_response_id", responseId);
 
         facade.responses(secondRequest, secondExchange).block();
@@ -2349,11 +2349,11 @@ class ProxyFacadeRoutingTest {
         assertThat(replayed.path("store").asBoolean(true)).isFalse();
         JsonNode input = replayed.path("input");
         assertThat(input).hasSize(3);
-        assertThat(input.path(0).path("content").path(0).path("text").asText()).isEqualTo("write a file");
-        assertThat(input.path(1).path("type").asText()).isEqualTo("function_call");
-        assertThat(input.path(1).path("call_id").asText()).isEqualTo("call_write");
-        assertThat(input.path(2).path("type").asText()).isEqualTo("function_call_output");
-        assertThat(input.path(2).path("call_id").asText()).isEqualTo("call_write");
+        assertThat(input.path(0).path("content").path(0).path("text").asString("")).isEqualTo("write a file");
+        assertThat(input.path(1).path("type").asString("")).isEqualTo("function_call");
+        assertThat(input.path(1).path("call_id").asString("")).isEqualTo("call_write");
+        assertThat(input.path(2).path("type").asString("")).isEqualTo("function_call_output");
+        assertThat(input.path(2).path("call_id").asString("")).isEqualTo("call_write");
     }
 
     private ProxyFacade proxyFacade(
@@ -2689,7 +2689,7 @@ class ProxyFacadeRoutingTest {
     }
 
     private JsonNode billingRequest(JsonNode request, boolean responses) {
-        var expected = ((com.fasterxml.jackson.databind.node.ObjectNode) request).deepCopy();
+        var expected = ((tools.jackson.databind.node.ObjectNode) request).deepCopy();
         expected.put(responses ? "max_output_tokens" : "max_tokens", 4096L);
         return expected;
     }

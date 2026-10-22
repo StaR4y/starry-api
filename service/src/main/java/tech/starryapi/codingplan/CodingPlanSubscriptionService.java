@@ -1,7 +1,5 @@
 package tech.starryapi.codingplan;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
@@ -16,6 +14,8 @@ import tech.starryapi.admin.AdminPrincipal;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.common.Hashing;
 import tech.starryapi.codingplan.CodingPlanDtos.*;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class CodingPlanSubscriptionService {
@@ -70,12 +70,12 @@ public class CodingPlanSubscriptionService {
             try {
                 var result = mapper.readTree(row.get("result", String.class));
                 if (result.has("error")) {
-                    String error = result.path("error").asText();
+                    String error = result.path("error").asString("");
                     throw new ApiException(error.equals("INSUFFICIENT_BALANCE") ? HttpStatus.PAYMENT_REQUIRED : HttpStatus.CONFLICT,
                         error, "套餐开通失败，请检查余额、套餐版本或重复提交的内容");
                 }
-                return new ActivationOutcome(result.path("subscriptionId").asText(), result.path("balance").decimalValue());
-            } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+                return new ActivationOutcome(result.path("subscriptionId").asString(""), result.path("balance").decimalValue(BigDecimal.ZERO));
+            } catch (tools.jackson.core.JacksonException error) {
                 throw new IllegalStateException("Invalid activation result", error);
             }
         }).one();

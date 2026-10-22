@@ -1,6 +1,5 @@
 package tech.starryapi.admin;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -49,6 +48,7 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 import tech.starryapi.common.ApiException;
+import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class DataTransferService {

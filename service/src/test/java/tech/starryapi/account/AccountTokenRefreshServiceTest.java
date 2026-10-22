@@ -9,7 +9,6 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -27,6 +26,7 @@ import reactor.core.publisher.Mono;
 import tech.starryapi.admin.DataManagementSecurityService;
 import tech.starryapi.admin.SystemMaintenanceTaskGate;
 import tech.starryapi.config.ProductionWebClients;
+import tools.jackson.databind.ObjectMapper;
 
 class AccountTokenRefreshServiceTest {
 

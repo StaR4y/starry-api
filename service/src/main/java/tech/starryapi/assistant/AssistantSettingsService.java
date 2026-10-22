@@ -1,6 +1,5 @@
 package tech.starryapi.assistant;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Locale;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -9,6 +8,7 @@ import tech.starryapi.assistant.AssistantDtos.PublicSettings;
 import tech.starryapi.assistant.AssistantDtos.Settings;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.plugin.PluginRuntime;
+import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class AssistantSettingsService {

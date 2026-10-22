@@ -42,13 +42,12 @@ spring:
       - SET ROLE starry_api_owner
     connect-retries: ${FLYWAY_CONNECT_RETRIES:10}
     clean-disabled: true
-  jackson2:
+  jackson:
+    # Responses omit null properties (and null map values), as they always have.
     default-property-inclusion: non_null
+    # Everything else that departs from Jackson 3's defaults is in tech.starryapi.config.JacksonConfig.
   http:
     codecs:
-      # The application still uses Jackson 2 (com.fasterxml.jackson); Boot 4 would otherwise pick Jackson 3 for the
-      # WebFlux server and for every WebClient built from Boot's builder.
-      preferred-json-mapper: jackson2
       max-in-memory-size: ${SPRING_CODEC_MAX_IN_MEMORY_SIZE:16MB}
   webflux:
     multipart:
@@ -59,6 +58,10 @@ spring:
 
 management:
   endpoints:
+    # Boot 4 serializes endpoint JSON with a private Jackson 3 mapper that sorts properties alphabetically; use the
+    # application's mapper so /actuator/health keeps the {"status":...,"groups":...} layout probes already read.
+    jackson:
+      isolated-json-mapper: false
     web:
       exposure:
         include: health,info,metrics,prometheus

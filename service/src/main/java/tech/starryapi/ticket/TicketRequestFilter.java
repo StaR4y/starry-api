@@ -23,8 +23,8 @@ public class TicketRequestFilter implements WebFilter {
     private static final int PER_USER_SUBMISSIONS = 2;
     private static final java.time.Duration UPLOAD_IDLE_TIMEOUT = java.time.Duration.ofSeconds(30);
     private final java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger> perUser = new java.util.concurrent.ConcurrentHashMap<>();
-    private final com.fasterxml.jackson.databind.ObjectMapper json;
-    public TicketRequestFilter(AdminAuth auth, com.fasterxml.jackson.databind.ObjectMapper json) { this.auth = auth; this.json = json; }
+    private final tools.jackson.databind.ObjectMapper json;
+    public TicketRequestFilter(AdminAuth auth, tools.jackson.databind.ObjectMapper json) { this.auth = auth; this.json = json; }
 
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, WebFilterChain chain) {
@@ -40,7 +40,7 @@ public class TicketRequestFilter implements WebFilter {
             try {
                 byte[] body = json.writeValueAsBytes(tech.starryapi.common.ApiResponse.error(error.getCode(), error.getMessage()));
                 return exchange.getResponse().writeWith(Mono.just(exchange.getResponse().bufferFactory().wrap(body)));
-            } catch (com.fasterxml.jackson.core.JsonProcessingException e) { return Mono.error(e); }
+            } catch (tools.jackson.core.JacksonException e) { return Mono.error(e); }
         }
         long limit = 7L * 1024 * 1024;
         var tooLarge = new ResponseStatusException(HttpStatus.CONTENT_TOO_LARGE, "工单请求最大 7 MB");

@@ -3,8 +3,6 @@ package tech.starryapi.model;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -17,6 +15,8 @@ import org.springframework.web.reactive.function.client.ExchangeFunction;
 import org.springframework.web.reactive.function.client.WebClient;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.model.ModelRankingDtos.RankingSnapshot;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 
 class ModelRankingServiceTest {
 
@@ -218,7 +218,7 @@ class ModelRankingServiceTest {
     }
 
     private static ObjectMapper mapper() {
-        return JsonMapper.builder().build().findAndRegisterModules();
+        return JsonMapper.builder().build();
     }
 
     private ModelRankingProperties properties(boolean remoteEnabled) {

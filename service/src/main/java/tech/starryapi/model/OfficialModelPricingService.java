@@ -1,7 +1,5 @@
 package tech.starryapi.model;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
@@ -39,6 +37,9 @@ import tech.starryapi.admin.SystemSettingRepository;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.model.OfficialPriceResolver.OfficialPriceMatch;
 import tech.starryapi.platform.catalog.ModelPriceRepoModelIds;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class OfficialModelPricingService {
@@ -301,7 +302,7 @@ public class OfficialModelPricingService {
                 throw new IllegalArgumentException("Official model price catalog contains no usable token prices");
             }
             return new ParsedCatalog(Map.copyOf(parsed), root, content);
-        } catch (IOException error) {
+        } catch (JacksonException error) {
             throw new IllegalArgumentException("Could not parse official model price catalog", error);
         }
     }

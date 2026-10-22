@@ -2,10 +2,10 @@ package tech.starryapi.platform.gemini;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 class GeminiRequestAdapterTest {
 
@@ -46,13 +46,13 @@ class GeminiRequestAdapterTest {
 
         ObjectNode chat = adapter.generateContentToChat("gemini-2.5-pro", request);
 
-        assertThat(chat.path("model").asText()).isEqualTo("gemini-2.5-pro");
+        assertThat(chat.path("model").asString("")).isEqualTo("gemini-2.5-pro");
         assertThat(chat.path("messages")).hasSize(2);
-        assertThat(chat.path("messages").get(0).path("role").asText()).isEqualTo("system");
-        assertThat(chat.path("messages").get(0).path("content").asText()).isEqualTo("be concise");
-        assertThat(chat.path("messages").get(1).path("role").asText()).isEqualTo("user");
-        assertThat(chat.path("messages").get(1).path("content").asText()).isEqualTo("say hello");
-        assertThat(chat.path("max_tokens").asInt()).isEqualTo(128);
-        assertThat(chat.path("tools").get(0).path("function").path("name").asText()).isEqualTo("lookup");
+        assertThat(chat.path("messages").get(0).path("role").asString("")).isEqualTo("system");
+        assertThat(chat.path("messages").get(0).path("content").asString("")).isEqualTo("be concise");
+        assertThat(chat.path("messages").get(1).path("role").asString("")).isEqualTo("user");
+        assertThat(chat.path("messages").get(1).path("content").asString("")).isEqualTo("say hello");
+        assertThat(chat.path("max_tokens").asInt(0)).isEqualTo(128);
+        assertThat(chat.path("tools").get(0).path("function").path("name").asString("")).isEqualTo("lookup");
     }
 }

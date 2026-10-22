@@ -1,7 +1,5 @@
 package tech.starryapi.model;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.AtomicMoveNotSupportedException;
@@ -43,6 +41,9 @@ import tech.starryapi.model.ModelRankingDtos.RankingEntry;
 import tech.starryapi.model.ModelRankingDtos.RankingSettingsResponse;
 import tech.starryapi.model.ModelRankingDtos.RankingSnapshot;
 import tech.starryapi.model.ModelRankingDtos.UpdateRankingSettingsRequest;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class ModelRankingService {
@@ -314,7 +315,7 @@ public class ModelRankingService {
                 storedFetchedAt,
                 List.copyOf(entries.subList(0, limit))
             );
-        } catch (IOException error) {
+        } catch (JacksonException error) {
             throw new IllegalArgumentException("Could not parse model ranking payload", error);
         }
     }
@@ -360,7 +361,7 @@ public class ModelRankingService {
             } finally {
                 Files.deleteIfExists(upload);
             }
-        } catch (IOException error) {
+        } catch (IOException | JacksonException error) {
             log.warn("Unable to persist {} ranking snapshot", snapshot.benchmark(), error);
         }
     }
@@ -438,13 +439,13 @@ public class ModelRankingService {
         if (model.isBlank() || !node.path("rank").isNumber() || !node.path("score").isNumber()) {
             return null;
         }
-        Double secondary = node.path("secondaryScore").isNumber() ? node.get("secondaryScore").asDouble() : null;
+        Double secondary = node.path("secondaryScore").isNumber() ? node.get("secondaryScore").asDouble(0.0) : null;
         return new RankingEntry(
-            node.get("rank").asInt(),
+            node.get("rank").asInt(0),
             model,
             text(node.get("organization")),
             text(node.get("agent")),
-            node.get("score").asDouble(),
+            node.get("score").asDouble(0.0),
             secondary
         );
     }
@@ -468,11 +469,11 @@ public class ModelRankingService {
             return null;
         }
         try {
-            if (node.isTextual()) {
-                return Instant.parse(node.asText());
+            if (node.isString()) {
+                return Instant.parse(node.asString(""));
             }
             if (node.isNumber()) {
-                long value = node.asLong();
+                long value = node.asLong(0L);
                 return value > 10_000_000_000L ? Instant.ofEpochMilli(value) : Instant.ofEpochSecond(value);
             }
         } catch (RuntimeException ignored) {
@@ -482,7 +483,7 @@ public class ModelRankingService {
     }
 
     private static String text(JsonNode node) {
-        return node == null || node.isNull() ? "" : node.asText("").trim();
+        return node == null || node.isNull() ? "" : node.asString("").trim();
     }
 
     private static String blankToNull(String value) {

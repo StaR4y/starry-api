@@ -1,6 +1,5 @@
 package tech.starryapi.documentation;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicLong;
 import org.springframework.core.Ordered;
@@ -14,6 +13,7 @@ import org.springframework.web.server.*;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import tech.starryapi.common.*;
+import tools.jackson.databind.ObjectMapper;
 
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE + 50)

@@ -1,8 +1,5 @@
 package tech.starryapi.platform.kiro;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import java.io.IOException;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -14,6 +11,9 @@ import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.core.PlatformToolUse;
 import tech.starryapi.platform.core.PlatformUsage;
 import tech.starryapi.platform.upstream.UpstreamException;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 @Component
 public class AwsEventStreamParser {
@@ -127,7 +127,7 @@ public class AwsEventStreamParser {
             assistant = event;
         }
         if (assistant != null && assistant.has("content")) {
-            content.append(assistant.path("content").asText());
+            content.append(assistant.path("content").asString(""));
         }
     }
 
@@ -139,8 +139,8 @@ public class AwsEventStreamParser {
         if (toolUse == null) {
             return;
         }
-        String id = firstNonBlank(toolUse.path("toolUseId").asText(null), toolUse.path("id").asText(null));
-        String name = firstNonBlank(toolUse.path("name").asText(null), toolUse.path("toolName").asText(null));
+        String id = firstNonBlank(toolUse.path("toolUseId").asString(null), toolUse.path("id").asString(null));
+        String name = firstNonBlank(toolUse.path("name").asString(null), toolUse.path("toolName").asString(null));
         if (id != null && name != null) {
             toolUses.start(id, name);
         }
@@ -175,24 +175,24 @@ public class AwsEventStreamParser {
                 usage.cacheWriteTokens = cacheWrite;
                 return;
             }
-            if (metadata.has("inputTokens")) usage.inputTokens = metadata.path("inputTokens").asLong();
-            if (metadata.has("outputTokens")) usage.outputTokens = metadata.path("outputTokens").asLong();
+            if (metadata.has("inputTokens")) usage.inputTokens = metadata.path("inputTokens").asLong(0L);
+            if (metadata.has("outputTokens")) usage.outputTokens = metadata.path("outputTokens").asLong(0L);
         }
         JsonNode usageEvent = firstExisting(event, "usageEvent", "usage");
         if (usageEvent == null && isEventType(eventType, "usageEvent", "usage")) {
             usageEvent = event;
         }
         if (usageEvent != null) {
-            if (usageEvent.has("inputTokens")) usage.inputTokens = usageEvent.path("inputTokens").asLong();
-            if (usageEvent.has("outputTokens")) usage.outputTokens = usageEvent.path("outputTokens").asLong();
+            if (usageEvent.has("inputTokens")) usage.inputTokens = usageEvent.path("inputTokens").asLong(0L);
+            if (usageEvent.has("outputTokens")) usage.outputTokens = usageEvent.path("outputTokens").asLong(0L);
         }
         JsonNode metering = event.path("meteringEvent");
         if (!metering.isMissingNode() && metering.has("usage")) {
-            usage.credits = usage.credits.add(metering.path("usage").decimalValue());
+            usage.credits = usage.credits.add(metering.path("usage").decimalValue(BigDecimal.ZERO));
         }
         JsonNode contextUsage = event.path("contextUsageEvent");
         if (!contextUsage.isMissingNode() && usage.inputTokens == 0 && contextUsage.has("contextUsagePercentage")) {
-            usage.inputTokens = Math.round(contextWindow(fallbackModel) * contextUsage.path("contextUsagePercentage").asDouble() / 100.0);
+            usage.inputTokens = Math.round(contextWindow(fallbackModel) * contextUsage.path("contextUsagePercentage").asDouble(0.0) / 100.0);
         }
     }
 
@@ -288,7 +288,7 @@ public class AwsEventStreamParser {
     private JsonNode readJsonOrNull(String text) {
         try {
             return objectMapper.readTree(text);
-        } catch (IOException ignored) {
+        } catch (JacksonException ignored) {
             return null;
         }
     }
@@ -326,8 +326,8 @@ public class AwsEventStreamParser {
             if (id == null) {
                 return;
             }
-            if (inputNode.isTextual()) {
-                input.append(inputNode.asText());
+            if (inputNode.isString()) {
+                input.append(inputNode.asString(""));
                 return;
             }
             input = new StringBuilder(inputNode.toString());

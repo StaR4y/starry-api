@@ -39,8 +39,8 @@ public class HttpClientConfig {
             .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5_000);
 
         // A WebClient built by hand does not get Boot's codec setup. Apply the same customizers Boot applies to its own
-        // WebClient.Builder, otherwise the JSON codec is Spring Framework 7's Jackson 3 default and cannot read or
-        // write the Jackson 2 JsonNode/ObjectNode types this code passes around.
+        // WebClient.Builder, so the JSON codec uses the application's JsonMapper (JacksonConfig and spring.jackson.*)
+        // like the WebFlux server does, instead of a default Jackson mapper Spring Framework would create on its own.
         ExchangeStrategies strategies = ExchangeStrategies.builder()
             .codecs(configurer -> {
                 codecCustomizers.orderedStream().forEach(customizer -> customizer.customize(configurer));

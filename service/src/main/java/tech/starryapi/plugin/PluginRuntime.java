@@ -1,6 +1,5 @@
 package tech.starryapi.plugin;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PreDestroy;
 import java.net.URI;
 import java.net.URL;
@@ -40,6 +39,7 @@ import tech.starryapi.admin.SystemMaintenanceTaskGate;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.plugin.sdk.PluginContext;
 import tech.starryapi.plugin.sdk.StarryPlugin;
+import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class PluginRuntime {
@@ -531,9 +531,9 @@ public class PluginRuntime {
         try {
             var parsed = value == null || value.length() > 65536
                 || value.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 65536 ? null
-                : json.reader().with(com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(value);
+                : json.reader().with(tools.jackson.databind.DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(value);
             if (parsed == null || (object && !parsed.isObject())) throw PluginArchive.invalid("需要有效的 JSON，配置必须为对象，最大 64 KiB");
-        } catch (com.fasterxml.jackson.core.JsonProcessingException failure) {
+        } catch (tools.jackson.core.JacksonException failure) {
             throw PluginArchive.invalid("JSON 格式无效");
         }
     }

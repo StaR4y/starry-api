@@ -2,12 +2,12 @@ package tech.starryapi.platform.kiro;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
 import tech.starryapi.platform.core.PlatformCompletionResult;
+import tools.jackson.databind.ObjectMapper;
 
 class AwsEventStreamParserTest {
 
@@ -55,7 +55,7 @@ class AwsEventStreamParserTest {
         assertThat(result.toolUses()).hasSize(1);
         assertThat(result.toolUses().get(0).id()).isEqualTo("toolu_1");
         assertThat(result.toolUses().get(0).name()).isEqualTo("Bash");
-        assertThat(result.toolUses().get(0).input().path("command").asText()).isEqualTo("pwd");
+        assertThat(result.toolUses().get(0).input().path("command").asString("")).isEqualTo("pwd");
         assertThat(result.usage().outputTokens()).isEqualTo(1);
     }
 

@@ -1,6 +1,5 @@
 package tech.starryapi.plugin;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
@@ -30,6 +29,7 @@ import tech.starryapi.plugin.sdk.PluginContext;
 import tech.starryapi.plugin.sdk.PluginHttpEvent;
 import tech.starryapi.plugin.sdk.PluginJson;
 import tech.starryapi.plugin.sdk.PluginTasks;
+import tools.jackson.databind.ObjectMapper;
 
 final class PluginHostContext implements PluginContext {
     private static final Set<String> HOP_HEADERS = Set.of("host", "content-length", "connection", "transfer-encoding",

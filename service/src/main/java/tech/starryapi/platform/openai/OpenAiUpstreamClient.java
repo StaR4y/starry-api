@@ -1,9 +1,5 @@
 package tech.starryapi.platform.openai;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -27,6 +23,10 @@ import tech.starryapi.platform.core.PlatformUsage;
 import tech.starryapi.platform.core.ToolSchemaSanitizer;
 import tech.starryapi.platform.deepseek.DeepSeekModelCatalog;
 import tech.starryapi.platform.upstream.UpstreamException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
 
 @Component
 public class OpenAiUpstreamClient {
@@ -209,8 +209,8 @@ public class OpenAiUpstreamClient {
         JsonNode body = readJson(rawBody);
         JsonNode message = body.path("choices").path(0).path("message");
         return new PlatformCompletionResult(
-            message.path("content").asText(""),
-            message.path("reasoning_content").asText(""),
+            message.path("content").asString(""),
+            message.path("reasoning_content").asString(""),
             chatToolUses(message.path("tool_calls")),
             usage(body.path("usage"), "prompt_tokens", "completion_tokens")
         );
@@ -224,12 +224,12 @@ public class OpenAiUpstreamClient {
         int index = 0;
         for (JsonNode toolCall : toolCalls) {
             JsonNode function = toolCall.path("function");
-            String name = function.path("name").asText("");
+            String name = function.path("name").asString("");
             if (name.isBlank()) {
                 continue;
             }
             String rawInput = jsonText(function.path("arguments"), "{}");
-            String id = firstNonBlank(toolCall.path("id").asText(null), "call_" + index++);
+            String id = firstNonBlank(toolCall.path("id").asString(null), "call_" + index++);
             result.add(new PlatformToolUse(
                 id,
                 name,
@@ -268,14 +268,14 @@ public class OpenAiUpstreamClient {
     }
 
     private PlatformCompletionResult parseResponsesJson(JsonNode body) {
-        String content = body.path("output_text").asText("");
+        String content = body.path("output_text").asString("");
         if (content.isBlank()) {
             content = responseOutputText(body.path("output"));
         }
         return new PlatformCompletionResult(
             content,
             firstNonBlank(
-                body.path("reasoning_text").asText(""),
+                body.path("reasoning_text").asString(""),
                 responseReasoningText(body.path("output"))
             ),
             responseToolUses(body.path("output")),
@@ -297,18 +297,18 @@ public class OpenAiUpstreamClient {
                 continue;
             }
             JsonNode event = objectMapper.readTree(data);
-            String type = event.path("type").asText("");
+            String type = event.path("type").asString("");
             if ("response.output_text.delta".equals(type)) {
-                content.append(event.path("delta").asText(""));
+                content.append(event.path("delta").asString(""));
             } else if ("response.output_text.done".equals(type)) {
-                fallbackContent = firstNonBlank(fallbackContent, event.path("text").asText(""));
+                fallbackContent = firstNonBlank(fallbackContent, event.path("text").asString(""));
             } else if ("response.reasoning_text.delta".equals(type)) {
-                reasoningContent.append(event.path("delta").asText(""));
+                reasoningContent.append(event.path("delta").asString(""));
             } else if ("response.reasoning_text.done".equals(type)) {
                 fallbackReasoningContent = firstNonBlank(
                     fallbackReasoningContent,
-                    event.path("text").asText(""),
-                    event.path("reasoning_text").asText("")
+                    event.path("text").asString(""),
+                    event.path("reasoning_text").asString("")
                 );
             } else if ("response.content_part.done".equals(type)) {
                 JsonNode part = event.path("part");
@@ -337,12 +337,12 @@ public class OpenAiUpstreamClient {
                 JsonNode response = event.path("response");
                 fallbackContent = firstNonBlank(
                     fallbackContent,
-                    response.path("output_text").asText(""),
+                    response.path("output_text").asString(""),
                     responseOutputText(response.path("output"))
                 );
                 fallbackReasoningContent = firstNonBlank(
                     fallbackReasoningContent,
-                    response.path("reasoning_text").asText(""),
+                    response.path("reasoning_text").asString(""),
                     responseReasoningText(response.path("output"))
                 );
                 rememberResponseToolUses(pendingToolUses, response.path("output"));
@@ -400,7 +400,7 @@ public class OpenAiUpstreamClient {
                 converted.add(applyPatchFunctionTool(tool));
                 continue;
             }
-            if (!"function".equals(tool.path("type").asText())) {
+            if (!"function".equals(tool.path("type").asString(""))) {
                 converted.add(tool);
                 continue;
             }
@@ -412,7 +412,7 @@ public class OpenAiUpstreamClient {
             }
             ObjectNode codexTool = converted.addObject();
             codexTool.put("type", "function");
-            codexTool.put("name", source.path("name").asText());
+            codexTool.put("name", source.path("name").asString(""));
             if (source.has("description")) {
                 codexTool.set("description", source.get("description"));
             }
@@ -462,7 +462,7 @@ public class OpenAiUpstreamClient {
         tool.put("type", "function");
         tool.put("name", APPLY_PATCH_TOOL_NAME);
         String description = firstNonBlank(
-            source.path("description").asText(null),
+            source.path("description").asString(null),
             "Apply a raw patch. The patch string must start with *** Begin Patch and end with *** End Patch."
         );
         tool.put("description", description);
@@ -481,7 +481,7 @@ public class OpenAiUpstreamClient {
     }
 
     private boolean isApplyPatchTool(JsonNode source) {
-        return APPLY_PATCH_TOOL_NAME.equals(source.path("name").asText(null));
+        return APPLY_PATCH_TOOL_NAME.equals(source.path("name").asString(null));
     }
 
     private JsonNode codexToolChoice(JsonNode toolChoice) {
@@ -489,7 +489,7 @@ public class OpenAiUpstreamClient {
         if (applyPatchChoice != toolChoice) {
             return applyPatchChoice;
         }
-        if (!toolChoice.isObject() || !"function".equals(toolChoice.path("type").asText())) {
+        if (!toolChoice.isObject() || !"function".equals(toolChoice.path("type").asString(""))) {
             return toolChoice;
         }
         String name = toolChoiceName(toolChoice);
@@ -518,7 +518,7 @@ public class OpenAiUpstreamClient {
 
     private String toolChoiceName(JsonNode toolChoice) {
         JsonNode function = toolChoice.path("function");
-        return firstNonBlank(function.path("name").asText(null), toolChoice.path("name").asText(null));
+        return firstNonBlank(function.path("name").asString(null), toolChoice.path("name").asString(null));
     }
 
     private ArrayNode codexInput(JsonNode request) {
@@ -533,7 +533,7 @@ public class OpenAiUpstreamClient {
         JsonNode messages = request.path("messages");
         if (messages.isArray()) {
             for (JsonNode message : messages) {
-                if ("system".equals(message.path("role").asText())) {
+                if ("system".equals(message.path("role").asString(""))) {
                     continue;
                 }
                 appendCodexMessage(input, message);
@@ -553,12 +553,12 @@ public class OpenAiUpstreamClient {
 
     private ArrayNode codexResponsesInput(JsonNode sourceInput) {
         ArrayNode input = objectMapper.createArrayNode();
-        if (sourceInput.isTextual()) {
+        if (sourceInput.isString()) {
             ObjectNode message = input.addObject();
             message.put("type", "message");
             message.put("role", "user");
             ArrayNode content = message.putArray("content");
-            addTextPart(content, "input_text", sourceInput.asText());
+            addTextPart(content, "input_text", sourceInput.asString(""));
         } else if (sourceInput.isArray()) {
             for (JsonNode item : sourceInput) {
                 appendCodexResponsesInputItem(input, item);
@@ -575,7 +575,7 @@ public class OpenAiUpstreamClient {
     }
 
     private void appendCodexMessage(ArrayNode input, JsonNode source) {
-        String role = source.path("role").asText();
+        String role = source.path("role").asString("");
         if ("tool".equals(role)) {
             appendCodexFunctionCallOutput(input, source);
             return;
@@ -601,32 +601,32 @@ public class OpenAiUpstreamClient {
     }
 
     private void appendCodexResponsesInputItem(ArrayNode input, JsonNode source) {
-        String type = source.path("type").asText("");
+        String type = source.path("type").asString("");
         if ("function_call".equals(type)) {
             ObjectNode item = input.addObject();
             item.put("type", "function_call");
-            item.put("call_id", firstNonBlank(source.path("call_id").asText(null), source.path("id").asText(null)));
-            item.put("name", source.path("name").asText());
+            item.put("call_id", firstNonBlank(source.path("call_id").asString(null), source.path("id").asString(null)));
+            item.put("name", source.path("name").asString(""));
             item.put("arguments", jsonText(source.path("arguments"), "{}"));
-            item.put("status", source.path("status").asText("completed"));
+            item.put("status", source.path("status").asString("completed"));
             return;
         }
         if ("function_call_output".equals(type)) {
             ObjectNode item = input.addObject();
             item.put("type", "function_call_output");
-            item.put("call_id", source.path("call_id").asText());
+            item.put("call_id", source.path("call_id").asString(""));
             item.put("output", functionCallOutputText(source.path("output")));
             return;
         }
         if ("message".equals(type) || source.has("role") || source.has("content")) {
-            String role = source.path("role").asText("user");
+            String role = source.path("role").asString("user");
             ObjectNode message = input.addObject();
             message.put("type", "message");
             message.put("role", "assistant".equals(role) ? "assistant" : "user");
             ArrayNode content = message.putArray("content");
-            appendCodexContentParts(content, source.path("content"), message.path("role").asText());
+            appendCodexContentParts(content, source.path("content"), message.path("role").asString(""));
             if (content.isEmpty()) {
-                addTextPart(content, "assistant".equals(message.path("role").asText()) ? "output_text" : "input_text", "");
+                addTextPart(content, "assistant".equals(message.path("role").asString("")) ? "output_text" : "input_text", "");
             }
             return;
         }
@@ -640,13 +640,13 @@ public class OpenAiUpstreamClient {
         for (JsonNode toolCall : toolCalls) {
             ObjectNode item = input.addObject();
             item.put("type", "function_call");
-            item.put("call_id", toolCall.path("id").asText(toolCall.path("call_id").asText()));
+            item.put("call_id", toolCall.path("id").asString(toolCall.path("call_id").asString("")));
             JsonNode function = toolCall.path("function");
-            item.put("name", firstNonBlank(function.path("name").asText(null), toolCall.path("name").asText(null)));
+            item.put("name", firstNonBlank(function.path("name").asString(null), toolCall.path("name").asString(null)));
             JsonNode arguments = function.path("arguments");
             item.put("arguments", arguments.isMissingNode() || arguments.isNull()
                 ? "{}"
-                : arguments.isTextual() ? arguments.asText() : arguments.toString());
+                : arguments.isString() ? arguments.asString("") : arguments.toString());
             item.put("status", "completed");
         }
     }
@@ -654,7 +654,7 @@ public class OpenAiUpstreamClient {
     private void appendCodexFunctionCallOutput(ArrayNode input, JsonNode source) {
         ObjectNode item = input.addObject();
         item.put("type", "function_call_output");
-        item.put("call_id", firstNonBlank(source.path("tool_call_id").asText(null), source.path("call_id").asText(null)));
+        item.put("call_id", firstNonBlank(source.path("tool_call_id").asString(null), source.path("call_id").asString(null)));
         item.put("output", contentText(source.path("content")));
     }
 
@@ -663,8 +663,8 @@ public class OpenAiUpstreamClient {
             return;
         }
         String textType = "assistant".equals(role) ? "output_text" : "input_text";
-        if (content.isTextual()) {
-            addTextPart(target, textType, content.asText());
+        if (content.isString()) {
+            addTextPart(target, textType, content.asString(""));
             return;
         }
         if (!content.isArray()) {
@@ -677,15 +677,15 @@ public class OpenAiUpstreamClient {
     }
 
     private void appendCodexContentPart(ArrayNode target, JsonNode part, String textType) {
-        String type = part.path("type").asText("");
+        String type = part.path("type").asString("");
         switch (type) {
-            case "text" -> addTextPart(target, textType, part.path("text").asText(""));
+            case "text" -> addTextPart(target, textType, part.path("text").asString(""));
             case "input_text", "output_text" -> {
                 ObjectNode copy = target.addObject();
                 copy.put("type", type);
-                copy.put("text", part.path("text").asText(""));
+                copy.put("text", part.path("text").asString(""));
             }
-            case "refusal" -> addTextPart(target, "output_text", part.path("refusal").asText(part.path("text").asText("")));
+            case "refusal" -> addTextPart(target, "output_text", part.path("refusal").asString(part.path("text").asString("")));
             case "image_url" -> addInputImageFromChat(target, part);
             case "input_image" -> target.add(normalizedInputImage(part));
             case "input_file" -> target.add(part.deepCopy());
@@ -704,7 +704,7 @@ public class OpenAiUpstreamClient {
             if (imageUrl.has("detail")) {
                 inputImage.set("detail", imageUrl.get("detail"));
             }
-        } else if (imageUrl.isTextual()) {
+        } else if (imageUrl.isString()) {
             inputImage.set("image_url", imageUrl);
         }
     }
@@ -731,7 +731,7 @@ public class OpenAiUpstreamClient {
     }
 
     private String codexInstructions(JsonNode request) {
-        String explicit = request.path("instructions").asText(null);
+        String explicit = request.path("instructions").asString(null);
         if (explicit != null && !explicit.isBlank()) {
             return explicit;
         }
@@ -739,7 +739,7 @@ public class OpenAiUpstreamClient {
         JsonNode messages = request.path("messages");
         if (messages.isArray()) {
             for (JsonNode message : messages) {
-                if (!"system".equals(message.path("role").asText())) {
+                if (!"system".equals(message.path("role").asString(""))) {
                     continue;
                 }
                 String text = contentText(message.path("content"));
@@ -758,15 +758,15 @@ public class OpenAiUpstreamClient {
         if (content == null || content.isMissingNode() || content.isNull()) {
             return "";
         }
-        if (content.isTextual()) {
-            return content.asText();
+        if (content.isString()) {
+            return content.asString("");
         }
         if (!content.isArray()) {
             return content.toString();
         }
         StringBuilder builder = new StringBuilder();
         for (JsonNode part : content) {
-            String text = firstNonBlank(part.path("text").asText(null), part.path("refusal").asText(null));
+            String text = firstNonBlank(part.path("text").asString(null), part.path("refusal").asString(null));
             if (!text.isBlank()) {
                 if (!builder.isEmpty()) {
                     builder.append('\n');
@@ -796,7 +796,7 @@ public class OpenAiUpstreamClient {
      * message tree is shared with the request instead of being deep-copied for every call.
      */
     private static ObjectNode copyForUpstream(JsonNode request) {
-        return request instanceof ObjectNode object ? JsonNodes.shallowCopy(object) : request.deepCopy();
+        return request instanceof ObjectNode object ? JsonNodes.shallowCopy(object) : (ObjectNode) request.deepCopy();
     }
 
     private void forceNonStreaming(ObjectNode body) {
@@ -966,12 +966,12 @@ public class OpenAiUpstreamClient {
     }
 
     private void appendResponseToolUse(List<PlatformToolUse> toolUses, JsonNode item) {
-        String type = item.path("type").asText();
+        String type = item.path("type").asString("");
         if (!isResponseToolCall(type)) {
             return;
         }
-        String callId = firstNonBlank(item.path("call_id").asText(null), item.path("id").asText(null));
-        String name = item.path("name").asText(null);
+        String callId = firstNonBlank(item.path("call_id").asString(null), item.path("id").asString(null));
+        String name = item.path("name").asString(null);
         if (callId == null || name == null || name.isBlank()) {
             return;
         }
@@ -992,12 +992,12 @@ public class OpenAiUpstreamClient {
     }
 
     private void rememberResponseToolUse(Map<String, PendingResponseToolUse> pendingToolUses, JsonNode item) {
-        String type = item.path("type").asText();
+        String type = item.path("type").asString("");
         if (!isResponseToolCall(type)) {
             return;
         }
-        String itemId = item.path("id").asText(null);
-        String callId = firstNonBlank(item.path("call_id").asText(null), itemId);
+        String itemId = item.path("id").asString(null);
+        String callId = firstNonBlank(item.path("call_id").asString(null), itemId);
         String key = firstNonBlank(itemId, callId);
         if (key.isBlank()) {
             return;
@@ -1005,7 +1005,7 @@ public class OpenAiUpstreamClient {
         PendingResponseToolUse pending = pendingToolUses.computeIfAbsent(key, ignored -> new PendingResponseToolUse());
         pending.itemId = firstNonBlank(pending.itemId, itemId);
         pending.callId = firstNonBlank(pending.callId, callId);
-        pending.name = firstNonBlank(pending.name, item.path("name").asText(null));
+        pending.name = firstNonBlank(pending.name, item.path("name").asString(null));
         pending.type = firstNonBlank(pending.type, responseToolUseType(type, pending.name));
         if (item.isObject()) {
             pending.item = item.deepCopy();
@@ -1024,7 +1024,7 @@ public class OpenAiUpstreamClient {
         if (pending == null) {
             return;
         }
-        String delta = event.path("delta").asText("");
+        String delta = event.path("delta").asString("");
         if (!delta.isEmpty()) {
             pending.arguments.append(delta);
         }
@@ -1035,7 +1035,7 @@ public class OpenAiUpstreamClient {
         if (pending == null) {
             return;
         }
-        String arguments = firstNonBlank(event.path("arguments").asText(null), event.path("input").asText(null));
+        String arguments = firstNonBlank(event.path("arguments").asString(null), event.path("input").asString(null));
         String type = responseToolUseType(firstNonBlank(pending.type, "function_call"), pending.name);
         String input = responseToolUseRawInput(type, pending.name, arguments);
         if (!input.isBlank() && shouldReplacePendingToolInput(type, pending.name, pending.arguments, input)) {
@@ -1059,8 +1059,8 @@ public class OpenAiUpstreamClient {
     }
 
     private PendingResponseToolUse pendingResponseToolUse(Map<String, PendingResponseToolUse> pendingToolUses, JsonNode event) {
-        String itemId = event.path("item_id").asText(null);
-        String callId = event.path("call_id").asText(null);
+        String itemId = event.path("item_id").asString(null);
+        String callId = event.path("call_id").asString(null);
         String key = firstNonBlank(itemId, callId);
         if (key.isBlank()) {
             return null;
@@ -1068,7 +1068,7 @@ public class OpenAiUpstreamClient {
         PendingResponseToolUse pending = pendingToolUses.computeIfAbsent(key, ignored -> new PendingResponseToolUse());
         pending.itemId = firstNonBlank(pending.itemId, itemId);
         pending.callId = firstNonBlank(pending.callId, callId);
-        pending.name = firstNonBlank(pending.name, event.path("name").asText(null));
+        pending.name = firstNonBlank(pending.name, event.path("name").asString(null));
         return pending;
     }
 
@@ -1112,10 +1112,10 @@ public class OpenAiUpstreamClient {
             return "{}";
         }
         if (item.has("arguments")) {
-            return item.path("arguments").isTextual() ? item.path("arguments").asText() : item.path("arguments").toString();
+            return item.path("arguments").isString() ? item.path("arguments").asString("") : item.path("arguments").toString();
         }
         if (item.has("input")) {
-            return item.path("input").isTextual() ? item.path("input").asText() : item.path("input").toString();
+            return item.path("input").isString() ? item.path("input").asString("") : item.path("input").toString();
         }
         return "{}";
     }
@@ -1124,8 +1124,8 @@ public class OpenAiUpstreamClient {
         if (pending.item == null || !pending.item.isObject()) {
             return null;
         }
-        ObjectNode item = pending.item.deepCopy();
-        String type = responseToolUseType(firstNonBlank(pending.type, item.path("type").asText(null), "function_call"), pending.name);
+        ObjectNode item = (ObjectNode) pending.item.deepCopy();
+        String type = responseToolUseType(firstNonBlank(pending.type, item.path("type").asString(null), "function_call"), pending.name);
         item.put("type", type);
         if ("custom_tool_call".equals(type)) {
             item.remove(List.of("arguments", "status"));
@@ -1140,7 +1140,7 @@ public class OpenAiUpstreamClient {
         if (item == null || !item.isObject()) {
             return null;
         }
-        ObjectNode copy = item.deepCopy();
+        ObjectNode copy = (ObjectNode) item.deepCopy();
         copy.put("type", type);
         if ("custom_tool_call".equals(type)) {
             copy.remove(List.of("arguments", "status"));
@@ -1172,14 +1172,14 @@ public class OpenAiUpstreamClient {
         }
         try {
             JsonNode parsed = objectMapper.readTree(rawInput);
-            if (parsed.isTextual()) {
-                return parsed.asText();
+            if (parsed.isString()) {
+                return parsed.asString("");
             }
             if (parsed.isObject()) {
                 String text = firstNonBlank(
-                    parsed.path("patch").asText(null),
-                    parsed.path("input").asText(null),
-                    parsed.path("text").asText(null)
+                    parsed.path("patch").asString(null),
+                    parsed.path("input").asString(null),
+                    parsed.path("text").asString(null)
                 );
                 if (!text.isBlank()) {
                     return text;
@@ -1250,8 +1250,8 @@ public class OpenAiUpstreamClient {
 
     private String responseReasoningItemText(JsonNode item) {
         String directText = firstNonBlank(
-            item.path("reasoning_text").asText(""),
-            item.path("reasoning_content").asText("")
+            item.path("reasoning_text").asString(""),
+            item.path("reasoning_content").asString("")
         );
         JsonNode content = item.path("content");
         if (!content.isArray()) {
@@ -1271,13 +1271,13 @@ public class OpenAiUpstreamClient {
     }
 
     private String contentPartText(JsonNode part) {
-        String type = part.path("type").asText("");
-        return "output_text".equals(type) || "text".equals(type) ? part.path("text").asText("") : "";
+        String type = part.path("type").asString("");
+        return "output_text".equals(type) || "text".equals(type) ? part.path("text").asString("") : "";
     }
 
     private String reasoningContentPartText(JsonNode part) {
-        return "reasoning_text".equals(part.path("type").asText(""))
-            ? part.path("text").asText("")
+        return "reasoning_text".equals(part.path("type").asString(""))
+            ? part.path("text").asString("")
             : "";
     }
 
@@ -1285,8 +1285,8 @@ public class OpenAiUpstreamClient {
         if (value == null || value.isMissingNode() || value.isNull()) {
             return fallback;
         }
-        if (value.isTextual()) {
-            return value.asText();
+        if (value.isString()) {
+            return value.asString("");
         }
         return value.toString();
     }
@@ -1295,15 +1295,15 @@ public class OpenAiUpstreamClient {
         if (output == null || output.isMissingNode() || output.isNull()) {
             return "";
         }
-        if (output.isTextual()) {
-            return output.asText();
+        if (output.isString()) {
+            return output.asString("");
         }
         if (!output.isArray()) {
             return output.toString();
         }
         StringBuilder builder = new StringBuilder();
         for (JsonNode part : output) {
-            String text = firstNonBlank(part.path("text").asText(null), part.path("output_text").asText(null));
+            String text = firstNonBlank(part.path("text").asString(null), part.path("output_text").asString(null));
             if (text.isBlank()) {
                 text = part.toString();
             }

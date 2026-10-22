@@ -2,14 +2,14 @@ package tech.starryapi.platform.openai;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.codec.ServerSentEvent;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.core.PlatformToolUse;
 import tech.starryapi.platform.core.PlatformUsage;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 class OpenAiResponseFactoryTest {
 
@@ -31,11 +31,11 @@ class OpenAiResponseFactoryTest {
         JsonNode response = factory.responses("claude-sonnet-4.5", result, null);
 
         JsonNode call = response.path("output").get(0);
-        assertThat(call.path("type").asText()).isEqualTo("function_call");
-        assertThat(call.path("call_id").asText()).isEqualTo("toolu_1");
-        assertThat(call.path("name").asText()).isEqualTo("Bash");
-        assertThat(call.path("arguments").asText()).isEqualTo("{\"command\":\"pwd\"}");
-        assertThat(call.path("status").asText()).isEqualTo("completed");
+        assertThat(call.path("type").asString("")).isEqualTo("function_call");
+        assertThat(call.path("call_id").asString("")).isEqualTo("toolu_1");
+        assertThat(call.path("name").asString("")).isEqualTo("Bash");
+        assertThat(call.path("arguments").asString("")).isEqualTo("{\"command\":\"pwd\"}");
+        assertThat(call.path("status").asString("")).isEqualTo("completed");
     }
 
     @Test
@@ -58,12 +58,12 @@ class OpenAiResponseFactoryTest {
         assertThat(events).hasSize(3);
         JsonNode toolChunk = objectMapper.readTree(events.get(0));
         JsonNode toolCall = toolChunk.path("choices").get(0).path("delta").path("tool_calls").get(0);
-        assertThat(toolCall.path("id").asText()).isEqualTo("toolu_1");
-        assertThat(toolCall.path("function").path("name").asText()).isEqualTo("Bash");
-        assertThat(toolCall.path("function").path("arguments").asText()).isEqualTo("{\"command\":\"pwd\"}");
+        assertThat(toolCall.path("id").asString("")).isEqualTo("toolu_1");
+        assertThat(toolCall.path("function").path("name").asString("")).isEqualTo("Bash");
+        assertThat(toolCall.path("function").path("arguments").asString("")).isEqualTo("{\"command\":\"pwd\"}");
 
         JsonNode stopChunk = objectMapper.readTree(events.get(1));
-        assertThat(stopChunk.path("choices").get(0).path("finish_reason").asText()).isEqualTo("tool_calls");
+        assertThat(stopChunk.path("choices").get(0).path("finish_reason").asString("")).isEqualTo("tool_calls");
         assertThat(events.get(2)).isEqualTo("[DONE]");
     }
 
@@ -84,15 +84,15 @@ class OpenAiResponseFactoryTest {
 
         JsonNode choice = response.path("choices").get(0);
         JsonNode message = choice.path("message");
-        assertThat(message.path("reasoning_content").asText()).isEqualTo("checked the request");
+        assertThat(message.path("reasoning_content").asString("")).isEqualTo("checked the request");
         assertThat(message.path("content").isNull()).isTrue();
         assertThat(message.path("tool_calls")).hasSize(1);
         JsonNode toolCall = message.path("tool_calls").get(0);
-        assertThat(toolCall.path("id").asText()).isEqualTo("call_lookup");
-        assertThat(toolCall.path("function").path("name").asText()).isEqualTo("lookup");
-        assertThat(toolCall.path("function").path("arguments").asText())
+        assertThat(toolCall.path("id").asString("")).isEqualTo("call_lookup");
+        assertThat(toolCall.path("function").path("name").asString("")).isEqualTo("lookup");
+        assertThat(toolCall.path("function").path("arguments").asString(""))
             .isEqualTo("{\"query\":\"stars\"}");
-        assertThat(choice.path("finish_reason").asText()).isEqualTo("tool_calls");
+        assertThat(choice.path("finish_reason").asString("")).isEqualTo("tool_calls");
     }
 
     @Test
@@ -116,17 +116,17 @@ class OpenAiResponseFactoryTest {
         assertThat(events).hasSize(4);
         JsonNode reasoningChunk = objectMapper.readTree(events.get(0));
         JsonNode reasoningDelta = reasoningChunk.path("choices").get(0).path("delta");
-        assertThat(reasoningDelta.path("reasoning_content").asText()).isEqualTo("checked the request");
+        assertThat(reasoningDelta.path("reasoning_content").asString("")).isEqualTo("checked the request");
 
         JsonNode toolChunk = objectMapper.readTree(events.get(1));
         JsonNode toolCall = toolChunk.path("choices").get(0).path("delta").path("tool_calls").get(0);
-        assertThat(toolCall.path("id").asText()).isEqualTo("call_lookup");
-        assertThat(toolCall.path("function").path("name").asText()).isEqualTo("lookup");
-        assertThat(toolCall.path("function").path("arguments").asText())
+        assertThat(toolCall.path("id").asString("")).isEqualTo("call_lookup");
+        assertThat(toolCall.path("function").path("name").asString("")).isEqualTo("lookup");
+        assertThat(toolCall.path("function").path("arguments").asString(""))
             .isEqualTo("{\"query\":\"stars\"}");
 
         JsonNode stopChunk = objectMapper.readTree(events.get(2));
-        assertThat(stopChunk.path("choices").get(0).path("finish_reason").asText()).isEqualTo("tool_calls");
+        assertThat(stopChunk.path("choices").get(0).path("finish_reason").asString("")).isEqualTo("tool_calls");
         assertThat(events.get(3)).isEqualTo("[DONE]");
     }
 
@@ -149,16 +149,16 @@ class OpenAiResponseFactoryTest {
 
         List<JsonNode> jsonEvents = jsonEvents(events);
         assertThat(jsonEvents)
-            .extracting(event -> event.path("type").asText())
+            .extracting(event -> event.path("type").asString(""))
             .contains("response.output_text.delta", "response.output_text.done", "response.completed");
 
         JsonNode completed = jsonEvents.stream()
-            .filter(event -> "response.completed".equals(event.path("type").asText()))
+            .filter(event -> "response.completed".equals(event.path("type").asString("")))
             .findFirst()
             .orElseThrow();
-        assertThat(completed.path("response").path("object").asText()).isEqualTo("response");
-        assertThat(completed.path("response").path("status").asText()).isEqualTo("completed");
-        assertThat(completed.path("response").path("previous_response_id").asText()).isEqualTo("resp_prev");
+        assertThat(completed.path("response").path("object").asString("")).isEqualTo("response");
+        assertThat(completed.path("response").path("status").asString("")).isEqualTo("completed");
+        assertThat(completed.path("response").path("previous_response_id").asString("")).isEqualTo("resp_prev");
     }
 
     @Test
@@ -177,24 +177,24 @@ class OpenAiResponseFactoryTest {
         JsonNode response = factory.responses("deepseek-v4-flash", result, null);
 
         assertThat(response.path("output"))
-            .extracting(item -> item.path("type").asText())
+            .extracting(item -> item.path("type").asString(""))
             .containsExactly("reasoning", "message", "function_call");
         JsonNode reasoningItem = response.path("output").get(0);
-        assertThat(reasoningItem.path("id").asText()).startsWith("rs_");
-        assertThat(reasoningItem.path("status").asText()).isEqualTo("completed");
+        assertThat(reasoningItem.path("id").asString("")).startsWith("rs_");
+        assertThat(reasoningItem.path("status").asString("")).isEqualTo("completed");
         assertThat(reasoningItem.path("summary")).isEmpty();
-        assertThat(reasoningItem.path("content").get(0).path("type").asText()).isEqualTo("reasoning_text");
-        assertThat(reasoningItem.path("content").get(0).path("text").asText()).isEqualTo("checked the response");
+        assertThat(reasoningItem.path("content").get(0).path("type").asString("")).isEqualTo("reasoning_text");
+        assertThat(reasoningItem.path("content").get(0).path("text").asString("")).isEqualTo("checked the response");
 
         List<ServerSentEvent<String>> events = factory
-            .responsesStreamEvents((com.fasterxml.jackson.databind.node.ObjectNode) response)
+            .responsesStreamEvents((tools.jackson.databind.node.ObjectNode) response)
             .collectList()
             .block();
 
         assertThat(events).isNotNull();
         List<JsonNode> jsonEvents = jsonEvents(events);
         assertThat(jsonEvents)
-            .extracting(event -> event.path("type").asText())
+            .extracting(event -> event.path("type").asString(""))
             .containsSubsequence(
                 "response.output_item.added",
                 "response.reasoning_text.delta",
@@ -208,31 +208,31 @@ class OpenAiResponseFactoryTest {
             );
 
         JsonNode reasoningAdded = jsonEvents.stream()
-            .filter(event -> "response.output_item.added".equals(event.path("type").asText()))
-            .filter(event -> "reasoning".equals(event.path("item").path("type").asText()))
+            .filter(event -> "response.output_item.added".equals(event.path("type").asString("")))
+            .filter(event -> "reasoning".equals(event.path("item").path("type").asString("")))
             .findFirst()
             .orElseThrow();
-        assertThat(reasoningAdded.path("item").path("content").get(0).path("text").asText()).isEmpty();
+        assertThat(reasoningAdded.path("item").path("content").get(0).path("text").asString("")).isEmpty();
 
         JsonNode reasoningDelta = jsonEvents.stream()
-            .filter(event -> "response.reasoning_text.delta".equals(event.path("type").asText()))
+            .filter(event -> "response.reasoning_text.delta".equals(event.path("type").asString("")))
             .findFirst()
             .orElseThrow();
-        assertThat(reasoningDelta.path("delta").asText()).isEqualTo("checked the response");
+        assertThat(reasoningDelta.path("delta").asString("")).isEqualTo("checked the response");
 
         JsonNode reasoningDone = jsonEvents.stream()
-            .filter(event -> "response.reasoning_text.done".equals(event.path("type").asText()))
+            .filter(event -> "response.reasoning_text.done".equals(event.path("type").asString("")))
             .findFirst()
             .orElseThrow();
-        assertThat(reasoningDone.path("text").asText()).isEqualTo("checked the response");
+        assertThat(reasoningDone.path("text").asString("")).isEqualTo("checked the response");
 
         JsonNode completed = jsonEvents.stream()
-            .filter(event -> "response.completed".equals(event.path("type").asText()))
+            .filter(event -> "response.completed".equals(event.path("type").asString("")))
             .findFirst()
             .orElseThrow();
-        assertThat(completed.path("response").path("output").get(0).path("type").asText())
+        assertThat(completed.path("response").path("output").get(0).path("type").asString(""))
             .isEqualTo("reasoning");
-        assertThat(completed.path("response").path("output").get(2).path("type").asText())
+        assertThat(completed.path("response").path("output").get(2).path("type").asString(""))
             .isEqualTo("function_call");
     }
 
@@ -255,23 +255,23 @@ class OpenAiResponseFactoryTest {
         assertThat(events).isNotNull();
         List<JsonNode> jsonEvents = jsonEvents(events);
         assertThat(jsonEvents)
-            .extracting(event -> event.path("type").asText())
+            .extracting(event -> event.path("type").asString(""))
             .contains("response.output_item.added", "response.function_call_arguments.done", "response.output_item.done", "response.completed");
 
         JsonNode toolAdded = jsonEvents.stream()
-            .filter(event -> "response.output_item.added".equals(event.path("type").asText()))
+            .filter(event -> "response.output_item.added".equals(event.path("type").asString("")))
             .findFirst()
             .orElseThrow();
-        assertThat(toolAdded.path("item").path("arguments").asText()).isEmpty();
+        assertThat(toolAdded.path("item").path("arguments").asString("")).isEmpty();
 
         JsonNode toolDone = jsonEvents.stream()
-            .filter(event -> "response.output_item.done".equals(event.path("type").asText()))
+            .filter(event -> "response.output_item.done".equals(event.path("type").asString("")))
             .findFirst()
             .orElseThrow();
-        assertThat(toolDone.path("item").path("type").asText()).isEqualTo("function_call");
-        assertThat(toolDone.path("item").path("call_id").asText()).isEqualTo("call_1");
-        assertThat(toolDone.path("item").path("name").asText()).isEqualTo("Bash");
-        assertThat(toolDone.path("item").path("arguments").asText()).isEqualTo("{\"command\":\"pwd\"}");
+        assertThat(toolDone.path("item").path("type").asString("")).isEqualTo("function_call");
+        assertThat(toolDone.path("item").path("call_id").asString("")).isEqualTo("call_1");
+        assertThat(toolDone.path("item").path("name").asString("")).isEqualTo("Bash");
+        assertThat(toolDone.path("item").path("arguments").asString("")).isEqualTo("{\"command\":\"pwd\"}");
     }
 
     @Test
@@ -299,7 +299,7 @@ class OpenAiResponseFactoryTest {
         assertThat(events).isNotNull();
         List<JsonNode> jsonEvents = jsonEvents(events);
         assertThat(jsonEvents)
-            .extracting(event -> event.path("type").asText())
+            .extracting(event -> event.path("type").asString(""))
             .contains(
                 "response.output_item.added",
                 "response.custom_tool_call_input.delta",
@@ -309,31 +309,31 @@ class OpenAiResponseFactoryTest {
             );
 
         JsonNode toolAdded = jsonEvents.stream()
-            .filter(event -> "response.output_item.added".equals(event.path("type").asText()))
+            .filter(event -> "response.output_item.added".equals(event.path("type").asString("")))
             .findFirst()
             .orElseThrow();
-        assertThat(toolAdded.path("item").path("input").asText()).isEmpty();
+        assertThat(toolAdded.path("item").path("input").asString("")).isEmpty();
 
         JsonNode inputDelta = jsonEvents.stream()
-            .filter(event -> "response.custom_tool_call_input.delta".equals(event.path("type").asText()))
+            .filter(event -> "response.custom_tool_call_input.delta".equals(event.path("type").asString("")))
             .findFirst()
             .orElseThrow();
-        assertThat(inputDelta.path("delta").asText()).endsWith("*** End Patch\n");
+        assertThat(inputDelta.path("delta").asString("")).endsWith("*** End Patch\n");
 
         JsonNode inputDone = jsonEvents.stream()
-            .filter(event -> "response.custom_tool_call_input.done".equals(event.path("type").asText()))
+            .filter(event -> "response.custom_tool_call_input.done".equals(event.path("type").asString("")))
             .findFirst()
             .orElseThrow();
-        assertThat(inputDone.path("input").asText()).endsWith("*** End Patch\n");
+        assertThat(inputDone.path("input").asString("")).endsWith("*** End Patch\n");
 
         JsonNode toolDone = jsonEvents.stream()
-            .filter(event -> "response.output_item.done".equals(event.path("type").asText()))
+            .filter(event -> "response.output_item.done".equals(event.path("type").asString("")))
             .findFirst()
             .orElseThrow();
-        assertThat(toolDone.path("item").path("type").asText()).isEqualTo("custom_tool_call");
-        assertThat(toolDone.path("item").path("call_id").asText()).isEqualTo("call_patch");
-        assertThat(toolDone.path("item").path("name").asText()).isEqualTo("apply_patch");
-        assertThat(toolDone.path("item").path("input").asText()).endsWith("*** End Patch\n");
+        assertThat(toolDone.path("item").path("type").asString("")).isEqualTo("custom_tool_call");
+        assertThat(toolDone.path("item").path("call_id").asString("")).isEqualTo("call_patch");
+        assertThat(toolDone.path("item").path("name").asString("")).isEqualTo("apply_patch");
+        assertThat(toolDone.path("item").path("input").asString("")).endsWith("*** End Patch\n");
     }
 
     private List<JsonNode> jsonEvents(List<ServerSentEvent<String>> events) {

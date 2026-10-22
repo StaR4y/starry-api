@@ -1,8 +1,5 @@
 package tech.starryapi.account;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -22,6 +19,9 @@ import reactor.core.publisher.Mono;
 import tech.starryapi.admin.SystemMaintenanceTaskGate;
 import tech.starryapi.common.Hashing;
 import tech.starryapi.platform.upstream.UpstreamException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 @Service
 public class AccountTokenRefreshService {
@@ -384,10 +384,10 @@ public class AccountTokenRefreshService {
 
     private TokenRefreshResult tokenResult(JsonNode json, String fallbackRefreshToken, String fallbackClientId) {
         return new TokenRefreshResult(
-            firstNonBlank(json.path("accessToken").asText(null), json.path("access_token").asText(null)),
-            firstNonBlank(json.path("refreshToken").asText(null), json.path("refresh_token").asText(null), fallbackRefreshToken),
-            firstNonBlank(json.path("idToken").asText(null), json.path("id_token").asText(null)),
-            firstNonBlank(json.path("clientId").asText(null), json.path("client_id").asText(null), fallbackClientId),
+            firstNonBlank(json.path("accessToken").asString(null), json.path("access_token").asString(null)),
+            firstNonBlank(json.path("refreshToken").asString(null), json.path("refresh_token").asString(null), fallbackRefreshToken),
+            firstNonBlank(json.path("idToken").asString(null), json.path("id_token").asString(null)),
+            firstNonBlank(json.path("clientId").asString(null), json.path("client_id").asString(null), fallbackClientId),
             tokenExpiresAt(json)
         );
     }
@@ -439,9 +439,9 @@ public class AccountTokenRefreshService {
                 continue;
             }
             if (value.canConvertToLong()) {
-                return value.asLong();
+                return value.asLong(0L);
             }
-            String text = value.isTextual() ? clean(value.asText()) : clean(value.asText(null));
+            String text = value.isString() ? clean(value.asString("")) : clean(value.asString(null));
             if (text == null) {
                 continue;
             }
@@ -460,9 +460,9 @@ public class AccountTokenRefreshService {
         }
         try {
             if (node.canConvertToLong()) {
-                return epochInstant(node.asLong());
+                return epochInstant(node.asLong(0L));
             }
-            String value = node.isTextual() ? clean(node.asText()) : clean(node.asText(null));
+            String value = node.isString() ? clean(node.asString("")) : clean(node.asString(null));
             if (value == null) {
                 return null;
             }

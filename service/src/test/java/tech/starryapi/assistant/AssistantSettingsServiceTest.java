@@ -5,12 +5,12 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import com.fasterxml.jackson.databind.json.JsonMapper;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
 import tech.starryapi.assistant.AssistantDtos.Settings;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.plugin.PluginRuntime;
+import tools.jackson.databind.json.JsonMapper;
 
 class AssistantSettingsServiceTest {
 

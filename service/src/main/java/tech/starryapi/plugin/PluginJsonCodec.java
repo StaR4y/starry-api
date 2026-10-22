@@ -1,14 +1,14 @@
 package tech.starryapi.plugin;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.JavaType;
-import com.fasterxml.jackson.databind.util.LRUMap;
-import com.fasterxml.jackson.databind.util.LookupCache;
 import java.nio.charset.StandardCharsets;
 import java.util.Objects;
 import tech.starryapi.plugin.sdk.PluginJson;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.JavaType;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.util.LookupCache;
+import tools.jackson.databind.util.SimpleLookupCache;
 
 final class PluginJsonCodec implements PluginJson {
     private final ObjectMapper mapper;
@@ -16,10 +16,11 @@ final class PluginJsonCodec implements PluginJson {
 
     PluginJsonCodec(ObjectMapper hostMapper, Runnable requireActive) {
         // Plugin DTO classes must not be retained in the host mapper's shared type cache.
-        LookupCache<Object, JavaType> types = new LRUMap<>(16, 200);
-        this.mapper = hostMapper.copy().setTypeFactory(hostMapper.getTypeFactory().withCache(types))
+        LookupCache<Object, JavaType> types = new SimpleLookupCache<>(16, 200);
+        this.mapper = hostMapper.rebuild().typeFactory(hostMapper.getTypeFactory().withCache(types))
             .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
-            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            .build();
         this.requireActive = requireActive;
     }
 
@@ -28,7 +29,7 @@ final class PluginJsonCodec implements PluginJson {
         Objects.requireNonNull(type);
         size(json);
         try { return mapper.readValue(json, type); }
-        catch (JsonProcessingException failure) { throw new IllegalArgumentException("Invalid JSON for " + type.getName()); }
+        catch (JacksonException failure) { throw new IllegalArgumentException("Invalid JSON for " + type.getName()); }
     }
 
     @Override public String write(Object value) {
@@ -37,7 +38,7 @@ final class PluginJsonCodec implements PluginJson {
             String result = mapper.writeValueAsString(value);
             size(result);
             return result;
-        } catch (JsonProcessingException failure) { throw new IllegalArgumentException("Unable to encode plugin JSON"); }
+        } catch (JacksonException failure) { throw new IllegalArgumentException("Unable to encode plugin JSON"); }
     }
 
     private static void size(String json) {

@@ -6,7 +6,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
@@ -20,6 +19,7 @@ import tech.starryapi.account.AccountPoolService;
 import tech.starryapi.assistant.AssistantDtos.Settings;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.proxy.ProxyFacade;
+import tools.jackson.databind.json.JsonMapper;
 
 class AssistantChatServiceTest {
 

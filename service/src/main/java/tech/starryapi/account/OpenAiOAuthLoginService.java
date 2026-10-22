@@ -1,8 +1,5 @@
 package tech.starryapi.account;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import java.nio.charset.StandardCharsets;
@@ -29,6 +26,9 @@ import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.common.Hashing;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 @Service
 public class OpenAiOAuthLoginService {
@@ -208,10 +208,10 @@ public class OpenAiOAuthLoginService {
         String targetAccountId,
         JsonNode json
     ) {
-        String deviceAuthId = clean(json.path("device_auth_id").asText(null));
-        String userCode = clean(json.path("user_code").asText(null));
+        String deviceAuthId = clean(json.path("device_auth_id").asString(null));
+        String userCode = clean(json.path("user_code").asString(null));
         if (userCode == null) {
-            userCode = clean(json.path("usercode").asText(null));
+            userCode = clean(json.path("usercode").asString(null));
         }
         if (deviceAuthId == null || userCode == null) {
             throw authProtocolError("OpenAI device authorization response is missing required fields");
@@ -295,9 +295,9 @@ public class OpenAiOAuthLoginService {
         LoginSession session,
         JsonNode json
     ) {
-        String authorizationCode = clean(json.path("authorization_code").asText(null));
-        String codeVerifier = clean(json.path("code_verifier").asText(null));
-        String codeChallenge = clean(json.path("code_challenge").asText(null));
+        String authorizationCode = clean(json.path("authorization_code").asString(null));
+        String codeVerifier = clean(json.path("code_verifier").asString(null));
+        String codeChallenge = clean(json.path("code_challenge").asString(null));
         if (authorizationCode == null || codeVerifier == null || codeChallenge == null) {
             return Mono.error(authProtocolError("OpenAI authorization response is missing required fields"));
         }
@@ -341,9 +341,9 @@ public class OpenAiOAuthLoginService {
             })
             .timeout(UPSTREAM_REQUEST_TIMEOUT)
             .map(json -> new OAuthTokens(
-                clean(json.path("access_token").asText(null)),
-                clean(json.path("refresh_token").asText(null)),
-                clean(json.path("id_token").asText(null))
+                clean(json.path("access_token").asString(null)),
+                clean(json.path("refresh_token").asString(null)),
+                clean(json.path("id_token").asString(null))
             ))
             .map(tokens -> {
                 if (tokens.accessToken == null || tokens.refreshToken == null || tokens.idToken == null) {
@@ -672,7 +672,7 @@ public class OpenAiOAuthLoginService {
     private int pollInterval(JsonNode value) {
         int interval = 5;
         try {
-            interval = value.isNumber() ? value.asInt() : Integer.parseInt(value.asText("5").trim());
+            interval = value.isNumber() ? value.asInt(0) : Integer.parseInt(value.asString("5").trim());
         } catch (RuntimeException ignored) {
             // Keep the conservative default when the optional interval is malformed.
         }

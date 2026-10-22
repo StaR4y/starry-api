@@ -2,10 +2,10 @@ package tech.starryapi.platform.openai;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 class OpenAiResponseStateStoreTest {
 
@@ -56,13 +56,13 @@ class OpenAiResponseStateStoreTest {
         assertThat(expanded.path("store").asBoolean(true)).isFalse();
         JsonNode input = expanded.path("input");
         assertThat(input).hasSize(3);
-        assertThat(input.path(0).path("type").asText()).isEqualTo("message");
-        assertThat(input.path(0).path("role").asText()).isEqualTo("user");
-        assertThat(input.path(0).path("content").path(0).path("text").asText()).isEqualTo("write a file");
-        assertThat(input.path(1).path("type").asText()).isEqualTo("function_call");
-        assertThat(input.path(1).path("call_id").asText()).isEqualTo("call_1");
-        assertThat(input.path(2).path("type").asText()).isEqualTo("function_call_output");
-        assertThat(input.path(2).path("call_id").asText()).isEqualTo("call_1");
+        assertThat(input.path(0).path("type").asString("")).isEqualTo("message");
+        assertThat(input.path(0).path("role").asString("")).isEqualTo("user");
+        assertThat(input.path(0).path("content").path(0).path("text").asString("")).isEqualTo("write a file");
+        assertThat(input.path(1).path("type").asString("")).isEqualTo("function_call");
+        assertThat(input.path(1).path("call_id").asString("")).isEqualTo("call_1");
+        assertThat(input.path(2).path("type").asString("")).isEqualTo("function_call_output");
+        assertThat(input.path(2).path("call_id").asString("")).isEqualTo("call_1");
     }
 
     @Test
@@ -92,8 +92,8 @@ class OpenAiResponseStateStoreTest {
 
         ObjectNode expanded = store.expand(request);
 
-        assertThat(expanded.path("previous_response_id").asText()).isEqualTo("resp_missing");
-        assertThat(expanded.path("input").asText()).isEqualTo("continue");
+        assertThat(expanded.path("previous_response_id").asString("")).isEqualTo("resp_missing");
+        assertThat(expanded.path("input").asString("")).isEqualTo("continue");
     }
 
     @Test
@@ -137,11 +137,11 @@ class OpenAiResponseStateStoreTest {
 
         JsonNode input = expanded.path("input");
         assertThat(input).hasSize(3);
-        assertThat(input.path(1).path("type").asText()).isEqualTo("custom_tool_call");
-        assertThat(input.path(1).path("call_id").asText()).isEqualTo("call_patch");
-        assertThat(input.path(1).path("input").asText()).startsWith("*** Begin Patch");
-        assertThat(input.path(2).path("type").asText()).isEqualTo("custom_tool_call_output");
-        assertThat(input.path(2).path("call_id").asText()).isEqualTo("call_patch");
+        assertThat(input.path(1).path("type").asString("")).isEqualTo("custom_tool_call");
+        assertThat(input.path(1).path("call_id").asString("")).isEqualTo("call_patch");
+        assertThat(input.path(1).path("input").asString("")).startsWith("*** Begin Patch");
+        assertThat(input.path(2).path("type").asString("")).isEqualTo("custom_tool_call_output");
+        assertThat(input.path(2).path("call_id").asString("")).isEqualTo("call_patch");
     }
 
     @Test
@@ -180,7 +180,7 @@ class OpenAiResponseStateStoreTest {
         assertThat(bounded.canExpand("resp_huge")).isFalse();
         // An unknown previous_response_id is passed through untouched instead of failing the request.
         ObjectNode expanded = bounded.expand(objectMapper.createObjectNode().put("previous_response_id", "resp_huge").put("input", "next"));
-        assertThat(expanded.path("previous_response_id").asText()).isEqualTo("resp_huge");
+        assertThat(expanded.path("previous_response_id").asString("")).isEqualTo("resp_huge");
     }
 
     @Test
@@ -193,7 +193,7 @@ class OpenAiResponseStateStoreTest {
         ObjectNode expanded = store.expand(objectMapper.createObjectNode().put("previous_response_id", "resp_cn").put("input", "继续"));
 
         assertThat(expanded.path("input")).hasSize(3);
-        assertThat(expanded.path("input").path(0).path("content").path(0).path("text").asText())
+        assertThat(expanded.path("input").path(0).path("content").path(0).path("text").asString(""))
             .isEqualTo("你好，请把这段中文也原样保存。".repeat(200));
     }
 }

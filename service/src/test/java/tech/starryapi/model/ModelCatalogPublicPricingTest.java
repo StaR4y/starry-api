@@ -2,7 +2,6 @@ package tech.starryapi.model;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
@@ -10,6 +9,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.reactive.function.client.WebClient;
 import tech.starryapi.platform.catalog.ProxyModelCatalog;
+import tools.jackson.databind.json.JsonMapper;
 
 class ModelCatalogPublicPricingTest {
 

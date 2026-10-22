@@ -1,8 +1,5 @@
 package tech.starryapi.model;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
@@ -30,6 +27,9 @@ import tech.starryapi.payment.PaymentSettingsService;
 import tech.starryapi.platform.core.PlatformUsage;
 import tech.starryapi.platform.deepseek.DeepSeekModelCatalog;
 import tech.starryapi.platform.catalog.PlatformModelCatalogSupport;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class ModelPricingService {
@@ -490,7 +490,7 @@ public class ModelPricingService {
                 .filter(Objects::nonNull)
                 .sorted(ruleComparator())
                 .toList();
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             log.warn("Could not parse model pricing rules; falling back to empty rules", e);
             return List.of();
         }
@@ -840,7 +840,7 @@ public class ModelPricingService {
     private String toJson(List<ModelPricingRule> rules) {
         try {
             return objectMapper.writeValueAsString(rules == null ? List.of() : rules);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "MODEL_PRICE_SERIALIZE_FAILED", "Could not save model pricing rules");
         }
     }

@@ -2,14 +2,14 @@ package tech.starryapi.platform.gemini;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.core.PlatformToolUse;
 import tech.starryapi.platform.core.PlatformUsage;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 class GeminiResponseFactoryTest {
 
@@ -25,11 +25,11 @@ class GeminiResponseFactoryTest {
 
         JsonNode response = factory.generateContent("gemini-2.5-pro", result);
 
-        assertThat(response.path("candidates").get(0).path("content").path("role").asText()).isEqualTo("model");
-        assertThat(response.path("candidates").get(0).path("content").path("parts").get(0).path("text").asText())
+        assertThat(response.path("candidates").get(0).path("content").path("role").asString("")).isEqualTo("model");
+        assertThat(response.path("candidates").get(0).path("content").path("parts").get(0).path("text").asString(""))
             .isEqualTo("Hello.");
-        assertThat(response.path("usageMetadata").path("totalTokenCount").asLong()).isEqualTo(5);
-        assertThat(response.path("modelVersion").asText()).isEqualTo("gemini-2.5-pro");
+        assertThat(response.path("usageMetadata").path("totalTokenCount").asLong(0L)).isEqualTo(5);
+        assertThat(response.path("modelVersion").asString("")).isEqualTo("gemini-2.5-pro");
     }
 
     @Test
@@ -46,7 +46,7 @@ class GeminiResponseFactoryTest {
             .path("parts").get(0)
             .path("functionCall");
 
-        assertThat(functionCall.path("name").asText()).isEqualTo("lookup");
-        assertThat(functionCall.path("args").path("id").asText()).isEqualTo("1");
+        assertThat(functionCall.path("name").asString("")).isEqualTo("lookup");
+        assertThat(functionCall.path("args").path("id").asString("")).isEqualTo("1");
     }
 }

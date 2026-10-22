@@ -2,8 +2,6 @@ package tech.starryapi.platform.anthropic;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -11,6 +9,8 @@ import org.springframework.http.codec.ServerSentEvent;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.core.PlatformToolUse;
 import tech.starryapi.platform.core.PlatformUsage;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 class AnthropicResponseFactoryTest {
 
@@ -23,12 +23,12 @@ class AnthropicResponseFactoryTest {
 
         JsonNode response = factory.message("claude-sonnet-4.5", result);
 
-        assertThat(response.path("stop_reason").asText()).isEqualTo("tool_use");
+        assertThat(response.path("stop_reason").asString("")).isEqualTo("tool_use");
         JsonNode block = response.path("content").path(0);
-        assertThat(block.path("type").asText()).isEqualTo("tool_use");
-        assertThat(block.path("id").asText()).isEqualTo("toolu_1");
-        assertThat(block.path("name").asText()).isEqualTo("Bash");
-        assertThat(block.path("input").path("command").asText()).isEqualTo("pwd");
+        assertThat(block.path("type").asString("")).isEqualTo("tool_use");
+        assertThat(block.path("id").asString("")).isEqualTo("toolu_1");
+        assertThat(block.path("name").asString("")).isEqualTo("Bash");
+        assertThat(block.path("input").path("command").asString("")).isEqualTo("pwd");
     }
 
     @Test
@@ -49,24 +49,24 @@ class AnthropicResponseFactoryTest {
             .map(this::readJson)
             .toList();
         JsonNode blockStart = jsonEvents.stream()
-            .filter(event -> "content_block_start".equals(event.path("type").asText()))
+            .filter(event -> "content_block_start".equals(event.path("type").asString("")))
             .findFirst()
             .orElseThrow();
-        assertThat(blockStart.path("content_block").path("type").asText()).isEqualTo("tool_use");
-        assertThat(blockStart.path("content_block").path("id").asText()).isEqualTo("toolu_1");
+        assertThat(blockStart.path("content_block").path("type").asString("")).isEqualTo("tool_use");
+        assertThat(blockStart.path("content_block").path("id").asString("")).isEqualTo("toolu_1");
 
         JsonNode inputDelta = jsonEvents.stream()
-            .filter(event -> "content_block_delta".equals(event.path("type").asText()))
+            .filter(event -> "content_block_delta".equals(event.path("type").asString("")))
             .findFirst()
             .orElseThrow();
-        assertThat(inputDelta.path("delta").path("type").asText()).isEqualTo("input_json_delta");
-        assertThat(inputDelta.path("delta").path("partial_json").asText()).isEqualTo("{\"command\":\"pwd\"}");
+        assertThat(inputDelta.path("delta").path("type").asString("")).isEqualTo("input_json_delta");
+        assertThat(inputDelta.path("delta").path("partial_json").asString("")).isEqualTo("{\"command\":\"pwd\"}");
 
         JsonNode messageDelta = jsonEvents.stream()
-            .filter(event -> "message_delta".equals(event.path("type").asText()))
+            .filter(event -> "message_delta".equals(event.path("type").asString("")))
             .findFirst()
             .orElseThrow();
-        assertThat(messageDelta.path("delta").path("stop_reason").asText()).isEqualTo("tool_use");
+        assertThat(messageDelta.path("delta").path("stop_reason").asString("")).isEqualTo("tool_use");
     }
 
     private PlatformCompletionResult toolUseResult() throws Exception {

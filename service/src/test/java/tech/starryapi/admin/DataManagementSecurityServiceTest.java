@@ -12,8 +12,6 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.ObjectWriter;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.file.Files;
@@ -36,6 +34,8 @@ import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
 import org.springframework.mock.web.server.MockServerWebExchange;
 import reactor.core.publisher.Mono;
 import tech.starryapi.common.ApiException;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectWriter;
 
 class DataManagementSecurityServiceTest {
 
@@ -491,7 +491,7 @@ class DataManagementSecurityServiceTest {
             Files.setPosixFilePermissions(recoveryFile, PosixFilePermissions.fromString("rw-------"));
         }
 
-        ObjectMapper failingMapper = spy(new ObjectMapper().findAndRegisterModules());
+        ObjectMapper failingMapper = spy(new ObjectMapper());
         ObjectWriter failingWriter = mock(ObjectWriter.class);
         when(failingMapper.writerWithDefaultPrettyPrinter()).thenReturn(failingWriter);
         when(failingWriter.writeValueAsBytes(any())).thenThrow(
@@ -974,7 +974,7 @@ class DataManagementSecurityServiceTest {
     ) {
         return new DataManagementSecurityService(
             repository,
-            new ObjectMapper().findAndRegisterModules(),
+            new ObjectMapper(),
             handlers,
             stateFile,
             recoveryFile,

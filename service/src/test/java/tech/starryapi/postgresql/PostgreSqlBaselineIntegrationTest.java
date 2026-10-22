@@ -10,7 +10,6 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.r2dbc.postgresql.api.PostgresqlConnection;
 import io.r2dbc.spi.ConnectionFactories;
 import io.r2dbc.spi.ConnectionFactory;
@@ -79,6 +78,7 @@ import tech.starryapi.payment.RedemptionCodeRepository;
 import tech.starryapi.payment.RedemptionCodeService;
 import tech.starryapi.stats.StatsAnalyticsService;
 import tech.starryapi.stats.StatsDtos;
+import tools.jackson.databind.ObjectMapper;
 
 @SpringBootTest(
     webEnvironment = SpringBootTest.WebEnvironment.NONE,

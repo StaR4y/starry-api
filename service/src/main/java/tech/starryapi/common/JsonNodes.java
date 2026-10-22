@@ -1,12 +1,14 @@
 package tech.starryapi.common;
 
-import com.fasterxml.jackson.core.JsonGenerator;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.IOException;
 import java.io.Writer;
+import tech.starryapi.config.JacksonConfig;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.JsonGenerator;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.JsonNodeFactory;
+import tools.jackson.databind.node.ObjectNode;
 
 /**
  * Helpers for working with large request trees without duplicating them.
@@ -17,7 +19,7 @@ import java.io.Writer;
  */
 public final class JsonNodes {
 
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final ObjectMapper MAPPER = JacksonConfig.newMapper();
 
     private JsonNodes() {
     }
@@ -34,8 +36,9 @@ public final class JsonNodes {
 
     /**
      * Size of the compact JSON form in UTF-8 bytes, counted while streaming and without building a String.
-     * Counting goes through the char-based generator because Jackson's UTF-8 generator escapes astral
-     * characters (emoji) as {@code \\uD83D\\uDE00}, which would overstate the size of what {@code toString()} gives.
+     * Counting goes through the char-based generator, the one {@code toString()} uses: Jackson 2's UTF-8 generator
+     * escaped astral characters (emoji) as {@code \\uD83D\\uDE00}, which would have overstated the size of what
+     * {@code toString()} gives.
      */
     public static long utf8Length(JsonNode node) {
         return count(node).utf8;
@@ -61,9 +64,9 @@ public final class JsonNodes {
         }
         FixedBytes sink = new FixedBytes((int) length);
         try (Writer writer = new java.io.OutputStreamWriter(sink, java.nio.charset.StandardCharsets.UTF_8);
-             JsonGenerator generator = MAPPER.getFactory().createGenerator(writer)) {
+             JsonGenerator generator = MAPPER.createGenerator(writer)) {
             MAPPER.writeTree(generator, node);
-        } catch (IOException error) {
+        } catch (IOException | JacksonException error) {
             return node.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
         }
         return sink.result();
@@ -106,9 +109,9 @@ public final class JsonNodes {
         if (node == null) {
             return counter;
         }
-        try (JsonGenerator generator = MAPPER.getFactory().createGenerator(counter)) {
+        try (JsonGenerator generator = MAPPER.createGenerator(counter)) {
             MAPPER.writeTree(generator, node);
-        } catch (IOException error) {
+        } catch (JacksonException error) {
             String text = node.toString();
             CountingWriter fallback = new CountingWriter();
             fallback.write(text, 0, text.length());

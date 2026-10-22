@@ -8,8 +8,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.Test;
@@ -25,6 +23,8 @@ import tech.starryapi.platform.kiro.KiroPayloadFactory;
 import tech.starryapi.platform.kiro.KiroUpstreamClient;
 import tech.starryapi.platform.core.PlatformUsage;
 import tech.starryapi.platform.upstream.UpstreamException;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 class AccountTestServiceTest {
 
@@ -75,7 +75,7 @@ class AccountTestServiceTest {
             .path("currentMessage")
             .path("userInputMessage")
             .path("origin")
-            .asText()).isEqualTo("AI_EDITOR");
+            .asString("")).isEqualTo("AI_EDITOR");
     }
 
     @Test

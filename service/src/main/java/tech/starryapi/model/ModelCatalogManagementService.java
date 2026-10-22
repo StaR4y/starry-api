@@ -1,8 +1,5 @@
 package tech.starryapi.model;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -23,6 +20,9 @@ import reactor.core.publisher.Mono;
 import tech.starryapi.admin.SystemSettingEntity;
 import tech.starryapi.admin.SystemSettingRepository;
 import tech.starryapi.common.ApiException;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class ModelCatalogManagementService {
@@ -479,7 +479,7 @@ public class ModelCatalogManagementService {
         try {
             List<ModelCatalogCustomization> parsed = objectMapper.readValue(json, CUSTOMIZATION_LIST);
             return parsed == null ? List.of() : List.copyOf(parsed);
-        } catch (JsonProcessingException error) {
+        } catch (JacksonException error) {
             throw new ApiException(
                 HttpStatus.INTERNAL_SERVER_ERROR,
                 "MODEL_CATALOG_INVALID",
@@ -491,7 +491,7 @@ public class ModelCatalogManagementService {
     private String toJson(List<ModelCatalogCustomization> customizations) {
         try {
             return objectMapper.writeValueAsString(customizations);
-        } catch (JsonProcessingException error) {
+        } catch (JacksonException error) {
             throw new IllegalStateException("Could not serialize managed model catalog", error);
         }
     }
@@ -598,7 +598,7 @@ public class ModelCatalogManagementService {
                 }
             }
             return List.copyOf(cleaned);
-        } catch (JsonProcessingException error) {
+        } catch (JacksonException error) {
             throw new ApiException(
                 HttpStatus.INTERNAL_SERVER_ERROR,
                 "MODEL_CATALOG_ORDER_INVALID",
@@ -610,7 +610,7 @@ public class ModelCatalogManagementService {
     private String toOrderJson(List<String> order) {
         try {
             return objectMapper.writeValueAsString(order == null ? List.of() : order);
-        } catch (JsonProcessingException error) {
+        } catch (JacksonException error) {
             throw new IllegalStateException("Could not serialize managed model catalog order", error);
         }
     }
@@ -625,7 +625,7 @@ public class ModelCatalogManagementService {
                 ModelDtos.ModelCatalogDisplaySettings.class
             );
             return normalizeDisplay(toUpdateRequest(parsed), DEFAULT_DISPLAY, false);
-        } catch (JsonProcessingException error) {
+        } catch (JacksonException error) {
             log.warn("Stored model catalog display settings are invalid; using defaults");
             return DEFAULT_DISPLAY;
         }
@@ -634,7 +634,7 @@ public class ModelCatalogManagementService {
     private String toDisplayJson(ModelDtos.ModelCatalogDisplaySettings settings) {
         try {
             return objectMapper.writeValueAsString(settings);
-        } catch (JsonProcessingException error) {
+        } catch (JacksonException error) {
             throw new IllegalStateException("Could not serialize model catalog display settings", error);
         }
     }

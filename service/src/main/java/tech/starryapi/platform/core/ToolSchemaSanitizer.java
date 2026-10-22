@@ -1,13 +1,13 @@
 package tech.starryapi.platform.core;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.MissingNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Set;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.MissingNode;
+import tools.jackson.databind.node.ObjectNode;
 
 public final class ToolSchemaSanitizer {
 
@@ -98,10 +98,10 @@ public final class ToolSchemaSanitizer {
         if (type == null || type.isMissingNode() || type.isNull()) {
             return MissingNode.getInstance();
         }
-        if (type.isTextual()) {
-            String value = type.asText("").trim().toLowerCase(Locale.ROOT);
+        if (type.isString()) {
+            String value = type.asString("").trim().toLowerCase(Locale.ROOT);
             return SUPPORTED_TYPES.contains(value)
-                ? objectMapper.getNodeFactory().textNode(value)
+                ? objectMapper.getNodeFactory().stringNode(value)
                 : MissingNode.getInstance();
         }
         if (!type.isArray()) {
@@ -110,10 +110,10 @@ public final class ToolSchemaSanitizer {
         ArrayNode values = objectMapper.createArrayNode();
         Set<String> seen = new HashSet<>();
         for (JsonNode item : type) {
-            if (!item.isTextual()) {
+            if (!item.isString()) {
                 continue;
             }
-            String value = item.asText("").trim().toLowerCase(Locale.ROOT);
+            String value = item.asString("").trim().toLowerCase(Locale.ROOT);
             if (SUPPORTED_TYPES.contains(value) && seen.add(value)) {
                 values.add(value);
             }
@@ -125,8 +125,8 @@ public final class ToolSchemaSanitizer {
     }
 
     private static void copyText(JsonNode source, ObjectNode target, String field) {
-        if (source.path(field).isTextual()) {
-            target.put(field, source.path(field).asText());
+        if (source.path(field).isString()) {
+            target.put(field, source.path(field).asString(""));
         }
     }
 
@@ -151,10 +151,10 @@ public final class ToolSchemaSanitizer {
         ArrayNode sanitizedRequired = target.putArray("required");
         Set<String> seen = new HashSet<>();
         for (JsonNode item : required) {
-            if (!item.isTextual()) {
+            if (!item.isString()) {
                 continue;
             }
-            String field = item.asText();
+            String field = item.asString("");
             if (properties.has(field) && seen.add(field)) {
                 sanitizedRequired.add(field);
             }
@@ -173,12 +173,12 @@ public final class ToolSchemaSanitizer {
         JsonNode type = target.path("type");
         if (type.isArray()) {
             for (JsonNode item : type) {
-                if (item.isTextual() && seen.add(item.asText())) {
-                    values.add(item.asText());
+                if (item.isString() && seen.add(item.asString(""))) {
+                    values.add(item.asString(""));
                 }
             }
-        } else if (type.isTextual() && seen.add(type.asText())) {
-            values.add(type.asText());
+        } else if (type.isString() && seen.add(type.asString(""))) {
+            values.add(type.asString(""));
         }
         if (seen.add("null")) {
             values.add("null");
@@ -197,13 +197,13 @@ public final class ToolSchemaSanitizer {
         for (JsonNode option : union) {
             ObjectNode sanitized = sanitizeSchema(objectMapper, option, false);
             JsonNode type = sanitized.path("type");
-            if (type.isTextual()) {
-                String value = type.asText();
+            if (type.isString()) {
+                String value = type.asString("");
                 if (SUPPORTED_TYPES.contains(value) && seen.add(value)) {
                     types.add(value);
                 }
             }
-            if (firstSchema == null && !"null".equals(type.asText())) {
+            if (firstSchema == null && !"null".equals(type.asString(""))) {
                 firstSchema = sanitized;
             }
         }
