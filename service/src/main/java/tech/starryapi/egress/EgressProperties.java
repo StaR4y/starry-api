@@ -9,6 +9,7 @@ public class EgressProperties {
     private boolean mihomoEnabled;
     private String controllerUrl = "http://127.0.0.1:9090";
     private String controllerSecret = "";
+    private String controllerBind = "127.0.0.1:9090";
     private String listenerHost = "127.0.0.1";
     private String listenerBind = "127.0.0.1";
     private String interfaceName = "";
@@ -16,12 +17,14 @@ public class EgressProperties {
     private String tlsUrl = "http://127.0.0.1:9091";
     private String tlsSecret = "";
     private Duration probeTimeout = Duration.ofSeconds(15);
-    private List<String> tlsProfiles = List.of("chrome136", "safari184");
+    private List<String> tlsProfiles = List.of("chrome136", "safari18_4");
     public boolean isMihomoEnabled() { return mihomoEnabled; }
     public void setMihomoEnabled(boolean value) { mihomoEnabled = value; }
     public String getControllerUrl() { return controllerUrl; }
     public void setControllerUrl(String value) { controllerUrl = value; }
     public String getControllerSecret() { return controllerSecret; }
+    public String getControllerBind() { return controllerBind; }
+    public void setControllerBind(String value) { controllerBind = value; }
     public void setControllerSecret(String value) { controllerSecret = value; }
     public String getListenerHost() { return listenerHost; }
     public void setListenerHost(String value) { listenerHost = value; }

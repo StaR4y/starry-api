@@ -70,6 +70,7 @@ public class AnthropicUpstreamClient {
         String endpoint = anthropicApi(account.getBaseUrl(), "/messages");
         return webClient.post()
             .uri(endpoint)
+            .attribute(tech.starryapi.egress.AccountEgressTransport.ACCOUNT, account)
             .headers(headers -> applyAnthropicHeaders(headers, account))
             .bodyValue(body)
             .exchangeToMono(response -> handleResponse(response, endpoint));
@@ -81,6 +82,7 @@ public class AnthropicUpstreamClient {
         String endpoint = anthropicApi(account.getBaseUrl(), "/messages");
         return webClient.post()
             .uri(endpoint)
+            .attribute(tech.starryapi.egress.AccountEgressTransport.ACCOUNT, account)
             .headers(headers -> applyAnthropicHeaders(headers, account))
             .bodyValue(body)
             .exchangeToMono(response -> handleResponse(response, endpoint));
@@ -312,7 +314,7 @@ public class AnthropicUpstreamClient {
                     return Mono.error(new UpstreamException(
                         status.value(),
                         "Anthropic upstream error " + status.value() + ": " + rawBody,
-                        isRecoverableStatus(status.value())
+                        isRecoverableStatus(status.value()), response.headers().asHttpHeaders().getFirst("Retry-After")
                     ));
                 }
                 try {

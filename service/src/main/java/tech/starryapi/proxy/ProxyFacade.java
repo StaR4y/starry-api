@@ -1060,10 +1060,8 @@ public class ProxyFacade {
                 account.getAccountId(),
                 requestId,
                 null,
-                reliableSessionHint(sessionHint) ? Hashing.sha256(sessionHint) : null,
-                reliableSessionHint(sessionHint)
-                    && route == UpstreamRoute.ANTHROPIC
-                    && AccountPlatforms.isAnthropicApiKey(account),
+                Hashing.sha256(reliableSessionHint(sessionHint) ? sessionHint : "request:" + requestId),
+                AccountPlatforms.isAnthropicApiKey(account),
                 estimatedInput,
                 estimatedOutputTokens(request),
                 Duration.ofMinutes(10),
@@ -1754,7 +1752,8 @@ public class ProxyFacade {
                     "upstreamModel", poolContext.upstreamModel(),
                     "endpoint", path,
                     "provider", String.valueOf(account.getProvider()),
-                    "cooldownSeconds", classification.cooldown().toSeconds()
+                    "cooldownSeconds", classification.cooldown().toSeconds(),
+                    "retryAfterSeconds", UpstreamException.retryAfterSeconds(classification.failure())
                 )
             )
         );
@@ -2038,7 +2037,7 @@ public class ProxyFacade {
         );
         String bodyHint = firstNonBlank(
             responseMode == ResponseMode.ANTHROPIC_MESSAGES
-                ? body.path("metadata").path("user_id").asText(null)
+                ? SessionIdentifiers.anthropic(body.path("metadata"))
                 : null,
             body.path("conversation_id").asText(null),
             body.path("conversationId").asText(null),

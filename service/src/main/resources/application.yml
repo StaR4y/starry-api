@@ -70,6 +70,17 @@ springdoc:
     path: /v3/api-docs
 
 starry:
+  egress:
+    mihomo-enabled: ${STARRY_EGRESS_MIHOMO_ENABLED:false}
+    controller-url: ${STARRY_EGRESS_CONTROLLER_URL:http://127.0.0.1:9090}
+    controller-bind: ${STARRY_EGRESS_CONTROLLER_BIND:127.0.0.1:9090}
+    controller-secret: ${STARRY_EGRESS_CONTROLLER_SECRET:}
+    listener-host: ${STARRY_EGRESS_LISTENER_HOST:127.0.0.1}
+    listener-bind: ${STARRY_EGRESS_LISTENER_BIND:127.0.0.1}
+    interface-name: ${STARRY_EGRESS_INTERFACE_NAME:}
+    tls-enabled: ${STARRY_EGRESS_TLS_ENABLED:false}
+    tls-url: ${STARRY_EGRESS_TLS_URL:http://127.0.0.1:9091}
+    tls-secret: ${STARRY_TLS_SECRET:}
   documentation:
     attachment-dir: ${STARRY_DOCUMENTATION_ATTACHMENT_DIR:${user.home}/.starry-api/documentation}
   plugins:

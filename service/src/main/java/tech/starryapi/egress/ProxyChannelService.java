@@ -8,11 +8,10 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.stereotype.Service;
+import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
-import tech.starryapi.common.AdminAuth;
 import tech.starryapi.common.ApiException;
-import tech.starryapi.common.Hashing;
 import tech.starryapi.egress.ClashNodes.Node;
 
 @Service
@@ -22,10 +21,15 @@ public class ProxyChannelService {
     private final ClashNodes parser;
     private final SubscriptionFetcher fetcher;
     private final EgressProperties properties;
+    private final MihomoRuntime runtime;
+    private final org.springframework.transaction.reactive.TransactionalOperator transactions;
 
     public ProxyChannelService(DatabaseClient db, ObjectMapper mapper, ClashNodes parser,
-                               SubscriptionFetcher fetcher, EgressProperties properties) {
+                               SubscriptionFetcher fetcher, EgressProperties properties, MihomoRuntime runtime,
+                               org.springframework.transaction.ReactiveTransactionManager transactionManager) {
         this.db = db; this.mapper = mapper; this.parser = parser; this.fetcher = fetcher; this.properties = properties;
+        this.runtime = runtime;
+        this.transactions = org.springframework.transaction.reactive.TransactionalOperator.create(transactionManager);
     }
 
     public Mono<ProxyChannelDtos.Catalog> catalog() {
@@ -37,13 +41,13 @@ public class ProxyChannelService {
             """).map((r,m) -> new ProxyChannelDtos.Channel(r.get("channel_id", UUID.class), r.get("subscription_id", UUID.class),
                 r.get("name", String.class), r.get("protocol", String.class), Boolean.TRUE.equals(r.get("enabled", Boolean.class)),
                 r.get("runtime_status", String.class), r.get("runtime_error", String.class), number(r.get("bound_accounts")),
-                instant(r.get("updated_at")))).all().collectList();
+                instant(r.get("updated_at")))).all().map(this::runtimeStatus).collectList();
         Mono<List<ProxyChannelDtos.Subscription>> subscriptions = db.sql("""
-            SELECT s.subscription_id, s.name, s.status, s.last_synced_at, s.last_error, count(c.channel_id) AS node_count
+            SELECT s.subscription_id, s.name, s.status, s.last_synced_at, s.last_error, s.subscription_url NOT LIKE 'inline:%' AS refreshable, count(c.channel_id) AS node_count
             FROM proxy_subscriptions s LEFT JOIN proxy_channels c ON c.subscription_id=s.subscription_id
             GROUP BY s.subscription_id ORDER BY s.updated_at DESC
             """).map((r,m) -> new ProxyChannelDtos.Subscription(r.get("subscription_id", UUID.class), r.get("name", String.class),
-                r.get("status", String.class), instant(r.get("last_synced_at")), r.get("last_error", String.class), number(r.get("node_count")))).all().collectList();
+                r.get("status", String.class), instant(r.get("last_synced_at")), r.get("last_error", String.class), number(r.get("node_count")), Boolean.TRUE.equals(r.get("refreshable", Boolean.class)))).all().collectList();
         return channels.zipWith(subscriptions).map(pair -> new ProxyChannelDtos.Catalog(pair.getT1(), pair.getT2(),
             properties.isMihomoEnabled(), properties.isTlsEnabled(), properties.getTlsProfiles()));
     }
@@ -54,65 +58,213 @@ public class ProxyChannelService {
         }
         Node node;
         try {
-            node = blank(request.proxyUrl()) != null ? parser.node(parser.document(request.clashYaml()).path("proxies").path(0))
-                : parser.url(request.name(), request.proxyUrl());
+            if (blank(request.proxyUrl()) == null) {
+                JsonNode document = parser.document(request.clashYaml());
+                if (document.has("proxies")) {
+                    if (!document.path("proxies").isArray() || document.path("proxies").size() != 1) throw ClashNodes.invalid("Provide exactly one node, or import a subscription");
+                    document = document.path("proxies").get(0);
+                }
+                node = parser.node(document);
+            } else node = parser.url(request.name(), request.proxyUrl());
         } catch (ApiException error) { return Mono.error(error); }
         if (node.issue() != null) return Mono.error(ClashNodes.invalid(node.issue()));
-        return insertChannel(null, request.name().trim(), node).flatMap(id -> channel(id));
+        return insertChannel(null, request.name().trim(), node).flatMap(id -> refreshRuntime().then(channel(id)));
     }
 
     public Mono<ProxyChannelDtos.SyncResult> subscribe(ProxyChannelDtos.ImportSubscription request) {
         String url = blank(request.url());
-        if (url == null && blank(request.yaml()) == null) return Mono.error(ClashNodes.invalid("Provide a subscription URL or YAML"));
+        if ((url == null) == (blank(request.yaml()) == null)) return Mono.error(ClashNodes.invalid("Provide exactly one subscription URL or YAML"));
         UUID id = UUID.randomUUID();
         Mono<String> source = url == null ? Mono.just(request.yaml()) : fetcher.fetch(url);
-        return db.sql("INSERT INTO proxy_subscriptions(subscription_id,name,subscription_url) VALUES(:id,:name,:url)")
-            .bind("id", id).bind("name", request.name().trim()).bind("url", url == null ? "inline:" + id : url)
-            .fetch().rowsUpdated().then(source.flatMap(yaml -> syncParsed(id, yaml)).onErrorResume(error -> markSubscriptionError(id, error).then(Mono.error(error))));
+        DatabaseClient.GenericExecuteSpec insert = db.sql("INSERT INTO proxy_subscriptions(subscription_id,name,subscription_url) VALUES(:id,:name,:url)")
+            .bind("id", id).bind("name", request.name().trim());
+        insert = insert.bind("url", url == null ? "inline:" + id : url);
+        return insert.fetch().rowsUpdated().then(lockedSync(id, source)
+            .onErrorResume(error -> markSubscriptionError(id, error).then(Mono.error(error))));
     }
 
     public Mono<ProxyChannelDtos.SyncResult> sync(UUID subscriptionId) {
         return db.sql("SELECT subscription_url FROM proxy_subscriptions WHERE subscription_id=:id").bind("id", subscriptionId)
             .map((r,m) -> r.get("subscription_url", String.class)).one().switchIfEmpty(Mono.error(notFound("Subscription")))
-            .flatMap(url -> url.startsWith("inline:") ? Mono.error(ClashNodes.invalid("Inline subscription cannot be refreshed")) : fetcher.fetch(url).flatMap(yaml -> syncParsed(subscriptionId, yaml)));
+            .flatMap(url -> url.startsWith("inline:") ? Mono.error(ClashNodes.invalid("Inline subscription cannot be refreshed"))
+                : lockedSync(subscriptionId, fetcher.fetch(url))
+                    .onErrorResume(error -> markSubscriptionError(subscriptionId, error).then(Mono.error(error))));
+    }
+
+    private Mono<ProxyChannelDtos.SyncResult> lockedSync(UUID id, Mono<String> source) {
+        // Hold the source row lock through download so concurrent refreshes cannot overwrite newer data.
+        return db.sql("SELECT subscription_id FROM proxy_subscriptions WHERE subscription_id=:id FOR UPDATE")
+            .bind("id", id).fetch().one().switchIfEmpty(Mono.error(notFound("Subscription")))
+            .then(source.flatMap(yaml -> syncParsed(id, yaml))).timeout(java.time.Duration.ofSeconds(60))
+            .flux().as(transactions::transactional).collectList()
+            .flatMap(results -> refreshRuntime().thenReturn(results.getFirst()));
+    }
+
+    private Mono<Void> refreshRuntime() {
+        // Persisted nodes remain visible with an ERROR state if the optional runtime is down.
+        return runtime.reconcile().onErrorResume(EgressException.class, error -> Mono.empty());
+    }
+
+    private Mono<JsonNode> expandedDocument(String yaml) {
+        return Mono.fromCallable(() -> parser.document(yaml)).subscribeOn(Schedulers.boundedElastic()).flatMap(doc -> {
+            var nodes = mapper.createArrayNode();
+            if (doc.has("proxies")) {
+                if (!doc.path("proxies").isArray()) return Mono.error(ClashNodes.invalid("Expected a proxies array"));
+                nodes.addAll((com.fasterxml.jackson.databind.node.ArrayNode) doc.path("proxies"));
+            }
+            JsonNode providers = doc.path("proxy-providers");
+            if (!providers.isMissingNode() && (!providers.isObject() || providers.size() > 16))
+                return Mono.error(ClashNodes.invalid("At most 16 HTTP or inline proxy providers are supported"));
+            List<JsonNode> sources = new ArrayList<>();
+            providers.elements().forEachRemaining(sources::add);
+            return reactor.core.publisher.Flux.fromIterable(sources).concatMap(provider -> {
+                String type = provider.path("type").asText();
+                if (type.equals("inline")) return Mono.just(provider.path("payload"));
+                if (!type.equals("http")) return Mono.error(ClashNodes.invalid("Only HTTP and inline proxy providers are supported"));
+                return fetcher.fetch(provider.path("url").asText()).map(parser::document).map(data -> data.path("proxies"));
+            }).doOnNext(list -> {
+                if (!list.isArray()) throw ClashNodes.invalid("Provider contains no proxies array");
+                nodes.addAll((com.fasterxml.jackson.databind.node.ArrayNode) list);
+                if (nodes.size() > 500 || nodes.toString().length() > 4 * 1024 * 1024)
+                    throw ClashNodes.invalid("Subscription exceeds 500 nodes or 4 MiB of node configuration");
+            }).then(Mono.fromSupplier(() -> mapper.createObjectNode().set("proxies", nodes)));
+        });
     }
 
     private Mono<ProxyChannelDtos.SyncResult> syncParsed(UUID subscriptionId, String yaml) {
-        return Mono.fromCallable(() -> {
-            JsonNode doc = parser.document(yaml);
+        return expandedDocument(yaml).map(doc -> {
             List<Node> nodes = new ArrayList<>();
+            List<String> issues = new ArrayList<>();
             JsonNode list = doc.path("proxies");
             if (!list.isArray() || list.isEmpty()) throw ClashNodes.invalid("Subscription contains no proxies");
-            list.forEach(raw -> { try { nodes.add(parser.node(raw)); } catch (ApiException ignored) {} });
-            return nodes;
-        }).subscribeOn(Schedulers.boundedElastic()).flatMap(nodes -> FluxHelper.persist(db, subscriptionId, nodes));
+            if (list.size() > 500) throw ClashNodes.invalid("Subscription contains more than 500 proxy nodes");
+            list.forEach(raw -> {
+                try {
+                    Node node = parser.node(raw);
+                    nodes.add(node);
+                    if (node.issue() != null) issues.add(node.name() + ": " + node.issue());
+                } catch (ApiException error) {
+                    String name = raw.path("name").asText("Unnamed node").replaceAll("[\\p{Cntrl}]", "");
+                    issues.add(name.substring(0, Math.min(100, name.length())) + ": unsupported node format");
+                }
+            });
+            if (nodes.stream().noneMatch(node -> node.issue() == null)) {
+                throw ClashNodes.invalid("Subscription has no supported proxy nodes; the previous version was kept");
+            }
+            Map<String, Node> unique = new LinkedHashMap<>();
+            nodes.forEach(node -> unique.putIfAbsent(node.fingerprint(), node));
+            return new ParsedNodes(List.copyOf(unique.values()), issues);
+        }).flatMap(parsed -> FluxHelper.persist(db, subscriptionId, parsed));
     }
 
     public Mono<ProxyChannelDtos.Channel> update(UUID id, ProxyChannelDtos.UpdateChannel request) {
-        return db.sql("UPDATE proxy_channels SET name=COALESCE(:name,name), enabled=COALESCE(:enabled,enabled), runtime_status=CASE WHEN :enabled IS FALSE THEN 'DISABLED' ELSE runtime_status END WHERE channel_id=:id")
-            .bind("id", id).bind("name", request.name()).bind("enabled", request.enabled()).fetch().rowsUpdated().flatMap(count -> count == 0 ? Mono.error(notFound("Channel")) : channel(id));
+        DatabaseClient.GenericExecuteSpec update = db.sql("UPDATE proxy_channels SET name=COALESCE(:name,name), enabled=COALESCE(:enabled,enabled), runtime_status=CASE WHEN COALESCE(:enabled,enabled) IS FALSE THEN 'DISABLED' WHEN NOT source_present OR config_issue IS NOT NULL THEN 'ERROR' ELSE 'PENDING' END WHERE channel_id=:id").bind("id", id);
+        update = nullable(update, "enabled", request.enabled(), Boolean.class);
+        update = nullable(update, "name", blank(request.name()), String.class);
+        return update.fetch().rowsUpdated().flatMap(count -> count == 0 ? Mono.error(notFound("Channel"))
+            : refreshRuntime().then(channel(id)));
     }
-    public Mono<Void> delete(UUID id) { return db.sql("DELETE FROM proxy_channels WHERE channel_id=:id").bind("id", id).fetch().rowsUpdated().flatMap(c -> c == 0 ? Mono.error(notFound("Channel")) : Mono.empty()); }
-    public Mono<ProxyChannelDtos.ProbeResult> test(UUID id) { return channel(id).map(c -> c.runtimeStatus().equals("ACTIVE") ? new ProxyChannelDtos.ProbeResult(true, null, 0, null) : new ProxyChannelDtos.ProbeResult(false, null, 0, "Channel runtime is not active")); }
+    public Mono<Void> delete(UUID id) {
+        return db.sql("DELETE FROM proxy_channels WHERE channel_id=:id").bind("id", id).fetch().rowsUpdated()
+            .flatMap(c -> c == 0 ? Mono.error(notFound("Channel")) : refreshRuntime())
+            .onErrorMap(org.springframework.dao.DataIntegrityViolationException.class,
+                e -> new ApiException(HttpStatus.CONFLICT, "PROXY_NODE_IN_USE", "Unbind accounts before deleting this node"));
+    }
+    public Mono<ProxyChannelDtos.ProbeResult> test(UUID id) {
+        return runtime.route(id).flatMap(route -> {
+            reactor.netty.http.client.HttpClient http = reactor.netty.http.client.HttpClient.newConnection()
+                .proxy(spec -> spec.type(reactor.netty.transport.ProxyProvider.Proxy.HTTP)
+                    .host(properties.getListenerHost()).port(route.port()))
+                .option(io.netty.channel.ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000)
+                .responseTimeout(properties.getProbeTimeout());
+            WebClient client = WebClient.builder().clientConnector(new org.springframework.http.client.reactive.ReactorClientHttpConnector(http)).build();
+            long started = System.nanoTime();
+            return client.get().uri("https://api.ipify.org?format=json").retrieve().bodyToMono(JsonNode.class)
+                .timeout(properties.getProbeTimeout())
+                .map(body -> {
+                    String ip = body.path("ip").asText("");
+                    if (!io.netty.util.NetUtil.isValidIpV4Address(ip) && !io.netty.util.NetUtil.isValidIpV6Address(ip))
+                        throw new EgressException("Invalid exit probe response");
+                    return new ProxyChannelDtos.ProbeResult(true, ip,
+                        java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), null);
+                })
+                .onErrorResume(error -> Mono.just(new ProxyChannelDtos.ProbeResult(false, null,
+                    java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), "Outbound probe failed")));
+        }).onErrorResume(error -> Mono.just(new ProxyChannelDtos.ProbeResult(false, null, 0, "Proxy node is not active")))
+            .flatMap(result -> db.sql("UPDATE proxy_channels SET last_tested_at=clock_timestamp(),last_test_result=:result WHERE channel_id=:id")
+                .bind("id", id).bind("result", result.success() ? "SUCCESS" : "FAILED").fetch().rowsUpdated().thenReturn(result));
+    }
 
     public Mono<ProxyChannelDtos.Channel> channel(UUID id) {
         return db.sql("SELECT c.channel_id,c.subscription_id,c.name,c.protocol,c.enabled,c.runtime_status,c.runtime_error,count(a.account_id) bound_accounts,c.updated_at FROM proxy_channels c LEFT JOIN proxy_accounts a ON a.proxy_channel_id=c.channel_id WHERE c.channel_id=:id GROUP BY c.channel_id")
-            .bind("id", id).map((r,m) -> new ProxyChannelDtos.Channel(r.get("channel_id",UUID.class),r.get("subscription_id",UUID.class),r.get("name",String.class),r.get("protocol",String.class),Boolean.TRUE.equals(r.get("enabled",Boolean.class)),r.get("runtime_status",String.class),r.get("runtime_error",String.class),number(r.get("bound_accounts")),instant(r.get("updated_at")))).one().switchIfEmpty(Mono.error(notFound("Channel")));
+            .bind("id", id).map((r,m) -> new ProxyChannelDtos.Channel(r.get("channel_id",UUID.class),r.get("subscription_id",UUID.class),r.get("name",String.class),r.get("protocol",String.class),Boolean.TRUE.equals(r.get("enabled",Boolean.class)),r.get("runtime_status",String.class),r.get("runtime_error",String.class),number(r.get("bound_accounts")),instant(r.get("updated_at")))).one().map(this::runtimeStatus).switchIfEmpty(Mono.error(notFound("Channel")));
+    }
+    private ProxyChannelDtos.Channel runtimeStatus(ProxyChannelDtos.Channel channel) {
+        String status = !channel.enabled() ? "DISABLED" : channel.runtimeStatus().equals("ERROR") ? "ERROR"
+            : runtime.active(channel.channelId()) ? "ACTIVE" : "PENDING";
+        return new ProxyChannelDtos.Channel(channel.channelId(), channel.subscriptionId(), channel.name(), channel.protocol(),
+            channel.enabled(), status, channel.runtimeError(), channel.boundAccounts(), channel.updatedAt());
+    }
+    private static <T> DatabaseClient.GenericExecuteSpec nullable(DatabaseClient.GenericExecuteSpec spec, String name, T value, Class<T> type) {
+        return value == null ? spec.bindNull(name, type) : spec.bind(name, value);
     }
     private Mono<Void> markSubscriptionError(UUID id, Throwable e) { return db.sql("UPDATE proxy_subscriptions SET status='ERROR',last_error=:error,updated_at=clock_timestamp() WHERE subscription_id=:id").bind("id",id).bind("error",safeError(e)).fetch().rowsUpdated().then(); }
-    private static String safeError(Throwable e) { return e == null ? "Unknown error" : e.getMessage() == null ? "Import failed" : e.getMessage().replaceAll("https?://\\S+", "[url]").substring(0, Math.min(512, e.getMessage().length())); }
+    private static String safeError(Throwable e) {
+        String message = e instanceof ApiException || e instanceof EgressException ? e.getMessage() : "Subscription import failed";
+        message = message.replaceAll("https?://\\S+", "[subscription URL]").replaceAll("(?i)(password|uuid|token|authorization)\\s*[:=]\\s*[^, }]+", "$1=[redacted]");
+        return message.substring(0, Math.min(512, message.length()));
+    }
     private static String blank(String v) { return v == null || v.isBlank() ? null : v.trim(); }
     private static long number(Object value) { return value instanceof Number n ? n.longValue() : 0; }
     private static Instant instant(Object value) { return value instanceof Instant i ? i : value instanceof java.time.OffsetDateTime o ? o.toInstant() : null; }
     private static ApiException notFound(String name) { return new ApiException(HttpStatus.NOT_FOUND, "PROXY_RESOURCE_NOT_FOUND", name + " not found"); }
-    private Mono<UUID> insertChannel(UUID subscriptionId, String name, Node node) { UUID id=UUID.randomUUID(); return db.sql("INSERT INTO proxy_channels(channel_id,subscription_id,name,proxy_name,protocol,node_config, runtime_status,config_fingerprint) VALUES(:id,:sub,:name,:proxy,:protocol,:config::jsonb,'PENDING',:fingerprint)").bind("id",id).bind("sub",subscriptionId).bind("name",name).bind("proxy",name).bind("protocol",node.protocol()).bind("config",node.config().toString()).bind("fingerprint",node.fingerprint()).fetch().rowsUpdated().thenReturn(id).onErrorMap(DuplicateKeyException.class,e -> new ApiException(HttpStatus.CONFLICT,"PROXY_NODE_EXISTS","A proxy node with this name already exists")); }
+    private Mono<UUID> insertChannel(UUID subscriptionId, String name, Node node) {
+        UUID id = UUID.randomUUID();
+        String proxyName = "node-" + id;
+        DatabaseClient.GenericExecuteSpec spec = db.sql("INSERT INTO proxy_channels(channel_id,subscription_id,name,proxy_name,protocol,node_config,runtime_status,config_fingerprint,config_issue) VALUES(:id,:sub,:name,:proxy,:protocol,:config::jsonb,'PENDING',:fingerprint,:issue)")
+            .bind("id", id).bind("name", name).bind("proxy", proxyName).bind("protocol", node.protocol())
+            .bind("config", node.config().toString()).bind("fingerprint", node.fingerprint());
+        spec = nullable(spec, "issue", node.issue(), String.class);
+        spec = subscriptionId == null ? spec.bindNull("sub", UUID.class) : spec.bind("sub", subscriptionId);
+        return spec.fetch().rowsUpdated().thenReturn(id).onErrorMap(DuplicateKeyException.class,
+            e -> new ApiException(HttpStatus.CONFLICT, "PROXY_NODE_EXISTS", "This node already exists in the subscription"));
+    }
 
     static final class FluxHelper {
-        static Mono<ProxyChannelDtos.SyncResult> persist(DatabaseClient db, UUID subscriptionId, List<Node> nodes) {
-            return reactor.core.publisher.Flux.fromIterable(nodes).concatMap(node -> {
-                UUID id=UUID.randomUUID(); return db.sql("INSERT INTO proxy_channels(channel_id,subscription_id,name,proxy_name,protocol,node_config,runtime_status,config_fingerprint) VALUES(:id,:sub,:name,:proxy,:protocol,:config::jsonb,'PENDING',:fingerprint) ON CONFLICT (proxy_name) DO UPDATE SET subscription_id=EXCLUDED.subscription_id,node_config=EXCLUDED.node_config,protocol=EXCLUDED.protocol,config_fingerprint=EXCLUDED.config_fingerprint,updated_at=clock_timestamp()")
-                    .bind("id",id).bind("sub",subscriptionId).bind("name",node.name()).bind("proxy",node.name()).bind("protocol",node.protocol()).bind("config",node.config().toString()).bind("fingerprint",node.fingerprint()).fetch().rowsUpdated();
-            }).count().flatMap(count -> db.sql("UPDATE proxy_subscriptions SET status='ACTIVE',last_synced_at=clock_timestamp(),last_error=NULL,updated_at=clock_timestamp() WHERE subscription_id=:id").bind("id",subscriptionId).fetch().rowsUpdated().thenReturn(new ProxyChannelDtos.SyncResult(subscriptionId,count.intValue(),0,List.of())));
+        static Mono<ProxyChannelDtos.SyncResult> persist(DatabaseClient db, UUID subscriptionId, ParsedNodes parsed) {
+            return reactor.core.publisher.Flux.fromIterable(parsed.nodes()).concatMap(node -> upsert(db, subscriptionId, node))
+                .collectList().flatMap(ids -> db.sql("UPDATE proxy_channels SET source_present=FALSE,runtime_status='ERROR',runtime_error='Node is no longer present in the latest subscription' WHERE subscription_id=:id AND channel_id <> ALL(:ids)")
+                .bind("id",subscriptionId).bind("ids",ids.toArray(UUID[]::new)).fetch().rowsUpdated()
+                .then(db.sql("UPDATE proxy_subscriptions SET status='ACTIVE',last_synced_at=clock_timestamp(),last_error=NULL,updated_at=clock_timestamp() WHERE subscription_id=:id").bind("id",subscriptionId).fetch().rowsUpdated())
+                .thenReturn(new ProxyChannelDtos.SyncResult(subscriptionId, parsed.nodes().size(), parsed.issues().size(), parsed.issues())));
+        }
+
+        private static Mono<UUID> upsert(DatabaseClient db, UUID subscriptionId, Node node) {
+            // Refreshes hold the subscription lock. Update first so unchanged nodes do not consume listener ports.
+            var update = db.sql("""
+                UPDATE proxy_channels SET name=:name,node_config=:config::jsonb,protocol=:protocol,
+                    source_present=TRUE,config_issue=:issue,runtime_error=:issue,
+                    runtime_status=CASE WHEN NOT enabled THEN 'DISABLED' WHEN CAST(:issue AS text) IS NULL THEN 'PENDING' ELSE 'ERROR' END
+                WHERE subscription_id=:sub AND config_fingerprint=:fingerprint RETURNING channel_id
+                """);
+            return bindNode(update, subscriptionId, node).map((row, meta) -> row.get("channel_id", UUID.class)).one()
+                .switchIfEmpty(Mono.defer(() -> {
+                    UUID id = UUID.randomUUID();
+                    var insert = db.sql("""
+                        INSERT INTO proxy_channels(channel_id,subscription_id,name,proxy_name,protocol,node_config,
+                            runtime_status,runtime_error,config_fingerprint,source_present,config_issue)
+                        VALUES(:id,:sub,:name,:proxy,:protocol,:config::jsonb,
+                            CASE WHEN CAST(:issue AS text) IS NULL THEN 'PENDING' ELSE 'ERROR' END,:issue,:fingerprint,TRUE,:issue)
+                        RETURNING channel_id
+                        """).bind("id", id).bind("proxy", "node-" + id);
+                    return bindNode(insert, subscriptionId, node).map((row, meta) -> row.get("channel_id", UUID.class)).one();
+                }));
+        }
+
+        private static DatabaseClient.GenericExecuteSpec bindNode(DatabaseClient.GenericExecuteSpec spec, UUID subscriptionId, Node node) {
+            return nullable(spec.bind("sub", subscriptionId).bind("name", node.name()).bind("protocol", node.protocol())
+                .bind("config", node.config().toString()).bind("fingerprint", node.fingerprint()), "issue", node.issue(), String.class);
         }
     }
+    private record ParsedNodes(List<Node> nodes, List<String> issues) {}
 }

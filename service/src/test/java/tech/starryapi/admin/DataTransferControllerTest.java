@@ -120,7 +120,9 @@ class DataTransferControllerTest {
         assertThat(download.getHeaders().getContentLength()).isEqualTo(content.length);
         assertThat(download.getHeaders().getFirst(HttpHeaders.CONTENT_DISPOSITION)).contains("database.dump");
         assertThat(read(download.getBody())).isEqualTo(content);
-        assertThat(dump).doesNotExist();
+        // doFinally runs after downstream completion; wait for the asynchronous file reader's cleanup.
+        org.awaitility.Awaitility.await().atMost(java.time.Duration.ofSeconds(2))
+            .untilAsserted(() -> assertThat(dump).doesNotExist());
         verify(adminAuth).verifyAdmin(exchange);
         verify(securityService).authorize(
             principal,

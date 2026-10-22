@@ -31,6 +31,8 @@ public class AccountAllocationPolicyService {
                        policy.max_sessions,
                        policy.session_idle_seconds,
                        policy.max_inflight_tokens,
+                       policy.cooldown_seconds,
+                       policy.tls_profile,
                        policy.policy_version,
                        lifecycle.lifecycle_state,
                        lifecycle.state_version,
@@ -76,15 +78,14 @@ public class AccountAllocationPolicyService {
                 safe_rpm = COALESCE(:safeRpm, policy.safe_rpm),
                 burst_capacity = COALESCE(:burstCapacity, policy.burst_capacity),
                 max_sessions = CASE
-                    WHEN target.provider NOT IN ('anthropic', 'claude')
-                         AND (
-                             target.provider IN ('openai', 'openai-compatible', 'deepseek', 'codex')
-                             OR target.auth_method IN ('api-key', 'apikey', 'openai-api-key', 'codex')
-                         ) THEN 0
+                    WHEN target.provider NOT IN ('anthropic', 'claude') THEN 0
                     ELSE COALESCE(:maxSessions, policy.max_sessions)
                 END,
                 session_idle_seconds = COALESCE(:sessionIdleSeconds, policy.session_idle_seconds),
                 max_inflight_tokens = COALESCE(:maxInflightTokens, policy.max_inflight_tokens),
+                cooldown_seconds = COALESCE(:cooldownSeconds, policy.cooldown_seconds),
+                tls_profile = CASE WHEN target.provider IN ('anthropic','claude')
+                    THEN COALESCE(:tlsProfile, policy.tls_profile) ELSE '' END,
                 policy_version = policy.policy_version + 1,
                 updated_at = clock_timestamp()
             FROM target
@@ -100,9 +101,13 @@ public class AccountAllocationPolicyService {
         spec = bindNullable(spec, "maxSessions", values.maxSessions(), Integer.class);
         spec = bindNullable(spec, "sessionIdleSeconds", values.sessionIdleSeconds(), Integer.class);
         spec = bindNullable(spec, "maxInflightTokens", values.maxInflightTokens(), Long.class);
+        spec = bindNullable(spec, "cooldownSeconds", values.cooldownSeconds(), Integer.class);
+        spec = bindNullable(spec, "tlsProfile", values.tlsProfile(), String.class);
         return spec.map((row, metadata) -> row.get("account_id", String.class))
             .one()
             .switchIfEmpty(notFound(accountId))
+            .then(databaseClient.sql("UPDATE account_active_sessions s SET expires_at=s.last_seen_at + make_interval(secs=>p.session_idle_seconds) FROM account_allocation_policies p WHERE s.account_id=p.account_id AND s.account_id=:id")
+                .bind("id", accountId).fetch().rowsUpdated())
             .then(get(accountId));
     }
 
@@ -126,7 +131,9 @@ public class AccountAllocationPolicyService {
             integer(row, "active_concurrency"),
             number(row, "reserved_input_tokens"),
             number(row, "reserved_output_tokens"),
-            instant(row, "updated_at")
+            instant(row, "updated_at"),
+            integer(row, "cooldown_seconds"),
+            row.get("tls_profile", String.class)
         );
     }
 

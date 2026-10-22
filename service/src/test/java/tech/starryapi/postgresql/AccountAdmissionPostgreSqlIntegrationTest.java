@@ -55,6 +55,8 @@ class AccountAdmissionPostgreSqlIntegrationTest extends PostgreSqlIntegrationTes
             .rowsUpdated()
             .block();
 
+        databaseClient.sql("UPDATE account_allocation_policies SET safe_concurrency=1 WHERE account_id=:id")
+            .bind("id", accountId).fetch().rowsUpdated().block();
         AccountAdmissionStore.AdmissionDecision first = admissionStore.acquire(request(accountId, "request-a-" + suffix)).block();
         AccountAdmissionStore.AdmissionDecision second = admissionStore.acquire(request(accountId, "request-b-" + suffix)).block();
 
@@ -99,7 +101,7 @@ class AccountAdmissionPostgreSqlIntegrationTest extends PostgreSqlIntegrationTes
             ))
             .one()
             .block();
-        assertThat(state).isEqualTo(new AdmissionState(0, 0L, 0L, "WARMING", (short) 2));
+        assertThat(state).isEqualTo(new AdmissionState(0, 0L, 0L, "HEALTHY", (short) 4));
 
         String responseId = "resp_" + suffix;
         responseOwnerStore.remember(responseId, accountId).block();
@@ -375,8 +377,8 @@ class AccountAdmissionPostgreSqlIntegrationTest extends PostgreSqlIntegrationTes
 
         AccountDtos.AccountAllocationPolicyResponse initial = allocationPolicyService.get(anthropicAccountId).block();
         assertThat(initial).isNotNull();
-        assertThat(initial.safeConcurrency()).isEqualTo(2);
-        assertThat(initial.maxSessions()).isEqualTo(4);
+        assertThat(initial.safeConcurrency()).isEqualTo(14);
+        assertThat(initial.maxSessions()).isZero();
 
         AccountDtos.AccountAllocationPolicyResponse anthropic = allocationPolicyService.update(
             anthropicAccountId,
@@ -403,6 +405,84 @@ class AccountAdmissionPostgreSqlIntegrationTest extends PostgreSqlIntegrationTes
             .isInstanceOf(ApiException.class)
             .extracting(error -> ((ApiException) error).getCode())
             .isEqualTo("ACCOUNT_ALLOCATION_POLICY_NOT_FOUND");
+    }
+
+    @Test
+    void officialDefaultsAndUnlimitedThirdPartyAdmission() {
+        String official = "official-" + UUID.randomUUID();
+        insertAccount(official, "OpenAI", "api-key");
+        var decisions = reactor.core.publisher.Flux.range(0, 20)
+            .flatMap(i -> admissionStore.acquire(scopedRequest(official, official + i, null, "gpt-test", "/v1/responses")), 8)
+            .collectList().block();
+        assertThat(decisions.stream().filter(AccountAdmissionStore.AdmissionDecision::accepted)).hasSize(14);
+        assertThat(decisions.stream().filter(d -> !d.accepted())).allMatch(d -> "CONCURRENCY_LIMIT".equals(d.rejectionReason()));
+        decisions.stream().filter(AccountAdmissionStore.AdmissionDecision::accepted).forEach(d -> admissionStore.abandon(d.leaseId(), "TEST").block());
+
+        for (String url : java.util.List.of("https://api.openai.com.evil.example/v1", "http://api.openai.com/v1", "https://relay.example/v1")) {
+            String id = "thirdparty-" + UUID.randomUUID();
+            databaseClient.sql("INSERT INTO proxy_accounts(account_id,access_token,provider,auth_method,base_url,enabled) VALUES(:id,'test','OpenAI','api-key',:url,TRUE)")
+                .bind("id", id).bind("url", url).fetch().rowsUpdated().block();
+            assertThat(allocationPolicyService.get(id).block().safeConcurrency()).isZero();
+            var unlimited = reactor.core.publisher.Flux.range(0, 20)
+                .concatMap(i -> admissionStore.acquire(scopedRequest(id, id + i, null, "gpt-test", "/v1/responses"))).collectList().block();
+            assertThat(unlimited).allMatch(AccountAdmissionStore.AdmissionDecision::accepted);
+            unlimited.forEach(d -> admissionStore.abandon(d.leaseId(), "TEST").block());
+        }
+    }
+
+    @Test
+    void sessionWindowCountsDistinctSessionsAndHonorsWindowChanges() {
+        String id = "session-window-" + UUID.randomUUID();
+        insertAccount(id, "Anthropic", "api-key");
+        databaseClient.sql("UPDATE account_allocation_policies SET max_sessions=2,session_idle_seconds=600 WHERE account_id=:id")
+            .bind("id", id).fetch().rowsUpdated().block();
+        for (String session : java.util.List.of("a", "b", "a")) {
+            var admitted = admissionStore.acquire(sessionRequest(id, session)).block();
+            assertThat(admitted.accepted()).isTrue();
+            admissionStore.abandon(admitted.leaseId(), "TEST").block();
+        }
+        assertThat(admissionStore.acquire(sessionRequest(id, "c")).block().rejectionReason()).isEqualTo("SESSION_LIMIT");
+        databaseClient.sql("UPDATE account_active_sessions SET last_seen_at=clock_timestamp()-INTERVAL '2 minutes' WHERE account_id=:id")
+            .bind("id", id).fetch().rowsUpdated().block();
+        databaseClient.sql("UPDATE account_allocation_policies SET session_idle_seconds=60 WHERE account_id=:id")
+            .bind("id", id).fetch().rowsUpdated().block();
+        assertThat(admissionStore.acquire(sessionRequest(id, "c")).block().accepted()).isTrue();
+    }
+
+    @Test
+    void customCooldownOverridesAutomaticDelayAndLateSuccessDoesNotClearIt() {
+        String id = "custom-cooldown-" + UUID.randomUUID();
+        insertAccount(id, "Anthropic", "api-key");
+        databaseClient.sql("UPDATE account_allocation_policies SET cooldown_seconds=5 WHERE account_id=:id")
+            .bind("id", id).fetch().rowsUpdated().block();
+        var failure = admissionStore.acquire(sessionRequest(id, "a")).block();
+        var success = admissionStore.acquire(sessionRequest(id, "b")).block();
+        admissionStore.reconcile(new AccountAdmissionStore.AdmissionResult(failure.leaseId(), false, 0, 0, 100, 429,
+            AccountFailureScope.CAPACITY_ACCOUNT, Duration.ofSeconds(45), false, Map.of())).block();
+        var cooled = allocationPolicyService.get(id).block();
+        assertThat(cooled.cooldownUntil()).isBefore(java.time.Instant.now().plusSeconds(6)).isAfter(java.time.Instant.now());
+        admissionStore.reconcile(new AccountAdmissionStore.AdmissionResult(success.leaseId(), true, 0, 0, 100, 200,
+            AccountFailureScope.UNKNOWN, Duration.ZERO, false, Map.of())).block();
+        var afterSuccess = allocationPolicyService.get(id).block();
+        assertThat(afterSuccess.cooldownUntil()).isEqualTo(cooled.cooldownUntil());
+        assertThat(afterSuccess.lifecycleState()).isEqualTo("COOLDOWN");
+    }
+
+    @Test
+    void upstreamRetryAfterIsMinimumCooldown() {
+        String id = "retry-after-" + UUID.randomUUID();
+        insertAccount(id, "Anthropic", "api-key");
+        databaseClient.sql("UPDATE account_allocation_policies SET cooldown_seconds=5 WHERE account_id=:id")
+            .bind("id", id).fetch().rowsUpdated().block();
+        var lease = admissionStore.acquire(sessionRequest(id, "a")).block();
+        admissionStore.reconcile(new AccountAdmissionStore.AdmissionResult(lease.leaseId(), false, 0, 0, 100, 429,
+            AccountFailureScope.CAPACITY_ACCOUNT, Duration.ofSeconds(45), false, Map.of("retryAfterSeconds", 30))).block();
+        assertThat(allocationPolicyService.get(id).block().cooldownUntil()).isAfter(java.time.Instant.now().plusSeconds(25));
+    }
+
+    private AccountAdmissionStore.AdmissionRequest sessionRequest(String id, String session) {
+        return new AccountAdmissionStore.AdmissionRequest(id, UUID.randomUUID().toString(), null,
+            tech.starryapi.common.Hashing.sha256(session), true, 100, 200, Duration.ofMinutes(10));
     }
 
     private void insertAccount(String accountId, String provider, String authMethod) {

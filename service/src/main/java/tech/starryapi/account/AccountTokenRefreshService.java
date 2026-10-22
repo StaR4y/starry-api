@@ -191,6 +191,7 @@ public class AccountTokenRefreshService {
 
         return webClient.post()
             .uri(OpenAiOAuthConstants.TOKEN_URL)
+            .attribute(tech.starryapi.egress.AccountEgressTransport.ACCOUNT, account)
             .contentType(MediaType.APPLICATION_JSON)
             .accept(MediaType.APPLICATION_JSON)
             .bodyValue(body)
@@ -222,6 +223,7 @@ public class AccountTokenRefreshService {
 
         return webClient.post()
             .uri("https://oidc." + region(account) + ".amazonaws.com/token")
+            .attribute(tech.starryapi.egress.AccountEgressTransport.ACCOUNT, account)
             .contentType(MediaType.APPLICATION_JSON)
             .bodyValue(body)
             .exchangeToMono(response -> {
@@ -240,6 +242,7 @@ public class AccountTokenRefreshService {
 
         return webClient.post()
             .uri(KIRO_AUTH_ENDPOINT + "/refreshToken")
+            .attribute(tech.starryapi.egress.AccountEgressTransport.ACCOUNT, account)
             .contentType(MediaType.APPLICATION_JSON)
             .header(HttpHeaders.USER_AGENT, kiroUserAgent(machineId(account)))
             .bodyValue(body)

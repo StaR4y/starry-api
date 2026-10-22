@@ -498,13 +498,19 @@ Content-Type: application/json
   "burstCapacity": 8,
   "maxSessions": 12,
   "sessionIdleSeconds": 900,
-  "maxInflightTokens": 2000000
+  "maxInflightTokens": 2000000,
+  "cooldownSeconds": 60,
+  "tlsProfile": "chrome136"
 }
 ```
 
-校验范围：优先级和并发 `1..10000`、RPM `1..1000000`、突发 `1..100000`、会话数 `0..100000`、会话空闲 `60..86400` 秒、在途 token `1..1000000000`。`allocationPriority` **越小越优先**。OpenAI、Codex、DeepSeek、OpenAI 兼容账号对这个调度器是无状态的，所以服务端总是为它们存 `maxSessions=0`。Anthropic 和 Kiro 兼容账号可以用会话限额。
+校验范围：优先级 `1..10000`、并发 `0..10000`、RPM `0..1000000`、突发 `0..100000`、会话数 `0..100000`、会话窗口 `60..86400` 秒、在途 token `1..1000000000`、冷却 `0..86400` 秒。并发 / RPM / 会话数的 0 表示不限制；RPM 为 0 时突发桶关闭；冷却 0 表示自动。`allocationPriority` 越小越优先。会话与 TLS 指纹仅对 Anthropic 生效；TLS 接受空字符串（关闭）、`chrome136`、`safari18_4`。
 
-响应包含可编辑字段，外加 `lifecycleState`、`stateVersion`、`warmupStage`、`cooldownUntil`、`recentErrorRate`（`0..1` 的 EWMA）、`recentLatencyMs`（整次尝试的延迟，**不是** TTFT）、`activeConcurrency`、输入 / 输出 token 预留和 `updatedAt`。新的 Anthropic 账号默认并发 / RPM / 突发 / 会话限额是 `2/20/2/4`；OpenAI 家族是 `4/60/4/0`；Kiro / 其他是 `2/30/2/4`。所有类型默认优先级 `100`、会话空闲 600 秒、在途 token 1,000,000。账号状态的含义见 [架构说明：账号池行为](ARCHITECTURE.md#账号池行为)。
+响应还包含 `lifecycleState`、`stateVersion`、`warmupStage`、`cooldownUntil`、`recentErrorRate`、`recentLatencyMs`（整次尝试）、`activeConcurrency`、token 预留和 `updatedAt`。新建官方 OpenAI / Anthropic API 默认 `14/0/0/0`，非官方 API 默认 `0/0/0/0`，Codex `4/60/4/0`，Kiro `2/30/2/0`。已有账号保留策略。默认优先级 100、窗口 600 秒、在途 token 1,000,000。详见 [路由与限流](ACCOUNT_EGRESS.md)。
+
+新建与 PATCH 账号支持 `proxyChannelId` 和嵌套 `allocationPolicy`，账号与策略在同一事务保存。PATCH 使用 `clearProxyChannel:true` 清除节点，`proxyUrl:""` 清除旧 URL。节点绑定优先于旧 URL。
+
+管理员节点接口：`GET/POST /admin/proxy-channels`，`PATCH/DELETE /admin/proxy-channels/{id}`，`POST /admin/proxy-channels/{id}/test`，`POST /admin/proxy-channels/subscriptions`（`name` 与 `url` / `yaml` 二选一），`POST /admin/proxy-channels/subscriptions/{id}/sync`。目录响应包含节点、来源、组件启用状态和支持的 TLS profile，不返回订阅 URL 或节点凭据。
 
 ### 路由策略
 

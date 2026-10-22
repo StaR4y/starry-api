@@ -58,7 +58,7 @@ public class AccountCandidateRanker {
     static double openAiScore(ProxyAccountEntity account, AllocationSnapshot snapshot) {
         double errorRisk = snapshot == null ? 0 : snapshot.recentErrorEwma() * 60.0;
         double latencyRisk = snapshot == null ? 0 : Math.min(snapshot.recentLatencyEwmaMs() / 30_000.0, 1.0) * 10.0;
-        double concurrencyPressure = snapshot == null
+        double concurrencyPressure = snapshot == null || snapshot.safeConcurrency() == 0
             ? 0
             : ratio(snapshot.activeConcurrency(), Math.max(snapshot.safeConcurrency(), 1)) * 20.0;
         double tokenPressure = snapshot == null
@@ -77,7 +77,7 @@ public class AccountCandidateRanker {
     static double anthropicScore(ProxyAccountEntity account, AllocationSnapshot snapshot) {
         double errorRisk = snapshot == null ? 0 : snapshot.recentErrorEwma() * 50.0;
         double latencyRisk = snapshot == null ? 0 : Math.min(snapshot.recentLatencyEwmaMs() / 60_000.0, 1.0) * 8.0;
-        double concurrencyPressure = snapshot == null
+        double concurrencyPressure = snapshot == null || snapshot.safeConcurrency() == 0
             ? 0
             : ratio(snapshot.activeConcurrency(), Math.max(snapshot.safeConcurrency(), 1)) * 30.0;
         double tokenPressure = snapshot == null

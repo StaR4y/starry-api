@@ -507,6 +507,12 @@ EOF
   cp "$recovery_path" "$stage_dir/runtime/${RECOVERY_TOOL_NAME}"
   cp "$recovery_checksum_path" "$stage_dir/runtime/${RECOVERY_TOOL_NAME}.sha256"
   cp "$info_path" "$stage_dir/build-info.json"
+  mkdir -p "$stage_dir/docker/egress" "$stage_dir/docs"
+  cp "$ROOT_DIR/docker-compose.egress.yml" "$stage_dir/docker-compose.egress.yml"
+  for egress_file in Dockerfile requirements.txt bridge.py mihomo-entrypoint.sh; do
+    cp "$ROOT_DIR/docker/egress/$egress_file" "$stage_dir/docker/egress/$egress_file"
+  done
+  cp "$ROOT_DIR/docs/ACCOUNT_EGRESS.md" "$stage_dir/docs/ACCOUNT_EGRESS.md"
   {
     printf '%s  %s\n' "$(sha256_file "$stage_dir/app/starry-api.jar")" "app/starry-api.jar"
     printf '%s  %s\n' "$(sha256_file "$stage_dir/app/starry-api.jar.sha256")" "app/starry-api.jar.sha256"
@@ -517,6 +523,9 @@ EOF
     printf '%s  %s\n' "$(sha256_file "$stage_dir/runtime/${RECOVERY_TOOL_NAME}")" "runtime/${RECOVERY_TOOL_NAME}"
     printf '%s  %s\n' "$(sha256_file "$stage_dir/runtime/${RECOVERY_TOOL_NAME}.sha256")" "runtime/${RECOVERY_TOOL_NAME}.sha256"
     printf '%s  %s\n' "$(sha256_file "$stage_dir/build-info.json")" "build-info.json"
+    for egress_file in docker-compose.egress.yml docker/egress/Dockerfile docker/egress/requirements.txt docker/egress/bridge.py docker/egress/mihomo-entrypoint.sh docs/ACCOUNT_EGRESS.md; do
+      printf '%s  %s\n' "$(sha256_file "$stage_dir/$egress_file")" "$egress_file"
+    done
   } > "$stage_dir/sha256sums.txt"
   write_bundle_readme "$stage_dir/README.txt"
   tar -C "$stage_dir" -czf "$bundle_path" .

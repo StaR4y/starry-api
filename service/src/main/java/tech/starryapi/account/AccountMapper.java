@@ -38,7 +38,8 @@ final class AccountMapper {
             entity.getLastUsedAt(),
             entity.getCreatedAt(),
             entity.getUpdatedAt(),
-            entity.getBadgeColor()
+            entity.getBadgeColor(),
+            entity.getProxyChannelId()
         );
     }
 

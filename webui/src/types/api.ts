@@ -380,6 +380,7 @@ export interface Account {
   profileArn: string | null;
   machineId: string | null;
   proxyUrl: string | null;
+  proxyChannelId?: string | null;
   poolTier: 'primary' | 'secondary' | string;
   poolWeight: number;
   enabled: boolean;
@@ -451,6 +452,8 @@ export interface CreateAccountRequest {
   profileArn?: string;
   machineId?: string;
   proxyUrl?: string;
+  proxyChannelId?: string;
+  allocationPolicy?: UpdateAccountAllocationPolicyRequest;
   poolTier?: 'primary' | 'secondary' | string;
   poolWeight?: number;
   quotaLimit?: number;
@@ -478,6 +481,7 @@ export interface CreateAccountRequest {
 
 export type UpdateAccountRequest = Partial<
   Omit<CreateAccountRequest, 'accountId'> & {
+    clearProxyChannel: boolean;
     enabled: boolean;
     quotaUsed: number;
     quotaResetAt: string;
@@ -501,6 +505,8 @@ export interface AccountAllocationPolicy {
   maxSessions: number;
   sessionIdleSeconds: number;
   maxInflightTokens: number;
+  cooldownSeconds: number;
+  tlsProfile: string;
   policyVersion: number;
   lifecycleState: string;
   stateVersion: number;
@@ -524,6 +530,8 @@ export type UpdateAccountAllocationPolicyRequest = Partial<
     | 'maxSessions'
     | 'sessionIdleSeconds'
     | 'maxInflightTokens'
+    | 'cooldownSeconds'
+    | 'tlsProfile'
   >
 >;
 

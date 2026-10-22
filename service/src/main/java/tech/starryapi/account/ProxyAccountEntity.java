@@ -1,6 +1,7 @@
 package tech.starryapi.account;
 
 import java.time.Instant;
+import java.util.UUID;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.relational.core.mapping.Column;
 import org.springframework.data.relational.core.mapping.Table;
@@ -27,6 +28,7 @@ public class ProxyAccountEntity {
     private String profileArn;
     private String machineId;
     private String proxyUrl;
+    private UUID proxyChannelId;
     private String poolTier;
     private Integer poolWeight;
     private Boolean enabled;
@@ -198,6 +200,9 @@ public class ProxyAccountEntity {
     public void setProxyUrl(String proxyUrl) {
         this.proxyUrl = proxyUrl;
     }
+
+    public UUID getProxyChannelId() { return proxyChannelId; }
+    public void setProxyChannelId(UUID proxyChannelId) { this.proxyChannelId = proxyChannelId; }
 
     public String getPoolTier() {
         return poolTier;

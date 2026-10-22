@@ -107,6 +107,13 @@
           icon: Monitor,
         },
         {
+          name: 'settings-proxy-channels',
+          get label() {
+            return t('出站代理');
+          },
+          icon: Connection,
+        },
+        {
           name: 'settings-plugins',
           get label() {
             return t('插件开发');

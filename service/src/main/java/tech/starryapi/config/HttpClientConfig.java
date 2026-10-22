@@ -14,11 +14,10 @@ import reactor.netty.resources.ConnectionProvider;
 public class HttpClientConfig {
 
     /**
-     * The one outbound HTTP client: model upstreams of every platform, the payment provider, Turnstile and the
-     * ranking and pricing feeds all share its connection pool.
+     * Unbound service requests share this pool. Account attributes select their own isolated egress transport.
      */
     @Bean
-    WebClient upstreamWebClient(ProxyProperties properties) {
+    WebClient upstreamWebClient(ProxyProperties properties, tech.starryapi.egress.AccountEgressTransport egress) {
         ConnectionProvider provider = ConnectionProvider.builder("starry-upstream")
             .maxConnections(500)
             .pendingAcquireMaxCount(2_000)
@@ -41,6 +40,7 @@ public class HttpClientConfig {
             .build();
 
         return WebClient.builder()
+            .filter(egress.filter())
             .clientConnector(new ReactorClientHttpConnector(httpClient))
             .exchangeStrategies(strategies)
             .build();

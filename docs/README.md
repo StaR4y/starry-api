@@ -23,6 +23,7 @@
 | [工单系统](SUPPORT_TICKETS.md) | 用户提交问题、管理员回复、邮件通知、限制与存储 |
 | [用户文档系统](USER_DOCUMENTATION.md) | 管理员在线编写教程、图片 / 视频 / 附件、Apifox 入口、备份 |
 | [中英文界面](INTERNATIONALIZATION.md) | 切换界面语言、双语文档、怎么维护翻译 |
+| [账号出站代理与路由限制](ACCOUNT_EGRESS.md) | Clash 节点订阅、固定出口、Mihomo / TLS 部署、并发与会话窗口 |
 
 ## 二、部署与运维（给运维）
 

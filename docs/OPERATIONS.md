@@ -248,7 +248,7 @@ curl -X POST http://127.0.0.1:8080/admin/accounts/test \
 调度器在 PostgreSQL 里**原子地**决定每次尝试能不能被某个账号接收。请求在发往上游之前，可能因为并发、RPM、突发、会话、在途令牌容量，或匹配的模型 / 端点冷却而被拒绝；此时代理会**换一个**符合条件的账号，**不会**把被拒绝的账号算作上游失败。
 
 - 已派发的租约最多预留容量 **10 分钟**，并在成功 / 失败时核销。取消和派发后的本地失败会立刻放弃租约。进程意外退出时，过期的预留会在下次考虑该账号时被回收。
-- 数值**越小越优先**。从厂商默认值开始，逐步增加容量；新建或恢复的账号会按 10% → 25% → 50% → 100% 预热。
+- 数值越小越优先。API 账号使用完整配置容量；Codex / Kiro 保留 10% → 25% → 50% → 100% 分阶段预热。
 
 ### 诊断一个账号
 
@@ -260,7 +260,7 @@ curl http://127.0.0.1:8080/admin/accounts/<accountId>/allocation-policy -H "Auth
 
 ### 无状态与会话
 
-OpenAI / Codex / DeepSeek / OpenAI 兼容账号的调度是**无状态**的，`maxSessions` 强制为 0。原生 Anthropic 账号只有在客户端提供可靠的会话标识时才会执行会话容量限制。目前的延迟反馈衡量的是**整次上游尝试**，不是流式的首字时间（TTFT）。账号级连接池、强制的代理出口 / TLS 身份基线、Anthropic OAuth / Setup Token 凭据暂未提供。
+非 Anthropic 账号不使用会话容量。Anthropic 在设置上限后按最近活动窗口统计不同会话；缺少可靠标识时按独立请求计数。延迟反馈仍衡量整次上游尝试，不是 TTFT。已支持节点出口、HTTP / SOCKS5 及 Anthropic TLS 指纹，部署和限流语义见 [账号出站代理](ACCOUNT_EGRESS.md)。Anthropic OAuth / Setup Token 凭据暂未提供。
 
 ### 账号路由策略
 
@@ -544,14 +544,14 @@ docker compose -f docker-compose.artifact.yml logs --tail=200 service
 
 ### 恢复流程
 
-导入数据是被刻意保护的：控制台要求你键入 `RESTORE_DATABASE`。每次导入前，服务都会用 `pg_restore` 校验自定义归档，再检查归档的目录（TOC）。**只接受 PostgreSQL 17、数据库 / schema 为 `starry_api` 的归档**；恢复后，它们的 Flyway V1–V24 脚本和校验和必须与正在运行的应用**完全一致**，不可变的 Root 标记必须解析到唯一一个已启用的 `ADMIN` Root，核心应用表必须存在，且不含其他 schema 的对象。独立的 `starry_security` 审计 / 发件箱 schema 故意不在归档里，也不会被应用恢复影响。运行时镜像已带 PostgreSQL 17 客户端工具；直接用 jar 运行的宿主机需要在 `PATH` 里提供 PostgreSQL 17 的 `pg_dump` 和 `pg_restore`。
+导入数据是被刻意保护的：控制台要求你键入 `RESTORE_DATABASE`。每次导入前，服务都会用 `pg_restore` 校验自定义归档，再检查归档的目录（TOC）。**只接受 PostgreSQL 17、数据库 / schema 为 `starry_api` 的归档**；恢复后，它们的 Flyway V1–V26 脚本和校验和必须与正在运行的应用**完全一致**，不可变的 Root 标记必须解析到唯一一个已启用的 `ADMIN` Root，核心应用表必须存在，且不含其他 schema 的对象。独立的 `starry_security` 审计 / 发件箱 schema 故意不在归档里，也不会被应用恢复影响。运行时镜像已带 PostgreSQL 17 客户端工具；直接用 jar 运行的宿主机需要在 `PATH` 里提供 PostgreSQL 17 的 `pg_dump` 和 `pg_restore`。
 
 备份用 PostgreSQL **会话级共享咨询锁**，恢复用对应的**排他锁**。这些锁协调**所有服务实例**，而不只是一个 JVM 里的线程。获得排他锁后，恢复按这个顺序进行：
 
 1. 撤销 `starry_api_runtime` 的数据库 `CONNECT` 权限，并终止现有 `starry_api` 后端连接。
 2. 从已静默的数据库创建一份服务端**回滚备份**。
 3. 对 `starry_api` schema 运行 `pg_restore --clean --if-exists --single-transaction --exit-on-error`。
-4. 校验：schema `starry_api`、所有必需的核心表、精确的 Flyway V1–V24 历史和校验和、V5 熔断纪元的列 / 索引 / 设置、恰好一个与 `application_root_user_id` 匹配的已启用 `admin` Root；还要校验 `starry_security` 保留了只追加触发器、最小权限的运行时 ACL 和不含密钥的结构；然后在运行时访问**仍被禁用**时运行 `ANALYZE`。如果传入的恢复已提交，但校验或分析失败，会自动用恢复前的备份做一次干净恢复，并在重新开放访问前校验、分析回滚结果。
+4. 校验：schema `starry_api`、所有必需的核心表、精确的 Flyway V1–V26 历史和校验和、V5 熔断纪元的列 / 索引 / 设置、恰好一个与 `application_root_user_id` 匹配的已启用 `admin` Root；还要校验 `starry_security` 保留了只追加触发器、最小权限的运行时 ACL 和不含密钥的结构；然后在运行时访问**仍被禁用**时运行 `ANALYZE`。如果传入的恢复已提交，但校验或分析失败，会自动用恢复前的备份做一次干净恢复，并在重新开放访问前校验、分析回滚结果。
 5. 在 `finally` 里恢复 `CONNECT`，然后清空本地会话和所有源自数据库的缓存——即使恢复在进入隔离后失败也是如此。
 6. 让其他实例重连它们的 PostgreSQL 通知监听器；每次成功重连都会执行同样的本地状态整体失效。代数检查防止恢复前的异步缓存加载在之后发布过期状态。
 

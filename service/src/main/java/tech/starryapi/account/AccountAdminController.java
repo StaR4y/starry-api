@@ -106,7 +106,7 @@ public class AccountAdminController implements AccountAdminApi {
     public Mono<ApiResponse<AccountDtos.AccountResponse>> update(
         ServerWebExchange exchange,
         @PathVariable String accountId,
-        @RequestBody AccountDtos.UpdateAccountRequest request
+        @Valid @RequestBody AccountDtos.UpdateAccountRequest request
     ) {
         adminAuth.verifyAdmin(exchange);
         return service.update(accountId, request)

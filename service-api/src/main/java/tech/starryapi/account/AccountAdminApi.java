@@ -48,7 +48,7 @@ public interface AccountAdminApi {
     Mono<ApiResponse<AccountDtos.AccountResponse>> update(
         ServerWebExchange exchange,
         @PathVariable String accountId,
-        @RequestBody AccountDtos.UpdateAccountRequest request
+        @Valid @RequestBody AccountDtos.UpdateAccountRequest request
     );
 
     @PostMapping("/{accountId}/suspend")

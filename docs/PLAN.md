@@ -55,7 +55,7 @@ Compatibility intentionally retained:
 - The Kiro, OpenAI, and Anthropic clients do not yet implement one unified upstream adapter interface.
 - Gemini is an inbound compatibility layer routed through Kiro aliases; direct Google API-key dispatch, account testing, and `streamGenerateContent` are missing.
 - OpenAI/Anthropic image, document, file, and prompt-cache parity remains partial.
-- Per-account `proxyUrl` is stored but is not wired into outbound `WebClient` dispatch.
+- Account egress supports fixed subscription nodes, legacy HTTP/SOCKS5 URLs and optional TLS impersonation; pre-account ChatGPT browser authorization still uses the service's default connection. See [egress deployment and limits](ACCOUNT_EGRESS.md).
 - Rate limiting and data-management unlock state are instance-local. Rate limiting is not distributed, and data-management security supports one active service instance only.
 - `/actuator/prometheus` is exposed, but domain metrics for providers, upstream latency/errors, account state, and circuit transitions are incomplete.
 
@@ -111,7 +111,7 @@ Completed:
 
 Remaining:
 
-1. Wire each account's outbound proxy URL into its HTTP client dispatch.
+1. Extend egress selection to pre-account ChatGPT authorization if deployment requirements call for it; saved account calls, tests, and refreshes already honor their route.
 2. Decide whether exact account/group-to-key binding is still needed beyond provider scoping.
 3. Add distributed rate limiting before supporting horizontally scaled public traffic.
 4. Graduate the model-family circuit policy only after production observation, alerting, and rollback exercises.

@@ -82,6 +82,7 @@ public class OpenAiAccountTestClient {
         String endpoint = OpenAiEndpoints.openAiApi(account.getBaseUrl(), "/chat/completions");
         return webClient.post()
             .uri(endpoint)
+            .attribute(tech.starryapi.egress.AccountEgressTransport.ACCOUNT, account)
             .headers(headers -> applyOpenAiHeaders(headers, account))
             .bodyValue(body)
             .exchangeToMono(response -> handleResponse(response, this::parseChatCompletions, endpoint));
@@ -120,6 +121,7 @@ public class OpenAiAccountTestClient {
         String endpoint = OpenAiEndpoints.codexApi(account.getBaseUrl(), "/responses");
         return webClient.post()
             .uri(endpoint)
+            .attribute(tech.starryapi.egress.AccountEgressTransport.ACCOUNT, account)
             .headers(headers -> applyCodexHeaders(headers, account))
             .bodyValue(body)
             .exchangeToMono(response -> handleResponse(response, this::parseResponses, endpoint));
@@ -129,6 +131,7 @@ public class OpenAiAccountTestClient {
         String endpoint = OpenAiEndpoints.codexApi(account.getBaseUrl(), "/responses");
         return webClient.post()
             .uri(endpoint)
+            .attribute(tech.starryapi.egress.AccountEgressTransport.ACCOUNT, account)
             .headers(headers -> applyCodexHeaders(headers, account))
             .bodyValue(body)
             .exchangeToMono(response -> handleQuotaResponse(response, endpoint));

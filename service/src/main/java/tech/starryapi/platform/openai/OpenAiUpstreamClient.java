@@ -89,6 +89,7 @@ public class OpenAiUpstreamClient {
         String endpoint = OpenAiEndpoints.openAiApi(account.getBaseUrl(), "/chat/completions");
         return webClient.post()
             .uri(endpoint)
+            .attribute(tech.starryapi.egress.AccountEgressTransport.ACCOUNT, account)
             .headers(headers -> applyOpenAiHeaders(headers, account))
             .bodyValue(body)
             .exchangeToMono(response -> handleResponse(response, this::parseChatCompletions, endpoint));
@@ -115,6 +116,7 @@ public class OpenAiUpstreamClient {
         String endpoint = OpenAiEndpoints.codexApi(account.getBaseUrl(), "/responses");
         return webClient.post()
             .uri(endpoint)
+            .attribute(tech.starryapi.egress.AccountEgressTransport.ACCOUNT, account)
             .headers(headers -> applyCodexHeaders(headers, account))
             .bodyValue(body)
             .exchangeToMono(response -> handleResponse(response, this::parseResponses, endpoint));
@@ -158,6 +160,7 @@ public class OpenAiUpstreamClient {
         String endpoint = OpenAiEndpoints.openAiApi(account.getBaseUrl(), "/responses");
         return webClient.post()
             .uri(endpoint)
+            .attribute(tech.starryapi.egress.AccountEgressTransport.ACCOUNT, account)
             .headers(headers -> applyOpenAiResponsesHeaders(headers, account))
             .bodyValue(body)
             .exchangeToMono(response -> handleResponse(response, this::parseResponses, endpoint));
@@ -194,7 +197,7 @@ public class OpenAiUpstreamClient {
                     return Mono.error(new UpstreamException(
                         status.value(),
                         "OpenAI upstream error " + status.value() + ": " + truncate(rawBody),
-                        isRecoverableStatus(status.value())
+                        isRecoverableStatus(status.value()), response.headers().asHttpHeaders().getFirst("Retry-After")
                     ));
                 }
                 try {

@@ -198,6 +198,12 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '系统设置', adminOnly: true, menuName: 'settings' },
         children: [
           {
+            path: 'proxy-channels',
+            name: 'settings-proxy-channels',
+            component: () => import('@/views/settings/ProxyChannelsView.vue'),
+            meta: { title: '出站代理' },
+          },
+          {
             path: 'documentation',
             name: 'settings-documentation',
             component: () => import('@/views/settings/DocumentationSettingsView.vue'),

@@ -19,7 +19,8 @@ public class SubscriptionFetcher {
             .flatMap(target -> {
                 // Pin the checked address while preserving the original Host and TLS SNI.
                 var client = HttpClient.newConnection().followRedirect(false)
-                    .remoteAddress(() -> new InetSocketAddress(target.address(), target.port()))
+                    .resolver(pinnedResolver(target))
+                    .option(io.netty.channel.ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000)
                     .responseTimeout(Duration.ofSeconds(15));
                 return WebClient.builder().clientConnector(new ReactorClientHttpConnector(client))
                     .codecs(c -> c.defaultCodecs().maxInMemorySize(4 * 1024 * 1024)).build()
@@ -37,6 +38,25 @@ public class SubscriptionFetcher {
                     }).timeout(Duration.ofSeconds(20));
             }).onErrorMap(error -> error instanceof tech.starryapi.common.ApiException ? error
                 : ClashNodes.invalid("Subscription download failed; check the URL and server connectivity"));
+    }
+    static io.netty.resolver.AddressResolverGroup<InetSocketAddress> pinnedResolver(Target target) {
+        return new io.netty.resolver.AddressResolverGroup<>() {
+            @Override protected io.netty.resolver.AddressResolver<InetSocketAddress> newResolver(io.netty.util.concurrent.EventExecutor executor) {
+                return new io.netty.resolver.AbstractAddressResolver<>(executor, InetSocketAddress.class) {
+                    @Override protected boolean doIsResolved(InetSocketAddress address) { return false; }
+                    private InetSocketAddress pinned() throws UnknownHostException {
+                        // Keep the logical hostname for TLS SNI while fixing the already-checked IP bytes.
+                        return new InetSocketAddress(InetAddress.getByAddress(target.uri().getHost(), target.address().getAddress()), target.port());
+                    }
+                    @Override protected void doResolve(InetSocketAddress address, io.netty.util.concurrent.Promise<InetSocketAddress> promise) throws Exception {
+                        promise.setSuccess(pinned());
+                    }
+                    @Override protected void doResolveAll(InetSocketAddress address, io.netty.util.concurrent.Promise<List<InetSocketAddress>> promise) throws Exception {
+                        promise.setSuccess(List.of(pinned()));
+                    }
+                };
+            }
+        };
     }
     static Target validated(String url) throws Exception {
         URI uri = URI.create(url);

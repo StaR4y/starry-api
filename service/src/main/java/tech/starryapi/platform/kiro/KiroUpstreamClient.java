@@ -99,6 +99,7 @@ public class KiroUpstreamClient {
                 byte[] requestBytes = serialize(endpointPayload);
                 return webClient.post()
                     .uri(endpoint.getUrl())
+                    .attribute(tech.starryapi.egress.AccountEgressTransport.ACCOUNT, account)
                     .headers(headers -> applyHeaders(headers, account))
                     .bodyValue(requestBytes)
                     .exchangeToMono(response -> handleResponse(response, requestBytes, model, endpoint));
@@ -180,7 +181,7 @@ public class KiroUpstreamClient {
                 .flatMap(body -> Mono.error(new UpstreamException(
                     status.value(),
                     "Kiro upstream error " + status.value() + " on " + endpoint.getName() + ": " + body,
-                    isRecoverableStatus(status.value())
+                    isRecoverableStatus(status.value()), response.headers().asHttpHeaders().getFirst("Retry-After")
                 )));
         }
         return response.bodyToMono(byte[].class)
@@ -312,6 +313,7 @@ public class KiroUpstreamClient {
         String url = modelListUrl(account.getRegion(), profileArn, nextToken);
         return webClient.get()
             .uri(url)
+            .attribute(tech.starryapi.egress.AccountEgressTransport.ACCOUNT, account)
             .headers(headers -> applyModelListHeaders(headers, account))
             .exchangeToMono(response -> {
                 if (response.statusCode().isError()) {

@@ -10,12 +10,8 @@
   import { useRouter } from 'vue-router';
   import { ElMessage, type FormInstance, type FormRules } from 'element-plus';
   import { accountsApi, modelsApi } from '@/api';
-  import type {
-    Account,
-    AccountAllocationPolicy,
-    CreateAccountRequest,
-    UpdateAccountAllocationPolicyRequest,
-  } from '@/types/api';
+  import { proxyChannelsApi, type ProxyCatalog } from '@/api/proxyChannels';
+  import type { Account, AccountAllocationPolicy, CreateAccountRequest } from '@/types/api';
   import ChatGptOAuthFlow from './ChatGptOAuthFlow.vue';
   import ProviderBadge from './ProviderBadge.vue';
   import {
@@ -56,6 +52,7 @@
   const formSubmitting = ref(false);
   const allocationPolicyLoading = ref(false);
   const allocationPolicy = ref<AccountAllocationPolicy | null>(null);
+  const proxyCatalog = ref<ProxyCatalog | null>(null);
   const activeFormTab = ref('basic');
   const createMethod = ref<'credentials' | 'chatgpt'>('credentials');
   let allocationPolicyRequest = 0;
@@ -92,6 +89,7 @@
     profileArn: '',
     machineId: '',
     proxyUrl: '',
+    proxyChannelId: '',
     poolTier: 'primary',
     poolWeight: 100,
     quotaLimit: undefined as number | undefined,
@@ -107,6 +105,8 @@
     maxSessions: 0,
     sessionIdleSeconds: 600,
     maxInflightTokens: 1_000_000,
+    cooldownSeconds: 0,
+    tlsProfile: '',
   });
 
   const isOpenAiCompatibleForm = computed(
@@ -141,10 +141,7 @@
   const isChatGptCreate = computed(
     () => props.mode === 'create' && createMethod.value === 'chatgpt',
   );
-  const usesSessionLimit = computed(() => {
-    const provider = normalized(form.provider);
-    return !(isOpenAiApiKeyForm.value || isDeepSeekApiKeyForm.value || provider === 'codex');
-  });
+  const usesSessionLimit = computed(() => isAnthropicApiKeyForm.value);
   const accessTokenLabel = computed(() => {
     const suffix = props.mode === 'edit' ? t('（留空则不修改）') : '';
     return isApiKeyForm.value ? `API Key${suffix}` : `Access Token${suffix}`;
@@ -237,6 +234,7 @@
       profileArn: '',
       machineId: '',
       proxyUrl: '',
+      proxyChannelId: '',
       poolTier: 'primary',
       poolWeight: 100,
       quotaLimit: undefined,
@@ -252,7 +250,10 @@
       maxSessions: 0,
       sessionIdleSeconds: 600,
       maxInflightTokens: 1_000_000,
+      cooldownSeconds: 0,
+      tlsProfile: '',
     });
+    applyRoutingDefaults();
   }
 
   async function loadAllocationPolicy(accountId: string) {
@@ -270,6 +271,8 @@
         maxSessions: policy.maxSessions,
         sessionIdleSeconds: policy.sessionIdleSeconds,
         maxInflightTokens: policy.maxInflightTokens,
+        cooldownSeconds: policy.cooldownSeconds ?? 0,
+        tlsProfile: policy.tlsProfile ?? '',
       });
     } catch {
       if (request === allocationPolicyRequest) {
@@ -437,6 +440,46 @@
   }
 
   watch(() => form.provider, applyProviderDefaults);
+  const isOfficialApi = computed(() => {
+    if (!isApiKeyForm.value || normalized(form.authMethod) === 'codex') return false;
+    const host =
+      normalized(form.provider) === 'openai'
+        ? 'api.openai.com'
+        : isAnthropicApiKeyForm.value
+          ? 'api.anthropic.com'
+          : '';
+    if (!host) return false;
+    try {
+      const url = new URL(form.baseUrl.trim() || `https://${host}/v1`);
+      return (
+        url.protocol === 'https:' &&
+        url.hostname === host &&
+        !url.port &&
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash
+      );
+    } catch {
+      return false;
+    }
+  });
+  function applyRoutingDefaults() {
+    const api = isApiKeyForm.value && normalized(form.authMethod) !== 'codex';
+    const codex = normalized(form.authMethod) === 'codex' || normalized(form.provider) === 'codex';
+    Object.assign(policyForm, {
+      safeConcurrency: api ? (isOfficialApi.value ? 14 : 0) : codex ? 4 : 2,
+      safeRpm: api ? 0 : codex ? 60 : 30,
+      burstCapacity: api ? 0 : codex ? 4 : 2,
+      maxSessions: 0,
+      sessionIdleSeconds: 600,
+      cooldownSeconds: 0,
+      tlsProfile: '',
+    });
+  }
+  watch([() => form.provider, () => form.authMethod, isOfficialApi], () => {
+    if (props.mode === 'create') applyRoutingDefaults();
+  });
   watch(
     () => form.catalogVendor,
     (vendor) => {
@@ -453,6 +496,14 @@
       resetForm();
       activeFormTab.value = 'basic';
       void loadCompatibleVendors();
+      void proxyChannelsApi
+        .catalog()
+        .then((value) => {
+          proxyCatalog.value = value;
+        })
+        .catch(() => {
+          ElMessage.error(t('代理节点加载失败'));
+        });
       if (props.mode === 'edit' && props.account) {
         const row = props.account;
         Object.assign(form, {
@@ -467,6 +518,7 @@
           profileArn: row.profileArn ?? '',
           machineId: row.machineId ?? '',
           proxyUrl: row.proxyUrl ?? '',
+          proxyChannelId: row.proxyChannelId ?? '',
           poolTier: normalizedPoolTier(row.poolTier),
           poolWeight: row.poolWeight ?? 100,
           quotaLimit: row.quotaLimit ?? undefined,
@@ -499,7 +551,13 @@
       }
       if (props.mode === 'create') {
         const { catalogVendor: _catalogVendor, ...createFields } = form;
-        const payload = compact({ ...createFields }) as CreateAccountRequest;
+        const payload = compact({
+          ...createFields,
+          allocationPolicy: {
+            ...policyForm,
+            tlsProfile: isAnthropicApiKeyForm.value ? policyForm.tlsProfile : '',
+          },
+        }) as CreateAccountRequest;
         await accountsApi.create(payload);
         ElMessage.success(t('账号已创建'));
       } else if (props.account) {
@@ -515,23 +573,21 @@
         // 编辑模式下 access/refresh token 仅在有值时提交
         const payload = compact({
           ...rest,
+          clearProxyChannel: !form.proxyChannelId,
+          allocationPolicy: allocationPolicy.value
+            ? {
+                ...policyForm,
+                tlsProfile: isAnthropicApiKeyForm.value ? policyForm.tlsProfile : '',
+              }
+            : undefined,
           accessToken: accessToken || undefined,
           refreshToken: refreshToken || undefined,
           clientId: clientId || undefined,
           clientSecret: clientSecret || undefined,
           idToken: idToken || undefined,
         });
+        payload.proxyUrl = form.proxyUrl;
         await accountsApi.update(props.account.accountId, payload);
-        if (allocationPolicy.value) {
-          const policyPayload: UpdateAccountAllocationPolicyRequest = {
-            ...policyForm,
-            maxSessions: usesSessionLimit.value ? policyForm.maxSessions : 0,
-          };
-          allocationPolicy.value = await accountsApi.updateAllocationPolicy(
-            props.account.accountId,
-            policyPayload,
-          );
-        }
         ElMessage.success(t('账号已更新'));
       }
       visibleValue.value = false;
@@ -716,21 +772,21 @@
                             class="vendor-option__icon"
                             :src="vendor.icon"
                             alt=""
-                          >
+                          />
                           <span v-else class="vendor-option__icon vendor-option__icon--fallback">
                             {{ vendor.name.slice(0, 1).toUpperCase() }}
                           </span>
                           <span class="vendor-option__name">{{ vendor.name }}</span>
-                          <span class="vendor-option__count">{{ vendor.modelCount }} {{ t('个模型') }}</span>
+                          <span class="vendor-option__count"
+                            >{{ vendor.modelCount }} {{ t('个模型') }}</span
+                          >
                         </span>
                       </el-option>
                     </el-select>
                     <p v-if="!vendorsLoading && compatibleVendors.length === 0" class="form-hint">
                       {{ t('还没有第三方 OpenAI 兼容厂商。') }}
                       <el-button link type="primary" @click="goAddVendorModel">
-                        {{
-                          t('去添加模型')
-                        }}
+                        {{ t('去添加模型') }}
                       </el-button>
                     </p>
                   </el-form-item>
@@ -749,8 +805,32 @@
               </template>
 
               <el-col :span="24">
-                <el-form-item :label="t('出站代理 URL')">
-                  <el-input v-model="form.proxyUrl" placeholder="http://user:pass@host:port" />
+                <el-form-item :label="t('代理出口节点')">
+                  <el-select
+                    v-model="form.proxyChannelId"
+                    clearable
+                    filterable
+                    class="w-full"
+                    :placeholder="t('直连')"
+                    @change="form.proxyUrl = ''"
+                  >
+                    <el-option
+                      v-for="node in proxyCatalog?.channels ?? []"
+                      :key="node.channelId"
+                      :label="`${node.name} · ${node.protocol}`"
+                      :value="node.channelId"
+                      :disabled="!node.enabled || node.runtimeStatus === 'ERROR'"
+                    />
+                  </el-select>
+                </el-form-item>
+                <el-form-item v-if="form.proxyUrl" :label="t('出站代理 URL')">
+                  <el-input
+                    v-model="form.proxyUrl"
+                    type="password"
+                    show-password
+                    clearable
+                    autocomplete="off"
+                  />
                 </el-form-item>
               </el-col>
             </el-row>
@@ -870,10 +950,10 @@
           </div>
         </el-tab-pane>
 
-        <el-tab-pane v-if="mode === 'edit'" :label="t('分配策略')" name="allocation">
+        <el-tab-pane :label="t('路由与限制')" name="allocation">
           <div v-loading="allocationPolicyLoading" class="tab-pane-content allocation-pane">
-            <template v-if="allocationPolicy">
-              <div class="allocation-runtime">
+            <template v-if="mode === 'create' || allocationPolicy">
+              <div v-if="allocationPolicy" class="allocation-runtime">
                 <div class="runtime-state">
                   <span class="runtime-label">{{ t('运行状态') }}</span>
                   <el-tag :type="lifecycleTagType(allocationPolicy.lifecycleState)" effect="light">
@@ -886,9 +966,11 @@
                 </div>
                 <div class="runtime-metric">
                   <span>{{ t('当前并发') }}</span>
-                  <strong>{{ allocationPolicy.activeConcurrency }}/{{
-                    policyForm.safeConcurrency
-                  }}</strong>
+                  <strong
+                    >{{ allocationPolicy.activeConcurrency }}/{{
+                      policyForm.safeConcurrency === 0 ? t('不限') : policyForm.safeConcurrency
+                    }}</strong
+                  >
                 </div>
                 <div class="runtime-metric">
                   <span>{{ t('预留令牌') }}</span>
@@ -908,6 +990,11 @@
               </div>
 
               <el-row :gutter="20">
+                <el-col :span="24"
+                  ><el-button link type="primary" @click="applyRoutingDefaults">{{
+                    t('应用此类型的默认策略')
+                  }}</el-button></el-col
+                >
                 <el-col :span="12" :xs="24">
                   <el-form-item :label="t('分配优先级')">
                     <el-input-number
@@ -921,10 +1008,10 @@
                   </el-form-item>
                 </el-col>
                 <el-col :span="12" :xs="24">
-                  <el-form-item :label="t('安全并发数')">
+                  <el-form-item :label="t('并发上限（0 为不限）')">
                     <el-input-number
                       v-model="policyForm.safeConcurrency"
-                      :min="1"
+                      :min="0"
                       :max="10000"
                       controls-position="right"
                       class="w-full"
@@ -932,10 +1019,10 @@
                   </el-form-item>
                 </el-col>
                 <el-col :span="12" :xs="24">
-                  <el-form-item :label="t('每分钟请求数（RPM）')">
+                  <el-form-item :label="t('平均每分钟请求数（0 为不限）')">
                     <el-input-number
                       v-model="policyForm.safeRpm"
-                      :min="1"
+                      :min="0"
                       :max="1000000"
                       controls-position="right"
                       class="w-full"
@@ -946,7 +1033,8 @@
                   <el-form-item :label="t('突发容量')">
                     <el-input-number
                       v-model="policyForm.burstCapacity"
-                      :min="1"
+                      :min="0"
+                      :disabled="policyForm.safeRpm === 0"
                       :max="100000"
                       controls-position="right"
                       class="w-full"
@@ -954,7 +1042,7 @@
                   </el-form-item>
                 </el-col>
                 <el-col :span="12" :xs="24">
-                  <el-form-item :label="t('最大活跃会话数')">
+                  <el-form-item :label="t('窗口内不同会话上限（0 为不限）')">
                     <el-input-number
                       v-model="policyForm.maxSessions"
                       :min="0"
@@ -966,12 +1054,41 @@
                   </el-form-item>
                 </el-col>
                 <el-col :span="12" :xs="24">
-                  <el-form-item :label="t('会话空闲时间（秒）')">
+                  <el-form-item :label="t('会话窗口（秒）')">
                     <el-input-number
                       v-model="policyForm.sessionIdleSeconds"
                       :min="60"
                       :max="86400"
                       :disabled="!usesSessionLimit"
+                      controls-position="right"
+                      class="w-full"
+                    />
+                  </el-form-item>
+                </el-col>
+                <el-col v-if="isAnthropicApiKeyForm" :span="12" :xs="24">
+                  <el-form-item :label="t('TLS 指纹')">
+                    <el-select
+                      v-model="policyForm.tlsProfile"
+                      clearable
+                      class="w-full"
+                      :placeholder="t('关闭')"
+                      :disabled="!proxyCatalog?.tlsEnabled && !policyForm.tlsProfile"
+                    >
+                      <el-option
+                        v-for="profile in proxyCatalog?.tlsProfiles ?? []"
+                        :key="profile"
+                        :label="profile"
+                        :value="profile"
+                      />
+                    </el-select>
+                  </el-form-item>
+                </el-col>
+                <el-col :span="12" :xs="24">
+                  <el-form-item :label="t('冷却时间（秒，0 为自动）')">
+                    <el-input-number
+                      v-model="policyForm.cooldownSeconds"
+                      :min="0"
+                      :max="86400"
                       controls-position="right"
                       class="w-full"
                     />

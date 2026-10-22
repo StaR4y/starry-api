@@ -252,10 +252,11 @@ public class AccountPoolService {
     }
 
     public Mono<ProxyAccountEntity> create(AccountDtos.CreateAccountRequest request) {
-        return insertImportedAccount(request, false, 0)
+        Mono<ProxyAccountEntity> write = insertImportedAccount(request, false, 0)
             .map(AccountWriteResult::account)
             .switchIfEmpty(Mono.error(accountEmailExists()))
-            .doOnNext(this::updateCachedAccount);
+            .flatMap(account -> saveAllocationPolicy(account, request.allocationPolicy()));
+        return committed(write).doOnNext(this::updateCachedAccount);
     }
 
     public Mono<AccountDtos.ImportAccountsResponse> importAccounts(AccountDtos.ImportAccountsRequest request) {
@@ -271,11 +272,30 @@ public class AccountPoolService {
     }
 
     public Mono<ProxyAccountEntity> update(String accountId, AccountDtos.UpdateAccountRequest request) {
-        return repository.findByAccountId(accountId)
+        Mono<ProxyAccountEntity> write = repository.findByAccountId(accountId)
             .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "ACCOUNT_NOT_FOUND", "Account not found")))
             .flatMap(entity -> updateManagedFields(entity, request))
             .onErrorMap(DuplicateKeyException.class, error -> accountEmailExists())
-            .doOnNext(this::updateCachedAccount);
+            .flatMap(account -> saveAllocationPolicy(account, request.allocationPolicy()));
+        return committed(write).doOnNext(this::updateCachedAccount);
+    }
+
+    private AccountAllocationPolicyService allocationPolicyService;
+    private org.springframework.transaction.reactive.TransactionalOperator accountWriteTransaction;
+
+    @Autowired
+    void configureAccountWrites(AccountAllocationPolicyService policies, org.springframework.transaction.ReactiveTransactionManager transactions) {
+        allocationPolicyService = policies;
+        accountWriteTransaction = org.springframework.transaction.reactive.TransactionalOperator.create(transactions);
+    }
+
+    private Mono<ProxyAccountEntity> saveAllocationPolicy(ProxyAccountEntity account, AccountDtos.UpdateAccountAllocationPolicyRequest policy) {
+        return policy == null ? Mono.just(account) : allocationPolicyService.update(account.getAccountId(), policy).thenReturn(account);
+    }
+
+    private <T> Mono<T> committed(Mono<T> write) {
+        return accountWriteTransaction == null ? write : accountWriteTransaction.transactional(write).flux().collectList()
+            .flatMap(results -> results.isEmpty() ? Mono.empty() : Mono.just(results.getFirst()));
     }
 
     public Mono<Void> delete(String accountId) {
@@ -1311,6 +1331,7 @@ public class AccountPoolService {
         if (isQuotaExhausted(account)) {
             return false;
         }
+        if (candidateRanker != null) return true; // PostgreSQL owns production cooldown deadlines.
         int errors = Optional.ofNullable(account.getErrorCount()).orElse(0);
         if (errors <= 0 || account.getLastUsedAt() == null) {
             return true;
@@ -1396,7 +1417,8 @@ public class AccountPoolService {
             return Mono.just(importFailure(index, request.accountId(), request.email(), "accessToken / apiKey / credentials.accessToken is required"));
         }
 
-        return insertImportedAccount(request, upsert, 0)
+        return committed(insertImportedAccount(request, upsert, 0)
+            .flatMap(result -> saveAllocationPolicy(result.account(), request.allocationPolicy()).thenReturn(result)))
             .doOnNext(result -> updateCachedAccount(result.account()))
             .map(result -> result.inserted()
                 ? importSuccess(index, "CREATED", importCreatedMessage(request, result.account()), result.account())
@@ -1443,6 +1465,7 @@ public class AccountPoolService {
                     profile_arn = EXCLUDED.profile_arn,
                     machine_id = EXCLUDED.machine_id,
                     proxy_url = EXCLUDED.proxy_url,
+                    proxy_channel_id = CASE WHEN :proxyChannelId IS NULL THEN target.proxy_channel_id ELSE EXCLUDED.proxy_channel_id END,
                     pool_tier = EXCLUDED.pool_tier,
                     pool_weight = EXCLUDED.pool_weight,
                     quota_limit = EXCLUDED.quota_limit,
@@ -1456,12 +1479,12 @@ public class AccountPoolService {
             INSERT INTO proxy_accounts AS target (
                 account_id, email, access_token, refresh_token, client_id, client_secret,
                 region, auth_method, provider, base_url, upstream_account_id, id_token,
-                token_expires_at, profile_arn, machine_id, proxy_url, pool_tier, pool_weight,
+                token_expires_at, profile_arn, machine_id, proxy_url, proxy_channel_id, pool_tier, pool_weight,
                 quota_limit, quota_5h_limit, quota_7d_limit, badge_color
             ) VALUES (
                 :accountId, :email, :accessToken, :refreshToken, :clientId, :clientSecret,
                 :region, :authMethod, :provider, :baseUrl, :upstreamAccountId, :idToken,
-                :tokenExpiresAt, :profileArn, :machineId, :proxyUrl, :poolTier, :poolWeight,
+                :tokenExpiresAt, :profileArn, :machineId, :proxyUrl, :proxyChannelId, :poolTier, :poolWeight,
                 :quotaLimit, :quota5hLimit, :quota7dLimit, :badgeColor
             )
             ON CONFLICT (lower(email)) WHERE email IS NOT NULL
@@ -1487,6 +1510,7 @@ public class AccountPoolService {
         spec = bindNullable(spec, "profileArn", entity.getProfileArn(), String.class);
         spec = bindNullable(spec, "machineId", entity.getMachineId(), String.class);
         spec = bindNullable(spec, "proxyUrl", entity.getProxyUrl(), String.class);
+        spec = bindNullable(spec, "proxyChannelId", entity.getProxyChannelId(), java.util.UUID.class);
         spec = bindNullable(spec, "quotaLimit", entity.getQuotaLimit(), Long.class);
         spec = bindNullable(spec, "quota5hLimit", entity.getQuota5hLimit(), Long.class);
         spec = bindNullable(spec, "quota7dLimit", entity.getQuota7dLimit(), Long.class);
@@ -1565,6 +1589,7 @@ public class AccountPoolService {
         entity.setProfileArn(request.profileArn());
         entity.setMachineId(request.machineId());
         entity.setProxyUrl(request.proxyUrl());
+        entity.setProxyChannelId(request.proxyChannelId());
         entity.setPoolTier(normalizePoolTier(request.poolTier()));
         entity.setPoolWeight(AccountPoolPolicyService.normalizeWeight(request.poolWeight()));
         entity.setQuotaLimit(request.quotaLimit());
@@ -1647,6 +1672,9 @@ public class AccountPoolService {
         putIfPresent(updates, "profile_arn", request.profileArn(), request.profileArn(), String.class);
         putIfPresent(updates, "machine_id", request.machineId(), request.machineId(), String.class);
         putIfPresent(updates, "proxy_url", request.proxyUrl(), request.proxyUrl(), String.class);
+        if (Boolean.TRUE.equals(request.clearProxyChannel()) || request.proxyChannelId() != null) {
+            updates.put("proxy_channel_id", new SqlValue(request.proxyChannelId(), java.util.UUID.class));
+        }
         putIfPresent(updates, "pool_tier", request.poolTier(), normalizePoolTier(request.poolTier()), String.class);
         putIfPresent(
             updates,

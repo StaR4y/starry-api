@@ -48,6 +48,7 @@ public class ClashNodes {
         String name = config.path("name").asText("").trim();
         if (name.isEmpty() || name.length() > 200) throw invalid("Node name must contain 1 to 200 characters");
         String protocol = config.path("type").asText("").toLowerCase(Locale.ROOT);
+        if (!protocol.matches("[a-z0-9-]{1,32}")) throw invalid("Invalid proxy protocol");
         String issue = null;
         if (!TYPES.contains(protocol)) issue = "Unsupported node protocol: " + protocol.replaceAll("[^a-z0-9-]", "");
         if (config.path("server").asText("").isBlank() || config.path("server").asText().length() > 253

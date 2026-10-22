@@ -13,7 +13,7 @@ public final class ProxyChannelDtos {
                           boolean enabled, String runtimeStatus, String runtimeError,
                           long boundAccounts, Instant updatedAt) {}
     public record Subscription(UUID subscriptionId, String name, String status,
-                               Instant lastSyncedAt, String lastError, long nodeCount) {}
+                               Instant lastSyncedAt, String lastError, long nodeCount, boolean refreshable) {}
     public record Catalog(List<Channel> channels, List<Subscription> subscriptions, boolean mihomoEnabled,
                           boolean tlsEnabled, List<String> tlsProfiles) {}
     public record CreateChannel(@NotBlank @Size(max = 200) String name,

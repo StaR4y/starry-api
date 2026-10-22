@@ -24,6 +24,11 @@ final class UpstreamFailureClassifier {
     }
 
     static Classification classify(Throwable error, ProxyAccountEntity account) {
+        tech.starryapi.egress.EgressException egress = findCause(error, tech.starryapi.egress.EgressException.class);
+        if (egress != null) {
+            return new Classification(error, null, AccountPoolService.UpstreamErrorType.RECOVERABLE,
+                egress.retryable(), false, false, AccountFailureScope.REQUEST, Duration.ZERO, false);
+        }
         UpstreamException upstream = findCause(error, UpstreamException.class);
         Throwable failure = rootFailure(error);
         if (upstream == null) {

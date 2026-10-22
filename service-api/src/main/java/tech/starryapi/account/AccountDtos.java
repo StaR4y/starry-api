@@ -38,7 +38,8 @@ public final class AccountDtos {
         Long quota5hLimit,
         Long quota7dLimit,
         String badgeColor,
-        UUID proxyChannelId
+        UUID proxyChannelId,
+        @Valid UpdateAccountAllocationPolicyRequest allocationPolicy
     ) {
         public CreateAccountRequest(
             String accountId,
@@ -86,6 +87,7 @@ public final class AccountDtos {
                 quota5hLimit,
                 quota7dLimit,
                 null,
+                null,
                 null
             );
         }
@@ -120,7 +122,9 @@ public final class AccountDtos {
         Long quota7dLimit,
         Instant quota7dResetAt,
         String badgeColor,
-        UUID proxyChannelId
+        UUID proxyChannelId,
+        Boolean clearProxyChannel,
+        @Valid UpdateAccountAllocationPolicyRequest allocationPolicy
     ) {
         public UpdateAccountRequest(
             String email,
@@ -179,6 +183,8 @@ public final class AccountDtos {
                 quota7dUsed,
                 quota7dLimit,
                 quota7dResetAt,
+                null,
+                null,
                 null,
                 null
             );
@@ -641,19 +647,36 @@ public final class AccountDtos {
         Integer activeConcurrency,
         Long reservedInputTokens,
         Long reservedOutputTokens,
-        Instant updatedAt
+        Instant updatedAt,
+        Integer cooldownSeconds,
+        String tlsProfile
     ) {
+        public AccountAllocationPolicyResponse(String accountId, Integer allocationPriority, Integer safeConcurrency,
+            Integer safeRpm, Integer burstCapacity, Integer maxSessions, Integer sessionIdleSeconds, Long maxInflightTokens,
+            Long policyVersion, String lifecycleState, Long stateVersion, Integer warmupStage, Instant cooldownUntil,
+            Double recentErrorRate, Double recentLatencyMs, Integer activeConcurrency, Long reservedInputTokens,
+            Long reservedOutputTokens, Instant updatedAt) {
+            this(accountId, allocationPriority, safeConcurrency, safeRpm, burstCapacity, maxSessions, sessionIdleSeconds,
+                maxInflightTokens, policyVersion, lifecycleState, stateVersion, warmupStage, cooldownUntil, recentErrorRate,
+                recentLatencyMs, activeConcurrency, reservedInputTokens, reservedOutputTokens, updatedAt, 0, "");
+        }
     }
 
     public record UpdateAccountAllocationPolicyRequest(
         @Min(1) @Max(10000) Integer allocationPriority,
-        @Min(1) @Max(10000) Integer safeConcurrency,
-        @Min(1) @Max(1000000) Integer safeRpm,
-        @Min(1) @Max(100000) Integer burstCapacity,
+        @Min(0) @Max(10000) Integer safeConcurrency,
+        @Min(0) @Max(1000000) Integer safeRpm,
+        @Min(0) @Max(100000) Integer burstCapacity,
         @Min(0) @Max(100000) Integer maxSessions,
         @Min(60) @Max(86400) Integer sessionIdleSeconds,
-        @Min(1) @Max(1000000000) Long maxInflightTokens
+        @Min(1) @Max(1000000000) Long maxInflightTokens,
+        @Min(0) @Max(86400) Integer cooldownSeconds,
+        @jakarta.validation.constraints.Pattern(regexp = "|chrome136|safari18_4") String tlsProfile
     ) {
+        public UpdateAccountAllocationPolicyRequest(Integer allocationPriority, Integer safeConcurrency, Integer safeRpm,
+            Integer burstCapacity, Integer maxSessions, Integer sessionIdleSeconds, Long maxInflightTokens) {
+            this(allocationPriority, safeConcurrency, safeRpm, burstCapacity, maxSessions, sessionIdleSeconds, maxInflightTokens, null, null);
+        }
     }
 
     public record AccountFailureRankingResponse(
