@@ -41,7 +41,7 @@ public class GlobalExceptionHandler {
 
     @ExceptionHandler(DataBufferLimitException.class)
     ResponseEntity<ApiResponse<Void>> handleDataBufferLimit(DataBufferLimitException ignored) {
-        return ResponseEntity.status(HttpStatus.PAYLOAD_TOO_LARGE)
+        return ResponseEntity.status(HttpStatus.CONTENT_TOO_LARGE)
             .body(ApiResponse.error("PAYLOAD_TOO_LARGE", "上传文件过大"));
     }
 

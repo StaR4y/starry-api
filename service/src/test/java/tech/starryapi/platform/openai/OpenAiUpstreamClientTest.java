@@ -17,10 +17,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
-import org.springframework.web.reactive.function.client.WebClient;
 import tech.starryapi.account.AccountPlatforms;
 import tech.starryapi.account.AccountTokenRefreshService;
 import tech.starryapi.account.ProxyAccountEntity;
+import tech.starryapi.config.ProductionWebClients;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import reactor.core.publisher.Mono;
 
@@ -51,7 +51,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -95,7 +95,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -194,7 +194,7 @@ class OpenAiUpstreamClientTest {
             when(tokenRefreshService.refresh(account)).thenReturn(Mono.just(refreshed));
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 tokenRefreshService
             );
             JsonNode request = objectMapper.readTree("""
@@ -238,7 +238,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -341,7 +341,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -416,7 +416,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -478,7 +478,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -531,7 +531,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -579,7 +579,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -626,7 +626,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -717,7 +717,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -771,7 +771,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = openAiAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -829,7 +829,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = openAiAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -884,7 +884,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = openAiCompatibleAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -938,7 +938,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = openAiCompatibleAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -978,7 +978,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = openAiCompatibleAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -1035,7 +1035,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = deepSeekAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -1108,7 +1108,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = deepSeekAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -1171,7 +1171,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = deepSeekAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -1197,7 +1197,7 @@ class OpenAiUpstreamClientTest {
     void deepSeekProRejectsUnsupportedResponsesApiBeforeNetworkCall() throws Exception {
         OpenAiUpstreamClient client = new OpenAiUpstreamClient(
             objectMapper,
-            WebClient.builder().build(),
+            ProductionWebClients.builder().build(),
             mock(AccountTokenRefreshService.class)
         );
         ProxyAccountEntity account = deepSeekAccount("http://127.0.0.1:1");
@@ -1231,7 +1231,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = openAiCompatibleAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -1285,7 +1285,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = openAiCompatibleAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -1327,7 +1327,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());

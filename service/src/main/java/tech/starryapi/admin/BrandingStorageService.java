@@ -57,7 +57,7 @@ public class BrandingStorageService {
             }
             if (size > maxBytes) {
                 throw new ApiException(
-                    HttpStatus.PAYLOAD_TOO_LARGE,
+                    HttpStatus.CONTENT_TOO_LARGE,
                     "BRANDING_FILE_TOO_LARGE",
                     "Branding file exceeds the configured size limit"
                 );

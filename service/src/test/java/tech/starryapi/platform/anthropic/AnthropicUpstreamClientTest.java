@@ -11,9 +11,9 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
-import org.springframework.web.reactive.function.client.WebClient;
 import tech.starryapi.account.AccountPlatforms;
 import tech.starryapi.account.ProxyAccountEntity;
+import tech.starryapi.config.ProductionWebClients;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 
 class AnthropicUpstreamClientTest {
@@ -55,7 +55,7 @@ class AnthropicUpstreamClientTest {
         server.start();
 
         try {
-            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, WebClient.builder().build());
+            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, ProductionWebClients.builder().build());
             ProxyAccountEntity account = anthropicAccount("http://127.0.0.1:" + server.getAddress().getPort());
             JsonNode request = objectMapper.readTree("""
                 {
@@ -125,7 +125,7 @@ class AnthropicUpstreamClientTest {
         server.start();
 
         try {
-            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, WebClient.builder().build());
+            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, ProductionWebClients.builder().build());
             ProxyAccountEntity account = anthropicAccount("http://127.0.0.1:" + server.getAddress().getPort());
 
             PlatformCompletionResult result = client.testClaudeCode(account, "claude-sonnet-4.5").block();
@@ -191,7 +191,7 @@ class AnthropicUpstreamClientTest {
         server.start();
 
         try {
-            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, WebClient.builder().build());
+            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, ProductionWebClients.builder().build());
             ProxyAccountEntity account = anthropicAccount("http://127.0.0.1:" + server.getAddress().getPort());
             JsonNode request = objectMapper.readTree("""
                 {"model":"anthropic/claude-sonnet-4.5","stream":true,"messages":[{"role":"user","content":"ping"}]}
@@ -234,7 +234,7 @@ class AnthropicUpstreamClientTest {
 
             """);
         try {
-            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, WebClient.builder().build());
+            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, ProductionWebClients.builder().build());
             PlatformCompletionResult result = client.complete(
                 anthropicAccount("http://127.0.0.1:" + server.getAddress().getPort()),
                 objectMapper.readTree("{\"model\":\"anthropic/claude-sonnet-4.5\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"),
@@ -266,7 +266,7 @@ class AnthropicUpstreamClientTest {
 
             """);
         try {
-            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, WebClient.builder().build());
+            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, ProductionWebClients.builder().build());
             org.assertj.core.api.Assertions.assertThatThrownBy(() -> client.complete(
                 anthropicAccount("http://127.0.0.1:" + server.getAddress().getPort()),
                 objectMapper.readTree("{\"model\":\"anthropic/claude-sonnet-4.5\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"),

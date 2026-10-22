@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
 
+@SuppressWarnings("removal") // mirrors the builder Boot's Jackson 2 ObjectMapper is created from; goes away with Jackson 3
 class AppearanceDtosJsonTest {
 
     private final ObjectMapper mapper = Jackson2ObjectMapperBuilder.json()

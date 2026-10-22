@@ -1085,7 +1085,7 @@ public class DataTransferService {
                 total += read;
                 if (total > limit) {
                     throw new ApiException(
-                        HttpStatus.PAYLOAD_TOO_LARGE,
+                        HttpStatus.CONTENT_TOO_LARGE,
                         "DATA_IMPORT_FILE_TOO_LARGE",
                         "PostgreSQL dump inside the backup exceeds the configured limit"
                     );
@@ -1097,7 +1097,7 @@ public class DataTransferService {
 
     private void validateImportSize(Path file, String message) throws IOException {
         if (Files.size(file) > maxImportBytes) {
-            throw new ApiException(HttpStatus.PAYLOAD_TOO_LARGE, "DATA_IMPORT_FILE_TOO_LARGE", message);
+            throw new ApiException(HttpStatus.CONTENT_TOO_LARGE, "DATA_IMPORT_FILE_TOO_LARGE", message);
         }
     }
 

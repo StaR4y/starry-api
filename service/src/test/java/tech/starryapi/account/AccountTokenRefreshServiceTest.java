@@ -26,6 +26,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import tech.starryapi.admin.DataManagementSecurityService;
 import tech.starryapi.admin.SystemMaintenanceTaskGate;
+import tech.starryapi.config.ProductionWebClients;
 
 class AccountTokenRefreshServiceTest {
 
@@ -69,7 +70,7 @@ class AccountTokenRefreshServiceTest {
         AtomicReference<URI> requestUri = new AtomicReference<>();
         ExchangeFunction exchange = request -> {
             requestUri.set(request.url());
-            return Mono.just(ClientResponse.create(HttpStatus.OK)
+            return Mono.just(ClientResponse.create(HttpStatus.OK, ProductionWebClients.strategies())
                 .header("Content-Type", "application/json")
                 .body("""
                     {"accessToken":"new-access","refreshToken":"new-refresh","expiresIn":3600}
@@ -127,7 +128,7 @@ class AccountTokenRefreshServiceTest {
 
         // Before the fix the cancelled caller removed the shared refresh, so the third caller started a second one.
         assertThat(upstreamCalls.get()).isEqualTo(1);
-        gate.tryEmitValue(ClientResponse.create(HttpStatus.OK)
+        gate.tryEmitValue(ClientResponse.create(HttpStatus.OK, ProductionWebClients.strategies())
             .header("Content-Type", "application/json")
             .body("{\"accessToken\":\"new-access\",\"refreshToken\":\"new-refresh\",\"expiresIn\":3600}")
             .build());
@@ -158,7 +159,7 @@ class AccountTokenRefreshServiceTest {
 
     @Test
     void refreshesEligibleAccountsForScheduledRefresh() {
-        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.OK)
+        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.OK, ProductionWebClients.strategies())
             .header("Content-Type", "application/json")
             .body("""
                 {"accessToken":"new-access","refreshToken":"new-refresh","expiresIn":3600}
@@ -206,7 +207,7 @@ class AccountTokenRefreshServiceTest {
         ExchangeFunction exchange = request -> {
             requestUri.set(request.url());
             requestContentType.set(request.headers().getContentType());
-            return Mono.just(ClientResponse.create(HttpStatus.OK)
+            return Mono.just(ClientResponse.create(HttpStatus.OK, ProductionWebClients.strategies())
                 .header("Content-Type", "application/json")
                 .body("""
                     {
@@ -248,7 +249,7 @@ class AccountTokenRefreshServiceTest {
 
     @Test
     void codexRefreshRequiresRotatedRefreshToken() {
-        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.OK)
+        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.OK, ProductionWebClients.strategies())
             .header("Content-Type", "application/json")
             .body("""
                 {
@@ -281,7 +282,7 @@ class AccountTokenRefreshServiceTest {
         AtomicBoolean called = new AtomicBoolean(false);
         ExchangeFunction exchange = request -> {
             called.set(true);
-            return Mono.just(ClientResponse.create(HttpStatus.OK).build());
+            return Mono.just(ClientResponse.create(HttpStatus.OK, ProductionWebClients.strategies()).build());
         };
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         AccountPoolService accountPoolService = mock(AccountPoolService.class);
@@ -313,7 +314,7 @@ class AccountTokenRefreshServiceTest {
         AtomicBoolean called = new AtomicBoolean(false);
         ExchangeFunction exchange = request -> {
             called.set(true);
-            return Mono.just(ClientResponse.create(HttpStatus.BAD_REQUEST)
+            return Mono.just(ClientResponse.create(HttpStatus.BAD_REQUEST, ProductionWebClients.strategies())
                 .header("Content-Type", "application/json")
                 .body("""
                     {
@@ -354,7 +355,7 @@ class AccountTokenRefreshServiceTest {
         AtomicBoolean called = new AtomicBoolean(false);
         ExchangeFunction exchange = request -> {
             called.set(true);
-            return Mono.just(ClientResponse.create(HttpStatus.OK).build());
+            return Mono.just(ClientResponse.create(HttpStatus.OK, ProductionWebClients.strategies()).build());
         };
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         AccountPoolService accountPoolService = mock(AccountPoolService.class);
@@ -381,7 +382,7 @@ class AccountTokenRefreshServiceTest {
 
     @Test
     void scheduledRefreshDisablesCodexAccountOnTerminatedSession() {
-        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.BAD_REQUEST)
+        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.BAD_REQUEST, ProductionWebClients.strategies())
             .header("Content-Type", "application/json")
             .body("""
                 {
@@ -430,7 +431,7 @@ class AccountTokenRefreshServiceTest {
 
     @Test
     void scheduledRefreshDisablesCodexAccountOnInvalidatedRefreshToken() {
-        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.UNAUTHORIZED)
+        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.UNAUTHORIZED, ProductionWebClients.strategies())
             .header("Content-Type", "application/json")
             .body("""
                 {

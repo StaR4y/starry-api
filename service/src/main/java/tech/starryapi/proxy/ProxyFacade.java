@@ -1877,7 +1877,7 @@ public class ProxyFacade {
             case 403 -> HttpStatus.FORBIDDEN;
             case 404 -> HttpStatus.NOT_FOUND;
             case 408 -> HttpStatus.REQUEST_TIMEOUT;
-            case 422 -> HttpStatus.UNPROCESSABLE_ENTITY;
+            case 422 -> HttpStatus.UNPROCESSABLE_CONTENT;
             case 500 -> HttpStatus.INTERNAL_SERVER_ERROR;
             case 502 -> HttpStatus.BAD_GATEWAY;
             case 503 -> HttpStatus.SERVICE_UNAVAILABLE;

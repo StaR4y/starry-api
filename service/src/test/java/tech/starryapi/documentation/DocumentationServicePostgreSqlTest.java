@@ -20,7 +20,7 @@ import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
 import org.springframework.transaction.interceptor.TransactionInterceptor;
 import org.testcontainers.DockerClientFactory;
-import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.postgresql.PostgreSQLContainer;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import tech.starryapi.admin.SystemSettingRepository;
@@ -28,7 +28,7 @@ import tech.starryapi.common.ApiException;
 import tech.starryapi.documentation.DocumentationDtos.*;
 
 class DocumentationServicePostgreSqlTest {
-    private static PostgreSQLContainer<?> container;
+    private static PostgreSQLContainer container;
     private static String r2dbcUrl;
     private DocumentationService service;
     private DocumentationStorage storage;
@@ -41,7 +41,7 @@ class DocumentationServicePostgreSqlTest {
         String jdbcUrl = System.getenv("STARRY_DOCS_TEST_JDBC_URL");
         if (jdbcUrl == null) {
             Assumptions.assumeTrue(DockerClientFactory.instance().isDockerAvailable(), "Docker or an isolated STARRY_DOCS_TEST_JDBC_URL is required");
-            container = new PostgreSQLContainer<>("postgres:17-alpine").withDatabaseName("starry_api")
+            container = new PostgreSQLContainer("postgres:17-alpine").withDatabaseName("starry_api")
                 .withUsername("starry_api_bootstrap").withPassword("bootstrap_test")
                 .withInitScript("postgresql/init-test-roles.sql");
             container.start();

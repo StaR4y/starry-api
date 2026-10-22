@@ -2,6 +2,8 @@ package tech.starryapi.config;
 
 import io.netty.channel.ChannelOption;
 import java.time.Duration;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.http.codec.CodecCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
@@ -18,7 +20,7 @@ public class HttpClientConfig {
      * ranking and pricing feeds all share its connection pool.
      */
     @Bean
-    WebClient upstreamWebClient(ProxyProperties properties) {
+    WebClient upstreamWebClient(ProxyProperties properties, ObjectProvider<CodecCustomizer> codecCustomizers) {
         ConnectionProvider provider = ConnectionProvider.builder("starry-upstream")
             .maxConnections(500)
             .pendingAcquireMaxCount(2_000)
@@ -36,8 +38,14 @@ public class HttpClientConfig {
             .responseTimeout(properties.getRequestTimeout())
             .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5_000);
 
+        // A WebClient built by hand does not get Boot's codec setup. Apply the same customizers Boot applies to its own
+        // WebClient.Builder, otherwise the JSON codec is Spring Framework 7's Jackson 3 default and cannot read or
+        // write the Jackson 2 JsonNode/ObjectNode types this code passes around.
         ExchangeStrategies strategies = ExchangeStrategies.builder()
-            .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(16 * 1024 * 1024))
+            .codecs(configurer -> {
+                codecCustomizers.orderedStream().forEach(customizer -> customizer.customize(configurer));
+                configurer.defaultCodecs().maxInMemorySize(16 * 1024 * 1024);
+            })
             .build();
 
         return WebClient.builder()

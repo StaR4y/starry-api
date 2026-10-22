@@ -43,7 +43,7 @@ public class TicketRequestFilter implements WebFilter {
             } catch (com.fasterxml.jackson.core.JsonProcessingException e) { return Mono.error(e); }
         }
         long limit = 7L * 1024 * 1024;
-        var tooLarge = new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "工单请求最大 7 MB");
+        var tooLarge = new ResponseStatusException(HttpStatus.CONTENT_TOO_LARGE, "工单请求最大 7 MB");
         if (exchange.getRequest().getHeaders().getContentLength() > limit) return Mono.error(tooLarge);
         var request = new ServerHttpRequestDecorator(exchange.getRequest()) {
             @Override public Flux<DataBuffer> getBody() {

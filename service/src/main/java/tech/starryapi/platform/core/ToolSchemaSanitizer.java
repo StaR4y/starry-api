@@ -59,7 +59,7 @@ public final class ToolSchemaSanitizer {
                 sanitized.put("type", "object");
             }
             ObjectNode sanitizedProperties = sanitized.putObject("properties");
-            properties.fields().forEachRemaining(entry ->
+            properties.properties().forEach(entry ->
                 sanitizedProperties.set(entry.getKey(), sanitizeSchema(objectMapper, entry.getValue(), false))
             );
             copyRequired(source, sanitized, sanitizedProperties);

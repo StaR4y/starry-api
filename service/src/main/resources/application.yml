@@ -42,10 +42,14 @@ spring:
       - SET ROLE starry_api_owner
     connect-retries: ${FLYWAY_CONNECT_RETRIES:10}
     clean-disabled: true
-  jackson:
+  jackson2:
     default-property-inclusion: non_null
-  codec:
-    max-in-memory-size: ${SPRING_CODEC_MAX_IN_MEMORY_SIZE:16MB}
+  http:
+    codecs:
+      # The application still uses Jackson 2 (com.fasterxml.jackson); Boot 4 would otherwise pick Jackson 3 for the
+      # WebFlux server and for every WebClient built from Boot's builder.
+      preferred-json-mapper: jackson2
+      max-in-memory-size: ${SPRING_CODEC_MAX_IN_MEMORY_SIZE:16MB}
   webflux:
     multipart:
       max-in-memory-size: 256KB

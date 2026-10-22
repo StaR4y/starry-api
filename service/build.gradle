@@ -18,21 +18,26 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-mail'
     implementation 'org.springframework.boot:spring-boot-starter-validation'
     implementation 'org.springframework.boot:spring-boot-starter-webflux'
-    implementation 'org.springdoc:springdoc-openapi-starter-webflux-ui:2.8.17'
+    // Boot 4 moved the WebClient.Builder auto-configuration (used by NewsService) out of the webflux starter.
+    implementation 'org.springframework.boot:spring-boot-starter-webclient'
+    // Phase 1 of the Boot 4 migration keeps Jackson 2 (com.fasterxml.jackson); Boot 4 itself defaults to Jackson 3.
+    implementation 'org.springframework.boot:spring-boot-jackson2'
+    implementation 'org.springdoc:springdoc-openapi-starter-webflux-ui:3.1.1'
     implementation 'com.github.ben-manes.caffeine:caffeine'
     implementation 'org.postgresql:r2dbc-postgresql'
     implementation 'io.micrometer:micrometer-registry-prometheus'
     implementation 'io.r2dbc:r2dbc-pool'
-    implementation 'org.flywaydb:flyway-core'
+    implementation 'org.springframework.boot:spring-boot-starter-flyway'
     implementation 'org.flywaydb:flyway-database-postgresql'
-    runtimeOnly "io.netty:netty-resolver-dns-native-macos:${nettyVersion}:osx-aarch_64"
+    // Version comes from the Netty BOM that Spring Boot imports, so it always matches the other Netty artifacts.
+    runtimeOnly group: 'io.netty', name: 'netty-resolver-dns-native-macos', classifier: 'osx-aarch_64'
     runtimeOnly 'org.postgresql:postgresql'
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testImplementation 'org.springframework.boot:spring-boot-testcontainers'
     testImplementation 'io.projectreactor:reactor-test'
-    testImplementation 'org.testcontainers:junit-jupiter'
-    testImplementation 'org.testcontainers:postgresql'
+    testImplementation 'org.testcontainers:testcontainers-junit-jupiter'
+    testImplementation 'org.testcontainers:testcontainers-postgresql'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 

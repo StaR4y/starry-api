@@ -38,7 +38,7 @@ class TicketRequestFilterTest {
         var filter = new TicketRequestFilter(auth, new ObjectMapper());
         StepVerifier.create(filter.filter(exchange, e -> e.getRequest().getBody().doOnNext(DataBufferUtils::release).then()))
             .expectErrorSatisfies(error -> assertThat(error).isInstanceOfSatisfying(ResponseStatusException.class,
-                e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.PAYLOAD_TOO_LARGE))).verify();
+                e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.CONTENT_TOO_LARGE))).verify();
     }
     @Test void unrelatedRoutesAreNotIntercepted() {
         var auth = mock(AdminAuth.class);

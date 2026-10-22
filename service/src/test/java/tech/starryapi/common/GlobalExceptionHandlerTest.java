@@ -2,6 +2,7 @@ package tech.starryapi.common;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.net.URI;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.http.HttpStatus;
@@ -16,7 +17,7 @@ class GlobalExceptionHandlerTest {
     @Test
     void keepsMissingStaticResourcesAsNotFound() {
         ResponseEntity<ApiResponse<Void>> response = handler.handleResponseStatus(
-            new NoResourceFoundException("missing.js")
+            new NoResourceFoundException(URI.create("/missing.js"), "missing.js")
         );
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
@@ -43,7 +44,7 @@ class GlobalExceptionHandlerTest {
             new DataBufferLimitException("Exceeded limit")
         );
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.PAYLOAD_TOO_LARGE);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONTENT_TOO_LARGE);
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody().error().code()).isEqualTo("PAYLOAD_TOO_LARGE");
         assertThat(response.getBody().error().message()).isEqualTo("上传文件过大");

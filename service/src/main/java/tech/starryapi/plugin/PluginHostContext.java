@@ -3,6 +3,8 @@ package tech.starryapi.plugin;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
@@ -13,6 +15,7 @@ import java.util.concurrent.TimeUnit;
 import org.springframework.context.ApplicationContext;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.Disposable;
@@ -167,7 +170,7 @@ final class PluginHostContext implements PluginContext {
                     requireActive();
                     return requestSpec(method, relative, headers, body, token).exchangeToFlux(response -> {
                         log(Level.INFO, "API_STREAM " + method + " " + relative.getPath() + " status=" + response.statusCode().value());
-                        var head = new PluginHttpEvent.Head(response.statusCode().value(), response.headers().asHttpHeaders());
+                        var head = new PluginHttpEvent.Head(response.statusCode().value(), headerMap(response.headers().asHttpHeaders()));
                         return Flux.<PluginHttpEvent>just(head).concatWith(response.bodyToFlux(DataBuffer.class)
                             .map(buffer -> {
                                 try {
@@ -186,6 +189,13 @@ final class PluginHostContext implements PluginContext {
             requireActive();
             return Flux.empty();
         }));
+    }
+
+    // HttpHeaders stopped being a Map in Spring Framework 7; PluginHttpEvent.Head wants a plain multi-value map.
+    private static Map<String, List<String>> headerMap(HttpHeaders headers) {
+        Map<String, List<String>> copy = new LinkedHashMap<>();
+        headers.forEach(copy::put);
+        return copy;
     }
 
     private Mono<Void> revocation() {

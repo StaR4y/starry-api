@@ -33,6 +33,7 @@ import reactor.core.Disposable;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 import tech.starryapi.common.ApiException;
+import tech.starryapi.config.ProductionWebClients;
 
 class OpenAiOAuthLoginServiceTest {
 
@@ -120,7 +121,7 @@ class OpenAiOAuthLoginServiceTest {
             case "/api/accounts/deviceauth/usercode" -> json(HttpStatus.OK, """
                 {"device_auth_id":"device-123","user_code":"ABCD-EFGH","interval":"1"}
                 """);
-            case "/api/accounts/deviceauth/token" -> Mono.just(ClientResponse.create(HttpStatus.FORBIDDEN).build());
+            case "/api/accounts/deviceauth/token" -> Mono.just(ClientResponse.create(HttpStatus.FORBIDDEN, ProductionWebClients.strategies()).build());
             default -> Mono.error(new AssertionError("Unexpected request " + request.url()));
         };
         OpenAiOAuthLoginService service = service(
@@ -244,7 +245,7 @@ class OpenAiOAuthLoginServiceTest {
             started.loginId()
         ).toFuture();
         AccountDtos.ChatGptOAuthStatusResponse cancelled = service.cancel("admin-1", started.loginId());
-        devicePollResponse.tryEmitValue(ClientResponse.create(HttpStatus.OK)
+        devicePollResponse.tryEmitValue(ClientResponse.create(HttpStatus.OK, ProductionWebClients.strategies())
             .header("Content-Type", MediaType.APPLICATION_JSON_VALUE)
             .body("""
                 {
@@ -409,7 +410,7 @@ class OpenAiOAuthLoginServiceTest {
     }
 
     private Mono<ClientResponse> json(HttpStatus status, String body) {
-        return Mono.just(ClientResponse.create(status)
+        return Mono.just(ClientResponse.create(status, ProductionWebClients.strategies())
             .header("Content-Type", MediaType.APPLICATION_JSON_VALUE)
             .body(body)
             .build());

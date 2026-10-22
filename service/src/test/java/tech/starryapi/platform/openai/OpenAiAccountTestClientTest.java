@@ -12,10 +12,10 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
-import org.springframework.web.reactive.function.client.WebClient;
 import tech.starryapi.account.AccountPlatforms;
 import tech.starryapi.account.AccountTokenRefreshService;
 import tech.starryapi.account.ProxyAccountEntity;
+import tech.starryapi.config.ProductionWebClients;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 
 class OpenAiAccountTestClientTest {
@@ -43,7 +43,7 @@ class OpenAiAccountTestClientTest {
         try {
             OpenAiAccountTestClient client = new OpenAiAccountTestClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = openAiCompatibleAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -96,7 +96,7 @@ class OpenAiAccountTestClientTest {
         try {
             OpenAiAccountTestClient client = new OpenAiAccountTestClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -155,7 +155,7 @@ class OpenAiAccountTestClientTest {
         try {
             OpenAiAccountTestClient client = new OpenAiAccountTestClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());

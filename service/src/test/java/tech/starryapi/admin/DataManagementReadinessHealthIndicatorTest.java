@@ -5,11 +5,11 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.actuate.availability.LivenessStateHealthIndicator;
-import org.springframework.boot.actuate.health.Status;
 import org.springframework.boot.availability.ApplicationAvailability;
 import org.springframework.boot.availability.LivenessState;
 import org.springframework.boot.availability.ReadinessState;
+import org.springframework.boot.health.application.LivenessStateHealthIndicator;
+import org.springframework.boot.health.contributor.Status;
 import reactor.core.publisher.Mono;
 
 class DataManagementReadinessHealthIndicatorTest {

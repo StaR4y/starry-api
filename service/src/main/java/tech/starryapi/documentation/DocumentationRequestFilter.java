@@ -33,7 +33,7 @@ public class DocumentationRequestFilter implements WebFilter {
         } catch (ApiException error) { return reject(exchange, error.getStatus(), error.getCode(), error.getMessage()); }
         boolean upload = path.matches("/admin/documentation/pages/[^/]+/attachments") && exchange.getRequest().getMethod() == HttpMethod.POST;
         long limit = upload ? DocumentationStorage.REQUEST_LIMIT : 1024 * 1024;
-        if (exchange.getRequest().getHeaders().getContentLength() > limit) return reject(exchange, HttpStatus.PAYLOAD_TOO_LARGE, "PAYLOAD_TOO_LARGE", "附件最大 64 MB");
+        if (exchange.getRequest().getHeaders().getContentLength() > limit) return reject(exchange, HttpStatus.CONTENT_TOO_LARGE, "PAYLOAD_TOO_LARGE", "附件最大 64 MB");
         if (upload && !uploads.tryAcquire()) return reject(exchange, HttpStatus.TOO_MANY_REQUESTS, "DOCUMENTATION_BUSY", "上传繁忙，请稍后重试");
         var request = new ServerHttpRequestDecorator(exchange.getRequest()) {
             @Override public Flux<DataBuffer> getBody() {
@@ -41,7 +41,7 @@ public class DocumentationRequestFilter implements WebFilter {
                 return super.getBody().<DataBuffer>handle((buffer, sink) -> {
                     if (bytes.addAndGet(buffer.readableByteCount()) > limit) {
                         DataBufferUtils.release(buffer);
-                        sink.error(new ResponseStatusException(HttpStatus.PAYLOAD_TOO_LARGE, "文档请求过大"));
+                        sink.error(new ResponseStatusException(HttpStatus.CONTENT_TOO_LARGE, "文档请求过大"));
                     } else sink.next(buffer);
                 }).doOnDiscard(DataBuffer.class, DataBufferUtils::release);
             }

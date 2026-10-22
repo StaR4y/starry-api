@@ -129,7 +129,7 @@ public class WebFluxConfig implements WebFluxConfigurer, WebFilter {
         }
         if (contentLength > maxBodyBytes) {
             var response = exchange.getResponse();
-            response.setStatusCode(HttpStatus.PAYLOAD_TOO_LARGE);
+            response.setStatusCode(HttpStatus.CONTENT_TOO_LARGE);
             response.getHeaders().setContentType(MediaType.APPLICATION_JSON);
             String json = "{\"success\":false,\"error\":{\"code\":\"PAYLOAD_TOO_LARGE\",\"message\":\"上传文件过大\"},\"timestamp\":\""
                 + Instant.now()
