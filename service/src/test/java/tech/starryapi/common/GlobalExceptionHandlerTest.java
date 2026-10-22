@@ -6,6 +6,7 @@ import java.net.URI;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.buffer.DataBufferLimitException;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.reactive.resource.NoResourceFoundException;
 import org.springframework.web.server.ResponseStatusException;
@@ -23,7 +24,23 @@ class GlobalExceptionHandlerTest {
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
         assertThat(response.getBody()).isNotNull();
         assertThat(response.getBody().error().code()).isEqualTo("NOT_FOUND");
-        assertThat(response.getBody().error().message()).contains("missing.js");
+        assertThat(response.getBody().error().message()).isEqualTo("No static resource missing.js.");
+    }
+
+    @Test
+    void keepsTheErrorCodesOfStatusesSpringRenamed() {
+        assertThat(handler.handleResponseStatus(new ResponseStatusException(HttpStatus.valueOf(413))).getBody().error())
+            .satisfies(error -> {
+                assertThat(error.code()).isEqualTo("PAYLOAD_TOO_LARGE");
+                assertThat(error.message()).isEqualTo("Payload Too Large");
+            });
+        assertThat(handler.handleResponseStatus(new ResponseStatusException(HttpStatus.valueOf(422), "bad")).getBody().error())
+            .satisfies(error -> {
+                assertThat(error.code()).isEqualTo("UNPROCESSABLE_ENTITY");
+                assertThat(error.message()).isEqualTo("bad");
+            });
+        assertThat(handler.handleResponseStatus(new ResponseStatusException(HttpStatusCode.valueOf(421))).getBody().error().code())
+            .isEqualTo("HTTP_421");
     }
 
     @Test
