@@ -15,7 +15,10 @@ public class ProxyChannelAdminController implements ProxyChannelAdminApi {
     public Mono<ApiResponse<ProxyChannelDtos.Channel>> create(ServerWebExchange e, ProxyChannelDtos.CreateChannel r){auth.verifyAdmin(e);return service.create(r).map(ApiResponse::ok);}
     public Mono<ApiResponse<ProxyChannelDtos.Channel>> update(ServerWebExchange e, UUID id, ProxyChannelDtos.UpdateChannel r){auth.verifyAdmin(e);return service.update(id,r).map(ApiResponse::ok);}
     public Mono<ApiResponse<Void>> delete(ServerWebExchange e, UUID id){auth.verifyAdmin(e);return service.delete(id).thenReturn(ApiResponse.ok(null));}
+    public Mono<ApiResponse<java.util.List<ProxyChannelDtos.BoundAccount>>> accounts(ServerWebExchange e, UUID id){auth.verifyAdmin(e);return service.accounts(id).map(ApiResponse::ok);}
     public Mono<ApiResponse<ProxyChannelDtos.ProbeResult>> test(ServerWebExchange e, UUID id){auth.verifyAdmin(e);return service.test(id).map(ApiResponse::ok);}
     public Mono<ApiResponse<ProxyChannelDtos.SyncResult>> subscribe(ServerWebExchange e, ProxyChannelDtos.ImportSubscription r){auth.verifyAdmin(e);return service.subscribe(r).map(ApiResponse::ok);}
+    public Mono<ApiResponse<ProxyChannelDtos.Subscription>> renameSubscription(ServerWebExchange e, UUID id, ProxyChannelDtos.RenameSubscription r){auth.verifyAdmin(e);return service.renameSubscription(id,r).map(ApiResponse::ok);}
+    public Mono<ApiResponse<Void>> deleteSubscription(ServerWebExchange e, UUID id){auth.verifyAdmin(e);return service.deleteSubscription(id).thenReturn(ApiResponse.ok(null));}
     public Mono<ApiResponse<ProxyChannelDtos.SyncResult>> sync(ServerWebExchange e, UUID id){auth.verifyAdmin(e);return service.sync(id).map(ApiResponse::ok);}
 }

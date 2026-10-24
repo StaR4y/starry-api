@@ -64,13 +64,15 @@ public class ClashNodes {
         try {
             URI uri = URI.create(value.trim());
             String scheme = uri.getScheme().toLowerCase(Locale.ROOT);
-            if (!Set.of("http", "socks5", "socks5h").contains(scheme) || uri.getHost() == null
+            if (!Set.of("http", "https", "socks5", "socks5h").contains(scheme) || uri.getHost() == null
                 || uri.getPort() < 1 || uri.getPort() > 65535 || uri.getRawQuery() != null
                 || uri.getRawFragment() != null || !(uri.getPath() == null || uri.getPath().isEmpty() || uri.getPath().equals("/"))) {
-                throw invalid("Use an HTTP CONNECT or SOCKS5 URL with an explicit port");
+                throw invalid("Use an HTTP, HTTPS or SOCKS5 proxy URL with an explicit port");
             }
+            // socks5 and socks5h both leave the name resolution of the target to the proxy; https is TLS to the proxy itself.
             ObjectNode node = mapper.createObjectNode().put("name", name).put("type", scheme.startsWith("socks") ? "socks5" : "http")
                 .put("server", uri.getHost()).put("port", uri.getPort());
+            if (scheme.equals("https")) node.put("tls", true);
             if (uri.getRawUserInfo() != null) {
                 String[] auth = uri.getRawUserInfo().split(":", 2);
                 node.put("username", decode(auth[0]));
@@ -99,5 +101,26 @@ public class ClashNodes {
         return value;
     }
     static ApiException invalid(String message) { return new ApiException(HttpStatus.BAD_REQUEST, "PROXY_CONFIG_INVALID", message); }
-    public record Node(String name, String protocol, ObjectNode config, String fingerprint, String issue) {}
+    // What a plain HTTP CONNECT, HTTPS CONNECT (tls: true) or SOCKS5 tunnel opened by this application can honour. A
+    // node with more (certificate options, custom headers, ...) needs Mihomo, since reaching it directly would
+    // silently drop those options.
+    private static final Set<String> PLAIN_PROXY_FIELDS = Set.of("type", "server", "port", "username", "password", "udp");
+    public static final String DIRECT_PROXY = "DIRECT_PROXY";
+    public static final String MIHOMO = "MIHOMO";
+
+    public record Node(String name, String protocol, ObjectNode config, String fingerprint, String issue) {
+        /** DIRECT_PROXY when this application connects to the node itself, MIHOMO when it needs a Mihomo listener. */
+        public String route() {
+            Set<String> names = fieldNames(config);
+            // tls: false is the default; tls: true (an https:// proxy) is something this application can do for an HTTP proxy.
+            if (!config.path("tls").asBoolean(false) || protocol.equals("http")) names.remove("tls");
+            boolean plain = (protocol.equals("http") || protocol.equals("socks5")) && PLAIN_PROXY_FIELDS.containsAll(names);
+            return plain ? DIRECT_PROXY : MIHOMO;
+        }
+        private static Set<String> fieldNames(ObjectNode config) {
+            Set<String> names = new HashSet<>();
+            config.fieldNames().forEachRemaining(names::add);
+            return names;
+        }
+    }
 }

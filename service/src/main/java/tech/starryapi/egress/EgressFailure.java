@@ -23,7 +23,16 @@ public enum EgressFailure {
     PROBE_TLS_FAILED("The exit probe failed TLS verification or negotiation. Check the proxy route's certificate and TLS settings."),
     PROBE_HTTP_FAILED("The exit probe service returned an unsuccessful HTTP status. This alone does not prove the node is unavailable."),
     PROBE_INVALID_RESPONSE("The exit probe service did not return a valid IP address."),
-    PROBE_FAILED("The exit probe failed. Check the node and Mihomo component status.");
+    PROBE_FAILED("The exit probe failed. Check the node and Mihomo component status."),
+    // Failures of account requests (as opposed to activation and exit probes). A request failure either happened
+    // before anything was sent, or after the request may have reached the proxy.
+    ACCOUNT_ROUTE_UNAVAILABLE("The account's outbound route could not be loaded."),
+    LEGACY_PROXY_INVALID("The account's legacy proxy URL is not a supported HTTP CONNECT or SOCKS5 URL."),
+    TLS_PROFILE_UNAVAILABLE("The requested TLS profile is not enabled on the TLS component."),
+    TLS_COMPONENT_UNAVAILABLE("The TLS component is disabled, not authenticated or unreachable."),
+    TLS_COMPONENT_REJECTED("The TLS component rejected the request before forwarding it. Check the bridge key."),
+    TLS_COMPONENT_FAILED("The TLS component could not complete the forwarded request."),
+    PROXY_TRANSPORT_FAILED("The connection through the selected proxy failed after the request may have been sent.");
 
     private final String message;
 

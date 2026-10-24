@@ -17,6 +17,8 @@ public class EgressProperties {
     private String tlsUrl = "http://127.0.0.1:9091";
     private String tlsSecret = "";
     private Duration probeTimeout = Duration.ofSeconds(15);
+    private String probeUrl = "https://api.ipify.org?format=json";
+    private Duration activationFailureBackoff = Duration.ofSeconds(5);
     private List<String> tlsProfiles = List.of("chrome136", "safari18_4");
     public boolean isMihomoEnabled() { return mihomoEnabled; }
     public void setMihomoEnabled(boolean value) { mihomoEnabled = value; }
@@ -38,6 +40,12 @@ public class EgressProperties {
     public void setTlsUrl(String value) { tlsUrl = value; }
     public String getTlsSecret() { return tlsSecret; }
     public void setTlsSecret(String value) { tlsSecret = value; }
+    /** A service that answers with {"ip": "..."}; the exit probe asks it through the node under test. */
+    public String getProbeUrl() { return probeUrl; }
+    public void setProbeUrl(String value) { probeUrl = value; }
+    /** After a failed activation, requests fail fast for this long instead of each waiting for another attempt. */
+    public Duration getActivationFailureBackoff() { return activationFailureBackoff; }
+    public void setActivationFailureBackoff(Duration value) { activationFailureBackoff = value; }
     public Duration getProbeTimeout() { return probeTimeout; }
     public void setProbeTimeout(Duration value) { probeTimeout = value; }
     public List<String> getTlsProfiles() { return tlsProfiles; }

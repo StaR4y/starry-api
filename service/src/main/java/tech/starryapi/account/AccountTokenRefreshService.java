@@ -378,11 +378,9 @@ public class AccountTokenRefreshService {
     }
 
     private Throwable rootFailure(Throwable error) {
-        Throwable current = error;
-        while (current != null && current.getCause() != null && current.getCause() != current) {
-            current = current.getCause();
-        }
-        return current == null ? error : current;
+        // An egress failure is local and fixed; the transport error under it must not be mistaken for a refusal.
+        Throwable root = tech.starryapi.egress.EgressException.rootCause(error);
+        return root == null ? error : root;
     }
 
     private TokenRefreshResult tokenResult(JsonNode json, String fallbackRefreshToken, String fallbackClientId) {

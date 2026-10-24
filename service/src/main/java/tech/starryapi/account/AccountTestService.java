@@ -235,7 +235,10 @@ public class AccountTestService {
                     ? AccountPoolService.UpstreamErrorType.RECOVERABLE
                     : AccountPoolService.UpstreamErrorType.FATAL;
                 Integer upstreamStatus = statusCode == 0 ? null : statusCode;
-                Mono<Void> failureUpdate = AccountPlatforms.isDeepSeek(account)
+                // A broken outbound route is not evidence about the account: report it, but leave the account's health alone.
+                Mono<Void> failureUpdate = failure instanceof tech.starryapi.egress.EgressException
+                    ? Mono.empty()
+                    : AccountPlatforms.isDeepSeek(account)
                     ? accountPoolService.recordTestFailure(
                         account.getAccountId(),
                         type,
@@ -395,11 +398,7 @@ public class AccountTestService {
     }
 
     private Throwable rootFailure(Throwable error) {
-        Throwable current = error;
-        while (current.getCause() != null && current.getCause() != current) {
-            current = current.getCause();
-        }
-        return current;
+        return tech.starryapi.egress.EgressException.rootCause(error);
     }
 
     private boolean recoverableStatus(int statusCode) {

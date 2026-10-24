@@ -81,6 +81,8 @@ starry:
     tls-enabled: ${STARRY_EGRESS_TLS_ENABLED:false}
     tls-url: ${STARRY_EGRESS_TLS_URL:http://127.0.0.1:9091}
     tls-secret: ${STARRY_TLS_SECRET:}
+    probe-url: ${STARRY_EGRESS_PROBE_URL:https://api.ipify.org?format=json}
+    activation-failure-backoff: ${STARRY_EGRESS_ACTIVATION_FAILURE_BACKOFF:5s}
   documentation:
     attachment-dir: ${STARRY_DOCUMENTATION_ATTACHMENT_DIR:${user.home}/.starry-api/documentation}
   plugins:

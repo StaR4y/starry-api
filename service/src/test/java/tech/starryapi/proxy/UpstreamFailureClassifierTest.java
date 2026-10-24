@@ -10,6 +10,8 @@ import org.junit.jupiter.api.Test;
 import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.account.allocation.AccountFailureScope;
 import tech.starryapi.account.AccountPoolService;
+import tech.starryapi.egress.EgressException;
+import tech.starryapi.egress.EgressFailure;
 import tech.starryapi.platform.upstream.UpstreamException;
 
 class UpstreamFailureClassifierTest {
@@ -161,6 +163,56 @@ class UpstreamFailureClassifierTest {
         assertThat(overloaded.scope()).isEqualTo(AccountFailureScope.PROVIDER_POOL);
         assertThat(overloaded.cooldown()).isEqualTo(java.time.Duration.ofMinutes(1));
         assertThat(overloaded.retryable()).isTrue();
+    }
+
+    @Test
+    void aRouteFailureBeforeAnythingWasSentMovesToAnotherAccountWithoutBlamingThisOne() {
+        Throwable error = new RuntimeException("request failed", EgressException.notSent(
+            EgressFailure.PROXY_CONNECT_FAILED, new ConnectException("refused 127.0.0.1:20001")));
+
+        UpstreamFailureClassifier.Classification classification = UpstreamFailureClassifier.classify(error);
+
+        assertThat(classification.retryable()).isTrue();
+        assertThat(classification.crossAccountRetryAllowed()).isTrue();
+        assertThat(classification.circuitFailure()).isFalse();
+        assertThat(classification.scope()).isEqualTo(AccountFailureScope.REQUEST);
+        assertThat(classification.cooldown()).isEqualTo(java.time.Duration.ZERO);
+        assertThat(classification.permanentCredentialFailure()).isFalse();
+        assertThat(classification.type()).isEqualTo(AccountPoolService.UpstreamErrorType.RECOVERABLE);
+        // The failure kept for logs and messages is the fixed one, not the transport text under it.
+        assertThat(classification.failure()).isInstanceOf(EgressException.class);
+        assertThat(classification.failure().getMessage()).isEqualTo(EgressFailure.PROXY_CONNECT_FAILED.message());
+        assertThat(UpstreamFailureClassifier.neverReachedUpstream(error)).isTrue();
+    }
+
+    @Test
+    void aRouteFailureAfterTheRequestMayHaveBeenSentIsNeitherRetriedNorAccountedAndStaysBillingUncertain() {
+        for (Throwable cause : new Throwable[] {new io.netty.handler.timeout.ReadTimeoutException(),
+            new java.net.SocketException("Connection reset"), new ConnectException("late connect error")}) {
+            Throwable error = EgressException.maybeSent(EgressFailure.PROXY_TRANSPORT_FAILED, cause);
+
+            UpstreamFailureClassifier.Classification classification = UpstreamFailureClassifier.classify(error);
+
+            assertThat(classification.retryable()).as(cause.toString()).isFalse();
+            assertThat(classification.crossAccountRetryAllowed()).isFalse();
+            assertThat(classification.circuitFailure()).isFalse();
+            assertThat(classification.scope()).isEqualTo(AccountFailureScope.REQUEST);
+            // What the route knows wins over what its transport happened to report underneath.
+            assertThat(UpstreamFailureClassifier.neverReachedUpstream(error)).as(cause.toString()).isFalse();
+        }
+        // ...and a route failure before sending stays unbilled whatever the transport reported.
+        assertThat(UpstreamFailureClassifier.neverReachedUpstream(
+            EgressException.notSent(EgressFailure.NODE_NOT_ACTIVE, new io.netty.handler.timeout.ReadTimeoutException()))).isTrue();
+    }
+
+    @Test
+    void theEgressRootStopsBeforeItsTransportCause() {
+        Throwable error = new RuntimeException(EgressException.maybeSent(EgressFailure.PROXY_TRANSPORT_FAILED,
+            new RuntimeException("proxy user:secret@10.0.0.1 rejected")));
+        assertThat(EgressException.rootCause(error)).isInstanceOf(EgressException.class);
+        assertThat(EgressException.rootCause(new IllegalStateException("x", new IllegalArgumentException("y"))))
+            .hasMessage("y");
+        assertThat(EgressException.rootCause(null)).isNull();
     }
 
     private void assertCircuitFailure(Throwable error, Integer statusCode) {

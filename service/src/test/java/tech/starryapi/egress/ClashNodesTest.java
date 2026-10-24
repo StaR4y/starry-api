@@ -22,8 +22,36 @@ class ClashNodesTest {
         }
         assertThatThrownBy(() -> parser.document("!!java.net.URL [https://example.com]")).hasMessageContaining("Invalid Clash YAML");
         assertThatThrownBy(() -> parser.document("proxies: []\nproxies: []")).hasMessageContaining("Invalid Clash YAML");
-        assertThatThrownBy(() -> parser.url("A", "https://example.com:80")).hasMessageContaining("HTTP CONNECT");
+        assertThatThrownBy(() -> parser.url("A", "ftp://example.com:80")).hasMessageContaining("proxy URL");
+        assertThatThrownBy(() -> parser.url("A", "https://example.com")).hasMessageContaining("explicit port");
         assertThat(parser.url("A", "socks5h://user%2Bname:pass%3Aword@127.0.0.1:9000").config().path("password").asText()).isEqualTo("pass:word");
+    }
+
+    @Test void onlyPlainHttpHttpsAndSocks5NodesAreReachedDirectly() {
+        assertThat(parser.url("A", "http://user:pass@example.com:8080").route()).isEqualTo(ClashNodes.DIRECT_PROXY);
+        assertThat(parser.url("A", "socks5://example.com:1080").route()).isEqualTo(ClashNodes.DIRECT_PROXY);
+        assertThat(parser.url("A", "socks5h://example.com:1080").route()).isEqualTo(ClashNodes.DIRECT_PROXY);
+        assertThat(parser.node(parser.document("name: A\ntype: socks5\nserver: example.com\nport: 1080\nusername: u\npassword: p\nudp: true\n")).route())
+            .isEqualTo(ClashNodes.DIRECT_PROXY);
+        // An https:// proxy is an HTTP proxy with TLS to the proxy itself.
+        var https = parser.url("A", "https://user:pass@example.com:8443");
+        assertThat(https.protocol()).isEqualTo("http");
+        assertThat(https.config().path("tls").asBoolean()).isTrue();
+        assertThat(https.route()).isEqualTo(ClashNodes.DIRECT_PROXY);
+        assertThat(parser.url("A", "socks5h://example.com:1080").protocol()).isEqualTo("socks5");
+        assertThat(parser.node(parser.document("name: A\ntype: http\nserver: example.com\nport: 8080\ntls: false\n")).route())
+            .isEqualTo(ClashNodes.DIRECT_PROXY);
+        // Options a CONNECT or SOCKS5 tunnel opened by this application cannot honour need Mihomo.
+        for (String option : new String[] {"headers: {X-Node: a}", "skip-cert-verify: true", "sni: node.example", "ip-version: ipv4", "fingerprint: abc"}) {
+            assertThat(parser.node(parser.document("name: A\ntype: http\nserver: example.com\nport: 8080\ntls: true\n" + option)).route())
+                .as(option).isEqualTo(ClashNodes.MIHOMO);
+        }
+        assertThat(parser.node(parser.document("name: A\ntype: socks5\nserver: example.com\nport: 1080\ntls: true\n")).route())
+            .as("socks5 over tls").isEqualTo(ClashNodes.MIHOMO);
+        for (String type : new String[] {"vless", "vmess", "trojan", "ss", "hysteria2", "tuic"}) {
+            assertThat(parser.node(parser.document("name: A\ntype: " + type + "\nserver: example.com\nport: 443\n")).route())
+                .as(type).isEqualTo(ClashNodes.MIHOMO);
+        }
     }
 
     @Test void subscriptionFetchRejectsPrivateTargetsAndPinsValidatedIp() throws Exception {

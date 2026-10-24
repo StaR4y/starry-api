@@ -1855,7 +1855,10 @@ public class ProxyFacade {
                 HttpStatus status = mapUpstreamStatusCode(upstream.getStatusCode());
                 yield new ApiException(status, "UPSTREAM_ERROR", safeFailureMessage(upstream)).initCause(upstream);
             }
-            default -> new ApiException(HttpStatus.BAD_GATEWAY, "UPSTREAM_ERROR", safeFailureMessage(failure));
+            // Keep the egress failure as the cause: whether the request was sent decides how it is billed.
+            case tech.starryapi.egress.EgressException egress ->
+                new ApiException(HttpStatus.BAD_GATEWAY, "UPSTREAM_ERROR", safeFailureMessage(egress)).initCause(egress);
+            default -> new ApiException(HttpStatus.BAD_GATEWAY, "UPSTREAM_ERROR", safeFailureMessage(failure)).initCause(failure);
         };
     }
 
@@ -1888,11 +1891,8 @@ public class ProxyFacade {
     }
 
     private Throwable rootFailure(Throwable error) {
-        Throwable current = error;
-        while (current.getCause() != null && current.getCause() != current) {
-            current = current.getCause();
-        }
-        return current;
+        // Stops at an egress failure: its cause is a transport detail that must not reach clients or classification.
+        return tech.starryapi.egress.EgressException.rootCause(error);
     }
 
     private ResponseEntity<?> jsonResponse(ResponseMode mode, JsonNode request, String mappedModel, PlatformCompletionResult result) {

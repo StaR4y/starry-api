@@ -544,14 +544,14 @@ docker compose -f docker-compose.artifact.yml logs --tail=200 service
 
 ### 恢复流程
 
-导入数据是被刻意保护的：控制台要求你键入 `RESTORE_DATABASE`。每次导入前，服务都会用 `pg_restore` 校验自定义归档，再检查归档的目录（TOC）。**只接受 PostgreSQL 17、数据库 / schema 为 `starry_api` 的归档**；恢复后，它们的 Flyway V1–V26 脚本和校验和必须与正在运行的应用**完全一致**，不可变的 Root 标记必须解析到唯一一个已启用的 `ADMIN` Root，核心应用表必须存在，且不含其他 schema 的对象。独立的 `starry_security` 审计 / 发件箱 schema 故意不在归档里，也不会被应用恢复影响。运行时镜像已带 PostgreSQL 17 客户端工具；直接用 jar 运行的宿主机需要在 `PATH` 里提供 PostgreSQL 17 的 `pg_dump` 和 `pg_restore`。
+导入数据是被刻意保护的：控制台要求你键入 `RESTORE_DATABASE`。每次导入前，服务都会用 `pg_restore` 校验自定义归档，再检查归档的目录（TOC）。**只接受 PostgreSQL 17、数据库 / schema 为 `starry_api` 的归档**；恢复后，它们的 Flyway V1–V28 脚本和校验和必须与正在运行的应用**完全一致**，不可变的 Root 标记必须解析到唯一一个已启用的 `ADMIN` Root，核心应用表必须存在，且不含其他 schema 的对象。独立的 `starry_security` 审计 / 发件箱 schema 故意不在归档里，也不会被应用恢复影响。运行时镜像已带 PostgreSQL 17 客户端工具；直接用 jar 运行的宿主机需要在 `PATH` 里提供 PostgreSQL 17 的 `pg_dump` 和 `pg_restore`。
 
 备份用 PostgreSQL **会话级共享咨询锁**，恢复用对应的**排他锁**。这些锁协调**所有服务实例**，而不只是一个 JVM 里的线程。获得排他锁后，恢复按这个顺序进行：
 
 1. 撤销 `starry_api_runtime` 的数据库 `CONNECT` 权限，并终止现有 `starry_api` 后端连接。
 2. 从已静默的数据库创建一份服务端**回滚备份**。
 3. 对 `starry_api` schema 运行 `pg_restore --clean --if-exists --single-transaction --exit-on-error`。
-4. 校验：schema `starry_api`、所有必需的核心表、精确的 Flyway V1–V26 历史和校验和、V5 熔断纪元的列 / 索引 / 设置、恰好一个与 `application_root_user_id` 匹配的已启用 `admin` Root；还要校验 `starry_security` 保留了只追加触发器、最小权限的运行时 ACL 和不含密钥的结构；然后在运行时访问**仍被禁用**时运行 `ANALYZE`。如果传入的恢复已提交，但校验或分析失败，会自动用恢复前的备份做一次干净恢复，并在重新开放访问前校验、分析回滚结果。
+4. 校验：schema `starry_api`、所有必需的核心表、精确的 Flyway V1–V28 历史和校验和、V5 熔断纪元的列 / 索引 / 设置、恰好一个与 `application_root_user_id` 匹配的已启用 `admin` Root；还要校验 `starry_security` 保留了只追加触发器、最小权限的运行时 ACL 和不含密钥的结构；然后在运行时访问**仍被禁用**时运行 `ANALYZE`。如果传入的恢复已提交，但校验或分析失败，会自动用恢复前的备份做一次干净恢复，并在重新开放访问前校验、分析回滚结果。
 5. 在 `finally` 里恢复 `CONNECT`，然后清空本地会话和所有源自数据库的缓存——即使恢复在进入隔离后失败也是如此。
 6. 让其他实例重连它们的 PostgreSQL 通知监听器；每次成功重连都会执行同样的本地状态整体失效。代数检查防止恢复前的异步缓存加载在之后发布过期状态。
 

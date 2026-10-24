@@ -10,6 +10,7 @@ import tech.starryapi.account.AccountPlatforms;
 import tech.starryapi.account.AccountPoolService;
 import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.account.allocation.AccountFailureScope;
+import tech.starryapi.egress.EgressException;
 import tech.starryapi.platform.upstream.UpstreamException;
 
 final class UpstreamFailureClassifier {
@@ -24,10 +25,16 @@ final class UpstreamFailureClassifier {
     }
 
     static Classification classify(Throwable error, ProxyAccountEntity account) {
-        tech.starryapi.egress.EgressException egress = findCause(error, tech.starryapi.egress.EgressException.class);
+        EgressException egress = EgressException.find(error);
         if (egress != null) {
-            return new Classification(error, null, AccountPoolService.UpstreamErrorType.RECOVERABLE,
-                egress.retryable(), false, false, AccountFailureScope.REQUEST, Duration.ZERO, false);
+            // A broken outbound route says nothing about the account itself, so it never counts as an account
+            // failure (REQUEST scope, no circuit failure, no cooldown). The same account is never retried and the
+            // request is never sent directly; a request that provably never left may use another account, while
+            // one that may have been written stays on its account like a response timeout after dispatch.
+            boolean notSent = !egress.requestMayHaveBeenSent();
+            return new Classification(egress, null,
+                notSent ? AccountPoolService.UpstreamErrorType.RECOVERABLE : AccountPoolService.UpstreamErrorType.FATAL,
+                notSent, notSent, false, AccountFailureScope.REQUEST, Duration.ZERO, false);
         }
         UpstreamException upstream = findCause(error, UpstreamException.class);
         Throwable failure = rootFailure(error);
@@ -290,6 +297,10 @@ final class UpstreamFailureClassifier {
     static boolean neverReachedUpstream(Throwable error) {
         Throwable current = error;
         while (current != null) {
+            if (current instanceof EgressException egress) {
+                // The route knows whether the request was written; what its transport reported underneath does not matter.
+                return !egress.requestMayHaveBeenSent();
+            }
             String name = current.getClass().getSimpleName();
             if (current instanceof java.net.ConnectException
                 || current instanceof java.net.UnknownHostException
@@ -350,11 +361,7 @@ final class UpstreamFailureClassifier {
     }
 
     private static Throwable rootFailure(Throwable error) {
-        Throwable current = error;
-        while (current != null && current.getCause() != null && current.getCause() != current) {
-            current = current.getCause();
-        }
-        return current;
+        return EgressException.rootCause(error);
     }
 
     record Classification(

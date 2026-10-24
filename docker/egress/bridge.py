@@ -47,7 +47,7 @@ async def forward(request):
         parsed = urlsplit(target)
         if parsed.scheme not in ("https", "http") or not parsed.hostname or parsed.username or parsed.fragment:
             raise ValueError()
-        if proxy and (urlsplit(proxy).scheme not in ("http", "socks5", "socks5h") or not urlsplit(proxy).hostname):
+        if proxy and (urlsplit(proxy).scheme not in ("http", "https", "socks5", "socks5h") or not urlsplit(proxy).hostname):
             raise ValueError()
         if profile not in PROFILES:
             raise ValueError()

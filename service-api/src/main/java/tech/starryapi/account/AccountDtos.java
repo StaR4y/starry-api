@@ -495,10 +495,17 @@ public final class AccountDtos {
     ) {
     }
 
-    /** Starts a ChatGPT device authorization, or reauthorizes an existing Codex account. */
+    /**
+     * Starts a ChatGPT device authorization, or reauthorizes an existing Codex account. With a proxy channel, this
+     * site's calls of the login (start, polling, token exchange) go through it and the resulting account is bound to it.
+     */
     public record ChatGptOAuthStartRequest(
-        @Size(max = 64) String accountId
+        @Size(max = 64) String accountId,
+        UUID proxyChannelId
     ) {
+        public ChatGptOAuthStartRequest(String accountId) {
+            this(accountId, null);
+        }
     }
 
     public record ChatGptOAuthStartResponse(

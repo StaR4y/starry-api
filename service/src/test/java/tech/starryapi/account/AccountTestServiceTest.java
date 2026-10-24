@@ -788,6 +788,32 @@ class AccountTestServiceTest {
         );
     }
 
+    @Test
+    void aBrokenOutboundRouteIsReportedButDoesNotCountAgainstTheAccount() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        KiroUpstreamClient upstreamClient = mock(KiroUpstreamClient.class);
+        ProxyAccountEntity account = account("kiro-main", "token");
+        when(repository.findAll()).thenReturn(Flux.just(account));
+        when(upstreamClient.complete(any(ProxyAccountEntity.class), any(ObjectNode.class), eq("auto"))).thenReturn(Mono.error(
+            tech.starryapi.egress.EgressException.notSent(tech.starryapi.egress.EgressFailure.PROXY_CONNECT_FAILED,
+                new java.net.ConnectException("refused for user:secret@127.0.0.1"))));
+
+        AccountTestService service = new AccountTestService(objectMapper, repository, accountPoolService,
+            new KiroPayloadFactory(objectMapper, modelCatalog), upstreamClient, mock(OpenAiAccountTestClient.class),
+            mock(AnthropicUpstreamClient.class));
+
+        AccountDtos.TestAccountsResponse response = service
+            .test(new AccountDtos.TestAccountsRequest(null, true, "auto", "ping", 1, true)).block();
+
+        assertThat(response.failed()).isEqualTo(1);
+        assertThat(response.items()).singleElement().satisfies(item -> {
+            assertThat(item.status()).isEqualTo("FAILED");
+            assertThat(item.detail()).isEqualTo(tech.starryapi.egress.EgressFailure.PROXY_CONNECT_FAILED.message());
+        });
+        verifyNoInteractions(accountPoolService);
+    }
+
     private ProxyAccountEntity account(String accountId, String accessToken) {
         ProxyAccountEntity account = new ProxyAccountEntity();
         account.setAccountId(accountId);

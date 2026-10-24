@@ -13,9 +13,10 @@ import org.springframework.web.server.ResponseStatusException;
 public class GlobalExceptionHandler {
 
     @ExceptionHandler(ApiException.class)
-    ResponseEntity<ApiResponse<Void>> handleApiException(ApiException exception) {
-        return ResponseEntity.status(exception.getStatus())
-            .body(ApiResponse.error(exception.getCode(), exception.getMessage()));
+    ResponseEntity<? extends ApiResponse<?>> handleApiException(ApiException exception) {
+        return ResponseEntity.status(exception.getStatus()).body(exception.getDetails() == null
+            ? ApiResponse.error(exception.getCode(), exception.getMessage())
+            : ApiResponse.error(exception.getCode(), exception.getMessage(), exception.getDetails()));
     }
 
     @ExceptionHandler(WebExchangeBindException.class)

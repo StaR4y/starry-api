@@ -2356,6 +2356,142 @@ class ProxyFacadeRoutingTest {
         assertThat(input.path(2).path("call_id").asText()).isEqualTo("call_write");
     }
 
+    // ---- failures of the account's outbound route (egress) ----
+
+    @Test
+    void anEgressFailureBeforeAnythingIsSentFailsOverToAnotherAccountWithoutTouchingTheAccountsHealth() throws Exception {
+        EgressScenario scenario = new EgressScenario(
+            tech.starryapi.egress.EgressException.notSent(
+                tech.starryapi.egress.EgressFailure.PROXY_CONNECT_FAILED,
+                new java.net.ConnectException("refused 127.0.0.1:20001 user:secret")
+            )
+        );
+        scenario.backupSucceeds();
+
+        ResponseEntity<?> response = scenario.facade().chat(scenario.request, scenario.exchange).block();
+
+        assertThat(response).isNotNull();
+        verify(scenario.accountPoolService).selectOpenAiAccountForPool(
+            eq("key-1"), eq(List.of("openai-main")), any(AccountPoolRequestContext.class)
+        );
+        verify(scenario.openAiUpstreamClient).complete(eq(scenario.backup), any(), eq("gpt-5"));
+        // A broken route is not the account's fault: no failure count, no cooldown or circuit failure.
+        verify(scenario.accountPoolService, never()).recordRequestFailure(
+            anyString(), any(AccountPoolService.UpstreamErrorType.class), any(), anyString(), any(AccountPoolRequestContext.class)
+        );
+        verify(scenario.accountPoolService, never()).recordCircuitFailure(any(AccountPoolRequestContext.class), any());
+        verify(scenario.accountAutoSuspendService, never()).scheduleIfNeeded(any());
+    }
+
+    @Test
+    void anEgressFailureWithNoOtherAccountReleasesTheReservationAsUnbilledAndHidesTransportDetails() throws Exception {
+        EgressScenario scenario = new EgressScenario(
+            tech.starryapi.egress.EgressException.notSent(
+                tech.starryapi.egress.EgressFailure.PROXY_CONNECT_FAILED,
+                new java.net.ConnectException("refused 127.0.0.1:20001 user:secret")
+            )
+        );
+        scenario.noBackupAccount();
+
+        assertThatThrownBy(() -> scenario.facade().chat(scenario.request, scenario.exchange).block())
+            .isInstanceOfSatisfying(ApiException.class, error -> {
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_GATEWAY);
+                assertThat(error.getMessage()).isEqualTo(tech.starryapi.egress.EgressFailure.PROXY_CONNECT_FAILED.message());
+            });
+        verify(scenario.apiKeyService).releaseUsage(any(), anyString(), eq(true), anyString());
+        verify(scenario.apiKeyService, never()).releaseUsage(any(), anyString(), eq(false), anyString());
+    }
+
+    @Test
+    void aDirectConnectFailureWithNoOtherAccountReleasesTheReservationAsUnbilled() throws Exception {
+        // No proxy involved: the upstream refused the connection, so nothing was generated or charged.
+        EgressScenario scenario = new EgressScenario(new java.net.ConnectException("Connection refused"));
+        scenario.noBackupAccount();
+        when(scenario.accountPoolService.recordRequestFailure(
+            anyString(), any(AccountPoolService.UpstreamErrorType.class), any(), anyString(),
+            any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(new AccountPoolService.RequestFailureRecord("openai-primary", 1, 502, false)));
+
+        assertThatThrownBy(() -> scenario.facade().chat(scenario.request, scenario.exchange).block())
+            .isInstanceOfSatisfying(ApiException.class, error ->
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_GATEWAY));
+        verify(scenario.apiKeyService).releaseUsage(any(), anyString(), eq(true), anyString());
+        verify(scenario.apiKeyService, never()).releaseUsage(any(), anyString(), eq(false), anyString());
+    }
+
+    @Test
+    void anEgressFailureAfterTheRequestMayHaveBeenSentStaysOnItsAccountAndStaysBillingUncertain() throws Exception {
+        EgressScenario scenario = new EgressScenario(
+            tech.starryapi.egress.EgressException.maybeSent(
+                tech.starryapi.egress.EgressFailure.PROXY_TRANSPORT_FAILED,
+                new java.net.SocketException("Connection reset")
+            )
+        );
+
+        assertThatThrownBy(() -> scenario.facade().chat(scenario.request, scenario.exchange).block())
+            .isInstanceOfSatisfying(ApiException.class, error ->
+                assertThat(error.getMessage()).isEqualTo(tech.starryapi.egress.EgressFailure.PROXY_TRANSPORT_FAILED.message()));
+        verify(scenario.accountPoolService, never()).selectOpenAiAccountForPool(
+            eq("key-1"), eq(List.of("openai-main")), any(AccountPoolRequestContext.class)
+        );
+        verify(scenario.apiKeyService).releaseUsage(any(), anyString(), eq(false), anyString());
+        verify(scenario.accountPoolService, never()).recordRequestFailure(
+            anyString(), any(AccountPoolService.UpstreamErrorType.class), any(), anyString(), any(AccountPoolRequestContext.class)
+        );
+    }
+
+    /** One OpenAI chat request whose first account fails with the given egress error. */
+    private final class EgressScenario {
+        final ApiKeyService apiKeyService = mock(ApiKeyService.class);
+        final AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        final AccountAutoSuspendService accountAutoSuspendService = mock(AccountAutoSuspendService.class);
+        final ModelMappingService modelMappingService = mock(ModelMappingService.class);
+        final RateLimiterService rateLimiterService = mock(RateLimiterService.class);
+        final OpenAiUpstreamClient openAiUpstreamClient = mock(OpenAiUpstreamClient.class);
+        final StatsService statsService = mock(StatsService.class);
+        final ProxyAccountEntity primary = openAiAccount("openai-main");
+        final ProxyAccountEntity backup = openAiAccount("openai-backup");
+        final JsonNode request;
+        final MockServerWebExchange exchange = MockServerWebExchange.from(MockServerHttpRequest.post("/v1/chat/completions"));
+
+        EgressScenario(Throwable primaryError) throws Exception {
+            request = objectMapper.readTree("{\"model\":\"gpt-5\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
+            when(apiKeyService.authenticate(exchange))
+                .thenReturn(Mono.just(new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO)));
+            when(rateLimiterService.check("key-1")).thenReturn(new RateLimiterService.RateLimitResult(true, 0, 0, 0));
+            when(modelMappingService.apply("gpt-5", "key-1")).thenReturn("gpt-5");
+            when(accountPoolService.selectOpenAiAccountForPool(eq("key-1"), any(AccountPoolRequestContext.class)))
+                .thenReturn(Mono.just(primary));
+            when(openAiUpstreamClient.complete(eq(primary), any(), eq("gpt-5"))).thenReturn(Mono.error(primaryError));
+            when(statsService.log(any())).thenReturn(Mono.empty());
+        }
+
+        void backupSucceeds() {
+            when(accountPoolService.selectOpenAiAccountForPool(
+                eq("key-1"), eq(List.of("openai-main")), any(AccountPoolRequestContext.class)
+            )).thenReturn(Mono.just(backup));
+            when(openAiUpstreamClient.complete(eq(backup), any(), eq("gpt-5")))
+                .thenReturn(Mono.just(new PlatformCompletionResult("OK", new PlatformUsage(1, 1, BigDecimal.ZERO, 0, 0, 0))));
+            when(accountPoolService.recordSuccess(eq("openai-backup"), eq(2L), any(AccountPoolRequestContext.class)))
+                .thenReturn(Mono.empty());
+            when(accountPoolService.recordCircuitSuccess(any(AccountPoolRequestContext.class), eq(backup))).thenReturn(73L);
+            when(apiKeyService.accountUsage(any(ApiKeyPrincipal.class), anyString(), any(), eq(1L), eq(1L))).thenReturn(Mono.empty());
+        }
+
+        void noBackupAccount() {
+            when(accountPoolService.selectOpenAiAccountForPool(
+                eq("key-1"), eq(List.of("openai-main")), any(AccountPoolRequestContext.class)
+            )).thenReturn(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "none")));
+        }
+
+        ProxyFacade facade() {
+            return proxyFacade(
+                apiKeyService, accountPoolService, accountAutoSuspendService, new DefaultModelCatalogProvider(),
+                modelMappingService, rateLimiterService, mock(KiroUpstreamClient.class), openAiUpstreamClient, statsService
+            );
+        }
+    }
+
     private ProxyFacade proxyFacade(
         ApiKeyService apiKeyService,
         AccountPoolService accountPoolService,

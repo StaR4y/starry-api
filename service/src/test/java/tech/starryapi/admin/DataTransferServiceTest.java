@@ -199,7 +199,7 @@ class DataTransferServiceTest {
     }
 
     @Test
-    void requiresExactFlywayV26HistoryAndMatchingChecksumsForRestore() {
+    void requiresExactFlywayV28HistoryAndMatchingChecksumsForRestore() {
         List<DataTransferService.FlywayMigration> current = currentMigrationHistory();
 
         assertThatCode(() -> DataTransferService.validateMigrationHistory(current)).doesNotThrowAnyException();
@@ -208,19 +208,19 @@ class DataTransferServiceTest {
 
         assertThatThrownBy(() -> DataTransferService.validateMigrationHistory(current.subList(0, 9)))
             .isInstanceOf(SQLException.class)
-            .hasMessageContaining("V1-V26");
+            .hasMessageContaining("V1-V28");
 
         List<DataTransferService.FlywayMigration> future = new ArrayList<>(current);
         future.add(new DataTransferService.FlywayMigration(
-            "27",
-            "V27__unknown_future.sql",
+            "29",
+            "V29__unknown_future.sql",
             "SQL",
             8008,
             true
         ));
         assertThatThrownBy(() -> DataTransferService.validateMigrationHistory(future))
             .isInstanceOf(SQLException.class)
-            .hasMessageContaining("V1-V26");
+            .hasMessageContaining("V1-V28");
 
         List<DataTransferService.FlywayMigration> changedChecksum = new ArrayList<>(current);
         DataTransferService.FlywayMigration v5 = changedChecksum.get(4);
@@ -440,7 +440,9 @@ class DataTransferServiceTest {
             new DataTransferService.FlywayMigration("23", "V23__documentation_tutorials.sql", "SQL", 1023, true),
             new DataTransferService.FlywayMigration("24", "V24__documentation_user_focus.sql", "SQL", 1024, true),
             new DataTransferService.FlywayMigration("25", "V25__account_egress_proxy_channels.sql", "SQL", 1025, true),
-            new DataTransferService.FlywayMigration("26", "V26__account_egress_policy.sql", "SQL", 1026, true)
+            new DataTransferService.FlywayMigration("26", "V26__account_egress_policy.sql", "SQL", 1026, true),
+            new DataTransferService.FlywayMigration("27", "V27__egress_listener_ports_and_probe_results.sql", "SQL", 1027, true),
+            new DataTransferService.FlywayMigration("28", "V28__account_allocation_defaults.sql", "SQL", 1028, true)
         );
     }
 }

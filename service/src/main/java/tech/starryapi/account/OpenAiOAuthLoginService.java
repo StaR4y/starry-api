@@ -14,6 +14,8 @@ import java.util.Base64;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
@@ -29,6 +31,9 @@ import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.common.Hashing;
+import tech.starryapi.egress.AccountEgressTransport;
+import tech.starryapi.egress.EgressException;
+import tech.starryapi.egress.ProxyChannelService;
 
 @Service
 public class OpenAiOAuthLoginService {
@@ -46,6 +51,7 @@ public class OpenAiOAuthLoginService {
     private final WebClient webClient;
     private final ProxyAccountRepository repository;
     private final AccountPoolService accountPoolService;
+    private final ProxyChannelService proxyChannels;
     private final String authBaseUrl;
     private final String clientId;
     private final Clock clock;
@@ -60,13 +66,15 @@ public class OpenAiOAuthLoginService {
         ObjectMapper objectMapper,
         WebClient upstreamWebClient,
         ProxyAccountRepository repository,
-        AccountPoolService accountPoolService
+        AccountPoolService accountPoolService,
+        ProxyChannelService proxyChannels
     ) {
         this(
             objectMapper,
             upstreamWebClient,
             repository,
             accountPoolService,
+            proxyChannels,
             OpenAiOAuthConstants.AUTH_BASE_URL,
             OpenAiOAuthConstants.CLIENT_ID,
             Clock.systemUTC()
@@ -78,6 +86,7 @@ public class OpenAiOAuthLoginService {
         WebClient webClient,
         ProxyAccountRepository repository,
         AccountPoolService accountPoolService,
+        ProxyChannelService proxyChannels,
         String authBaseUrl,
         String clientId,
         Clock clock
@@ -86,6 +95,7 @@ public class OpenAiOAuthLoginService {
         this.webClient = webClient;
         this.repository = repository;
         this.accountPoolService = accountPoolService;
+        this.proxyChannels = proxyChannels;
         this.authBaseUrl = authBaseUrl.replaceAll("/+$", "");
         this.clientId = clientId;
         this.clock = clock;
@@ -101,12 +111,22 @@ public class OpenAiOAuthLoginService {
     ) {
         String owner = requireOwner(adminUserId);
         String targetAccountId = clean(request == null ? null : request.accountId());
+        UUID proxyChannelId = request == null ? null : request.proxyChannelId();
         return validateTarget(targetAccountId)
-            .then(Mono.defer(() -> {
-                StartReservation reservation = reserveLoginSlot(owner);
-                return requestDeviceCode(owner, targetAccountId)
-                    .doFinally(signal -> reservation.release());
-            }));
+            .map(Optional::of)
+            .defaultIfEmpty(Optional.empty())
+            .flatMap(target -> validateChannel(proxyChannelId)
+                .then(Mono.defer(() -> {
+                    // The whole login uses one exit: the chosen channel, else the reauthorized account's own binding.
+                    LoginEgress egress = new LoginEgress(proxyChannelId, proxyChannelId == null ? target.orElse(null) : null);
+                    StartReservation reservation = reserveLoginSlot(owner);
+                    return requestDeviceCode(owner, targetAccountId, proxyChannelId, egress)
+                        .doFinally(signal -> reservation.release());
+                })));
+    }
+
+    private Mono<Void> validateChannel(UUID proxyChannelId) {
+        return proxyChannelId == null ? Mono.empty() : proxyChannels.requireUsable(proxyChannelId);
     }
 
     public Mono<AccountDtos.ChatGptOAuthStatusResponse> poll(String adminUserId, String loginId) {
@@ -147,7 +167,7 @@ public class OpenAiOAuthLoginService {
         }
     }
 
-    private Mono<Void> validateTarget(String accountId) {
+    private Mono<ProxyAccountEntity> validateTarget(String accountId) {
         if (accountId == null) {
             return Mono.empty();
         }
@@ -159,24 +179,27 @@ public class OpenAiOAuthLoginService {
             )))
             .flatMap(account -> {
                 if (!AccountPlatforms.isCodex(account)) {
-                    return Mono.error(new ApiException(
+                    return Mono.<ProxyAccountEntity>error(new ApiException(
                         HttpStatus.BAD_REQUEST,
                         "CHATGPT_OAUTH_ACCOUNT_UNSUPPORTED",
                         "Only Codex OAuth accounts can be reauthorized"
                     ));
                 }
-                return Mono.empty();
+                return Mono.just(account);
             });
     }
 
     private Mono<AccountDtos.ChatGptOAuthStartResponse> requestDeviceCode(
         String owner,
-        String targetAccountId
+        String targetAccountId,
+        UUID proxyChannelId,
+        LoginEgress egress
     ) {
         ObjectNode body = objectMapper.createObjectNode();
         body.put("client_id", clientId);
         return webClient.post()
             .uri(authBaseUrl + "/api/accounts/deviceauth/usercode")
+            .attributes(egress::apply)
             .contentType(MediaType.APPLICATION_JSON)
             .accept(MediaType.APPLICATION_JSON)
             .bodyValue(body)
@@ -197,15 +220,17 @@ public class OpenAiOAuthLoginService {
                     .switchIfEmpty(Mono.error(authProtocolError("OpenAI returned an empty device authorization response")));
             })
             .timeout(UPSTREAM_REQUEST_TIMEOUT)
-            .map(json -> createSession(owner, targetAccountId, json))
+            .map(json -> createSession(owner, targetAccountId, proxyChannelId, egress, json))
             .onErrorMap(error -> !(error instanceof ApiException), error -> authUnavailable(
-                "Unable to reach OpenAI device authorization"
+                routeUnavailable(error, "Unable to reach OpenAI device authorization")
             ));
     }
 
     private AccountDtos.ChatGptOAuthStartResponse createSession(
         String owner,
         String targetAccountId,
+        UUID proxyChannelId,
+        LoginEgress egress,
         JsonNode json
     ) {
         String deviceAuthId = clean(json.path("device_auth_id").asText(null));
@@ -227,7 +252,9 @@ public class OpenAiOAuthLoginService {
             userCode,
             now.plus(AUTHORIZATION_TTL),
             interval,
-            now
+            now,
+            proxyChannelId,
+            egress
         );
         sessions.put(loginId, session);
         return new AccountDtos.ChatGptOAuthStartResponse(
@@ -258,6 +285,7 @@ public class OpenAiOAuthLoginService {
         body.put("user_code", pollRequest.userCode);
         return webClient.post()
             .uri(authBaseUrl + "/api/accounts/deviceauth/token")
+            .attributes(session.egress::apply)
             .contentType(MediaType.APPLICATION_JSON)
             .accept(MediaType.APPLICATION_JSON)
             .bodyValue(body)
@@ -284,7 +312,9 @@ public class OpenAiOAuthLoginService {
             .switchIfEmpty(Mono.fromSupplier(() -> pendingStatus(session)))
             .onErrorResume(error -> {
                 if (!(error instanceof ApiException)) {
-                    noteTransientFailure(session);
+                    EgressException egress = EgressException.find(error);
+                    // The device code stays valid, so a route that fails now may still recover before it expires.
+                    noteTransientFailure(session, egress == null ? null : routeUnavailable(error, null));
                     return Mono.just(pendingStatus(session));
                 }
                 return Mono.just(failedStatus(session, error));
@@ -312,13 +342,13 @@ public class OpenAiOAuthLoginService {
             session.state = LoginState.COMPLETING;
             session.message = "正在保存授权账号";
         }
-        return exchangeTokens(authorizationCode, codeVerifier)
+        return exchangeTokens(authorizationCode, codeVerifier, session.egress)
             .flatMap(tokens -> saveAuthorizedAccount(session, tokens))
             .map(account -> succeededStatus(session, account))
             .onErrorResume(error -> Mono.just(failedStatus(session, error)));
     }
 
-    private Mono<OAuthTokens> exchangeTokens(String authorizationCode, String codeVerifier) {
+    private Mono<OAuthTokens> exchangeTokens(String authorizationCode, String codeVerifier, LoginEgress egress) {
         MultiValueMap<String, String> form = new LinkedMultiValueMap<>();
         form.add("grant_type", "authorization_code");
         form.add("code", authorizationCode);
@@ -327,6 +357,7 @@ public class OpenAiOAuthLoginService {
         form.add("code_verifier", codeVerifier);
         return webClient.post()
             .uri(authBaseUrl + "/oauth/token")
+            .attributes(egress::apply)
             .contentType(MediaType.APPLICATION_FORM_URLENCODED)
             .accept(MediaType.APPLICATION_JSON)
             .bodyValue(form)
@@ -340,6 +371,9 @@ public class OpenAiOAuthLoginService {
                     .switchIfEmpty(Mono.error(authProtocolError("OpenAI returned an empty token response")));
             })
             .timeout(UPSTREAM_REQUEST_TIMEOUT)
+            .onErrorMap(error -> EgressException.find(error) != null, error -> authUnavailable(
+                routeUnavailable(error, "Unable to reach OpenAI token exchange")
+            ))
             .map(json -> new OAuthTokens(
                 clean(json.path("access_token").asText(null)),
                 clean(json.path("refresh_token").asText(null)),
@@ -368,25 +402,27 @@ public class OpenAiOAuthLoginService {
                     "ACCOUNT_NOT_FOUND",
                     "Account was removed while authorization was in progress"
                 )))
-                .flatMap(existing -> updateExisting(existing, identity, tokens, true));
+                .flatMap(existing -> updateExisting(existing, identity, tokens, session.proxyChannelId, true));
         }
 
         return repository.findByAccountId(stableAccountId)
-            .flatMap(account -> updateExisting(account, identity, tokens, true))
+            .flatMap(account -> updateExisting(account, identity, tokens, session.proxyChannelId, true))
             .switchIfEmpty(Mono.defer(() -> findByEmail(identity)
-                .flatMap(account -> updateExisting(account, identity, tokens, true))
-                .switchIfEmpty(Mono.defer(() -> createAccount(stableAccountId, identity, tokens)))))
+                .flatMap(account -> updateExisting(account, identity, tokens, session.proxyChannelId, true))
+                .switchIfEmpty(Mono.defer(() -> createAccount(stableAccountId, identity, tokens, session.proxyChannelId)))))
             .onErrorResume(DuplicateKeyException.class, error -> findAndUpdateAfterConflict(
                 stableAccountId,
                 identity,
-                tokens
+                tokens,
+                session.proxyChannelId
             ));
     }
 
     private Mono<ProxyAccountEntity> findAndUpdateAfterConflict(
         String stableAccountId,
         OpenAiOAuthTokenClaims.Identity identity,
-        OAuthTokens tokens
+        OAuthTokens tokens,
+        UUID proxyChannelId
     ) {
         return repository.findByAccountId(stableAccountId)
             .switchIfEmpty(findByEmail(identity))
@@ -395,7 +431,7 @@ public class OpenAiOAuthLoginService {
                 "CHATGPT_OAUTH_ACCOUNT_CONFLICT",
                 "An account with the same ChatGPT identity already exists"
             )))
-            .flatMap(account -> updateExisting(account, identity, tokens, true));
+            .flatMap(account -> updateExisting(account, identity, tokens, proxyChannelId, true));
     }
 
     private Mono<ProxyAccountEntity> findByEmail(OpenAiOAuthTokenClaims.Identity identity) {
@@ -406,7 +442,8 @@ public class OpenAiOAuthLoginService {
     private Mono<ProxyAccountEntity> createAccount(
         String accountId,
         OpenAiOAuthTokenClaims.Identity identity,
-        OAuthTokens tokens
+        OAuthTokens tokens,
+        UUID proxyChannelId
     ) {
         Instant now = clock.instant();
         ProxyAccountEntity account = new ProxyAccountEntity();
@@ -418,6 +455,7 @@ public class OpenAiOAuthLoginService {
         account.setAuthMethod(AccountPlatforms.OPENAI_CODEX_AUTH);
         account.setProvider(AccountPlatforms.OPENAI_PROVIDER);
         account.setBaseUrl(AccountPlatforms.DEFAULT_CODEX_BASE_URL);
+        account.setProxyChannelId(proxyChannelId);
         account.setUpstreamAccountId(identity.upstreamAccountId());
         account.setIdToken(tokens.idToken);
         account.setTokenExpiresAt(identity.expiresAt());
@@ -439,6 +477,7 @@ public class OpenAiOAuthLoginService {
         ProxyAccountEntity account,
         OpenAiOAuthTokenClaims.Identity identity,
         OAuthTokens tokens,
+        UUID proxyChannelId,
         boolean requireSameIdentity
     ) {
         if (!AccountPlatforms.isCodex(account)) {
@@ -464,6 +503,9 @@ public class OpenAiOAuthLoginService {
         account.setAuthMethod(AccountPlatforms.OPENAI_CODEX_AUTH);
         account.setProvider(AccountPlatforms.OPENAI_PROVIDER);
         account.setBaseUrl(AccountPlatforms.DEFAULT_CODEX_BASE_URL);
+        if (proxyChannelId != null) {
+            account.setProxyChannelId(proxyChannelId);
+        }
         if (identity.upstreamAccountId() != null) {
             account.setUpstreamAccountId(identity.upstreamAccountId());
         }
@@ -654,11 +696,21 @@ public class OpenAiOAuthLoginService {
     }
 
     private void noteTransientFailure(LoginSession session) {
+        noteTransientFailure(session, null);
+    }
+
+    private void noteTransientFailure(LoginSession session, String routeProblem) {
         synchronized (session) {
             if (session.state == LoginState.PENDING) {
-                session.message = "OpenAI 授权服务暂时不可用，正在重试";
+                session.message = routeProblem == null ? "OpenAI 授权服务暂时不可用，正在重试" : routeProblem;
             }
         }
+    }
+
+    /** The fixed text of an egress failure; transport messages can carry proxy credentials and are never shown. */
+    private String routeUnavailable(Throwable error, String fallback) {
+        EgressException egress = EgressException.find(error);
+        return egress == null ? fallback : "The selected outbound proxy is unavailable: " + egress.getMessage();
     }
 
     private void noteWaiting(LoginSession session) {
@@ -743,6 +795,8 @@ public class OpenAiOAuthLoginService {
         private LoginState state = LoginState.PENDING;
         private String message;
         private AccountDtos.AccountResponse account;
+        private final UUID proxyChannelId;
+        private final LoginEgress egress;
 
         private LoginSession(
             String loginId,
@@ -752,8 +806,12 @@ public class OpenAiOAuthLoginService {
             String userCode,
             Instant expiresAt,
             int pollIntervalSeconds,
-            Instant nextPollAt
+            Instant nextPollAt,
+            UUID proxyChannelId,
+            LoginEgress egress
         ) {
+            this.proxyChannelId = proxyChannelId;
+            this.egress = egress;
             this.loginId = loginId;
             this.owner = owner;
             this.targetAccountId = targetAccountId;
@@ -781,6 +839,17 @@ public class OpenAiOAuthLoginService {
     }
 
     private record DevicePollRequest(String deviceAuthId, String userCode) {
+    }
+
+    /** The exit of one login: an explicit channel, or the reauthorized account's own binding; none means direct. */
+    private record LoginEgress(UUID channelId, ProxyAccountEntity account) {
+        void apply(Map<String, Object> attributes) {
+            if (channelId != null) {
+                attributes.put(AccountEgressTransport.CHANNEL, channelId);
+            } else if (account != null) {
+                attributes.put(AccountEgressTransport.ACCOUNT, account);
+            }
+        }
     }
 
     private record OAuthTokens(String accessToken, String refreshToken, String idToken) {

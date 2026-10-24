@@ -48,4 +48,17 @@ class GlobalExceptionHandlerTest {
         assertThat(response.getBody().error().code()).isEqualTo("PAYLOAD_TOO_LARGE");
         assertThat(response.getBody().error().message()).isEqualTo("上传文件过大");
     }
+
+    @Test
+    void returnsTheRecordsThatBlockAnOperationAsTheDataOfTheError() {
+        ResponseEntity<? extends ApiResponse<?>> response = handler.handleApiException(new ApiException(
+            HttpStatus.CONFLICT, "IN_USE", "Still in use", java.util.List.of(java.util.Map.of("accountId", "a-1"))
+        ));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(response.getBody().success()).isFalse();
+        assertThat(response.getBody().error().code()).isEqualTo("IN_USE");
+        assertThat(response.getBody().data()).isEqualTo(java.util.List.of(java.util.Map.of("accountId", "a-1")));
+        assertThat(handler.handleApiException(new ApiException(HttpStatus.CONFLICT, "IN_USE", "x")).getBody().data()).isNull();
+    }
 }

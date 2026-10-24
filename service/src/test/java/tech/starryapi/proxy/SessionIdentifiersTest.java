@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.*;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import tech.starryapi.egress.EgressException;
+import tech.starryapi.egress.EgressFailure;
 import tech.starryapi.account.allocation.AccountFailureScope;
 
 class SessionIdentifiersTest {
@@ -17,10 +18,11 @@ class SessionIdentifiersTest {
     }
 
     @Test void egressFailureDoesNotInvalidateCredentialsOrRetryAmbiguousDispatch() {
-        var local = UpstreamFailureClassifier.classify(new EgressException("disabled"));
+        var local = UpstreamFailureClassifier.classify(new EgressException(EgressFailure.RUNTIME_DISABLED));
         assertThat(local.scope()).isEqualTo(AccountFailureScope.REQUEST);
         assertThat(local.retryable()).isTrue();
-        var dispatched = UpstreamFailureClassifier.classify(new EgressException("transport interrupted", false));
+        var dispatched = UpstreamFailureClassifier.classify(
+            EgressException.maybeSent(EgressFailure.PROXY_TRANSPORT_FAILED, new java.io.IOException("reset")));
         assertThat(dispatched.retryable()).isFalse();
         assertThat(dispatched.permanentCredentialFailure()).isFalse();
     }
