@@ -30,6 +30,8 @@ Starry API 支持两种部署方式：**源码构建**（在服务器上用 Dock
 | `artifacts/sha256sums.txt` | 所有可部署文件的校验和清单 |
 | `artifacts/build-info.json` | 源码提交、分支、版本、构建时间、大小、校验和等元数据 |
 
+整包还带有 `docker/egress/mihomo-entrypoint.sh`（可选 Mihomo 组件的启动脚本）、实验性的 `docker-compose.tls-bridge.yml`（TLS 指纹 bridge）和 `docs/ACCOUNT_EGRESS.md`。Compose 文件里的 `mihomo` 服务属于 `mihomo` profile，默认不启动；整包不含 Mihomo 二进制，部署时拉取官方镜像。
+
 ---
 
 ## 每次提交后发布
@@ -119,6 +121,7 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
 | `PUBLIC_BASE_URL` | 空 | 用于启动日志的公网 HTTPS 地址 |
 | `FORCE_ENV` | `false` | 仅在 PostgreSQL 初始化**之前**重新生成 `.env`；已初始化的集群需要先在数据库里轮换角色密码，再手动更新 `.env` |
 | `INSTALL_DOCKER` | `true` | 缺少 Docker 时是否自动安装 |
+| `ENABLE_MIHOMO` | `false` | 设为 `true` 时启用可选的 Mihomo 出站组件（`.env` 里的 `COMPOSE_PROFILES=mihomo`、`STARRY_EGRESS_MIHOMO_ENABLED=true`、随机的 `STARRY_EGRESS_CONTROLLER_SECRET`）；`false` 不改动已有选择。整包只含启动脚本，不含 Mihomo 二进制，镜像部署时拉取官方 `metacubex/mihomo`。见 [账号出站代理](ACCOUNT_EGRESS.md#部署) |
 | `GITHUB_TOKEN` | 空 | 私有仓库下载用的 Token |
 | `GITHUB_TOKEN_FILE` | `${INSTALL_DIR}/.github-token` | `GITHUB_TOKEN` 为空时使用的本地 Token 文件 |
 

@@ -164,6 +164,10 @@ services:
       STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS: ${STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS:-90}
       STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE: ${STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE:-10000}
       STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES: ${STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES:-20}
+      # Optional Mihomo, off by default. Enabled by the "mihomo" profile together with these two settings
+      # (see docs/ACCOUNT_EGRESS.md); every other STARRY_EGRESS_* setting keeps its application default.
+      STARRY_EGRESS_MIHOMO_ENABLED: ${STARRY_EGRESS_MIHOMO_ENABLED:-false}
+      STARRY_EGRESS_CONTROLLER_SECRET: ${STARRY_EGRESS_CONTROLLER_SECRET:-}
       # glibc keeps one malloc arena per thread by default, which inflates resident memory of a busy JVM.
       MALLOC_ARENA_MAX: "2"
       JAVA_OPTS: "${JAVA_OPTS:--Xms64m -Xmx768m -XX:MaxDirectMemorySize=256m -XX:+ExitOnOutOfMemoryError -XX:G1PeriodicGCInterval=300000 -XX:-G1PeriodicGCInvokesConcurrent -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=30}"
@@ -178,6 +182,30 @@ services:
       - "${HOST_BIND_ADDR:-127.0.0.1}:${HOST_HTTP_PORT:-18080}:${SERVER_PORT:-8080}"
     networks:
       - starryapi
+
+  # Optional Mihomo (Clash.Meta), off by default: only Clash subscriptions and protocols the Java backend cannot speak
+  # need it. Started by COMPOSE_PROFILES=mihomo (docs/ACCOUNT_EGRESS.md). The official image is used as is; Starry API
+  # never bundles the binary. It shares the service network namespace, so the controller (9090) and the per-node
+  # listeners stay on 127.0.0.1 and nothing is published.
+  mihomo:
+    profiles: ["mihomo"]
+    image: metacubex/mihomo:${MIHOMO_VERSION:-v1.19.32}
+    network_mode: "service:service"
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    environment:
+      # Compose interpolates inactive profiles too, so this must not be required with ":?"; the entrypoint refuses an
+      # empty secret instead.
+      STARRY_EGRESS_CONTROLLER_SECRET: ${STARRY_EGRESS_CONTROLLER_SECRET:-}
+      GOMEMLIMIT: ${MIHOMO_GOMEMLIMIT:-200MiB}
+    volumes:
+      - ./docker/egress/mihomo-entrypoint.sh:/entrypoint.sh:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: ${MIHOMO_MEM_LIMIT:-256m}
 
 networks:
   starryapi:

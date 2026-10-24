@@ -247,6 +247,10 @@ services:
       STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS: ${STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS:-90}
       STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE: ${STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE:-10000}
       STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES: ${STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES:-20}
+      # Optional Mihomo, off by default. Enabled by the "mihomo" profile together with these two settings
+      # (see docs/ACCOUNT_EGRESS.md); every other STARRY_EGRESS_* setting keeps its application default.
+      STARRY_EGRESS_MIHOMO_ENABLED: ${STARRY_EGRESS_MIHOMO_ENABLED:-false}
+      STARRY_EGRESS_CONTROLLER_SECRET: ${STARRY_EGRESS_CONTROLLER_SECRET:-}
       # glibc keeps one malloc arena per thread by default, which inflates resident memory of a busy JVM.
       MALLOC_ARENA_MAX: "2"
       JAVA_OPTS: "${JAVA_OPTS:--Xms64m -Xmx768m -XX:MaxDirectMemorySize=256m -XX:+ExitOnOutOfMemoryError -XX:G1PeriodicGCInterval=300000 -XX:-G1PeriodicGCInvokesConcurrent -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=30}"
@@ -255,6 +259,30 @@ services:
     command: ["sh", "-c", "exec java $${JAVA_OPTS:-} -jar /app/app.jar"]
     networks:
       - starryapi
+
+  # Optional Mihomo (Clash.Meta), off by default: only Clash subscriptions and protocols the Java backend cannot speak
+  # need it. Started by COMPOSE_PROFILES=mihomo (docs/ACCOUNT_EGRESS.md). The official image is used as is; Starry API
+  # never bundles the binary. It shares the service network namespace, so the controller (9090) and the per-node
+  # listeners stay on 127.0.0.1 and nothing is published.
+  mihomo:
+    profiles: ["mihomo"]
+    image: metacubex/mihomo:${MIHOMO_VERSION:-v1.19.32}
+    network_mode: "service:service"
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    environment:
+      # Compose interpolates inactive profiles too, so this must not be required with ":?"; the entrypoint refuses an
+      # empty secret instead.
+      STARRY_EGRESS_CONTROLLER_SECRET: ${STARRY_EGRESS_CONTROLLER_SECRET:-}
+      GOMEMLIMIT: ${MIHOMO_GOMEMLIMIT:-200MiB}
+    volumes:
+      - ./docker/egress/mihomo-entrypoint.sh:/entrypoint.sh:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: ${MIHOMO_MEM_LIMIT:-256m}
 
 networks:
   starryapi:
@@ -277,7 +305,12 @@ Package layout:
 - app/starry-api.jar: executable Spring Boot jar with WebUI files embedded.
 - app/starry-api.jar.sha256: jar checksum.
 - starry-api-webui.tar.gz: standalone WebUI dist archive for inspection or CDN use.
-- docker-compose.artifact.yml: compose file that runs the jar with a JRE image.
+- docker-compose.artifact.yml: compose file that runs the jar with a JRE image. It also defines the optional
+  Mihomo service (off by default; enable with COMPOSE_PROFILES=mihomo, see docs/ACCOUNT_EGRESS.md). The official
+  Mihomo image is pulled at deploy time; no Mihomo binary is shipped here.
+- docker-compose.tls-bridge.yml: experimental, opt-in overlay for the Anthropic TLS fingerprint bridge.
+- docker/egress/: Mihomo entrypoint script and the TLS bridge build context.
+- docs/ACCOUNT_EGRESS.md: account egress deployment and limits.
 - postgres-init/001-starry-api-roles.sh: first-start least-privilege role bootstrap.
 - runtime/recover-data-management.sh: interactive container recovery tool.
 - runtime/recover-data-management.sh.sha256: recovery tool checksum.
@@ -508,7 +541,7 @@ EOF
   cp "$recovery_checksum_path" "$stage_dir/runtime/${RECOVERY_TOOL_NAME}.sha256"
   cp "$info_path" "$stage_dir/build-info.json"
   mkdir -p "$stage_dir/docker/egress" "$stage_dir/docs"
-  cp "$ROOT_DIR/docker-compose.egress.yml" "$stage_dir/docker-compose.egress.yml"
+  cp "$ROOT_DIR/docker-compose.tls-bridge.yml" "$stage_dir/docker-compose.tls-bridge.yml"
   for egress_file in Dockerfile requirements.txt bridge.py mihomo-entrypoint.sh; do
     cp "$ROOT_DIR/docker/egress/$egress_file" "$stage_dir/docker/egress/$egress_file"
   done
@@ -523,7 +556,7 @@ EOF
     printf '%s  %s\n' "$(sha256_file "$stage_dir/runtime/${RECOVERY_TOOL_NAME}")" "runtime/${RECOVERY_TOOL_NAME}"
     printf '%s  %s\n' "$(sha256_file "$stage_dir/runtime/${RECOVERY_TOOL_NAME}.sha256")" "runtime/${RECOVERY_TOOL_NAME}.sha256"
     printf '%s  %s\n' "$(sha256_file "$stage_dir/build-info.json")" "build-info.json"
-    for egress_file in docker-compose.egress.yml docker/egress/Dockerfile docker/egress/requirements.txt docker/egress/bridge.py docker/egress/mihomo-entrypoint.sh docs/ACCOUNT_EGRESS.md; do
+    for egress_file in docker-compose.tls-bridge.yml docker/egress/Dockerfile docker/egress/requirements.txt docker/egress/bridge.py docker/egress/mihomo-entrypoint.sh docs/ACCOUNT_EGRESS.md; do
       printf '%s  %s\n' "$(sha256_file "$stage_dir/$egress_file")" "$egress_file"
     done
   } > "$stage_dir/sha256sums.txt"

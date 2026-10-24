@@ -186,7 +186,7 @@ public class MihomoRuntime {
 
     ObjectNode configuration(List<Route> rows) {
         ObjectNode config = mapper.createObjectNode();
-        config.put("allow-lan", false).put("mode", "rule").put("log-level", "silent")
+        config.put("allow-lan", false).put("mode", "rule").put("log-level", "silent").put("geo-auto-update", false)
             .put("external-controller", properties.getControllerBind()).put("secret", properties.getControllerSecret());
         if (!properties.getInterfaceName().isBlank()) config.put("interface-name", properties.getInterfaceName());
         config.putObject("profile").put("store-selected", false).put("store-fake-ip", false);

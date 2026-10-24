@@ -76,6 +76,7 @@ run_failure_case() {
   local scenario="$1"
   local case_dir="$2"
   local force_env="$3"
+  local enable_mihomo="${4:-false}"
   local status
 
   : > "$case_dir/commands.log"
@@ -86,6 +87,7 @@ run_failure_case() {
   TRACE_FILE="$case_dir/commands.log" \
   HEALTH_FILE="$case_dir/health-count" \
   FORCE_ENV="$force_env" \
+  ENABLE_MIHOMO="$enable_mihomo" \
   STARRY_INSTALL_SERVER_LIBRARY_ONLY=true \
     bash -c '
       source "$INSTALLER"
@@ -244,6 +246,12 @@ grep -q -- '- ./data/documentation:/app/documentation$' "$first_case/docker-comp
   || fail_test "first-install Compose must keep documentation attachments outside the container"
 grep -q 'STARRY_DOCUMENTATION_ATTACHMENT_DIR: /app/documentation$' "$first_case/docker-compose.artifact.yml" \
   || fail_test "first-install Compose must point the service at the mounted documentation directory"
+if grep -Eq '^(COMPOSE_PROFILES|STARRY_EGRESS_[A-Z_]*|MIHOMO_[A-Z_]*)=' "$first_case/.env"; then
+  fail_test "a default install must not add any Mihomo setting to .env"
+fi
+if grep -qi 'mihomo' "$first_case/commands.log"; then
+  fail_test "a default install must not mention the mihomo service in Compose commands"
+fi
 
 # The installer writes this Compose file when it falls back to the single jar; the publisher ships its own copy in
 # the bundle. Both must describe the same stack, otherwise the result depends on which download path was taken.
@@ -308,6 +316,8 @@ printf 'bundle-jar\n' > "$bundle_source/app/starry-api.jar"
 printf '%s  starry-api.jar\n' "$(sha256_file "$bundle_source/app/starry-api.jar")" \
   > "$bundle_source/app/starry-api.jar.sha256"
 printf 'bundle-compose\n' > "$bundle_source/docker-compose.artifact.yml"
+mkdir -p "$bundle_source/docker/egress"
+printf 'bundle-mihomo-entrypoint\n' > "$bundle_source/docker/egress/mihomo-entrypoint.sh"
 printf 'bundle-init\n' > "$bundle_source/postgres-init/001-starry-api-roles.sh"
 printf 'bundle-recovery-tool\n' > "$bundle_source/runtime/recover-data-management.sh"
 printf '%s  recover-data-management.sh\n' \
@@ -334,6 +344,8 @@ cmp -s "$bundle_install/runtime/recover-data-management.sh.sha256" "$bundle_sour
   || fail_test "bundle installation must install the recovery tool checksum"
 [[ -x "$bundle_install/runtime/recover-data-management.sh" ]] \
   || fail_test "bundle recovery tool must be executable"
+cmp -s "$bundle_install/docker/egress/mihomo-entrypoint.sh" "$bundle_source/docker/egress/mihomo-entrypoint.sh" \
+  || fail_test "bundle installation must install the Mihomo entrypoint the Compose file mounts"
 
 fallback_case="$TEST_ROOT/fallback"
 fallback_input="$fallback_case/input"
@@ -436,4 +448,302 @@ assert_bundle_rejected \
   parent-path \
   "contains a parent-directory path"
 
-printf '[install-server-test] rollback, bundle, and fallback scenarios passed\n'
+# --- Optional Mihomo component ---------------------------------------------------------------------------------------
+
+# Runs one installer function in library mode against an install directory; stdout and stderr land in $output_file.
+run_installer_function() {
+  local install_dir="$1"
+  local enable_mihomo="$2"
+  local output_file="$3"
+  local function_name="$4"
+  local status
+
+  set +e
+  INSTALL_DIR="$install_dir" \
+  ENABLE_MIHOMO="$enable_mihomo" \
+  FORCE_ENV=false \
+  STARRY_INSTALL_SERVER_LIBRARY_ONLY=true \
+    bash -c 'source "$1"; "$2"' _ "$INSTALLER" "$function_name" > "$output_file" 2>&1
+  status=$?
+  set -e
+  return "$status"
+}
+
+env_count() {
+  grep -c -E "^$2=" "$1" || true
+}
+
+env_value() {
+  grep -E "^$2=" "$1" | tail -n 1 | cut -d= -f2-
+}
+
+assert_mihomo_env() {
+  local env_file="$1"
+  local label="$2"
+  local secret
+
+  [[ "$(env_count "$env_file" COMPOSE_PROFILES)" -eq 1 ]] \
+    || fail_test "$label: COMPOSE_PROFILES must be assigned exactly once"
+  [[ "$(env_count "$env_file" STARRY_EGRESS_MIHOMO_ENABLED)" -eq 1 ]] \
+    || fail_test "$label: STARRY_EGRESS_MIHOMO_ENABLED must be assigned exactly once"
+  [[ "$(env_count "$env_file" STARRY_EGRESS_CONTROLLER_SECRET)" -eq 1 ]] \
+    || fail_test "$label: STARRY_EGRESS_CONTROLLER_SECRET must be assigned exactly once"
+  [[ "$(env_value "$env_file" STARRY_EGRESS_MIHOMO_ENABLED)" == "true" ]] \
+    || fail_test "$label: the backend switch must be true"
+  secret="$(env_value "$env_file" STARRY_EGRESS_CONTROLLER_SECRET)"
+  [[ "$secret" =~ ^[A-Za-z0-9_-]{32,}$ ]] \
+    || fail_test "$label: the controller secret must be long and accepted by the Mihomo entrypoint"
+}
+
+file_mode() {
+  ls -ld "$1" | cut -c1-10
+}
+
+# Fresh install with ENABLE_MIHOMO=true writes the three lines, and the secret never reaches the log.
+mihomo_fresh="$TEST_ROOT/mihomo-fresh"
+mkdir -p "$mihomo_fresh"
+run_installer_function "$mihomo_fresh" true "$mihomo_fresh.log" write_env_file \
+  || fail_test "a fresh install with ENABLE_MIHOMO=true failed: $(cat "$mihomo_fresh.log")"
+assert_mihomo_env "$mihomo_fresh/.env" "fresh install"
+[[ "$(env_value "$mihomo_fresh/.env" COMPOSE_PROFILES)" == "mihomo" ]] \
+  || fail_test "fresh install: COMPOSE_PROFILES must select the mihomo profile"
+grep -q '^POSTGRES_BOOTSTRAP_PASSWORD=' "$mihomo_fresh/.env" \
+  || fail_test "fresh install with Mihomo must still write the database settings"
+[[ "$(file_mode "$mihomo_fresh/.env")" == "-rw-------" ]] \
+  || fail_test "the .env file with the Mihomo secret must stay private"
+if grep -Fq "$(env_value "$mihomo_fresh/.env" STARRY_EGRESS_CONTROLLER_SECRET)" "$mihomo_fresh.log"; then
+  fail_test "the controller secret must never be printed"
+fi
+[[ ! -e "$mihomo_fresh/.env.previous" ]] \
+  || fail_test "a fresh install has no previous .env to keep"
+if ls "$mihomo_fresh"/.env.incoming.* >/dev/null 2>&1; then
+  fail_test "a fresh install must not leave temporary .env files behind"
+fi
+
+# The same options on a fresh install with the default leave Mihomo out entirely.
+mihomo_default="$TEST_ROOT/mihomo-default"
+mkdir -p "$mihomo_default"
+run_installer_function "$mihomo_default" false "$mihomo_default.log" write_env_file \
+  || fail_test "a default fresh install failed: $(cat "$mihomo_default.log")"
+if grep -Eq '^(COMPOSE_PROFILES|STARRY_EGRESS_[A-Z_]*)=' "$mihomo_default/.env"; then
+  fail_test "a default fresh install must not write Mihomo settings"
+fi
+
+# Enabling on an existing .env appends the lines, keeps the old file as .env.previous and does not touch the rest.
+mihomo_existing="$TEST_ROOT/mihomo-existing"
+prepare_existing_deployment "$mihomo_existing" postgresql
+chmod 0644 "$mihomo_existing/.env"
+run_installer_function "$mihomo_existing" true "$mihomo_existing.log" write_env_file \
+  || fail_test "enabling Mihomo on an existing .env failed: $(cat "$mihomo_existing.log")"
+assert_mihomo_env "$mihomo_existing/.env" "existing .env"
+cmp -s "$mihomo_existing/.env.previous" "$mihomo_existing/expected.env" \
+  || fail_test "enabling Mihomo must keep the untouched .env as .env.previous"
+original_lines="$(wc -l < "$mihomo_existing/expected.env" | tr -d '[:space:]')"
+head -n "$original_lines" "$mihomo_existing/.env" | cmp -s - "$mihomo_existing/expected.env" \
+  || fail_test "enabling Mihomo must only append to an existing .env"
+[[ "$(env_value "$mihomo_existing/.env" POSTGRES_PASSWORD)" == "old-application-password" ]] \
+  || fail_test "enabling Mihomo must keep the database credentials"
+[[ "$(file_mode "$mihomo_existing/.env")" == "-rw-------" ]] \
+  || fail_test "the updated .env must be private"
+if grep -Fq "$(env_value "$mihomo_existing/.env" STARRY_EGRESS_CONTROLLER_SECRET)" "$mihomo_existing.log"; then
+  fail_test "the controller secret must never be printed when updating an existing .env"
+fi
+if ls "$mihomo_existing"/.env.incoming.* >/dev/null 2>&1; then
+  fail_test "enabling Mihomo must not leave temporary .env files behind"
+fi
+
+# Running it again adds nothing: no duplicate keys, same secret, same file.
+cp "$mihomo_existing/.env" "$mihomo_existing/after-first.env"
+run_installer_function "$mihomo_existing" true "$mihomo_existing.log" write_env_file \
+  || fail_test "repeating ENABLE_MIHOMO=true failed: $(cat "$mihomo_existing.log")"
+cmp -s "$mihomo_existing/.env" "$mihomo_existing/after-first.env" \
+  || fail_test "repeating ENABLE_MIHOMO=true must leave .env unchanged"
+assert_mihomo_env "$mihomo_existing/.env" "repeated enable"
+
+# The default never changes the choice: an enabled deployment stays enabled, a disabled one stays disabled.
+run_installer_function "$mihomo_existing" false "$mihomo_existing.log" write_env_file \
+  || fail_test "a default run on an enabled deployment failed: $(cat "$mihomo_existing.log")"
+cmp -s "$mihomo_existing/.env" "$mihomo_existing/after-first.env" \
+  || fail_test "ENABLE_MIHOMO=false must not remove an existing Mihomo choice"
+mihomo_untouched="$TEST_ROOT/mihomo-untouched"
+prepare_existing_deployment "$mihomo_untouched" postgresql
+run_installer_function "$mihomo_untouched" false "$mihomo_untouched.log" write_env_file \
+  || fail_test "a default run on an existing .env failed: $(cat "$mihomo_untouched.log")"
+cmp -s "$mihomo_untouched/.env" "$mihomo_untouched/expected.env" \
+  || fail_test "ENABLE_MIHOMO=false must not change an existing .env"
+
+# Settings that are already partly there are merged, not duplicated; the existing secret is kept.
+mihomo_merge="$TEST_ROOT/mihomo-merge"
+prepare_existing_deployment "$mihomo_merge" postgresql
+cat >> "$mihomo_merge/.env" <<'EOF'
+COMPOSE_PROFILES="monitoring"
+STARRY_EGRESS_MIHOMO_ENABLED=false
+STARRY_EGRESS_CONTROLLER_SECRET=Existing_secret-1234567890abcdef
+EOF
+run_installer_function "$mihomo_merge" true "$mihomo_merge.log" write_env_file \
+  || fail_test "merging Mihomo settings failed: $(cat "$mihomo_merge.log")"
+assert_mihomo_env "$mihomo_merge/.env" "merged .env"
+[[ "$(env_value "$mihomo_merge/.env" COMPOSE_PROFILES)" == "monitoring,mihomo" ]] \
+  || fail_test "merging must keep the other Compose profiles and add mihomo"
+[[ "$(env_value "$mihomo_merge/.env" STARRY_EGRESS_CONTROLLER_SECRET)" == "Existing_secret-1234567890abcdef" ]] \
+  || fail_test "an existing controller secret must be kept"
+
+# A secret the Mihomo entrypoint would refuse is rejected before anything changes.
+mihomo_badsecret="$TEST_ROOT/mihomo-badsecret"
+prepare_existing_deployment "$mihomo_badsecret" postgresql
+printf 'STARRY_EGRESS_CONTROLLER_SECRET=bad secret$value\n' >> "$mihomo_badsecret/.env"
+cp "$mihomo_badsecret/.env" "$mihomo_badsecret/expected-bad.env"
+if run_installer_function "$mihomo_badsecret" true "$mihomo_badsecret.log" write_env_file; then
+  fail_test "an unusable controller secret must be rejected"
+fi
+grep -Fq 'STARRY_EGRESS_CONTROLLER_SECRET' "$mihomo_badsecret.log" \
+  || fail_test "the rejection must name the offending setting"
+if grep -Fq 'bad secret' "$mihomo_badsecret.log"; then
+  fail_test "a rejected secret must not be echoed"
+fi
+cmp -s "$mihomo_badsecret/.env" "$mihomo_badsecret/expected-bad.env" \
+  || fail_test "a rejected secret must leave .env untouched"
+[[ ! -e "$mihomo_badsecret/.env.previous" ]] \
+  || fail_test "a rejected secret must not rewrite .env.previous"
+
+# The option itself is validated.
+if run_installer_function "$TEST_ROOT/mihomo-fresh" maybe "$TEST_ROOT/mihomo-option.log" validate_enable_mihomo; then
+  fail_test "ENABLE_MIHOMO must be true or false"
+fi
+
+# The state shown in the final summary follows .env.
+mihomo_state_of() {
+  run_installer_function "$1" false "$1.state" mihomo_state_line || fail_test "could not read the Mihomo state"
+  cat "$1.state"
+}
+[[ "$(mihomo_state_of "$mihomo_default")" == disabled* ]] || fail_test "summary must report a default install as disabled"
+[[ "$(mihomo_state_of "$mihomo_fresh")" == enabled* ]] || fail_test "summary must report an enabled install as enabled"
+mihomo_partial="$TEST_ROOT/mihomo-partial"
+mkdir -p "$mihomo_partial"
+printf 'COMPOSE_PROFILES=mihomo\n' > "$mihomo_partial/.env"
+[[ "$(mihomo_state_of "$mihomo_partial")" == INCOMPLETE* ]] || fail_test "summary must flag a half-configured Mihomo"
+
+# Deployment: the profile's service is not started by naming other services, so the installer names it and recreates it
+# with the service it shares a network namespace with.
+mihomo_deploy="$TEST_ROOT/mihomo-deploy"
+mkdir -p "$mihomo_deploy"
+cp "$mihomo_fresh/.env" "$mihomo_deploy/.env"
+: > "$mihomo_deploy/commands.log"
+INSTALL_DIR="$mihomo_deploy" \
+INSTALLER="$INSTALLER" \
+TRACE_FILE="$mihomo_deploy/commands.log" \
+STARRY_INSTALL_SERVER_LIBRARY_ONLY=true \
+  bash -c '
+    source "$INSTALLER"
+    COMPOSE_CMD=(mock-compose)
+    root_cmd() { printf "%s\n" "$*" >> "$TRACE_FILE"; }
+    wait_for_health() { return 0; }
+    deploy_stack
+  ' > "$mihomo_deploy/output.log" 2>&1
+grep -q ' up -d --build --force-recreate service mihomo$' "$mihomo_deploy/commands.log" \
+  || fail_test "with Mihomo enabled the service and mihomo must be recreated together"
+grep -q ' up -d --remove-orphans postgres service mihomo$' "$mihomo_deploy/commands.log" \
+  || fail_test "with Mihomo enabled the final up must include mihomo"
+grep -q '^Mihomo egress: *enabled' "$mihomo_deploy/output.log" \
+  || fail_test "the deployment summary must say Mihomo is enabled"
+if grep -Fq "$(env_value "$mihomo_deploy/.env" STARRY_EGRESS_CONTROLLER_SECRET)" "$mihomo_deploy/output.log" "$mihomo_deploy/commands.log"; then
+  fail_test "the deployment must not print the controller secret"
+fi
+if grep -q '^Mihomo egress: *disabled' "$mihomo_deploy/output.log"; then
+  fail_test "an enabled deployment must not be summarised as disabled"
+fi
+success_summary="$TEST_ROOT/success-summary.log"
+INSTALL_DIR="$success_case" \
+STARRY_INSTALL_SERVER_LIBRARY_ONLY=true \
+  bash -c '
+    source "$1"
+    COMPOSE_CMD=(mock-compose)
+    root_cmd() { :; }
+    wait_for_health() { return 0; }
+    deploy_stack
+  ' _ "$INSTALLER" > "$success_summary" 2>&1
+grep -q '^Mihomo egress: *disabled' "$success_summary" \
+  || fail_test "the deployment summary must say Mihomo is disabled by default"
+
+# A failed deployment that had started Mihomo restores the old .env, and a Mihomo container left over from the failed
+# attempt is removed explicitly because Compose does not treat an inactive profile's container as an orphan.
+mihomo_rollback="$TEST_ROOT/mihomo-rollback"
+prepare_existing_deployment "$mihomo_rollback" postgresql
+prepare_new_artifact "$mihomo_rollback"
+run_failure_case service-health "$mihomo_rollback" false true
+assert_existing_deployment_restored "$mihomo_rollback" 2
+grep -q ' up -d --build --force-recreate service mihomo$' "$mihomo_rollback/commands.log" \
+  || fail_test "the failed attempt must have started Mihomo with the service"
+grep -q ' rm -sf mihomo$' "$mihomo_rollback/commands.log" \
+  || fail_test "rolling back to a deployment without Mihomo must remove the Mihomo container"
+if grep -q 'mihomo' "$mihomo_rollback/.env"; then
+  fail_test "the restored .env must not mention Mihomo"
+fi
+
+# ensure_mihomo_support: refuses a Compose file that cannot run Mihomo, and supplies the entrypoint the container mounts.
+mihomo_support="$TEST_ROOT/mihomo-support"
+mkdir -p "$mihomo_support/input"
+cp "$mihomo_fresh/.env" "$mihomo_support/.env"
+printf 'services:\n  service:\n    image: x\n' > "$mihomo_support/docker-compose.artifact.yml"
+if run_installer_function "$mihomo_support" false "$mihomo_support.log" ensure_mihomo_support; then
+  fail_test "a bundle without the mihomo service must be refused when Mihomo is enabled"
+fi
+grep -q 'does not define the mihomo service' "$mihomo_support.log" \
+  || fail_test "the refusal must explain that the bundle has no mihomo service"
+printf '#!/bin/sh\necho entrypoint\n' > "$mihomo_support/input/mihomo-entrypoint.sh"
+compose_template "$INSTALLER" write_compose_file > "$mihomo_support/docker-compose.artifact.yml"
+mkdir -p "$mihomo_support/docker/egress/mihomo-entrypoint.sh"   # what Docker leaves behind for a missing mount source
+INSTALL_DIR="$mihomo_support" \
+MIHOMO_ENTRYPOINT_URL="$mihomo_support/input/mihomo-entrypoint.sh" \
+STARRY_INSTALL_SERVER_LIBRARY_ONLY=true \
+  bash -c '
+    source "$1"
+    download_file() { cp -- "$1" "$2"; }
+    ensure_mihomo_support
+  ' _ "$INSTALLER" > "$mihomo_support.log" 2>&1 \
+  || fail_test "ensure_mihomo_support failed: $(cat "$mihomo_support.log")"
+[[ -f "$mihomo_support/docker/egress/mihomo-entrypoint.sh" ]] \
+  || fail_test "the Mihomo entrypoint must be installed as a file"
+cmp -s "$mihomo_support/docker/egress/mihomo-entrypoint.sh" "$mihomo_support/input/mihomo-entrypoint.sh" \
+  || fail_test "the downloaded Mihomo entrypoint must be installed unchanged"
+rm -f "$mihomo_support/.env"
+rm -rf "$mihomo_support/docker"
+run_installer_function "$mihomo_support" false "$mihomo_support.log" ensure_mihomo_support \
+  || fail_test "without Mihomo the installer must not require the entrypoint or the mihomo service"
+[[ ! -e "$mihomo_support/docker" ]] \
+  || fail_test "without Mihomo the installer must not fetch the entrypoint"
+
+# The three Compose definitions of the mihomo service and of the service's egress settings must not drift apart, and
+# nothing that a profile-less deployment interpolates may be mandatory.
+mihomo_block() {
+  awk '/^  # Optional Mihomo \(Clash.Meta\)/ { on = 1 } /^networks:/ { on = 0 } on { print }' "$1"
+}
+template_file="$TEST_ROOT/installer-compose-template.yml"
+compose_template "$INSTALLER" write_compose_file > "$template_file"
+[[ -n "$(mihomo_block "$template_file")" ]] || fail_test "the installer Compose template must define the mihomo service"
+cmp -s <(mihomo_block "${ROOT_DIR}/docker-compose.yml") <(mihomo_block "$template_file") \
+  || fail_test "docker-compose.yml and the installer template must define the same mihomo service"
+for compose_source in "${ROOT_DIR}/docker-compose.yml" "$template_file"; do
+  grep -q 'profiles: \["mihomo"\]' "$compose_source" \
+    || fail_test "the mihomo service must belong to the mihomo profile in $compose_source"
+  grep -q 'image: metacubex/mihomo:${MIHOMO_VERSION:-v1.19.32}$' "$compose_source" \
+    || fail_test "the mihomo service must use the pinned official image in $compose_source"
+  grep -q 'STARRY_EGRESS_MIHOMO_ENABLED: ${STARRY_EGRESS_MIHOMO_ENABLED:-false}$' "$compose_source" \
+    || fail_test "the service must default the Mihomo switch to false in $compose_source"
+  if grep -E 'STARRY_EGRESS_|MIHOMO_' "$compose_source" | grep -q ':?'; then
+    fail_test "Compose interpolates inactive profiles: no Mihomo setting may be mandatory in $compose_source"
+  fi
+done
+if grep -E 'STARRY_EGRESS_TLS|STARRY_TLS_SECRET|tls-bridge' "${ROOT_DIR}/docker-compose.yml" "$template_file" >/dev/null; then
+  fail_test "the TLS bridge must not be coupled to the base Compose files"
+fi
+[[ ! -e "${ROOT_DIR}/docker-compose.egress.yml" ]] \
+  || fail_test "docker-compose.egress.yml was replaced by docker-compose.tls-bridge.yml"
+grep -q 'STARRY_TLS_SECRET: ${STARRY_TLS_SECRET:?' "${ROOT_DIR}/docker-compose.tls-bridge.yml" \
+  || fail_test "the opt-in TLS bridge overlay must require its secret"
+if grep -vE '^[[:space:]]*#' "${ROOT_DIR}/docker-compose.tls-bridge.yml" | grep -qi 'mihomo'; then
+  fail_test "the TLS bridge overlay must not depend on Mihomo"
+fi
+
+
+printf '[install-server-test] rollback, bundle, fallback, and Mihomo scenarios passed\n'

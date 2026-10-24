@@ -78,9 +78,7 @@
             }}
           </p>
           <p class="status-cell__note">
-            {{
-              t('启用：部署 Mihomo 可选组件，设置 STARRY_EGRESS_MIHOMO_ENABLED=true 并重启后端。')
-            }}
+            {{ t('启用：安装时设置 ENABLE_MIHOMO=true，或在 .env 启用 mihomo profile，详见文档。') }}
           </p>
         </template>
       </div>

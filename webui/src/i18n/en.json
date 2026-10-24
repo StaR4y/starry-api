@@ -150,7 +150,7 @@
   "尚未加载节点": "No nodes loaded yet",
   "需要 Mihomo 的 {p0} 个节点暂时无法使用。": "{p0} nodes that need Mihomo cannot be used for now.",
   "需要 Mihomo 的节点（VLESS、Hysteria2、TUIC 等）暂时无法使用。": "Nodes that need Mihomo (VLESS, Hysteria2, TUIC, etc.) cannot be used for now.",
-  "启用：部署 Mihomo 可选组件，设置 STARRY_EGRESS_MIHOMO_ENABLED=true 并重启后端。": "To enable: deploy the optional Mihomo component, set STARRY_EGRESS_MIHOMO_ENABLED=true and restart the backend.",
+  "启用：安装时设置 ENABLE_MIHOMO=true，或在 .env 启用 mihomo profile，详见文档。": "To enable: set ENABLE_MIHOMO=true when installing, or enable the mihomo profile in .env. See the documentation.",
   "TLS 组件": "TLS component",
   "未提供可选的 TLS 指纹。": "No TLS profiles are available.",
   "Anthropic 账号的 TLS 指纹需要启用 TLS 组件。": "TLS fingerprints for Anthropic accounts need the TLS component enabled.",

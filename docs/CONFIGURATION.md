@@ -4,7 +4,7 @@ Starry API 的运行时配置主要来自**环境变量**，由 `service/src/mai
 
 > **旧的 `KIRO_` 变量名**：网关的通用设置以前沿用历史上的 `KIRO_` 前缀（如 `KIRO_WEBUI_URL`），现在统一为 `STARRY_` 前缀（如 `STARRY_WEBUI_URL`）；Kiro 专属的端点选择由 `KIRO_PREFERRED_ENDPOINT` 改名为 `STARRY_KIRO_PREFERRED_ENDPOINT`。旧名字**仍然有效**：新名字没有设置时，服务会读取对应的 `KIRO_` 变量，所以已有的 `.env` 不用改。两个都设置时以 `STARRY_` 为准。新部署请只用 `STARRY_` 名字。
 
-**目录**：[最常用的配置](#最常用的配置) · [服务器与 JVM](#服务器与-jvm) · [PostgreSQL 17](#postgresql-17) · [插件](#插件运行时) · [备份与恢复](#数据库备份与恢复) · [模型目录与价格](#模型目录与官方价格) · [上游运行时](#上游运行时与适配器) · [注册与 SMTP](#注册与-smtp-设置) · [支付与计费](#支付与计费) · [工单通知](#工单通知) · [请求分析与保留](#请求分析与保留) · [本地环境示例](#本地环境示例) · [生产环境建议](#生产环境建议)
+**目录**：[最常用的配置](#最常用的配置) · [服务器与 JVM](#服务器与-jvm) · [出站代理组件](#出站代理组件可选) · [PostgreSQL 17](#postgresql-17) · [插件](#插件运行时) · [备份与恢复](#数据库备份与恢复) · [模型目录与价格](#模型目录与官方价格) · [上游运行时](#上游运行时与适配器) · [注册与 SMTP](#注册与-smtp-设置) · [支付与计费](#支付与计费) · [工单通知](#工单通知) · [请求分析与保留](#请求分析与保留) · [本地环境示例](#本地环境示例) · [生产环境建议](#生产环境建议)
 
 ---
 
@@ -53,6 +53,24 @@ JAVA_OPTS="-Xms64m -Xmx768m -XX:MaxDirectMemorySize=256m -XX:+ExitOnOutOfMemoryE
 并发更高或有大量长时间流式响应时，把 `SERVICE_MEM_LIMIT` 调到 `3g` 并相应调大 `-Xmx`。**不要**把一个没有上限的宿主机 / 容器的 75% 都分给 Java 堆：Netty 的直接缓冲、元空间、代码缓存、线程栈和原生库都需要堆之外的内存。实测的数据基线、压测结果、监控阈值见 [性能与内存基线](PERFORMANCE.md)。
 
 **用户文档附件目录**：`STARRY_DOCUMENTATION_ATTACHMENT_DIR`（默认 `${user.home}/.starry-api/documentation`）。Compose 把 `./data/documentation` 挂载到 `/app/documentation`。请保持持久，并**与 PostgreSQL 分开备份**。详见 [用户文档系统](USER_DOCUMENTATION.md)。
+
+---
+
+## 出站代理组件（可选）
+
+账号出站代理里，HTTP / HTTPS / SOCKS5 节点由后端直接连接，不需要额外组件。Mihomo（Clash.Meta）只用于 Java 无法自己执行的协议（SS、VMess、VLESS、Hysteria2 等），**默认关闭**，由 Compose profile 启用。部署步骤、关闭方法和资源建议见 [账号出站代理](ACCOUNT_EGRESS.md#部署)。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `ENABLE_MIHOMO` | `false` | 仅一键安装脚本使用。`true` 时在 `.env` 写入下面三项并部署 Mihomo；`false` 不改动已有选择 |
+| `COMPOSE_PROFILES` | 空 | Compose 读取的 profile 列表。含 `mihomo` 时才会启动 Mihomo 容器 |
+| `STARRY_EGRESS_MIHOMO_ENABLED` | `false` | 后端是否使用 Mihomo。须与 profile 一起打开 |
+| `STARRY_EGRESS_CONTROLLER_SECRET` | 空 | Mihomo 控制端密钥，启用时必填，只含字母、数字、`_`、`-`。安装脚本自动生成，不会打印 |
+| `MIHOMO_VERSION` | `v1.19.32` | 官方镜像 `metacubex/mihomo` 的标签 |
+| `MIHOMO_MEM_LIMIT` | `256m` | Mihomo 容器的内存上限（`mem_limit`） |
+| `MIHOMO_GOMEMLIMIT` | `200MiB` | Mihomo 的 Go 运行时内存软上限，应低于 `MIHOMO_MEM_LIMIT` |
+
+启用只需要 `.env` 里的三行：`COMPOSE_PROFILES=mihomo`、`STARRY_EGRESS_MIHOMO_ENABLED=true`、`STARRY_EGRESS_CONTROLLER_SECRET=<随机值>`。默认的 256m / 200MiB 适合约 2000 路并发流和普通请求体；多 MB 上传与大量并发流同时出现时用 `512m` / `400MiB`。其余 `STARRY_EGRESS_*` 变量保持应用默认值，一般不用改。
 
 ---
 

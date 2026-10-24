@@ -136,6 +136,7 @@ sudo env \
 | `PUBLIC_BASE_URL` | 空 | 公网 HTTPS 地址，用于启动日志里的提示 |
 | `FORCE_ENV` | `false` | 在数据库初始化**之前**重新生成 `.env`；或重新启用上次失败部署保留的凭据。已初始化的集群见下文 |
 | `INSTALL_DOCKER` | `true` | 缺少 Docker 时是否自动安装 |
+| `ENABLE_MIHOMO` | `false` | 设为 `true` 时启用可选的 Mihomo 出站组件：在 `.env` 写入 `COMPOSE_PROFILES=mihomo`、`STARRY_EGRESS_MIHOMO_ENABLED=true` 和随机生成的 `STARRY_EGRESS_CONTROLLER_SECRET`（不会打印），并部署官方 `metacubex/mihomo` 镜像。已有 `.env` 会先保存为 `.env.previous` 再追加，重复执行不产生重复项；`false` 不改动已有选择。详见 [账号出站代理](ACCOUNT_EGRESS.md#部署) |
 | `GITHUB_TOKEN` | 空 | 私有仓库下载用的 Token |
 | `GITHUB_TOKEN_FILE` | `${INSTALL_DIR}/.github-token` | `GITHUB_TOKEN` 为空时读取的 Token 文件 |
 | `REPO_URL` | `https://github.com/StaR4y/starry-api.git` | 用来推导 raw 下载地址的仓库 |
@@ -150,6 +151,7 @@ sudo env \
 | `ARTIFACT_URL` / `CHECKSUM_URL` | 单独的 jar 及校验和（仅在整包不可用时的回退） |
 | `BUILD_INFO_URL` | `${REPO_RAW_BASE}/artifacts/build-info.json` |
 | `RECOVERY_TOOL_URL` / `RECOVERY_TOOL_CHECKSUM_URL` | 恢复工具及校验和（仅回退路径使用） |
+| `MIHOMO_ENTRYPOINT_URL` | Mihomo 启动脚本（仅回退路径且启用 Mihomo 时使用），默认 `${REPO_RAW_BASE}/docker/egress/mihomo-entrypoint.sh` |
 
 ---
 

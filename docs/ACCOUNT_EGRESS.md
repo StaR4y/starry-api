@@ -45,40 +45,91 @@ Anthropic 可设置 `maxSessions` 与 `sessionIdleSeconds`：例如 600 秒内�
 
 ## 部署
 
-可选组件默认关闭。普通直连部署不增加进程；旧 `proxyUrl` 的 HTTP / SOCKS5 连接由 Java 直接执行，不依赖 Mihomo。
+Mihomo 是可选组件，**默认关闭**，普通直连部署不增加任何进程。HTTP / HTTPS / SOCKS5 节点（含旧 `proxyUrl`）由 Java 直接连接，不依赖它；只有 Clash 订阅里的 SS、VMess、VLESS、Hysteria2 等 Java 无法自己执行的协议才需要。部署时拉取官方镜像 `metacubex/mihomo`（GPL-3.0，固定为 `v1.19.32`）；本项目的产物不包含 Mihomo 二进制。
 
-在部署使用的 `.env` 中设置两个不同的随机密钥：`STARRY_EGRESS_CONTROLLER_SECRET`、`STARRY_TLS_SECRET`。建议各用 `openssl rand -hex 32` 生成；控制密钥限定字母、数字、下划线、短横线。
+### 启用
 
-源码部署：
-
-```bash
-docker compose -f docker-compose.yml -f docker-compose.egress.yml up -d --build
-```
-
-新版预构建 bundle 包含 overlay、`docker/egress` 和本文；在解压目录运行：
+一键安装脚本加 `ENABLE_MIHOMO=true`：
 
 ```bash
-docker compose -f docker-compose.artifact.yml -f docker-compose.egress.yml up -d --build
+curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
+  | sudo env ENABLE_MIHOMO=true bash
 ```
 
-Mihomo 与 TLS bridge 共享 `service` 网络命名空间，控制端口 9090、bridge 9091、节点监听 20000..29999 全部绑定 `127.0.0.1`，不映射公网端口。两组件分别限额 256 MiB / 512 MiB，容器只读文件系统、无附加 capability。TLS bridge 非 root 运行，最多 16 个请求并发、64 MiB 请求体总预算、单请求 16 MiB，并关闭环境代理和自动重定向。
+脚本只改 `.env`，且不会打印密钥：新建的 `.env` 直接带下面三行；已有 `.env` 先保存为 `.env.previous`，再追加缺少的行，已有的密钥和其他 Compose profile 保持不变，重复执行不产生重复项。默认的 `ENABLE_MIHOMO=false` 不改动已有选择，启用过的部署之后正常更新仍保留 Mihomo；安装结束的摘要会写明 Mihomo 是否启用。
 
-在 IDE / jar 环境运行时，需自行把 Mihomo 与 bridge 放在服务可访问的本地地址，并配置：
+也可以手动在部署使用的 `.env` 加三行（密钥只含字母、数字、下划线、短横线，例如 `openssl rand -hex 24`），再启动：
+
+```dotenv
+COMPOSE_PROFILES=mihomo
+STARRY_EGRESS_MIHOMO_ENABLED=true
+STARRY_EGRESS_CONTROLLER_SECRET=<随机十六进制>
+```
+
+```bash
+docker compose -f docker-compose.artifact.yml up -d   # 服务器 / 预构建部署包
+docker compose up -d --build                          # 源码部署，同一个 profile
+```
+
+Compose 把脚本挂载进容器，所以 `docker/egress/mihomo-entrypoint.sh` 必须存在于部署目录：源码部署自带；服务器上由安装脚本在每次更新时安装，缺失时重新运行安装脚本即可（否则 Docker 会在该路径建一个空目录，容器无法启动）。
+
+Compose 从 `.env` 读取 `COMPOSE_PROFILES`，之后的 `logs`、`down` 等命令都会包含 `mihomo`。Mihomo 与 `service` 共享网络命名空间，因此重建 `service` 时必须一起重建：用不带服务名的 `up -d`，或 `up -d --force-recreate service mihomo`（只重建 `service` 会让 Mihomo 留在旧的命名空间里）。安装脚本已按此处理。
+
+控制端口 9090、节点监听 20000..29999 全部绑定 `127.0.0.1`，不映射公网端口。容器只读文件系统、无附加 capability、`no-new-privileges`；配置里 `geo-auto-update: false`、日志级别 `silent`，不会主动下载地理数据。
+
+### 关闭
+
+删掉 `.env` 里的三行（至少去掉 `COMPOSE_PROFILES` 里的 `mihomo`），然后：
+
+```bash
+docker compose -f docker-compose.artifact.yml rm -sf mihomo
+docker compose -f docker-compose.artifact.yml up -d
+```
+
+源码部署去掉 `-f` 参数。Compose 不把未启用 profile 的容器当作孤儿，`up --remove-orphans` 不会删除它，所以要显式 `rm -sf`。关闭后需要 Mihomo 的节点显示不可用，账号绑定保留，请求失败而不是直连。
+
+### 资源
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `MIHOMO_MEM_LIMIT` | `256m` | 容器内存上限 |
+| `MIHOMO_GOMEMLIMIT` | `200MiB` | Go 运行时软上限，应低于容器上限 |
+| `MIHOMO_VERSION` | `v1.19.32` | 官方镜像标签；更换版本前先自行验证 |
+
+默认值（256m / 200MiB）实测可承载约 2000 路并发流和普通请求体，常驻内存约 130 MB 且无错误。多 MB 请求体的上传与大量并发流同时出现时，改用 `MIHOMO_MEM_LIMIT=512m`、`MIHOMO_GOMEMLIMIT=400MiB`。单个实例建议不超过约 500 个需要 Mihomo 的节点（软上限），不要超过 1000 个（硬上限）。
+
+### 配置变量
 
 | 变量 | 默认值 |
 | --- | --- |
+| `ENABLE_MIHOMO` | `false`（仅安装脚本） |
+| `COMPOSE_PROFILES` | 空；含 `mihomo` 时 Compose 才启动 Mihomo 容器 |
 | `STARRY_EGRESS_MIHOMO_ENABLED` | `false` |
 | `STARRY_EGRESS_CONTROLLER_URL` | `http://127.0.0.1:9090` |
 | `STARRY_EGRESS_CONTROLLER_BIND` | `127.0.0.1:9090` |
 | `STARRY_EGRESS_CONTROLLER_SECRET` | 空；启用时必填 |
 | `STARRY_EGRESS_LISTENER_HOST` / `STARRY_EGRESS_LISTENER_BIND` | `127.0.0.1` |
-| `STARRY_EGRESS_TLS_ENABLED` | `false` |
-| `STARRY_EGRESS_TLS_URL` | `http://127.0.0.1:9091` |
-| `STARRY_TLS_SECRET` | 空；启用时必填 |
 | `STARRY_EGRESS_PROBE_URL` | `https://api.ipify.org?format=json` |
 | `STARRY_EGRESS_ACTIVATION_FAILURE_BACKOFF` | `5s` |
 
-不能把独立 Docker 容器中的 `127.0.0.1` 当成宿主机回环地址。推荐直接使用 overlay，避免遗漏监听端口与网络配置。
+Compose 只传 `STARRY_EGRESS_MIHOMO_ENABLED` 和 `STARRY_EGRESS_CONTROLLER_SECRET`，其余沿用应用默认值（均指向 `127.0.0.1`）。在 IDE / jar 环境运行时，需自行把 Mihomo 放在服务可访问的本地地址并设置这些变量。不能把独立 Docker 容器中的 `127.0.0.1` 当成宿主机回环地址，推荐直接使用 Compose profile。
+
+### TLS bridge（实验性）
+
+Anthropic 的 TLS 指纹 bridge（curl_cffi）是单独的实验性 overlay，与 Mihomo 互不依赖，也不是默认部署的一部分。在 `.env` 设置 `STARRY_TLS_SECRET`（`openssl rand -hex 32`）后叠加使用，之后的每条 `docker compose` 命令都要带同样的 `-f`：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.tls-bridge.yml up -d --build
+docker compose -f docker-compose.artifact.yml -f docker-compose.tls-bridge.yml up -d --build
+```
+
+预构建 bundle 包含 overlay、`docker/egress` 和本文，在解压目录运行第二条。bridge 与 `service` 共享网络命名空间，监听 `127.0.0.1:9091`，限额 512 MiB，容器只读文件系统、无附加 capability，非 root 运行，最多 16 个请求并发、64 MiB 请求体总预算、单请求 16 MiB，并关闭环境代理和自动重定向。
+
+| 变量 | 默认值 |
+| --- | --- |
+| `STARRY_EGRESS_TLS_ENABLED` | `false`；overlay 设为 `true` |
+| `STARRY_EGRESS_TLS_URL` | `http://127.0.0.1:9091` |
+| `STARRY_TLS_SECRET` | 空；启用时必填 |
 
 ## TLS 与失败处理
 

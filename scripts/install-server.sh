@@ -30,6 +30,7 @@ BUILD_INFO_URL="${BUILD_INFO_URL:-${REPO_RAW_BASE%/}/artifacts/build-info.json}"
 POSTGRES_INIT_URL="${POSTGRES_INIT_URL:-${REPO_RAW_BASE%/}/docker/postgresql/init/001-starry-api-roles.sh}"
 RECOVERY_TOOL_URL="${RECOVERY_TOOL_URL:-${REPO_RAW_BASE%/}/artifacts/runtime/recover-data-management.sh}"
 RECOVERY_TOOL_CHECKSUM_URL="${RECOVERY_TOOL_CHECKSUM_URL:-${RECOVERY_TOOL_URL}.sha256}"
+MIHOMO_ENTRYPOINT_URL="${MIHOMO_ENTRYPOINT_URL:-${REPO_RAW_BASE%/}/docker/egress/mihomo-entrypoint.sh}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/starry-api}"
 GITHUB_TOKEN_FILE="${GITHUB_TOKEN_FILE:-${INSTALL_DIR}/.github-token}"
 HOST_BIND_ADDR="${HOST_BIND_ADDR:-0.0.0.0}"
@@ -39,6 +40,11 @@ HEALTH_WAIT_SECONDS="${HEALTH_WAIT_SECONDS:-300}"
 PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}"
 FORCE_ENV="${FORCE_ENV:-false}"
 INSTALL_DOCKER="${INSTALL_DOCKER:-true}"
+# ENABLE_MIHOMO=true turns on the optional Mihomo (Clash.Meta) egress component: it adds COMPOSE_PROFILES=mihomo,
+# STARRY_EGRESS_MIHOMO_ENABLED=true and a generated STARRY_EGRESS_CONTROLLER_SECRET to .env, and deploys the official
+# metacubex/mihomo image next to the service. The default (false) never touches an existing choice, so a deployment that
+# enabled Mihomo keeps it. Remove the lines from .env and run "docker compose rm -sf mihomo" to disable it again.
+ENABLE_MIHOMO="${ENABLE_MIHOMO:-false}"
 ARTIFACT_UPDATED=false
 ARTIFACT_ROLLBACK_AVAILABLE=false
 COMPOSE_ROLLBACK_AVAILABLE=false
@@ -46,6 +52,7 @@ POSTGRES_INIT_ROLLBACK_AVAILABLE=false
 RECOVERY_TOOL_ROLLBACK_AVAILABLE=false
 ENV_ROLLBACK_AVAILABLE=false
 ENV_UPDATED=false
+MIHOMO_STACK_STARTED=false
 RECOVERY_TOOL_UPDATED=false
 STACK_MUTATION_STARTED=false
 DEPLOYMENT_COMMITTED=false
@@ -414,6 +421,7 @@ deployment_exit_handler() {
   if [[ "$STACK_MUTATION_STARTED" == "true" ]]; then
     cd "$INSTALL_DIR" || exit "$status"
     if root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml up -d --build --force-recreate --remove-orphans \
+      && discard_unwanted_mihomo \
       && wait_for_health; then
       ROLLBACK_COMPLETED=true
       log "The previous deployment unit is healthy after automatic rollback."
@@ -534,6 +542,197 @@ validate_database_secrets() {
     || fail "PostgreSQL bootstrap, migration, and application passwords must be distinct."
 }
 
+validate_enable_mihomo() {
+  if [[ "$ENABLE_MIHOMO" != "true" && "$ENABLE_MIHOMO" != "false" ]]; then
+    fail "ENABLE_MIHOMO must be true or false."
+  fi
+}
+
+# The value of a key as Compose reads it from an env file: the last assignment, without surrounding quotes.
+env_file_plain_value() {
+  local value
+  value="$(env_file_value "$1" "$2")"
+  value="${value%\"}"
+  value="${value#\"}"
+  value="${value%\'}"
+  value="${value#\'}"
+  printf '%s' "$value"
+}
+
+# True when COMPOSE_PROFILES in the env file selects the mihomo profile (or every profile).
+mihomo_profile_listed() {
+  local env_file="$1"
+  local profiles item
+  local -a items=()
+  [[ -f "$env_file" ]] || return 1
+  profiles="$(env_file_plain_value "$env_file" COMPOSE_PROFILES)"
+  IFS=, read -r -a items <<< "$profiles" || true
+  for item in ${items[@]+"${items[@]}"}; do
+    item="${item//[[:space:]]/}"
+    if [[ "$item" == "mihomo" || "$item" == "*" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Replaces every assignment of a key by a single one at the end of the file.
+set_env_value() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local temporary
+
+  temporary="$(mktemp "${file}.incoming.XXXXXX")" || return 1
+  if ! { grep -v -E "^${key}=" "$file" || true; printf '%s=%s\n' "$key" "$value"; } > "$temporary"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+  if ! mv -f -- "$temporary" "$file"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+}
+
+# An existing controller secret must be something the Mihomo entrypoint accepts; it is never printed.
+validate_mihomo_secret() {
+  local secret
+  secret="$(env_file_plain_value "$1" STARRY_EGRESS_CONTROLLER_SECRET)"
+  if [[ -n "$secret" && ! "$secret" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    fail "STARRY_EGRESS_CONTROLLER_SECRET in .env may only contain letters, digits, '_' and '-', otherwise Mihomo refuses to start."
+  fi
+}
+
+# Makes the env file enable Mihomo: the profile is selected, the backend switch is on and a controller secret exists.
+# Settings that are already right are left as they are, so applying it again changes nothing. The secret is never printed.
+apply_mihomo_env_settings() {
+  local file="$1"
+  local profiles secret
+
+  if ! mihomo_profile_listed "$file"; then
+    profiles="$(env_file_plain_value "$file" COMPOSE_PROFILES)"
+    set_env_value "$file" COMPOSE_PROFILES "${profiles:+${profiles},}mihomo" || return 1
+  fi
+  if [[ "$(env_file_plain_value "$file" STARRY_EGRESS_MIHOMO_ENABLED)" != "true" ]]; then
+    set_env_value "$file" STARRY_EGRESS_MIHOMO_ENABLED true || return 1
+  fi
+  if [[ -z "$(env_file_plain_value "$file" STARRY_EGRESS_CONTROLLER_SECRET)" ]]; then
+    secret="$(random_secret)" || return 1
+    [[ -n "$secret" ]] || return 1
+    set_env_value "$file" STARRY_EGRESS_CONTROLLER_SECRET "$secret" || return 1
+  fi
+}
+
+# Enables Mihomo in the .env that is already in place. When something has to change, the current file is first kept as
+# .env.previous (unless the caller has just done that), and the new one replaces it atomically.
+enable_mihomo_in_env_file() {
+  local env_file="$1"
+  local preserve_previous="$2"
+  local env_tmp
+
+  validate_mihomo_secret "$env_file"
+  env_tmp="$(mktemp "${env_file}.incoming.XXXXXX")" \
+    || fail "Could not prepare the updated .env file."
+  if ! chmod 0600 "$env_tmp" || ! cp -- "$env_file" "$env_tmp" || ! apply_mihomo_env_settings "$env_tmp"; then
+    rm -f -- "$env_tmp"
+    fail "Could not enable Mihomo in .env."
+  fi
+  if cmp -s "$env_file" "$env_tmp"; then
+    rm -f -- "$env_tmp"
+    log "Mihomo is already enabled in .env."
+    return
+  fi
+  if [[ "$preserve_previous" == "true" ]]; then
+    if ! atomic_install_file "$env_file" "${INSTALL_DIR}/.env.previous" 0600; then
+      rm -f -- "$env_tmp"
+      fail "Could not preserve the existing .env file."
+    fi
+  fi
+  mv -f -- "$env_tmp" "$env_file" || { rm -f -- "$env_tmp"; fail "Could not activate the updated .env file."; }
+  log "Enabled Mihomo in .env (COMPOSE_PROFILES, STARRY_EGRESS_MIHOMO_ENABLED, STARRY_EGRESS_CONTROLLER_SECRET)."
+}
+
+# One of: enabled, disabled, incomplete. Enabled needs the profile (the container), the backend switch and a secret.
+mihomo_state() {
+  local env_file="${INSTALL_DIR}/.env"
+  local listed=false switch=false secret=false
+
+  mihomo_profile_listed "$env_file" && listed=true
+  if [[ -f "$env_file" ]]; then
+    [[ "$(env_file_plain_value "$env_file" STARRY_EGRESS_MIHOMO_ENABLED)" == "true" ]] && switch=true
+    [[ -n "$(env_file_plain_value "$env_file" STARRY_EGRESS_CONTROLLER_SECRET)" ]] && secret=true
+  fi
+  if [[ "$listed" == "true" && "$switch" == "true" && "$secret" == "true" ]]; then
+    printf 'enabled'
+  elif [[ "$listed" == "false" && "$switch" == "false" ]]; then
+    printf 'disabled'
+  else
+    printf 'incomplete'
+  fi
+}
+
+mihomo_state_line() {
+  case "$(mihomo_state)" in
+    enabled)
+      printf 'enabled (official metacubex/mihomo image, Compose profile "mihomo")'
+      ;;
+    incomplete)
+      printf 'INCOMPLETE - .env needs COMPOSE_PROFILES=mihomo, STARRY_EGRESS_MIHOMO_ENABLED=true and STARRY_EGRESS_CONTROLLER_SECRET'
+      ;;
+    *)
+      printf 'disabled (rerun with ENABLE_MIHOMO=true to enable; see docs/ACCOUNT_EGRESS.md)'
+      ;;
+  esac
+}
+
+# The Mihomo container mounts this script from the install directory. A missing source would make Docker create a
+# directory in its place, so the script is installed whenever the bundle carries it and fetched when Mihomo needs it.
+install_mihomo_entrypoint() {
+  local source="$1"
+  local target="${INSTALL_DIR}/docker/egress/mihomo-entrypoint.sh"
+
+  if [[ -d "$target" ]]; then
+    rmdir -- "$target" 2>/dev/null \
+      || fail "${target} is a directory; remove it so the Mihomo entrypoint script can be installed."
+  fi
+  mkdir -p "${INSTALL_DIR}/docker/egress" || fail "Could not create ${INSTALL_DIR}/docker/egress."
+  atomic_install_file "$source" "$target" 0644 \
+    || fail "Could not install the Mihomo entrypoint atomically."
+}
+
+ensure_mihomo_entrypoint() {
+  local target="${INSTALL_DIR}/docker/egress/mihomo-entrypoint.sh"
+  local temporary
+
+  [[ ! -f "$target" ]] || return 0
+  mihomo_profile_listed "${INSTALL_DIR}/.env" || return 0
+  mkdir -p "${INSTALL_DIR}/docker/egress" || fail "Could not create ${INSTALL_DIR}/docker/egress."
+  temporary="$(mktemp "${target}.download.XXXXXX")" \
+    || fail "Could not prepare the Mihomo entrypoint download."
+  download_required_file "Mihomo entrypoint script" "$MIHOMO_ENTRYPOINT_URL" "$temporary"
+  install_mihomo_entrypoint "$temporary"
+  rm -f -- "$temporary"
+}
+
+# Fails before the stack is touched when Mihomo is selected but the installed Compose file cannot run it, instead of
+# leaving the backend waiting for a controller that was never started.
+ensure_mihomo_support() {
+  mihomo_profile_listed "${INSTALL_DIR}/.env" || return 0
+  grep -q '^  mihomo:' "${INSTALL_DIR}/docker-compose.artifact.yml" \
+    || fail "Mihomo is enabled in .env, but the downloaded deployment bundle does not define the mihomo service. Use a release that includes it, or disable Mihomo."
+  ensure_mihomo_entrypoint
+}
+
+# Compose does not count a container of an inactive profile as an orphan, so a Mihomo container started by a deployment
+# that was rolled back (and whose .env no longer selects the profile) has to be removed explicitly.
+discard_unwanted_mihomo() {
+  [[ "$MIHOMO_STACK_STARTED" == "true" ]] || return 0
+  if ! mihomo_profile_listed "${INSTALL_DIR}/.env"; then
+    root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml rm -sf mihomo || true
+  fi
+  return 0
+}
+
 load_github_token() {
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     log "Using GitHub token from environment."
@@ -561,10 +760,14 @@ write_env_file() {
   if [[ "$FORCE_ENV" != "true" && "$FORCE_ENV" != "false" ]]; then
     fail "FORCE_ENV must be true or false."
   fi
+  validate_enable_mihomo
 
   if [[ -f "$env_file" && "$FORCE_ENV" != "true" ]]; then
     validate_database_secrets "$env_file"
     log "Keeping existing .env. Set FORCE_ENV=true to regenerate it."
+    if [[ "$ENABLE_MIHOMO" == "true" ]]; then
+      enable_mihomo_in_env_file "$env_file" true
+    fi
     return
   fi
 
@@ -579,6 +782,9 @@ write_env_file() {
         || fail "Could not restore the PostgreSQL retry environment."
       ENV_UPDATED=true
       log "Reusing PostgreSQL credentials retained from the previous failed deployment."
+      if [[ "$ENABLE_MIHOMO" == "true" ]]; then
+        enable_mihomo_in_env_file "$env_file" false
+      fi
       return
     fi
     fail "Refusing to generate new database passwords for an initialized PostgreSQL cluster. Restore the matching .env, or rotate the roles in PostgreSQL and update .env manually."
@@ -687,6 +893,17 @@ STARRY_KIRO_PREFERRED_ENDPOINT=codewhisperer
 
 JAVA_OPTS="-Xms64m -Xmx768m -XX:MaxDirectMemorySize=256m -XX:+ExitOnOutOfMemoryError -XX:G1PeriodicGCInterval=300000 -XX:-G1PeriodicGCInvokesConcurrent -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=30"
 EOF
+  if [[ "$ENABLE_MIHOMO" == "true" ]]; then
+    log "Enabling the optional Mihomo component (ENABLE_MIHOMO=true)."
+    {
+      printf '\n# Optional Mihomo egress component. Remove these three lines and run "docker compose rm -sf mihomo" to\n'
+      printf '# disable it; the secret is shared by the backend and the Mihomo controller.\n'
+    } >> "$env_tmp" || { rm -f -- "$env_tmp"; fail "Could not write the Mihomo settings."; }
+    if ! apply_mihomo_env_settings "$env_tmp"; then
+      rm -f -- "$env_tmp"
+      fail "Could not write the Mihomo settings."
+    fi
+  fi
   mv -f -- "$env_tmp" "$env_file" || fail "Could not activate the new .env file."
   ENV_UPDATED=true
 }
@@ -882,6 +1099,10 @@ services:
       STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS: ${STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS:-90}
       STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE: ${STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE:-10000}
       STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES: ${STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES:-20}
+      # Optional Mihomo, off by default. Enabled by the "mihomo" profile together with these two settings
+      # (see docs/ACCOUNT_EGRESS.md); every other STARRY_EGRESS_* setting keeps its application default.
+      STARRY_EGRESS_MIHOMO_ENABLED: ${STARRY_EGRESS_MIHOMO_ENABLED:-false}
+      STARRY_EGRESS_CONTROLLER_SECRET: ${STARRY_EGRESS_CONTROLLER_SECRET:-}
       # glibc keeps one malloc arena per thread by default, which inflates resident memory of a busy JVM.
       MALLOC_ARENA_MAX: "2"
       JAVA_OPTS: "${JAVA_OPTS:--Xms64m -Xmx768m -XX:MaxDirectMemorySize=256m -XX:+ExitOnOutOfMemoryError -XX:G1PeriodicGCInterval=300000 -XX:-G1PeriodicGCInvokesConcurrent -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=30}"
@@ -890,6 +1111,30 @@ services:
     command: ["sh", "-c", "exec java $${JAVA_OPTS:-} -jar /app/app.jar"]
     networks:
       - starryapi
+
+  # Optional Mihomo (Clash.Meta), off by default: only Clash subscriptions and protocols the Java backend cannot speak
+  # need it. Started by COMPOSE_PROFILES=mihomo (docs/ACCOUNT_EGRESS.md). The official image is used as is; Starry API
+  # never bundles the binary. It shares the service network namespace, so the controller (9090) and the per-node
+  # listeners stay on 127.0.0.1 and nothing is published.
+  mihomo:
+    profiles: ["mihomo"]
+    image: metacubex/mihomo:${MIHOMO_VERSION:-v1.19.32}
+    network_mode: "service:service"
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    environment:
+      # Compose interpolates inactive profiles too, so this must not be required with ":?"; the entrypoint refuses an
+      # empty secret instead.
+      STARRY_EGRESS_CONTROLLER_SECRET: ${STARRY_EGRESS_CONTROLLER_SECRET:-}
+      GOMEMLIMIT: ${MIHOMO_GOMEMLIMIT:-200MiB}
+    volumes:
+      - ./docker/egress/mihomo-entrypoint.sh:/entrypoint.sh:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: ${MIHOMO_MEM_LIMIT:-256m}
 
 networks:
   starryapi:
@@ -1013,6 +1258,9 @@ download_bundle() {
     || fail "Could not install Docker Compose configuration atomically."
   atomic_install_file "${extract_dir}/postgres-init/001-starry-api-roles.sh" "${INSTALL_DIR}/postgres-init/001-starry-api-roles.sh" 0755 \
     || fail "Could not install the PostgreSQL bootstrap atomically."
+  if [[ -f "${extract_dir}/docker/egress/mihomo-entrypoint.sh" ]]; then
+    install_mihomo_entrypoint "${extract_dir}/docker/egress/mihomo-entrypoint.sh"
+  fi
   [[ ! -f "${extract_dir}/build-info.json" ]] \
     || atomic_install_file "${extract_dir}/build-info.json" "${INSTALL_DIR}/app/build-info.json" 0644 \
     || fail "Could not install build metadata atomically."
@@ -1075,6 +1323,9 @@ report_stack_failure() {
   root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml ps || true
   root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml logs --tail=120 postgres || true
   root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml logs --tail=160 service || true
+  if mihomo_profile_listed "${INSTALL_DIR}/.env"; then
+    root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml logs --tail=40 mihomo || true
+  fi
 }
 
 try_artifact_rollback() {
@@ -1083,18 +1334,27 @@ try_artifact_rollback() {
   log "Recreating the stack with the previous deployment unit..."
   root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml up -d --build --force-recreate --remove-orphans \
     || return 1
+  discard_unwanted_mihomo
   wait_for_health || return 1
   ROLLBACK_COMPLETED=true
 }
 
 deploy_stack() {
   cd "$INSTALL_DIR"
+  # Mihomo shares the service's network namespace, so it must be recreated together with the service: a container left
+  # attached to the old one would keep running without being reachable. Naming services on the command line does not
+  # start a profile's service on its own, so it is listed explicitly when the profile is selected in .env.
+  local -a stack_services=(service)
+  if mihomo_profile_listed "${INSTALL_DIR}/.env"; then
+    stack_services+=(mihomo)
+    MIHOMO_STACK_STARTED=true
+  fi
   log "Starting Docker Compose stack from prebuilt artifact..."
   STACK_MUTATION_STARTED=true
   root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml pull postgres || true
   root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml up -d postgres
-  log "Recreating service container so the new jar is loaded..."
-  if ! root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml up -d --build --force-recreate service; then
+  log "Recreating ${stack_services[*]} so the new jar is loaded..."
+  if ! root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml up -d --build --force-recreate "${stack_services[@]}"; then
     report_stack_failure
     if try_artifact_rollback; then
       fail "The new service could not be started; the previous deployment unit was restored and is healthy."
@@ -1113,7 +1373,7 @@ deploy_stack() {
   fi
 
   log "Removing containers left behind by the previous Compose definition..."
-  root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml up -d --remove-orphans postgres service
+  root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml up -d --remove-orphans postgres "${stack_services[@]}"
   rm -f -- "${INSTALL_DIR}/.env.postgresql-retry"
   root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml logs --tail=120 service || true
 
@@ -1126,6 +1386,7 @@ Artifact file:      ${INSTALL_DIR}/app/starry-api.jar
 Local WebUI:        http://$(local_access_host):${HOST_HTTP_PORT}/#/login
 Local API docs:     http://$(local_access_host):${HOST_HTTP_PORT}/docs
 Reverse proxy to:   $(reverse_proxy_target)
+Mihomo egress:      $(mihomo_state_line)
 
 Common commands:
   cd ${INSTALL_DIR}
@@ -1138,6 +1399,7 @@ EOF
 main() {
   require_linux
   require_root
+  validate_enable_mihomo
   install_base_packages
   ensure_docker
   ensure_compose
@@ -1151,6 +1413,7 @@ main() {
   write_compose_file
   download_bundle || download_artifact
   ensure_postgres_init_script
+  ensure_mihomo_support
   deploy_stack
   DEPLOYMENT_COMMITTED=true
 }

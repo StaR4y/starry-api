@@ -1,0 +1,25 @@
+# EXPERIMENTAL and opt-in: Anthropic TLS fingerprint bridge (curl_cffi). Independent of Mihomo; add it to either base file:
+#   docker compose -f docker-compose.yml -f docker-compose.tls-bridge.yml up -d --build
+#   docker compose -f docker-compose.artifact.yml -f docker-compose.tls-bridge.yml up -d --build
+# Requires STARRY_TLS_SECRET in .env (openssl rand -hex 32). See docs/ACCOUNT_EGRESS.md.
+services:
+  service:
+    environment:
+      STARRY_EGRESS_TLS_ENABLED: "true"
+      STARRY_EGRESS_TLS_URL: http://127.0.0.1:9091
+      STARRY_TLS_SECRET: ${STARRY_TLS_SECRET:?Set a random TLS bridge secret}
+  tls-bridge:
+    network_mode: "service:service"
+    build:
+      context: .
+      dockerfile: docker/egress/Dockerfile
+    restart: unless-stopped
+    environment:
+      STARRY_TLS_SECRET: ${STARRY_TLS_SECRET:?Set a random TLS bridge secret}
+      STARRY_TLS_BIND: 127.0.0.1
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
