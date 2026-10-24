@@ -1,22 +1,13 @@
 <script setup lang="ts">
   /**
-   * 新账号路由与限制：各类账号新建时的初始限制。
+   * 新账号路由与限制：各类账号新建时的初始限制，按类别并排对比。
    * 每个账号仍可在自己的设置里单独调整；这里的修改不影响已有账号。
    *
    * 后端 PUT 会整体替换配置，所以每次保存都带上所有类别当前已保存的值，只改动被编辑的那一类。
    */
-  import { computed, onMounted, ref, type Component } from 'vue';
+  import { computed, onMounted, ref } from 'vue';
   import { ElMessage, ElMessageBox } from 'element-plus';
-  import {
-    Box,
-    ChatDotRound,
-    EditPen,
-    Key,
-    Odometer,
-    RefreshLeft,
-    Share,
-    User,
-  } from '@element-plus/icons-vue';
+  import { EditPen, InfoFilled, Odometer, RefreshLeft } from '@element-plus/icons-vue';
   import PageSection from '@/components/PageSection.vue';
   import { t } from '@/i18n';
   import { ApiError } from '@/utils/http';
@@ -28,20 +19,15 @@
     type AllocationPolicy,
   } from '@/api/allocationDefaults';
   import { proxyChannelsApi } from '@/api/proxyChannels';
+  import AccountTypeLogo from '@/views/accounts/components/account-form/AccountTypeLogo.vue';
   import AllocationEditDialog from './components/allocation/AllocationEditDialog.vue';
   import {
+    CATEGORY_LOGO,
+    LIMIT_COLUMNS,
     allocationErrorMessage,
     categoryMeta,
-    policyCells,
+    limitCell,
   } from './components/allocation/allocationMeta';
-
-  const icons: Record<AllocationCategory, Component> = {
-    OFFICIAL_API_KEY: Key,
-    COMPATIBLE_API_KEY: Share,
-    CODEX: ChatDotRound,
-    CLAUDE_OAUTH: User,
-    KIRO: Box,
-  };
 
   const state = ref<'loading' | 'ready' | 'error'>('loading');
   const loadError = ref('');
@@ -58,8 +44,13 @@
   const serverError = ref('');
   const resetting = ref<AllocationCategory | null>(null);
 
-  const anyCustomized = computed(
-    () => !!defaults.value?.categories.some((item) => item.configured),
+  /** 一行的各列取值 */
+  function rowCells(item: AllocationCategoryDefaults) {
+    return LIMIT_COLUMNS.map((column) => ({ column, cell: limitCell(column.key, item) }));
+  }
+
+  const customizedCount = computed(
+    () => defaults.value?.categories.filter((item) => item.configured).length ?? 0,
   );
 
   async function load() {
@@ -144,16 +135,16 @@
 </script>
 
 <template>
-  <PageSection :title="t('新账号路由与限制')" :subtitle="t('运行与安全')" :icon="Odometer">
+  <PageSection :title="t('路由与限制')" :subtitle="t('运行与安全')" :icon="Odometer">
     <p class="limits-intro">
       {{
         t(
-          '这是各类账号新建时的初始限制。每个账号仍可在自己的设置里单独调整；修改这里不会影响已有账号。',
+          '各类账号新建时的初始限制。每个账号仍可在自己的「路由与限制」里单独调整；修改这里不会影响已有账号。',
         )
       }}
     </p>
 
-    <el-skeleton v-if="state === 'loading'" class="limits-state" :rows="8" animated />
+    <el-skeleton v-if="state === 'loading'" class="limits-state" :rows="6" animated />
 
     <el-result
       v-else-if="state === 'error'"
@@ -167,58 +158,117 @@
       </template>
     </el-result>
 
-    <div v-else-if="defaults" class="limits-list">
-      <article
-        v-for="item in defaults.categories"
-        :key="item.category"
-        class="limit-card surface-card"
-      >
-        <header class="limit-card__head">
-          <span class="limit-card__icon" aria-hidden="true">
-            <el-icon :size="18"><component :is="icons[item.category]" /></el-icon>
+    <template v-else-if="defaults">
+      <div class="limits-table surface-card" role="table" :aria-label="t('各类账号的初始限制')">
+        <div class="limits-row limits-row--head" role="row">
+          <span class="limits-cell limits-cell--category" role="columnheader">
+            {{ t('账号类别') }}
           </span>
-          <div class="limit-card__title">
-            <div class="limit-card__name">
-              <strong>{{ categoryMeta(item.category).title }}</strong>
-              <el-tag
-                :type="item.configured ? 'primary' : 'info'"
-                size="small"
-                effect="light"
-                round
-              >
-                {{ item.configured ? t('已自定义') : t('内置默认') }}
-              </el-tag>
-            </div>
-            <p>{{ categoryMeta(item.category).description }}</p>
-          </div>
-          <div class="limit-card__actions">
-            <el-button
-              v-if="item.configured"
-              link
-              :icon="RefreshLeft"
-              :loading="resetting === item.category"
-              :disabled="resetting !== null"
-              @click="restoreBuiltIn(item)"
-            >
-              {{ t('恢复内置值') }}
-            </el-button>
-            <el-button :icon="EditPen" @click="openEdit(item)">{{ t('编辑') }}</el-button>
-          </div>
-        </header>
-        <dl class="limit-card__cells">
-          <div
-            v-for="cell in policyCells(item.effective, item.builtIn, item.anthropicSettings)"
-            :key="cell.key"
-            class="limit-cell"
-            :class="{ 'is-changed': cell.changed }"
+          <span
+            v-for="column in LIMIT_COLUMNS"
+            :key="column.key"
+            class="limits-cell"
+            role="columnheader"
           >
-            <dt>{{ cell.label }}</dt>
-            <dd>{{ cell.value }}</dd>
-          </div>
-        </dl>
-      </article>
-      <p v-if="anyCustomized" class="limits-note">{{ t('主题色的取值与内置值不同。') }}</p>
-    </div>
+            <el-tooltip :content="column.tip()" placement="top" :show-after="150">
+              <span class="limits-head">
+                {{ column.label() }}
+                <el-icon class="limits-head__icon"><InfoFilled /></el-icon>
+              </span>
+            </el-tooltip>
+          </span>
+          <span class="limits-cell limits-cell--actions" role="columnheader">
+            <span class="sr-only">{{ t('操作') }}</span>
+          </span>
+        </div>
+
+        <div
+          v-for="item in defaults.categories"
+          :key="item.category"
+          class="limits-row"
+          :class="{ 'is-customized': item.configured }"
+          role="row"
+        >
+          <span class="limits-cell limits-cell--category" role="rowheader">
+            <AccountTypeLogo :type="CATEGORY_LOGO[item.category]" :size="32" />
+            <span class="category">
+              <span class="category__name">
+                <strong>{{ categoryMeta(item.category).title }}</strong>
+                <el-tag v-if="item.configured" size="small" effect="light" round>
+                  {{ t('已自定义') }}
+                </el-tag>
+              </span>
+              <span class="category__desc">{{ categoryMeta(item.category).description }}</span>
+            </span>
+          </span>
+
+          <span
+            v-for="{ column, cell } in rowCells(item)"
+            :key="column.key"
+            class="limits-cell"
+            :class="{ 'is-na': !cell.applicable }"
+            role="cell"
+          >
+            <span class="limits-cell__label">{{ column.label() }}</span>
+            <span v-if="!cell.applicable" class="value value--na">
+              <el-tooltip :content="t('仅对 Anthropic 账号生效')" placement="top" :show-after="150">
+                <span>—</span>
+              </el-tooltip>
+            </span>
+            <el-tooltip
+              v-else
+              :content="
+                cell.changed
+                  ? t('{p0}（内置值：{p1}）', { p0: cell.full, p1: cell.builtIn })
+                  : cell.full
+              "
+              :disabled="!cell.changed && cell.full === cell.value"
+              placement="top"
+              :show-after="150"
+            >
+              <span class="value" :class="{ 'value--changed': cell.changed }">
+                {{ cell.value }}
+                <small v-if="cell.detail">{{ cell.detail }}</small>
+              </span>
+            </el-tooltip>
+          </span>
+
+          <span class="limits-cell limits-cell--actions" role="cell">
+            <el-tooltip v-if="item.configured" :content="t('恢复内置值')" placement="top">
+              <el-button
+                link
+                :icon="RefreshLeft"
+                :aria-label="t('恢复内置值')"
+                :loading="resetting === item.category"
+                :disabled="resetting !== null"
+                @click="restoreBuiltIn(item)"
+              />
+            </el-tooltip>
+            <el-tooltip :content="t('编辑')" placement="top">
+              <el-button
+                size="small"
+                :icon="EditPen"
+                :aria-label="t('编辑')"
+                @click="openEdit(item)"
+              >
+                {{ t('编辑') }}
+              </el-button>
+            </el-tooltip>
+          </span>
+        </div>
+      </div>
+
+      <p class="limits-note">
+        <template v-if="customizedCount">
+          {{
+            t('{p0} 类已自定义；高亮的取值与内置值不同，悬停可查看内置值。', {
+              p0: customizedCount,
+            })
+          }}
+        </template>
+        <template v-else>{{ t('全部使用内置值。') }}</template>
+      </p>
+    </template>
 
     <AllocationEditDialog
       v-model="dialogOpen"
@@ -244,120 +294,184 @@
     min-height: 320px;
   }
 
-  .limits-list {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
+  .limits-table {
+    /* 是否改成卡片取决于表格本身的宽度（两侧导航都会占位），不是窗口宽度 */
+    container: limits / inline-size;
     min-width: 0;
+    padding: 4px 0;
   }
 
-  .limit-card {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    min-width: 0;
-    padding: 14px 16px;
+  .limits-row {
+    display: grid;
+    grid-template-columns: minmax(150px, 1.6fr) repeat(7, minmax(56px, 1fr)) 64px;
+    align-items: center;
+    column-gap: 10px;
+    padding: 12px 16px;
+    border-top: 1px solid var(--kp-divider);
 
-    &__head {
+    &--head {
+      padding-block: 10px;
+      border-top: 0;
+      font-size: 12px;
+      color: var(--kp-text-muted);
+    }
+
+    &.is-customized {
+      background: color-mix(in srgb, var(--kp-primary) 4%, transparent);
+    }
+  }
+
+  .limits-cell {
+    min-width: 0;
+
+    &__label {
+      display: none;
+    }
+
+    &--category {
       display: flex;
       align-items: center;
-      gap: 12px;
-      min-width: 0;
+      gap: 10px;
     }
 
-    &__icon {
-      display: grid;
-      flex: 0 0 auto;
-      place-items: center;
-      width: 36px;
-      height: 36px;
-      border-radius: var(--kp-radius-sm);
-      background: var(--kp-primary-soft);
-      color: var(--kp-primary);
-    }
+    &--actions {
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 6px;
 
-    &__title {
-      flex: 1 1 auto;
-      min-width: 0;
+      .el-button {
+        margin: 0;
+      }
 
-      p {
-        margin: 2px 0 0;
-        font-size: 12.5px;
-        color: var(--kp-text-muted);
-        overflow-wrap: anywhere;
+      /* 表格里按钮只显示图标（文字在 Element Plus 按钮内部的 span 里） */
+      :deep(.el-button > span) {
+        display: none;
       }
     }
+  }
+
+  .limits-head {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    white-space: nowrap;
+    cursor: help;
+
+    &__icon {
+      font-size: 12px;
+      opacity: 0.55;
+    }
+  }
+
+  .category {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
 
     &__name {
       display: flex;
       flex-wrap: wrap;
       align-items: center;
-      gap: 8px;
+      gap: 6px;
 
       strong {
-        font-size: 15px;
+        font-size: 14px;
         color: var(--kp-text);
       }
     }
 
-    &__actions {
-      display: flex;
-      flex: 0 0 auto;
-      flex-wrap: wrap;
-      align-items: center;
-      justify-content: flex-end;
-      gap: 4px 8px;
-
-      .el-button {
-        margin: 0;
-      }
-    }
-
-    &__cells {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
-      gap: 10px 16px;
-      margin: 0;
-      padding-top: 12px;
-      border-top: 1px solid var(--kp-divider);
+    &__desc {
+      margin-top: 2px;
+      font-size: 12px;
+      color: var(--kp-text-muted);
+      overflow-wrap: anywhere;
     }
   }
 
-  .limit-cell {
-    min-width: 0;
+  .value {
+    display: inline-flex;
+    flex-direction: column;
+    font-size: 13.5px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.35;
+    color: var(--kp-text);
+    white-space: nowrap;
 
-    dt {
+    small {
       font-size: 11.5px;
+      font-weight: 400;
       color: var(--kp-text-muted);
     }
 
-    dd {
-      margin: 2px 0 0;
-      font-size: 13.5px;
-      font-weight: 600;
-      color: var(--kp-text);
-      overflow-wrap: anywhere;
+    &--changed {
+      color: var(--kp-primary);
+      cursor: help;
     }
 
-    &.is-changed dd {
-      color: var(--kp-primary);
+    &--na {
+      font-weight: 400;
+      color: var(--kp-text-muted);
     }
   }
 
   .limits-note {
-    margin: 0;
+    margin: 10px 2px 0;
     font-size: 12px;
     color: var(--kp-text-muted);
   }
 
-  @media (max-width: 640px) {
-    .limit-card__head {
-      flex-wrap: wrap;
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
+  }
+
+  /* 表格放不下时（各列最小宽度合计约 720px）：每类一张卡片，取值按宽度排成几列并带上自己的名称 */
+  @container limits (max-width: 720px) {
+    .limits-row {
+      grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+      row-gap: 10px;
+      padding: 14px 16px;
+
+      &--head {
+        display: none;
+      }
+
+      &:nth-child(2) {
+        border-top: 0;
+      }
     }
 
-    .limit-card__actions {
-      width: 100%;
-      justify-content: flex-start;
+    .limits-cell {
+      &--category {
+        grid-column: 1 / -1;
+      }
+
+      &--actions {
+        grid-column: 1 / -1;
+        justify-content: flex-start;
+
+        :deep(.el-button > span) {
+          display: inline;
+        }
+      }
+
+      &__label {
+        display: block;
+        margin-bottom: 2px;
+        font-size: 11.5px;
+        color: var(--kp-text-muted);
+      }
+
+      /* 卡片里不显示对该类别无效的项 */
+      &.is-na {
+        display: none;
+      }
     }
   }
 </style>

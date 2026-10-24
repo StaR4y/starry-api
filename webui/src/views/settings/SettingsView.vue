@@ -17,7 +17,6 @@
   import AppIcon from '../accounts/components/AppIcon.vue';
   import DisabledSchedulePanel from '../accounts/components/DisabledSchedulePanel.vue';
   import PoolPolicyPanel from '../accounts/components/PoolPolicyPanel.vue';
-  import RoutingPolicyPanel from '../accounts/components/RoutingPolicyPanel.vue';
   import BatchTestResultDialog from '../accounts/components/BatchTestResultDialog.vue';
   import TestDetailDialog from '../accounts/components/TestDetailDialog.vue';
   import { accountsApi } from '@/api';
@@ -183,8 +182,6 @@
     </el-result>
 
     <div v-else class="settings-stack">
-      <RoutingPolicyPanel />
-
       <!-- 账号池分级熔断策略 -->
       <div
         class="settings-card surface-card"

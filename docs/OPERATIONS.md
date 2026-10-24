@@ -264,7 +264,7 @@ curl http://127.0.0.1:8080/admin/accounts/<accountId>/allocation-policy -H "Auth
 
 ### 账号路由策略
 
-「系统设置 → 账号池设置 → 账号路由策略」。默认：
+控制台不再提供这个面板，默认值适合绝大多数部署；确需调整时用 `PATCH /admin/accounts/settings` 修改 `routingPolicy`（字段见 [API：路由策略](API.md#路由策略)）。默认：
 
 - Codex 账号与官方 OpenAI API Key **隔离**；普通 GPT 请求只用官方 `sk-` 账号；
 - 准入时**不**建立亲和；单独的 API Key **不会**被当成会话；已派发的 Codex 请求只尝试**一个**账号；

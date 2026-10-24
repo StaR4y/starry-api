@@ -1,5 +1,10 @@
-import { t } from '@/i18n';
-import type { AllocationCategory, AllocationPolicy } from '@/api/allocationDefaults';
+import { locale, t } from '@/i18n';
+import type {
+  AllocationCategory,
+  AllocationCategoryDefaults,
+  AllocationPolicy,
+} from '@/api/allocationDefaults';
+import type { AccountTypeKey } from '@/views/accounts/components/account-form/accountTypes';
 import { ApiError } from '@/utils/http';
 import { formatNumber } from '@/utils/format';
 
@@ -58,81 +63,149 @@ export function policyFieldLabel(key: string): string {
   }
 }
 
-export interface PolicyCell {
-  key: string;
-  label: string;
-  value: string;
-  /** 与内置值不同 */
-  changed: boolean;
-}
+/** 每个类别在列表里显示的账号类型标志 */
+export const CATEGORY_LOGO: Record<AllocationCategory, AccountTypeKey> = {
+  OFFICIAL_API_KEY: 'openai',
+  COMPATIBLE_API_KEY: 'compatible',
+  CODEX: 'codex',
+  CLAUDE_OAUTH: 'anthropic',
+  KIRO: 'kiro',
+};
+
+export type LimitColumnKey =
+  | 'concurrency'
+  | 'rate'
+  | 'sessions'
+  | 'cooldown'
+  | 'priority'
+  | 'inflight'
+  | 'tls';
+
+/** 对比表的列：名称与说明在使用时翻译 */
+export const LIMIT_COLUMNS: { key: LimitColumnKey; label: () => string; tip: () => string }[] = [
+  {
+    key: 'concurrency',
+    label: () => t('并发上限'),
+    tip: () => t('同一账号同时处理的请求数上限；0 为不限。'),
+  },
+  {
+    key: 'rate',
+    label: () => t('每分钟请求'),
+    tip: () =>
+      t(
+        '平均每分钟请求数按令牌桶持续补充，括号内是突发容量（短时间内允许超出的请求数）；0 为不限速。',
+      ),
+  },
+  {
+    key: 'sessions',
+    label: () => t('会话上限'),
+    tip: () => t('会话窗口内同一账号最多服务的不同会话数；仅对 Anthropic 账号生效。'),
+  },
+  {
+    key: 'cooldown',
+    label: () => t('冷却时间'),
+    tip: () => t('账号出错后暂停分配的时间；自动表示按错误类型决定。'),
+  },
+  {
+    key: 'priority',
+    label: () => t('优先级'),
+    tip: () => t('分配优先级，数值越小越优先。'),
+  },
+  {
+    key: 'inflight',
+    label: () => t('在途令牌'),
+    tip: () => t('同一账号同时预留的输入与输出令牌总数上限。'),
+  },
+  {
+    key: 'tls',
+    label: () => t('TLS 指纹'),
+    tip: () => t('上游 TLS 握手使用的浏览器指纹；需要启用 TLS 组件，仅对 Anthropic 账号生效。'),
+  },
+];
 
 const unlimited = (value: number, text: (value: number) => string) =>
   value === 0 ? t('不限') : text(value);
 
-/** 把一份策略压缩成几个「名称 / 取值」小格；changed 标出与内置值不同的项 */
-export function policyCells(
+/** 100万 / 1M：表格列窄，完整数字放在提示里 */
+function compactNumber(value: number): string {
+  return new Intl.NumberFormat(locale.value, {
+    notation: 'compact',
+    maximumFractionDigits: 1,
+  }).format(value);
+}
+
+/** 主值，以及放在第二行的补充（突发容量、会话窗口） */
+function formatColumn(
+  key: LimitColumnKey,
   policy: AllocationPolicy,
-  builtIn: AllocationPolicy,
-  anthropic: boolean,
-): PolicyCell[] {
-  const differs = (...keys: (keyof AllocationPolicy)[]) =>
-    keys.some((key) => policy[key] !== builtIn[key]);
-  const cells: PolicyCell[] = [
-    {
-      key: 'safeConcurrency',
-      label: t('并发上限'),
-      value: unlimited(policy.safeConcurrency, String),
-      changed: differs('safeConcurrency'),
-    },
-    {
-      key: 'safeRpm',
-      label: t('每分钟请求数'),
-      value: unlimited(policy.safeRpm, (rpm) =>
-        t('{p0}（突发 {p1}）', { p0: rpm, p1: policy.burstCapacity }),
-      ),
-      changed: differs('safeRpm', 'burstCapacity'),
-    },
-  ];
-  if (anthropic) {
-    cells.push({
-      key: 'maxSessions',
-      label: t('会话上限'),
-      value: unlimited(policy.maxSessions, (sessions) =>
-        t('{p0}（窗口 {p1} 秒）', { p0: sessions, p1: policy.sessionIdleSeconds }),
-      ),
-      changed: differs('maxSessions', 'sessionIdleSeconds'),
-    });
+): { value: string; detail?: string } {
+  switch (key) {
+    case 'concurrency':
+      return { value: unlimited(policy.safeConcurrency, String) };
+    case 'rate':
+      return policy.safeRpm === 0
+        ? { value: t('不限') }
+        : { value: String(policy.safeRpm), detail: t('突发 {p0}', { p0: policy.burstCapacity }) };
+    case 'sessions':
+      return policy.maxSessions === 0
+        ? { value: t('不限') }
+        : {
+            value: String(policy.maxSessions),
+            detail: t('窗口 {p0} 秒', { p0: policy.sessionIdleSeconds }),
+          };
+    case 'cooldown':
+      return {
+        value:
+          policy.cooldownSeconds === 0 ? t('自动') : t('{p0} 秒', { p0: policy.cooldownSeconds }),
+      };
+    case 'priority':
+      return { value: String(policy.allocationPriority) };
+    case 'inflight':
+      return { value: compactNumber(policy.maxInflightTokens), detail: undefined };
+    case 'tls':
+      return { value: policy.tlsProfile || t('不使用') };
   }
-  cells.push(
-    {
-      key: 'cooldownSeconds',
-      label: t('冷却时间'),
-      value:
-        policy.cooldownSeconds === 0 ? t('自动') : t('{p0} 秒', { p0: policy.cooldownSeconds }),
-      changed: differs('cooldownSeconds'),
-    },
-    {
-      key: 'allocationPriority',
-      label: t('分配优先级'),
-      value: String(policy.allocationPriority),
-      changed: differs('allocationPriority'),
-    },
-    {
-      key: 'maxInflightTokens',
-      label: t('最大在途令牌数'),
-      value: formatNumber(policy.maxInflightTokens),
-      changed: differs('maxInflightTokens'),
-    },
-  );
-  if (anthropic) {
-    cells.push({
-      key: 'tlsProfile',
-      label: t('TLS 指纹'),
-      value: policy.tlsProfile || t('不使用'),
-      changed: differs('tlsProfile'),
-    });
-  }
-  return cells;
+}
+
+function describe(key: LimitColumnKey, policy: AllocationPolicy): string {
+  if (key === 'inflight') return formatNumber(policy.maxInflightTokens);
+  const { value, detail } = formatColumn(key, policy);
+  return detail ? `${value} · ${detail}` : value;
+}
+
+const COLUMN_FIELDS: Record<LimitColumnKey, (keyof AllocationPolicy)[]> = {
+  concurrency: ['safeConcurrency'],
+  rate: ['safeRpm', 'burstCapacity'],
+  sessions: ['maxSessions', 'sessionIdleSeconds'],
+  cooldown: ['cooldownSeconds'],
+  priority: ['allocationPriority'],
+  inflight: ['maxInflightTokens'],
+  tls: ['tlsProfile'],
+};
+
+export interface LimitCell {
+  /** 会话与 TLS 只对 Anthropic 账号生效 */
+  applicable: boolean;
+  value: string;
+  detail?: string;
+  /** 完整取值，用于提示 */
+  full: string;
+  builtIn: string;
+  /** 与内置值不同 */
+  changed: boolean;
+}
+
+export function limitCell(key: LimitColumnKey, item: AllocationCategoryDefaults): LimitCell {
+  const applicable = item.anthropicSettings || (key !== 'sessions' && key !== 'tls');
+  const { value, detail } = formatColumn(key, item.effective);
+  return {
+    applicable,
+    value,
+    detail,
+    full: describe(key, item.effective),
+    builtIn: describe(key, item.builtIn),
+    changed: COLUMN_FIELDS[key].some((field) => item.effective[field] !== item.builtIn[field]),
+  };
 }
 
 /** 后端校验失败（VALIDATION_ERROR / ALLOCATION_DEFAULTS_INVALID）的中文说明 */
