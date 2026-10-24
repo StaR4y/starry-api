@@ -34,6 +34,8 @@ public class AccountEgressTransport {
     // changed node is noticed immediately; this cache never decides where a request goes.
     private final RoutedClients clients = new RoutedClients(
         RoutedClients.MAX_ROUTES, RoutedClients.UNUSED_ROUTE_TTL, RoutedClients.DISPOSE_GRACE);
+    // Account traffic only: the administrator's exit probe dials on its own, so a suspended node can still be tested.
+    RouteBreaker breaker = new RouteBreaker(RouteBreaker.FAILURES_TO_SUSPEND, RouteBreaker.SUSPENSION, System::nanoTime);
     // Trust for TLS to an https:// proxy: the JDK trust store, replaceable in tests.
     volatile SslContext proxyTls;
 
@@ -75,11 +77,20 @@ public class AccountEgressTransport {
     private Mono<ClientResponse> dispatch(ClientRequest request, ExchangeFunction next, Route route) {
         if (!route.tlsProfile().isBlank()) return fingerprintExchange(request, route.url(), route.tlsProfile());
         if (route.proxy() == null) return next.exchange(request);
+        if (!breaker.tryAcquire(route.key())) {
+            return Mono.error(EgressException.notSent(EgressFailure.PROXY_ROUTE_SUSPENDED, null));
+        }
         AtomicBoolean started = new AtomicBoolean();
         // Never fall back to a direct connection: a failed route fails the request.
         return exchangeFor(route.proxy(), route.key(), started).exchange(request)
-            .onErrorMap(error -> EgressException.transport(error, started.get(),
-                EgressFailure.PROXY_CONNECT_FAILED, EgressFailure.PROXY_TRANSPORT_FAILED));
+            // Any answer, whatever its status, came through the route.
+            .doOnNext(response -> breaker.succeeded(route.key()))
+            .onErrorMap(error -> {
+                EgressException failure = EgressException.transport(error, started.get(),
+                    EgressFailure.PROXY_CONNECT_FAILED, EgressFailure.PROXY_TRANSPORT_FAILED);
+                if (!failure.requestMayHaveBeenSent() && !EgressException.poolExhausted(error)) breaker.failed(route.key());
+                return failure;
+            });
     }
 
     private Mono<Settings> settings(ProxyAccountEntity account) {

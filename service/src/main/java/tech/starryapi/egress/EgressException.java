@@ -60,6 +60,14 @@ public class EgressException extends RuntimeException {
         return current;
     }
 
+    /** A request that never got a pooled connection: this side is saturated, which says nothing about the route. */
+    static boolean poolExhausted(Throwable error) {
+        for (int depth = 0; error != null && depth < 32; depth++, error = error.getCause()) {
+            if (error.getClass().getSimpleName().startsWith("PoolAcquire")) return true;
+        }
+        return false;
+    }
+
     static boolean failedBeforeRequest(Throwable error) {
         for (int depth = 0; error != null && depth < 32; depth++, error = error.getCause()) {
             String name = error.getClass().getSimpleName();

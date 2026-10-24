@@ -22,6 +22,16 @@ import reactor.core.publisher.Sinks;
 @Component
 public class MihomoRuntime {
     private static final Logger log = LoggerFactory.getLogger(MihomoRuntime.class);
+    /**
+     * The configuration issue of a node Mihomo refused. One bad node used to fail the whole configuration and with it
+     * every Mihomo node; it is now set aside and the others are activated. A subscription refresh rewrites the issue,
+     * and enabling the node again clears it, so it is retried after either.
+     */
+    public static final String REJECTED_ISSUE =
+        "Mihomo rejected this node's configuration. Check its protocol options, then disable and enable it to retry.";
+    // Mihomo names the offending entry of "proxies" by its index: {"message":"proxy 3: ..."}.
+    private static final java.util.regex.Pattern REJECTED_PROXY = java.util.regex.Pattern.compile("^proxy (\\d+):");
+    private static final int MAX_REJECTED_PER_ACTIVATION = 20;
     private final DatabaseClient db;
     private final ObjectMapper mapper;
     private final EgressProperties properties;
@@ -117,17 +127,26 @@ public class MihomoRuntime {
         retryNotBefore = System.nanoTime() + properties.getActivationFailureBackoff().toNanos();
     }
 
-    private Mono<Void> activate() {
+    private Mono<Void> activate() { return activate(0); }
+
+    private Mono<Void> activate(int rejected) {
         return rows().flatMap(rows -> {
             String config = configuration(rows).toString(); // JSON is valid YAML, with no string interpolation.
             if (config.equals(activeConfig)) return Mono.empty();
             return controller.put().uri("/configs?force=true").bodyValue(Map.of("payload", config))
-                .exchangeToMono(response -> response.releaseBody().then(response.statusCode().is2xxSuccessful()
-                    ? Mono.<Void>empty() : Mono.<Void>error(new EgressException(
-                        response.statusCode().value() == 401 || response.statusCode().value() == 403
-                            ? EgressFailure.CONTROLLER_AUTH_FAILED : EgressFailure.CONFIG_REJECTED))))
+                .exchangeToMono(response -> {
+                    int status = response.statusCode().value();
+                    if (response.statusCode().is2xxSuccessful()) return response.releaseBody();
+                    if (status == 401 || status == 403) {
+                        return response.releaseBody().then(Mono.<Void>error(new EgressException(EgressFailure.CONTROLLER_AUTH_FAILED)));
+                    }
+                    return response.bodyToMono(String.class).defaultIfEmpty("").flatMap(body -> {
+                        Route node = rejectedNode(body, rows);
+                        return Mono.<Void>error(node == null ? new EgressException(EgressFailure.CONFIG_REJECTED) : new NodeRejected(node));
+                    });
+                })
                 .timeout(Duration.ofSeconds(20))
-                .onErrorMap(error -> error instanceof EgressException ? error
+                .onErrorMap(error -> error instanceof EgressException || error instanceof NodeRejected ? error
                     : new EgressException(EgressFailure.CONTROLLER_UNREACHABLE))
                 .then(markActive(rows))
                 .doOnSuccess(ignored -> {
@@ -138,13 +157,31 @@ public class MihomoRuntime {
                     log.info("Activated egress configuration: nodes={}", rows.size());
                 })
                 .onErrorResume(error -> {
+                    if (error instanceof NodeRejected node && rejected < MAX_REJECTED_PER_ACTIVATION) {
+                        // Errors of the next attempt are its own: onErrorResume does not see its fallback's failures.
+                        log.warn("Mihomo rejected a node configuration; activating the others without it: channel={}", node.route().id());
+                        return markRejected(node.route()).then(Mono.defer(() -> activate(rejected + 1)));
+                    }
                     active = Map.of();
                     activeConfig = "";
-                    EgressFailure failure = EgressFailure.classify(error, EgressFailure.RUNTIME_FAILED);
+                    EgressFailure failure = error instanceof NodeRejected ? EgressFailure.CONFIG_REJECTED
+                        : EgressFailure.classify(error, EgressFailure.RUNTIME_FAILED);
                     failed(failure);
                     return markFailed(failure).then(Mono.error(new EgressException(failure)));
                 });
         });
+    }
+
+    /** The node a rejection names, if it names one of these rows; the proxies are in row order. */
+    private Route rejectedNode(String body, List<Route> rows) {
+        try {
+            var matcher = REJECTED_PROXY.matcher(mapper.readTree(body).path("message").asText(""));
+            if (!matcher.find()) return null;
+            int index = Integer.parseInt(matcher.group(1));
+            return index < rows.size() ? rows.get(index) : null;
+        } catch (Exception unreadable) {
+            return null;
+        }
     }
 
     ObjectNode configuration(List<Route> rows) {
@@ -181,6 +218,13 @@ public class MihomoRuntime {
         return reactor.core.publisher.Flux.fromIterable(rows).concatMap(route ->
             db.sql("UPDATE proxy_channels SET runtime_status='ACTIVE',runtime_error=NULL WHERE channel_id=:id AND node_config=:config::jsonb AND route='MIHOMO' AND enabled AND source_present AND config_issue IS NULL")
                 .bind("id", route.id()).bind("config", route.config().toString()).fetch().rowsUpdated()).then();
+    }
+
+    /** Sets the node aside (which also releases its listener port), unless it changed meanwhile. */
+    Mono<Void> markRejected(Route route) {
+        return db.sql("UPDATE proxy_channels SET config_issue=:issue,runtime_status='ERROR',runtime_error=:issue WHERE channel_id=:id AND node_config=:config::jsonb AND config_issue IS NULL")
+            .bind("issue", REJECTED_ISSUE).bind("id", route.id()).bind("config", route.config().toString())
+            .fetch().rowsUpdated().then();
     }
 
     Mono<Void> markFailed(EgressFailure failure) {
@@ -234,6 +278,11 @@ public class MihomoRuntime {
     public record Health(Boolean controllerReachable, Instant lastPollAt, Instant lastActivatedAt,
                          int activeNodes, EgressFailure lastFailure, Instant lastFailureAt) {}
     private record Failure(EgressFailure code, Instant at) {}
+    private static final class NodeRejected extends RuntimeException {
+        private final transient Route route;
+        NodeRejected(Route route) { super(null, null, false, false); this.route = route; }
+        Route route() { return route; }
+    }
     private static final class Activation {
         final Sinks.Empty<Void> done = Sinks.empty();
         boolean forced;

@@ -95,6 +95,41 @@ class AccountEgressPoolingTest {
         }
     }
 
+    @Test void aRouteThatKeepsFailingToConnectIsSkippedUntilItIsTriedAgain() throws Exception {
+        try (var proxy = new KeepAliveProxy(new ServerSocket(0, 20, InetAddress.getLoopbackAddress()))) {
+            proxy.refuseTunnels = true;
+            var routes = mock(ChannelRoutes.class);
+            when(routes.resolve(CHANNEL)).thenReturn(Mono.just(listener(proxy.port(), "v1")));
+            var transport = transport(routes);
+            var clock = new java.util.concurrent.atomic.AtomicLong();
+            transport.breaker = new RouteBreaker(2, Duration.ofSeconds(15), clock::get);
+            var client = client(transport);
+
+            // The node behind the proxy is down: the proxy answers CONNECT with an error, twice.
+            for (int i = 0; i < 2; i++) {
+                assertThatThrownBy(() -> get(client)).isInstanceOfSatisfying(EgressException.class, error -> {
+                    assertThat(error.failure()).isEqualTo(EgressFailure.PROXY_CONNECT_FAILED);
+                    assertThat(error.requestMayHaveBeenSent()).isFalse();
+                });
+            }
+            assertThat(proxy.connections).hasValue(2);
+
+            // Now requests fail at once, without dialing, and may still move to another account.
+            assertThatThrownBy(() -> get(client)).isInstanceOfSatisfying(EgressException.class, error -> {
+                assertThat(error.failure()).isEqualTo(EgressFailure.PROXY_ROUTE_SUSPENDED);
+                assertThat(error.requestMayHaveBeenSent()).isFalse();
+            });
+            assertThat(proxy.connections).hasValue(2);
+
+            // The node recovered; after the pause the route is tried again and stays in use.
+            proxy.refuseTunnels = false;
+            clock.addAndGet(Duration.ofSeconds(15).toNanos());
+            assertThat(get(client)).startsWith("response-");
+            assertThat(get(client)).startsWith("response-");
+            transport.shutdown();
+        }
+    }
+
     @Test void evictedPoolsAreDisposedButARequestInFlightSurvivesIt() throws Exception {
         try (var idle = new KeepAliveProxy(new ServerSocket(0, 20, InetAddress.getLoopbackAddress()), false);
              var slow = new ServerSocket(0, 5, InetAddress.getLoopbackAddress());
@@ -251,6 +286,8 @@ class AccountEgressPoolingTest {
         final CompletableFuture<String> firstRequest = new CompletableFuture<>();
 
         private final boolean tunnel;
+        /** Answers CONNECT with 502, like a proxy whose upstream node is unreachable. */
+        volatile boolean refuseTunnels;
 
         KeepAliveProxy(ServerSocket server) { this(server, true); }
 
@@ -276,6 +313,10 @@ class AccountEgressPoolingTest {
                 connections.incrementAndGet();
                 if (tunnel) {
                     firstRequest.complete(headers(socket.getInputStream()));
+                    if (refuseTunnels) {
+                        write(socket, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
+                        return;
+                    }
                     write(socket, "HTTP/1.1 200 Connection established\r\n\r\n");
                 }
                 while (true) {

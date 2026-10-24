@@ -383,6 +383,38 @@ class ProxyChannelsPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSu
         }
     }
 
+    @Test void aNodeMihomoRejectedLosesItsPortAndIsRetriedWhenEnabledAgain() {
+        UUID other = createVless("other");
+        UUID rejected = createVless("rejected");
+        int port = portOf(rejected);
+        // What MihomoRuntime.markRejected stores.
+        db.sql("UPDATE proxy_channels SET config_issue=:issue,runtime_status='ERROR',runtime_error=:issue WHERE channel_id=:id")
+            .bind("issue", MihomoRuntime.REJECTED_ISSUE).bind("id", rejected).fetch().rowsUpdated().block();
+        var listed = service.channel(rejected).block();
+        assertThat(listed.configIssue()).isEqualTo(MihomoRuntime.REJECTED_ISSUE);
+        assertThat(listed.runtimeStatus()).isEqualTo("ERROR");
+        assertThat(portOf(rejected)).isNull();
+        assertThat(portOf(other)).isNotNull();
+
+        // Disabling keeps the mark; enabling retries the node with a listener port again.
+        service.update(rejected, new ProxyChannelDtos.UpdateChannel(null, false)).block();
+        assertThat(service.channel(rejected).block().configIssue()).isEqualTo(MihomoRuntime.REJECTED_ISSUE);
+        var enabled = service.update(rejected, new ProxyChannelDtos.UpdateChannel(null, true)).block();
+        assertThat(enabled.configIssue()).isNull();
+        assertThat(enabled.runtimeStatus()).isEqualTo("PENDING");
+        assertThat(enabled.runtimeError()).isNull();
+        assertThat(portOf(rejected)).isEqualTo(port);
+    }
+
+    @Test void enablingANodeKeepsAnIssueTheImportFound() {
+        UUID node = createVless("node");
+        db.sql("UPDATE proxy_channels SET config_issue='Unsupported option: plugin' WHERE channel_id=:id").bind("id", node)
+            .fetch().rowsUpdated().block();
+        var enabled = service.update(node, new ProxyChannelDtos.UpdateChannel(null, true)).block();
+        assertThat(enabled.configIssue()).isEqualTo("Unsupported option: plugin");
+        assertThat(enabled.runtimeStatus()).isEqualTo("ERROR");
+    }
+
     @Test void aVlessChannelStillNeedsMihomoAndNeverGoesDirect() {
         UUID channel = createVless("vless");
         var listed = service.channel(channel).block();

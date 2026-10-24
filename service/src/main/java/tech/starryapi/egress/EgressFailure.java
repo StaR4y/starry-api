@@ -32,7 +32,8 @@ public enum EgressFailure {
     TLS_COMPONENT_UNAVAILABLE("The TLS component is disabled, not authenticated or unreachable."),
     TLS_COMPONENT_REJECTED("The TLS component rejected the request before forwarding it. Check the bridge key."),
     TLS_COMPONENT_FAILED("The TLS component could not complete the forwarded request."),
-    PROXY_TRANSPORT_FAILED("The connection through the selected proxy failed after the request may have been sent.");
+    PROXY_TRANSPORT_FAILED("The connection through the selected proxy failed after the request may have been sent."),
+    PROXY_ROUTE_SUSPENDED("The selected proxy failed to connect repeatedly; its requests use other accounts for a few seconds before it is tried again.");
 
     private final String message;
 

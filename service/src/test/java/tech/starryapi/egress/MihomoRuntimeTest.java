@@ -28,6 +28,8 @@ class MihomoRuntimeTest {
     private volatile long putDelayMillis;
     private volatile String proxiesBody = "{\"proxies\":{}}";
     private volatile int proxiesStatus = 200;
+    /** A node server the fake controller refuses, answering like Mihomo with the index of the entry. */
+    private volatile String rejectedServer;
     private HttpServer controller;
     private EgressProperties properties;
     private TestRuntime runtime;
@@ -39,6 +41,16 @@ class MihomoRuntimeTest {
             puts.incrementAndGet();
             lastPayload.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             try { Thread.sleep(putDelayMillis); } catch (InterruptedException ignored) { }
+            var proxies = json.readTree(json.readTree(lastPayload.get()).path("payload").asText()).path("proxies");
+            for (int i = 0; rejectedServer != null && i < proxies.size(); i++) {
+                if (rejectedServer.equals(proxies.get(i).path("server").asText())) {
+                    byte[] body = ("{\"message\":\"proxy " + i + ": '' has unset fields: uuid\"}").getBytes(StandardCharsets.UTF_8);
+                    exchange.sendResponseHeaders(400, body.length);
+                    exchange.getResponseBody().write(body);
+                    exchange.close();
+                    return;
+                }
+            }
             exchange.sendResponseHeaders(putStatus, -1);
             exchange.close();
         });
@@ -191,6 +203,32 @@ class MihomoRuntimeTest {
         assertThat(health.lastFailure()).isEqualTo(EgressFailure.CONTROLLER_AUTH_FAILED);
     }
 
+    @Test void aNodeMihomoRejectsIsSetAsideAndTheOthersStillActivate() {
+        MihomoRuntime.Route first = runtime.add(20001);
+        MihomoRuntime.Route bad = runtime.add(20002);
+        MihomoRuntime.Route third = runtime.add(20003);
+        rejectedServer = "node20002.example";
+
+        assertThat(runtime.route(first.id()).block(Duration.ofSeconds(5))).isEqualTo(first);
+        assertThat(runtime.route(third.id()).block(Duration.ofSeconds(5))).isEqualTo(third);
+        assertThat(runtime.rejected).containsExactly(bad.id());
+        assertThat(runtime.markedFailed).isEmpty();
+        assertThat(lastPayload.get()).doesNotContain(bad.id().toString());
+        assertThat(runtime.health().lastFailure()).isNull();
+        // The rejected node is no longer offered (its row now carries the configuration issue).
+        assertThatThrownBy(() -> runtime.route(bad.id()).block(Duration.ofSeconds(5)))
+            .isInstanceOfSatisfying(EgressException.class, error -> assertThat(error.failure()).isEqualTo(EgressFailure.NODE_UNAVAILABLE));
+    }
+
+    @Test void aRejectionThatNamesNoNodeStillFailsTheWholeActivation() {
+        MihomoRuntime.Route route = runtime.add(20001);
+        putStatus = 400;
+        assertThatThrownBy(() -> runtime.route(route.id()).block(Duration.ofSeconds(5)))
+            .isInstanceOfSatisfying(EgressException.class, error -> assertThat(error.failure()).isEqualTo(EgressFailure.CONFIG_REJECTED));
+        assertThat(runtime.rejected).isEmpty();
+        assertThat(runtime.markedFailed).containsExactly(EgressFailure.CONFIG_REJECTED);
+    }
+
     @Test void aDisabledRuntimeNeverTouchesTheController() {
         properties.setMihomoEnabled(false);
         MihomoRuntime.Route route = runtime.add(20001);
@@ -211,6 +249,7 @@ class MihomoRuntimeTest {
     private final class TestRuntime extends MihomoRuntime {
         final AtomicInteger snapshots = new AtomicInteger();
         final List<EgressFailure> markedFailed = new java.util.concurrent.CopyOnWriteArrayList<>();
+        final List<UUID> rejected = new java.util.concurrent.CopyOnWriteArrayList<>();
         private final List<MihomoRuntime.Route> routes = new java.util.concurrent.CopyOnWriteArrayList<>();
 
         TestRuntime(EgressProperties properties) { super(null, json, properties); }
@@ -225,5 +264,8 @@ class MihomoRuntimeTest {
         @Override Mono<MihomoRuntime.Route> find(UUID id) { return Mono.justOrEmpty(routes.stream().filter(route -> route.id().equals(id)).findFirst()); }
         @Override Mono<Void> markActive(List<MihomoRuntime.Route> active) { return Mono.empty(); }
         @Override Mono<Void> markFailed(EgressFailure failure) { markedFailed.add(failure); return Mono.empty(); }
+        @Override Mono<Void> markRejected(MihomoRuntime.Route route) {
+            return Mono.fromRunnable(() -> { rejected.add(route.id()); routes.remove(route); });
+        }
     }
 }

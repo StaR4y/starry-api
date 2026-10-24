@@ -207,7 +207,19 @@ public class ProxyChannelService {
 
     public Mono<ProxyChannelDtos.Channel> update(UUID id, ProxyChannelDtos.UpdateChannel request) {
         // A renamed node keeps its name through later subscription refreshes.
-        DatabaseClient.GenericExecuteSpec update = db.sql("UPDATE proxy_channels SET name=COALESCE(:name,name), name_customized=name_customized OR (CAST(:name AS varchar) IS NOT NULL AND CAST(:name AS varchar)<>name), enabled=COALESCE(:enabled,enabled), runtime_status=CASE WHEN COALESCE(:enabled,enabled) IS FALSE THEN 'DISABLED' WHEN NOT source_present OR config_issue IS NOT NULL THEN 'ERROR' ELSE 'PENDING' END WHERE channel_id=:id").bind("id", id);
+        // Enabling a node that Mihomo rejected earlier retries it.
+        DatabaseClient.GenericExecuteSpec update = db.sql("""
+            UPDATE proxy_channels SET name=COALESCE(:name,name),
+                name_customized=name_customized OR (CAST(:name AS varchar) IS NOT NULL AND CAST(:name AS varchar)<>name),
+                enabled=COALESCE(:enabled,enabled),
+                config_issue=CASE WHEN CAST(:enabled AS boolean) IS TRUE AND config_issue=:rejected THEN NULL ELSE config_issue END,
+                runtime_error=CASE WHEN CAST(:enabled AS boolean) IS TRUE AND config_issue=:rejected THEN NULL ELSE runtime_error END,
+                runtime_status=CASE WHEN COALESCE(:enabled,enabled) IS FALSE THEN 'DISABLED'
+                    WHEN NOT source_present OR (config_issue IS NOT NULL
+                        AND NOT (CAST(:enabled AS boolean) IS TRUE AND config_issue=:rejected)) THEN 'ERROR'
+                    ELSE 'PENDING' END
+            WHERE channel_id=:id
+            """).bind("id", id).bind("rejected", MihomoRuntime.REJECTED_ISSUE);
         update = nullable(update, "enabled", request.enabled(), Boolean.class);
         update = nullable(update, "name", blank(request.name()), String.class);
         return update.fetch().rowsUpdated().flatMap(count -> count == 0 ? Mono.error(notFound("Channel"))
