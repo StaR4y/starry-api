@@ -16,6 +16,7 @@ import tech.starryapi.egress.ClashNodes.Node;
 
 @Service
 public class ProxyChannelService {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(ProxyChannelService.class);
     private final DatabaseClient db;
     private final ObjectMapper mapper;
     private final ClashNodes parser;
@@ -171,26 +172,32 @@ public class ProxyChannelService {
                 e -> new ApiException(HttpStatus.CONFLICT, "PROXY_NODE_IN_USE", "Unbind accounts before deleting this node"));
     }
     public Mono<ProxyChannelDtos.ProbeResult> test(UUID id) {
-        return runtime.route(id).flatMap(route -> {
+        return Mono.defer(() -> {
+            long started = System.nanoTime();
+            return runtime.route(id).flatMap(route -> {
             reactor.netty.http.client.HttpClient http = reactor.netty.http.client.HttpClient.newConnection()
                 .proxy(spec -> spec.type(reactor.netty.transport.ProxyProvider.Proxy.HTTP)
                     .host(properties.getListenerHost()).port(route.port()))
                 .option(io.netty.channel.ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000)
                 .responseTimeout(properties.getProbeTimeout());
             WebClient client = WebClient.builder().clientConnector(new org.springframework.http.client.reactive.ReactorClientHttpConnector(http)).build();
-            long started = System.nanoTime();
             return client.get().uri("https://api.ipify.org?format=json").retrieve().bodyToMono(JsonNode.class)
                 .timeout(properties.getProbeTimeout())
+                .switchIfEmpty(Mono.error(new EgressException(EgressFailure.PROBE_INVALID_RESPONSE)))
                 .map(body -> {
                     String ip = body.path("ip").asText("");
                     if (!io.netty.util.NetUtil.isValidIpV4Address(ip) && !io.netty.util.NetUtil.isValidIpV6Address(ip))
-                        throw new EgressException("Invalid exit probe response");
+                        throw new EgressException(EgressFailure.PROBE_INVALID_RESPONSE);
                     return new ProxyChannelDtos.ProbeResult(true, ip,
-                        java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), null);
-                })
-                .onErrorResume(error -> Mono.just(new ProxyChannelDtos.ProbeResult(false, null,
-                    java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), "Outbound probe failed")));
-        }).onErrorResume(error -> Mono.just(new ProxyChannelDtos.ProbeResult(false, null, 0, "Proxy node is not active")))
+                        java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), null, null);
+                });
+            }).onErrorResume(error -> {
+                EgressFailure failure = EgressFailure.classify(error, EgressFailure.PROBE_FAILED);
+                long elapsed = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+                log.warn("Exit probe failed: channel={}, code={}, elapsedMs={}", id, failure, elapsed);
+                return Mono.just(new ProxyChannelDtos.ProbeResult(false, null, elapsed, failure.message(), failure.name()));
+            });
+        })
             .flatMap(result -> db.sql("UPDATE proxy_channels SET last_tested_at=clock_timestamp(),last_test_result=:result WHERE channel_id=:id")
                 .bind("id", id).bind("result", result.success() ? "SUCCESS" : "FAILED").fetch().rowsUpdated().thenReturn(result));
     }

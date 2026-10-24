@@ -3,6 +3,7 @@
   import { ElMessage, ElMessageBox } from 'element-plus';
   import { Plus, Refresh, Delete, Connection, Search, Edit } from '@element-plus/icons-vue';
   import { t } from '@/i18n';
+  import { probeFailureMessage } from '@/utils/egressDiagnostics';
   import {
     proxyChannelsApi,
     type ProxyCatalog,
@@ -36,11 +37,13 @@
   const status = (node: ProxyChannel) =>
     !node.enabled
       ? t('已停用')
-      : node.runtimeStatus === 'ACTIVE'
-        ? t('已加载')
-        : node.runtimeStatus === 'ERROR'
-          ? t('不可用')
-          : t('待加载');
+      : !catalog.value.mihomoEnabled
+        ? t('未启用')
+        : node.runtimeStatus === 'ACTIVE'
+          ? t('已加载')
+          : node.runtimeStatus === 'ERROR'
+            ? t('不可用')
+            : t('待加载');
   async function load() {
     loading.value = true;
     try {
@@ -93,8 +96,11 @@
   }
   async function probe(id: string) {
     busy.add(id);
+    delete probes[id];
     try {
       probes[id] = await proxyChannelsApi.test(id);
+    } catch {
+      probes[id] = { success: false, latencyMs: 0, errorCode: 'PROBE_REQUEST_FAILED' };
     } finally {
       busy.delete(id);
     }
@@ -103,6 +109,7 @@
     busy.add(node.channelId);
     try {
       await proxyChannelsApi.update(node.channelId, { enabled });
+      delete probes[node.channelId];
       await load();
     } finally {
       busy.delete(node.channelId);
@@ -156,6 +163,16 @@
       >
     </div>
     <el-alert
+      v-if="!loading && !catalog.mihomoEnabled"
+      type="warning"
+      :closable="false"
+      show-icon
+      :title="t('代理组件未启用')"
+      :description="
+        t('节点已保存，但尚不能使用或测试。请启动 Mihomo，设置 STARRY_EGRESS_MIHOMO_ENABLED=true 和匹配的控制密钥，再重启后端。IDE 本地运行与 Docker 部署需要各自配置。')
+      "
+    />
+    <el-alert
       v-if="issues.length"
       type="warning"
       :title="t('部分节点不可用')"
@@ -204,7 +221,9 @@
           ><template #default="{ row }"
             ><el-tag
               :type="
-                row.runtimeStatus === 'ACTIVE'
+                !catalog.mihomoEnabled || !row.enabled
+                  ? 'info'
+                  : row.runtimeStatus === 'ACTIVE'
                   ? 'success'
                   : row.runtimeStatus === 'ERROR'
                     ? 'danger'
@@ -213,7 +232,7 @@
               effect="plain"
               >{{ status(row) }}</el-tag
             >
-            <div v-if="row.runtimeError" class="error">{{ row.runtimeError }}</div></template
+            <div v-if="catalog.mihomoEnabled && row.runtimeError" class="error">{{ row.runtimeError }}</div></template
           ></el-table-column
         >
         <el-table-column :label="t('出口测试')" min-width="175"
@@ -222,7 +241,10 @@
               ><span :class="{ error: !probes[row.channelId].success }">{{
                 probes[row.channelId].success ? probes[row.channelId].exitIp : t('连接失败')
               }}</span>
-              <div class="muted">{{ probes[row.channelId].latencyMs }} ms</div></template
+              <div v-if="!probes[row.channelId].success" class="error" role="status">
+                {{ probeFailureMessage(probes[row.channelId]) }}
+              </div>
+              <div v-if="probes[row.channelId].success" class="muted">{{ probes[row.channelId].latencyMs }} ms</div></template
             ><span v-else class="muted">—</span></template
           ></el-table-column
         >
@@ -236,11 +258,11 @@
         ></el-table-column>
         <el-table-column :label="t('操作')" width="130"
           ><template #default="{ row }">
-            <el-tooltip :content="t('测试出口')"
+            <el-tooltip :content="catalog.mihomoEnabled ? t('测试出口') : t('代理组件未启用')"
               ><el-button
                 link
                 :icon="Connection"
-                :disabled="busy.has(row.channelId) || !row.enabled"
+                :disabled="busy.has(row.channelId) || !row.enabled || !catalog.mihomoEnabled"
                 :aria-label="t('测试出口')"
                 @click="probe(row.channelId)"
             /></el-tooltip>

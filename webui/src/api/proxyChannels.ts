@@ -37,6 +37,7 @@ export interface ProxyProbe {
   exitIp?: string;
   latencyMs: number;
   error?: string;
+  errorCode?: string;
 }
 export const proxyChannelsApi = {
   catalog: () => unwrap<ProxyCatalog>(http.get<ApiResponse<ProxyCatalog>>('/admin/proxy-channels')),
@@ -49,7 +50,12 @@ export const proxyChannelsApi = {
   remove: (id: string) =>
     unwrap<void>(http.delete<ApiResponse<void>>(`/admin/proxy-channels/${id}`)),
   test: (id: string) =>
-    unwrap<ProxyProbe>(http.post<ApiResponse<ProxyProbe>>(`/admin/proxy-channels/${id}/test`)),
+    unwrap<ProxyProbe>(
+      http.post<ApiResponse<ProxyProbe>>(`/admin/proxy-channels/${id}/test`, undefined, {
+        // Runtime activation can take 20s, followed by a 15s exit probe.
+        timeout: 45000,
+      }),
+    ),
   subscribe: (payload: { name: string; url?: string; yaml?: string }) =>
     unwrap<ProxySyncResult>(
       http.post<ApiResponse<ProxySyncResult>>('/admin/proxy-channels/subscriptions', payload, {

@@ -24,5 +24,5 @@ public final class ProxyChannelDtos {
                                      @Size(max = 8192) String url,
                                      @Size(max = 4194304) String yaml) {}
     public record SyncResult(UUID subscriptionId, int imported, int unavailable, List<String> issues) {}
-    public record ProbeResult(boolean success, String exitIp, long latencyMs, String error) {}
+    public record ProbeResult(boolean success, String exitIp, long latencyMs, String error, String errorCode) {}
 }

@@ -40,17 +40,17 @@ public class MihomoRuntime {
     }
 
     public Mono<Route> route(UUID id) {
-        if (!properties.isMihomoEnabled()) return Mono.error(new EgressException("Proxy runtime is disabled"));
+        if (!properties.isMihomoEnabled()) return Mono.error(new EgressException(EgressFailure.RUNTIME_DISABLED));
         return db.sql("SELECT channel_id,listener_port,node_config::text AS config FROM proxy_channels WHERE channel_id=:id AND enabled AND source_present AND config_issue IS NULL")
             .bind("id", id).map((r, m) -> readRoute(r)).one()
-            .switchIfEmpty(Mono.error(new EgressException("Selected proxy node is disabled, missing or unsupported")))
+            .switchIfEmpty(Mono.error(new EgressException(EgressFailure.NODE_UNAVAILABLE)))
             .flatMap(requested -> {
             Route loaded = active.get(id);
             if (requested.equals(loaded)) return Mono.just(loaded);
             return reconcile().then(Mono.defer(() -> {
                 Route activated = active.get(id);
                 return requested.equals(activated) ? Mono.just(activated)
-                    : Mono.error(new EgressException("Selected proxy node is not active"));
+                    : Mono.error(new EgressException(EgressFailure.NODE_NOT_ACTIVE));
             }));
         });
     }
@@ -75,8 +75,12 @@ public class MihomoRuntime {
             if (config.equals(activeConfig)) return Mono.empty();
             return controller.put().uri("/configs?force=true").bodyValue(Map.of("payload", config))
                 .exchangeToMono(response -> response.releaseBody().then(response.statusCode().is2xxSuccessful()
-                    ? Mono.<Void>empty() : Mono.<Void>error(new EgressException("Proxy runtime rejected configuration (HTTP " + response.statusCode().value() + ")"))))
+                    ? Mono.<Void>empty() : Mono.<Void>error(new EgressException(
+                        response.statusCode().value() == 401 || response.statusCode().value() == 403
+                            ? EgressFailure.CONTROLLER_AUTH_FAILED : EgressFailure.CONFIG_REJECTED))))
                 .timeout(Duration.ofSeconds(20))
+                .onErrorMap(error -> error instanceof EgressException ? error
+                    : new EgressException(EgressFailure.CONTROLLER_UNREACHABLE))
                 .thenMany(reactor.core.publisher.Flux.fromIterable(rows).concatMap(route ->
                     db.sql("UPDATE proxy_channels SET runtime_status='ACTIVE',runtime_error=NULL WHERE channel_id=:id AND node_config=:config::jsonb AND enabled AND source_present AND config_issue IS NULL")
                         .bind("id", route.id()).bind("config", route.config().toString()).fetch().rowsUpdated()))
@@ -89,8 +93,10 @@ public class MihomoRuntime {
                 .onErrorResume(error -> {
                     active = Map.of();
                     activeConfig = "";
-                    return db.sql("UPDATE proxy_channels SET runtime_status='ERROR',runtime_error='Proxy runtime could not activate the configuration' WHERE enabled AND source_present AND config_issue IS NULL")
-                        .fetch().rowsUpdated().then(Mono.error(new EgressException("Proxy runtime could not activate the configuration")));
+                    EgressFailure failure = EgressFailure.classify(error, EgressFailure.RUNTIME_FAILED);
+                    return db.sql("UPDATE proxy_channels SET runtime_status='ERROR',runtime_error=:error WHERE enabled AND source_present AND config_issue IS NULL")
+                        .bind("error", failure.message()).fetch().rowsUpdated()
+                        .then(Mono.error(new EgressException(failure)));
                 });
         });
     }

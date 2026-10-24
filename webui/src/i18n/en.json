@@ -2002,5 +2002,22 @@
   "使用概览": "Usage overview",
   "模型使用情况": "Model usage",
   "总 Token：": "Total tokens:",
-  "暂无模型使用数据": "No model usage data"
+  "暂无模型使用数据": "No model usage data",
+  "代理组件未启用": "Proxy runtime is not enabled",
+  "节点已保存，但尚不能使用或测试。请启动 Mihomo，设置 STARRY_EGRESS_MIHOMO_ENABLED=true 和匹配的控制密钥，再重启后端。IDE 本地运行与 Docker 部署需要各自配置。": "Nodes are saved but cannot be used or tested yet. Start Mihomo, set STARRY_EGRESS_MIHOMO_ENABLED=true with a matching controller secret, and restart the backend. Local IDE runs and Docker deployments need separate configuration.",
+  "Mihomo 未启用，请启动代理组件并启用后端代理配置。": "Mihomo is not enabled. Start the proxy component and enable it in the backend configuration.",
+  "节点已停用、已从订阅移除或协议不受支持。": "The node is disabled, no longer in its subscription, or uses an unsupported protocol.",
+  "节点尚未加载，请在 Mihomo 就绪后重试。": "The node is not loaded. Retry after Mihomo is ready.",
+  "无法连接 Mihomo 控制端，请检查组件是否启动及后端连接地址。": "Cannot reach the Mihomo controller. Check that it is running and the backend controller URL is correct.",
+  "Mihomo 控制端认证失败，请检查两端控制密钥是否一致。": "Mihomo controller authentication failed. Check that both controller secrets match.",
+  "Mihomo 拒绝了节点配置，请检查协议参数或监听端口是否冲突。": "Mihomo rejected the node configuration. Check protocol options and listener port conflicts.",
+  "代理配置加载失败，请检查组件状态及后端日志。": "Proxy configuration failed to load. Check component status and backend logs.",
+  "出口探测超时，请检查节点连接及 api.ipify.org 的可达性。": "The exit probe timed out. Check node connectivity and access to api.ipify.org.",
+  "代理连接失败，请检查节点连通性及 Mihomo 监听端口。": "The proxy connection failed. Check node connectivity and the Mihomo listener.",
+  "域名解析失败，请检查代理链路的 DNS 配置。": "Hostname resolution failed. Check DNS on the proxy route.",
+  "出口探测 TLS 握手或证书验证失败，请检查代理链路。": "The exit probe failed TLS negotiation or certificate verification. Check the proxy route.",
+  "探测服务返回异常状态，不代表节点一定不可用，请稍后重试。": "The probe service returned an unsuccessful status. The node may still be available; retry later.",
+  "探测服务没有返回有效的出口 IP。": "The probe service did not return a valid exit IP address.",
+  "测试请求未完成，请检查后端连接后重试。": "The test request did not complete. Check the backend connection and retry.",
+  "出口探测失败，请检查节点及代理组件状态。": "The exit probe failed. Check the node and proxy component status."
 }
