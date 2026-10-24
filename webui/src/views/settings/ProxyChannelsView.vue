@@ -1,428 +1,328 @@
 <script setup lang="ts">
-  import { computed, onMounted, reactive, ref } from 'vue';
+  /**
+   * 出站代理：代理节点与订阅管理、Mihomo / TLS 组件状态与出口测试。
+   *
+   * 页面只负责编排：加载与测试在 useProxyCatalog，列表和对话框是 components/proxy/ 下的子组件。
+   * 全局 axios 拦截器已经为失败的请求弹出提示，这里不再重复提示。
+   */
+  import { nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
   import { ElMessage, ElMessageBox } from 'element-plus';
-  import { Plus, Refresh, Delete, Connection, Search, Edit } from '@element-plus/icons-vue';
+  import { Connection, Plus, Refresh } from '@element-plus/icons-vue';
+  import PageSection from '@/components/PageSection.vue';
   import { t } from '@/i18n';
-  import { probeFailureMessage } from '@/utils/egressDiagnostics';
+  import { ApiError } from '@/utils/http';
   import {
+    PROXY_NODE_IN_USE,
     proxyChannelsApi,
-    type ProxyCatalog,
+    type ProxyBoundAccount,
     type ProxyChannel,
-    type ProxyProbe,
+    type ProxySubscription,
     type ProxySyncResult,
   } from '@/api/proxyChannels';
+  import ProxyAccountsDrawer from './components/proxy/ProxyAccountsDrawer.vue';
+  import ProxyAddDialog from './components/proxy/ProxyAddDialog.vue';
+  import ProxyInUseDialog from './components/proxy/ProxyInUseDialog.vue';
+  import ProxyNodeTable from './components/proxy/ProxyNodeTable.vue';
+  import ProxyRenameDialog from './components/proxy/ProxyRenameDialog.vue';
+  import ProxyStatusStrip from './components/proxy/ProxyStatusStrip.vue';
+  import ProxySubscriptionList from './components/proxy/ProxySubscriptionList.vue';
+  import ProxySyncResultView from './components/proxy/ProxySyncResult.vue';
+  import { useProxyCatalog } from './components/proxy/useProxyCatalog';
 
-  const catalog = ref<ProxyCatalog>({
-    channels: [],
-    subscriptions: [],
-    mihomoEnabled: false,
-    tlsEnabled: false,
-    tlsProfiles: [],
-  });
-  const loading = ref(false);
-  const search = ref('');
-  const dialog = ref<'node' | 'subscription' | null>(null);
-  const saving = ref(false);
-  const form = reactive({ name: '', mode: 'url', content: '' });
+  const { catalog, state, errorMessage, refreshing, testing, batch, load, runTests, cancelTests } =
+    useProxyCatalog();
+  /** 正在变更的节点 / 订阅 */
   const busy = reactive(new Set<string>());
-  const probes = reactive<Record<string, ProxyProbe>>({});
-  const issues = ref<string[]>([]);
-  const channels = computed(() =>
-    catalog.value.channels.filter((node) =>
-      `${node.name} ${node.protocol}`.toLowerCase().includes(search.value.toLowerCase()),
-    ),
-  );
-  const source = (id?: string | null) =>
-    catalog.value.subscriptions.find((s) => s.subscriptionId === id)?.name ?? t('手动添加');
-  const status = (node: ProxyChannel) =>
-    !node.enabled
-      ? t('已停用')
-      : !catalog.value.mihomoEnabled
-        ? t('未启用')
-        : node.runtimeStatus === 'ACTIVE'
-          ? t('已加载')
-          : node.runtimeStatus === 'ERROR'
-            ? t('不可用')
-            : t('待加载');
-  async function load() {
-    loading.value = true;
+  const sourceFilter = ref('');
+  const nodesAnchor = ref<HTMLElement | null>(null);
+
+  const addDialog = reactive({ open: false, tab: 'node' as 'node' | 'subscription' });
+  const renaming = reactive({
+    open: false,
+    kind: 'node' as 'node' | 'subscription',
+    id: '',
+    name: '',
+    saving: false,
+  });
+  const accountsDrawer = reactive({ open: false, id: '', name: '' });
+  const inUse = reactive({
+    open: false,
+    name: '',
+    subscription: false,
+    accounts: [] as ProxyBoundAccount[],
+  });
+  const syncDialog = reactive({ open: false, result: null as ProxySyncResult | null });
+
+  function openAdd(tab: 'node' | 'subscription') {
+    Object.assign(addDialog, { open: true, tab });
+  }
+  const addNode = () => openAdd('node');
+  const addSubscription = () => openAdd('subscription');
+
+  async function reload() {
+    await load({ silent: true });
+  }
+
+  async function withBusy(id: string, action: () => Promise<void>) {
+    busy.add(id);
     try {
-      catalog.value = await proxyChannelsApi.catalog();
+      await action();
     } finally {
-      loading.value = false;
+      busy.delete(id);
     }
   }
-  function open(kind: 'node' | 'subscription') {
-    Object.assign(form, { name: '', mode: 'url', content: '' });
-    dialog.value = kind;
-  }
-  function synced(result: ProxySyncResult) {
-    issues.value = result.issues;
-    ElMessage.success(t('已导入 {p0} 个节点', { p0: result.imported }));
-  }
-  async function save() {
-    if (!form.name.trim() || !form.content.trim()) return;
-    saving.value = true;
-    try {
-      if (dialog.value === 'node') {
-        await proxyChannelsApi.create({
-          name: form.name.trim(),
-          ...(form.mode === 'url'
-            ? { proxyUrl: form.content.trim() }
-            : { clashYaml: form.content }),
-        });
-      } else {
-        synced(
-          await proxyChannelsApi.subscribe({
-            name: form.name.trim(),
-            ...(form.mode === 'url' ? { url: form.content.trim() } : { yaml: form.content }),
-          }),
-        );
+
+  /* ---------- 节点 ---------- */
+
+  function toggleNode(node: ProxyChannel, enabled: boolean) {
+    return withBusy(node.channelId, async () => {
+      try {
+        await proxyChannelsApi.update(node.channelId, { enabled });
+      } catch {
+        /* 已提示 */
       }
-      dialog.value = null;
-      await load();
-    } finally {
-      saving.value = false;
+      await reload();
+    });
+  }
+
+  function showInUse(name: string, subscription: boolean, data: unknown) {
+    Object.assign(inUse, {
+      open: true,
+      name,
+      subscription,
+      accounts: Array.isArray(data) ? (data as ProxyBoundAccount[]) : [],
+    });
+  }
+
+  function isInUse(err: unknown): err is ApiError {
+    return err instanceof ApiError && err.code === PROXY_NODE_IN_USE;
+  }
+
+  async function removeNode(node: ProxyChannel) {
+    // 已知有账号绑定时不必先确认：直接列出账号
+    if (node.boundAccounts > 0) {
+      const accounts = await proxyChannelsApi.boundAccounts(node.channelId).catch(() => []);
+      if (accounts.length) return showInUse(node.name, false, accounts);
     }
-  }
-  async function sync(id: string) {
-    busy.add(id);
-    try {
-      synced(await proxyChannelsApi.sync(id));
-      await load();
-    } finally {
-      busy.delete(id);
-    }
-  }
-  async function probe(id: string) {
-    busy.add(id);
-    delete probes[id];
-    try {
-      probes[id] = await proxyChannelsApi.test(id);
-    } catch {
-      probes[id] = { success: false, latencyMs: 0, errorCode: 'PROBE_REQUEST_FAILED' };
-    } finally {
-      busy.delete(id);
-    }
-  }
-  async function toggle(node: ProxyChannel, enabled: boolean) {
-    busy.add(node.channelId);
-    try {
-      await proxyChannelsApi.update(node.channelId, { enabled });
-      delete probes[node.channelId];
-      await load();
-    } finally {
-      busy.delete(node.channelId);
-    }
-  }
-  async function rename(node: ProxyChannel) {
-    const { value } = await ElMessageBox.prompt(t('节点名称'), t('重命名'), {
-      inputValue: node.name,
-      inputValidator: (value) => !!value.trim() && value.length <= 200,
-    }).catch(() => ({ value: '' }));
-    if (!value) return;
-    await proxyChannelsApi.update(node.channelId, { name: value.trim() });
-    await load();
-  }
-  async function remove(node: ProxyChannel) {
-    const confirmed = await ElMessageBox.confirm(t('删除代理节点？'), node.name, {
-      type: 'warning',
-    })
+    const confirmed = await ElMessageBox.confirm(
+      t('确定删除节点「{p0}」？此操作无法撤销。', { p0: node.name }),
+      t('删除代理节点？'),
+      { type: 'warning', confirmButtonText: t('删除'), cancelButtonText: t('取消') },
+    )
       .then(() => true)
       .catch(() => false);
     if (!confirmed) return;
-    await proxyChannelsApi.remove(node.channelId);
-    await load();
+    await withBusy(node.channelId, async () => {
+      try {
+        await proxyChannelsApi.remove(node.channelId);
+        ElMessage.success(t('已删除节点'));
+      } catch (err) {
+        if (isInUse(err)) showInUse(node.name, false, err.data);
+      }
+      await reload();
+    });
   }
-  onMounted(load);
+
+  function showAccounts(node: ProxyChannel) {
+    Object.assign(accountsDrawer, { open: true, id: node.channelId, name: node.name });
+  }
+
+  /* ---------- 重命名（节点与订阅共用） ---------- */
+
+  function startRename(kind: 'node' | 'subscription', id: string, name: string) {
+    Object.assign(renaming, { open: true, kind, id, name, saving: false });
+  }
+
+  async function confirmRename(name: string) {
+    renaming.saving = true;
+    try {
+      if (renaming.kind === 'node') await proxyChannelsApi.update(renaming.id, { name });
+      else await proxyChannelsApi.renameSubscription(renaming.id, name);
+      renaming.open = false;
+      await reload();
+    } catch {
+      /* 已提示，保留对话框以便修改 */
+    } finally {
+      renaming.saving = false;
+    }
+  }
+
+  /* ---------- 订阅 ---------- */
+
+  function syncSubscription(id: string) {
+    return withBusy(id, async () => {
+      try {
+        const result = await proxyChannelsApi.sync(id);
+        if (result.issues.length || result.unavailable > 0) {
+          Object.assign(syncDialog, { open: true, result });
+        } else {
+          ElMessage.success(t('已同步：{p0} 个节点', { p0: result.imported }));
+        }
+      } catch {
+        /* 失败原因由后端记录在订阅上，刷新后可见 */
+      }
+      await reload();
+    });
+  }
+
+  async function removeSubscription(subscription: ProxySubscription) {
+    const confirmed = await ElMessageBox.confirm(
+      t('将删除订阅「{p0}」及其 {p1} 个节点。此操作无法撤销。', {
+        p0: subscription.name,
+        p1: subscription.nodeCount,
+      }),
+      t('删除订阅？'),
+      { type: 'warning', confirmButtonText: t('删除'), cancelButtonText: t('取消') },
+    )
+      .then(() => true)
+      .catch(() => false);
+    if (!confirmed) return;
+    await withBusy(subscription.subscriptionId, async () => {
+      try {
+        await proxyChannelsApi.removeSubscription(subscription.subscriptionId);
+        ElMessage.success(t('已删除订阅'));
+        if (sourceFilter.value === subscription.subscriptionId) sourceFilter.value = '';
+      } catch (err) {
+        if (isInUse(err)) showInUse(subscription.name, true, err.data);
+      }
+      await reload();
+    });
+  }
+
+  async function showSubscriptionNodes(id: string) {
+    sourceFilter.value = id;
+    await nextTick();
+    nodesAnchor.value?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  onMounted(() => load());
+  onBeforeUnmount(cancelTests);
 </script>
 
 <template>
-  <div v-loading="loading" class="egress-page">
-    <div class="egress-heading">
-      <div>
-        <h2>{{ t('出站代理') }}</h2>
-        <span class="muted">{{ catalog.channels.length }} {{ t('个节点') }}</span>
-      </div>
-      <div class="egress-actions">
-        <el-tooltip :content="t('刷新')"
-          ><el-button :icon="Refresh" :aria-label="t('刷新')" @click="load"
-        /></el-tooltip>
-        <el-button :icon="Plus" @click="open('subscription')">{{ t('添加订阅') }}</el-button>
-        <el-button type="primary" :icon="Plus" @click="open('node')">{{ t('添加节点') }}</el-button>
-      </div>
-    </div>
-    <div class="runtime-strip">
-      <span
-        ><i :class="{ ready: catalog.mihomoEnabled }" />Mihomo ·
-        {{ catalog.mihomoEnabled ? t('已启用') : t('未启用') }}</span
-      >
-      <span
-        ><i :class="{ ready: catalog.tlsEnabled }" />TLS ·
-        {{ catalog.tlsEnabled ? t('已启用') : t('未启用') }}</span
-      >
-    </div>
-    <el-alert
-      v-if="!loading && !catalog.mihomoEnabled"
-      type="warning"
-      :closable="false"
-      show-icon
-      :title="t('代理组件未启用')"
-      :description="
-        t('节点已保存，但尚不能使用或测试。请启动 Mihomo，设置 STARRY_EGRESS_MIHOMO_ENABLED=true 和匹配的控制密钥，再重启后端。IDE 本地运行与 Docker 部署需要各自配置。')
-      "
-    />
-    <el-alert
-      v-if="issues.length"
-      type="warning"
-      :title="t('部分节点不可用')"
-      show-icon
-      @close="issues = []"
-    >
-      <p v-for="issue in issues" :key="issue">{{ issue }}</p>
-    </el-alert>
-    <section v-if="catalog.subscriptions.length" class="egress-section">
-      <h3>{{ t('订阅来源') }}</h3>
-      <div v-for="sub in catalog.subscriptions" :key="sub.subscriptionId" class="subscription-row">
-        <div>
-          <strong>{{ sub.name }}</strong
-          ><span class="muted">{{ sub.nodeCount }} {{ t('个节点') }}</span>
-          <p v-if="sub.lastError" class="error">{{ sub.lastError }}</p>
-        </div>
+  <PageSection :title="t('出站代理')" :subtitle="t('运行与安全')" :icon="Connection">
+    <template #actions>
+      <el-tooltip :content="t('刷新')">
         <el-button
-          v-if="sub.refreshable"
           :icon="Refresh"
-          :loading="busy.has(sub.subscriptionId)"
-          @click="sync(sub.subscriptionId)"
-          >{{ t('同步') }}</el-button
-        >
-      </div>
-    </section>
-    <section class="egress-section">
-      <div class="egress-heading">
-        <h3>{{ t('代理节点') }}</h3>
-        <el-input
-          v-model="search"
-          :prefix-icon="Search"
-          :placeholder="t('搜索节点')"
-          clearable
-          class="node-search"
+          :loading="refreshing"
+          :disabled="state === 'loading'"
+          :aria-label="t('刷新')"
+          @click="reload"
         />
-      </div>
-      <el-table :data="channels" row-key="channelId" :empty-text="t('暂无代理节点')">
-        <el-table-column :label="t('节点')" min-width="190"
-          ><template #default="{ row }"
-            ><strong>{{ row.name }}</strong>
-            <div class="muted">{{ source(row.subscriptionId) }}</div></template
-          ></el-table-column
-        >
-        <el-table-column prop="protocol" :label="t('协议')" width="100" />
-        <el-table-column :label="t('状态')" min-width="150"
-          ><template #default="{ row }"
-            ><el-tag
-              :type="
-                !catalog.mihomoEnabled || !row.enabled
-                  ? 'info'
-                  : row.runtimeStatus === 'ACTIVE'
-                  ? 'success'
-                  : row.runtimeStatus === 'ERROR'
-                    ? 'danger'
-                    : 'info'
-              "
-              effect="plain"
-              >{{ status(row) }}</el-tag
-            >
-            <div v-if="catalog.mihomoEnabled && row.runtimeError" class="error">{{ row.runtimeError }}</div></template
-          ></el-table-column
-        >
-        <el-table-column :label="t('出口测试')" min-width="175"
-          ><template #default="{ row }"
-            ><template v-if="probes[row.channelId]"
-              ><span :class="{ error: !probes[row.channelId].success }">{{
-                probes[row.channelId].success ? probes[row.channelId].exitIp : t('连接失败')
-              }}</span>
-              <div v-if="!probes[row.channelId].success" class="error" role="status">
-                {{ probeFailureMessage(probes[row.channelId]) }}
-              </div>
-              <div v-if="probes[row.channelId].success" class="muted">{{ probes[row.channelId].latencyMs }} ms</div></template
-            ><span v-else class="muted">—</span></template
-          ></el-table-column
-        >
-        <el-table-column prop="boundAccounts" :label="t('绑定账号')" width="100" />
-        <el-table-column :label="t('启用')" width="80"
-          ><template #default="{ row }"
-            ><el-switch
-              :model-value="row.enabled"
-              :loading="busy.has(row.channelId)"
-              @change="toggle(row, Boolean($event))" /></template
-        ></el-table-column>
-        <el-table-column :label="t('操作')" width="130"
-          ><template #default="{ row }">
-            <el-tooltip :content="catalog.mihomoEnabled ? t('测试出口') : t('代理组件未启用')"
-              ><el-button
-                link
-                :icon="Connection"
-                :disabled="busy.has(row.channelId) || !row.enabled || !catalog.mihomoEnabled"
-                :aria-label="t('测试出口')"
-                @click="probe(row.channelId)"
-            /></el-tooltip>
-            <el-tooltip :content="t('重命名')"
-              ><el-button link :icon="Edit" :aria-label="t('重命名')" @click="rename(row)"
-            /></el-tooltip>
-            <el-tooltip :content="t('删除')"
-              ><el-button
-                link
-                type="danger"
-                :icon="Delete"
-                :disabled="row.boundAccounts > 0"
-                :aria-label="t('删除')"
-                @click="remove(row)"
-            /></el-tooltip> </template
-        ></el-table-column>
-      </el-table>
-    </section>
-    <el-dialog
-      :model-value="dialog !== null"
-      :title="dialog === 'node' ? t('添加节点') : t('添加订阅')"
-      width="min(600px, 94vw)"
-      destroy-on-close
-      @close="dialog = null"
+      </el-tooltip>
+      <el-button :icon="Plus" @click="addSubscription">{{ t('添加订阅') }}</el-button>
+      <el-button type="primary" :icon="Plus" @click="addNode">{{ t('添加节点') }}</el-button>
+    </template>
+
+    <el-skeleton v-if="state === 'loading'" class="egress-state" :rows="8" animated />
+
+    <el-result
+      v-else-if="state === 'error'"
+      class="egress-state"
+      icon="warning"
+      :title="t('出站代理加载失败')"
+      :sub-title="errorMessage"
     >
-      <el-form label-position="top" @submit.prevent="save">
-        <el-form-item :label="t('名称')" required
-          ><el-input v-model="form.name" :maxlength="160"
-        /></el-form-item>
-        <el-form-item
-          ><el-radio-group v-model="form.mode"
-            ><el-radio-button value="url">URL</el-radio-button
-            ><el-radio-button value="yaml">Clash YAML</el-radio-button></el-radio-group
-          ></el-form-item
-        >
-        <el-form-item
-          :label="
-            form.mode === 'url' ? (dialog === 'node' ? t('代理 URL') : t('订阅 URL')) : 'Clash YAML'
-          "
-          required
-        >
-          <el-input
-            v-model="form.content"
-            :type="form.mode === 'url' ? 'password' : 'textarea'"
-            :show-password="form.mode === 'url'"
-            :rows="10"
-            autocomplete="off"
-            :placeholder="
-              form.mode === 'url'
-                ? dialog === 'node'
-                  ? 'http://user:pass@host:port'
-                  : 'https://example.com/subscription'
-                : 'proxies:\n  - name: ...'
-            "
-          />
-        </el-form-item>
-      </el-form>
-      <template #footer
-        ><el-button @click="dialog = null">{{ t('取消') }}</el-button
-        ><el-button
-          type="primary"
-          :loading="saving"
-          :disabled="!form.name.trim() || !form.content.trim()"
-          @click="save"
-          >{{ t('添加') }}</el-button
-        ></template
+      <template #extra>
+        <el-button type="primary" @click="load()">{{ t('重新加载') }}</el-button>
+      </template>
+    </el-result>
+
+    <div v-else class="egress-stack">
+      <ProxyStatusStrip :catalog="catalog" />
+
+      <el-empty
+        v-if="catalog.channels.length === 0 && catalog.subscriptions.length === 0"
+        class="surface-card"
+        :image-size="72"
+        :description="
+          t('还没有出站代理。添加一个代理节点或导入订阅后，就可以在账号设置里为账号选择出站线路。')
+        "
       >
+        <el-button type="primary" :icon="Plus" @click="openAdd('node')">
+          {{ t('添加节点') }}
+        </el-button>
+        <el-button :icon="Plus" @click="openAdd('subscription')">{{ t('添加订阅') }}</el-button>
+      </el-empty>
+
+      <template v-else>
+        <ProxySubscriptionList
+          v-if="catalog.subscriptions.length"
+          :subscriptions="catalog.subscriptions"
+          :busy="busy"
+          @sync="syncSubscription"
+          @rename="startRename('subscription', $event.subscriptionId, $event.name)"
+          @remove="removeSubscription"
+          @show="showSubscriptionNodes"
+        />
+        <div ref="nodesAnchor" class="egress-anchor">
+          <ProxyNodeTable
+            v-model:source="sourceFilter"
+            :channels="catalog.channels"
+            :subscriptions="catalog.subscriptions"
+            :mihomo-enabled="catalog.mihomoEnabled"
+            :testing="testing"
+            :busy="busy"
+            :batch="batch"
+            @test="runTests"
+            @cancel="cancelTests"
+            @toggle="toggleNode"
+            @rename="startRename('node', $event.channelId, $event.name)"
+            @remove="removeNode"
+            @accounts="showAccounts"
+          />
+        </div>
+      </template>
+    </div>
+
+    <ProxyAddDialog v-model="addDialog.open" :initial-tab="addDialog.tab" @changed="reload" />
+    <ProxyRenameDialog
+      v-model="renaming.open"
+      :title="renaming.kind === 'node' ? t('重命名节点') : t('重命名订阅')"
+      :name="renaming.name"
+      :max-length="renaming.kind === 'node' ? 200 : 160"
+      :saving="renaming.saving"
+      @confirm="confirmRename"
+    />
+    <ProxyAccountsDrawer
+      v-model="accountsDrawer.open"
+      :channel-id="accountsDrawer.id"
+      :name="accountsDrawer.name"
+    />
+    <ProxyInUseDialog
+      v-model="inUse.open"
+      :name="inUse.name"
+      :subscription="inUse.subscription"
+      :accounts="inUse.accounts"
+    />
+    <el-dialog
+      v-model="syncDialog.open"
+      append-to-body
+      :title="t('同步完成')"
+      width="min(560px, 94vw)"
+      destroy-on-close
+    >
+      <ProxySyncResultView v-if="syncDialog.result" :result="syncDialog.result" />
+      <template #footer>
+        <el-button type="primary" @click="syncDialog.open = false">{{ t('完成') }}</el-button>
+      </template>
     </el-dialog>
-  </div>
+  </PageSection>
 </template>
 
 <style scoped>
-  .egress-page {
+  .egress-state {
+    min-height: 320px;
+  }
+  .egress-stack {
     display: flex;
     flex-direction: column;
-    gap: 24px;
+    gap: 20px;
     min-width: 0;
   }
-  .egress-heading {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 16px;
-    flex-wrap: wrap;
-  }
-  h2 {
-    font-size: 20px;
-    margin: 0 0 6px;
-    color: var(--kp-text);
-  }
-  h3 {
-    font-size: 15px;
-    margin: 0;
-    color: var(--kp-text);
-  }
-  .egress-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-  }
-  .egress-actions .el-button {
-    margin: 0;
-  }
-  .muted {
-    font-size: 12px;
-    color: var(--kp-text-muted);
-    overflow-wrap: anywhere;
-  }
-  .runtime-strip {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 24px;
-    font-size: 12px;
-    color: var(--kp-text-secondary);
-  }
-  .runtime-strip span {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  .runtime-strip i {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--kp-text-muted);
-  }
-  .runtime-strip i.ready {
-    background: var(--el-color-success);
-  }
-  .egress-section {
-    display: flex;
-    flex-direction: column;
-    gap: 16px;
-    padding-top: 20px;
-    border-top: 1px solid var(--kp-divider);
+  .egress-anchor {
     min-width: 0;
-  }
-  .subscription-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: 16px;
-    padding: 10px 0;
-  }
-  .subscription-row strong {
-    margin-right: 14px;
-    font-size: 14px;
-    overflow-wrap: anywhere;
-  }
-  .error {
-    color: var(--el-color-danger);
-    font-size: 12px;
-    margin: 4px 0;
-    overflow-wrap: anywhere;
-  }
-  .node-search {
-    width: min(260px, 100%);
-  }
-  :deep(.el-table) {
-    --el-table-bg-color: transparent;
-    --el-table-tr-bg-color: transparent;
+    scroll-margin-top: 90px;
   }
 </style>

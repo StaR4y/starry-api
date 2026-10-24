@@ -258,6 +258,12 @@ const routes: RouteRecordRaw[] = [
             meta: { title: '账号池设置' },
           },
           {
+            path: 'account-limits',
+            name: 'settings-account-limits',
+            component: () => import('@/views/settings/AccountLimitsSettingsView.vue'),
+            meta: { title: '路由与限制' },
+          },
+          {
             path: 'appearance',
             name: 'settings-appearance',
             component: () => import('@/views/settings/AppearanceSettingsView.vue'),

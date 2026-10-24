@@ -18,7 +18,7 @@ public enum EgressFailure {
     CONFIG_REJECTED("Mihomo rejected the node configuration. Check protocol options and listener port conflicts."),
     RUNTIME_FAILED("Mihomo configuration could not be activated. Check the component status and backend logs."),
     PROBE_TIMEOUT("The exit probe timed out. Check node connectivity and access to api.ipify.org."),
-    PROXY_CONNECT_FAILED("The proxy connection failed. Check the Mihomo listener and the node's upstream connectivity."),
+    PROXY_CONNECT_FAILED("The proxy connection failed. Check the proxy address, port and credentials; for a Mihomo node also whether the node itself is reachable."),
     PROBE_DNS_FAILED("The exit probe could not resolve a hostname. Check DNS on the proxy route."),
     PROBE_TLS_FAILED("The exit probe failed TLS verification or negotiation. Check the proxy route's certificate and TLS settings."),
     PROBE_HTTP_FAILED("The exit probe service returned an unsuccessful HTTP status. This alone does not prove the node is unavailable."),

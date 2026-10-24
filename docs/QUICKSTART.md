@@ -72,28 +72,24 @@ Password: <一串随机字符>
 | ③ | 状态筛选 | 按「可用 / 停用 / 异常」过滤 |
 | ④ | 账号行 | 每行右侧有「编辑」「测试」和「…」更多操作 |
 
-### 2.1 选对「账号协议」
+### 2.1 选对「账号类型」
 
-点 ① 新建账号，在弹窗里选择**添加方式**（「手动凭证」或「ChatGPT 浏览器授权」），再选**账号协议**：
+点 ① 新建账号，在弹窗顶部先选**账号类型**，下面只显示这个类型需要填的字段：
 
-![新建账号：基本配置](images/account-create-kiro.jpg)
+![新建账号：选择账号类型](images/account-create-type.jpg)
 
-| 你手里是什么 | 账号协议选这个 | 要填的关键信息 |
+| 你手里是什么 | 账号类型选这个 | 要填的关键信息 |
 | --- | --- | --- |
 | OpenAI 官方 API Key（`sk-...`） | **OpenAI 官方 API Key** | API Key；Base URL 留空即默认 `https://api.openai.com/v1` |
 | 第三方站点的 OpenAI 兼容 Key（OpenRouter、中转站等） | **第三方 OpenAI 兼容 API Key** | API Key + **Base URL**（站点地址，如 `https://openrouter.ai/api/v1`） |
 | DeepSeek 官方 Key | **DeepSeek API Key** | API Key；Base URL 留空即默认 `https://api.deepseek.com/v1` |
 | Anthropic（Claude）官方 Key（`sk-ant-...`） | **Anthropic / Claude API Key** | API Key；Base URL 留空即默认 `https://api.anthropic.com/v1` |
 | Kiro / AWS BuilderID 账号 | **BuilderID / Kiro** | Access Token（必填），可选 Refresh Token、区域等 |
-| ChatGPT 账号（走 Codex） | 添加方式选 **ChatGPT 浏览器授权** | 在浏览器里授权，不用手动复制 Token |
+| ChatGPT 账号（走 Codex） | **Codex（ChatGPT 账号）** | 默认「ChatGPT 浏览器授权」，在浏览器里授权，不用手动复制 Token |
 
-填「凭证配置」标签页，把 API Key 粘贴进去：
+在「凭证」里粘贴 API Key。需要经代理访问上游时，在「出站代理」选择节点（节点在 系统设置 → 出站代理 里添加，见 [控制台手册：出站代理](CONSOLE_GUIDE.md#出站代理)）。「路由与限制」默认折叠，新账号使用其类别的默认值（在 系统设置 → 路由与限制 统一调整），初次使用不用动：
 
-![凭证配置标签页](images/account-create-openai.jpg)
-
-「高级与路由」标签页可以设置账号池分层（主 / 备）、权重、额度上限等，初次使用保持默认即可：
-
-![高级与路由标签页](images/account-create-advanced.jpg)
+![凭证、出站代理与路由限制](images/account-create-routing.jpg)
 
 点「提交」。
 
@@ -101,7 +97,7 @@ Password: <一串随机字符>
 
 ### 2.2 想用 ChatGPT 账号（Codex）？
 
-在弹窗顶部把添加方式切到「**ChatGPT 浏览器授权**」：
+账号类型选「**Codex（ChatGPT 账号）**」，凭证区默认就是「ChatGPT 浏览器授权」。需要经代理登录时，开始前先选好出站代理节点：登录请求和授权后生成的账号都会使用它。
 
 ![ChatGPT 浏览器授权](images/account-create-chatgpt.jpg)
 

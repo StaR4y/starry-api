@@ -7,21 +7,31 @@
     CopyDocument,
     Link,
     Loading,
-    Lock,
     Refresh,
     WarningFilled,
   } from '@element-plus/icons-vue';
   import { accountsApi } from '@/api';
-  import type { Account, ChatGptOAuthStartResult, ChatGptOAuthStatusResult } from '@/types/api';
+  import type {
+    Account,
+    ChatGptOAuthStartRequest,
+    ChatGptOAuthStartResult,
+    ChatGptOAuthStatusResult,
+  } from '@/types/api';
   import { ApiError } from '@/utils/http';
+  import ChatGptPrerequisite from './account-form/ChatGptPrerequisite.vue';
+  import { emptyProxyLabel, proxyErrorMessage } from './account-form/chatGptProxy';
+  import { useProxyCatalog } from './account-form/useProxyCatalog';
 
   const props = defineProps<{
     active: boolean;
     accountId?: string | null;
+    /** 预选的出站代理节点（例如已在账号表单里选好）；空字符串表示不使用代理 */
+    proxyChannelId?: string;
   }>();
 
   const emit = defineEmits<{
     (e: 'saved', account: Account): void;
+    (e: 'update:proxyChannelId', value: string): void;
   }>();
 
   type Phase =
@@ -38,8 +48,24 @@
   const statusResult = ref<ChatGptOAuthStatusResult | null>(null);
   const errorMessage = ref('');
   const pollMessage = ref('');
+  const proxyError = ref('');
+  const selectedProxy = ref(props.proxyChannelId ?? '');
+  /** 本次授权实际使用的出口，授权码页面上提示给管理员 */
+  const usedProxyName = ref('');
+  const proxyCatalog = useProxyCatalog();
   let timer: number | undefined;
   let generation = 0;
+
+  watch(
+    () => props.proxyChannelId,
+    (value) => {
+      selectedProxy.value = value ?? '';
+    },
+  );
+  watch(selectedProxy, (value) => {
+    proxyError.value = '';
+    emit('update:proxyChannelId', value);
+  });
 
   const isPolling = computed(() => phase.value === 'waiting' || phase.value === 'completing');
 
@@ -58,6 +84,14 @@
     statusResult.value = null;
     errorMessage.value = '';
     pollMessage.value = '';
+    void proxyCatalog.load();
+  }
+
+  function selectedProxyName() {
+    const node = proxyCatalog.catalog.value?.channels.find(
+      (channel) => channel.channelId === selectedProxy.value,
+    );
+    return node?.name ?? emptyProxyLabel(props.accountId) ?? t('直连');
   }
 
   async function begin() {
@@ -68,10 +102,13 @@
     statusResult.value = null;
     errorMessage.value = '';
     pollMessage.value = '';
+    proxyError.value = '';
+    usedProxyName.value = selectedProxyName();
+    const payload: ChatGptOAuthStartRequest = {};
+    if (props.accountId) payload.accountId = props.accountId;
+    if (selectedProxy.value) payload.proxyChannelId = selectedProxy.value;
     try {
-      const result = await accountsApi.startChatGptOAuth(
-        props.accountId ? { accountId: props.accountId } : {},
-      );
+      const result = await accountsApi.startChatGptOAuth(payload);
       if (currentGeneration !== generation || !props.active) {
         await accountsApi.cancelChatGptOAuth(result.loginId).catch(() => undefined);
         return;
@@ -81,6 +118,13 @@
       schedulePoll(result.pollIntervalSeconds);
     } catch (error) {
       if (currentGeneration !== generation) return;
+      const proxyMessage = proxyErrorMessage(error);
+      if (proxyMessage) {
+        // 节点问题回到选择页，让管理员直接改选
+        showPrerequisite();
+        proxyError.value = proxyMessage;
+        return;
+      }
       phase.value = 'error';
       errorMessage.value = error instanceof ApiError ? error.message : t('无法发起 ChatGPT 授权');
     }
@@ -185,49 +229,17 @@
 
 <template>
   <div class="chatgpt-oauth-flow">
-    <div v-if="phase === 'prerequisite'" class="oauth-prerequisite">
-      <el-icon class="oauth-prerequisite__icon" :size="32"><Lock /></el-icon>
-      <h3>{{ t('通过 OpenAI 官方页面登录') }}</h3>
-      <p>
-        {{
-          t(
-            'Starry API 使用 Codex 设备授权连接 ChatGPT。账号登录、密码和六位验证码都只在 auth.openai.com 完成。',
-          )
-        }}
-      </p>
-      <ol class="oauth-guide">
-        <li>
-          <strong>{{ t('登录 ChatGPT') }}</strong>
-          <span>{{
-            t('若 OpenAI 向邮箱发送六位验证码，请在随后打开的 OpenAI 官方页面填写。')
-          }}</span>
-        </li>
-        <li>
-          <strong>{{ t('批准设备授权') }}</strong>
-          <span>{{ t('登录完成后，再输入本页面生成的设备授权码并确认授权。') }}</span>
-        </li>
-      </ol>
-      <el-alert
-        type="info"
-        :closable="false"
-        show-icon
-        :title="
-          t(
-            '开始前，请在 ChatGPT「设置 → 安全」中开启 Codex 设备代码授权；工作区账号需由管理员开启。',
-          )
-        "
-      />
-      <div class="oauth-prerequisite__actions">
-        <el-link
-          href="https://learn.chatgpt.com/docs/auth#mainContent"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          {{ t('查看 OpenAI 官方说明') }}
-        </el-link>
-        <el-button type="primary" @click="begin">{{ t('已开启，获取设备授权码') }}</el-button>
-      </div>
-    </div>
+    <ChatGptPrerequisite
+      v-if="phase === 'prerequisite'"
+      v-model="selectedProxy"
+      :account-id="accountId"
+      :catalog="proxyCatalog.catalog.value"
+      :loading="proxyCatalog.loading.value"
+      :failed="proxyCatalog.failed.value"
+      :error="proxyError"
+      @refresh="proxyCatalog.load()"
+      @start="begin"
+    />
 
     <div v-else-if="phase === 'starting'" class="oauth-loading" aria-live="polite">
       <el-icon class="is-loading" :size="30"><Loading /></el-icon>
@@ -235,9 +247,15 @@
     </div>
 
     <div v-else-if="startResult && isPolling" class="oauth-flow">
-      <div class="oauth-origin">
-        <span class="oauth-origin__label">{{ t('授权站点') }}</span>
-        <strong>auth.openai.com</strong>
+      <div class="oauth-origins">
+        <div class="oauth-origin">
+          <span class="oauth-origin__label">{{ t('授权站点') }}</span>
+          <strong>auth.openai.com</strong>
+        </div>
+        <div class="oauth-origin">
+          <span class="oauth-origin__label">{{ t('出站代理') }}</span>
+          <strong class="oauth-origin__plain">{{ usedProxyName }}</strong>
+        </div>
       </div>
 
       <div class="oauth-browser-guide">
@@ -313,98 +331,6 @@
     margin: 0 auto;
   }
 
-  .oauth-prerequisite {
-    min-height: 260px;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-
-    &__icon {
-      color: var(--kp-primary);
-    }
-
-    h3 {
-      margin: 14px 0 8px;
-      color: var(--kp-text);
-      font-size: 18px;
-    }
-
-    > p {
-      max-width: 480px;
-      margin: 0 0 16px;
-      color: var(--kp-text-secondary);
-      font-size: 14px;
-      line-height: 1.7;
-    }
-
-    .el-alert {
-      text-align: left;
-    }
-
-    &__actions {
-      width: 100%;
-      display: flex;
-      align-items: center;
-      justify-content: flex-end;
-      gap: 16px;
-      margin-top: 18px;
-    }
-  }
-
-  .oauth-guide {
-    width: 100%;
-    margin: 0 0 18px;
-    padding: 0;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 18px;
-    counter-reset: oauth-step;
-    list-style: none;
-    text-align: left;
-
-    li {
-      position: relative;
-      min-width: 0;
-      padding-left: 34px;
-      counter-increment: oauth-step;
-
-      &::before {
-        content: counter(oauth-step);
-        position: absolute;
-        top: 1px;
-        left: 0;
-        width: 23px;
-        height: 23px;
-        display: grid;
-        place-items: center;
-        border: 1px solid var(--el-color-primary-light-5);
-        border-radius: 50%;
-        color: var(--el-color-primary);
-        font-size: 12px;
-        font-weight: 700;
-      }
-    }
-
-    strong,
-    span {
-      display: block;
-    }
-
-    strong {
-      margin-bottom: 4px;
-      color: var(--kp-text);
-      font-size: 14px;
-    }
-
-    span {
-      color: var(--kp-text-secondary);
-      font-size: 13px;
-      line-height: 1.55;
-    }
-  }
-
   .oauth-loading {
     min-height: 230px;
     display: flex;
@@ -447,13 +373,19 @@
     font-weight: 600;
   }
 
+  .oauth-origins {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--el-border-color-lighter);
+  }
+
   .oauth-origin {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 16px;
-    padding-bottom: 12px;
-    border-bottom: 1px solid var(--el-border-color-lighter);
 
     &__label {
       color: var(--kp-text-secondary);
@@ -464,6 +396,13 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       font-size: 13px;
       color: var(--kp-success);
+    }
+
+    strong.oauth-origin__plain {
+      font-family: inherit;
+      color: var(--kp-text);
+      text-align: right;
+      overflow-wrap: anywhere;
     }
   }
 
@@ -552,21 +491,6 @@
   }
 
   @media (max-width: 560px) {
-    .oauth-prerequisite {
-      min-height: 300px;
-
-      &__actions {
-        align-items: stretch;
-        flex-direction: column-reverse;
-        gap: 12px;
-      }
-    }
-
-    .oauth-guide {
-      grid-template-columns: 1fr;
-      gap: 14px;
-    }
-
     .oauth-code span {
       font-size: 22px;
     }

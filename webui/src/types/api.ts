@@ -407,6 +407,8 @@ export interface Account {
 
 export interface ChatGptOAuthStartRequest {
   accountId?: string;
+  /** 登录过程（发起、轮询、换取令牌）经由该代理出口，生成的账号也绑定到它 */
+  proxyChannelId?: string;
 }
 
 export interface ChatGptOAuthStartResult {

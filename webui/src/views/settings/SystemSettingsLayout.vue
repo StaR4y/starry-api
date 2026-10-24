@@ -14,6 +14,7 @@
     Connection,
     Message,
     Monitor,
+    Odometer,
     Postcard,
     SetUp,
     Trophy,
@@ -105,6 +106,13 @@
             return t('账号池设置');
           },
           icon: Monitor,
+        },
+        {
+          name: 'settings-account-limits',
+          get label() {
+            return t('路由与限制');
+          },
+          icon: Odometer,
         },
         {
           name: 'settings-proxy-channels',

@@ -103,6 +103,11 @@
         flex-wrap: wrap;
       }
 
+      /* gap 已负责间距；Element Plus 相邻按钮的左外边距会让换行后的第一个按钮错位 */
+      .page-section__actions > :deep(.el-button + .el-button) {
+        margin-left: 0;
+      }
+
       .page-section__summary {
         margin-bottom: 18px;
       }

@@ -52,12 +52,13 @@ http.interceptors.request.use((config: InternalAxiosRequestConfig) => {
   return config;
 });
 
-/** 业务错误：携带后端返回的 error.code，便于上层做差异化处理 */
+/** 业务错误：携带后端返回的 error.code，便于上层做差异化处理；data 是错误响应附带的详情（例如阻止删除的记录） */
 export class ApiError extends Error {
   constructor(
     public code: string,
     message: string,
     public status?: number,
+    public data?: unknown,
   ) {
     super(message);
   }
@@ -152,10 +153,16 @@ http.interceptors.response.use(
       url.includes('/admin/usage-tracker/me') ||
       url.includes('/admin/logs/me') ||
       url.includes('/plugin-assets/');
-    if (!silent && code !== MAINTENANCE_ERROR_CODE) {
+    // 这些错误由页面自行展示：409 列出仍绑定节点的账号，默认限制的校验错误显示在编辑框内
+    const shownByCaller =
+      code === 'PROXY_NODE_IN_USE' ||
+      (url.includes('/admin/accounts/allocation-defaults') &&
+        (code === 'VALIDATION_ERROR' || code === 'ALLOCATION_DEFAULTS_INVALID'));
+    if (!silent && !shownByCaller && code !== MAINTENANCE_ERROR_CODE) {
       ElMessage.error(message);
     }
-    return Promise.reject(new ApiError(code, message, status));
+    const data = err.response?.data instanceof Blob ? undefined : err.response?.data?.data;
+    return Promise.reject(new ApiError(code, message, status, data ?? undefined));
   },
 );
 
