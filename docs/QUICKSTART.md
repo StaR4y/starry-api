@@ -29,9 +29,9 @@ Password: <一串随机字符>
 ```
 
 - 本机运行：在启动命令所在的终端里找。
-- Docker 部署：执行 `docker compose logs service | grep -A3 "Default admin user"`（装服务器用的是 `docker-compose.artifact.yml` 时，命令里要加 `-f docker-compose.artifact.yml`）。
+- Docker 部署（一键安装的服务器）：在服务器上执行 `sudo starry-api info`，它会显示控制台地址和初始密码。用仓库里的 `docker-compose.yml` 部署时，在仓库根目录执行 `./scripts/starry-api.sh info`。
 
-> 密码只会在「系统里还没有任何用户」时打印。错过了就找不回来了，只能清库重来或联系有数据库权限的人处理，参见 [故障排查](TROUBLESHOOTING.md#首次启动密码丢了)。
+> 密码只以加盐哈希保存，**读不回来**：`starry-api info` 只在「Root 还没改过密码，并且服务日志里还留着首次启动打印的那一行」时显示初始密码，更新或重建容器后日志就没了。这时在服务器上执行 `sudo starry-api reset-password`，会得到一个新的临时密码（并重启服务）；本机运行（非 Docker）没有这个命令，参见 [故障排查](TROUBLESHOOTING.md#首次启动密码丢了)。
 
 ### 1.2 登录
 

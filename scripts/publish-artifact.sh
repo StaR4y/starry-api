@@ -10,6 +10,7 @@ WEBUI_DIST_NAME="${WEBUI_DIST_NAME:-starry-api-webui.tar.gz}"
 COMPOSE_NAME="${COMPOSE_NAME:-docker-compose.artifact.yml}"
 CHECKSUMS_NAME="${CHECKSUMS_NAME:-sha256sums.txt}"
 RECOVERY_TOOL_NAME="${RECOVERY_TOOL_NAME:-recover-data-management.sh}"
+ADMIN_COMMAND_NAME="${ADMIN_COMMAND_NAME:-starry-api.sh}"
 RUN_TESTS="${RUN_TESTS:-true}"
 SKIP_BUILD="${SKIP_BUILD:-false}"
 COMMIT_ARTIFACTS="${COMMIT_ARTIFACTS:-false}"
@@ -329,6 +330,9 @@ Package layout:
 - postgres-init/001-starry-api-roles.sh: first-start least-privilege role bootstrap.
 - runtime/recover-data-management.sh: interactive container recovery tool.
 - runtime/recover-data-management.sh.sha256: recovery tool checksum.
+- starry-api.sh: the "starry-api" administration command (sign-in information, Root password reset); the installer
+  installs it as <install dir>/starry-api and links it into /usr/local/bin.
+- starry-api.sh.sha256: administration command checksum.
 - build-info.json: source commit and artifact metadata.
 - sha256sums.txt: checksums for files inside the bundle.
 EOF
@@ -445,6 +449,7 @@ main() {
   local version branch commit built_at java_version dirty jar_path artifact_path checksum size_bytes checksum_path info_path
   local webui_dist_path webui_checksum webui_size compose_path compose_checksum init_path init_checksum
   local recovery_path recovery_checksum recovery_checksum_path checksums_path bundle_path bundle_checksum bundle_size tmp_dir stage_dir
+  local admin_command_path admin_command_checksum admin_command_checksum_path
   version="${VERSION:-$(project_version)}"
   version="${version:-0.1.0-SNAPSHOT}"
   branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'unknown')"
@@ -507,6 +512,12 @@ main() {
     || fail "Could not publish the data-management recovery tool atomically."
   recovery_checksum="$(sha256_file "$recovery_path")"
   printf '%s  %s\n' "$recovery_checksum" "$RECOVERY_TOOL_NAME" > "$recovery_checksum_path"
+  admin_command_path="${ARTIFACT_DIR}/${ADMIN_COMMAND_NAME}"
+  admin_command_checksum_path="${admin_command_path}.sha256"
+  atomic_copy_file scripts/starry-api.sh "$admin_command_path" 0755 \
+    || fail "Could not publish the administration command atomically."
+  admin_command_checksum="$(sha256_file "$admin_command_path")"
+  printf '%s  %s\n' "$admin_command_checksum" "$ADMIN_COMMAND_NAME" > "$admin_command_checksum_path"
 
   cat > "$info_path" <<EOF
 {
@@ -515,6 +526,7 @@ main() {
   "webuiDist": "$(json_escape "$WEBUI_DIST_NAME")",
   "compose": "$(json_escape "$COMPOSE_NAME")",
   "recoveryTool": "runtime/$(json_escape "$RECOVERY_TOOL_NAME")",
+  "adminCommand": "$(json_escape "$ADMIN_COMMAND_NAME")",
   "version": "$(json_escape "$version")",
   "branch": "$(json_escape "$branch")",
   "commit": "$(json_escape "$commit")",
@@ -527,6 +539,7 @@ main() {
   "webuiSha256": "$(json_escape "$webui_checksum")",
   "composeSha256": "$(json_escape "$compose_checksum")",
   "recoveryToolSha256": "$(json_escape "$recovery_checksum")",
+  "adminCommandSha256": "$(json_escape "$admin_command_checksum")",
   "java": "$(json_escape "$java_version")"
 }
 EOF
@@ -539,6 +552,8 @@ EOF
     printf '%s  %s\n' "$init_checksum" "postgres-init/001-starry-api-roles.sh"
     printf '%s  %s\n' "$recovery_checksum" "runtime/${RECOVERY_TOOL_NAME}"
     printf '%s  %s\n' "$(sha256_file "$recovery_checksum_path")" "runtime/${RECOVERY_TOOL_NAME}.sha256"
+    printf '%s  %s\n' "$admin_command_checksum" "$ADMIN_COMMAND_NAME"
+    printf '%s  %s\n' "$(sha256_file "$admin_command_checksum_path")" "${ADMIN_COMMAND_NAME}.sha256"
     printf '%s  %s\n' "$(sha256_file "$info_path")" "build-info.json"
   } > "$checksums_path"
 
@@ -554,6 +569,8 @@ EOF
   cp "$init_path" "$stage_dir/postgres-init/001-starry-api-roles.sh"
   cp "$recovery_path" "$stage_dir/runtime/${RECOVERY_TOOL_NAME}"
   cp "$recovery_checksum_path" "$stage_dir/runtime/${RECOVERY_TOOL_NAME}.sha256"
+  cp "$admin_command_path" "$stage_dir/${ADMIN_COMMAND_NAME}"
+  cp "$admin_command_checksum_path" "$stage_dir/${ADMIN_COMMAND_NAME}.sha256"
   cp "$info_path" "$stage_dir/build-info.json"
   mkdir -p "$stage_dir/docker/egress" "$stage_dir/docs"
   cp "$ROOT_DIR/docker-compose.tls-bridge.yml" "$stage_dir/docker-compose.tls-bridge.yml"
@@ -570,6 +587,8 @@ EOF
     printf '%s  %s\n' "$(sha256_file "$stage_dir/postgres-init/001-starry-api-roles.sh")" "postgres-init/001-starry-api-roles.sh"
     printf '%s  %s\n' "$(sha256_file "$stage_dir/runtime/${RECOVERY_TOOL_NAME}")" "runtime/${RECOVERY_TOOL_NAME}"
     printf '%s  %s\n' "$(sha256_file "$stage_dir/runtime/${RECOVERY_TOOL_NAME}.sha256")" "runtime/${RECOVERY_TOOL_NAME}.sha256"
+    printf '%s  %s\n' "$(sha256_file "$stage_dir/${ADMIN_COMMAND_NAME}")" "$ADMIN_COMMAND_NAME"
+    printf '%s  %s\n' "$(sha256_file "$stage_dir/${ADMIN_COMMAND_NAME}.sha256")" "${ADMIN_COMMAND_NAME}.sha256"
     printf '%s  %s\n' "$(sha256_file "$stage_dir/build-info.json")" "build-info.json"
     for egress_file in docker-compose.tls-bridge.yml docker/egress/Dockerfile docker/egress/requirements.txt docker/egress/bridge.py docker/egress/mihomo-entrypoint.sh docs/ACCOUNT_EGRESS.md; do
       printf '%s  %s\n' "$(sha256_file "$stage_dir/$egress_file")" "$egress_file"

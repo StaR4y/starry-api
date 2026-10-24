@@ -129,6 +129,8 @@ Default admin user already exists and still uses the first-login password.
 The password was printed only during first startup and will not be shown again.
 ```
 
+不用翻日志：在仓库根目录执行 `./scripts/starry-api.sh info`（Root 还没改过密码、且日志里还留着那一行时，会显示初始密码），忘了密码就执行 `./scripts/starry-api.sh reset-password`，输入 `RESET` 确认后得到新的临时密码（服务会重启）。数据管理安全密钥无法找回或重置，该命令只显示它的状态。详见 [运维手册](OPERATIONS.md#服务器上的-starry-api-命令)。
+
 ### 5. 配置 1Panel 反向代理
 
 [→ 跳到下一节](#配置-1panel-反向代理)

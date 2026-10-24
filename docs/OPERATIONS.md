@@ -33,18 +33,18 @@ SERVER_PORT=8081 ./scripts/start-proxy.sh      # 换端口
 STARRY_RUN_MODE=jar ./scripts/start-proxy.sh     # 用打好的 boot jar 启动
 ```
 
-**首次启动**时，从启动日志里读取生成的 `admin` 初始密码。服务只会在「Root 标记未分配、且 `admin_users` 表为空」时打印**一次**。
+**首次启动**时，服务会创建 Root（用户名 `admin`）和一个随机初始密码，只在「Root 标记未分配、且 `admin_users` 表为空」时在启动日志里打印**一次**。Docker 部署不用翻日志：在服务器上执行 `sudo starry-api info` 即可看到，详见 [服务器上的 `starry-api` 命令](#服务器上的-starry-api-命令)。
 
 ---
 
 ## 登录管理员
 
-控制台里直接登录最方便（见 [快速开始](QUICKSTART.md#第-1-步登录并修改初始密码)）。用命令行的话：
+控制台里直接登录最方便（见 [快速开始](QUICKSTART.md#第-1-步登录并修改初始密码)）。忘了密码或找不到初始密码，先看下一节的 `starry-api` 命令。用命令行的话：
 
 ```bash
 curl -X POST http://127.0.0.1:8080/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"admin","password":"<启动日志里的密码>"}'
+  -d '{"username":"admin","password":"<初始密码>"}'
 
 export ADMIN_TOKEN="adm-..."     # 取返回的 data.accessToken
 ```
@@ -55,10 +55,33 @@ export ADMIN_TOKEN="adm-..."     # 取返回的 data.accessToken
 curl -X POST http://127.0.0.1:8080/auth/password \
   -H 'Content-Type: application/json' \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
-  -d '{"oldPassword":"<启动日志里的密码>","newPassword":"<新密码>"}'
+  -d '{"oldPassword":"<初始密码>","newPassword":"<新密码>"}'
 ```
 
 改密码会让该账号**所有**控制台会话失效，请重新登录并替换 `ADMIN_TOKEN`。
+
+### 服务器上的 `starry-api` 命令
+
+一键安装脚本会把 `starry-api` 命令装到 `/opt/starry-api/starry-api`，并链接到 `/usr/local/bin/starry-api`；用仓库里的 `docker-compose.yml` 部署时，在仓库根目录用 `./scripts/starry-api.sh` 即可（用法相同）。请在服务器上以 root 运行，或用能操作 Docker 的用户。输出语言跟随系统语言，也可以用 `--lang zh|en` 指定。
+
+| 命令 | 作用 |
+| --- | --- |
+| `sudo starry-api info` | （默认）控制台地址和反向代理目标、服务容器状态和 `/health`、Root 用户名与邮箱、Root 密码状态、数据管理安全密钥的状态、Mihomo 部署与开关状态 |
+| `sudo starry-api info --show-secrets` | 同上，并显示 `.env` 里的密钥（数据库密码、`STARRY_EGRESS_CONTROLLER_SECRET`、`STARRY_TLS_SECRET` 及其他名称含 `PASSWORD` / `SECRET` / `TOKEN` / `KEY` 的项），前面带警告。默认**不显示**，也不会写入任何文件 |
+| `sudo starry-api reset-password` | 为 Root 设置新的临时密码（下面详述） |
+
+**Root 密码**以加盐 PBKDF2 哈希保存，**永远读不回来**。`info` 只在两个条件同时成立时显示初始密码：Root 还没有改过密码（`first_login` 为真），并且当前容器的启动日志里还留着那一行；它还会核对日志里的密码**仍是当前密码**（重置过就不是了），核对不上就不显示。其余情况会告诉你原因——已被管理员修改，或日志已随容器重建（更新、`--force-recreate`）消失——并建议 `reset-password`。
+
+**`reset-password`** 会：
+
+1. 说明将发生的事，要求你在终端里输入 `RESET` 确认（没有终端时必须加 `--yes`）；
+2. 为 Root 生成新的随机临时密码，写入数据库，下次登录必须先改密码（12–128 个字符）；
+3. **重启服务**（几秒到一两分钟，期间无法访问）：控制台会话只存在服务内存里，无法从数据库撤销，重启才能让所有旧会话失效；
+4. 等 `/health` 恢复后，**只显示一次**用户名和临时密码。如果重启失败，仍会显示密码，并告诉你手动重启的命令。
+
+数据管理处于锁定状态时站点在维护模式，所有登录都返回 503，新密码此时也进不去；命令会提醒你先按 [恢复被锁定的数据管理](#恢复被锁定的数据管理) 处理。
+
+**数据管理安全密钥（`dmsk-…`）无法从服务器显示、找回或重置**——服务器上只保存它的加盐校验值，`starry-api` 也故意不提供这类操作。`info` 只显示**状态**：未生成 / 生成于何时（以及连续失败次数）/ 连续失败 5 次后已锁定 / 状态文件丢失或无效。密钥丢了、被锁定或状态文件异常时，请按 [恢复被锁定的数据管理](#恢复被锁定的数据管理) 处理，**不要**删除或重建安全目录里的文件。
 
 ---
 
@@ -482,7 +505,7 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions \
 
 ### 初始化与保存密钥
 
-初始化返回形如 `dmsk-...` 的安全密钥，**只显示一次**。请直接复制到受控的密码管理器，并另存一份加密的离线副本。控制台**故意不提供明文下载**。服务只在「仅属主可读」的状态文件里保存一个加盐的 PBKDF2 校验值，不保存密钥本身。
+初始化返回形如 `dmsk-...` 的安全密钥，**只显示一次**。请直接复制到受控的密码管理器，并另存一份加密的离线副本。控制台**故意不提供明文下载**。服务只在「仅属主可读」的状态文件里保存一个加盐的 PBKDF2 校验值，不保存密钥本身——所以**无法在服务器上显示、找回或重置**；在服务器上用 `sudo starry-api info` 只能查看它的状态。
 
 - 受保护操作前，用密钥在 `/security/unlock` 换取一个 `dmt-...` 短期令牌，它绑定当前管理员会话、请求的动作和可选的备份文件名；把它放在 `X-Data-Management-Token` 头里。
 - 支持的动作：`EXPORT_DATABASE`、`EXPORT_BACKUP`、`CREATE_BACKUP`、`DOWNLOAD_BACKUP`、`DELETE_BACKUP`、`RESTORE_DATABASE`。
@@ -497,6 +520,8 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions \
 维护模式下业务后台任务也**故障关闭**：账号 Token 刷新、账号池评估、禁用账号测试、支付对账、用量聚合 / 保留、性能指标写入、账号缓存刷新、注册令牌清理都会被跳过。锁定状态刷新、待处理安全事件持久化、SMTP 安全告警发件箱、健康检查和内存里的会话 / 限流清理继续运行。已经通过闸门的任务不会被强行中断；如果需要立刻终止已在进行的外部调用，请隔离部署。
 
 ### 恢复被锁定的数据管理
+
+先在服务器上执行 `sudo starry-api info`，「数据管理安全密钥」一节会告诉你当前是已锁定，还是状态文件丢失 / 无效。
 
 #### Docker Compose 部署
 

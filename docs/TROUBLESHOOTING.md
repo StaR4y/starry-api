@@ -143,9 +143,11 @@ Password: ...
 
 - **普通账号**（非 Root）忘了密码：由管理员重置——控制台「用户管理」里点「重置密码」，或调接口 `POST /admin/users/{userId}/reset-password`。
 - **Root** 不一样：其他管理员**不能**重置或替换它。如果还有一个有效的 Root 会话，Root 可以自己改密码或自助重置（之后所有 Root 会话被撤销）。
-- 如果 Root 的密码**和**所有会话都丢了：应用**故意**不会自动创建替代账号。
-  - 仅限**一次性本地测试库**：删掉整个库再重建，触发首次启动流程。
-  - **生产环境**：停止流量，由数据库所有者做有审计的恢复，或恢复一份可信备份。
+- 如果 Root 的密码**和**所有会话都丢了：应用**故意**不会自动创建替代账号，但能操作服务器上 Docker 的人可以用 `starry-api` 命令重置：
+  - **Docker 部署**（一键安装，或用仓库里的 `docker-compose.yml`）：先 `sudo starry-api info`——Root 还没改过密码、日志里还有那一行时，它会直接显示初始密码；否则执行 `sudo starry-api reset-password`，输入 `RESET` 确认，会得到一个新的临时密码（只显示一次，下次登录必须改），服务会重启几秒到一两分钟，所有控制台会话被登出。详见 [运维手册](OPERATIONS.md#服务器上的-starry-api-命令)。
+  - 仅限**一次性本地测试库**（没有 Docker）：删掉整个库再重建，触发首次启动流程。
+  - **其他生产环境**：停止流量，由数据库所有者做有审计的恢复，或恢复一份可信备份。
+- **数据管理安全密钥**丢了不是这样：它无法在服务器上显示、找回或重置（只保存加盐校验值）。用你保存的原始密钥操作；被锁定见 [整站维护锁定](#整站维护锁定503-system_maintenance)。
 
 ### 管理接口返回 `403 FIRST_LOGIN_PASSWORD_CHANGE_REQUIRED`
 
@@ -275,7 +277,7 @@ curl http://127.0.0.1:8080/admin/api-keys -H 'Authorization: Bearer adm-...'   #
 curl -fsS http://127.0.0.1:18080/system/status
 ```
 
-返回里有 `"maintenance":true` 和 `"code":"SYSTEM_MAINTENANCE"` 就是它。**此时不要删安全状态文件，也不要反复重启。**让公网流量保持隔离，确认只有**一个** `service` 容器在运行，然后用镜像里自带的恢复工具：
+返回里有 `"maintenance":true` 和 `"code":"SYSTEM_MAINTENANCE"` 就是它。在服务器上执行 `sudo starry-api info`，「数据管理安全密钥」一节会显示「已锁定」或状态文件异常。安全密钥无法在服务器上找回或重置，只能用你保存的原始密钥恢复；Root 重置密码也解决不了维护锁定。**此时不要删安全状态文件，也不要反复重启。**让公网流量保持隔离，确认只有**一个** `service` 容器在运行，然后用镜像里自带的恢复工具：
 
 ```bash
 cd /opt/starry-api

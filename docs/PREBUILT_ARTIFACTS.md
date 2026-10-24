@@ -27,6 +27,8 @@ Starry API 支持两种部署方式：**源码构建**（在服务器上用 Dock
 | `artifacts/docker-compose.artifact.yml` | 用 JRE 镜像运行 jar 的 Compose 文件 |
 | `artifacts/runtime/recover-data-management.sh` | 双语交互恢复工具，会被复制进服务镜像的 `/app/bin/recover-data-management` |
 | `artifacts/runtime/recover-data-management.sh.sha256` | 恢复工具校验和，安装时会校验 |
+| `artifacts/starry-api.sh` | `starry-api` 管理命令（登录信息、重置 Root 密码），安装为 `${INSTALL_DIR}/starry-api` 并链接到 `/usr/local/bin/starry-api` |
+| `artifacts/starry-api.sh.sha256` | 管理命令校验和，安装时会校验 |
 | `artifacts/sha256sums.txt` | 所有可部署文件的校验和清单 |
 | `artifacts/build-info.json` | 源码提交、分支、版本、构建时间、大小、校验和等元数据 |
 
@@ -85,6 +87,7 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
 - 校验并解压到 `/opt/starry-api`；
 - 仅当整包不可用时，才回退到单独的 `artifacts/starry-api.jar`；
 - 安装经校验的恢复工具，并复制进服务镜像的 `/app/bin/recover-data-management`；
+- 安装经校验的 `starry-api` 管理命令（整包自带；旧版本没有时单独下载，下载不到只提示并跳过）；
 - 启动 PostgreSQL 17 和服务运行时（含 PostgreSQL 17 客户端工具和 `jq`）；
 - 等待 `/actuator/health` 通过。
 
@@ -114,6 +117,7 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
 | `ARTIFACT_URL` / `CHECKSUM_URL` | `${REPO_RAW_BASE}/artifacts/starry-api.jar` / `….jar.sha256` | 单独 jar 及校验和地址 |
 | `BUILD_INFO_URL` | `${REPO_RAW_BASE}/artifacts/build-info.json` | 可选的构建元数据地址 |
 | `RECOVERY_TOOL_URL` / `RECOVERY_TOOL_CHECKSUM_URL` | `${REPO_RAW_BASE}/artifacts/runtime/recover-data-management.sh` / `${RECOVERY_TOOL_URL}.sha256` | 恢复工具及校验和地址，**仅在回退路径使用** |
+| `CLI_TOOL_URL` / `CLI_TOOL_CHECKSUM_URL` | `${REPO_RAW_BASE}/artifacts/starry-api.sh` / `${CLI_TOOL_URL}.sha256` | `starry-api` 管理命令及校验和地址，**仅在整包里没有它时使用** |
 | `INSTALL_DIR` | `/opt/starry-api` | 服务器安装目录 |
 | `HOST_BIND_ADDR` | `0.0.0.0` | Compose 端口绑定的宿主机地址 |
 | `HOST_HTTP_PORT` | `18080` | Compose 暴露的宿主机端口 |

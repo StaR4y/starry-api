@@ -89,7 +89,7 @@ export POSTGRES_MIGRATION_PASSWORD="$STARRY_POSTGRES_MIGRATION_PASSWORD"
 curl http://127.0.0.1:8080/health
 ```
 
-**④ 登录控制台**：打开 <http://127.0.0.1:8080/#/login>，用户名 `admin`，密码是**首次启动时日志里打印的那一次**随机密码。第一次登录会强制你改密码。
+**④ 登录控制台**：打开 <http://127.0.0.1:8080/#/login>，用户名 `admin`，密码是**首次启动时日志里打印的那一次**随机密码。第一次登录会强制你改密码。（Docker 部署的服务器上，用 `sudo starry-api info` 查看登录信息，忘了密码用 `sudo starry-api reset-password` 重置，见 [运维手册](docs/OPERATIONS.md#服务器上的-starry-api-命令)。）
 
 ![登录页](docs/images/login.jpg)
 

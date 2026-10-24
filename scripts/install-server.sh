@@ -31,8 +31,15 @@ POSTGRES_INIT_URL="${POSTGRES_INIT_URL:-${REPO_RAW_BASE%/}/docker/postgresql/ini
 RECOVERY_TOOL_URL="${RECOVERY_TOOL_URL:-${REPO_RAW_BASE%/}/artifacts/runtime/recover-data-management.sh}"
 RECOVERY_TOOL_CHECKSUM_URL="${RECOVERY_TOOL_CHECKSUM_URL:-${RECOVERY_TOOL_URL}.sha256}"
 MIHOMO_ENTRYPOINT_URL="${MIHOMO_ENTRYPOINT_URL:-${REPO_RAW_BASE%/}/docker/egress/mihomo-entrypoint.sh}"
+# The "starry-api" administration command (sign-in information, Root password reset). The bundle carries it; these
+# URLs are used only when the bundle does not, or when the single-jar fallback is taken.
+CLI_TOOL_URL="${CLI_TOOL_URL:-${REPO_RAW_BASE%/}/artifacts/starry-api.sh}"
+CLI_TOOL_CHECKSUM_URL="${CLI_TOOL_CHECKSUM_URL:-${CLI_TOOL_URL}.sha256}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/starry-api}"
 GITHUB_TOKEN_FILE="${GITHUB_TOKEN_FILE:-${INSTALL_DIR}/.github-token}"
+# Where the "starry-api" command is linked so that it is on the PATH; empty skips the link. The command itself is always
+# installed as ${INSTALL_DIR}/starry-api.
+CLI_LINK_PATH="${CLI_LINK_PATH-/usr/local/bin/starry-api}"
 HOST_BIND_ADDR="${HOST_BIND_ADDR:-0.0.0.0}"
 HOST_HTTP_PORT="${HOST_HTTP_PORT:-18080}"
 SERVER_PORT="${SERVER_PORT:-8080}"
@@ -68,6 +75,9 @@ DEPLOYMENT_COMMITTED=false
 ROLLBACK_COMPLETED=false
 ROLLBACK_ATTEMPTED=false
 INSTALLED_ARTIFACT_CHECKSUM=""
+# True once this run has installed the administration command; CLI_COMMAND is how the deployment summary names it.
+CLI_TOOL_INSTALLED=false
+CLI_COMMAND=""
 
 log() {
   printf '[%s] %s\n' "$APP_NAME" "$*"
@@ -342,6 +352,96 @@ install_verified_recovery_tool() {
     || fail "Could not install the recovery tool checksum atomically."
   atomic_install_file "$source" "${INSTALL_DIR}/runtime/recover-data-management.sh" 0555 \
     || fail "Could not install the data-management recovery tool atomically."
+}
+
+install_verified_cli_tool() {
+  local source="$1"
+  local checksum_file="$2"
+  local expected actual
+
+  expected="$(awk '{print $1}' "$checksum_file" | head -n 1)"
+  actual="$(sha256_file "$source")"
+  [[ -n "$expected" ]] || fail "Administration command checksum file is empty."
+  [[ "$expected" == "$actual" ]] \
+    || fail "Administration command checksum mismatch. expected=${expected} actual=${actual}"
+
+  atomic_install_file "$source" "${INSTALL_DIR}/starry-api" 0755 \
+    || fail "Could not install the administration command atomically."
+  CLI_TOOL_INSTALLED=true
+}
+
+# The administration command is a convenience for operators, so a release that does not offer it (or a download that
+# fails) only skips it with a notice. A script that does not match its checksum is never installed and stops the
+# deployment, like any other artifact.
+download_and_install_cli_tool() {
+  local tmp_dir tmp_script tmp_sha
+
+  tmp_dir="$(mktemp -d)"
+  tmp_script="${tmp_dir}/starry-api.sh"
+  tmp_sha="${tmp_dir}/starry-api.sh.sha256"
+  log "Downloading the administration command: ${CLI_TOOL_URL}"
+  if download_file "$CLI_TOOL_URL" "$tmp_script" && download_file "$CLI_TOOL_CHECKSUM_URL" "$tmp_sha"; then
+    install_verified_cli_tool "$tmp_script" "$tmp_sha"
+  else
+    log "This release does not offer the starry-api administration command; skipping it."
+  fi
+  rm -rf "$tmp_dir"
+}
+
+# True for a symlink that points at the starry-api script of some Starry API installation directory (the one a
+# previous run linked); anything else at the link path is somebody else's file.
+cli_link_is_ours() {
+  local link="$1"
+  local target
+
+  [[ -L "$link" ]] || return 1
+  target="$(readlink "$link")"
+  [[ "$target" == /* && "$(basename "$target")" == "starry-api" ]] || return 1
+  [[ -f "$(dirname "$target")/docker-compose.artifact.yml" || -f "$(dirname "$target")/docker-compose.yml" ]]
+}
+
+# Puts "starry-api" on the PATH by linking CLI_LINK_PATH to ${INSTALL_DIR}/starry-api, and works out how the deployment
+# summary names the command. It only creates a missing link or replaces one that already points into a Starry API
+# installation; a regular file, a directory or any other link at that path is left alone.
+link_cli_tool() {
+  local target="${INSTALL_DIR}/starry-api"
+  local link="$CLI_LINK_PATH"
+  local temporary
+
+  CLI_COMMAND=""
+  [[ -f "$target" ]] || return 0
+  CLI_COMMAND="$target"
+  if [[ -z "$link" ]]; then
+    return 0
+  fi
+  if [[ ! -d "$(dirname "$link")" ]]; then
+    log "$(dirname "$link") does not exist; not linking the starry-api command. Run ${target} instead."
+    return 0
+  fi
+  if [[ -L "$link" && "$(readlink "$link")" == "$target" ]]; then
+    CLI_COMMAND="starry-api"
+    return 0
+  fi
+  if [[ -e "$link" || -L "$link" ]] && ! cli_link_is_ours "$link"; then
+    log "Leaving ${link} alone because it is not a link to a Starry API installation. Run ${target} instead."
+    return 0
+  fi
+  temporary="${link}.incoming.$$"
+  rm -f -- "$temporary"
+  if ln -s "$target" "$temporary" && mv -f -- "$temporary" "$link"; then
+    CLI_COMMAND="starry-api"
+    log "Linked ${link} to ${target}."
+  else
+    rm -f -- "$temporary"
+    log "Could not link ${link}; run ${target} instead."
+  fi
+}
+
+ensure_cli_tool() {
+  if [[ "$CLI_TOOL_INSTALLED" != "true" ]]; then
+    download_and_install_cli_tool
+  fi
+  link_cli_tool
 }
 
 rollback_installed_artifact() {
@@ -1325,6 +1425,9 @@ download_bundle() {
   [[ ! -f "${extract_dir}/starry-api-webui.tar.gz.sha256" ]] \
     || atomic_install_file "${extract_dir}/starry-api-webui.tar.gz.sha256" "${INSTALL_DIR}/app/starry-api-webui.tar.gz.sha256" 0644 \
     || fail "Could not install the WebUI checksum atomically."
+  if [[ -f "${extract_dir}/starry-api.sh" && -f "${extract_dir}/starry-api.sh.sha256" ]]; then
+    install_verified_cli_tool "${extract_dir}/starry-api.sh" "${extract_dir}/starry-api.sh.sha256"
+  fi
   install_verified_recovery_tool \
     "${extract_dir}/runtime/recover-data-management.sh" \
     "${extract_dir}/runtime/recover-data-management.sh.sha256"
@@ -1391,6 +1494,19 @@ try_artifact_rollback() {
   ROLLBACK_COMPLETED=true
 }
 
+# The deployment summary's lines for the administration command (each starts or ends with its own newline so that
+# nothing is printed when this release does not have one).
+cli_summary_line() {
+  [[ -n "$CLI_COMMAND" ]] || return 0
+  printf '\nRoot login info:    %s info   (console address, initial Root password while unchanged)' "$CLI_COMMAND"
+}
+
+cli_common_commands() {
+  [[ -n "$CLI_COMMAND" ]] || return 0
+  printf '  %s info             # console address, Root account, password state\n' "$CLI_COMMAND"
+  printf '  %s reset-password   # set a new temporary Root password (restarts the service)\n' "$CLI_COMMAND"
+}
+
 deploy_stack() {
   cd "$INSTALL_DIR"
   # Mihomo shares the service's network namespace, so it must be recreated together with the service: a container left
@@ -1429,6 +1545,11 @@ deploy_stack() {
   rm -f -- "${INSTALL_DIR}/.env.postgresql-retry"
   root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml logs --tail=120 service || true
 
+  local summary_cli_line summary_cli_commands
+  summary_cli_line="$(cli_summary_line)"
+  summary_cli_commands="$(cli_common_commands)"
+  [[ -z "$summary_cli_commands" ]] || summary_cli_commands+=$'\n'
+
   cat <<EOF
 
 Deployment complete.
@@ -1438,10 +1559,10 @@ Artifact file:      ${INSTALL_DIR}/app/starry-api.jar
 Local WebUI:        http://$(local_access_host):${HOST_HTTP_PORT}/#/login
 Local API docs:     http://$(local_access_host):${HOST_HTTP_PORT}/docs
 Reverse proxy to:   $(reverse_proxy_target)
-Mihomo egress:      $(mihomo_state_line)
+Mihomo egress:      $(mihomo_state_line)${summary_cli_line}
 
 Common commands:
-  cd ${INSTALL_DIR}
+${summary_cli_commands}  cd ${INSTALL_DIR}
   docker compose -f docker-compose.artifact.yml logs -f service
   docker compose -f docker-compose.artifact.yml restart service
   docker compose -f docker-compose.artifact.yml down
@@ -1466,6 +1587,7 @@ main() {
   download_bundle || download_artifact
   ensure_postgres_init_script
   ensure_mihomo_support
+  ensure_cli_tool
   deploy_stack
   DEPLOYMENT_COMMITTED=true
 }

@@ -50,6 +50,9 @@ jobs:
       - name: Test data-management recovery tool
         run: ./scripts/test-recover-data-management.sh
 
+      - name: Test starry-api administration command
+        run: ./scripts/test-starry-api.sh
+
       - name: Run all tests and build WebUI
         run: ./gradlew --no-daemon clean test :webui:npmBuild
 
@@ -64,16 +67,22 @@ jobs:
           test -x "$artifact_test_dir/runtime/recover-data-management.sh"
           cmp scripts/recover-data-management.sh \
             "$artifact_test_dir/runtime/recover-data-management.sh"
+          test -x "$artifact_test_dir/starry-api.sh"
+          cmp scripts/starry-api.sh "$artifact_test_dir/starry-api.sh"
+          tar -tzf "$artifact_test_dir/starry-api-bundle.tar.gz" | grep -q '^\./starry-api\.sh$'
           (cd "$artifact_test_dir" && sha256sum -c sha256sums.txt)
 
       - name: Verify PostgreSQL integration tests ran
         run: |
-          report="service/build/test-results/test/TEST-tech.starryapi.postgresql.PostgreSqlBaselineIntegrationTest.xml"
-          test -f "$report"
-          grep -Eq 'tests="[1-9][0-9]*"' "$report"
-          grep -q 'skipped="0"' "$report"
-          grep -q 'failures="0"' "$report"
-          grep -q 'errors="0"' "$report"
+          for report in \
+            service/build/test-results/test/TEST-tech.starryapi.postgresql.PostgreSqlBaselineIntegrationTest.xml \
+            service/build/test-results/test/TEST-tech.starryapi.postgresql.AdminCliPostgreSqlIntegrationTest.xml; do
+            test -f "$report"
+            grep -Eq 'tests="[1-9][0-9]*"' "$report"
+            grep -q 'skipped="0"' "$report"
+            grep -q 'failures="0"' "$report"
+            grep -q 'errors="0"' "$report"
+          done
 
       - name: Upload test reports on failure
         if: failure()
@@ -108,12 +117,15 @@ jobs:
 
       - name: Verify PostgreSQL integration tests ran
         run: |
-          report="service/build/test-results/test/TEST-tech.starryapi.postgresql.PostgreSqlBaselineIntegrationTest.xml"
-          test -f "$report"
-          grep -Eq 'tests="[1-9][0-9]*"' "$report"
-          grep -q 'skipped="0"' "$report"
-          grep -q 'failures="0"' "$report"
-          grep -q 'errors="0"' "$report"
+          for report in \
+            service/build/test-results/test/TEST-tech.starryapi.postgresql.PostgreSqlBaselineIntegrationTest.xml \
+            service/build/test-results/test/TEST-tech.starryapi.postgresql.AdminCliPostgreSqlIntegrationTest.xml; do
+            test -f "$report"
+            grep -Eq 'tests="[1-9][0-9]*"' "$report"
+            grep -q 'skipped="0"' "$report"
+            grep -q 'failures="0"' "$report"
+            grep -q 'errors="0"' "$report"
+          done
 
       - name: Upload test reports on failure
         if: failure()

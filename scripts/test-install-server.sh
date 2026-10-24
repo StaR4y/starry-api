@@ -908,4 +908,294 @@ if grep -vE '^[[:space:]]*#' "${ROOT_DIR}/docker-compose.tls-bridge.yml" | grep 
 fi
 
 
-printf '[install-server-test] rollback, bundle, fallback, and Mihomo scenarios passed\n'
+# --- The starry-api administration command ---------------------------------------------------------------------------
+#
+# The bundle carries scripts/starry-api.sh with its checksum; the installer installs it as ${INSTALL_DIR}/starry-api and
+# links it into the PATH. A release without it (or a failed download) only skips it; a checksum mismatch stops the
+# deployment; and the link never replaces a file that is not a link to a Starry API installation.
+
+cli_root="$TEST_ROOT/cli"
+mkdir -p "$cli_root"
+
+# make_cli_bundle <dir> <with-command|without-command|bad-checksum>: a bundle like the publisher's, with or without the
+# command; $dir/bundle.tar.gz(.sha256) are the files the installer downloads.
+make_cli_bundle() {
+  local dir="$1"
+  local kind="$2"
+  mkdir -p "$dir/source/app" "$dir/source/postgres-init" "$dir/source/runtime"
+  printf 'cli-bundle-jar\n' > "$dir/source/app/starry-api.jar"
+  printf '%s  starry-api.jar\n' "$(sha256_file "$dir/source/app/starry-api.jar")" > "$dir/source/app/starry-api.jar.sha256"
+  printf 'cli-bundle-compose\n' > "$dir/source/docker-compose.artifact.yml"
+  printf 'cli-bundle-init\n' > "$dir/source/postgres-init/001-starry-api-roles.sh"
+  printf 'cli-bundle-recovery\n' > "$dir/source/runtime/recover-data-management.sh"
+  printf '%s  recover-data-management.sh\n' "$(sha256_file "$dir/source/runtime/recover-data-management.sh")" \
+    > "$dir/source/runtime/recover-data-management.sh.sha256"
+  if [[ "$kind" != "without-command" ]]; then
+    printf '#!/usr/bin/env bash\necho bundle-starry-api\n' > "$dir/source/starry-api.sh"
+    printf '%s  starry-api.sh\n' "$(sha256_file "$dir/source/starry-api.sh")" > "$dir/source/starry-api.sh.sha256"
+  fi
+  if [[ "$kind" == "bad-checksum" ]]; then
+    printf '%064d  starry-api.sh\n' 0 > "$dir/source/starry-api.sh.sha256"
+  fi
+  tar -C "$dir/source" -czf "$dir/bundle.tar.gz" .
+  printf '%s  bundle.tar.gz\n' "$(sha256_file "$dir/bundle.tar.gz")" > "$dir/bundle.tar.gz.sha256"
+}
+
+# make_cli_download <dir> <good|bad-checksum|missing>: what CLI_TOOL_URL and CLI_TOOL_CHECKSUM_URL serve.
+make_cli_download() {
+  local dir="$1"
+  local kind="$2"
+  mkdir -p "$dir"
+  [[ "$kind" != "missing" ]] || return 0
+  printf '#!/usr/bin/env bash\necho downloaded-starry-api\n' > "$dir/starry-api.sh"
+  printf '%s  starry-api.sh\n' "$(sha256_file "$dir/starry-api.sh")" > "$dir/starry-api.sh.sha256"
+  if [[ "$kind" == "bad-checksum" ]]; then
+    printf '%064d  starry-api.sh\n' 0 > "$dir/starry-api.sh.sha256"
+  fi
+}
+
+# cli_install <case-dir> <steps...>: runs installer functions in library mode against $case_dir/install with every
+# download answered from a local file ($case_dir/downloads/starry-api.sh for the command) and the link in $case_dir/bin.
+# Everything the steps print lands in $case_dir/output.log. Returns the exit status of the steps.
+cli_install() {
+  local case_dir="$1"
+  shift
+  local status
+  mkdir -p "$case_dir/install/app" "$case_dir/install/postgres-init" "$case_dir/install/runtime"
+  : > "$case_dir/downloads.log"
+  set +e
+  INSTALL_DIR="$case_dir/install" \
+  CASE_DIR="$case_dir" \
+  BUNDLE_URL="$case_dir/bundle.tar.gz" \
+  BUNDLE_CHECKSUM_URL="$case_dir/bundle.tar.gz.sha256" \
+  CLI_TOOL_URL="$case_dir/downloads/starry-api.sh" \
+  CLI_TOOL_CHECKSUM_URL="$case_dir/downloads/starry-api.sh.sha256" \
+  CLI_LINK_PATH="${CLI_LINK_PATH_OVERRIDE-$case_dir/bin/starry-api}" \
+  STARRY_INSTALL_SERVER_LIBRARY_ONLY=true \
+    bash -c '
+      source "$1"
+      shift
+      download_file() {
+        printf "%s\n" "$1" >> "$CASE_DIR/downloads.log"
+        cp -- "$1" "$2"
+      }
+      for step in "$@"; do
+        $step
+      done
+      printf "CLI_COMMAND=%s\n" "$CLI_COMMAND"
+    ' _ "$INSTALLER" "$@" > "$case_dir/output.log" 2>&1
+  status=$?
+  set -e
+  return "$status"
+}
+
+# A bundle that carries the command: installed from the bundle, no download, linked.
+bundle_with_case="$cli_root/bundle-with"
+make_cli_bundle "$bundle_with_case" with-command
+make_cli_download "$bundle_with_case/downloads" good
+mkdir -p "$bundle_with_case/bin"
+cli_install "$bundle_with_case" download_bundle ensure_cli_tool \
+  || fail_test "a bundle with the administration command must install"
+cmp -s "$bundle_with_case/install/starry-api" "$bundle_with_case/source/starry-api.sh" \
+  || fail_test "the bundle's administration command must be installed as INSTALL_DIR/starry-api"
+[[ -x "$bundle_with_case/install/starry-api" ]] \
+  || fail_test "the installed administration command must be executable"
+[[ "$(readlink "$bundle_with_case/bin/starry-api")" == "$bundle_with_case/install/starry-api" ]] \
+  || fail_test "the administration command must be linked to the install directory's copy"
+if grep -Fq "$bundle_with_case/downloads/starry-api.sh" "$bundle_with_case/downloads.log"; then
+  fail_test "a bundle that carries the administration command must not download it again"
+fi
+grep -q '^CLI_COMMAND=starry-api$' "$bundle_with_case/output.log" \
+  || fail_test "the summary must name the linked command as starry-api"
+
+# A bundle without the command (an older release): downloaded and verified from the artifacts URL instead.
+bundle_without_case="$cli_root/bundle-without"
+make_cli_bundle "$bundle_without_case" without-command
+make_cli_download "$bundle_without_case/downloads" good
+mkdir -p "$bundle_without_case/bin"
+cli_install "$bundle_without_case" download_bundle ensure_cli_tool \
+  || fail_test "a bundle without the administration command must still install"
+cmp -s "$bundle_without_case/install/starry-api" "$bundle_without_case/downloads/starry-api.sh" \
+  || fail_test "a bundle without the administration command must download it"
+[[ -x "$bundle_without_case/install/starry-api" ]] || fail_test "the downloaded administration command must be executable"
+[[ -L "$bundle_without_case/bin/starry-api" ]] || fail_test "the downloaded administration command must be linked"
+
+# The single-jar fallback gets it from the same URLs.
+fallback_cli_case="$cli_root/fallback"
+make_cli_download "$fallback_cli_case/downloads" good
+mkdir -p "$fallback_cli_case/bin"
+printf 'fallback-cli-jar\n' > "$fallback_cli_case/starry-api.jar"
+printf '%s  starry-api.jar\n' "$(sha256_file "$fallback_cli_case/starry-api.jar")" > "$fallback_cli_case/starry-api.jar.sha256"
+printf 'fallback-cli-recovery\n' > "$fallback_cli_case/recover-data-management.sh"
+printf '%s  recover-data-management.sh\n' "$(sha256_file "$fallback_cli_case/recover-data-management.sh")" \
+  > "$fallback_cli_case/recover-data-management.sh.sha256"
+ARTIFACT_URL="$fallback_cli_case/starry-api.jar" \
+CHECKSUM_URL="$fallback_cli_case/starry-api.jar.sha256" \
+RECOVERY_TOOL_URL="$fallback_cli_case/recover-data-management.sh" \
+RECOVERY_TOOL_CHECKSUM_URL="$fallback_cli_case/recover-data-management.sh.sha256" \
+BUILD_INFO_URL="$fallback_cli_case/missing-build-info.json" \
+  cli_install "$fallback_cli_case" download_artifact ensure_cli_tool \
+  || fail_test "the single-jar fallback must install with the administration command"
+cmp -s "$fallback_cli_case/install/starry-api" "$fallback_cli_case/downloads/starry-api.sh" \
+  || fail_test "the single-jar fallback must install the administration command"
+
+# A release that does not offer it: skipped with a notice, the deployment goes on, nothing is linked.
+unavailable_case="$cli_root/unavailable"
+make_cli_bundle "$unavailable_case" without-command
+make_cli_download "$unavailable_case/downloads" missing
+mkdir -p "$unavailable_case/bin"
+cli_install "$unavailable_case" download_bundle ensure_cli_tool \
+  || fail_test "a release without the administration command must not fail the installation"
+[[ ! -e "$unavailable_case/install/starry-api" ]] || fail_test "no administration command may appear when none was offered"
+[[ ! -e "$unavailable_case/bin/starry-api" && ! -L "$unavailable_case/bin/starry-api" ]] \
+  || fail_test "nothing may be linked when no administration command was installed"
+grep -q 'does not offer the starry-api administration command' "$unavailable_case/output.log" \
+  || fail_test "a skipped administration command must be mentioned"
+grep -q '^CLI_COMMAND=$' "$unavailable_case/output.log" \
+  || fail_test "the summary must not name a command that was not installed"
+
+# An earlier copy stays when the download is unavailable, and is still linked.
+kept_case="$cli_root/kept"
+make_cli_bundle "$kept_case" without-command
+make_cli_download "$kept_case/downloads" missing
+mkdir -p "$kept_case/install" "$kept_case/bin"
+printf '#!/usr/bin/env bash\necho earlier-starry-api\n' > "$kept_case/install/starry-api"
+chmod 0755 "$kept_case/install/starry-api"
+cp "$kept_case/install/starry-api" "$kept_case/expected-starry-api"
+cli_install "$kept_case" download_bundle ensure_cli_tool \
+  || fail_test "an earlier administration command must not break the installation"
+cmp -s "$kept_case/install/starry-api" "$kept_case/expected-starry-api" \
+  || fail_test "an earlier administration command must stay when none is offered"
+[[ -L "$kept_case/bin/starry-api" ]] || fail_test "an earlier administration command must still be linked"
+
+# Integrity: a script that does not match its checksum is never installed, from the bundle or from a download.
+bad_bundle_case="$cli_root/bad-bundle"
+make_cli_bundle "$bad_bundle_case" bad-checksum
+make_cli_download "$bad_bundle_case/downloads" good
+mkdir -p "$bad_bundle_case/bin"
+if cli_install "$bad_bundle_case" download_bundle ensure_cli_tool; then
+  fail_test "a bundle whose administration command does not match its checksum must be refused"
+fi
+grep -q 'Administration command checksum mismatch' "$bad_bundle_case/output.log" \
+  || fail_test "a refused bundle command must say why"
+[[ ! -e "$bad_bundle_case/install/starry-api" ]] || fail_test "a script with a bad checksum must not be installed from a bundle"
+bad_download_case="$cli_root/bad-download"
+make_cli_bundle "$bad_download_case" without-command
+make_cli_download "$bad_download_case/downloads" bad-checksum
+mkdir -p "$bad_download_case/bin"
+if cli_install "$bad_download_case" download_bundle ensure_cli_tool; then
+  fail_test "a downloaded administration command that does not match its checksum must be refused"
+fi
+[[ ! -e "$bad_download_case/install/starry-api" ]] || fail_test "a script with a bad checksum must not be installed from a download"
+[[ ! -L "$bad_download_case/bin/starry-api" ]] || fail_test "nothing may be linked for a refused administration command"
+
+# The link: created when absent, replaced when it points into a Starry API installation, otherwise left alone.
+link_case="$cli_root/link"
+mkdir -p "$link_case/install" "$link_case/bin" "$link_case/elsewhere" "$link_case/old-install" "$link_case/plain-dir"
+printf '#!/usr/bin/env bash\n' > "$link_case/install/starry-api"
+chmod 0755 "$link_case/install/starry-api"
+link_target="$link_case/install/starry-api"
+printf '#!/usr/bin/env bash\n' > "$link_case/old-install/starry-api"
+printf 'services: {}\n' > "$link_case/old-install/docker-compose.artifact.yml"
+printf '#!/usr/bin/env bash\n' > "$link_case/plain-dir/starry-api"
+printf 'precious\n' > "$link_case/elsewhere/other-tool"
+
+run_link() {
+  cli_install "$link_case" link_cli_tool || fail_test "linking the administration command must never fail the installation"
+}
+
+run_link
+[[ "$(readlink "$link_case/bin/starry-api")" == "$link_target" ]] || fail_test "a missing link must be created"
+grep -q '^CLI_COMMAND=starry-api$' "$link_case/output.log" || fail_test "a created link must be reported as starry-api"
+
+run_link
+[[ "$(readlink "$link_case/bin/starry-api")" == "$link_target" ]] || fail_test "a correct link must stay as it is"
+grep -q '^CLI_COMMAND=starry-api$' "$link_case/output.log" || fail_test "a correct link must be reported as starry-api"
+
+rm -f "$link_case/bin/starry-api"
+ln -s "$link_case/old-install/starry-api" "$link_case/bin/starry-api"
+run_link
+[[ "$(readlink "$link_case/bin/starry-api")" == "$link_target" ]] \
+  || fail_test "a link into another Starry API installation must be repointed to this one"
+
+rm -f "$link_case/bin/starry-api"
+printf 'a regular file that is not ours\n' > "$link_case/bin/starry-api"
+run_link
+[[ ! -L "$link_case/bin/starry-api" && "$(cat "$link_case/bin/starry-api")" == "a regular file that is not ours" ]] \
+  || fail_test "a regular file at the link path must never be replaced"
+grep -q 'Leaving .* alone' "$link_case/output.log" || fail_test "a link that is left alone must be mentioned"
+grep -q "^CLI_COMMAND=${link_target}\$" "$link_case/output.log" \
+  || fail_test "when the link is not made the summary must name the full path"
+
+rm -f "$link_case/bin/starry-api"
+ln -s "$link_case/elsewhere/other-tool" "$link_case/bin/starry-api"
+run_link
+[[ "$(readlink "$link_case/bin/starry-api")" == "$link_case/elsewhere/other-tool" ]] \
+  || fail_test "a link to an unrelated file must not be replaced"
+
+rm -f "$link_case/bin/starry-api"
+ln -s "$link_case/plain-dir/starry-api" "$link_case/bin/starry-api"
+run_link
+[[ "$(readlink "$link_case/bin/starry-api")" == "$link_case/plain-dir/starry-api" ]] \
+  || fail_test "a link to a script outside any installation directory must not be replaced"
+
+rm -f "$link_case/bin/starry-api"
+mkdir "$link_case/bin/starry-api"
+run_link
+[[ -d "$link_case/bin/starry-api" && ! -L "$link_case/bin/starry-api" ]] || fail_test "a directory at the link path must be left alone"
+rmdir "$link_case/bin/starry-api"
+
+rmdir "${link_case:?}/bin"
+run_link
+[[ ! -e "$link_case/bin" ]] || fail_test "a missing link directory must not be created"
+grep -q "^CLI_COMMAND=${link_target}\$" "$link_case/output.log" || fail_test "without a link directory the summary must name the full path"
+
+mkdir -p "$link_case/bin"
+CLI_LINK_PATH_OVERRIDE="" cli_install "$link_case" link_cli_tool || fail_test "an empty CLI_LINK_PATH must not fail the installation"
+[[ ! -e "$link_case/bin/starry-api" && ! -L "$link_case/bin/starry-api" ]] || fail_test "an empty CLI_LINK_PATH must skip the link"
+
+rm -f "$link_case/install/starry-api"
+run_link
+[[ ! -e "$link_case/bin/starry-api" && ! -L "$link_case/bin/starry-api" ]] || fail_test "nothing may be linked when the command is not installed"
+grep -q '^CLI_COMMAND=$' "$link_case/output.log" || fail_test "without an installed command the summary must not name one"
+
+# The deployment summary tells operators about the command.
+summary_case="$cli_root/summary"
+mkdir -p "$summary_case/install"
+for summary_kind in named none; do
+  command_name=""
+  [[ "$summary_kind" == "none" ]] || command_name="starry-api"
+  INSTALL_DIR="$summary_case/install" \
+  SUMMARY_COMMAND="$command_name" \
+  STARRY_INSTALL_SERVER_LIBRARY_ONLY=true \
+    bash -c '
+      source "$1"
+      COMPOSE_CMD=(mock-compose)
+      root_cmd() { :; }
+      wait_for_health() { return 0; }
+      CLI_COMMAND="$SUMMARY_COMMAND"
+      deploy_stack
+    ' _ "$INSTALLER" > "$summary_case/$summary_kind.log" 2>&1
+done
+grep -q 'starry-api info' "$summary_case/named.log" || fail_test "the deployment summary must mention starry-api info"
+grep -q 'starry-api reset-password' "$summary_case/named.log" || fail_test "the deployment summary must mention starry-api reset-password"
+grep -q '^Mihomo egress:.*' "$summary_case/named.log" && grep -q '^Root login info:    starry-api info' "$summary_case/named.log" \
+  || fail_test "the summary must show where to find the Root login"
+grep -q 'Common commands:' "$summary_case/named.log" || fail_test "the summary must keep its list of common commands"
+if grep -q 'starry-api info\|reset-password' "$summary_case/none.log"; then
+  fail_test "the summary must not mention a command that was not installed"
+fi
+grep -q 'logs -f service' "$summary_case/none.log" || fail_test "the summary without the command must keep the usual commands"
+
+# main installs and links the command before the stack starts, and the publisher ships it in the bundle.
+main_body="$(awk '/^main\(\)/,/^}/' "$INSTALLER")"
+ensure_line="$(printf '%s\n' "$main_body" | grep -n 'ensure_cli_tool' | head -n 1 | cut -d: -f1)"
+deploy_line="$(printf '%s\n' "$main_body" | grep -n 'deploy_stack' | head -n 1 | cut -d: -f1)"
+[[ -n "$ensure_line" && -n "$deploy_line" && "$ensure_line" -lt "$deploy_line" ]] \
+  || fail_test "main must install the administration command before it deploys the stack"
+grep -q 'scripts/starry-api.sh' "${ROOT_DIR}/scripts/publish-artifact.sh" \
+  || fail_test "the artifact publisher must ship scripts/starry-api.sh"
+grep -q 'starry-api.sh.sha256' "${ROOT_DIR}/scripts/publish-artifact.sh" \
+  || fail_test "the artifact publisher must ship the administration command checksum"
+
+printf '[install-server-test] rollback, bundle, fallback, administration command, and Mihomo scenarios passed\n'
