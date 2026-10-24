@@ -11,6 +11,9 @@ import tech.starryapi.common.ApiResponse;
 @RequestMapping("/admin/proxy-channels")
 public interface ProxyChannelAdminApi {
     @GetMapping Mono<ApiResponse<ProxyChannelDtos.Catalog>> catalog(ServerWebExchange exchange);
+    /** Switches the optional Mihomo component on or off; 409 PROXY_RUNTIME_UNAVAILABLE when it is not deployed. */
+    @PutMapping("/runtime") Mono<ApiResponse<ProxyChannelDtos.Catalog>> updateRuntime(ServerWebExchange exchange,
+        @Valid @RequestBody ProxyChannelDtos.UpdateRuntime request);
     @PostMapping Mono<ApiResponse<ProxyChannelDtos.Channel>> create(ServerWebExchange exchange,
         @Valid @RequestBody ProxyChannelDtos.CreateChannel request);
     @PatchMapping("/{id}") Mono<ApiResponse<ProxyChannelDtos.Channel>> update(ServerWebExchange exchange,

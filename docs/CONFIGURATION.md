@@ -58,19 +58,19 @@ JAVA_OPTS="-Xms64m -Xmx768m -XX:MaxDirectMemorySize=256m -XX:+ExitOnOutOfMemoryE
 
 ## 出站代理组件（可选）
 
-账号出站代理里，HTTP / HTTPS / SOCKS5 节点由后端直接连接，不需要额外组件。Mihomo（Clash.Meta）只用于 Java 无法自己执行的协议（SS、VMess、VLESS、Hysteria2 等），**默认关闭**，由 Compose profile 启用。部署步骤、关闭方法和资源建议见 [账号出站代理](ACCOUNT_EGRESS.md#部署)。
+账号出站代理里，HTTP / HTTPS / SOCKS5 节点由后端直接连接，不需要额外组件。Mihomo（Clash.Meta）只用于 Java 无法自己执行的协议（SS、VMess、VLESS、Hysteria2 等）。一键安装脚本默认把它**部署为空闲状态**（约 20 MB 内存），由管理员在「系统设置 → 出站代理」里打开开关后才使用；部署步骤、移除方法和资源建议见 [账号出站代理](ACCOUNT_EGRESS.md#部署)。
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `ENABLE_MIHOMO` | `false` | 仅一键安装脚本使用。`true` 时在 `.env` 写入下面三项并部署 Mihomo；`false` 不改动已有选择 |
+| `ENABLE_MIHOMO` | `auto` | 仅一键安装脚本使用。`auto`：全新安装时部署 Mihomo，已有 `.env` 不改动；`true`：全新安装或已有 `.env` 都部署（已有的先保存为 `.env.previous`）；`false`：不部署，已有的保持不变 |
 | `COMPOSE_PROFILES` | 空 | Compose 读取的 profile 列表。含 `mihomo` 时才会启动 Mihomo 容器 |
-| `STARRY_EGRESS_MIHOMO_ENABLED` | `false` | 后端是否使用 Mihomo。须与 profile 一起打开 |
-| `STARRY_EGRESS_CONTROLLER_SECRET` | 空 | Mihomo 控制端密钥，启用时必填，只含字母、数字、`_`、`-`。安装脚本自动生成，不会打印 |
+| `STARRY_EGRESS_CONTROLLER_SECRET` | 空 | Mihomo 控制端密钥，只含字母、数字、`_`、`-`。非空即表示 Mihomo 已部署（控制台可以打开开关）。安装脚本自动生成，不会打印 |
+| `STARRY_EGRESS_MIHOMO_ENABLED` | `false` | 仅是控制台开关的初始状态：开关从未被使用过时，`true` 表示一开始就启用。管理员在控制台用过开关之后，以保存的值为准 |
 | `MIHOMO_VERSION` | `v1.19.32` | 官方镜像 `metacubex/mihomo` 的标签 |
 | `MIHOMO_MEM_LIMIT` | `256m` | Mihomo 容器的内存上限（`mem_limit`） |
 | `MIHOMO_GOMEMLIMIT` | `200MiB` | Mihomo 的 Go 运行时内存软上限，应低于 `MIHOMO_MEM_LIMIT` |
 
-启用只需要 `.env` 里的三行：`COMPOSE_PROFILES=mihomo`、`STARRY_EGRESS_MIHOMO_ENABLED=true`、`STARRY_EGRESS_CONTROLLER_SECRET=<随机值>`。默认的 256m / 200MiB 适合约 2000 路并发流和普通请求体；多 MB 上传与大量并发流同时出现时用 `512m` / `400MiB`。其余 `STARRY_EGRESS_*` 变量保持应用默认值，一般不用改。
+部署只需要 `.env` 里的两行：`COMPOSE_PROFILES=mihomo` 和 `STARRY_EGRESS_CONTROLLER_SECRET=<随机值>`；之后在控制台打开开关。开关保存在系统设置 `egress_mihomo_enabled`，多个实例共用，不需要改 `.env` 或重启。默认的 256m / 200MiB 适合约 2000 路并发流和普通请求体；多 MB 上传与大量并发流同时出现时用 `512m` / `400MiB`。其余 `STARRY_EGRESS_*` 变量保持应用默认值，一般不用改。
 
 ---
 

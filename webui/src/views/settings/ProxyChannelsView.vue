@@ -27,12 +27,15 @@
   import ProxyStatusStrip from './components/proxy/ProxyStatusStrip.vue';
   import ProxySubscriptionList from './components/proxy/ProxySubscriptionList.vue';
   import ProxySyncResultView from './components/proxy/ProxySyncResult.vue';
+  import { mihomoBoundAccounts } from './components/proxy/helpers';
   import { useProxyCatalog } from './components/proxy/useProxyCatalog';
 
   const { catalog, state, errorMessage, refreshing, testing, batch, load, runTests, cancelTests } =
     useProxyCatalog();
   /** 正在变更的节点 / 订阅 */
   const busy = reactive(new Set<string>());
+  /** Mihomo 开关的请求进行中 */
+  const switchingMihomo = ref(false);
   const sourceFilter = ref('');
   const nodesAnchor = ref<HTMLElement | null>(null);
 
@@ -70,6 +73,42 @@
     } finally {
       busy.delete(id);
     }
+  }
+
+  /* ---------- Mihomo 开关 ---------- */
+
+  /** 启用或关闭 Mihomo；关闭会让绑定了相关节点的账号改走其他账号，所以先确认 */
+  async function switchMihomo(enabled: boolean) {
+    if (switchingMihomo.value) return;
+    if (!enabled) {
+      const accounts = mihomoBoundAccounts(catalog.value.channels);
+      const confirmed = await ElMessageBox.confirm(
+        accounts > 0
+          ? t(
+              '关闭后，需要 Mihomo 的节点将无法使用。已有 {p0} 个账号绑定了这些节点，它们的请求会改由其他账号处理，直到重新启用。',
+              { p0: accounts },
+            )
+          : t('关闭后，需要 Mihomo 的节点将无法使用，直到重新启用。'),
+        t('关闭 Mihomo？'),
+        { type: 'warning', confirmButtonText: t('关闭 Mihomo'), cancelButtonText: t('取消') },
+      )
+        .then(() => true)
+        .catch(() => false);
+      if (!confirmed) return;
+    }
+    switchingMihomo.value = true;
+    try {
+      const updated = await proxyChannelsApi.setMihomoEnabled(enabled);
+      if (!enabled) ElMessage.success(t('已关闭 Mihomo'));
+      else if (updated.runtime.lastFailureCode) {
+        ElMessage.warning(t('已启用 Mihomo，但节点未能加载，详见页面顶部的组件状态。'));
+      } else ElMessage.success(t('已启用 Mihomo'));
+    } catch {
+      /* 已提示 */
+    } finally {
+      switchingMihomo.value = false;
+    }
+    await reload();
   }
 
   /* ---------- 节点 ---------- */
@@ -230,7 +269,7 @@
     </el-result>
 
     <div v-else class="egress-stack">
-      <ProxyStatusStrip :catalog="catalog" />
+      <ProxyStatusStrip :catalog="catalog" :switching="switchingMihomo" @toggle="switchMihomo" />
 
       <el-empty
         v-if="catalog.channels.length === 0 && catalog.subscriptions.length === 0"

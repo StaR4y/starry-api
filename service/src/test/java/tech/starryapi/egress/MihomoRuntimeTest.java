@@ -32,6 +32,7 @@ class MihomoRuntimeTest {
     private volatile String rejectedServer;
     private HttpServer controller;
     private EgressProperties properties;
+    private MemoryStore store;
     private TestRuntime runtime;
 
     @BeforeEach void startController() throws Exception {
@@ -63,10 +64,12 @@ class MihomoRuntimeTest {
         });
         controller.start();
         properties = new EgressProperties();
+        // Switched on the way deployments from before the console switch did it: the initial value, no stored choice.
         properties.setMihomoEnabled(true);
         properties.setControllerSecret("controller-secret");
         properties.setControllerUrl("http://127.0.0.1:" + controller.getAddress().getPort());
         properties.setActivationFailureBackoff(Duration.ofSeconds(30));
+        store = new MemoryStore();
         runtime = new TestRuntime(properties);
     }
 
@@ -239,6 +242,166 @@ class MihomoRuntimeTest {
         assertThat(runtime.snapshots).hasValue(0);
     }
 
+    // ---- the switch: available (deployed) and enabled (switched on by an administrator) ----
+
+    @Test void mihomoIsNotAvailableWithoutAControllerSecretWhateverIsStoredOrConfigured() {
+        properties.setControllerSecret("");
+        store.value = true;
+        runtime.loadChoice();
+        MihomoRuntime.Route route = runtime.add(20001);
+
+        assertThat(runtime.available()).isFalse();
+        assertThat(runtime.enabled()).isFalse();
+        assertThatThrownBy(() -> runtime.route(route.id()).block(Duration.ofSeconds(5)))
+            .isInstanceOfSatisfying(EgressException.class, error -> assertThat(error.failure()).isEqualTo(EgressFailure.RUNTIME_DISABLED));
+        runtime.reconcile().block(Duration.ofSeconds(5));
+        int readsBeforePoll = store.reads.get();
+        runtime.poll();
+        assertThat(puts).hasValue(0);
+        assertThat(store.reads).as("a deployment without Mihomo has nothing to poll").hasValue(readsBeforePoll);
+        // A blank secret is no secret, and neither is a missing one.
+        properties.setControllerSecret("   ");
+        assertThat(runtime.available()).isFalse();
+        properties.setControllerSecret(null);
+        assertThat(runtime.available()).isFalse();
+    }
+
+    @Test void theConfiguredValueIsTheInitialSwitchUntilAnAdministratorHasChosen() {
+        assertThat(runtime.available()).isTrue();
+        assertThat(runtime.enabled()).as("the old environment switch on, no stored choice").isTrue();
+        properties.setMihomoEnabled(false);
+        assertThat(runtime.enabled()).as("the old environment switch off, no stored choice").isFalse();
+        // Reading a store in which nobody has used the switch yet changes nothing.
+        runtime.loadChoice();
+        assertThat(runtime.enabled()).isFalse();
+    }
+
+    @Test void aStoredChoiceWinsOverTheConfiguredValueInBothDirections() {
+        store.value = false;
+        runtime.loadChoice();
+        assertThat(runtime.enabled()).as("stored off beats the old switch on").isFalse();
+
+        properties.setMihomoEnabled(false);
+        store.value = true;
+        runtime.loadChoice();
+        assertThat(runtime.enabled()).as("stored on beats the old switch off").isTrue();
+    }
+
+    @Test void startingWithoutADatabaseAnswerFallsBackToTheConfiguredValue() {
+        store.failReads = true;
+        runtime.loadChoice();
+        assertThat(runtime.enabled()).isTrue();
+        properties.setMihomoEnabled(false);
+        assertThat(runtime.enabled()).isFalse();
+    }
+
+    @Test void switchingOffFailsRoutesAsNotSentAndLeavesTheControllerAlone() {
+        MihomoRuntime.Route route = runtime.add(20001);
+        assertThat(runtime.route(route.id()).block(Duration.ofSeconds(5))).isEqualTo(route);
+        assertThat(puts).hasValue(1);
+        assertThat(runtime.health().activeNodes()).isEqualTo(1);
+
+        runtime.setEnabled(false).block(Duration.ofSeconds(5));
+
+        assertThat(store.value).isFalse();
+        assertThat(runtime.enabled()).isFalse();
+        assertThat(runtime.available()).isTrue();
+        assertThatThrownBy(() -> runtime.route(route.id()).block(Duration.ofSeconds(5)))
+            .isInstanceOfSatisfying(EgressException.class, error -> {
+                assertThat(error.failure()).isEqualTo(EgressFailure.RUNTIME_DISABLED);
+                assertThat(error.requestMayHaveBeenSent()).as("not sent: the request fails over to another account").isFalse();
+            });
+        assertThatThrownBy(() -> runtime.ensureActive(route).block(Duration.ofSeconds(5)))
+            .isInstanceOfSatisfying(EgressException.class, error -> assertThat(error.failure()).isEqualTo(EgressFailure.RUNTIME_DISABLED));
+        runtime.reconcile().block(Duration.ofSeconds(5));
+        runtime.poll();
+        assertThat(puts).as("nothing is sent to the component while it is switched off").hasValue(1);
+        assertThat(runtime.active(route.id())).as("what was active is forgotten").isFalse();
+        assertThat(runtime.health().activeNodes()).isZero();
+    }
+
+    @Test void switchingOnLoadsTheConfigurationAgainEvenThoughItDidNotChange() {
+        MihomoRuntime.Route route = runtime.add(20001);
+        assertThat(runtime.route(route.id()).block(Duration.ofSeconds(5))).isEqualTo(route);
+        runtime.setEnabled(false).block(Duration.ofSeconds(5));
+        assertThat(puts).hasValue(1);
+
+        runtime.setEnabled(true).block(Duration.ofSeconds(5));
+
+        assertThat(store.value).isTrue();
+        assertThat(runtime.enabled()).isTrue();
+        assertThat(puts).as("the Mihomo process may have changed while it was switched off").hasValue(2);
+        assertThat(runtime.health().activeNodes()).isEqualTo(1);
+        assertThat(runtime.active(route.id())).isTrue();
+        assertThat(runtime.route(route.id()).block(Duration.ofSeconds(5))).isEqualTo(route);
+        assertThat(puts).hasValue(2);
+    }
+
+    @Test void switchingOnWhenTheComponentIsDownStillSucceedsAndReportsTheFailureAsHealth() {
+        properties.setMihomoEnabled(false);
+        controller.stop(0);
+        runtime.add(20001);
+
+        runtime.setEnabled(true).block(Duration.ofSeconds(10));
+
+        assertThat(runtime.enabled()).isTrue();
+        assertThat(store.value).isTrue();
+        assertThat(runtime.health().lastFailure()).isEqualTo(EgressFailure.CONTROLLER_UNREACHABLE);
+    }
+
+    @Test void aSwitchThatCannotBeStoredChangesNothing() {
+        store.failWrites = true;
+        assertThatThrownBy(() -> runtime.setEnabled(false).block(Duration.ofSeconds(5))).hasMessageContaining("database down");
+        assertThat(runtime.enabled()).isTrue();
+    }
+
+    @Test void thePollTakesOverAChangeMadeOnAnotherInstance() {
+        properties.setMihomoEnabled(false);
+        store.value = true;
+        MihomoRuntime.Route route = runtime.add(20001);
+        proxiesBody = "{\"proxies\":{\"node-" + route.id() + "\":{}}}";
+        assertThat(runtime.enabled()).as("not read yet").isFalse();
+
+        runtime.poll();
+        await().atMost(Duration.ofSeconds(5)).until(() -> runtime.enabled() && runtime.health().activeNodes() == 1);
+        assertThat(puts).hasValue(1);
+
+        store.value = false;
+        await().atMost(Duration.ofSeconds(5)).until(() -> {
+            runtime.poll();
+            return !runtime.enabled();
+        });
+        assertThat(runtime.active(route.id())).isFalse();
+        assertThat(puts).hasValue(1);
+
+        store.value = true;
+        await().atMost(Duration.ofSeconds(5)).until(() -> {
+            runtime.poll();
+            return runtime.enabled() && runtime.active(route.id());
+        });
+        assertThat(puts).as("switched on again: loaded again").hasValue(2);
+    }
+
+    @Test void aDatabaseFailureInThePollKeepsTheCachedChoiceAndIsNotAControllerFailure() {
+        properties.setMihomoEnabled(false);
+        store.value = true;
+        runtime.loadChoice();
+        assertThat(runtime.enabled()).isTrue();
+        MihomoRuntime.Route route = runtime.add(20001);
+        proxiesBody = "{\"proxies\":{\"node-" + route.id() + "\":{}}}";
+        store.failReads = true;
+
+        await().atMost(Duration.ofSeconds(5)).until(() -> {
+            runtime.poll();
+            return runtime.health().activeNodes() == 1;
+        });
+
+        assertThat(store.reads.get()).isGreaterThan(1);
+        assertThat(runtime.enabled()).isTrue();
+        assertThat(runtime.health().lastFailure()).isNull();
+        assertThat(runtime.health().controllerReachable()).isTrue();
+    }
+
     private List<Throwable> concurrentRoutes(MihomoRuntime.Route route, int callers) {
         return Flux.range(0, callers).flatMap(i -> runtime.route(route.id()).map(ignored -> (Throwable) new AssertionError("must fail"))
                 .onErrorResume(Mono::just).subscribeOn(Schedulers.boundedElastic()), callers)
@@ -252,7 +415,7 @@ class MihomoRuntimeTest {
         final List<UUID> rejected = new java.util.concurrent.CopyOnWriteArrayList<>();
         private final List<MihomoRuntime.Route> routes = new java.util.concurrent.CopyOnWriteArrayList<>();
 
-        TestRuntime(EgressProperties properties) { super(null, json, properties); }
+        TestRuntime(EgressProperties properties) { super(null, store, json, properties); }
 
         MihomoRuntime.Route add(int port) {
             MihomoRuntime.Route route = new MihomoRuntime.Route(UUID.randomUUID(), port, json.createObjectNode().put("type", "vless").put("server", "node" + port + ".example"));
@@ -266,6 +429,28 @@ class MihomoRuntimeTest {
         @Override Mono<Void> markFailed(EgressFailure failure) { markedFailed.add(failure); return Mono.empty(); }
         @Override Mono<Void> markRejected(MihomoRuntime.Route route) {
             return Mono.fromRunnable(() -> { rejected.add(route.id()); routes.remove(route); });
+        }
+    }
+
+    /** The setting row, kept in memory; "no value" is a switch nobody has used yet. */
+    private static final class MemoryStore extends MihomoSwitchStore {
+        volatile Boolean value;
+        volatile boolean failReads;
+        volatile boolean failWrites;
+        final AtomicInteger reads = new AtomicInteger();
+
+        MemoryStore() { super(null); }
+
+        @Override public Mono<Boolean> read() {
+            return Mono.defer(() -> {
+                reads.incrementAndGet();
+                return failReads ? Mono.<Boolean>error(new IllegalStateException("database down")) : Mono.justOrEmpty(value);
+            });
+        }
+
+        @Override public Mono<Void> write(boolean enabled) {
+            return Mono.defer(() -> failWrites ? Mono.<Void>error(new IllegalStateException("database down"))
+                : Mono.fromRunnable(() -> value = enabled));
         }
     }
 }

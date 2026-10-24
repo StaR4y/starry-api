@@ -136,7 +136,7 @@ sudo env \
 | `PUBLIC_BASE_URL` | 空 | 公网 HTTPS 地址，用于启动日志里的提示 |
 | `FORCE_ENV` | `false` | 在数据库初始化**之前**重新生成 `.env`；或重新启用上次失败部署保留的凭据。已初始化的集群见下文 |
 | `INSTALL_DOCKER` | `true` | 缺少 Docker 时是否自动安装 |
-| `ENABLE_MIHOMO` | `false` | 设为 `true` 时启用可选的 Mihomo 出站组件：在 `.env` 写入 `COMPOSE_PROFILES=mihomo`、`STARRY_EGRESS_MIHOMO_ENABLED=true` 和随机生成的 `STARRY_EGRESS_CONTROLLER_SECRET`（不会打印），并部署官方 `metacubex/mihomo` 镜像。已有 `.env` 会先保存为 `.env.previous` 再追加，重复执行不产生重复项；`false` 不改动已有选择。详见 [账号出站代理](ACCOUNT_EGRESS.md#部署) |
+| `ENABLE_MIHOMO` | `auto` | 可选的 Mihomo 出站组件。`auto`：全新安装时部署（空闲，约 20 MB），已有 `.env` 不改动，所以升级不会悄悄多出容器；`true`：也给已有 `.env` 追加（旧文件先保存为 `.env.previous`，重复执行不产生重复项）；`false`：不部署，已有的保持不变。部署 = 在 `.env` 写入 `COMPOSE_PROFILES=mihomo` 和随机生成的 `STARRY_EGRESS_CONTROLLER_SECRET`（不会打印）并拉取官方 `metacubex/mihomo` 镜像；是否使用由管理员在「系统设置 → 出站代理」打开开关。下载到的部署包不含 `mihomo` 服务（旧版本）时，`auto` 跳过它，`true` 报错退出。详见 [账号出站代理](ACCOUNT_EGRESS.md#部署) |
 | `GITHUB_TOKEN` | 空 | 私有仓库下载用的 Token |
 | `GITHUB_TOKEN_FILE` | `${INSTALL_DIR}/.github-token` | `GITHUB_TOKEN` 为空时读取的 Token 文件 |
 | `REPO_URL` | `https://github.com/StaR4y/starry-api.git` | 用来推导 raw 下载地址的仓库 |

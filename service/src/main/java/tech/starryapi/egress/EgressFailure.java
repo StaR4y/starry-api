@@ -10,7 +10,7 @@ import org.springframework.web.reactive.function.client.WebClientResponseExcepti
 
 /** Only these fixed diagnostics may be exposed; transport messages can contain credentials. */
 public enum EgressFailure {
-    RUNTIME_DISABLED("Mihomo is disabled. Start the component and enable STARRY_EGRESS_MIHOMO_ENABLED, then restart the backend."),
+    RUNTIME_DISABLED("Mihomo is not switched on. An administrator can switch it on under System settings > Outbound proxies once the component is deployed."),
     NODE_UNAVAILABLE("The selected node is disabled, missing from its subscription or unsupported."),
     NODE_NOT_ACTIVE("The selected node has not been loaded by Mihomo. Retry after the runtime is ready."),
     CONTROLLER_UNREACHABLE("Cannot reach the Mihomo controller. Check that it is running and reachable from the backend."),

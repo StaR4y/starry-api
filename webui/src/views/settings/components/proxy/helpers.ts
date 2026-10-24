@@ -46,7 +46,7 @@ export function nodeStatus(node: ProxyChannel, mihomoEnabled: boolean): NodeStat
       label: t('Mihomo 未启用'),
       tone: 'warning',
       group: 'abnormal',
-      hint: t('该节点需要 Mihomo，启用组件后才能使用。'),
+      hint: t('该节点需要 Mihomo，请在「系统设置 → 出站代理」启用后再使用。'),
     };
   }
   if (node.runtimeStatus === 'ERROR') {
@@ -91,6 +91,13 @@ export function canTest(node: ProxyChannel, mihomoEnabled: boolean): boolean {
     !node.configIssue &&
     (node.route === 'DIRECT_PROXY' || mihomoEnabled)
   );
+}
+
+/** 绑定在需要 Mihomo 的节点上的账号数；关闭 Mihomo 后这些账号的请求会改由其他账号处理 */
+export function mihomoBoundAccounts(channels: readonly ProxyChannel[]): number {
+  return channels
+    .filter((node) => node.route === 'MIHOMO')
+    .reduce((total, node) => total + node.boundAccounts, 0);
 }
 
 export type ProbeView =

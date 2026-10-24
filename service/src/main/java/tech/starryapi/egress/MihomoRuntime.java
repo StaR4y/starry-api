@@ -7,6 +7,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
@@ -33,6 +34,7 @@ public class MihomoRuntime {
     private static final java.util.regex.Pattern REJECTED_PROXY = java.util.regex.Pattern.compile("^proxy (\\d+):");
     private static final int MAX_REJECTED_PER_ACTIVATION = 20;
     private final DatabaseClient db;
+    private final MihomoSwitchStore store;
     private final ObjectMapper mapper;
     private final EgressProperties properties;
     private final WebClient controller;
@@ -50,20 +52,88 @@ public class MihomoRuntime {
     private volatile Boolean controllerReachable;
     private volatile Instant lastPollAt;
     private volatile Instant lastActivatedAt;
+    // The administrator's stored choice, cached so that the request path never reads the database for it. Null while
+    // none was made: the configured initial value applies then.
+    private volatile Boolean choice;
 
-    public MihomoRuntime(DatabaseClient db, ObjectMapper mapper, EgressProperties properties) {
+    public MihomoRuntime(DatabaseClient db, MihomoSwitchStore store, ObjectMapper mapper, EgressProperties properties) {
         this.db = db;
+        this.store = store;
         this.mapper = mapper;
         this.properties = properties;
-        if (properties.isMihomoEnabled() && properties.getControllerSecret().isBlank()) {
-            throw new IllegalArgumentException("Egress controller secret is required when Mihomo is enabled");
-        }
         this.controller = WebClient.builder().baseUrl(properties.getControllerUrl())
-            .defaultHeaders(h -> h.setBearerAuth(properties.getControllerSecret())).build();
+            .defaultHeaders(h -> h.setBearerAuth(properties.getControllerSecret() == null ? "" : properties.getControllerSecret())).build();
+    }
+
+    /** Mihomo is available when the deployment provides it, which is when the controller secret is set. */
+    public boolean available() {
+        String secret = properties.getControllerSecret();
+        return secret != null && !secret.isBlank();
+    }
+
+    /**
+     * The one switch for Mihomo: available, and switched on by an administrator. Until the administrator has used the
+     * switch, the initial value {@code starry.egress.mihomo-enabled} decides. Cheap and free of I/O.
+     */
+    public boolean enabled() {
+        Boolean stored = choice;
+        return available() && (stored != null ? stored : properties.isMihomoEnabled());
+    }
+
+    /** Reads the stored choice once at startup, before requests arrive; the poll keeps it fresh afterwards. */
+    @jakarta.annotation.PostConstruct
+    public void loadChoice() {
+        try {
+            applyChoice(store.read().block(Duration.ofSeconds(10)));
+        } catch (RuntimeException error) {
+            // Not fatal: the configured initial value applies until the first poll has read it.
+            log.warn("Could not read the Mihomo switch at startup; using the configured initial value for now");
+        }
+    }
+
+    /**
+     * Stores the administrator's choice and applies it on this instance at once; the other instances see it with their
+     * next poll. Switching on loads the configured nodes right away, and a failure of that is reported through
+     * {@link #health()} like any other activation failure, not as a failure of the switch. Switching off leaves the
+     * Mihomo process alone.
+     */
+    public Mono<Void> setEnabled(boolean enabled) {
+        return store.write(enabled).then(Mono.defer(() -> {
+            applyChoice(enabled);
+            return reconcile().timeout(Duration.ofSeconds(30), Mono.empty())
+                .onErrorResume(EgressException.class, error -> Mono.empty());
+        }));
+    }
+
+    private Mono<Void> refreshChoice() {
+        return store.read().map(Optional::of).defaultIfEmpty(Optional.empty())
+            .doOnNext(stored -> applyChoice(stored.orElse(null)))
+            .then()
+            // A database failure keeps the cached choice and is not a controller failure.
+            .onErrorResume(error -> {
+                log.warn("Could not read the Mihomo switch; keeping the current value");
+                return Mono.empty();
+            });
+    }
+
+    private synchronized void applyChoice(Boolean stored) {
+        boolean before = enabled();
+        choice = stored;
+        boolean after = enabled();
+        if (before == after) return;
+        // Whichever way it went, the next activation must start from nothing known about the Mihomo process: after
+        // switching off it may be changed or restarted, and nothing it reported while switched on still holds.
+        active = Map.of();
+        activeConfig = "";
+        lastFailure = null;
+        controllerReachable = null;
+        lastPollAt = null;
+        lastActivatedAt = null;
+        log.info("Mihomo switched {}", after ? "on" : "off");
     }
 
     public Mono<Route> route(UUID id) {
-        if (!properties.isMihomoEnabled()) return Mono.error(new EgressException(EgressFailure.RUNTIME_DISABLED));
+        if (!enabled()) return Mono.error(new EgressException(EgressFailure.RUNTIME_DISABLED));
         return find(id)
             .switchIfEmpty(Mono.error(new EgressException(EgressFailure.NODE_UNAVAILABLE)))
             .flatMap(this::ensureActive);
@@ -71,7 +141,7 @@ public class MihomoRuntime {
 
     /** The route, once this instance's Mihomo has loaded exactly the node configuration that was just read. */
     public Mono<Route> ensureActive(Route requested) {
-        if (!properties.isMihomoEnabled()) return Mono.error(new EgressException(EgressFailure.RUNTIME_DISABLED));
+        if (!enabled()) return Mono.error(new EgressException(EgressFailure.RUNTIME_DISABLED));
         Route loaded = active.get(requested.id());
         if (requested.equals(loaded)) return Mono.just(loaded);
         EgressFailure blocked = failFastReason();
@@ -87,7 +157,7 @@ public class MihomoRuntime {
     public Mono<Void> reconcile() { return Mono.defer(() -> activation(true)); }
 
     private Mono<Void> activation(boolean forced) {
-        if (!properties.isMihomoEnabled()) return Mono.empty();
+        if (!enabled()) return Mono.empty();
         Activation joined;
         synchronized (this) {
             if (queued == null) queued = new Activation();
@@ -104,6 +174,7 @@ public class MihomoRuntime {
         queued = null;
         running = next;
         Mono.defer(() -> {
+            if (!enabled()) return Mono.<Void>empty(); // switched off while it waited
             EgressFailure blocked = next.forced ? null : failFastReason();
             return blocked != null ? Mono.<Void>error(new EgressException(blocked)) : activate();
         }).subscribe(ignored -> {}, error -> finish(next, error), () -> finish(next, null));
@@ -239,15 +310,9 @@ public class MihomoRuntime {
 
     @Scheduled(fixedDelay = 15000, initialDelay = 5000)
     public void poll() {
-        if (!properties.isMihomoEnabled() || !polling.compareAndSet(false, true)) return;
-        // Re-apply after a component restart, which starts with no account listeners.
-        controller.get().uri("/proxies").retrieve().bodyToMono(JsonNode.class).timeout(Duration.ofSeconds(5))
-            .doOnNext(state -> {
-                controllerReachable = true;
-                lastPollAt = Instant.now();
-                if (active.keySet().stream().anyMatch(id -> !state.path("proxies").has("node-" + id))) activeConfig = "";
-            })
-            .then(Mono.defer(this::reconcile))
+        if (!available() || !polling.compareAndSet(false, true)) return;
+        // The stored choice first: another instance may have switched Mihomo on or off since the last poll.
+        refreshChoice().then(Mono.defer(() -> enabled() ? pollController() : Mono.empty()))
             .doFinally(signal -> polling.set(false))
             .subscribe(ignored -> {}, error -> {
                 activeConfig = "";
@@ -263,6 +328,17 @@ public class MihomoRuntime {
                 }
                 log.warn("Proxy runtime reconciliation failed: {}", error instanceof EgressException ? error.getMessage() : "runtime unavailable");
             });
+    }
+
+    private Mono<Void> pollController() {
+        // Re-apply after a component restart, which starts with no account listeners.
+        return controller.get().uri("/proxies").retrieve().bodyToMono(JsonNode.class).timeout(Duration.ofSeconds(5))
+            .doOnNext(state -> {
+                controllerReachable = true;
+                lastPollAt = Instant.now();
+                if (active.keySet().stream().anyMatch(id -> !state.path("proxies").has("node-" + id))) activeConfig = "";
+            })
+            .then(Mono.defer(this::reconcile));
     }
 
     public boolean active(UUID id) { return active.containsKey(id); }

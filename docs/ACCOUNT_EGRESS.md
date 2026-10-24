@@ -16,6 +16,7 @@
 - 「测试出口」走与账号请求相同的路径请求 `api.ipify.org`（`STARRY_EGRESS_PROBE_URL` 可改），显示出口 IP 和耗时，并保存最近一次结果（时间、结果、出口 IP、耗时、固定错误码）。加载成功只代表配置已应用，测试成功才证明探测目标可达。
 - 订阅可重命名、可删除；任一节点仍有账号绑定时删除返回 409 并列出账号。管理员改过名的节点，后续同步不会覆盖名称。
 - Mihomo 监听端口（20000..29999）只分配给需要 Mihomo 的节点，节点被来源移除、出现配置问题或不再需要 Mihomo 时释放，按最小空闲端口复用；端口耗尽时导入返回 409 `PROXY_PORT_RANGE_FULL`。
+- 需要 Mihomo 的节点要先部署 Mihomo，再在页面顶部的 Mihomo 开关里打开才能使用，见下文「部署」。
 
 账号新建 / 编辑页在「出站代理」选择节点；「路由与限制」默认使用 系统设置 → 路由与限制 中该类别的值，打开「自定义此账号」才单独覆盖。已有 `proxyUrl` 仍兼容；节点绑定优先于旧 URL；要直连须同时清除节点和旧 URL。绑定节点不可删除，可先解除绑定。
 
@@ -45,24 +46,54 @@ Anthropic 可设置 `maxSessions` 与 `sessionIdleSeconds`：例如 600 秒内�
 
 ## 部署
 
-Mihomo 是可选组件，**默认关闭**，普通直连部署不增加任何进程。HTTP / HTTPS / SOCKS5 节点（含旧 `proxyUrl`）由 Java 直接连接，不依赖它；只有 Clash 订阅里的 SS、VMess、VLESS、Hysteria2 等 Java 无法自己执行的协议才需要。部署时拉取官方镜像 `metacubex/mihomo`（GPL-3.0，固定为 `v1.19.32`）；本项目的产物不包含 Mihomo 二进制。
+Mihomo 是可选组件，只有 Clash 订阅里的 SS、VMess、VLESS、Hysteria2 等 Java 无法自己执行的协议才需要。HTTP / HTTPS / SOCKS5 节点（含旧 `proxyUrl`）由 Java 直接连接，不依赖它。部署时拉取官方镜像 `metacubex/mihomo`（GPL-3.0，固定为 `v1.19.32`）；本项目的产物不包含 Mihomo 二进制。
 
-### 启用
+「部署」和「启用」是两件事：
 
-一键安装脚本加 `ENABLE_MIHOMO=true`：
+- **部署**：Mihomo 容器在运行，并且后端拿到了控制端密钥（`STARRY_EGRESS_CONTROLLER_SECRET` 非空）。后端据此认为 Mihomo「可用」。
+- **启用**：管理员在「系统设置 → 出站代理」顶部的 Mihomo 开关里打开它，结果保存为系统设置 `egress_mihomo_enabled`（`true` / `false`）。后端只有在「可用且已启用」时才使用 Mihomo。
+
+一键安装脚本默认把 Mihomo 部署成**空闲状态**：常驻内存约 20 MB，不加载任何节点，不影响任何请求。要不要用它由管理员在控制台决定，不用改 `.env`，也不用重启。
+
+### 控制台开关
+
+页面顶部状态条里的 Mihomo 有三种状态：
+
+| 状态 | 含义 | 可以做什么 |
+| --- | --- | --- |
+| 未部署 | 没有控制端密钥 | 只给出部署提示（重新运行安装脚本并设置 `ENABLE_MIHOMO=true`），不能在控制台打开 |
+| 未启用 | 已部署，开关关闭 | 打开开关，需要 Mihomo 的节点随即可用 |
+| 已启用 | 开关打开 | 显示控制端是否可连接、活动节点数、最近一次错误；可以关闭 |
+
+- 打开后立即把当前的节点配置加载进 Mihomo。加载失败不算开关失败：开关保持打开，错误显示在状态条里，每 15 秒重试一次。
+- 关闭前会确认，并告诉你有多少账号绑定了需要 Mihomo 的节点。关闭后这些节点显示不可用，账号绑定保留；这些账号的请求不会发出（不会直连），而是改由其他账号处理，直到重新打开。关闭不会停止 Mihomo 容器，也不会删除任何节点。
+- 开关保存在数据库里，多个实例共用：当前实例立即生效，其他实例最迟 15 秒内跟上。
+- 兼容旧部署：开关从未被使用过时，`.env` 里的 `STARRY_EGRESS_MIHOMO_ENABLED=true` 仍作为初始状态，已经按旧方式启用的部署不用改动。管理员第一次使用开关之后以保存的值为准。
+- 接口：`PUT /admin/proxy-channels/runtime`，请求体 `{"mihomoEnabled": true}`（或 `false`），返回更新后的目录，结构与 `GET /admin/proxy-channels` 相同：`mihomoAvailable` 表示已部署，`mihomoEnabled` 表示实际生效。未部署时打开返回 409 `PROXY_RUNTIME_UNAVAILABLE`。与其他出站代理管理接口一样需要管理员身份。
+
+### 部署 Mihomo
+
+一键安装脚本的 `ENABLE_MIHOMO`：
+
+| 值 | 全新安装 | 已有 `.env` |
+| --- | --- | --- |
+| `auto`（默认） | 部署 Mihomo（空闲） | 不改动，升级不会悄悄多出一个容器 |
+| `true` | 部署 Mihomo | 追加缺少的配置，旧文件先保存为 `.env.previous` |
+| `false` | 不部署 | 不改动；已经部署的保持原样 |
+
+「部署」就是在 `.env` 里写入 `COMPOSE_PROFILES=mihomo` 和随机生成的 `STARRY_EGRESS_CONTROLLER_SECRET`。脚本不会打印密钥，也不写 `STARRY_EGRESS_MIHOMO_ENABLED`；已有 `.env` 里的密钥、`STARRY_EGRESS_MIHOMO_ENABLED` 和其他 Compose profile 都保持不变，重复执行不产生重复项。下载到的部署包若不含 `mihomo` 服务（旧版本），`auto` 会记一行日志并跳过 Mihomo，`true` 则报错退出。安装结束的摘要会写明 Mihomo 已部署还是未部署。
+
+**已有的部署**想加上 Mihomo，重新运行安装脚本并加 `ENABLE_MIHOMO=true`：
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
   | sudo env ENABLE_MIHOMO=true bash
 ```
 
-脚本只改 `.env`，且不会打印密钥：新建的 `.env` 直接带下面三行；已有 `.env` 先保存为 `.env.previous`，再追加缺少的行，已有的密钥和其他 Compose profile 保持不变，重复执行不产生重复项。默认的 `ENABLE_MIHOMO=false` 不改动已有选择，启用过的部署之后正常更新仍保留 Mihomo；安装结束的摘要会写明 Mihomo 是否启用。
-
-也可以手动在部署使用的 `.env` 加三行（密钥只含字母、数字、下划线、短横线，例如 `openssl rand -hex 24`），再启动：
+**源码部署或手动部署**在使用的 `.env` 里加两行（密钥只含字母、数字、下划线、短横线，例如 `openssl rand -hex 24`），再启动：
 
 ```dotenv
 COMPOSE_PROFILES=mihomo
-STARRY_EGRESS_MIHOMO_ENABLED=true
 STARRY_EGRESS_CONTROLLER_SECRET=<随机十六进制>
 ```
 
@@ -71,22 +102,24 @@ docker compose -f docker-compose.artifact.yml up -d   # 服务器 / 预构建部
 docker compose up -d --build                          # 源码部署，同一个 profile
 ```
 
+之后到「系统设置 → 出站代理」打开开关。
+
 Compose 把脚本挂载进容器，所以 `docker/egress/mihomo-entrypoint.sh` 必须存在于部署目录：源码部署自带；服务器上由安装脚本在每次更新时安装，缺失时重新运行安装脚本即可（否则 Docker 会在该路径建一个空目录，容器无法启动）。
 
 Compose 从 `.env` 读取 `COMPOSE_PROFILES`，之后的 `logs`、`down` 等命令都会包含 `mihomo`。Mihomo 与 `service` 共享网络命名空间，因此重建 `service` 时必须一起重建：用不带服务名的 `up -d`，或 `up -d --force-recreate service mihomo`（只重建 `service` 会让 Mihomo 留在旧的命名空间里）。安装脚本已按此处理。
 
 控制端口 9090、节点监听 20000..29999 全部绑定 `127.0.0.1`，不映射公网端口。容器只读文件系统、无附加 capability、`no-new-privileges`；配置里 `geo-auto-update: false`、日志级别 `silent`，不会主动下载地理数据。
 
-### 关闭
+### 移除
 
-删掉 `.env` 里的三行（至少去掉 `COMPOSE_PROFILES` 里的 `mihomo`），然后：
+只是暂时不用，在控制台把开关关掉即可，容器保持空闲。要连容器一起去掉：删掉 `.env` 里的 `COMPOSE_PROFILES` 中的 `mihomo` 和 `STARRY_EGRESS_CONTROLLER_SECRET`（旧的 `STARRY_EGRESS_MIHOMO_ENABLED` 也可以删），然后：
 
 ```bash
 docker compose -f docker-compose.artifact.yml rm -sf mihomo
 docker compose -f docker-compose.artifact.yml up -d
 ```
 
-源码部署去掉 `-f` 参数。Compose 不把未启用 profile 的容器当作孤儿，`up --remove-orphans` 不会删除它，所以要显式 `rm -sf`。关闭后需要 Mihomo 的节点显示不可用，账号绑定保留，请求失败而不是直连。
+源码部署去掉 `-f` 参数。Compose 不把未启用 profile 的容器当作孤儿，`up --remove-orphans` 不会删除它，所以要显式 `rm -sf`。移除后控制台显示「未部署」，需要 Mihomo 的节点显示不可用，账号绑定保留，这些账号的请求不会直连，而是改由其他账号处理。之后重新运行安装脚本（`auto` 或 `false`）不会把它加回来。
 
 ### 资源
 
@@ -96,23 +129,23 @@ docker compose -f docker-compose.artifact.yml up -d
 | `MIHOMO_GOMEMLIMIT` | `200MiB` | Go 运行时软上限，应低于容器上限 |
 | `MIHOMO_VERSION` | `v1.19.32` | 官方镜像标签；更换版本前先自行验证 |
 
-默认值（256m / 200MiB）实测可承载约 2000 路并发流和普通请求体，常驻内存约 130 MB 且无错误。多 MB 请求体的上传与大量并发流同时出现时，改用 `MIHOMO_MEM_LIMIT=512m`、`MIHOMO_GOMEMLIMIT=400MiB`。单个实例建议不超过约 500 个需要 Mihomo 的节点（软上限），不要超过 1000 个（硬上限）。
+空闲（未启用，或没有需要 Mihomo 的节点）时常驻内存约 20 MB。默认值（256m / 200MiB）实测可承载约 2000 路并发流和普通请求体，满载时常驻内存约 130 MB 且无错误。多 MB 请求体的上传与大量并发流同时出现时，改用 `MIHOMO_MEM_LIMIT=512m`、`MIHOMO_GOMEMLIMIT=400MiB`。单个实例建议不超过约 500 个需要 Mihomo 的节点（软上限），不要超过 1000 个（硬上限）。
 
 ### 配置变量
 
 | 变量 | 默认值 |
 | --- | --- |
-| `ENABLE_MIHOMO` | `false`（仅安装脚本） |
+| `ENABLE_MIHOMO` | `auto`（仅安装脚本） |
 | `COMPOSE_PROFILES` | 空；含 `mihomo` 时 Compose 才启动 Mihomo 容器 |
-| `STARRY_EGRESS_MIHOMO_ENABLED` | `false` |
+| `STARRY_EGRESS_CONTROLLER_SECRET` | 空；非空即视为已部署，容器启动也需要它 |
+| `STARRY_EGRESS_MIHOMO_ENABLED` | `false`；只是控制台开关的初始状态，管理员使用过开关之后不再起作用 |
 | `STARRY_EGRESS_CONTROLLER_URL` | `http://127.0.0.1:9090` |
 | `STARRY_EGRESS_CONTROLLER_BIND` | `127.0.0.1:9090` |
-| `STARRY_EGRESS_CONTROLLER_SECRET` | 空；启用时必填 |
 | `STARRY_EGRESS_LISTENER_HOST` / `STARRY_EGRESS_LISTENER_BIND` | `127.0.0.1` |
 | `STARRY_EGRESS_PROBE_URL` | `https://api.ipify.org?format=json` |
 | `STARRY_EGRESS_ACTIVATION_FAILURE_BACKOFF` | `5s` |
 
-Compose 只传 `STARRY_EGRESS_MIHOMO_ENABLED` 和 `STARRY_EGRESS_CONTROLLER_SECRET`，其余沿用应用默认值（均指向 `127.0.0.1`）。在 IDE / jar 环境运行时，需自行把 Mihomo 放在服务可访问的本地地址并设置这些变量。不能把独立 Docker 容器中的 `127.0.0.1` 当成宿主机回环地址，推荐直接使用 Compose profile。
+Compose 只传 `STARRY_EGRESS_MIHOMO_ENABLED` 和 `STARRY_EGRESS_CONTROLLER_SECRET`，其余沿用应用默认值（均指向 `127.0.0.1`）。在 IDE / jar 环境运行时，需自行把 Mihomo 放在服务可访问的本地地址并设置这些变量（至少是控制端密钥）。不能把独立 Docker 容器中的 `127.0.0.1` 当成宿主机回环地址，推荐直接使用 Compose profile。
 
 ### TLS bridge（实验性）
 

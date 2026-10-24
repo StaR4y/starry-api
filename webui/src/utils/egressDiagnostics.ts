@@ -8,7 +8,7 @@ import type { ProxyProbe, ProxyRuntimeHealth } from '@/api/proxyChannels';
 function knownFailureMessage(code: string | null | undefined): string | undefined {
   switch (code) {
     case 'RUNTIME_DISABLED':
-      return t('Mihomo 未启用，请启动代理组件并启用后端代理配置。');
+      return t('Mihomo 未启用，请在「系统设置 → 出站代理」启用。');
     case 'NODE_UNAVAILABLE':
       return t('节点已停用、已从订阅移除或协议不受支持。');
     case 'NODE_NOT_ACTIVE':

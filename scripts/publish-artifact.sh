@@ -247,8 +247,9 @@ services:
       STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS: ${STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS:-90}
       STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE: ${STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE:-10000}
       STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES: ${STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES:-20}
-      # Optional Mihomo, off by default. Enabled by the "mihomo" profile together with these two settings
-      # (see docs/ACCOUNT_EGRESS.md); every other STARRY_EGRESS_* setting keeps its application default.
+      # Optional Mihomo: deployed by the "mihomo" profile together with the controller secret, and switched on by an
+      # administrator in the console (see docs/ACCOUNT_EGRESS.md). STARRY_EGRESS_MIHOMO_ENABLED is only the initial
+      # state of that switch for setups that never used it; every other STARRY_EGRESS_* setting keeps its default.
       STARRY_EGRESS_MIHOMO_ENABLED: ${STARRY_EGRESS_MIHOMO_ENABLED:-false}
       STARRY_EGRESS_CONTROLLER_SECRET: ${STARRY_EGRESS_CONTROLLER_SECRET:-}
       # glibc keeps one malloc arena per thread by default, which inflates resident memory of a busy JVM.
@@ -260,10 +261,11 @@ services:
     networks:
       - starryapi
 
-  # Optional Mihomo (Clash.Meta), off by default: only Clash subscriptions and protocols the Java backend cannot speak
-  # need it. Started by COMPOSE_PROFILES=mihomo (docs/ACCOUNT_EGRESS.md). The official image is used as is; Starry API
-  # never bundles the binary. It shares the service network namespace, so the controller (9090) and the per-node
-  # listeners stay on 127.0.0.1 and nothing is published.
+  # Optional Mihomo (Clash.Meta): only Clash subscriptions and protocols the Java backend cannot speak need it. The
+  # installer deploys it idle (COMPOSE_PROFILES=mihomo and STARRY_EGRESS_CONTROLLER_SECRET in .env) and an administrator
+  # switches it on in the console (docs/ACCOUNT_EGRESS.md). The official image is used as is; Starry API never bundles
+  # the binary. It shares the service network namespace, so the controller (9090) and the per-node listeners stay on
+  # 127.0.0.1 and nothing is published.
   mihomo:
     profiles: ["mihomo"]
     image: metacubex/mihomo:${MIHOMO_VERSION:-v1.19.32}
@@ -306,8 +308,9 @@ Package layout:
 - app/starry-api.jar.sha256: jar checksum.
 - starry-api-webui.tar.gz: standalone WebUI dist archive for inspection or CDN use.
 - docker-compose.artifact.yml: compose file that runs the jar with a JRE image. It also defines the optional
-  Mihomo service (off by default; enable with COMPOSE_PROFILES=mihomo, see docs/ACCOUNT_EGRESS.md). The official
-  Mihomo image is pulled at deploy time; no Mihomo binary is shipped here.
+  Mihomo service (the installer deploys it idle on a fresh install; an administrator switches it on in the console,
+  and COMPOSE_PROFILES=mihomo with STARRY_EGRESS_CONTROLLER_SECRET deploys it by hand, see docs/ACCOUNT_EGRESS.md).
+  The official Mihomo image is pulled at deploy time; no Mihomo binary is shipped here.
 - docker-compose.tls-bridge.yml: experimental, opt-in overlay for the Anthropic TLS fingerprint bridge.
 - docker/egress/: Mihomo entrypoint script and the TLS bridge build context.
 - docs/ACCOUNT_EGRESS.md: account egress deployment and limits.

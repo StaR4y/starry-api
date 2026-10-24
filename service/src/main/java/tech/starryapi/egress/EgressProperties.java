@@ -20,10 +20,15 @@ public class EgressProperties {
     private String probeUrl = "https://api.ipify.org?format=json";
     private Duration activationFailureBackoff = Duration.ofSeconds(5);
     private List<String> tlsProfiles = List.of("chrome136", "safari18_4");
+    /**
+     * Only the initial value of the console switch (see {@link MihomoRuntime#enabled()}): it applies until an
+     * administrator uses the switch, so deployments that set it before the switch existed keep working.
+     */
     public boolean isMihomoEnabled() { return mihomoEnabled; }
     public void setMihomoEnabled(boolean value) { mihomoEnabled = value; }
     public String getControllerUrl() { return controllerUrl; }
     public void setControllerUrl(String value) { controllerUrl = value; }
+    /** Also what tells whether Mihomo is deployed at all: the component refuses to start without it. */
     public String getControllerSecret() { return controllerSecret; }
     public String getControllerBind() { return controllerBind; }
     public void setControllerBind(String value) { controllerBind = value; }

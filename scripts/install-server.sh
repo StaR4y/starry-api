@@ -40,11 +40,20 @@ HEALTH_WAIT_SECONDS="${HEALTH_WAIT_SECONDS:-300}"
 PUBLIC_BASE_URL="${PUBLIC_BASE_URL:-}"
 FORCE_ENV="${FORCE_ENV:-false}"
 INSTALL_DOCKER="${INSTALL_DOCKER:-true}"
-# ENABLE_MIHOMO=true turns on the optional Mihomo (Clash.Meta) egress component: it adds COMPOSE_PROFILES=mihomo,
-# STARRY_EGRESS_MIHOMO_ENABLED=true and a generated STARRY_EGRESS_CONTROLLER_SECRET to .env, and deploys the official
-# metacubex/mihomo image next to the service. The default (false) never touches an existing choice, so a deployment that
-# enabled Mihomo keeps it. Remove the lines from .env and run "docker compose rm -sf mihomo" to disable it again.
-ENABLE_MIHOMO="${ENABLE_MIHOMO:-false}"
+# ENABLE_MIHOMO controls whether the optional Mihomo (Clash.Meta) egress component is deployed next to the service.
+# Deploying it means COMPOSE_PROFILES=mihomo and a generated STARRY_EGRESS_CONTROLLER_SECRET in .env plus the official
+# metacubex/mihomo image (about 20 MB of memory while idle). It does not switch Mihomo on: an administrator does that
+# in the console (System settings > Outbound proxies).
+#   auto  (default) a fresh install deploys it; an existing .env is left as it is, so an upgrade never gains a
+#         container silently; a release whose bundle has no mihomo service is installed without it.
+#   true  also adds it to an existing .env (keeping the old file as .env.previous); fails if the bundle has no
+#         mihomo service.
+#   false never adds it. Anything already in .env stays; remove COMPOSE_PROFILES and STARRY_EGRESS_CONTROLLER_SECRET
+#         from .env and run "docker compose rm -sf mihomo" to remove it.
+ENABLE_MIHOMO="${ENABLE_MIHOMO:-auto}"
+# Set when this run put Mihomo into a new .env on its own (ENABLE_MIHOMO=auto), which is the only case in which a
+# bundle without the mihomo service is skipped instead of refused.
+MIHOMO_AUTO_DEPLOYED=false
 ARTIFACT_UPDATED=false
 ARTIFACT_ROLLBACK_AVAILABLE=false
 COMPOSE_ROLLBACK_AVAILABLE=false
@@ -543,8 +552,8 @@ validate_database_secrets() {
 }
 
 validate_enable_mihomo() {
-  if [[ "$ENABLE_MIHOMO" != "true" && "$ENABLE_MIHOMO" != "false" ]]; then
-    fail "ENABLE_MIHOMO must be true or false."
+  if [[ "$ENABLE_MIHOMO" != "auto" && "$ENABLE_MIHOMO" != "true" && "$ENABLE_MIHOMO" != "false" ]]; then
+    fail "ENABLE_MIHOMO must be auto, true or false."
   fi
 }
 
@@ -603,7 +612,9 @@ validate_mihomo_secret() {
   fi
 }
 
-# Makes the env file enable Mihomo: the profile is selected, the backend switch is on and a controller secret exists.
+# Makes the env file deploy Mihomo: the profile is selected (which starts the container) and a controller secret exists
+# (which makes it available to the backend). The backend switch is not touched: an administrator switches Mihomo on in
+# the console, and an existing STARRY_EGRESS_MIHOMO_ENABLED stays what it was (the initial value of that switch).
 # Settings that are already right are left as they are, so applying it again changes nothing. The secret is never printed.
 apply_mihomo_env_settings() {
   local file="$1"
@@ -613,9 +624,6 @@ apply_mihomo_env_settings() {
     profiles="$(env_file_plain_value "$file" COMPOSE_PROFILES)"
     set_env_value "$file" COMPOSE_PROFILES "${profiles:+${profiles},}mihomo" || return 1
   fi
-  if [[ "$(env_file_plain_value "$file" STARRY_EGRESS_MIHOMO_ENABLED)" != "true" ]]; then
-    set_env_value "$file" STARRY_EGRESS_MIHOMO_ENABLED true || return 1
-  fi
   if [[ -z "$(env_file_plain_value "$file" STARRY_EGRESS_CONTROLLER_SECRET)" ]]; then
     secret="$(random_secret)" || return 1
     [[ -n "$secret" ]] || return 1
@@ -623,7 +631,21 @@ apply_mihomo_env_settings() {
   fi
 }
 
-# Enables Mihomo in the .env that is already in place. When something has to change, the current file is first kept as
+# Takes back what a fresh install added on its own: the comment, the profile and the secret.
+remove_auto_mihomo_from_env_file() {
+  local file="$1"
+  local temporary
+
+  temporary="$(mktemp "${file}.incoming.XXXXXX")" || return 1
+  if ! chmod 0600 "$temporary" \
+    || ! { grep -v -E '^(# Optional Mihomo egress component|COMPOSE_PROFILES=|STARRY_EGRESS_CONTROLLER_SECRET=)' "$file" || true; } > "$temporary" \
+    || ! mv -f -- "$temporary" "$file"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+}
+
+# Adds Mihomo to the .env that is already in place. When something has to change, the current file is first kept as
 # .env.previous (unless the caller has just done that), and the new one replaces it atomically.
 enable_mihomo_in_env_file() {
   local env_file="$1"
@@ -635,11 +657,11 @@ enable_mihomo_in_env_file() {
     || fail "Could not prepare the updated .env file."
   if ! chmod 0600 "$env_tmp" || ! cp -- "$env_file" "$env_tmp" || ! apply_mihomo_env_settings "$env_tmp"; then
     rm -f -- "$env_tmp"
-    fail "Could not enable Mihomo in .env."
+    fail "Could not add Mihomo to .env."
   fi
   if cmp -s "$env_file" "$env_tmp"; then
     rm -f -- "$env_tmp"
-    log "Mihomo is already enabled in .env."
+    log "Mihomo is already deployed by .env."
     return
   fi
   if [[ "$preserve_previous" == "true" ]]; then
@@ -649,23 +671,23 @@ enable_mihomo_in_env_file() {
     fi
   fi
   mv -f -- "$env_tmp" "$env_file" || { rm -f -- "$env_tmp"; fail "Could not activate the updated .env file."; }
-  log "Enabled Mihomo in .env (COMPOSE_PROFILES, STARRY_EGRESS_MIHOMO_ENABLED, STARRY_EGRESS_CONTROLLER_SECRET)."
+  log "Added Mihomo to .env (COMPOSE_PROFILES, STARRY_EGRESS_CONTROLLER_SECRET); switch it on in the console."
 }
 
-# One of: enabled, disabled, incomplete. Enabled needs the profile (the container), the backend switch and a secret.
+# One of: deployed, not-deployed, incomplete. Deployed needs the profile (the container) and a secret (what makes it
+# available to the backend); whether it is switched on is an administrator's choice in the console, not part of .env.
 mihomo_state() {
   local env_file="${INSTALL_DIR}/.env"
-  local listed=false switch=false secret=false
+  local listed=false secret=false
 
   mihomo_profile_listed "$env_file" && listed=true
   if [[ -f "$env_file" ]]; then
-    [[ "$(env_file_plain_value "$env_file" STARRY_EGRESS_MIHOMO_ENABLED)" == "true" ]] && switch=true
     [[ -n "$(env_file_plain_value "$env_file" STARRY_EGRESS_CONTROLLER_SECRET)" ]] && secret=true
   fi
-  if [[ "$listed" == "true" && "$switch" == "true" && "$secret" == "true" ]]; then
-    printf 'enabled'
-  elif [[ "$listed" == "false" && "$switch" == "false" ]]; then
-    printf 'disabled'
+  if [[ "$listed" == "true" && "$secret" == "true" ]]; then
+    printf 'deployed'
+  elif [[ "$listed" == "false" && "$secret" == "false" ]]; then
+    printf 'not-deployed'
   else
     printf 'incomplete'
   fi
@@ -673,14 +695,17 @@ mihomo_state() {
 
 mihomo_state_line() {
   case "$(mihomo_state)" in
-    enabled)
-      printf 'enabled (official metacubex/mihomo image, Compose profile "mihomo")'
+    deployed)
+      printf 'deployed - switch it on in the console under 系统设置 → 出站代理 (System settings > Outbound proxies)'
+      if [[ "$(env_file_plain_value "${INSTALL_DIR}/.env" STARRY_EGRESS_MIHOMO_ENABLED)" == "true" ]]; then
+        printf '; STARRY_EGRESS_MIHOMO_ENABLED=true in .env keeps it on until that switch is used'
+      fi
       ;;
     incomplete)
-      printf 'INCOMPLETE - .env needs COMPOSE_PROFILES=mihomo, STARRY_EGRESS_MIHOMO_ENABLED=true and STARRY_EGRESS_CONTROLLER_SECRET'
+      printf 'INCOMPLETE - .env needs both COMPOSE_PROFILES=mihomo and STARRY_EGRESS_CONTROLLER_SECRET'
       ;;
     *)
-      printf 'disabled (rerun with ENABLE_MIHOMO=true to enable; see docs/ACCOUNT_EGRESS.md)'
+      printf 'not deployed (rerun with ENABLE_MIHOMO=true to deploy it; see docs/ACCOUNT_EGRESS.md)'
       ;;
   esac
 }
@@ -715,11 +740,19 @@ ensure_mihomo_entrypoint() {
 }
 
 # Fails before the stack is touched when Mihomo is selected but the installed Compose file cannot run it, instead of
-# leaving the backend waiting for a controller that was never started.
+# leaving the backend waiting for a controller that was never started. The one exception is a fresh install that
+# picked Mihomo on its own (ENABLE_MIHOMO=auto): an older release without the service is installed without Mihomo.
 ensure_mihomo_support() {
   mihomo_profile_listed "${INSTALL_DIR}/.env" || return 0
-  grep -q '^  mihomo:' "${INSTALL_DIR}/docker-compose.artifact.yml" \
-    || fail "Mihomo is enabled in .env, but the downloaded deployment bundle does not define the mihomo service. Use a release that includes it, or disable Mihomo."
+  if ! grep -q '^  mihomo:' "${INSTALL_DIR}/docker-compose.artifact.yml"; then
+    if [[ "$MIHOMO_AUTO_DEPLOYED" == "true" ]]; then
+      remove_auto_mihomo_from_env_file "${INSTALL_DIR}/.env" || fail "Could not take Mihomo out of .env."
+      MIHOMO_AUTO_DEPLOYED=false
+      log "The downloaded deployment bundle does not define the mihomo service (an older release), so Mihomo is not deployed. Rerun with ENABLE_MIHOMO=true once a release that includes it is installed."
+      return 0
+    fi
+    fail "Mihomo is selected in .env, but the downloaded deployment bundle does not define the mihomo service. Use a release that includes it, or remove COMPOSE_PROFILES and STARRY_EGRESS_CONTROLLER_SECRET from .env."
+  fi
   ensure_mihomo_entrypoint
 }
 
@@ -767,6 +800,8 @@ write_env_file() {
     log "Keeping existing .env. Set FORCE_ENV=true to regenerate it."
     if [[ "$ENABLE_MIHOMO" == "true" ]]; then
       enable_mihomo_in_env_file "$env_file" true
+    elif [[ "$ENABLE_MIHOMO" == "auto" ]] && ! mihomo_profile_listed "$env_file"; then
+      log "Not adding Mihomo to the existing .env (ENABLE_MIHOMO=auto only deploys it on a fresh install). Rerun with ENABLE_MIHOMO=true to add it."
     fi
     return
   fi
@@ -893,12 +928,15 @@ STARRY_KIRO_PREFERRED_ENDPOINT=codewhisperer
 
 JAVA_OPTS="-Xms64m -Xmx768m -XX:MaxDirectMemorySize=256m -XX:+ExitOnOutOfMemoryError -XX:G1PeriodicGCInterval=300000 -XX:-G1PeriodicGCInvokesConcurrent -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=30"
 EOF
-  if [[ "$ENABLE_MIHOMO" == "true" ]]; then
-    log "Enabling the optional Mihomo component (ENABLE_MIHOMO=true)."
-    {
-      printf '\n# Optional Mihomo egress component. Remove these three lines and run "docker compose rm -sf mihomo" to\n'
-      printf '# disable it; the secret is shared by the backend and the Mihomo controller.\n'
-    } >> "$env_tmp" || { rm -f -- "$env_tmp"; fail "Could not write the Mihomo settings."; }
+  if [[ "$ENABLE_MIHOMO" != "false" ]]; then
+    if [[ "$ENABLE_MIHOMO" == "true" ]]; then
+      log "Deploying the optional Mihomo component (ENABLE_MIHOMO=true)."
+    else
+      log "Deploying the optional Mihomo component (ENABLE_MIHOMO=auto); an administrator switches it on in the console."
+      MIHOMO_AUTO_DEPLOYED=true
+    fi
+    printf '\n# Optional Mihomo egress component, deployed idle; switch it on in the console (System settings > Outbound proxies). Remove COMPOSE_PROFILES and STARRY_EGRESS_CONTROLLER_SECRET and run "docker compose rm -sf mihomo" to remove it.\n' >> "$env_tmp" \
+      || { rm -f -- "$env_tmp"; fail "Could not write the Mihomo settings."; }
     if ! apply_mihomo_env_settings "$env_tmp"; then
       rm -f -- "$env_tmp"
       fail "Could not write the Mihomo settings."
@@ -1099,8 +1137,9 @@ services:
       STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS: ${STARRY_ACCOUNT_ALLOCATION_EVENT_RETENTION_DAYS:-90}
       STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE: ${STARRY_ACCOUNT_ALLOCATION_DELETE_BATCH_SIZE:-10000}
       STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES: ${STARRY_ACCOUNT_ALLOCATION_DELETE_MAX_BATCHES:-20}
-      # Optional Mihomo, off by default. Enabled by the "mihomo" profile together with these two settings
-      # (see docs/ACCOUNT_EGRESS.md); every other STARRY_EGRESS_* setting keeps its application default.
+      # Optional Mihomo: deployed by the "mihomo" profile together with the controller secret, and switched on by an
+      # administrator in the console (see docs/ACCOUNT_EGRESS.md). STARRY_EGRESS_MIHOMO_ENABLED is only the initial
+      # state of that switch for setups that never used it; every other STARRY_EGRESS_* setting keeps its default.
       STARRY_EGRESS_MIHOMO_ENABLED: ${STARRY_EGRESS_MIHOMO_ENABLED:-false}
       STARRY_EGRESS_CONTROLLER_SECRET: ${STARRY_EGRESS_CONTROLLER_SECRET:-}
       # glibc keeps one malloc arena per thread by default, which inflates resident memory of a busy JVM.
@@ -1112,10 +1151,11 @@ services:
     networks:
       - starryapi
 
-  # Optional Mihomo (Clash.Meta), off by default: only Clash subscriptions and protocols the Java backend cannot speak
-  # need it. Started by COMPOSE_PROFILES=mihomo (docs/ACCOUNT_EGRESS.md). The official image is used as is; Starry API
-  # never bundles the binary. It shares the service network namespace, so the controller (9090) and the per-node
-  # listeners stay on 127.0.0.1 and nothing is published.
+  # Optional Mihomo (Clash.Meta): only Clash subscriptions and protocols the Java backend cannot speak need it. The
+  # installer deploys it idle (COMPOSE_PROFILES=mihomo and STARRY_EGRESS_CONTROLLER_SECRET in .env) and an administrator
+  # switches it on in the console (docs/ACCOUNT_EGRESS.md). The official image is used as is; Starry API never bundles
+  # the binary. It shares the service network namespace, so the controller (9090) and the per-node listeners stay on
+  # 127.0.0.1 and nothing is published.
   mihomo:
     profiles: ["mihomo"]
     image: metacubex/mihomo:${MIHOMO_VERSION:-v1.19.32}

@@ -72,8 +72,10 @@ class ProxyChannelAdminControllerTest {
     @Test void theCatalogCarriesRoutesProbesIssuesAndTheRuntimeHealth() {
         var runtime = new ProxyChannelDtos.RuntimeHealth(true, Instant.parse("2026-10-24T00:00:10Z"), Instant.parse("2026-10-24T00:00:05Z"),
             4, "CONFIG_REJECTED", EgressFailure.CONFIG_REJECTED.message(), Instant.parse("2026-10-24T00:00:01Z"));
-        when(service.catalog()).thenReturn(Mono.just(new ProxyChannelDtos.Catalog(List.of(channel()), List.of(), true, false, List.of("chrome136"), runtime)));
+        when(service.catalog()).thenReturn(Mono.just(new ProxyChannelDtos.Catalog(List.of(channel()), List.of(), true, false, false, List.of("chrome136"), runtime)));
         client.get().uri("/admin/proxy-channels").exchange().expectStatus().isOk().expectBody()
+            .jsonPath("$.data.mihomoAvailable").isEqualTo(true)
+            .jsonPath("$.data.mihomoEnabled").isEqualTo(false)
             .jsonPath("$.data.channels[0].route").isEqualTo("DIRECT_PROXY")
             .jsonPath("$.data.channels[0].subscriptionName").isEqualTo("Sub")
             .jsonPath("$.data.channels[0].sourcePresent").isEqualTo(true)
@@ -88,12 +90,49 @@ class ProxyChannelAdminControllerTest {
             .jsonPath("$.data.runtime.lastFailureMessage").isEqualTo(EgressFailure.CONFIG_REJECTED.message());
     }
 
+    @Test void theRuntimeSwitchReturnsTheUpdatedCatalog() {
+        var health = new ProxyChannelDtos.RuntimeHealth(true, null, null, 0, null, null, null);
+        when(service.setMihomoEnabled(true)).thenReturn(Mono.just(new ProxyChannelDtos.Catalog(List.of(), List.of(), true, true, false, List.of(), health)));
+        when(service.setMihomoEnabled(false)).thenReturn(Mono.just(new ProxyChannelDtos.Catalog(List.of(), List.of(), true, false, false, List.of(), health)));
+
+        client.put().uri("/admin/proxy-channels/runtime").contentType(MediaType.APPLICATION_JSON)
+            .bodyValue("{\"mihomoEnabled\":true}").exchange().expectStatus().isOk().expectBody()
+            .jsonPath("$.success").isEqualTo(true).jsonPath("$.data.mihomoAvailable").isEqualTo(true)
+            .jsonPath("$.data.mihomoEnabled").isEqualTo(true).jsonPath("$.data.runtime.controllerReachable").isEqualTo(true);
+        client.put().uri("/admin/proxy-channels/runtime").contentType(MediaType.APPLICATION_JSON)
+            .bodyValue("{\"mihomoEnabled\":false}").exchange().expectStatus().isOk().expectBody()
+            .jsonPath("$.data.mihomoEnabled").isEqualTo(false);
+        verify(service).setMihomoEnabled(true);
+        verify(service).setMihomoEnabled(false);
+        verify(auth, times(2)).verifyAdmin(any());
+    }
+
+    @Test void switchingMihomoOnWhereItIsNotDeployedIsAConflictThatSaysSo() {
+        when(service.setMihomoEnabled(true)).thenReturn(Mono.error(new ApiException(HttpStatus.CONFLICT, "PROXY_RUNTIME_UNAVAILABLE",
+            "Mihomo is not deployed on this server. Rerun the installer with ENABLE_MIHOMO=true.")));
+        client.put().uri("/admin/proxy-channels/runtime").contentType(MediaType.APPLICATION_JSON)
+            .bodyValue("{\"mihomoEnabled\":true}").exchange().expectStatus().isEqualTo(HttpStatus.CONFLICT).expectBody()
+            .jsonPath("$.success").isEqualTo(false).jsonPath("$.error.code").isEqualTo("PROXY_RUNTIME_UNAVAILABLE")
+            .jsonPath("$.error.message").value(message -> org.assertj.core.api.Assertions.assertThat((String) message)
+                .contains("not deployed").contains("ENABLE_MIHOMO=true"));
+    }
+
+    @Test void theRuntimeSwitchNeedsAnExplicitValue() {
+        client.put().uri("/admin/proxy-channels/runtime").contentType(MediaType.APPLICATION_JSON)
+            .bodyValue("{}").exchange().expectStatus().isBadRequest().expectBody().jsonPath("$.error.code").isEqualTo("VALIDATION_ERROR");
+        client.put().uri("/admin/proxy-channels/runtime").contentType(MediaType.APPLICATION_JSON)
+            .bodyValue("{\"mihomoEnabled\":null}").exchange().expectStatus().isBadRequest();
+        verify(service, never()).setMihomoEnabled(anyBoolean());
+    }
+
     @Test void everyEndpointRequiresAnAdministrator() {
         when(auth.verifyAdmin(any())).thenThrow(new ApiException(HttpStatus.FORBIDDEN, "ADMIN_ROLE_REQUIRED", "Administrator role is required"));
         client.get().uri("/admin/proxy-channels/{id}/accounts", CHANNEL).exchange().expectStatus().isForbidden();
         client.delete().uri("/admin/proxy-channels/subscriptions/{id}", SUBSCRIPTION).exchange().expectStatus().isForbidden();
         client.patch().uri("/admin/proxy-channels/subscriptions/{id}", SUBSCRIPTION).contentType(MediaType.APPLICATION_JSON)
             .bodyValue("{\"name\":\"x\"}").exchange().expectStatus().isForbidden();
+        client.put().uri("/admin/proxy-channels/runtime").contentType(MediaType.APPLICATION_JSON)
+            .bodyValue("{\"mihomoEnabled\":true}").exchange().expectStatus().isForbidden();
         verifyNoInteractions(service);
     }
 

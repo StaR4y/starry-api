@@ -69,7 +69,7 @@ class ClashNodesTest {
 
     @Test void runtimeUsesFixedNodeListenersAndRejectDefault() {
         var props = new EgressProperties();
-        var runtime = new MihomoRuntime(null, json, props);
+        var runtime = new MihomoRuntime(null, null, json, props);
         var id = java.util.UUID.randomUUID();
         var node = parser.url("A", "http://example.com:8080");
         var config = runtime.configuration(java.util.List.of(new MihomoRuntime.Route(id, 20000, node.config())));

@@ -3,7 +3,7 @@ import type { ApiResponse } from '@/types/api';
 
 /**
  * DIRECT_PROXY：普通 HTTP(S) / SOCKS5 节点，由后端直接连接，不依赖 Mihomo；
- * MIHOMO：其他协议（VLESS、Hysteria2 等），需要启用 Mihomo 组件。
+ * MIHOMO：其他协议（VLESS、Hysteria2 等），需要部署 Mihomo 组件，并由管理员在控制台启用。
  */
 export type ProxyRoute = 'DIRECT_PROXY' | 'MIHOMO';
 export type ProxyRuntimeStatus = 'PENDING' | 'ACTIVE' | 'ERROR' | 'DISABLED';
@@ -53,6 +53,9 @@ export interface ProxyRuntimeHealth {
 export interface ProxyCatalog {
   channels: ProxyChannel[];
   subscriptions: ProxySubscription[];
+  /** 部署里带有 Mihomo（设置了控制密钥）；为 false 时无法在控制台启用 */
+  mihomoAvailable: boolean;
+  /** 实际生效的开关：已部署，并且管理员已启用 */
   mihomoEnabled: boolean;
   tlsEnabled: boolean;
   tlsProfiles: string[];
@@ -86,6 +89,16 @@ export const PROXY_NODE_IN_USE = 'PROXY_NODE_IN_USE';
 
 export const proxyChannelsApi = {
   catalog: () => unwrap<ProxyCatalog>(http.get<ApiResponse<ProxyCatalog>>('/admin/proxy-channels')),
+  /** 启用或关闭 Mihomo，返回更新后的目录；未部署时启用返回 409 PROXY_RUNTIME_UNAVAILABLE */
+  setMihomoEnabled: (enabled: boolean) =>
+    unwrap<ProxyCatalog>(
+      http.put<ApiResponse<ProxyCatalog>>(
+        '/admin/proxy-channels/runtime',
+        { mihomoEnabled: enabled },
+        // 启用时会立即加载节点，控制端无响应时最长约 20 秒
+        { timeout: 45000 },
+      ),
+    ),
   create: (payload: { name: string; proxyUrl?: string; clashYaml?: string }) =>
     unwrap<ProxyChannel>(http.post<ApiResponse<ProxyChannel>>('/admin/proxy-channels', payload)),
   update: (id: string, payload: { name?: string; enabled?: boolean }) =>

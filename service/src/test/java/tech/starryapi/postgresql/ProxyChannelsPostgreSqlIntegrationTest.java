@@ -36,6 +36,7 @@ class ProxyChannelsPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSu
     @Autowired ObjectMapper json;
     @Autowired tech.starryapi.account.AccountPoolService accounts;
     @Autowired tech.starryapi.account.AccountAllocationPolicyService policies;
+    @Autowired MihomoSwitchStore switchStore;
 
     private final SubscriptionFetcher fetcher = mock(SubscriptionFetcher.class);
     private final MihomoRuntime runtime = mock(MihomoRuntime.class);
@@ -423,7 +424,7 @@ class ProxyChannelsPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSu
         assertThatThrownBy(() -> service.requireUsable(channel).block()).isInstanceOfSatisfying(ApiException.class,
             error -> assertThat(error.getCode()).isEqualTo("PROXY_RUNTIME_DISABLED"));
         // The real runtime is disabled, so the node cannot be used and the request is not sent anywhere.
-        var disabledRuntime = new MihomoRuntime(db, json, props);
+        var disabledRuntime = new MihomoRuntime(db, switchStore, json, props);
         var strict = new ChannelRoutes(db, disabledRuntime, json, props);
         assertThatThrownBy(() -> strict.resolve(channel).block()).isInstanceOfSatisfying(EgressException.class, error -> {
             assertThat(error.failure()).isEqualTo(EgressFailure.RUNTIME_DISABLED);
@@ -442,6 +443,123 @@ class ProxyChannelsPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSu
         var https = service.create(new ProxyChannelDtos.CreateChannel("https", "https://user:pass@proxy.example:8443", null)).block();
         assertThat(https.route()).isEqualTo("DIRECT_PROXY");
         assertThat(portOf(https.channelId())).isNull();
+    }
+
+    // ---- the Mihomo switch: deployed (controller secret) and switched on by an administrator (system setting) ----
+
+    private static final String SWITCH_KEY = "egress_mihomo_enabled";
+
+    private void forgetSwitch() {
+        // The application role cannot delete settings; the owner can.
+        executeAsDatabaseOwner("DELETE FROM starry_api.system_settings WHERE setting_key = '" + SWITCH_KEY + "'");
+    }
+
+    private String storedSwitch() {
+        return db.sql("SELECT setting_value FROM system_settings WHERE setting_key=:key").bind("key", SWITCH_KEY)
+            .map((r, m) -> r.get("setting_value", String.class)).one().block();
+    }
+
+    @Test void theSwitchIsStoredOnceReadBackAndAnythingButABooleanIsNoChoice() {
+        forgetSwitch();
+        assertThat(switchStore.read().block()).as("never used").isNull();
+
+        switchStore.write(true).block();
+        assertThat(switchStore.read().block()).isTrue();
+        assertThat(storedSwitch()).isEqualTo("true");
+        switchStore.write(false).block();
+        assertThat(switchStore.read().block()).isFalse();
+        assertThat(storedSwitch()).isEqualTo("false");
+        assertThat(db.sql("SELECT count(*) AS n FROM system_settings WHERE setting_key=:key").bind("key", SWITCH_KEY)
+            .map((r, m) -> r.get("n", Long.class)).one().block()).as("one row, updated in place").isEqualTo(1);
+
+        executeAsDatabaseOwner("UPDATE starry_api.system_settings SET setting_value = 'maybe' WHERE setting_key = '" + SWITCH_KEY + "'");
+        assertThat(switchStore.read().block()).isNull();
+        executeAsDatabaseOwner("UPDATE starry_api.system_settings SET setting_value = ' TRUE ' WHERE setting_key = '" + SWITCH_KEY + "'");
+        assertThat(switchStore.read().block()).isTrue();
+        forgetSwitch();
+    }
+
+    @Test void concurrentSwitchesAreSerializedAndLeaveOneConsistentValue() {
+        forgetSwitch();
+        Flux.range(0, 24).flatMap(i -> switchStore.write(i % 2 == 0).subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic()), 24)
+            .then().block(Duration.ofSeconds(30));
+        assertThat(storedSwitch()).isIn("true", "false");
+        assertThat(switchStore.read().block()).isEqualTo(Boolean.valueOf(storedSwitch()));
+        forgetSwitch();
+    }
+
+    @Test void thePersistedSwitchSurvivesARestartAndDecidesTheCatalogAndTheRoutes() {
+        forgetSwitch();
+        var deployed = new EgressProperties();
+        deployed.setControllerSecret("controller-secret-for-the-test");
+        deployed.setControllerUrl("http://127.0.0.1:1"); // nothing listens there: activation fails, which is not the switch's failure
+        var firstRuntime = new MihomoRuntime(db, switchStore, json, deployed);
+        var firstService = new ProxyChannelService(db, json, parser, fetcher, deployed, firstRuntime,
+            new ChannelRoutes(db, firstRuntime, json, deployed), transactions);
+        UUID vless = createVless("switched");
+
+        var before = firstService.catalog().block();
+        assertThat(before.mihomoAvailable()).isTrue();
+        assertThat(before.mihomoEnabled()).as("deployed but nobody switched it on").isFalse();
+        assertThatThrownBy(() -> firstService.requireUsable(vless).block()).isInstanceOfSatisfying(ApiException.class,
+            error -> assertThat(error.getCode()).isEqualTo("PROXY_RUNTIME_DISABLED"));
+
+        var switchedOn = firstService.setMihomoEnabled(true).block(Duration.ofSeconds(30));
+        assertThat(switchedOn.mihomoEnabled()).isTrue();
+        assertThat(switchedOn.runtime().lastFailureCode()).isEqualTo("CONTROLLER_UNREACHABLE");
+        assertThat(storedSwitch()).isEqualTo("true");
+        firstService.requireUsable(vless).block();
+
+        // Another instance, or this one after a restart, reads it back; the old environment switch no longer matters.
+        deployed.setMihomoEnabled(false);
+        var restarted = new MihomoRuntime(db, switchStore, json, deployed);
+        assertThat(restarted.enabled()).as("not read yet").isFalse();
+        restarted.loadChoice();
+        assertThat(restarted.enabled()).isTrue();
+
+        var switchedOff = firstService.setMihomoEnabled(false).block(Duration.ofSeconds(30));
+        assertThat(switchedOff.mihomoAvailable()).isTrue();
+        assertThat(switchedOff.mihomoEnabled()).isFalse();
+        assertThat(storedSwitch()).isEqualTo("false");
+        assertThatThrownBy(() -> firstService.requireUsable(vless).block()).isInstanceOfSatisfying(ApiException.class,
+            error -> assertThat(error.getCode()).isEqualTo("PROXY_RUNTIME_DISABLED"));
+        deployed.setMihomoEnabled(true);
+        var afterSwitchOff = new MihomoRuntime(db, switchStore, json, deployed);
+        afterSwitchOff.loadChoice();
+        assertThat(afterSwitchOff.enabled()).as("a stored off beats the old environment switch").isFalse();
+        forgetSwitch();
+    }
+
+    @Test void theSwitchCannotBeTurnedOnWhereMihomoIsNotDeployedButCanBeTurnedOff() {
+        forgetSwitch();
+        var undeployed = new EgressProperties(); // no controller secret
+        undeployed.setMihomoEnabled(true);       // the old switch alone does not make it available
+        var runtimeWithoutMihomo = new MihomoRuntime(db, switchStore, json, undeployed);
+        var undeployedService = new ProxyChannelService(db, json, parser, fetcher, undeployed, runtimeWithoutMihomo,
+            new ChannelRoutes(db, runtimeWithoutMihomo, json, undeployed), transactions);
+
+        var catalog = undeployedService.catalog().block();
+        assertThat(catalog.mihomoAvailable()).isFalse();
+        assertThat(catalog.mihomoEnabled()).isFalse();
+        assertThatThrownBy(() -> undeployedService.setMihomoEnabled(true).block()).isInstanceOfSatisfying(ApiException.class, error -> {
+            assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+            assertThat(error.getCode()).isEqualTo("PROXY_RUNTIME_UNAVAILABLE");
+            assertThat(error.getMessage()).contains("ENABLE_MIHOMO=true");
+        });
+        assertThat(switchStore.read().block()).as("nothing was stored by the refused request").isNull();
+
+        assertThat(undeployedService.setMihomoEnabled(false).block().mihomoEnabled()).isFalse();
+        assertThat(storedSwitch()).isEqualTo("false");
+        forgetSwitch();
+    }
+
+    @Test void aMihomoNodeIsUsableForAnAccountOnceTheRuntimeIsSwitchedOn() {
+        UUID channel = createVless("usable");
+        when(runtime.enabled()).thenReturn(true);
+        service.requireUsable(channel).block();
+        when(runtime.enabled()).thenReturn(false);
+        assertThatThrownBy(() -> service.requireUsable(channel).block()).isInstanceOfSatisfying(ApiException.class,
+            error -> assertThat(error.getCode()).isEqualTo("PROXY_RUNTIME_DISABLED"));
     }
 
     // ---- helpers ----

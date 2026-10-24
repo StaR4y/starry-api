@@ -1,6 +1,8 @@
 <script setup lang="ts">
   /**
    * 出站代理页顶部的状态条：直连代理、Mihomo 组件与 TLS 组件各占一格。
+   * Mihomo 有三种状态：未部署（只提示如何部署）、已部署未启用（可在这里启用）、已启用（显示健康状况，可关闭）。
+   * 开关只发出 toggle 事件，确认与请求由页面处理；开关的状态始终来自后端返回的目录。
    */
   import { computed } from 'vue';
   import { t } from '@/i18n';
@@ -8,7 +10,8 @@
   import { runtimeFailureMessage } from '@/utils/egressDiagnostics';
   import { formatRelative } from './helpers';
 
-  const props = defineProps<{ catalog: ProxyCatalog }>();
+  const props = defineProps<{ catalog: ProxyCatalog; switching?: boolean }>();
+  const emit = defineEmits<{ toggle: [enabled: boolean] }>();
 
   const runtime = computed(() => props.catalog.runtime);
   const failure = computed(() => runtimeFailureMessage(runtime.value));
@@ -18,6 +21,10 @@
   );
 
   type Tone = 'on' | 'warn' | 'bad' | 'off';
+  const mihomoState = computed(() => {
+    if (!props.catalog.mihomoAvailable) return t('未部署');
+    return props.catalog.mihomoEnabled ? t('已启用') : t('未启用');
+  });
   const mihomoTone = computed<Tone>(() => {
     if (!props.catalog.mihomoEnabled) return 'off';
     if (runtime.value.controllerReachable === false) return 'bad';
@@ -49,11 +56,24 @@
         <div class="status-cell__head">
           <i class="status-dot" :class="`is-${mihomoTone}`" aria-hidden="true" />
           <strong>Mihomo</strong>
-          <span class="status-cell__state">
-            {{ catalog.mihomoEnabled ? t('已启用') : t('未启用') }}
+          <span class="status-cell__control">
+            <span class="status-cell__state">{{ mihomoState }}</span>
+            <el-switch
+              v-if="catalog.mihomoAvailable"
+              :model-value="catalog.mihomoEnabled"
+              :loading="switching"
+              :disabled="switching"
+              :aria-label="t('启用 Mihomo')"
+              @change="emit('toggle', Boolean($event))"
+            />
           </span>
         </div>
-        <template v-if="catalog.mihomoEnabled">
+        <template v-if="!catalog.mihomoAvailable">
+          <p class="status-cell__note">
+            {{ t('重新运行安装脚本并设置 ENABLE_MIHOMO=true 即可部署，详见文档。') }}
+          </p>
+        </template>
+        <template v-else-if="catalog.mihomoEnabled">
           <p class="status-cell__note">
             {{ controllerText }} · {{ t('活动节点 {p0}', { p0: runtime.activeNodes }) }} ·
             {{
@@ -69,18 +89,13 @@
             </span>
           </p>
         </template>
-        <template v-else>
-          <p class="status-cell__note is-warning">
-            {{
-              mihomoNodes > 0
-                ? t('需要 Mihomo 的 {p0} 个节点暂时无法使用。', { p0: mihomoNodes })
-                : t('需要 Mihomo 的节点（VLESS、Hysteria2、TUIC 等）暂时无法使用。')
-            }}
-          </p>
-          <p class="status-cell__note">
-            {{ t('启用：安装时设置 ENABLE_MIHOMO=true，或在 .env 启用 mihomo profile，详见文档。') }}
-          </p>
-        </template>
+        <p v-else class="status-cell__note" :class="{ 'is-warning': mihomoNodes > 0 }">
+          {{
+            mihomoNodes > 0
+              ? t('启用后，需要 Mihomo 的 {p0} 个节点即可使用。', { p0: mihomoNodes })
+              : t('启用后，VLESS、Hysteria2、TUIC 等需要 Mihomo 的节点即可使用。')
+          }}
+        </p>
       </div>
 
       <div class="status-cell surface-card">
@@ -158,6 +173,13 @@
         font-size: 14px;
         color: var(--kp-text);
       }
+    }
+
+    &__control {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-left: auto;
     }
 
     &__state {

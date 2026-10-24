@@ -55,7 +55,20 @@ public class ProxyChannelService {
         Mono<List<ProxyChannelDtos.Subscription>> subscriptions = db.sql(SUBSCRIPTION_SELECT + " GROUP BY s.subscription_id ORDER BY s.updated_at DESC")
             .map((r,m) -> subscriptionRow(r)).all().collectList();
         return channels.zipWith(subscriptions).map(pair -> new ProxyChannelDtos.Catalog(pair.getT1(), pair.getT2(),
-            properties.isMihomoEnabled(), properties.isTlsEnabled(), properties.getTlsProfiles(), runtimeHealth()));
+            runtime.available(), runtime.enabled(), properties.isTlsEnabled(), properties.getTlsProfiles(), runtimeHealth()));
+    }
+
+    /**
+     * Switches the optional Mihomo component on or off for the whole deployment and returns the catalog as it is
+     * afterwards. It can only be switched on where it is deployed; switching it off is always possible.
+     */
+    public Mono<ProxyChannelDtos.Catalog> setMihomoEnabled(boolean enabled) {
+        if (enabled && !runtime.available()) {
+            return Mono.error(new ApiException(HttpStatus.CONFLICT, "PROXY_RUNTIME_UNAVAILABLE",
+                "Mihomo is not deployed on this server. Rerun the installer with ENABLE_MIHOMO=true, or add the mihomo "
+                    + "Compose profile and STARRY_EGRESS_CONTROLLER_SECRET to .env (see docs/ACCOUNT_EGRESS.md), then switch it on."));
+        }
+        return runtime.setEnabled(enabled).then(Mono.defer(this::catalog));
     }
 
     private ProxyChannelDtos.RuntimeHealth runtimeHealth() {
@@ -273,7 +286,7 @@ public class ProxyChannelService {
             .switchIfEmpty(Mono.error(notFound("Channel")))
             .flatMap(route -> route.isEmpty() ? Mono.<Void>error(new ApiException(HttpStatus.BAD_REQUEST, "PROXY_CHANNEL_UNAVAILABLE",
                     EgressFailure.NODE_UNAVAILABLE.message()))
-                : ClashNodes.MIHOMO.equals(route) && !properties.isMihomoEnabled() ? Mono.<Void>error(new ApiException(HttpStatus.BAD_REQUEST,
+                : ClashNodes.MIHOMO.equals(route) && !runtime.enabled() ? Mono.<Void>error(new ApiException(HttpStatus.BAD_REQUEST,
                     "PROXY_RUNTIME_DISABLED", EgressFailure.RUNTIME_DISABLED.message()))
                 : Mono.<Void>empty());
     }

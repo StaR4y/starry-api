@@ -18,6 +18,7 @@ function emptyCatalog(): ProxyCatalog {
   return {
     channels: [],
     subscriptions: [],
+    mihomoAvailable: false,
     mihomoEnabled: false,
     tlsEnabled: false,
     tlsProfiles: [],

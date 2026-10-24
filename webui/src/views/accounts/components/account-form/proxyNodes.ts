@@ -13,7 +13,8 @@ export function nodeBlocker(node: ProxyChannel, mihomoEnabled: boolean): string 
   if (!node.enabled) return t('节点已停用');
   if (!node.sourcePresent) return t('订阅中已不存在该节点');
   if (node.configIssue) return t('节点配置不受支持');
-  if (node.route === 'MIHOMO' && !mihomoEnabled) return t('需要启用 Mihomo 组件');
+  if (node.route === 'MIHOMO' && !mihomoEnabled)
+    return t('需要在「系统设置 → 出站代理」启用 Mihomo');
   if (node.runtimeStatus === 'ERROR') return t('节点运行异常');
   return null;
 }

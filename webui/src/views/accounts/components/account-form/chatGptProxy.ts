@@ -7,7 +7,9 @@ const PROXY_ERROR_MESSAGES: Record<string, () => string> = {
   PROXY_CHANNEL_UNAVAILABLE: () =>
     t('所选代理节点当前不可用（已停用、已从订阅移除或配置不受支持），请换一个节点。'),
   PROXY_RUNTIME_DISABLED: () =>
-    t('所选节点需要 Mihomo 组件，但 Mihomo 未启用。请启用组件，或改选直连代理节点。'),
+    t(
+      '所选节点需要 Mihomo，但 Mihomo 未启用。请在「系统设置 → 出站代理」启用，或改选直连代理节点。',
+    ),
 };
 
 /** 与所选代理节点有关的授权失败说明；其他错误返回 null */

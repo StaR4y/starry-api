@@ -1,6 +1,7 @@
 package tech.starryapi.egress;
 
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import java.time.Instant;
 import java.util.List;
@@ -30,8 +31,13 @@ public final class ProxyChannelDtos {
      */
     public record RuntimeHealth(Boolean controllerReachable, Instant lastPollAt, Instant lastActivatedAt, int activeNodes,
                                 String lastFailureCode, String lastFailureMessage, Instant lastFailureAt) {}
-    public record Catalog(List<Channel> channels, List<Subscription> subscriptions, boolean mihomoEnabled,
-                          boolean tlsEnabled, List<String> tlsProfiles, RuntimeHealth runtime) {}
+    /**
+     * {@code mihomoAvailable} is whether the deployment provides Mihomo (its controller secret is set);
+     * {@code mihomoEnabled} is the effective switch: available and switched on by an administrator.
+     */
+    public record Catalog(List<Channel> channels, List<Subscription> subscriptions, boolean mihomoAvailable,
+                          boolean mihomoEnabled, boolean tlsEnabled, List<String> tlsProfiles, RuntimeHealth runtime) {}
+    public record UpdateRuntime(@NotNull Boolean mihomoEnabled) {}
     /** An account bound to a node; {@code channelId} and {@code channelName} say which node of a subscription. */
     public record BoundAccount(String accountId, String email, String provider, String authMethod, boolean enabled,
                                UUID channelId, String channelName) {}

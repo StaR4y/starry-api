@@ -12,6 +12,7 @@ public class ProxyChannelAdminController implements ProxyChannelAdminApi {
     private final ProxyChannelService service; private final AdminAuth auth;
     public ProxyChannelAdminController(ProxyChannelService service, AdminAuth auth) { this.service=service; this.auth=auth; }
     public Mono<ApiResponse<ProxyChannelDtos.Catalog>> catalog(ServerWebExchange e){auth.verifyAdmin(e);return service.catalog().map(ApiResponse::ok);}
+    public Mono<ApiResponse<ProxyChannelDtos.Catalog>> updateRuntime(ServerWebExchange e, ProxyChannelDtos.UpdateRuntime r){auth.verifyAdmin(e);return service.setMihomoEnabled(r.mihomoEnabled()).map(ApiResponse::ok);}
     public Mono<ApiResponse<ProxyChannelDtos.Channel>> create(ServerWebExchange e, ProxyChannelDtos.CreateChannel r){auth.verifyAdmin(e);return service.create(r).map(ApiResponse::ok);}
     public Mono<ApiResponse<ProxyChannelDtos.Channel>> update(ServerWebExchange e, UUID id, ProxyChannelDtos.UpdateChannel r){auth.verifyAdmin(e);return service.update(id,r).map(ApiResponse::ok);}
     public Mono<ApiResponse<Void>> delete(ServerWebExchange e, UUID id){auth.verifyAdmin(e);return service.delete(id).thenReturn(ApiResponse.ok(null));}

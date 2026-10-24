@@ -150,11 +150,15 @@ class AccountEgressPoolingTest {
                         assertThat(error.requestMayHaveBeenSent()).isFalse();
                     });
             }
+            // Reactor Netty may reconnect once by itself when a connection closes before anything was sent, so the
+            // two failed requests made two or more connections; a suspended request makes none.
+            int dialled = proxy.connections.get();
+            assertThat(dialled).isGreaterThanOrEqualTo(2);
             assertThatThrownBy(() -> client.get().uri("https://target.invalid/test").attribute(AccountEgressTransport.CHANNEL, CHANNEL)
                     .retrieve().bodyToMono(String.class).block(Duration.ofSeconds(10)))
                 .isInstanceOfSatisfying(EgressException.class, error ->
                     assertThat(error.failure()).isEqualTo(EgressFailure.PROXY_ROUTE_SUSPENDED));
-            assertThat(proxy.connections).hasValue(2);
+            assertThat(proxy.connections).hasValue(dialled);
             transport.shutdown();
         }
     }
