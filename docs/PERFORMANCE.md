@@ -26,7 +26,7 @@
 | 压测前堆已用 | 约 159 MiB |
 | 诊断性 Full GC 之后的存活堆 | 约 116 MiB |
 | 非堆内存 | 约 94 MiB |
-| Netty 直接缓冲内存 | 80 MiB（23 个缓冲） |
+| Netty 直接缓冲内存 | 80 MiB（23 个缓冲；Spring Boot 3.5 / Netty 4.1 时测得） |
 | 存活 JVM 线程 | 45 |
 | JVM 自动选择的最大堆 | 8 GiB |
 | 短压测期间 RSS 峰值 | 约 570 MiB |
@@ -137,6 +137,18 @@ JAVA_OPTS="-Xms64m -Xmx768m -XX:MaxDirectMemorySize=256m -XX:+ExitOnOutOfMemoryE
 
 > 这份数据来自 macOS 上的生产 JAR，不是 Linux 容器；模拟上游和压测脚本跑在同一台机器上，没有 TLS 和真实网络延迟。Linux 上 glibc 的内存碎片可能让常驻内存更高，所以容器上限要留余量。
 
+## Spring Boot 4 升级前后对比（2026-10-24）
+
+同一台机器（Apple M5，10 核）、同样的生产 `JAVA_OPTS`，分别运行 Spring Boot 3.5.16（Netty 4.1）和 4.1.2（Netty 4.2）的 jar，压测对象是本地假上游：
+
+| 场景 | 吞吐与延迟 | RSS 峰值（旧 → 新） | 说明 |
+| --- | --- | ---: | --- |
+| 300 路并发 SSE 流，持续 3 分钟 | 相同（约 47 req/s，P99 约 6.2 s） | 523 → 549 MiB | 新版常驻多约 25–50 MiB，线程多 9 个 |
+| 40 路并发 2 MiB 请求体，另加 120 路突发 | 相同（P99 约 2.1 s；突发均为 96 成功 + 24 个 `503 PROXY_OVERLOADED`） | 972 → 960 MiB | 新版堆峰值更低（524 → 460 MiB） |
+| 压测后空闲 6 分钟 | — | — | 两版的堆都会回落，没有泄漏 |
+
+两版都没有出现错误，流式响应完整。新版在 2 GiB 容器上限下仍有约 40% 余量，现有的 768 MiB 堆、256 MiB 直接内存设置不需要调整；改回 Netty 旧的池化分配器（`-Dio.netty.allocator.type=pooled`）不会降低内存，不建议使用。
+
 ## 监控阈值
 
 用 `/actuator/prometheus` 或管理端的性能页建立更长期的生产基线。建议的初始告警阈值：
@@ -145,10 +157,12 @@ JAVA_OPTS="-Xms64m -Xmx768m -XX:MaxDirectMemorySize=256m -XX:+ExitOnOutOfMemoryE
 | --- | --- |
 | 容器 RSS | 超过上限的 80%，持续 10 分钟 |
 | GC 后堆 | 超过 `-Xmx` 的 70%，持续 15 分钟 |
-| 直接缓冲内存 | 超过 `MaxDirectMemorySize` 的 70% |
+| Netty 直接内存 | `netty.direct.memory.used` 超过 `netty.direct.memory.max` 的 70% |
 | GC 暂停 P99 | 超过 100 ms |
 | GC 时间 | 超过墙钟时间的 2%，持续 10 分钟 |
 | 存活线程 | 持续增长到既定基线的 2 倍以上 |
+
+从 Spring Boot 4 / Netty 4.2 起，Netty 的缓冲不再经过 `ByteBuffer.allocateDirect`，JVM 自带的 `jvm.buffer.memory.used{id=direct}` 会一直接近 0，不能再用来判断直接内存；改看服务导出的 `netty.direct.memory.used` 和 `netty.direct.memory.max`（Netty 在两者相等时抛出 `OutOfDirectMemoryError`）。
 
 **只有当 GC 后的堆、或原生 / 直接内存，在多个可比的负载窗口里持续增长时，才需要调查泄漏。**单看 RSS 是不够的，因为 JVM 可能在对象已回收之后继续保留已提交的页。
 
@@ -167,7 +181,8 @@ jcmd "$PID" GC.heap_info
 ```bash
 curl -sS 'http://127.0.0.1:8080/actuator/metrics/jvm.memory.used?tag=area:heap'
 curl -sS 'http://127.0.0.1:8080/actuator/metrics/jvm.memory.used?tag=area:nonheap'
-curl -sS 'http://127.0.0.1:8080/actuator/metrics/jvm.buffer.memory.used?tag=id:direct'
+curl -sS 'http://127.0.0.1:8080/actuator/metrics/netty.direct.memory.used'
+curl -sS 'http://127.0.0.1:8080/actuator/metrics/netty.direct.memory.max'
 curl -sS 'http://127.0.0.1:8080/actuator/metrics/jvm.gc.pause'
 ```
 
