@@ -48,6 +48,26 @@ configure(subprojects.findAll { it.name in ['service-api', 'service', 'plugin-ap
         javaLauncher = javaToolchains.launcherFor {
             languageVersion = JavaLanguageVersion.of(25)
         }
+
+        // Paths such as starry.model-pricing.cache-dir default to ${user.home}/.starry-api, where a developer keeps real
+        // plugin packages and data-management state. Every test JVM gets an empty home of its own instead, and the
+        // STARRY_*_DIR / STARRY_*_FILE variables that would override those defaults are not passed through.
+        def realHome = System.getProperty('user.home')
+        def testHome = project.layout.buildDirectory.dir("${name}-home").get().asFile
+        systemProperty 'user.home', testHome.absolutePath
+        environment.keySet().removeAll { it ==~ /STARRY_\w+_(DIR|FILE)/ }
+        // Docker credentials and Testcontainers settings (docker.host for Colima, for example) still come from the real home.
+        if (!environment.containsKey('DOCKER_CONFIG')) {
+            environment 'DOCKER_CONFIG', "${realHome}/.docker"
+        }
+        def testcontainersProperties = new File(realHome, '.testcontainers.properties')
+        doFirst {
+            testHome.deleteDir()
+            testHome.mkdirs()
+            if (testcontainersProperties.file) {
+                java.nio.file.Files.copy(testcontainersProperties.toPath(), new File(testHome, testcontainersProperties.name).toPath())
+            }
+        }
     }
 
     tasks.withType(JavaExec).configureEach {
