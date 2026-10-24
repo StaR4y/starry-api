@@ -130,6 +130,35 @@ class AccountEgressPoolingTest {
         }
     }
 
+    @Test void aTunnelThatClosesRightAfterConnectBeforeTheTlsHandshakeIsNotSentAndCountsAgainstTheRoute() throws Exception {
+        // Mihomo answers CONNECT with 200 before it dials the node; a dead node then closes the tunnel. Upstreams are
+        // HTTPS, so that happens during the TLS handshake, before anything of the request was written.
+        try (var proxy = new KeepAliveProxy(new ServerSocket(0, 20, InetAddress.getLoopbackAddress()))) {
+            proxy.closeAfterConnect = true;
+            var routes = mock(ChannelRoutes.class);
+            when(routes.resolve(CHANNEL)).thenReturn(Mono.just(listener(proxy.port(), "v1")));
+            var transport = transport(routes);
+            var clock = new java.util.concurrent.atomic.AtomicLong();
+            transport.breaker = new RouteBreaker(2, Duration.ofSeconds(15), clock::get);
+            var client = client(transport);
+
+            for (int i = 0; i < 2; i++) {
+                assertThatThrownBy(() -> client.get().uri("https://target.invalid/test").attribute(AccountEgressTransport.CHANNEL, CHANNEL)
+                        .retrieve().bodyToMono(String.class).block(Duration.ofSeconds(10)))
+                    .isInstanceOfSatisfying(EgressException.class, error -> {
+                        assertThat(error.failure()).isEqualTo(EgressFailure.PROXY_CONNECT_FAILED);
+                        assertThat(error.requestMayHaveBeenSent()).isFalse();
+                    });
+            }
+            assertThatThrownBy(() -> client.get().uri("https://target.invalid/test").attribute(AccountEgressTransport.CHANNEL, CHANNEL)
+                    .retrieve().bodyToMono(String.class).block(Duration.ofSeconds(10)))
+                .isInstanceOfSatisfying(EgressException.class, error ->
+                    assertThat(error.failure()).isEqualTo(EgressFailure.PROXY_ROUTE_SUSPENDED));
+            assertThat(proxy.connections).hasValue(2);
+            transport.shutdown();
+        }
+    }
+
     @Test void evictedPoolsAreDisposedButARequestInFlightSurvivesIt() throws Exception {
         try (var idle = new KeepAliveProxy(new ServerSocket(0, 20, InetAddress.getLoopbackAddress()), false);
              var slow = new ServerSocket(0, 5, InetAddress.getLoopbackAddress());
@@ -288,6 +317,8 @@ class AccountEgressPoolingTest {
         private final boolean tunnel;
         /** Answers CONNECT with 502, like a proxy whose upstream node is unreachable. */
         volatile boolean refuseTunnels;
+        /** Answers CONNECT with 200 and then closes, like Mihomo when the node behind a listener is dead. */
+        volatile boolean closeAfterConnect;
 
         KeepAliveProxy(ServerSocket server) { this(server, true); }
 
@@ -318,6 +349,7 @@ class AccountEgressPoolingTest {
                         return;
                     }
                     write(socket, "HTTP/1.1 200 Connection established\r\n\r\n");
+                    if (closeAfterConnect) return;
                 }
                 while (true) {
                     headers(socket.getInputStream());
