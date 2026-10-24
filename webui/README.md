@@ -7,7 +7,7 @@ Starry API 的 Web 控制台。提供登录与用户欢迎页、上游账号池�
 | 维度 | 选型 | 说明 |
 | --- | --- | --- |
 | 框架 | **Vue 3** + `<script setup>` + TypeScript | 组合式 API，类型安全 |
-| 构建 | **Vite 5** | 极快冷启动 / HMR |
+| 构建 | **Vite 6** | 极快冷启动 / HMR |
 | 组件库 | **Element Plus** | 中文后台首选，按需自动引入 |
 | 状态 | **Pinia** | 轻量、模块化 |
 | 路由 | **Vue Router 4**（hash 模式） | 与后端无路径耦合，方便嵌入 `/admin` 子路径部署 |

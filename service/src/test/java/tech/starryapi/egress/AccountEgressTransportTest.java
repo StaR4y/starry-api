@@ -2,7 +2,6 @@ package tech.starryapi.egress;
 
 import static org.assertj.core.api.Assertions.*;
 import static org.mockito.Mockito.*;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
@@ -18,6 +17,7 @@ import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 import tech.starryapi.config.ProxyProperties;
+import tools.jackson.databind.ObjectMapper;
 
 class AccountEgressTransportTest {
     private final AccountEgressTransport transport = new AccountEgressTransport(null, null,
@@ -315,7 +315,7 @@ class AccountEgressTransportTest {
         return new ChannelRoutes.Resolved(ClashNodes.MIHOMO, proxy, ChannelRoutes.key(proxy, version));
     }
 
-    private static ChannelRoutes.Resolved direct(com.fasterxml.jackson.databind.node.ObjectNode proxy) {
+    private static ChannelRoutes.Resolved direct(tools.jackson.databind.node.ObjectNode proxy) {
         return new ChannelRoutes.Resolved(ClashNodes.DIRECT_PROXY, proxy, ChannelRoutes.key(proxy, null));
     }
 

@@ -1,8 +1,5 @@
 package tech.starryapi.assistant;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -18,6 +15,9 @@ import tech.starryapi.account.AccountPoolService;
 import tech.starryapi.assistant.AssistantDtos.Settings;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.proxy.ProxyFacade;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
 
 @Service
 public class AssistantChatService {

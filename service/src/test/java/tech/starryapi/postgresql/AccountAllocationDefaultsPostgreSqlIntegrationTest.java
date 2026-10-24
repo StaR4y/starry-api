@@ -1,7 +1,6 @@
 package tech.starryapi.postgresql;
 
 import static org.assertj.core.api.Assertions.*;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.DriverManager;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -21,6 +20,7 @@ import tech.starryapi.account.AllocationDefaultsDtos.ResolveRequest;
 import tech.starryapi.account.AllocationDefaultsDtos.UpdateDefaults;
 import tech.starryapi.account.allocation.AccountAllocationCategory;
 import tech.starryapi.common.ApiException;
+import tools.jackson.databind.ObjectMapper;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE, properties = {
     "spring.main.lazy-initialization=true", "spring.jmx.enabled=false", "starry.stats.aggregation-enabled=false"

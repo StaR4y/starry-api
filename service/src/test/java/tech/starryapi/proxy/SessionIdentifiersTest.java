@@ -1,11 +1,11 @@
 package tech.starryapi.proxy;
 
 import static org.assertj.core.api.Assertions.*;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import tech.starryapi.egress.EgressException;
 import tech.starryapi.egress.EgressFailure;
 import tech.starryapi.account.allocation.AccountFailureScope;
+import tools.jackson.databind.ObjectMapper;
 
 class SessionIdentifiersTest {
     private final ObjectMapper json = new ObjectMapper();

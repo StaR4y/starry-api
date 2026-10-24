@@ -3,8 +3,6 @@ package tech.starryapi.platform.openai;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -12,11 +10,13 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
-import org.springframework.web.reactive.function.client.WebClient;
 import tech.starryapi.account.AccountPlatforms;
 import tech.starryapi.account.AccountTokenRefreshService;
 import tech.starryapi.account.ProxyAccountEntity;
+import tech.starryapi.config.ProductionWebClients;
 import tech.starryapi.platform.core.PlatformCompletionResult;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 class OpenAiAccountTestClientTest {
 
@@ -43,7 +43,7 @@ class OpenAiAccountTestClientTest {
         try {
             OpenAiAccountTestClient client = new OpenAiAccountTestClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = openAiCompatibleAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -56,9 +56,9 @@ class OpenAiAccountTestClientTest {
             assertThat(authorization.get()).containsExactly("Bearer test-access-token");
 
             JsonNode body = objectMapper.readTree(requestBody.get());
-            assertThat(body.path("model").asText()).isEqualTo("deepseek-chat");
-            assertThat(body.path("stream").asBoolean()).isFalse();
-            assertThat(body.path("messages").path(0).path("content").asText()).isEqualTo("ping");
+            assertThat(body.path("model").asString("")).isEqualTo("deepseek-chat");
+            assertThat(body.path("stream").asBoolean(false)).isFalse();
+            assertThat(body.path("messages").path(0).path("content").asString("")).isEqualTo("ping");
         } finally {
             server.stop(0);
         }
@@ -96,7 +96,7 @@ class OpenAiAccountTestClientTest {
         try {
             OpenAiAccountTestClient client = new OpenAiAccountTestClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -111,16 +111,16 @@ class OpenAiAccountTestClientTest {
             assertThat(accept.get()).singleElement().asString().contains("text/event-stream");
 
             JsonNode body = objectMapper.readTree(requestBody.get());
-            assertThat(body.path("model").asText()).isEqualTo("gpt-5.5");
-            assertThat(body.path("instructions").asText()).isNotBlank();
+            assertThat(body.path("model").asString("")).isEqualTo("gpt-5.5");
+            assertThat(body.path("instructions").asString("")).isNotBlank();
             assertThat(body.has("max_output_tokens")).isFalse();
-            assertThat(body.path("store").asBoolean()).isFalse();
-            assertThat(body.path("stream").asBoolean()).isTrue();
-            assertThat(body.path("input").path(0).path("type").asText()).isEqualTo("message");
-            assertThat(body.path("input").path(0).path("role").asText()).isEqualTo("user");
-            assertThat(body.path("input").path(0).path("content").path(0).path("type").asText())
+            assertThat(body.path("store").asBoolean(false)).isFalse();
+            assertThat(body.path("stream").asBoolean(false)).isTrue();
+            assertThat(body.path("input").path(0).path("type").asString("")).isEqualTo("message");
+            assertThat(body.path("input").path(0).path("role").asString("")).isEqualTo("user");
+            assertThat(body.path("input").path(0).path("content").path(0).path("type").asString(""))
                 .isEqualTo("input_text");
-            assertThat(body.path("input").path(0).path("content").path(0).path("text").asText())
+            assertThat(body.path("input").path(0).path("content").path(0).path("text").asString(""))
                 .isEqualTo("ping");
         } finally {
             server.stop(0);
@@ -155,7 +155,7 @@ class OpenAiAccountTestClientTest {
         try {
             OpenAiAccountTestClient client = new OpenAiAccountTestClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -178,9 +178,9 @@ class OpenAiAccountTestClientTest {
             assertThat(quota.fiveHour().resetAt()).isAfter(quota.checkedAt());
 
             JsonNode body = objectMapper.readTree(requestBody.get());
-            assertThat(body.path("model").asText()).isEqualTo("gpt-5.5");
-            assertThat(body.path("stream").asBoolean()).isTrue();
-            assertThat(body.path("store").asBoolean()).isFalse();
+            assertThat(body.path("model").asString("")).isEqualTo("gpt-5.5");
+            assertThat(body.path("stream").asBoolean(false)).isTrue();
+            assertThat(body.path("store").asBoolean(false)).isFalse();
         } finally {
             server.stop(0);
         }

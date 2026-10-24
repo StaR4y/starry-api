@@ -2,11 +2,11 @@ package tech.starryapi.common;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 class JsonNodesTest {
 
@@ -33,7 +33,7 @@ class JsonNodesTest {
         copy.put("max_tokens", 10);
         copy.remove("messages");
 
-        assertThat(source.path("model").asText()).isEqualTo("a");
+        assertThat(source.path("model").asString("")).isEqualTo("a");
         assertThat(source.has("max_tokens")).isFalse();
         assertThat(source.has("messages")).isTrue();
         assertThat(JsonNodes.shallowCopy(source).get("messages")).isSameAs(source.get("messages"));

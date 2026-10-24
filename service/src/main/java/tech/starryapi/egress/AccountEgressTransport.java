@@ -1,10 +1,12 @@
 package tech.starryapi.egress;
 
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.netty.handler.ssl.SslContext;
 import java.net.URI;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.http.codec.CodecCustomizer;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.r2dbc.core.DatabaseClient;
@@ -18,7 +20,9 @@ import org.springframework.web.reactive.function.client.ExchangeStrategies;
 import reactor.core.publisher.Mono;
 import reactor.netty.http.client.HttpClient;
 import tech.starryapi.account.ProxyAccountEntity;
+import tech.starryapi.config.HttpClientConfig;
 import tech.starryapi.config.ProxyProperties;
+import tools.jackson.databind.node.ObjectNode;
 
 @Component
 public class AccountEgressTransport {
@@ -39,10 +43,27 @@ public class AccountEgressTransport {
     // Trust for TLS to an https:// proxy: the JDK trust store, replaceable in tests.
     volatile SslContext proxyTls;
 
+    // Requests that take this route are encoded and decoded here, so with the same codecs as the shared upstream client.
+    private final ExchangeStrategies strategies;
+
+    @Autowired
+    public AccountEgressTransport(DatabaseClient db, ChannelRoutes routes, EgressProperties properties,
+                                  ProxyProperties proxyProperties, ClashNodes parser,
+                                  ObjectProvider<CodecCustomizer> codecCustomizers) {
+        this(db, routes, properties, proxyProperties, parser, HttpClientConfig.upstreamStrategies(codecCustomizers));
+    }
+
+    /** With Spring's default codecs, for tests that run without an application context. */
     public AccountEgressTransport(DatabaseClient db, ChannelRoutes routes, EgressProperties properties,
                                   ProxyProperties proxyProperties, ClashNodes parser) {
+        this(db, routes, properties, proxyProperties, parser,
+            ExchangeStrategies.builder().codecs(c -> c.defaultCodecs().maxInMemorySize(16 * 1024 * 1024)).build());
+    }
+
+    private AccountEgressTransport(DatabaseClient db, ChannelRoutes routes, EgressProperties properties,
+                                   ProxyProperties proxyProperties, ClashNodes parser, ExchangeStrategies strategies) {
         this.db = db; this.routes = routes; this.properties = properties;
-        this.proxyProperties = proxyProperties; this.parser = parser;
+        this.proxyProperties = proxyProperties; this.parser = parser; this.strategies = strategies;
     }
 
     public ExchangeFilterFunction filter() {
@@ -155,8 +176,7 @@ public class AccountEgressTransport {
         HttpClient client = pooled.followRedirect(false).compress(true).responseTimeout(proxyProperties.getRequestTimeout())
             .option(io.netty.channel.ChannelOption.CONNECT_TIMEOUT_MILLIS, 5000)
             .doOnRequest((httpRequest, connection) -> started.set(true));
-        return ExchangeFunctions.create(new ReactorClientHttpConnector(client), ExchangeStrategies.builder()
-            .codecs(c -> c.defaultCodecs().maxInMemorySize(16 * 1024 * 1024)).build());
+        return ExchangeFunctions.create(new ReactorClientHttpConnector(client), strategies);
     }
 
     long pooledRoutes() { return clients.size(); }

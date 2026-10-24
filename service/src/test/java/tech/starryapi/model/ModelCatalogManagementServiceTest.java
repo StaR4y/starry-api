@@ -6,7 +6,6 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -17,6 +16,7 @@ import reactor.core.publisher.Mono;
 import tech.starryapi.admin.SystemSettingEntity;
 import tech.starryapi.admin.SystemSettingRepository;
 import tech.starryapi.common.ApiException;
+import tools.jackson.databind.ObjectMapper;
 
 class ModelCatalogManagementServiceTest {
 
@@ -64,7 +64,7 @@ class ModelCatalogManagementServiceTest {
         assertThat(result.badgeColor()).isEqualTo("#4D6BFE");
         assertThat(result.contextWindow()).isEqualTo(320_000);
         assertThat(provider.resolveTargetModel("team-model")).isEqualTo("claude-sonnet-4.5");
-        assertThat(objectMapper.readTree(customizationsJson()).get(0).path("endpoint").asText())
+        assertThat(objectMapper.readTree(customizationsJson()).get(0).path("endpoint").asString(""))
             .isEqualTo("https://gateway.example.com/v1/chat/completions");
     }
 

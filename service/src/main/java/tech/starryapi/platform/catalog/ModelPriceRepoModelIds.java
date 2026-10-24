@@ -1,7 +1,5 @@
 package tech.starryapi.platform.catalog;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.json.JsonMapper;
 import java.io.IOException;
 import java.io.InputStream;
 import java.math.BigDecimal;
@@ -11,9 +9,12 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.TreeSet;
 import org.springframework.core.io.ClassPathResource;
+import tech.starryapi.config.JacksonConfig;
 import tech.starryapi.model.ModelCatalogProvider;
 import tech.starryapi.model.ModelDtos.ModelSpec;
 import tech.starryapi.platform.catalog.PlatformModelCatalogSupport.AliasProfile;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
 
 public final class ModelPriceRepoModelIds {
 
@@ -112,10 +113,10 @@ public final class ModelPriceRepoModelIds {
         TreeSet<String> ids = new TreeSet<>();
         catalog.properties().forEach(entry -> {
             JsonNode metadata = entry.getValue();
-            String provider = metadata.path("litellm_provider").asText("")
+            String provider = metadata.path("litellm_provider").asString("")
                 .trim()
                 .toLowerCase(Locale.ROOT);
-            String mode = metadata.path("mode").asText("chat").trim().toLowerCase(Locale.ROOT);
+            String mode = metadata.path("mode").asString("chat").trim().toLowerCase(Locale.ROOT);
             if (providers.contains(provider)
                 && "chat".equals(mode)
                 && hasTokenPrices(metadata)
@@ -137,7 +138,7 @@ public final class ModelPriceRepoModelIds {
             return true;
         }
         for (JsonNode endpoint : endpoints) {
-            String path = endpoint.asText("");
+            String path = endpoint.asString("");
             if ("/v1/chat/completions".equals(path)
                 || "/v1/messages".equals(path)
                 || "/v1/completions".equals(path)) {
@@ -199,12 +200,12 @@ public final class ModelPriceRepoModelIds {
 
     private static JsonNode loadCatalog() {
         try (InputStream input = new ClassPathResource(BUNDLED_CATALOG).getInputStream()) {
-            JsonNode root = JsonMapper.builder().build().readTree(input);
+            JsonNode root = JacksonConfig.newMapper().readTree(input);
             if (root == null || !root.isObject()) {
                 throw new IllegalStateException("Bundled model price catalog must be a JSON object");
             }
             return root;
-        } catch (IOException error) {
+        } catch (IOException | JacksonException error) {
             throw new IllegalStateException("Could not load bundled model price catalog", error);
         }
     }

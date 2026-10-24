@@ -2,6 +2,8 @@ package tech.starryapi.config;
 
 import io.netty.channel.ChannelOption;
 import java.time.Duration;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.http.codec.CodecCustomizer;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
@@ -17,7 +19,8 @@ public class HttpClientConfig {
      * Unbound service requests share this pool. Account attributes select their own isolated egress transport.
      */
     @Bean
-    WebClient upstreamWebClient(ProxyProperties properties, tech.starryapi.egress.AccountEgressTransport egress) {
+    WebClient upstreamWebClient(ProxyProperties properties, tech.starryapi.egress.AccountEgressTransport egress,
+                                ObjectProvider<CodecCustomizer> codecCustomizers) {
         ConnectionProvider provider = ConnectionProvider.builder("starry-upstream")
             .maxConnections(500)
             .pendingAcquireMaxCount(2_000)
@@ -35,14 +38,26 @@ public class HttpClientConfig {
             .responseTimeout(properties.getRequestTimeout())
             .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 5_000);
 
-        ExchangeStrategies strategies = ExchangeStrategies.builder()
-            .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(16 * 1024 * 1024))
-            .build();
-
         return WebClient.builder()
             .filter(egress.filter())
             .clientConnector(new ReactorClientHttpConnector(httpClient))
-            .exchangeStrategies(strategies)
+            .exchangeStrategies(upstreamStrategies(codecCustomizers))
+            .build();
+    }
+
+    /**
+     * Codecs for upstream calls, shared by this client and the account egress transport (which writes and reads the
+     * same requests over its own connections). A WebClient built by hand does not get Boot's codec setup, so the
+     * customizers Boot applies to its own WebClient.Builder are applied here: the JSON codec then uses the
+     * application's JsonMapper (JacksonConfig and spring.jackson.*) like the WebFlux server does, instead of a default
+     * Jackson mapper Spring Framework would create on its own.
+     */
+    public static ExchangeStrategies upstreamStrategies(ObjectProvider<CodecCustomizer> codecCustomizers) {
+        return ExchangeStrategies.builder()
+            .codecs(configurer -> {
+                codecCustomizers.orderedStream().forEach(customizer -> customizer.customize(configurer));
+                configurer.defaultCodecs().maxInMemorySize(16 * 1024 * 1024);
+            })
             .build();
     }
 }

@@ -1,6 +1,5 @@
 package tech.starryapi.account;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.validation.Valid;
 import java.util.List;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -13,6 +12,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 import tech.starryapi.common.ApiResponse;
+import tools.jackson.databind.JsonNode;
 
 @RequestMapping("/admin/accounts")
 public interface AccountAdminApi {

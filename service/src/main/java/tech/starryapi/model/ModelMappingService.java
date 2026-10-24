@@ -1,8 +1,5 @@
 package tech.starryapi.model;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
@@ -18,6 +15,9 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.common.Hashing;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class ModelMappingService {
@@ -235,7 +235,7 @@ public class ModelMappingService {
         }
         try {
             return objectMapper.readValue(json, STRING_LIST);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             return List.of();
         }
     }
@@ -246,7 +246,7 @@ public class ModelMappingService {
         }
         try {
             return objectMapper.readValue(json, INTEGER_LIST);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             return List.of();
         }
     }
@@ -257,7 +257,7 @@ public class ModelMappingService {
         }
         try {
             return objectMapper.writeValueAsString(value);
-        } catch (JsonProcessingException e) {
+        } catch (JacksonException e) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "JSON_ENCODE_ERROR", "Invalid JSON field");
         }
     }

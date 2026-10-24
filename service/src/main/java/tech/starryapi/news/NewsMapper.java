@@ -1,6 +1,5 @@
 package tech.starryapi.news;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import java.util.ArrayList;
 import java.util.List;
 import tech.starryapi.news.NewsDtos.DailyIndex;
@@ -10,6 +9,7 @@ import tech.starryapi.news.NewsDtos.HotTopic;
 import tech.starryapi.news.NewsDtos.HotTopics;
 import tech.starryapi.news.NewsDtos.NewsItem;
 import tech.starryapi.news.NewsDtos.NewsSection;
+import tools.jackson.databind.JsonNode;
 
 final class NewsMapper {
     private NewsMapper() {
@@ -100,6 +100,6 @@ final class NewsMapper {
             return "";
         }
         JsonNode value = node.get(field);
-        return value == null || value.isNull() ? "" : value.asText("").trim();
+        return value == null || value.isNull() ? "" : value.asString("").trim();
     }
 }

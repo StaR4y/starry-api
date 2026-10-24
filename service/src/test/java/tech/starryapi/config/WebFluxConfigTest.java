@@ -38,7 +38,7 @@ class WebFluxConfigTest {
 
         config.filter(exchange, chain).block();
 
-        assertThat(exchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.PAYLOAD_TOO_LARGE);
+        assertThat(exchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.CONTENT_TOO_LARGE);
         verify(chain, never()).filter(exchange);
     }
 
@@ -129,7 +129,7 @@ class WebFluxConfigTest {
 
         config.filter(exchange, chain).block();
 
-        assertThat(exchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.PAYLOAD_TOO_LARGE);
+        assertThat(exchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.CONTENT_TOO_LARGE);
         verify(chain, never()).filter(exchange);
         assertThat(exchange.getResponse().getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_JSON);
     }

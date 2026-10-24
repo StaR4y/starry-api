@@ -2,12 +2,12 @@ package tech.starryapi.platform.kiro;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.model.DefaultModelCatalogProvider;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 class KiroPayloadFactoryTest {
 
@@ -31,21 +31,21 @@ class KiroPayloadFactoryTest {
 
         ObjectNode payload = factory.fromOpenAiChat(request, account, "gpt-4o", "AI_EDITOR", "session-1");
 
-        assertThat(payload.path("profileArn").asText()).isEqualTo("arn:test");
+        assertThat(payload.path("profileArn").asString("")).isEqualTo("arn:test");
         JsonNode history = payload.path("conversationState").path("history");
         assertThat(history).hasSize(2);
-        assertThat(history.get(0).path("userInputMessage").path("content").asText())
+        assertThat(history.get(0).path("userInputMessage").path("content").asString(""))
             .contains("system prompt")
             .contains("<identity_discipline>")
             .contains("client-requested model id: gpt-4o")
             .contains("<execution_discipline>");
-        assertThat(history.get(1).path("assistantResponseMessage").path("content").asText())
+        assertThat(history.get(1).path("assistantResponseMessage").path("content").asString(""))
             .isEqualTo("I will follow these instructions.");
-        assertThat(payload.path("conversationState").path("currentMessage").path("userInputMessage").path("content").asText())
+        assertThat(payload.path("conversationState").path("currentMessage").path("userInputMessage").path("content").asString(""))
             .isEqualTo("hello");
-        assertThat(payload.path("conversationState").path("currentMessage").path("userInputMessage").path("modelId").asText())
+        assertThat(payload.path("conversationState").path("currentMessage").path("userInputMessage").path("modelId").asString(""))
             .isEqualTo("claude-sonnet-4.5");
-        assertThat(payload.path("inferenceConfig").path("maxTokens").asInt()).isEqualTo(128);
+        assertThat(payload.path("inferenceConfig").path("maxTokens").asInt(0)).isEqualTo(128);
     }
 
     @Test
@@ -63,7 +63,7 @@ class KiroPayloadFactoryTest {
 
         ObjectNode payload = factory.fromOpenAiChat(request, account, "simple-task", "AI_EDITOR", "session-1");
 
-        assertThat(payload.path("profileArn").asText())
+        assertThat(payload.path("profileArn").asString(""))
             .isEqualTo("arn:aws:codewhisperer:us-east-1:638616132270:profile/AAAACCCCXXXX");
     }
 
@@ -119,14 +119,14 @@ class KiroPayloadFactoryTest {
 
         JsonNode history = payload.path("conversationState").path("history");
         JsonNode toolUse = findFirstToolUse(history);
-        assertThat(toolUse.path("toolUseId").asText()).isEqualTo("toolu_1");
-        assertThat(toolUse.path("name").asText()).isEqualTo("Bash");
-        assertThat(toolUse.path("input").path("command").asText()).isEqualTo("ls");
+        assertThat(toolUse.path("toolUseId").asString("")).isEqualTo("toolu_1");
+        assertThat(toolUse.path("name").asString("")).isEqualTo("Bash");
+        assertThat(toolUse.path("input").path("command").asString("")).isEqualTo("ls");
 
         JsonNode toolResult = findFirstToolResult(history);
-        assertThat(toolResult.path("toolUseId").asText()).isEqualTo("toolu_1");
-        assertThat(toolResult.path("content").get(0).path("text").asText()).isEqualTo("README.md");
-        assertThat(toolResult.path("status").asText()).isEqualTo("success");
+        assertThat(toolResult.path("toolUseId").asString("")).isEqualTo("toolu_1");
+        assertThat(toolResult.path("content").get(0).path("text").asString("")).isEqualTo("README.md");
+        assertThat(toolResult.path("status").asString("")).isEqualTo("success");
     }
 
     @Test
@@ -195,10 +195,10 @@ class KiroPayloadFactoryTest {
 
         JsonNode toolResults = findFirstToolResults(payload.path("conversationState").path("history"));
         assertThat(toolResults).hasSize(2);
-        assertThat(toolResults.get(0).path("toolUseId").asText()).isEqualTo("toolu_1");
-        assertThat(toolResults.get(0).path("status").asText()).isEqualTo("success");
-        assertThat(toolResults.get(1).path("toolUseId").asText()).isEqualTo("toolu_2");
-        assertThat(toolResults.get(1).path("status").asText()).isEqualTo("success");
+        assertThat(toolResults.get(0).path("toolUseId").asString("")).isEqualTo("toolu_1");
+        assertThat(toolResults.get(0).path("status").asString("")).isEqualTo("success");
+        assertThat(toolResults.get(1).path("toolUseId").asString("")).isEqualTo("toolu_2");
+        assertThat(toolResults.get(1).path("status").asString("")).isEqualTo("success");
     }
 
     @Test
@@ -246,9 +246,9 @@ class KiroPayloadFactoryTest {
         ObjectNode payload = factory.fromOpenAiChat(request, account, "gpt-4o", "AI_EDITOR", "session-1");
 
         JsonNode toolResult = findFirstToolResult(payload.path("conversationState").path("history"));
-        assertThat(toolResult.path("toolUseId").asText()).isEqualTo("toolu_missing");
-        assertThat(toolResult.path("status").asText()).isEqualTo("error");
-        assertThat(payload.path("conversationState").path("currentMessage").path("userInputMessage").path("content").asText())
+        assertThat(toolResult.path("toolUseId").asString("")).isEqualTo("toolu_missing");
+        assertThat(toolResult.path("status").asString("")).isEqualTo("error");
+        assertThat(payload.path("conversationState").path("currentMessage").path("userInputMessage").path("content").asString(""))
             .isEmpty();
     }
 
@@ -300,8 +300,8 @@ class KiroPayloadFactoryTest {
             .path("json")
             .path("properties")
             .path("page");
-        assertThat(page.path("type").asText()).isEqualTo("integer");
-        assertThat(page.path("description").asText()).isEqualTo("Page number");
+        assertThat(page.path("type").asString("")).isEqualTo("integer");
+        assertThat(page.path("description").asString("")).isEqualTo("Page number");
         assertThat(page.has("minimum")).isFalse();
         assertThat(page.has("default")).isFalse();
         assertThat(page.has("format")).isFalse();

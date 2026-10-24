@@ -2,12 +2,12 @@ package tech.starryapi.config;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import tech.starryapi.admin.LoginThrottle;
 import tech.starryapi.platform.openai.OpenAiResponseStateStore;
 import tech.starryapi.proxy.ProxyBodyBudgetFilter;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * Unit tests construct these classes by hand, which hides the "No default constructor found" failure Spring

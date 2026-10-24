@@ -2,10 +2,10 @@ package tech.starryapi.platform.anthropic;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import tech.starryapi.model.DefaultModelCatalogProvider;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 class AnthropicRequestAdapterTest {
 
@@ -36,12 +36,12 @@ class AnthropicRequestAdapterTest {
         JsonNode chat = adapter.messagesToChat(request);
 
         JsonNode message = chat.path("messages").path(0);
-        assertThat(message.path("role").asText()).isEqualTo("assistant");
-        assertThat(message.path("content").asText()).isEmpty();
+        assertThat(message.path("role").asString("")).isEqualTo("assistant");
+        assertThat(message.path("content").asString("")).isEmpty();
         JsonNode toolCall = message.path("tool_calls").path(0);
-        assertThat(toolCall.path("id").asText()).isEqualTo("toolu_1");
-        assertThat(toolCall.path("function").path("name").asText()).isEqualTo("Bash");
-        assertThat(toolCall.path("function").path("arguments").asText()).isEqualTo("{\"command\":\"pwd\"}");
+        assertThat(toolCall.path("id").asString("")).isEqualTo("toolu_1");
+        assertThat(toolCall.path("function").path("name").asString("")).isEqualTo("Bash");
+        assertThat(toolCall.path("function").path("arguments").asString("")).isEqualTo("{\"command\":\"pwd\"}");
     }
 
     @Test
@@ -62,8 +62,8 @@ class AnthropicRequestAdapterTest {
 
         JsonNode chat = adapter.messagesToChat(request);
 
-        assertThat(chat.path("tool_choice").path("type").asText()).isEqualTo("function");
-        assertThat(chat.path("tool_choice").path("function").path("name").asText()).isEqualTo("Bash");
+        assertThat(chat.path("tool_choice").path("type").asString("")).isEqualTo("function");
+        assertThat(chat.path("tool_choice").path("function").path("name").asString("")).isEqualTo("Bash");
         assertThat(chat.path("parallel_tool_calls").asBoolean(true)).isFalse();
     }
 
@@ -81,6 +81,6 @@ class AnthropicRequestAdapterTest {
 
         JsonNode chat = adapter.messagesToChat(request);
 
-        assertThat(chat.path("tool_choice").asText()).isEqualTo("required");
+        assertThat(chat.path("tool_choice").asString("")).isEqualTo("required");
     }
 }

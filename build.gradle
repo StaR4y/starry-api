@@ -1,5 +1,5 @@
 plugins {
-    id 'org.springframework.boot' version '3.5.14' apply false
+    id 'org.springframework.boot' version '4.1.2' apply false
     id 'io.spring.dependency-management' version '1.1.7' apply false
 }
 
@@ -18,7 +18,15 @@ configure(subprojects.findAll { it.name in ['service-api', 'service', 'plugin-ap
 
     dependencyManagement {
         imports {
-            mavenBom 'org.springframework.boot:spring-boot-dependencies:3.5.14'
+            mavenBom 'org.springframework.boot:spring-boot-dependencies:4.1.2'
+        }
+        dependencies {
+            // r2dbc-postgresql 1.1.3 still pulls SCRAM 3.2 (GHSA-p9jg-fcr6-3mhf, channel-binding downgrade). Remove
+            // once the Spring Boot BOM manages 3.3 or later.
+            dependencySet(group: 'com.ongres.scram', version: '3.4') {
+                entry 'scram-client'
+                entry 'scram-common'
+            }
         }
     }
 

@@ -1,9 +1,5 @@
 package tech.starryapi.platform.openai;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.time.Duration;
@@ -19,6 +15,11 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
 
 /**
  * Keeps the conversation history behind recent Responses API calls so that a later request carrying
@@ -63,7 +64,7 @@ public class OpenAiResponseStateStore {
 
     public ObjectNode expand(JsonNode request) {
         ObjectNode copy = request instanceof ObjectNode object ? object.deepCopy() : objectMapper.createObjectNode();
-        String previousResponseId = clean(request.path("previous_response_id").asText(null));
+        String previousResponseId = clean(request.path("previous_response_id").asString(null));
         Entry previous = previousResponseId == null ? null : get(previousResponseId);
         if (previous == null) {
             return copy;
@@ -87,7 +88,7 @@ public class OpenAiResponseStateStore {
     }
 
     public void remember(ObjectNode response, JsonNode request, String accountId) {
-        String responseId = clean(response.path("id").asText(null));
+        String responseId = clean(response.path("id").asString(null));
         if (responseId == null) {
             return;
         }
@@ -130,7 +131,7 @@ public class OpenAiResponseStateStore {
                 return null;
             }
             return bytes.toByteArray();
-        } catch (IOException error) {
+        } catch (IOException | JacksonException error) {
             log.debug("Unable to remember a Responses history: {}", error.toString());
             return null;
         } finally {
@@ -141,7 +142,7 @@ public class OpenAiResponseStateStore {
     private JsonNode inflate(Entry entry) {
         try (InflaterInputStream in = new InflaterInputStream(new java.io.ByteArrayInputStream(entry.packed))) {
             return objectMapper.readTree(in);
-        } catch (IOException error) {
+        } catch (IOException | JacksonException error) {
             log.debug("Unable to read a remembered Responses history: {}", error.toString());
             return null;
         }
@@ -176,14 +177,14 @@ public class OpenAiResponseStateStore {
             appendAll(target, input);
             return;
         }
-        if (input.isTextual()) {
+        if (input.isString()) {
             ObjectNode message = target.addObject();
             message.put("type", "message");
             message.put("role", "user");
             ArrayNode content = message.putArray("content");
             ObjectNode text = content.addObject();
             text.put("type", "input_text");
-            text.put("text", input.asText());
+            text.put("text", input.asString(""));
             return;
         }
         target.add(input.deepCopy());

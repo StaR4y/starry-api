@@ -33,6 +33,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+          # Use the newest 22.x release instead of whatever the runner image cached, so Node security releases apply.
+          check-latest: true
           cache: npm
           cache-dependency-path: webui/package-lock.json
 

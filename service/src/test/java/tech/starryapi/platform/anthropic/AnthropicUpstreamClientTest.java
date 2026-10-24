@@ -2,8 +2,6 @@ package tech.starryapi.platform.anthropic;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -11,10 +9,12 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
-import org.springframework.web.reactive.function.client.WebClient;
 import tech.starryapi.account.AccountPlatforms;
 import tech.starryapi.account.ProxyAccountEntity;
+import tech.starryapi.config.ProductionWebClients;
 import tech.starryapi.platform.core.PlatformCompletionResult;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 class AnthropicUpstreamClientTest {
 
@@ -55,7 +55,7 @@ class AnthropicUpstreamClientTest {
         server.start();
 
         try {
-            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, WebClient.builder().build());
+            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, ProductionWebClients.builder().build());
             ProxyAccountEntity account = anthropicAccount("http://127.0.0.1:" + server.getAddress().getPort());
             JsonNode request = objectMapper.readTree("""
                 {
@@ -83,12 +83,12 @@ class AnthropicUpstreamClientTest {
             assertThat(query.get()).isEqualTo("beta=true");
 
             JsonNode body = objectMapper.readTree(requestBody.get());
-            assertThat(body.path("model").asText()).isEqualTo("claude-sonnet-4-5-20250929");
-            assertThat(body.path("max_tokens").asInt()).isEqualTo(64);
-            assertThat(body.path("system").asText()).isEqualTo("Use short replies.");
-            assertThat(body.path("messages").path(0).path("role").asText()).isEqualTo("user");
-            assertThat(body.path("messages").path(0).path("content").path(0).path("type").asText()).isEqualTo("text");
-            assertThat(body.path("messages").path(0).path("content").path(0).path("text").asText()).isEqualTo("ping");
+            assertThat(body.path("model").asString("")).isEqualTo("claude-sonnet-4-5-20250929");
+            assertThat(body.path("max_tokens").asInt(0)).isEqualTo(64);
+            assertThat(body.path("system").asString("")).isEqualTo("Use short replies.");
+            assertThat(body.path("messages").path(0).path("role").asString("")).isEqualTo("user");
+            assertThat(body.path("messages").path(0).path("content").path(0).path("type").asString("")).isEqualTo("text");
+            assertThat(body.path("messages").path(0).path("content").path(0).path("text").asString("")).isEqualTo("ping");
         } finally {
             server.stop(0);
         }
@@ -125,7 +125,7 @@ class AnthropicUpstreamClientTest {
         server.start();
 
         try {
-            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, WebClient.builder().build());
+            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, ProductionWebClients.builder().build());
             ProxyAccountEntity account = anthropicAccount("http://127.0.0.1:" + server.getAddress().getPort());
 
             PlatformCompletionResult result = client.testClaudeCode(account, "claude-sonnet-4.5").block();
@@ -138,18 +138,18 @@ class AnthropicUpstreamClientTest {
             assertThat(query.get()).isEqualTo("beta=true");
 
             JsonNode body = objectMapper.readTree(requestBody.get());
-            assertThat(body.path("model").asText()).isEqualTo("claude-sonnet-4-5-20250929");
-            assertThat(body.path("max_tokens").asInt()).isEqualTo(1024);
-            assertThat(body.path("temperature").asInt()).isEqualTo(1);
-            assertThat(body.path("stream").asBoolean()).isTrue();
-            assertThat(body.path("messages").path(0).path("content").path(0).path("text").asText()).isEqualTo("hi");
-            assertThat(body.path("messages").path(0).path("content").path(0).path("cache_control").path("type").asText()).isEqualTo("ephemeral");
-            assertThat(body.path("system").path(0).path("text").asText()).isEqualTo("You are Claude Code, Anthropic's official CLI for Claude.");
-            assertThat(body.path("system").path(0).path("cache_control").path("type").asText()).isEqualTo("ephemeral");
-            JsonNode userId = objectMapper.readTree(body.path("metadata").path("user_id").asText());
-            assertThat(userId.path("device_id").asText()).hasSize(64);
-            assertThat(userId.path("account_uuid").asText()).isEmpty();
-            assertThat(userId.path("session_id").asText()).isNotBlank();
+            assertThat(body.path("model").asString("")).isEqualTo("claude-sonnet-4-5-20250929");
+            assertThat(body.path("max_tokens").asInt(0)).isEqualTo(1024);
+            assertThat(body.path("temperature").asInt(0)).isEqualTo(1);
+            assertThat(body.path("stream").asBoolean(false)).isTrue();
+            assertThat(body.path("messages").path(0).path("content").path(0).path("text").asString("")).isEqualTo("hi");
+            assertThat(body.path("messages").path(0).path("content").path(0).path("cache_control").path("type").asString("")).isEqualTo("ephemeral");
+            assertThat(body.path("system").path(0).path("text").asString("")).isEqualTo("You are Claude Code, Anthropic's official CLI for Claude.");
+            assertThat(body.path("system").path(0).path("cache_control").path("type").asString("")).isEqualTo("ephemeral");
+            JsonNode userId = objectMapper.readTree(body.path("metadata").path("user_id").asString(""));
+            assertThat(userId.path("device_id").asString("")).hasSize(64);
+            assertThat(userId.path("account_uuid").asString("")).isEmpty();
+            assertThat(userId.path("session_id").asString("")).isNotBlank();
         } finally {
             server.stop(0);
         }
@@ -191,7 +191,7 @@ class AnthropicUpstreamClientTest {
         server.start();
 
         try {
-            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, WebClient.builder().build());
+            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, ProductionWebClients.builder().build());
             ProxyAccountEntity account = anthropicAccount("http://127.0.0.1:" + server.getAddress().getPort());
             JsonNode request = objectMapper.readTree("""
                 {"model":"anthropic/claude-sonnet-4.5","stream":true,"messages":[{"role":"user","content":"ping"}]}
@@ -207,7 +207,7 @@ class AnthropicUpstreamClientTest {
                 .satisfies(tool -> {
                     assertThat(tool.id()).isEqualTo("toolu_1");
                     assertThat(tool.name()).isEqualTo("Bash");
-                    assertThat(tool.input().path("command").asText()).isEqualTo("pwd");
+                    assertThat(tool.input().path("command").asString("")).isEqualTo("pwd");
                 });
         } finally {
             server.stop(0);
@@ -234,7 +234,7 @@ class AnthropicUpstreamClientTest {
 
             """);
         try {
-            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, WebClient.builder().build());
+            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, ProductionWebClients.builder().build());
             PlatformCompletionResult result = client.complete(
                 anthropicAccount("http://127.0.0.1:" + server.getAddress().getPort()),
                 objectMapper.readTree("{\"model\":\"anthropic/claude-sonnet-4.5\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"),
@@ -266,7 +266,7 @@ class AnthropicUpstreamClientTest {
 
             """);
         try {
-            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, WebClient.builder().build());
+            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, ProductionWebClients.builder().build());
             org.assertj.core.api.Assertions.assertThatThrownBy(() -> client.complete(
                 anthropicAccount("http://127.0.0.1:" + server.getAddress().getPort()),
                 objectMapper.readTree("{\"model\":\"anthropic/claude-sonnet-4.5\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"),

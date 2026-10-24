@@ -1,7 +1,5 @@
 package tech.starryapi.proxy;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
@@ -61,6 +59,8 @@ import tech.starryapi.platform.openai.OpenAiUpstreamClient;
 import tech.starryapi.platform.upstream.UpstreamException;
 import tech.starryapi.payment.PaymentSettingsService;
 import tech.starryapi.stats.StatsService;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ObjectNode;
 
 @Service
 public class ProxyFacade {
@@ -256,8 +256,8 @@ public class ProxyFacade {
         Object body = response == null ? null : response.getBody();
         if (body instanceof JsonNode node) {
             JsonNode content = node.path("choices").path(0).path("message").path("content");
-            if (content.isTextual() && !content.asText().isBlank()) {
-                return content.asText();
+            if (content.isString() && !content.asString("").isBlank()) {
+                return content.asString("");
             }
         }
         throw new ApiException(HttpStatus.BAD_GATEWAY, "ASSISTANT_EMPTY_REPLY", "助手没有返回内容");
@@ -317,7 +317,7 @@ public class ProxyFacade {
         validateChatRequest(request);
         Instant start = Instant.now();
         String requestId = UUID.randomUUID().toString();
-        String requestedModel = request.path("model").asText(modelCatalog.defaultTargetModelId());
+        String requestedModel = request.path("model").asString(modelCatalog.defaultTargetModelId());
         String mappedModel = modelMappingService.apply(requestedModel, principal.keyId());
         ModelProviderAccessPolicy.verify(modelCatalog, principal, requestedModel, mappedModel);
         boolean requestedFastMode = isFastRequested(request, requestedModel, mappedModel);
@@ -493,12 +493,12 @@ public class ProxyFacade {
         Instant start = Instant.now();
         String requestId = UUID.randomUUID().toString();
         String path = "/v1/responses";
-        String requestedModel = request.path("model").asText(modelCatalog.defaultTargetModelId());
+        String requestedModel = request.path("model").asString(modelCatalog.defaultTargetModelId());
         String mappedModel = modelMappingService.apply(requestedModel, principal.keyId());
         ModelProviderAccessPolicy.verify(modelCatalog, principal, requestedModel, mappedModel);
         boolean requestedFastMode = isFastRequested(request, requestedModel, mappedModel);
         String upstreamModel = upstreamModelFor(mappedModel, requestedFastMode);
-        String previousResponseId = firstNonBlank(request.path("previous_response_id").asText(null));
+        String previousResponseId = firstNonBlank(request.path("previous_response_id").asString(null));
         String sessionHint = sessionHint(
             exchange,
             request,
@@ -595,7 +595,7 @@ public class ProxyFacade {
             .flatMap(quote -> {
                 AtomicBoolean uncertainFailure = new AtomicBoolean();
                 AtomicBoolean settled = new AtomicBoolean();
-                ObjectNode pricing = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+                ObjectNode pricing = tools.jackson.databind.node.JsonNodeFactory.instance.objectNode();
                 pricing.put("model", model).put("input", quote.input()).put("output", quote.output())
                     .put("cacheRead", quote.cacheRead()).put("cacheWrite", quote.cacheWrite()).put("fallback", quote.fallback());
                 return Mono.usingWhen(
@@ -656,8 +656,8 @@ public class ProxyFacade {
     private boolean containsRemoteBillingInput(JsonNode node) {
         if (node.isObject() && (node.hasNonNull("image_url") || node.hasNonNull("file_id")
             || node.hasNonNull("file_url") || java.util.Set.of("input_image", "input_file", "input_audio", "image", "document")
-                .contains(node.path("type").asText()))) return true;
-        if (node.isContainerNode()) {
+                .contains(node.path("type").asString("")))) return true;
+        if (node.isContainer()) {
             for (JsonNode child : node) if (containsRemoteBillingInput(child)) return true;
         }
         return false;
@@ -1340,8 +1340,8 @@ public class ProxyFacade {
     }
 
     private boolean isFastRequested(JsonNode request, String requestedModel, String mappedModel) {
-        return isPriorityTier(request.path("service_tier").asText(null))
-            || isPriorityTier(request.path("serviceTier").asText(null))
+        return isPriorityTier(request.path("service_tier").asString(null))
+            || isPriorityTier(request.path("serviceTier").asString(null))
             || request.path("fast").asBoolean(false)
             || request.path("fast_mode").asBoolean(false)
             || isFastOpenAiModel(requestedModel)
@@ -1879,7 +1879,7 @@ public class ProxyFacade {
             case 403 -> HttpStatus.FORBIDDEN;
             case 404 -> HttpStatus.NOT_FOUND;
             case 408 -> HttpStatus.REQUEST_TIMEOUT;
-            case 422 -> HttpStatus.UNPROCESSABLE_ENTITY;
+            case 422 -> HttpStatus.UNPROCESSABLE_CONTENT;
             case 500 -> HttpStatus.INTERNAL_SERVER_ERROR;
             case 502 -> HttpStatus.BAD_GATEWAY;
             case 503 -> HttpStatus.SERVICE_UNAVAILABLE;
@@ -1897,7 +1897,7 @@ public class ProxyFacade {
 
     private ResponseEntity<?> jsonResponse(ResponseMode mode, JsonNode request, String mappedModel, PlatformCompletionResult result) {
         ObjectNode body = switch (mode) {
-            case OPENAI_RESPONSES -> openAiResponseFactory.responses(mappedModel, result, request.path("previous_response_id").asText(null));
+            case OPENAI_RESPONSES -> openAiResponseFactory.responses(mappedModel, result, request.path("previous_response_id").asString(null));
             case ANTHROPIC_MESSAGES -> anthropicResponseFactory.message(mappedModel, result);
             case GEMINI_GENERATE_CONTENT -> geminiResponseFactory.generateContent(mappedModel, result);
             case OPENAI_CHAT -> openAiResponseFactory.chatCompletion(mappedModel, result);
@@ -1915,10 +1915,10 @@ public class ProxyFacade {
         ObjectNode body = openAiResponseFactory.responses(
             mappedModel,
             result,
-            request.path("previous_response_id").asText(null)
+            request.path("previous_response_id").asString(null)
         );
         openAiResponseStateStore.remember(body, stateRequest, account.getAccountId());
-        return new PreparedResponse(ResponseEntity.ok(body), body.path("id").asText(null));
+        return new PreparedResponse(ResponseEntity.ok(body), body.path("id").asString(null));
     }
 
     private PreparedResponse prepareResponsesStreamResponse(
@@ -1931,13 +1931,13 @@ public class ProxyFacade {
         ObjectNode body = openAiResponseFactory.responses(
             mappedModel,
             result,
-            request.path("previous_response_id").asText(null)
+            request.path("previous_response_id").asString(null)
         );
         openAiResponseStateStore.remember(body, stateRequest, account.getAccountId());
         ResponseEntity<Flux<ServerSentEvent<String>>> response = ResponseEntity.ok()
             .contentType(MediaType.TEXT_EVENT_STREAM)
             .body(openAiResponseFactory.responsesStreamEvents(body));
-        return new PreparedResponse(response, body.path("id").asText(null));
+        return new PreparedResponse(response, body.path("id").asString(null));
     }
 
     private Mono<Void> rememberResponseOwner(PreparedResponse response, ProxyAccountEntity account) {
@@ -1982,7 +1982,7 @@ public class ProxyFacade {
                 .body(openAiResponseFactory.responsesStreamEvents(
                     mappedModel,
                     result,
-                    request.path("previous_response_id").asText(null)
+                    request.path("previous_response_id").asString(null)
                 ));
         }
         return ResponseEntity.ok()
@@ -2008,10 +2008,10 @@ public class ProxyFacade {
         if (!request.hasNonNull("model")) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "MODEL_REQUIRED", "model is required");
         }
-        if (!request.path("model").isTextual()) {
+        if (!request.path("model").isString()) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "MODEL_INVALID", "model must be a string");
         }
-        if (request.path("model").asText().length() > MAX_MODEL_ID_LENGTH) {
+        if (request.path("model").asString("").length() > MAX_MODEL_ID_LENGTH) {
             throw new ApiException(
                 HttpStatus.BAD_REQUEST,
                 "MODEL_TOO_LONG",
@@ -2039,10 +2039,10 @@ public class ProxyFacade {
             responseMode == ResponseMode.ANTHROPIC_MESSAGES
                 ? SessionIdentifiers.anthropic(body.path("metadata"))
                 : null,
-            body.path("conversation_id").asText(null),
-            body.path("conversationId").asText(null),
-            body.path("thread_id").asText(null),
-            body.path("session_id").asText(null),
+            body.path("conversation_id").asString(null),
+            body.path("conversationId").asString(null),
+            body.path("thread_id").asString(null),
+            body.path("session_id").asString(null),
             previousResponseId
         );
         String hint = firstNonBlank(header, bodyHint);

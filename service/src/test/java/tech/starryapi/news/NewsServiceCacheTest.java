@@ -8,6 +8,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
+import tech.starryapi.config.ProductionWebClients;
 
 class NewsServiceCacheTest {
 
@@ -16,7 +17,7 @@ class NewsServiceCacheTest {
         AtomicInteger upstreamCalls = new AtomicInteger();
         WebClient.Builder builder = WebClient.builder().exchangeFunction(request -> {
             upstreamCalls.incrementAndGet();
-            return Mono.just(ClientResponse.create(HttpStatus.OK)
+            return Mono.just(ClientResponse.create(HttpStatus.OK, ProductionWebClients.strategies())
                 .header("Content-Type", "application/json")
                 .body("{\"date\":\"2026-01-01\",\"sections\":[]}")
                 .build());

@@ -6,7 +6,7 @@ import static org.mockito.Mockito.when;
 
 import io.r2dbc.postgresql.api.Notification;
 import org.junit.jupiter.api.Test;
-import org.springframework.boot.autoconfigure.r2dbc.R2dbcProperties;
+import org.springframework.boot.r2dbc.autoconfigure.R2dbcProperties;
 
 class SystemSettingNotificationListenerTest {
 

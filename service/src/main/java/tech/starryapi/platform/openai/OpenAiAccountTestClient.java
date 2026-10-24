@@ -1,9 +1,5 @@
 package tech.starryapi.platform.openai;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -21,6 +17,10 @@ import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.core.PlatformUsage;
 import tech.starryapi.platform.upstream.UpstreamException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
 
 @Component
 public class OpenAiAccountTestClient {
@@ -206,7 +206,7 @@ public class OpenAiAccountTestClient {
 
     private PlatformCompletionResult parseChatCompletions(String rawBody) throws Exception {
         JsonNode body = readJson(rawBody);
-        String content = body.path("choices").path(0).path("message").path("content").asText("");
+        String content = body.path("choices").path(0).path("message").path("content").asString("");
         return new PlatformCompletionResult(content, usage(body.path("usage"), "prompt_tokens", "completion_tokens"));
     }
 
@@ -225,7 +225,7 @@ public class OpenAiAccountTestClient {
     }
 
     private PlatformCompletionResult parseResponsesJson(JsonNode body) {
-        String content = body.path("output_text").asText("");
+        String content = body.path("output_text").asString("");
         if (content.isBlank()) {
             content = responseOutputText(body.path("output"));
         }
@@ -242,11 +242,11 @@ public class OpenAiAccountTestClient {
                 continue;
             }
             JsonNode event = objectMapper.readTree(data);
-            String type = event.path("type").asText("");
+            String type = event.path("type").asString("");
             if ("response.output_text.delta".equals(type)) {
-                content.append(event.path("delta").asText(""));
+                content.append(event.path("delta").asString(""));
             } else if ("response.output_text.done".equals(type)) {
-                fallbackContent = firstNonBlank(fallbackContent, event.path("text").asText(""));
+                fallbackContent = firstNonBlank(fallbackContent, event.path("text").asString(""));
             } else if ("response.content_part.done".equals(type)) {
                 fallbackContent = firstNonBlank(fallbackContent, contentPartText(event.path("part")));
             } else if ("response.output_item.done".equals(type)) {
@@ -255,7 +255,7 @@ public class OpenAiAccountTestClient {
                 JsonNode response = event.path("response");
                 fallbackContent = firstNonBlank(
                     fallbackContent,
-                    response.path("output_text").asText(""),
+                    response.path("output_text").asString(""),
                     responseOutputText(response.path("output"))
                 );
                 usage = presentNode(response.path("usage"), usage);
@@ -333,8 +333,8 @@ public class OpenAiAccountTestClient {
     }
 
     private String contentPartText(JsonNode part) {
-        String type = part.path("type").asText("");
-        return "output_text".equals(type) || "text".equals(type) ? part.path("text").asText("") : "";
+        String type = part.path("type").asString("");
+        return "output_text".equals(type) || "text".equals(type) ? part.path("text").asString("") : "";
     }
 
     private JsonNode presentNode(JsonNode candidate, JsonNode fallback) {

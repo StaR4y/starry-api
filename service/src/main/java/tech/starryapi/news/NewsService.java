@@ -1,6 +1,5 @@
 package tech.starryapi.news;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import java.time.Duration;
@@ -14,6 +13,7 @@ import tech.starryapi.common.ApiException;
 import tech.starryapi.news.NewsDtos.DailyIndex;
 import tech.starryapi.news.NewsDtos.DailyReport;
 import tech.starryapi.news.NewsDtos.HotTopics;
+import tools.jackson.databind.JsonNode;
 
 @Service
 public class NewsService {

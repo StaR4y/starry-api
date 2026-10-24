@@ -1,9 +1,5 @@
 package tech.starryapi.platform.anthropic;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.security.SecureRandom;
@@ -29,6 +25,10 @@ import tech.starryapi.platform.core.PlatformToolUse;
 import tech.starryapi.platform.core.PlatformUsage;
 import tech.starryapi.platform.core.ToolSchemaSanitizer;
 import tech.starryapi.platform.upstream.UpstreamException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
 
 @Component
 public class AnthropicUpstreamClient {
@@ -167,7 +167,7 @@ public class AnthropicUpstreamClient {
     }
 
     private void appendAnthropicMessage(ArrayNode messages, JsonNode source) {
-        String role = source.path("role").asText("user");
+        String role = source.path("role").asString("user");
         if ("system".equals(role)) {
             return;
         }
@@ -177,7 +177,7 @@ public class AnthropicUpstreamClient {
             ArrayNode content = message.putArray("content");
             ObjectNode result = content.addObject();
             result.put("type", "tool_result");
-            result.put("tool_use_id", firstNonBlank(source.path("tool_call_id").asText(null), source.path("call_id").asText(null)));
+            result.put("tool_use_id", firstNonBlank(source.path("tool_call_id").asString(null), source.path("call_id").asString(null)));
             result.put("content", contentText(source.path("content")));
             return;
         }
@@ -201,8 +201,8 @@ public class AnthropicUpstreamClient {
         if (content == null || content.isMissingNode() || content.isNull()) {
             return;
         }
-        if (content.isTextual()) {
-            addText(target, content.asText());
+        if (content.isString()) {
+            addText(target, content.asString(""));
             return;
         }
         if (!content.isArray()) {
@@ -210,27 +210,27 @@ public class AnthropicUpstreamClient {
             return;
         }
         for (JsonNode part : content) {
-            String type = part.path("type").asText("");
+            String type = part.path("type").asString("");
             switch (type) {
-                case "text", "input_text", "output_text" -> addText(target, part.path("text").asText(""));
-                case "refusal" -> addText(target, firstNonBlank(part.path("refusal").asText(null), part.path("text").asText(null)));
+                case "text", "input_text", "output_text" -> addText(target, part.path("text").asString(""));
+                case "refusal" -> addText(target, firstNonBlank(part.path("refusal").asString(null), part.path("text").asString(null)));
                 case "tool_use" -> {
                     if (assistant) {
                         ObjectNode toolUse = target.addObject();
                         toolUse.put("type", "tool_use");
-                        toolUse.put("id", part.path("id").asText());
-                        toolUse.put("name", part.path("name").asText());
+                        toolUse.put("id", part.path("id").asString(""));
+                        toolUse.put("name", part.path("name").asString(""));
                         toolUse.set("input", objectOrEmpty(part.path("input")));
                     }
                 }
                 case "tool_result" -> {
                     ObjectNode toolResult = target.addObject();
                     toolResult.put("type", "tool_result");
-                    toolResult.put("tool_use_id", part.path("tool_use_id").asText());
+                    toolResult.put("tool_use_id", part.path("tool_use_id").asString(""));
                     toolResult.put("content", contentText(part.path("content")));
                 }
                 default -> {
-                    String text = firstNonBlank(part.path("text").asText(null), part.path("content").asText(null));
+                    String text = firstNonBlank(part.path("text").asString(null), part.path("content").asString(null));
                     if (!text.isBlank()) {
                         addText(target, text);
                     }
@@ -245,13 +245,13 @@ public class AnthropicUpstreamClient {
         }
         for (JsonNode toolCall : toolCalls) {
             JsonNode function = toolCall.path("function");
-            String name = firstNonBlank(function.path("name").asText(null), toolCall.path("name").asText(null));
+            String name = firstNonBlank(function.path("name").asString(null), toolCall.path("name").asString(null));
             if (name.isBlank()) {
                 continue;
             }
             ObjectNode toolUse = content.addObject();
             toolUse.put("type", "tool_use");
-            toolUse.put("id", firstNonBlank(toolCall.path("id").asText(null), toolCall.path("call_id").asText(null), name));
+            toolUse.put("id", firstNonBlank(toolCall.path("id").asString(null), toolCall.path("call_id").asString(null), name));
             toolUse.put("name", name);
             toolUse.set("input", parseJsonObject(function.path("arguments")));
         }
@@ -260,14 +260,14 @@ public class AnthropicUpstreamClient {
     private ArrayNode anthropicTools(JsonNode tools) {
         ArrayNode converted = objectMapper.createArrayNode();
         for (JsonNode tool : tools) {
-            JsonNode function = "function".equals(tool.path("type").asText()) ? tool.path("function") : tool;
-            String name = function.path("name").asText(tool.path("name").asText(""));
+            JsonNode function = "function".equals(tool.path("type").asString("")) ? tool.path("function") : tool;
+            String name = function.path("name").asString(tool.path("name").asString(""));
             if (name.isBlank()) {
                 continue;
             }
             ObjectNode convertedTool = converted.addObject();
             convertedTool.put("name", name);
-            String description = firstNonBlank(function.path("description").asText(null), tool.path("description").asText(null));
+            String description = firstNonBlank(function.path("description").asString(null), tool.path("description").asString(null));
             if (!description.isBlank()) {
                 convertedTool.put("description", description);
             }
@@ -281,8 +281,8 @@ public class AnthropicUpstreamClient {
         if (toolChoice == null || toolChoice.isMissingNode() || toolChoice.isNull()) {
             return objectMapper.createObjectNode().put("type", "auto");
         }
-        if (toolChoice.isTextual()) {
-            String value = toolChoice.asText("").trim().toLowerCase(Locale.ROOT);
+        if (toolChoice.isString()) {
+            String value = toolChoice.asString("").trim().toLowerCase(Locale.ROOT);
             ObjectNode converted = objectMapper.createObjectNode();
             converted.put("type", "required".equals(value) ? "any" : firstNonBlank(value, "auto"));
             return converted;
@@ -290,11 +290,11 @@ public class AnthropicUpstreamClient {
         if (!toolChoice.isObject()) {
             return toolChoice.deepCopy();
         }
-        String type = toolChoice.path("type").asText("");
+        String type = toolChoice.path("type").asString("");
         if ("function".equals(type)) {
             ObjectNode converted = objectMapper.createObjectNode();
             converted.put("type", "tool");
-            converted.put("name", toolChoice.path("function").path("name").asText());
+            converted.put("name", toolChoice.path("function").path("name").asString(""));
             return converted;
         }
         if ("required".equals(type)) {
@@ -339,13 +339,13 @@ public class AnthropicUpstreamClient {
         StringBuilder content = new StringBuilder();
         List<PlatformToolUse> toolUses = new ArrayList<>();
         for (JsonNode part : body.path("content")) {
-            String type = part.path("type").asText("");
+            String type = part.path("type").asString("");
             if ("text".equals(type)) {
-                content.append(part.path("text").asText(""));
+                content.append(part.path("text").asString(""));
             } else if ("tool_use".equals(type)) {
                 toolUses.add(new PlatformToolUse(
-                    part.path("id").asText(),
-                    part.path("name").asText(),
+                    part.path("id").asString(""),
+                    part.path("name").asString(""),
                     objectOrEmpty(part.path("input"))
                 ));
             }
@@ -365,7 +365,7 @@ public class AnthropicUpstreamClient {
                 continue;
             }
             JsonNode event = objectMapper.readTree(data);
-            String type = event.path("type").asText("");
+            String type = event.path("type").asString("");
             if ("error".equals(type)) {
                 // A 200 response can still carry an error event (e.g. overloaded_error). Treating the partial
                 // text as a success would bill the user and report the account healthy.
@@ -379,16 +379,16 @@ public class AnthropicUpstreamClient {
                 rememberToolUseStart(pendingToolUses, event);
             } else if ("content_block_delta".equals(type)) {
                 JsonNode delta = event.path("delta");
-                String deltaType = delta.path("type").asText("");
+                String deltaType = delta.path("type").asString("");
                 if ("text_delta".equals(deltaType)) {
-                    content.append(delta.path("text").asText(""));
+                    content.append(delta.path("text").asString(""));
                 } else if ("input_json_delta".equals(deltaType)) {
-                    pendingToolUses.computeIfAbsent(event.path("index").asInt(), ignored -> new PendingToolUse())
+                    pendingToolUses.computeIfAbsent(event.path("index").asInt(0), ignored -> new PendingToolUse())
                         .arguments
-                        .append(delta.path("partial_json").asText(""));
+                        .append(delta.path("partial_json").asString(""));
                 }
             } else if ("content_block_stop".equals(type)) {
-                PendingToolUse pending = pendingToolUses.remove(event.path("index").asInt());
+                PendingToolUse pending = pendingToolUses.remove(event.path("index").asInt(0));
                 if (pending != null && !pending.name.isBlank()) {
                     toolUses.add(pending.toToolUse(objectMapper));
                 }
@@ -407,8 +407,8 @@ public class AnthropicUpstreamClient {
     }
 
     private UpstreamException inBandError(JsonNode error) {
-        String errorType = error.path("type").asText("api_error");
-        String message = error.path("message").asText("");
+        String errorType = error.path("type").asString("api_error");
+        String message = error.path("message").asString("");
         int status = switch (errorType) {
             case "overloaded_error" -> 529;
             case "rate_limit_error" -> 429;
@@ -429,12 +429,12 @@ public class AnthropicUpstreamClient {
 
     private void rememberToolUseStart(Map<Integer, PendingToolUse> pendingToolUses, JsonNode event) {
         JsonNode block = event.path("content_block");
-        if (!"tool_use".equals(block.path("type").asText())) {
+        if (!"tool_use".equals(block.path("type").asString(""))) {
             return;
         }
-        PendingToolUse pending = pendingToolUses.computeIfAbsent(event.path("index").asInt(), ignored -> new PendingToolUse());
-        pending.id = block.path("id").asText();
-        pending.name = block.path("name").asText();
+        PendingToolUse pending = pendingToolUses.computeIfAbsent(event.path("index").asInt(0), ignored -> new PendingToolUse());
+        pending.id = block.path("id").asString("");
+        pending.name = block.path("name").asString("");
         if (block.path("input").isObject() && !block.path("input").isEmpty()) {
             pending.input = block.path("input").deepCopy();
         }
@@ -519,7 +519,7 @@ public class AnthropicUpstreamClient {
     private int maxTokens(JsonNode request) {
         JsonNode tokenLimit = firstExisting(request, "max_tokens", "max_completion_tokens", "max_output_tokens");
         if (tokenLimit.isNumber()) {
-            return Math.max(1, tokenLimit.asInt());
+            return Math.max(1, tokenLimit.asInt(0));
         }
         return 1024;
     }
@@ -533,7 +533,7 @@ public class AnthropicUpstreamClient {
         JsonNode messages = request.path("messages");
         if (messages.isArray()) {
             for (JsonNode message : messages) {
-                if ("system".equals(message.path("role").asText())) {
+                if ("system".equals(message.path("role").asString(""))) {
                     String content = contentText(message.path("content"));
                     if (!content.isBlank()) {
                         prompts.add(content);
@@ -551,12 +551,12 @@ public class AnthropicUpstreamClient {
         }
         if (stop.isArray()) {
             for (JsonNode item : stop) {
-                if (item.isTextual()) {
-                    sequences.add(item.asText());
+                if (item.isString()) {
+                    sequences.add(item.asString(""));
                 }
             }
-        } else if (stop.isTextual()) {
-            sequences.add(stop.asText());
+        } else if (stop.isString()) {
+            sequences.add(stop.asString(""));
         }
         return sequences;
     }
@@ -593,19 +593,19 @@ public class AnthropicUpstreamClient {
         if (content == null || content.isMissingNode() || content.isNull()) {
             return "";
         }
-        if (content.isTextual()) {
-            return content.asText();
+        if (content.isString()) {
+            return content.asString("");
         }
         if (!content.isArray()) {
             return content.toString();
         }
         StringBuilder builder = new StringBuilder();
         for (JsonNode part : content) {
-            String text = switch (part.path("type").asText("")) {
-                case "text", "input_text", "output_text" -> part.path("text").asText("");
-                case "refusal" -> part.path("refusal").asText(part.path("text").asText(""));
+            String text = switch (part.path("type").asString("")) {
+                case "text", "input_text", "output_text" -> part.path("text").asString("");
+                case "refusal" -> part.path("refusal").asString(part.path("text").asString(""));
                 case "tool_result" -> contentText(part.path("content"));
-                default -> firstNonBlank(part.path("text").asText(null), part.path("content").asText(null));
+                default -> firstNonBlank(part.path("text").asString(null), part.path("content").asString(null));
             };
             if (!text.isBlank()) {
                 if (!builder.isEmpty()) {
@@ -624,7 +624,7 @@ public class AnthropicUpstreamClient {
         if (value.isObject()) {
             return value.deepCopy();
         }
-        String raw = value.isTextual() ? value.asText() : value.toString();
+        String raw = value.isString() ? value.asString("") : value.toString();
         if (raw == null || raw.isBlank()) {
             return objectMapper.createObjectNode();
         }

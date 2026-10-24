@@ -1,8 +1,5 @@
 package tech.starryapi.egress;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -14,6 +11,9 @@ import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.SafeConstructor;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.common.Hashing;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 @Component
 public class ClashNodes {
@@ -45,14 +45,14 @@ public class ClashNodes {
     public Node node(JsonNode raw) {
         if (!raw.isObject()) throw invalid("Proxy node must be an object");
         ObjectNode config = (ObjectNode) raw.deepCopy();
-        String name = config.path("name").asText("").trim();
+        String name = config.path("name").asString("").trim();
         if (name.isEmpty() || name.length() > 200) throw invalid("Node name must contain 1 to 200 characters");
-        String protocol = config.path("type").asText("").toLowerCase(Locale.ROOT);
+        String protocol = config.path("type").asString("").toLowerCase(Locale.ROOT);
         if (!protocol.matches("[a-z0-9-]{1,32}")) throw invalid("Invalid proxy protocol");
         String issue = null;
         if (!TYPES.contains(protocol)) issue = "Unsupported node protocol: " + protocol.replaceAll("[^a-z0-9-]", "");
-        if (config.path("server").asText("").isBlank() || config.path("server").asText().length() > 253
-            || config.path("port").asInt() < 1 || config.path("port").asInt() > 65535) issue = "Invalid node server or port";
+        if (config.path("server").asString("").isBlank() || config.path("server").asString("").length() > 253
+            || config.path("port").asInt(0) < 1 || config.path("port").asInt(0) > 65535) issue = "Invalid node server or port";
         if (containsForbidden(config)) issue = "Node contains unsupported chaining, file, or interface options";
         config.remove("name");
         config.put("type", protocol);
@@ -86,15 +86,14 @@ public class ClashNodes {
     private static String decode(String value) { return URLDecoder.decode(value.replace("+", "%2B"), StandardCharsets.UTF_8); }
     private boolean containsForbidden(JsonNode value) {
         if (value.isObject()) {
-            var fields = value.fields();
-            while (fields.hasNext()) { var field = fields.next(); if (FORBIDDEN.contains(field.getKey()) || containsForbidden(field.getValue())) return true; }
+            for (var field : value.properties()) { if (FORBIDDEN.contains(field.getKey()) || containsForbidden(field.getValue())) return true; }
         } else if (value.isArray()) { for (JsonNode item : value) if (containsForbidden(item)) return true; }
         return false;
     }
     private JsonNode canonical(JsonNode value) {
         if (value.isObject()) {
             ObjectNode sorted = mapper.createObjectNode();
-            var names = new TreeSet<String>(); value.fieldNames().forEachRemaining(names::add);
+            var names = new TreeSet<String>(value.propertyNames());
             names.forEach(name -> sorted.set(name, canonical(value.get(name)))); return sorted;
         }
         if (value.isArray()) { var list = mapper.createArrayNode(); value.forEach(item -> list.add(canonical(item))); return list; }
@@ -119,7 +118,7 @@ public class ClashNodes {
         }
         private static Set<String> fieldNames(ObjectNode config) {
             Set<String> names = new HashSet<>();
-            config.fieldNames().forEachRemaining(names::add);
+            names.addAll(config.propertyNames());
             return names;
         }
     }

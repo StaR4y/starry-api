@@ -1,17 +1,19 @@
 package tech.starryapi.plugin;
 
 import static org.assertj.core.api.Assertions.*;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
+import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 
 class PluginJsonCodecTest {
     record Configuration(String title, boolean enabled) {}
 
     @Test void roundTripsRecordsWithoutMutatingHostMapper() {
-        var host = new ObjectMapper();
+        // Jackson 3 ignores unknown properties by default, so make the host strict for the assertion below to mean something
+        var host = JsonMapper.builder().enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES).build();
         var json = new PluginJsonCodec(host, () -> {});
         var config = json.read("{\"title\":\"test\",\"enabled\":true,\"extra\":1}", Configuration.class);
         assertThat(config).isEqualTo(new Configuration("test", true));

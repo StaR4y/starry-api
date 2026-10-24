@@ -1,6 +1,5 @@
 package tech.starryapi.ticket;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
 import java.util.List;
 import org.springframework.r2dbc.core.DatabaseClient;
@@ -10,6 +9,7 @@ import tech.starryapi.admin.SystemSettingEntity;
 import tech.starryapi.admin.SystemSettingRepository;
 import tech.starryapi.admin.TicketMailer;
 import tech.starryapi.ticket.TicketDtos.*;
+import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class TicketSettingsService {

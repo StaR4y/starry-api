@@ -1,9 +1,5 @@
 package tech.starryapi.platform.kiro;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -14,6 +10,10 @@ import org.springframework.stereotype.Component;
 import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.model.ModelCatalogProvider;
 import tech.starryapi.platform.core.ToolSchemaSanitizer;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
 
 @Component
 public class KiroPayloadFactory {
@@ -52,7 +52,7 @@ public class KiroPayloadFactory {
         List<JsonNode> nonSystemMessages = new ArrayList<>();
         StringBuilder systemPrompt = new StringBuilder();
         for (JsonNode message : messages) {
-            if ("system".equals(message.path("role").asText())) {
+            if ("system".equals(message.path("role").asString(""))) {
                 String content = contentToText(message.path("content"));
                 if (!content.isBlank()) {
                     if (!systemPrompt.isEmpty()) systemPrompt.append("\n");
@@ -71,7 +71,7 @@ public class KiroPayloadFactory {
         conversationState.put("conversationId", stableConversationId(request, sessionHint));
 
         List<ObjectNode> allMessages = new ArrayList<>();
-        appendSystemPromptPair(allMessages, systemPrompt.toString(), origin, request.path("model").asText(model));
+        appendSystemPromptPair(allMessages, systemPrompt.toString(), origin, request.path("model").asString(model));
         for (JsonNode message : nonSystemMessages) {
             ObjectNode converted = historyMessage(message, model, origin);
             if (!converted.isEmpty()) {
@@ -124,7 +124,7 @@ public class KiroPayloadFactory {
 
     private ObjectNode historyMessage(JsonNode message, String model, String origin) {
         ObjectNode node = objectMapper.createObjectNode();
-        String role = message.path("role").asText("user");
+        String role = message.path("role").asString("user");
         if ("assistant".equals(role)) {
             ObjectNode assistant = node.putObject("assistantResponseMessage");
             String content = contentToText(message.path("content"));
@@ -149,7 +149,7 @@ public class KiroPayloadFactory {
             ObjectNode context = userInput.putObject("userInputMessageContext");
             appendTools(context, tools);
         }
-        if (message != null && "tool".equals(message.path("role").asText())) {
+        if (message != null && "tool".equals(message.path("role").asString(""))) {
             ObjectNode context = userInput.has("userInputMessageContext")
                 ? (ObjectNode) userInput.path("userInputMessageContext")
                 : userInput.putObject("userInputMessageContext");
@@ -197,8 +197,8 @@ public class KiroPayloadFactory {
             }
             ObjectNode wrapper = kiroTools.addObject();
             ObjectNode spec = wrapper.putObject("toolSpecification");
-            spec.put("name", function.path("name").asText());
-            spec.put("description", function.path("description").asText(""));
+            spec.put("name", function.path("name").asString(""));
+            spec.put("description", function.path("description").asString(""));
             ObjectNode inputSchema = spec.putObject("inputSchema");
             inputSchema.set("json", ToolSchemaSanitizer.sanitizeParameters(objectMapper, function.path("parameters")));
         }
@@ -215,16 +215,16 @@ public class KiroPayloadFactory {
                 continue;
             }
             ObjectNode toolUse = toolUses.addObject();
-            toolUse.put("toolUseId", toolCall.path("id").asText());
-            toolUse.put("name", function.path("name").asText());
-            toolUse.set("input", parseJsonOrObject(function.path("arguments").asText("{}")));
+            toolUse.put("toolUseId", toolCall.path("id").asString(""));
+            toolUse.put("name", function.path("name").asString(""));
+            toolUse.set("input", parseJsonOrObject(function.path("arguments").asString("{}")));
         }
     }
 
     private void appendToolResult(ObjectNode context, JsonNode message) {
         ArrayNode toolResults = context.putArray("toolResults");
         ObjectNode result = toolResults.addObject();
-        result.put("toolUseId", message.path("tool_call_id").asText());
+        result.put("toolUseId", message.path("tool_call_id").asString(""));
         ArrayNode content = result.putArray("content");
         ObjectNode text = content.addObject();
         text.put("text", contentToText(message.path("content")));
@@ -296,8 +296,8 @@ public class KiroPayloadFactory {
         ObjectNode targetInput = (ObjectNode) target.path("userInputMessage");
         ObjectNode sourceInput = (ObjectNode) source.path("userInputMessage");
         targetInput.put("content", flattenContent(
-            targetInput.path("content").asText(""),
-            sourceInput.path("content").asText("")
+            targetInput.path("content").asString(""),
+            sourceInput.path("content").asString("")
         ));
 
         JsonNode sourceResults = sourceInput.path("userInputMessageContext").path("toolResults");
@@ -324,7 +324,7 @@ public class KiroPayloadFactory {
                 ObjectNode assistant = (ObjectNode) copy.path("assistantResponseMessage");
                 flattenedToolUseIds.addAll(toolUseIds(copy));
                 assistant.put("content", flattenContent(
-                    assistant.path("content").asText(""),
+                    assistant.path("content").asString(""),
                     formatToolUses(assistant.path("toolUses"))
                 ));
                 assistant.remove("toolUses");
@@ -333,11 +333,11 @@ public class KiroPayloadFactory {
                 ObjectNode userInput = (ObjectNode) copy.path("userInputMessage");
                 ObjectNode context = (ObjectNode) userInput.path("userInputMessageContext");
                 userInput.put("content", flattenContent(
-                    userInput.path("content").asText(""),
+                    userInput.path("content").asString(""),
                     formatToolResults(context.path("toolResults"))
                 ));
                 context.remove("toolResults");
-                if (!context.fieldNames().hasNext()) {
+                if (context.isEmpty()) {
                     userInput.remove("userInputMessageContext");
                 }
             }
@@ -355,7 +355,7 @@ public class KiroPayloadFactory {
         }
         JsonNode toolUses = message.path("assistantResponseMessage").path("toolUses");
         for (JsonNode toolUse : toolUses) {
-            if (!toolNames.contains(toolUse.path("name").asText())) {
+            if (!toolNames.contains(toolUse.path("name").asString(""))) {
                 return true;
             }
         }
@@ -371,7 +371,7 @@ public class KiroPayloadFactory {
         }
         JsonNode toolResults = message.path("userInputMessage").path("userInputMessageContext").path("toolResults");
         for (JsonNode toolResult : toolResults) {
-            if (flattenedToolUseIds.contains(toolResult.path("toolUseId").asText())) {
+            if (flattenedToolUseIds.contains(toolResult.path("toolUseId").asString(""))) {
                 return true;
             }
         }
@@ -384,7 +384,7 @@ public class KiroPayloadFactory {
             return names;
         }
         for (JsonNode tool : tools) {
-            String name = tool.path("function").path("name").asText("");
+            String name = tool.path("function").path("name").asString("");
             if (!name.isBlank()) {
                 names.add(name);
             }
@@ -410,7 +410,7 @@ public class KiroPayloadFactory {
         for (JsonNode toolUse : toolUses) {
             if (!builder.isEmpty()) builder.append("\n\n");
             builder.append("Tool use: ")
-                .append(toolUse.path("name").asText())
+                .append(toolUse.path("name").asString(""))
                 .append("\nInput: ")
                 .append(toolUse.path("input"));
         }
@@ -425,13 +425,13 @@ public class KiroPayloadFactory {
         for (JsonNode toolResult : toolResults) {
             if (!builder.isEmpty()) builder.append("\n\n");
             builder.append("Tool result for ")
-                .append(toolResult.path("toolUseId").asText())
+                .append(toolResult.path("toolUseId").asString(""))
                 .append(":\n");
             JsonNode content = toolResult.path("content");
             if (content.isArray()) {
                 for (JsonNode part : content) {
                     if (part.has("text")) {
-                        builder.append(part.path("text").asText());
+                        builder.append(part.path("text").asString(""));
                     } else {
                         builder.append(part);
                     }
@@ -458,10 +458,10 @@ public class KiroPayloadFactory {
             ObjectNode stripped = message.deepCopy();
             ObjectNode context = (ObjectNode) stripped.path("userInputMessage").path("userInputMessageContext");
             context.remove("toolResults");
-            if (!context.fieldNames().hasNext()) {
+            if (context.isEmpty()) {
                 ((ObjectNode) stripped.path("userInputMessage")).remove("userInputMessageContext");
             }
-            if (!stripped.path("userInputMessage").path("content").asText("").isBlank()) {
+            if (!stripped.path("userInputMessage").path("content").asString("").isBlank()) {
                 result.add(stripped);
             }
         }
@@ -541,7 +541,7 @@ public class KiroPayloadFactory {
         ObjectNode last = messages.get(messages.size() - 1);
         return isUser(last)
             && hasToolResults(last)
-            && last.path("userInputMessage").path("content").asText("").isBlank();
+            && last.path("userInputMessage").path("content").asString("").isBlank();
     }
 
     private boolean hasMatchingToolResults(ObjectNode assistant, ObjectNode user) {
@@ -556,7 +556,7 @@ public class KiroPayloadFactory {
         for (String toolUseId : expected) {
             boolean found = false;
             for (JsonNode result : results) {
-                if (toolUseId.equals(result.path("toolUseId").asText())) {
+                if (toolUseId.equals(result.path("toolUseId").asString(""))) {
                     found = true;
                     break;
                 }
@@ -575,7 +575,7 @@ public class KiroPayloadFactory {
             return ids;
         }
         for (JsonNode toolUse : toolUses) {
-            String id = toolUse.path("toolUseId").asText("");
+            String id = toolUse.path("toolUseId").asString("");
             if (!id.isBlank()) {
                 ids.add(id);
             }
@@ -584,7 +584,7 @@ public class KiroPayloadFactory {
     }
 
     private String messageOrigin(ObjectNode message) {
-        return message.path("userInputMessage").path("origin").asText("AI_EDITOR");
+        return message.path("userInputMessage").path("origin").asString("AI_EDITOR");
     }
 
     private JsonNode parseJsonOrObject(String raw) {
@@ -610,15 +610,15 @@ public class KiroPayloadFactory {
         if (content == null || content.isMissingNode() || content.isNull()) {
             return "";
         }
-        if (content.isTextual()) {
-            return content.asText();
+        if (content.isString()) {
+            return content.asString("");
         }
         if (content.isArray()) {
             StringBuilder builder = new StringBuilder();
             for (JsonNode part : content) {
-                if ("text".equals(part.path("type").asText()) || "input_text".equals(part.path("type").asText())) {
+                if ("text".equals(part.path("type").asString("")) || "input_text".equals(part.path("type").asString(""))) {
                     if (!builder.isEmpty()) builder.append("\n");
-                    builder.append(part.path("text").asText());
+                    builder.append(part.path("text").asString(""));
                 }
             }
             return builder.toString();
@@ -628,8 +628,8 @@ public class KiroPayloadFactory {
 
     private String stableConversationId(JsonNode request, String sessionHint) {
         String explicit = firstNonBlank(
-            request.path("conversation_id").asText(null),
-            request.path("conversationId").asText(null),
+            request.path("conversation_id").asString(null),
+            request.path("conversationId").asString(null),
             sessionHint
         );
         return explicit == null ? UUID.randomUUID().toString() : UUID.nameUUIDFromBytes(explicit.getBytes()).toString();

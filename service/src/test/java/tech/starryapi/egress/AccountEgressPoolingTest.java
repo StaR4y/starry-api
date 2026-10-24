@@ -3,8 +3,6 @@ package tech.starryapi.egress;
 import static org.assertj.core.api.Assertions.*;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.Mockito.*;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import java.io.*;
@@ -26,6 +24,8 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 import tech.starryapi.config.ProxyProperties;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 /** Connection reuse per route (A9) and TLS to an https:// proxy plus remote name resolution through SOCKS5 (A10). */
 class AccountEgressPoolingTest {
@@ -161,6 +161,19 @@ class AccountEgressPoolingTest {
             assertThat(proxy.connections).hasValue(dialled);
             transport.shutdown();
         }
+    }
+
+    @Test void routedRequestsAreWrittenAndReadWithTheApplicationsCodecs() {
+        // The application's JsonMapper reaches codecs through Boot's CodecCustomizers; requests on an account route are
+        // encoded and decoded by the transport, so it must apply them like the shared upstream client does.
+        var beans = new org.springframework.beans.factory.support.DefaultListableBeanFactory();
+        var customized = new java.util.concurrent.atomic.AtomicInteger();
+        beans.registerSingleton("marker", (org.springframework.boot.http.codec.CodecCustomizer) configurer -> customized.incrementAndGet());
+        var proxyProperties = new ProxyProperties();
+        new AccountEgressTransport(null, mock(ChannelRoutes.class), new EgressProperties(), proxyProperties,
+            new ClashNodes(json), beans.getBeanProvider(org.springframework.boot.http.codec.CodecCustomizer.class)).shutdown();
+        // Applied once when the transport is built, not again for every request.
+        assertThat(customized).hasValue(1);
     }
 
     @Test void evictedPoolsAreDisposedButARequestInFlightSurvivesIt() throws Exception {

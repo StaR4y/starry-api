@@ -2,9 +2,9 @@ package tech.starryapi.platform.core;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 class ToolSchemaSanitizerTest {
 
@@ -37,17 +37,17 @@ class ToolSchemaSanitizerTest {
 
         JsonNode schema = ToolSchemaSanitizer.sanitizeParameters(objectMapper, input);
 
-        assertThat(schema.path("type").asText()).isEqualTo("object");
+        assertThat(schema.path("type").asString("")).isEqualTo("object");
         assertThat(schema.has("$schema")).isFalse();
         assertThat(schema.has("title")).isFalse();
         JsonNode page = schema.path("properties").path("page");
-        assertThat(page.path("type").asText()).isEqualTo("integer");
-        assertThat(page.path("description").asText()).isEqualTo("Page number");
+        assertThat(page.path("type").asString("")).isEqualTo("integer");
+        assertThat(page.path("description").asString("")).isEqualTo("Page number");
         assertThat(page.has("minimum")).isFalse();
         assertThat(page.has("default")).isFalse();
         assertThat(page.has("format")).isFalse();
         assertThat(schema.path("required")).hasSize(1);
-        assertThat(schema.path("required").get(0).asText()).isEqualTo("page");
+        assertThat(schema.path("required").get(0).asString("")).isEqualTo("page");
         assertThat(schema.path("properties").path("mode").path("enum")).hasSize(2);
         assertThat(schema.path("properties").path("mode").has("default")).isFalse();
     }

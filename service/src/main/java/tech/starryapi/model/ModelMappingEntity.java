@@ -1,5 +1,6 @@
 package tech.starryapi.model;
 
+import io.r2dbc.postgresql.codec.Json;
 import java.time.Instant;
 import org.springframework.data.annotation.Id;
 import org.springframework.data.relational.core.mapping.Table;
@@ -14,10 +15,12 @@ public class ModelMappingEntity {
     private Boolean enabled;
     private String mappingType;
     private String sourceModel;
-    private String targetModels;
-    private String weights;
+    // jsonb columns. Spring Data maps the driver's Json type natively (a String property would be bound as text and
+    // rejected by PostgreSQL); the accessors below keep the JSON text API the rest of the code uses.
+    private Json targetModels;
+    private Json weights;
     private Integer priority;
-    private String apiKeyIds;
+    private Json apiKeyIds;
     private Instant createdAt;
     private Instant updatedAt;
 
@@ -70,19 +73,19 @@ public class ModelMappingEntity {
     }
 
     public String getTargetModels() {
-        return targetModels;
+        return text(targetModels);
     }
 
     public void setTargetModels(String targetModels) {
-        this.targetModels = targetModels;
+        this.targetModels = json(targetModels);
     }
 
     public String getWeights() {
-        return weights;
+        return text(weights);
     }
 
     public void setWeights(String weights) {
-        this.weights = weights;
+        this.weights = json(weights);
     }
 
     public Integer getPriority() {
@@ -94,11 +97,11 @@ public class ModelMappingEntity {
     }
 
     public String getApiKeyIds() {
-        return apiKeyIds;
+        return text(apiKeyIds);
     }
 
     public void setApiKeyIds(String apiKeyIds) {
-        this.apiKeyIds = apiKeyIds;
+        this.apiKeyIds = json(apiKeyIds);
     }
 
     public Instant getCreatedAt() {
@@ -115,5 +118,13 @@ public class ModelMappingEntity {
 
     public void setUpdatedAt(Instant updatedAt) {
         this.updatedAt = updatedAt;
+    }
+
+    private static String text(Json value) {
+        return value == null ? null : value.asString();
+    }
+
+    private static Json json(String value) {
+        return value == null ? null : Json.of(value);
     }
 }

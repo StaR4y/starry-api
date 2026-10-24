@@ -49,7 +49,7 @@ public class ModelIconStorageService {
             }
             if (size > maxIconBytes) {
                 throw new ApiException(
-                    HttpStatus.PAYLOAD_TOO_LARGE,
+                    HttpStatus.CONTENT_TOO_LARGE,
                     "MODEL_ICON_TOO_LARGE",
                     "Model icon exceeds the configured size limit"
                 );

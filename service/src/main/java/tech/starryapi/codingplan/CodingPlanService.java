@@ -1,7 +1,5 @@
 package tech.starryapi.codingplan;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
@@ -22,6 +20,8 @@ import tech.starryapi.codingplan.CodingPlanDtos.CreateCodingPlanRequest;
 import tech.starryapi.codingplan.CodingPlanDtos.UpdateCodingPlanRequest;
 import tech.starryapi.model.ModelCatalogProvider;
 import tech.starryapi.platform.catalog.PlatformModelCatalogSupport;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class CodingPlanService {
@@ -187,7 +187,7 @@ public class CodingPlanService {
         try {
             List<String> parsed = objectMapper.readValue(
                 allowedProvidersJson,
-                new com.fasterxml.jackson.core.type.TypeReference<List<String>>() {
+                new tools.jackson.core.type.TypeReference<List<String>>() {
                 }
             );
             return parsed.stream()
@@ -195,7 +195,7 @@ public class CodingPlanService {
                 .filter(provider -> provider != null && !provider.isBlank())
                 .distinct()
                 .toList();
-        } catch (JsonProcessingException error) {
+        } catch (JacksonException error) {
             return List.of();
         }
     }
@@ -226,7 +226,7 @@ public class CodingPlanService {
         }
         try {
             return objectMapper.writeValueAsString(new ArrayList<>(normalized));
-        } catch (JsonProcessingException error) {
+        } catch (JacksonException error) {
             throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "CODING_PLAN_PROVIDER_ENCODING_FAILED", "Failed to encode allowed providers");
         }
     }

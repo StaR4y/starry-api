@@ -1,12 +1,12 @@
 package tech.starryapi.account;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.Base64;
 import org.springframework.http.HttpStatus;
 import tech.starryapi.common.ApiException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 final class OpenAiOAuthTokenClaims {
 
@@ -82,7 +82,7 @@ final class OpenAiOAuthTokenClaims {
         if (!value.canConvertToLong()) {
             return null;
         }
-        long epochSeconds = value.asLong();
+        long epochSeconds = value.asLong(0L);
         try {
             return epochSeconds > 0 ? Instant.ofEpochSecond(epochSeconds) : null;
         } catch (RuntimeException ignored) {
@@ -101,10 +101,10 @@ final class OpenAiOAuthTokenClaims {
     }
 
     private static String text(JsonNode value) {
-        if (value == null || !value.isTextual()) {
+        if (value == null || !value.isString()) {
             return null;
         }
-        String text = value.asText().trim();
+        String text = value.asString("").trim();
         return text.isEmpty() ? null : text;
     }
 

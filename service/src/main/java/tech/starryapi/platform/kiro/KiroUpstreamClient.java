@@ -2,8 +2,6 @@ package tech.starryapi.platform.kiro;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -27,6 +25,8 @@ import tech.starryapi.common.Hashing;
 import tech.starryapi.config.ProxyProperties;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.upstream.UpstreamException;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ObjectNode;
 
 @Component
 public class KiroUpstreamClient {
@@ -140,7 +140,7 @@ public class KiroUpstreamClient {
             return Mono.just(copy);
         }
         String requestedModelId = payloadModelId(copy);
-        String profileArn = copy.path("profileArn").asText("");
+        String profileArn = copy.path("profileArn").asString("");
         return resolveCodeWhispererModelId(account, requestedModelId, profileArn)
             .map(modelId -> {
                 applyPayloadModelId(copy, modelId);
@@ -320,18 +320,18 @@ public class KiroUpstreamClient {
                     return response.releaseBody().thenReturn(models);
                 }
                 return response.bodyToMono(JsonNode.class)
-                    .defaultIfEmpty(com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode())
+                    .defaultIfEmpty(tools.jackson.databind.node.JsonNodeFactory.instance.objectNode())
                     .flatMap(body -> {
                         JsonNode items = body.path("models");
                         if (items.isArray()) {
                             for (JsonNode item : items) {
-                                String modelId = item.path("modelId").asText("");
+                                String modelId = item.path("modelId").asString("");
                                 if (!modelId.isBlank()) {
-                                    models.add(new KiroModel(modelId, item.path("modelName").asText("")));
+                                    models.add(new KiroModel(modelId, item.path("modelName").asString("")));
                                 }
                             }
                         }
-                        String token = body.path("nextToken").asText("");
+                        String token = body.path("nextToken").asString("");
                         if (token.isBlank()) {
                             return Mono.just(models);
                         }
@@ -390,15 +390,15 @@ public class KiroUpstreamClient {
             .path("currentMessage")
             .path("userInputMessage")
             .path("modelId");
-        if (currentModelId.isTextual() && !currentModelId.asText().isBlank()) {
-            return currentModelId.asText();
+        if (currentModelId.isString() && !currentModelId.asString("").isBlank()) {
+            return currentModelId.asString("");
         }
         JsonNode history = payload.path("conversationState").path("history");
         if (history.isArray()) {
             for (JsonNode message : history) {
                 JsonNode historyModelId = message.path("userInputMessage").path("modelId");
-                if (historyModelId.isTextual() && !historyModelId.asText().isBlank()) {
-                    return historyModelId.asText();
+                if (historyModelId.isString() && !historyModelId.asString("").isBlank()) {
+                    return historyModelId.asString("");
                 }
             }
         }

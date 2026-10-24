@@ -1,9 +1,9 @@
 package tech.starryapi.egress;
 
 import static org.assertj.core.api.Assertions.*;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.*;
 import org.junit.jupiter.api.Test;
+import tools.jackson.databind.ObjectMapper;
 
 class ClashNodesTest {
     private final ObjectMapper json = new ObjectMapper();
@@ -24,7 +24,7 @@ class ClashNodesTest {
         assertThatThrownBy(() -> parser.document("proxies: []\nproxies: []")).hasMessageContaining("Invalid Clash YAML");
         assertThatThrownBy(() -> parser.url("A", "ftp://example.com:80")).hasMessageContaining("proxy URL");
         assertThatThrownBy(() -> parser.url("A", "https://example.com")).hasMessageContaining("explicit port");
-        assertThat(parser.url("A", "socks5h://user%2Bname:pass%3Aword@127.0.0.1:9000").config().path("password").asText()).isEqualTo("pass:word");
+        assertThat(parser.url("A", "socks5h://user%2Bname:pass%3Aword@127.0.0.1:9000").config().path("password").asString("")).isEqualTo("pass:word");
     }
 
     @Test void onlyPlainHttpHttpsAndSocks5NodesAreReachedDirectly() {
@@ -36,7 +36,7 @@ class ClashNodesTest {
         // An https:// proxy is an HTTP proxy with TLS to the proxy itself.
         var https = parser.url("A", "https://user:pass@example.com:8443");
         assertThat(https.protocol()).isEqualTo("http");
-        assertThat(https.config().path("tls").asBoolean()).isTrue();
+        assertThat(https.config().path("tls").asBoolean(false)).isTrue();
         assertThat(https.route()).isEqualTo(ClashNodes.DIRECT_PROXY);
         assertThat(parser.url("A", "socks5h://example.com:1080").protocol()).isEqualTo("socks5");
         assertThat(parser.node(parser.document("name: A\ntype: http\nserver: example.com\nport: 8080\ntls: false\n")).route())
@@ -73,13 +73,13 @@ class ClashNodesTest {
         var id = java.util.UUID.randomUUID();
         var node = parser.url("A", "http://example.com:8080");
         var config = runtime.configuration(java.util.List.of(new MihomoRuntime.Route(id, 20000, node.config())));
-        assertThat(config.path("rules").get(0).asText()).isEqualTo("MATCH,REJECT");
+        assertThat(config.path("rules").get(0).asString("")).isEqualTo("MATCH,REJECT");
         // Mihomo never downloads geo databases by itself: the container has no use for them and must not dial out.
         assertThat(config.path("geo-auto-update").isBoolean()).isTrue();
-        assertThat(config.path("geo-auto-update").asBoolean()).isFalse();
-        assertThat(config.path("log-level").asText()).isEqualTo("silent");
-        assertThat(config.path("listeners").get(0).path("proxy").asText()).isEqualTo("node-" + id);
-        assertThat(config.path("listeners").get(0).path("listen").asText()).isEqualTo("127.0.0.1");
-        assertThat(config.path("proxies").get(0).path("name").asText()).isEqualTo("node-" + id);
+        assertThat(config.path("geo-auto-update").asBoolean(false)).isFalse();
+        assertThat(config.path("log-level").asString("")).isEqualTo("silent");
+        assertThat(config.path("listeners").get(0).path("proxy").asString("")).isEqualTo("node-" + id);
+        assertThat(config.path("listeners").get(0).path("listen").asString("")).isEqualTo("127.0.0.1");
+        assertThat(config.path("proxies").get(0).path("name").asString("")).isEqualTo("node-" + id);
     }
 }

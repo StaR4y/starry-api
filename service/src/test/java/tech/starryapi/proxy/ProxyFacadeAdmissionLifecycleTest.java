@@ -12,8 +12,6 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.UUID;
@@ -59,6 +57,8 @@ import tech.starryapi.platform.openai.OpenAiResponseStateStore;
 import tech.starryapi.platform.openai.OpenAiUpstreamClient;
 import tech.starryapi.platform.upstream.UpstreamException;
 import tech.starryapi.stats.StatsService;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 class ProxyFacadeAdmissionLifecycleTest {
 
@@ -207,7 +207,7 @@ class ProxyFacadeAdmissionLifecycleTest {
     @ValueSource(strings = {"-1", "0", "1.5", "\"4096\"", "1000001", "null"})
     void invalidOutputLimitIsRejectedBeforeReservation(String limit) throws Exception {
         Fixture fixture = fixture();
-        var body = (com.fasterxml.jackson.databind.node.ObjectNode) request();
+        var body = (tools.jackson.databind.node.ObjectNode) request();
         body.set("max_tokens", objectMapper.readTree(limit));
         assertThatThrownBy(() -> fixture.facade().chat(body, exchange()).block())
             .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("MAX_OUTPUT_TOKENS_INVALID"));

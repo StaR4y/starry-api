@@ -1,8 +1,5 @@
 package tech.starryapi.plugin;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -11,6 +8,9 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.model.ModelCatalogProvider;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class PluginModuleSettingsService {

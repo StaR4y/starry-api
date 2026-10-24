@@ -2,18 +2,14 @@ package tech.starryapi.admin;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.annotation.JsonInclude;
-import com.fasterxml.jackson.databind.DeserializationFeature;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
-import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
+import tech.starryapi.config.ProductionJson;
+import tools.jackson.databind.ObjectMapper;
 
 class AppearanceDtosJsonTest {
 
-    private final ObjectMapper mapper = Jackson2ObjectMapperBuilder.json()
-        .serializationInclusion(JsonInclude.Include.NON_NULL)
-        .featuresToDisable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
-        .build();
+    // the application's own mapper: null properties are omitted globally and unknown ones are ignored
+    private final ObjectMapper mapper = ProductionJson.mapper();
 
     @Test
     void jacksonReadsChromeFromPartialPatch() throws Exception {

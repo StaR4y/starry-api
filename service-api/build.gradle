@@ -7,7 +7,7 @@ java {
 }
 
 dependencies {
-    api 'com.fasterxml.jackson.core:jackson-databind'
+    api 'tools.jackson.core:jackson-databind'
     api 'jakarta.validation:jakarta.validation-api'
     api 'org.springframework:spring-web'
     api 'org.springframework:spring-webflux'

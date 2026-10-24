@@ -2,7 +2,6 @@ package tech.starryapi.egress;
 
 import static org.assertj.core.api.Assertions.*;
 import static org.awaitility.Awaitility.await;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
@@ -19,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
+import tools.jackson.databind.ObjectMapper;
 
 class MihomoRuntimeTest {
     private final ObjectMapper json = new ObjectMapper();
@@ -42,9 +42,9 @@ class MihomoRuntimeTest {
             puts.incrementAndGet();
             lastPayload.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
             try { Thread.sleep(putDelayMillis); } catch (InterruptedException ignored) { }
-            var proxies = json.readTree(json.readTree(lastPayload.get()).path("payload").asText()).path("proxies");
+            var proxies = json.readTree(json.readTree(lastPayload.get()).path("payload").asString("")).path("proxies");
             for (int i = 0; rejectedServer != null && i < proxies.size(); i++) {
-                if (rejectedServer.equals(proxies.get(i).path("server").asText())) {
+                if (rejectedServer.equals(proxies.get(i).path("server").asString(""))) {
                     byte[] body = ("{\"message\":\"proxy " + i + ": '' has unset fields: uuid\"}").getBytes(StandardCharsets.UTF_8);
                     exchange.sendResponseHeaders(400, body.length);
                     exchange.getResponseBody().write(body);

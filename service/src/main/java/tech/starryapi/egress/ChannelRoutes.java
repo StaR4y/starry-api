@@ -1,8 +1,5 @@
 package tech.starryapi.egress;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.netty.handler.ssl.SslContext;
 import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
@@ -17,6 +14,9 @@ import tech.starryapi.common.Hashing;
 import reactor.core.publisher.Mono;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.transport.ProxyProvider;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 /**
  * How requests of a proxy channel reach their exit. A plain HTTP CONNECT or SOCKS5 node is connected to directly by
@@ -64,9 +64,9 @@ public class ChannelRoutes {
 
     /** Connections may be shared by exactly the requests that reach the same proxy with the same credentials. */
     static String key(ObjectNode proxy, String nodeVersion) {
-        return proxy.path("type").asText() + (proxy.path("tls").asBoolean(false) ? "+tls" : "") + "|"
-            + proxy.path("server").asText() + ":" + proxy.path("port").asInt() + "|"
-            + Hashing.sha256(proxy.path("username").asText("") + "\0" + proxy.path("password").asText(""))
+        return proxy.path("type").asString("") + (proxy.path("tls").asBoolean(false) ? "+tls" : "") + "|"
+            + proxy.path("server").asString("") + ":" + proxy.path("port").asInt(0) + "|"
+            + Hashing.sha256(proxy.path("username").asString("") + "\0" + proxy.path("password").asString(""))
             + (nodeVersion == null ? "" : "|" + nodeVersion);
     }
 
@@ -81,14 +81,14 @@ public class ChannelRoutes {
      */
     static HttpClient through(HttpClient client, ObjectNode proxy, SslContext proxyTls) {
         HttpClient routed = client.proxy(spec -> {
-            var configured = spec.type("socks5".equals(proxy.path("type").asText()) ? ProxyProvider.Proxy.SOCKS5 : ProxyProvider.Proxy.HTTP)
-                .host(proxy.path("server").asText()).port(proxy.path("port").asInt());
-            if (proxy.has("username")) configured.username(proxy.path("username").asText()).password(ignored -> proxy.path("password").asText());
+            var configured = spec.type("socks5".equals(proxy.path("type").asString("")) ? ProxyProvider.Proxy.SOCKS5 : ProxyProvider.Proxy.HTTP)
+                .host(proxy.path("server").asString("")).port(proxy.path("port").asInt(0));
+            if (proxy.has("username")) configured.username(proxy.path("username").asString("")).password(ignored -> proxy.path("password").asString(""));
             configured.connectTimeoutMillis(10000);
         });
         if (!proxy.path("tls").asBoolean(false)) return routed;
-        String host = proxy.path("server").asText();
-        int port = proxy.path("port").asInt();
+        String host = proxy.path("server").asString("");
+        int port = proxy.path("port").asInt(0);
         // Reactor Netty adds the proxy handler (and the HTTP codec it uses for CONNECT) first; the TLS to the proxy has
         // to sit in front of both, and the TLS to the target (if any) behind them.
         return routed.doOnChannelInit((observer, channel, remote) -> {
@@ -107,11 +107,11 @@ public class ChannelRoutes {
 
     /** The proxy as a URL for the TLS component, which makes the connection to the target itself. */
     static String url(ObjectNode proxy) {
-        boolean socks = "socks5".equals(proxy.path("type").asText());
+        boolean socks = "socks5".equals(proxy.path("type").asString(""));
         String credentials = proxy.has("username")
-            ? encode(proxy.path("username").asText()) + ":" + encode(proxy.path("password").asText("")) + "@" : "";
+            ? encode(proxy.path("username").asString("")) + ":" + encode(proxy.path("password").asString("")) + "@" : "";
         // socks5h: the proxy resolves the target name, as it does when this application connects.
-        return (socks ? "socks5h://" : proxy.path("tls").asBoolean(false) ? "https://" : "http://") + credentials + proxy.path("server").asText() + ":" + proxy.path("port").asInt();
+        return (socks ? "socks5h://" : proxy.path("tls").asBoolean(false) ? "https://" : "http://") + credentials + proxy.path("server").asString("") + ":" + proxy.path("port").asInt(0);
     }
 
     private static String encode(String value) { return URLEncoder.encode(value, StandardCharsets.UTF_8).replace("+", "%20"); }

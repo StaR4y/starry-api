@@ -2,12 +2,12 @@ package tech.starryapi.proxy;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import tech.starryapi.model.DefaultModelCatalogProvider;
 import tech.starryapi.model.ModelCatalogProvider;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 class ProxyModelServiceTest {
 
@@ -18,10 +18,10 @@ class ProxyModelServiceTest {
     void exposesOfficialHiddenAndPresetModels() {
         JsonNode response = objectMapper.valueToTree(modelCatalog.modelList(123L));
         JsonNode data = response.path("data");
-        List<String> ids = data.findValuesAsText("id");
+        List<String> ids = data.findValuesAsString("id");
 
         assertThat(response.path("models")).hasSize(data.size());
-        assertThat(response.path("models").get(0).path("id").asText()).isEqualTo(data.get(0).path("id").asText());
+        assertThat(response.path("models").get(0).path("id").asString("")).isEqualTo(data.get(0).path("id").asString(""));
         assertThat(ids)
             .hasSizeGreaterThanOrEqualTo(142)
             .contains(
@@ -76,19 +76,19 @@ class ProxyModelServiceTest {
                 "google/gemini-2.5-pro",
                 "google/gemini-3.7-flash"
             );
-        assertThat(model(data, "auto").path("owned_by").asText()).isEqualTo("anthropic");
-        assertThat(model(data, "auto").path("description").asText()).isEqualTo("Auto select best model");
-        assertThat(model(data, "simple-task").path("supportedInputTypes").get(0).asText()).isEqualTo("TEXT");
-        assertThat(model(data, "simple-task").path("maxOutputTokens").asInt()).isEqualTo(4096);
-        assertThat(model(data, "openai/gpt-5.5").path("owned_by").asText()).isEqualTo("starryapi");
-        assertThat(model(data, "openai/gpt-5.5").path("provider").asText()).isEqualTo("OpenAI");
-        assertThat(model(data, "gpt-6").path("family").asText()).isEqualTo("GPT-6");
-        assertThat(model(data, "openai/gpt-5.5").path("family").asText()).isEqualTo("GPT-5");
-        assertThat(model(data, "openai/gpt-5.5").path("targetModelId").asText()).isEqualTo("claude-sonnet-4.5");
-        assertThat(model(data, "google/gemini-3.5-flash").path("provider").asText()).isEqualTo("Google");
-        assertThat(model(data, "google/gemini-3.5-flash").path("family").asText()).isEqualTo("Gemini 3.5");
-        assertThat(model(data, "anthropic/claude-sonnet-4-5").path("provider").asText()).isEqualTo("Anthropic");
-        assertThat(model(data, "anthropic/claude-sonnet-4-5").path("family").asText()).isEqualTo("Claude 4");
+        assertThat(model(data, "auto").path("owned_by").asString("")).isEqualTo("anthropic");
+        assertThat(model(data, "auto").path("description").asString("")).isEqualTo("Auto select best model");
+        assertThat(model(data, "simple-task").path("supportedInputTypes").get(0).asString("")).isEqualTo("TEXT");
+        assertThat(model(data, "simple-task").path("maxOutputTokens").asInt(0)).isEqualTo(4096);
+        assertThat(model(data, "openai/gpt-5.5").path("owned_by").asString("")).isEqualTo("starryapi");
+        assertThat(model(data, "openai/gpt-5.5").path("provider").asString("")).isEqualTo("OpenAI");
+        assertThat(model(data, "gpt-6").path("family").asString("")).isEqualTo("GPT-6");
+        assertThat(model(data, "openai/gpt-5.5").path("family").asString("")).isEqualTo("GPT-5");
+        assertThat(model(data, "openai/gpt-5.5").path("targetModelId").asString("")).isEqualTo("claude-sonnet-4.5");
+        assertThat(model(data, "google/gemini-3.5-flash").path("provider").asString("")).isEqualTo("Google");
+        assertThat(model(data, "google/gemini-3.5-flash").path("family").asString("")).isEqualTo("Gemini 3.5");
+        assertThat(model(data, "anthropic/claude-sonnet-4-5").path("provider").asString("")).isEqualTo("Anthropic");
+        assertThat(model(data, "anthropic/claude-sonnet-4-5").path("family").asString("")).isEqualTo("Claude 4");
     }
 
     @Test
@@ -143,7 +143,7 @@ class ProxyModelServiceTest {
 
     private JsonNode model(JsonNode data, String id) {
         for (JsonNode item : data) {
-            if (id.equals(item.path("id").asText())) {
+            if (id.equals(item.path("id").asString(""))) {
                 return item;
             }
         }

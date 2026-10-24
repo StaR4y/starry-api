@@ -1,7 +1,5 @@
 package tech.starryapi.account;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -11,11 +9,14 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.common.Hashing;
+import tech.starryapi.config.JacksonConfig;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 @Component
 public class AccountImportParser {
 
-    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final ObjectMapper OBJECT_MAPPER = JacksonConfig.newMapper();
 
     public AccountDtos.ImportAccountsRequest parse(JsonNode body) {
         if (body == null || body.isMissingNode() || body.isNull()) {
@@ -328,7 +329,7 @@ public class AccountImportParser {
         if (value.isMissingNode() || value.isNull()) {
             return null;
         }
-        return value.isTextual() ? clean(value.asText()) : clean(value.asText(null));
+        return value.isString() ? clean(value.asString("")) : clean(value.asString(null));
     }
 
     private Long firstLong(JsonNode... nodes) {
@@ -337,11 +338,11 @@ public class AccountImportParser {
                 continue;
             }
             if (node.canConvertToLong()) {
-                return node.asLong();
+                return node.asLong(0L);
             }
-            if (node.isTextual()) {
+            if (node.isString()) {
                 try {
-                    return Long.parseLong(node.asText().trim());
+                    return Long.parseLong(node.asString("").trim());
                 } catch (NumberFormatException ignored) {
                     // Ignore malformed optional quota fields.
                 }
@@ -373,11 +374,11 @@ public class AccountImportParser {
                 continue;
             }
             if (value.canConvertToInt()) {
-                return value.asInt();
+                return value.asInt(0);
             }
-            if (value.isTextual()) {
+            if (value.isString()) {
                 try {
-                    return Integer.parseInt(value.asText().trim());
+                    return Integer.parseInt(value.asString("").trim());
                 } catch (NumberFormatException ignored) {
                     // Ignore malformed optional integer fields.
                 }
@@ -407,9 +408,9 @@ public class AccountImportParser {
         }
         try {
             if (node.canConvertToLong()) {
-                return epochInstant(node.asLong());
+                return epochInstant(node.asLong(0L));
             }
-            String value = node.isTextual() ? clean(node.asText()) : clean(node.asText(null));
+            String value = node.isString() ? clean(node.asString("")) : clean(node.asString(null));
             if (value == null) {
                 return null;
             }
@@ -432,10 +433,10 @@ public class AccountImportParser {
             return null;
         }
         if (node.isBoolean()) {
-            return node.asBoolean();
+            return node.asBoolean(false);
         }
-        if (node.isTextual()) {
-            return Boolean.parseBoolean(node.asText());
+        if (node.isString()) {
+            return Boolean.parseBoolean(node.asString(""));
         }
         return null;
     }

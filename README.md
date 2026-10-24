@@ -41,7 +41,7 @@ OpenAI · Anthropic · DeepSeek · Kiro(AWS) · 其他 OpenAI 兼容站点
 - **完整的管理控制台**：仪表盘、请求日志、用户、兑换码、在线充值、工单、使用文档、模型目录与价格倍率、外观定制，中英文界面。
 - **数据安全**：Root 专属的「数据管理」（备份 / 导出 / 恢复），所有高危操作要二次验证。
 - **可扩展**：全信任的插件机制，示例见 [插件开发](docs/PLUGINS.md)。
-- **技术栈**：Java 25、Spring WebFlux、R2DBC、PostgreSQL 17、Flyway、Vue 3，控制台内嵌在同一个 jar 里。
+- **技术栈**：Java 25、Spring Boot 4（WebFlux、Jackson 3）、R2DBC、PostgreSQL 17、Flyway、Vue 3，控制台内嵌在同一个 jar 里。
 
 ## 5 分钟快速开始
 

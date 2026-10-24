@@ -2,7 +2,6 @@ package tech.starryapi.ticket;
 
 import static org.assertj.core.api.Assertions.*;
 import static org.mockito.Mockito.*;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 import org.springframework.core.io.buffer.DataBufferUtils;
@@ -16,6 +15,7 @@ import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 import tech.starryapi.common.AdminAuth;
 import tech.starryapi.common.ApiException;
+import tools.jackson.databind.ObjectMapper;
 
 class TicketRequestFilterTest {
     @Test void unauthenticatedRequestIsRejectedBeforeReadingMultipartBody() {
@@ -25,7 +25,7 @@ class TicketRequestFilterTest {
             read.set(true); return Flux.empty();
         })));
         when(auth.verify(exchange)).thenThrow(new ApiException(HttpStatus.UNAUTHORIZED, "ADMIN_UNAUTHORIZED", "Login required"));
-        var filter = new TicketRequestFilter(auth, new ObjectMapper().findAndRegisterModules());
+        var filter = new TicketRequestFilter(auth, new ObjectMapper());
         filter.filter(exchange, e -> { throw new AssertionError("Unauthorized request reached controller"); }).block();
         assertThat(read).isFalse();
         assertThat(exchange.getResponse().getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
@@ -38,7 +38,7 @@ class TicketRequestFilterTest {
         var filter = new TicketRequestFilter(auth, new ObjectMapper());
         StepVerifier.create(filter.filter(exchange, e -> e.getRequest().getBody().doOnNext(DataBufferUtils::release).then()))
             .expectErrorSatisfies(error -> assertThat(error).isInstanceOfSatisfying(ResponseStatusException.class,
-                e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.PAYLOAD_TOO_LARGE))).verify();
+                e -> assertThat(e.getStatusCode()).isEqualTo(HttpStatus.CONTENT_TOO_LARGE))).verify();
     }
     @Test void unrelatedRoutesAreNotIntercepted() {
         var auth = mock(AdminAuth.class);

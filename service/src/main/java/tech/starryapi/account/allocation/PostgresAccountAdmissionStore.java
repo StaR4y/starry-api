@@ -1,7 +1,5 @@
 package tech.starryapi.account.allocation;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.r2dbc.spi.Row;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -11,6 +9,8 @@ import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.stereotype.Repository;
 import reactor.core.publisher.Mono;
 import tech.starryapi.common.ApiException;
+import tools.jackson.core.JacksonException;
+import tools.jackson.databind.ObjectMapper;
 
 @Repository
 public class PostgresAccountAdmissionStore implements AccountAdmissionStore {
@@ -143,7 +143,7 @@ public class PostgresAccountAdmissionStore implements AccountAdmissionStore {
     private String evidenceJson(AdmissionResult result) {
         try {
             return objectMapper.writeValueAsString(result.evidence());
-        } catch (JsonProcessingException error) {
+        } catch (JacksonException error) {
             throw new IllegalArgumentException("Admission evidence is not JSON serializable", error);
         }
     }

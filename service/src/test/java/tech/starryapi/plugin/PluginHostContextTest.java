@@ -112,6 +112,6 @@ class PluginHostContextTest {
         when(store.security()).thenReturn(Mono.just(new PluginStore.SecurityState(enabled, null, null, null,
             null, null, null, null, false, 0, null)));
         return new PluginHostContext(new PluginStore.Installed("test-plugin", "1", "", "", "", 1, false, "{}", Instant.now()),
-            host, store, new PluginLogs(), Path.of("."), URI.create("http://127.0.0.1:" + port + "/"), new com.fasterxml.jackson.databind.ObjectMapper());
+            host, store, new PluginLogs(), Path.of("."), URI.create("http://127.0.0.1:" + port + "/"), new tools.jackson.databind.ObjectMapper());
     }
 }

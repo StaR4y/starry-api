@@ -1,6 +1,5 @@
 package tech.starryapi.admin;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -49,6 +48,7 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 import tech.starryapi.common.ApiException;
+import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class DataTransferService {
@@ -1089,7 +1089,7 @@ public class DataTransferService {
                 total += read;
                 if (total > limit) {
                     throw new ApiException(
-                        HttpStatus.PAYLOAD_TOO_LARGE,
+                        HttpStatus.CONTENT_TOO_LARGE,
                         "DATA_IMPORT_FILE_TOO_LARGE",
                         "PostgreSQL dump inside the backup exceeds the configured limit"
                     );
@@ -1101,7 +1101,7 @@ public class DataTransferService {
 
     private void validateImportSize(Path file, String message) throws IOException {
         if (Files.size(file) > maxImportBytes) {
-            throw new ApiException(HttpStatus.PAYLOAD_TOO_LARGE, "DATA_IMPORT_FILE_TOO_LARGE", message);
+            throw new ApiException(HttpStatus.CONTENT_TOO_LARGE, "DATA_IMPORT_FILE_TOO_LARGE", message);
         }
     }
 

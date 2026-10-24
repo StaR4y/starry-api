@@ -1,6 +1,6 @@
 package tech.starryapi.platform.core;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import tools.jackson.databind.JsonNode;
 
 public record PlatformToolUse(
     String id,

@@ -1,8 +1,8 @@
 package tech.starryapi.proxy;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.regex.Pattern;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 final class SessionIdentifiers {
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -11,13 +11,13 @@ final class SessionIdentifiers {
     private SessionIdentifiers() {}
 
     static String anthropic(JsonNode metadata) {
-        String explicit = metadata.path("session_id").asText("");
+        String explicit = metadata.path("session_id").asString("");
         if (!explicit.isBlank() && explicit.length() <= 256) return explicit;
-        String userId = metadata.path("user_id").asText("");
+        String userId = metadata.path("user_id").asString("");
         if (userId.length() > 4096) return null;
         try {
             JsonNode value = JSON.readTree(userId);
-            String session = value == null ? "" : value.path("session_id").asText("");
+            String session = value == null ? "" : value.path("session_id").asString("");
             if (!session.isBlank() && session.length() <= 256) return session;
         } catch (Exception ignored) {
             // Older Claude Code clients encode session metadata in a structured user_id string.

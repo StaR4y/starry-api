@@ -1,6 +1,5 @@
 package tech.starryapi.account;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
@@ -20,6 +19,7 @@ import tech.starryapi.account.allocation.AccountAllocationCategory;
 import tech.starryapi.admin.SystemSettingEntity;
 import tech.starryapi.admin.SystemSettingRepository;
 import tech.starryapi.common.ApiException;
+import tools.jackson.databind.ObjectMapper;
 
 /**
  * Administrator-managed routing limits for new accounts, one JSON system setting per category. The account-creation

@@ -1,6 +1,5 @@
 package tech.starryapi.admin;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
@@ -44,6 +43,7 @@ import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.common.Hashing;
+import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class DataManagementSecurityService {

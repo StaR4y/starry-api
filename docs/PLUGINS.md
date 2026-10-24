@@ -171,7 +171,7 @@ SDK 1.1 的 Gradle 模块布局：旧的 `api` 模块现为 `service-api`（Java
 
 `settings.gradle` 会在**与 `starry-api` 同级的目录里存在**时，自动把可选插件项目（`../whale-whidget-plugin`、`../dynamic-island-plugin`）包含进构建。
 
-**兼容性**：已经编译好的 SDK 1.0 插件在更新后的宿主上仍然可用。现有的上下文方法和 `Starry-Plugin-Api: 1` 清单不变，新的接口方法都有默认实现；使用新方法的插件需要 SDK 1.1 的宿主。`sdkVersion()` 和 `capabilities()` 描述的是当前上下文，**不是** Maven 构件版本。
+**兼容性**：已经编译好的 SDK 1.0 插件在更新后的宿主上仍然可用。现有的上下文方法和 `Starry-Plugin-Api: 1` 清单不变，新的接口方法都有默认实现；使用新方法的插件需要 SDK 1.1 的宿主。`sdkVersion()` 和 `capabilities()` 描述的是当前上下文，**不是** Maven 构件版本。宿主升级到 Spring Boot 4 / Jackson 3（2026-10）后，已发布的插件无需重新编译（dynamic-island 0.1.8、whale-widget 1.1.1 已实测）。SDK 只暴露 Reactor 类型；宿主内部的 Jackson 已换成 3.x（`tools.jackson`），插件处理 JSON 请用 SDK 的 `PluginJson` 或自带依赖，不要依赖宿主类路径上的 `com.fasterxml.jackson`。
 
 **依赖规则**：
 

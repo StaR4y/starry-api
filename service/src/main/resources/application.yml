@@ -43,9 +43,12 @@ spring:
     connect-retries: ${FLYWAY_CONNECT_RETRIES:10}
     clean-disabled: true
   jackson:
+    # Responses omit null properties (and null map values), as they always have.
     default-property-inclusion: non_null
-  codec:
-    max-in-memory-size: ${SPRING_CODEC_MAX_IN_MEMORY_SIZE:16MB}
+    # Everything else that departs from Jackson 3's defaults is in tech.starryapi.config.JacksonConfig.
+  http:
+    codecs:
+      max-in-memory-size: ${SPRING_CODEC_MAX_IN_MEMORY_SIZE:16MB}
   webflux:
     multipart:
       max-in-memory-size: 256KB
@@ -55,6 +58,10 @@ spring:
 
 management:
   endpoints:
+    # Boot 4 serializes endpoint JSON with a private Jackson 3 mapper that sorts properties alphabetically; use the
+    # application's mapper so /actuator/health keeps the {"status":...,"groups":...} layout probes already read.
+    jackson:
+      isolated-json-mapper: false
     web:
       exposure:
         include: health,info,metrics,prometheus

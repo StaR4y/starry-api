@@ -2,7 +2,6 @@ package tech.starryapi.plugin;
 
 import static org.assertj.core.api.Assertions.*;
 import static org.mockito.Mockito.*;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.netty.buffer.Unpooled;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -30,6 +29,7 @@ import tech.starryapi.admin.AdminUserRepository;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.config.ProxyProperties;
 import tech.starryapi.plugin.sdk.PluginHttpEvent;
+import tools.jackson.databind.ObjectMapper;
 
 @Timeout(15)
 class PluginHttpStreamTest {

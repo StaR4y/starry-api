@@ -6,8 +6,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -17,12 +15,14 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
-import org.springframework.web.reactive.function.client.WebClient;
 import tech.starryapi.account.AccountPlatforms;
 import tech.starryapi.account.AccountTokenRefreshService;
 import tech.starryapi.account.ProxyAccountEntity;
+import tech.starryapi.config.ProductionWebClients;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import reactor.core.publisher.Mono;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 class OpenAiUpstreamClientTest {
 
@@ -51,7 +51,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -95,7 +95,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -129,24 +129,24 @@ class OpenAiUpstreamClientTest {
             assertThat(result).isNotNull();
             assertThat(result.content()).isEqualTo("OK");
             JsonNode body = objectMapper.readTree(requestBody.get());
-            assertThat(body.path("instructions").asText()).isEqualTo("Use short replies.");
-            assertThat(body.path("service_tier").asText()).isEqualTo("priority");
+            assertThat(body.path("instructions").asString("")).isEqualTo("Use short replies.");
+            assertThat(body.path("service_tier").asString("")).isEqualTo("priority");
             JsonNode input = body.path("input");
             assertThat(input.size()).isEqualTo(5);
-            assertThat(input.path(0).path("role").asText()).isEqualTo("user");
-            assertThat(input.path(0).path("content").path(0).path("type").asText()).isEqualTo("input_text");
-            assertThat(input.path(1).path("role").asText()).isEqualTo("assistant");
-            assertThat(input.path(1).path("content").path(0).path("type").asText()).isEqualTo("output_text");
-            assertThat(input.path(1).path("content").path(0).path("text").asText()).isEqualTo("answer");
-            assertThat(input.path(2).path("type").asText()).isEqualTo("function_call");
-            assertThat(input.path(2).path("call_id").asText()).isEqualTo("call_1");
-            assertThat(input.path(2).path("name").asText()).isEqualTo("Bash");
-            assertThat(input.path(2).path("arguments").asText()).isEqualTo("{\"command\":\"pwd\"}");
-            assertThat(input.path(3).path("type").asText()).isEqualTo("function_call_output");
-            assertThat(input.path(3).path("call_id").asText()).isEqualTo("call_1");
-            assertThat(input.path(3).path("output").asText()).isEqualTo("/tmp/project");
-            assertThat(input.path(4).path("role").asText()).isEqualTo("user");
-            assertThat(input.path(4).path("content").path(0).path("type").asText()).isEqualTo("input_text");
+            assertThat(input.path(0).path("role").asString("")).isEqualTo("user");
+            assertThat(input.path(0).path("content").path(0).path("type").asString("")).isEqualTo("input_text");
+            assertThat(input.path(1).path("role").asString("")).isEqualTo("assistant");
+            assertThat(input.path(1).path("content").path(0).path("type").asString("")).isEqualTo("output_text");
+            assertThat(input.path(1).path("content").path(0).path("text").asString("")).isEqualTo("answer");
+            assertThat(input.path(2).path("type").asString("")).isEqualTo("function_call");
+            assertThat(input.path(2).path("call_id").asString("")).isEqualTo("call_1");
+            assertThat(input.path(2).path("name").asString("")).isEqualTo("Bash");
+            assertThat(input.path(2).path("arguments").asString("")).isEqualTo("{\"command\":\"pwd\"}");
+            assertThat(input.path(3).path("type").asString("")).isEqualTo("function_call_output");
+            assertThat(input.path(3).path("call_id").asString("")).isEqualTo("call_1");
+            assertThat(input.path(3).path("output").asString("")).isEqualTo("/tmp/project");
+            assertThat(input.path(4).path("role").asString("")).isEqualTo("user");
+            assertThat(input.path(4).path("content").path(0).path("type").asString("")).isEqualTo("input_text");
         } finally {
             server.stop(0);
         }
@@ -194,7 +194,7 @@ class OpenAiUpstreamClientTest {
             when(tokenRefreshService.refresh(account)).thenReturn(Mono.just(refreshed));
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 tokenRefreshService
             );
             JsonNode request = objectMapper.readTree("""
@@ -238,7 +238,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -281,22 +281,22 @@ class OpenAiUpstreamClientTest {
             assertThat(result.toolUses()).hasSize(1);
             assertThat(result.toolUses().get(0).id()).isEqualTo("call_lookup");
             assertThat(result.toolUses().get(0).name()).isEqualTo("lookup");
-            assertThat(result.toolUses().get(0).input().path("query").asText()).isEqualTo("stars");
+            assertThat(result.toolUses().get(0).input().path("query").asString("")).isEqualTo("stars");
 
             JsonNode body = objectMapper.readTree(requestBody.get());
             JsonNode tool = body.path("tools").get(0);
-            assertThat(tool.path("type").asText()).isEqualTo("function");
-            assertThat(tool.path("name").asText()).isEqualTo("lookup");
+            assertThat(tool.path("type").asString("")).isEqualTo("function");
+            assertThat(tool.path("name").asString("")).isEqualTo("lookup");
             assertThat(tool.path("function").isMissingNode()).isTrue();
-            assertThat(tool.path("parameters").path("properties").path("query").path("type").asText()).isEqualTo("string");
+            assertThat(tool.path("parameters").path("properties").path("query").path("type").asString("")).isEqualTo("string");
             JsonNode page = tool.path("parameters").path("properties").path("page");
-            assertThat(page.path("type").asText()).isEqualTo("integer");
+            assertThat(page.path("type").asString("")).isEqualTo("integer");
             assertThat(page.has("minimum")).isFalse();
             assertThat(page.has("default")).isFalse();
             assertThat(page.has("format")).isFalse();
-            assertThat(tool.path("strict").asBoolean()).isTrue();
-            assertThat(body.path("tool_choice").path("type").asText()).isEqualTo("function");
-            assertThat(body.path("tool_choice").path("name").asText()).isEqualTo("lookup");
+            assertThat(tool.path("strict").asBoolean(false)).isTrue();
+            assertThat(body.path("tool_choice").path("type").asString("")).isEqualTo("function");
+            assertThat(body.path("tool_choice").path("name").asString("")).isEqualTo("lookup");
             assertThat(body.path("parallel_tool_calls").asBoolean(true)).isFalse();
         } finally {
             server.stop(0);
@@ -341,7 +341,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -362,17 +362,17 @@ class OpenAiUpstreamClientTest {
             assertThat(result.toolUses().get(0).name()).isEqualTo("apply_patch");
             assertThat(result.toolUses().get(0).type()).isEqualTo("custom_tool_call");
             assertThat(result.toolUses().get(0).rawInput()).isEqualTo("*** Begin Patch");
-            assertThat(result.toolUses().get(0).input().path("_rawArguments").asText()).isEqualTo("*** Begin Patch");
-            assertThat(result.toolUses().get(0).rawOutputItem().path("type").asText()).isEqualTo("custom_tool_call");
-            assertThat(result.toolUses().get(0).rawOutputItem().path("input").asText()).isEqualTo("*** Begin Patch");
+            assertThat(result.toolUses().get(0).input().path("_rawArguments").asString("")).isEqualTo("*** Begin Patch");
+            assertThat(result.toolUses().get(0).rawOutputItem().path("type").asString("")).isEqualTo("custom_tool_call");
+            assertThat(result.toolUses().get(0).rawOutputItem().path("input").asString("")).isEqualTo("*** Begin Patch");
             assertThat(result.toolUses().get(0).rawOutputItem().has("arguments")).isFalse();
             JsonNode body = objectMapper.readTree(requestBody.get());
-            assertThat(body.path("tools").path(0).path("type").asText()).isEqualTo("function");
-            assertThat(body.path("tools").path(0).path("name").asText()).isEqualTo("apply_patch");
-            assertThat(body.path("tools").path(0).path("parameters").path("properties").path("patch").path("type").asText())
+            assertThat(body.path("tools").path(0).path("type").asString("")).isEqualTo("function");
+            assertThat(body.path("tools").path(0).path("name").asString("")).isEqualTo("apply_patch");
+            assertThat(body.path("tools").path(0).path("parameters").path("properties").path("patch").path("type").asString(""))
                 .isEqualTo("string");
-            assertThat(body.path("tool_choice").path("type").asText()).isEqualTo("function");
-            assertThat(body.path("tool_choice").path("name").asText()).isEqualTo("apply_patch");
+            assertThat(body.path("tool_choice").path("type").asString("")).isEqualTo("function");
+            assertThat(body.path("tool_choice").path("name").asString("")).isEqualTo("apply_patch");
         } finally {
             server.stop(0);
         }
@@ -416,7 +416,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -437,12 +437,12 @@ class OpenAiUpstreamClientTest {
             assertThat(result.toolUses().get(0).name()).isEqualTo("apply_patch");
             assertThat(result.toolUses().get(0).type()).isEqualTo("custom_tool_call");
             assertThat(result.toolUses().get(0).rawInput()).endsWith("*** End Patch\n");
-            assertThat(result.toolUses().get(0).rawOutputItem().path("input").asText()).endsWith("*** End Patch\n");
+            assertThat(result.toolUses().get(0).rawOutputItem().path("input").asString("")).endsWith("*** End Patch\n");
             JsonNode body = objectMapper.readTree(requestBody.get());
-            assertThat(body.path("tools").path(0).path("type").asText()).isEqualTo("function");
-            assertThat(body.path("tools").path(0).path("parameters").path("properties").path("patch").path("type").asText())
+            assertThat(body.path("tools").path(0).path("type").asString("")).isEqualTo("function");
+            assertThat(body.path("tools").path(0).path("parameters").path("properties").path("patch").path("type").asString(""))
                 .isEqualTo("string");
-            assertThat(body.path("tool_choice").path("type").asText()).isEqualTo("function");
+            assertThat(body.path("tool_choice").path("type").asString("")).isEqualTo("function");
         } finally {
             server.stop(0);
         }
@@ -478,7 +478,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -531,7 +531,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -549,7 +549,7 @@ class OpenAiUpstreamClientTest {
             assertThat(result.toolUses()).hasSize(1);
             assertThat(result.toolUses().get(0).rawInput()).startsWith("*** Begin Patch");
             assertThat(result.toolUses().get(0).rawInput()).endsWith("*** End Patch\n");
-            assertThat(result.toolUses().get(0).rawOutputItem().path("input").asText()).endsWith("*** End Patch\n");
+            assertThat(result.toolUses().get(0).rawOutputItem().path("input").asString("")).endsWith("*** End Patch\n");
         } finally {
             server.stop(0);
         }
@@ -579,7 +579,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -626,7 +626,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -668,20 +668,20 @@ class OpenAiUpstreamClientTest {
             assertThat(result).isNotNull();
             JsonNode body = objectMapper.readTree(requestBody.get());
             JsonNode tool = body.path("tools").get(0);
-            assertThat(tool.path("type").asText()).isEqualTo("function");
-            assertThat(tool.path("name").asText()).isEqualTo("edit_file");
+            assertThat(tool.path("type").asString("")).isEqualTo("function");
+            assertThat(tool.path("name").asString("")).isEqualTo("edit_file");
             assertThat(tool.path("function").isMissingNode()).isTrue();
             JsonNode page = tool.path("parameters").path("properties").path("page");
-            assertThat(page.path("type").asText()).isEqualTo("integer");
+            assertThat(page.path("type").asString("")).isEqualTo("integer");
             assertThat(page.has("minimum")).isFalse();
             assertThat(page.has("default")).isFalse();
             assertThat(page.has("format")).isFalse();
             assertThat(tool.path("parameters").path("required")).hasSize(1);
-            assertThat(tool.path("parameters").path("required").get(0).asText()).isEqualTo("page");
-            assertThat(tool.path("strict").asBoolean()).isTrue();
-            assertThat(body.path("input").path(1).path("arguments").asText()).isEqualTo("{\"patch\":\"*** Begin Patch\"}");
-            assertThat(body.path("input").path(2).path("output").asText()).isEqualTo("Done");
-            assertThat(body.path("tool_choice").path("name").asText()).isEqualTo("edit_file");
+            assertThat(tool.path("parameters").path("required").get(0).asString("")).isEqualTo("page");
+            assertThat(tool.path("strict").asBoolean(false)).isTrue();
+            assertThat(body.path("input").path(1).path("arguments").asString("")).isEqualTo("{\"patch\":\"*** Begin Patch\"}");
+            assertThat(body.path("input").path(2).path("output").asString("")).isEqualTo("Done");
+            assertThat(body.path("tool_choice").path("name").asString("")).isEqualTo("edit_file");
             assertThat(body.path("parallel_tool_calls").asBoolean(true)).isFalse();
         } finally {
             server.stop(0);
@@ -717,7 +717,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -737,9 +737,9 @@ class OpenAiUpstreamClientTest {
 
             assertThat(result).isNotNull();
             JsonNode body = objectMapper.readTree(requestBody.get());
-            assertThat(body.path("prompt_cache_key").asText()).isEqualTo("session-1");
-            assertThat(body.path("reasoning").path("effort").asText()).isEqualTo("high");
-            assertThat(body.path("include").path(0).asText()).isEqualTo("reasoning.encrypted_content");
+            assertThat(body.path("prompt_cache_key").asString("")).isEqualTo("session-1");
+            assertThat(body.path("reasoning").path("effort").asString("")).isEqualTo("high");
+            assertThat(body.path("include").path(0).asString("")).isEqualTo("reasoning.encrypted_content");
             assertThat(body.has("metadata")).isFalse();
             assertThat(body.has("max_output_tokens")).isFalse();
             assertThat(body.path("store").asBoolean(true)).isFalse();
@@ -771,7 +771,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = openAiAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -798,13 +798,13 @@ class OpenAiUpstreamClientTest {
             assertThat(result.content()).isEqualTo("OK");
             JsonNode body = objectMapper.readTree(requestBody.get());
             JsonNode content = body.path("input").path(0).path("content");
-            assertThat(content.path(0).path("type").asText()).isEqualTo("input_text");
-            assertThat(content.path(1).path("type").asText()).isEqualTo("input_image");
-            assertThat(content.path(1).path("image_url").asText()).isEqualTo("data:image/png;base64,abc");
-            assertThat(content.path(1).path("detail").asText()).isEqualTo("high");
-            assertThat(content.path(2).path("type").asText()).isEqualTo("input_file");
-            assertThat(content.path(2).path("file_id").asText()).isEqualTo("file_123");
-            assertThat(content.path(2).path("filename").asText()).isEqualTo("notes.txt");
+            assertThat(content.path(0).path("type").asString("")).isEqualTo("input_text");
+            assertThat(content.path(1).path("type").asString("")).isEqualTo("input_image");
+            assertThat(content.path(1).path("image_url").asString("")).isEqualTo("data:image/png;base64,abc");
+            assertThat(content.path(1).path("detail").asString("")).isEqualTo("high");
+            assertThat(content.path(2).path("type").asString("")).isEqualTo("input_file");
+            assertThat(content.path(2).path("file_id").asString("")).isEqualTo("file_123");
+            assertThat(content.path(2).path("filename").asString("")).isEqualTo("notes.txt");
         } finally {
             server.stop(0);
         }
@@ -829,7 +829,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = openAiAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -854,12 +854,12 @@ class OpenAiUpstreamClientTest {
             assertThat(result).isNotNull();
             JsonNode body = objectMapper.readTree(requestBody.get());
             JsonNode tool = body.path("tools").path(0);
-            assertThat(tool.path("type").asText()).isEqualTo("function");
-            assertThat(tool.path("name").asText()).isEqualTo("apply_patch");
-            assertThat(tool.path("description").asText()).isEqualTo("Apply a raw unified patch");
-            assertThat(tool.path("parameters").path("properties").path("patch").path("type").asText()).isEqualTo("string");
-            assertThat(body.path("tool_choice").path("type").asText()).isEqualTo("function");
-            assertThat(body.path("tool_choice").path("name").asText()).isEqualTo("apply_patch");
+            assertThat(tool.path("type").asString("")).isEqualTo("function");
+            assertThat(tool.path("name").asString("")).isEqualTo("apply_patch");
+            assertThat(tool.path("description").asString("")).isEqualTo("Apply a raw unified patch");
+            assertThat(tool.path("parameters").path("properties").path("patch").path("type").asString("")).isEqualTo("string");
+            assertThat(body.path("tool_choice").path("type").asString("")).isEqualTo("function");
+            assertThat(body.path("tool_choice").path("name").asString("")).isEqualTo("apply_patch");
         } finally {
             server.stop(0);
         }
@@ -884,7 +884,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = openAiCompatibleAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -899,7 +899,7 @@ class OpenAiUpstreamClientTest {
 
             assertThat(result).isNotNull();
             JsonNode body = objectMapper.readTree(requestBody.get());
-            assertThat(body.path("model").asText()).isEqualTo("openai/gpt-5.5");
+            assertThat(body.path("model").asString("")).isEqualTo("openai/gpt-5.5");
         } finally {
             server.stop(0);
         }
@@ -912,7 +912,7 @@ class OpenAiUpstreamClientTest {
         HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/v1/responses", exchange -> {
             JsonNode body = objectMapper.readTree(exchange.getRequestBody().readAllBytes());
-            String model = body.path("model").asText();
+            String model = body.path("model").asString("");
             requestedModels.add(model);
             int attempt = attempts.incrementAndGet();
             if (attempt == 1) {
@@ -938,7 +938,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = openAiCompatibleAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -978,7 +978,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = openAiCompatibleAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -994,7 +994,7 @@ class OpenAiUpstreamClientTest {
             assertThat(result).isNotNull();
             assertThat(result.content()).isEqualTo("OK");
             JsonNode body = objectMapper.readTree(requestBody.get());
-            assertThat(body.path("model").asText()).isEqualTo("deepseek-chat");
+            assertThat(body.path("model").asString("")).isEqualTo("deepseek-chat");
         } finally {
             server.stop(0);
         }
@@ -1035,7 +1035,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = deepSeekAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -1051,7 +1051,7 @@ class OpenAiUpstreamClientTest {
             assertThat(result).isNotNull();
             assertThat(result.content()).isEqualTo("OK");
             JsonNode body = objectMapper.readTree(requestBody.get());
-            assertThat(body.path("model").asText()).isEqualTo("deepseek-v4-flash");
+            assertThat(body.path("model").asString("")).isEqualTo("deepseek-v4-flash");
             assertThat(result.usage().inputTokens()).isEqualTo(110);
             assertThat(result.usage().cacheReadTokens()).isEqualTo(100);
             assertThat(result.usage().outputTokens()).isEqualTo(20);
@@ -1059,7 +1059,7 @@ class OpenAiUpstreamClientTest {
             assertThat(result.toolUses()).singleElement().satisfies(toolUse -> {
                 assertThat(toolUse.id()).isEqualTo("call_lookup");
                 assertThat(toolUse.name()).isEqualTo("lookup");
-                assertThat(toolUse.input().path("query").asText()).isEqualTo("stars");
+                assertThat(toolUse.input().path("query").asString("")).isEqualTo("stars");
             });
         } finally {
             server.stop(0);
@@ -1108,7 +1108,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = deepSeekAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -1126,7 +1126,7 @@ class OpenAiUpstreamClientTest {
             assertThat(result.toolUses()).singleElement().satisfies(toolUse -> {
                 assertThat(toolUse.id()).isEqualTo("call_lookup");
                 assertThat(toolUse.name()).isEqualTo("lookup");
-                assertThat(toolUse.input().path("query").asText()).isEqualTo("stars");
+                assertThat(toolUse.input().path("query").asString("")).isEqualTo("stars");
             });
             assertThat(result.usage().inputTokens()).isEqualTo(110);
             assertThat(result.usage().outputTokens()).isEqualTo(20);
@@ -1171,7 +1171,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = deepSeekAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -1197,7 +1197,7 @@ class OpenAiUpstreamClientTest {
     void deepSeekProRejectsUnsupportedResponsesApiBeforeNetworkCall() throws Exception {
         OpenAiUpstreamClient client = new OpenAiUpstreamClient(
             objectMapper,
-            WebClient.builder().build(),
+            ProductionWebClients.builder().build(),
             mock(AccountTokenRefreshService.class)
         );
         ProxyAccountEntity account = deepSeekAccount("http://127.0.0.1:1");
@@ -1231,7 +1231,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = openAiCompatibleAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -1285,7 +1285,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = openAiCompatibleAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -1327,7 +1327,7 @@ class OpenAiUpstreamClientTest {
         try {
             OpenAiUpstreamClient client = new OpenAiUpstreamClient(
                 objectMapper,
-                WebClient.builder().build(),
+                ProductionWebClients.builder().build(),
                 mock(AccountTokenRefreshService.class)
             );
             ProxyAccountEntity account = codexAccount("http://127.0.0.1:" + server.getAddress().getPort());
@@ -1354,16 +1354,16 @@ class OpenAiUpstreamClientTest {
             assertThat(result).isNotNull();
             assertThat(result.content()).isEqualTo("OK");
             JsonNode body = objectMapper.readTree(requestBody.get());
-            assertThat(body.path("instructions").asText()).isEqualTo("Use vision.");
+            assertThat(body.path("instructions").asString("")).isEqualTo("Use vision.");
             JsonNode content = body.path("input").path(0).path("content");
-            assertThat(content.path(0).path("type").asText()).isEqualTo("input_text");
-            assertThat(content.path(0).path("text").asText()).isEqualTo("describe");
-            assertThat(content.path(1).path("type").asText()).isEqualTo("input_image");
-            assertThat(content.path(1).path("image_url").asText()).isEqualTo("data:image/png;base64,abc");
-            assertThat(content.path(1).path("detail").asText()).isEqualTo("high");
-            assertThat(content.path(2).path("type").asText()).isEqualTo("input_file");
-            assertThat(content.path(2).path("file_id").asText()).isEqualTo("file_123");
-            assertThat(content.path(2).path("filename").asText()).isEqualTo("notes.txt");
+            assertThat(content.path(0).path("type").asString("")).isEqualTo("input_text");
+            assertThat(content.path(0).path("text").asString("")).isEqualTo("describe");
+            assertThat(content.path(1).path("type").asString("")).isEqualTo("input_image");
+            assertThat(content.path(1).path("image_url").asString("")).isEqualTo("data:image/png;base64,abc");
+            assertThat(content.path(1).path("detail").asString("")).isEqualTo("high");
+            assertThat(content.path(2).path("type").asString("")).isEqualTo("input_file");
+            assertThat(content.path(2).path("file_id").asString("")).isEqualTo("file_123");
+            assertThat(content.path(2).path("filename").asString("")).isEqualTo("notes.txt");
         } finally {
             server.stop(0);
         }

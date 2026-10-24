@@ -236,7 +236,7 @@ OpenAI、Codex、Anthropic、DeepSeek 的凭据，作为上游账号记录**保�
 | `STARRY_BASE_COOLDOWN` | `60s` | 可恢复账号错误的基础冷却时间 |
 | `STARRY_QUOTA_RESET` | `1h` | 上游报告额度耗尽、而账号没有明确重置时间时，分配的默认总额度重置时长 |
 | `STARRY_PROBABILISTIC_RETRY` | `0.1` | 提前探测一个冷却中账号的概率 |
-| `STARRY_MAX_REQUEST_BODY_BYTES` | `10485760` | 单个入站请求体最大字节数（10 MiB） |
+| `STARRY_MAX_REQUEST_BODY_BYTES` | `10485760` | 单个入站请求体最大字节数（10 MiB）。JSON 请求体另外最多嵌套 500 层（Jackson 3 的上限），更深的返回 `400` |
 | `STARRY_PROXY_MAX_INFLIGHT_BODY_BYTES` | 自动（最大堆的 1/4） | **同时在处理的**代理请求体字节数总上限。一个请求会被缓冲、解析成 JSON 树并保留到上游返回，慢模型可能是几分钟，所以并发 × 请求体大小会直接吃堆。超过上限的新请求立刻得到 `503 PROXY_OVERLOADED` 和 `Retry-After: 1`（SDK 会自动重试），而不是把整个服务拖到内存溢出。单个比整个上限还大的请求在没有其他请求时仍会放行 |
 | `STARRY_RESPONSES_STATE_MAX_TOTAL_BYTES` | `67108864`（64 MiB） | `/v1/responses` 为支持 `previous_response_id` 而保存的对话历史，**压缩后**占用的总字节上限，超出按最旧优先淘汰 |
 | `STARRY_RESPONSES_STATE_MAX_ENTRY_BYTES` | `8388608`（8 MiB） | 单条历史压缩后的上限，更大的不保存 |

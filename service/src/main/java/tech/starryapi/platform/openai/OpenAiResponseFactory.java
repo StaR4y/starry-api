@@ -1,9 +1,5 @@
 package tech.starryapi.platform.openai;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -14,6 +10,10 @@ import reactor.core.publisher.Flux;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.core.PlatformToolUse;
 import tech.starryapi.platform.core.PlatformUsage;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
 
 @Component
 public class OpenAiResponseFactory {
@@ -142,7 +142,7 @@ public class OpenAiResponseFactory {
 
     public Flux<ServerSentEvent<String>> responsesStreamEvents(ObjectNode response) {
         ArrayNode output = (ArrayNode) response.path("output");
-        String responseId = response.path("id").asText();
+        String responseId = response.path("id").asString("");
         List<ServerSentEvent<String>> events = new ArrayList<>();
         int sequence = 0;
 
@@ -162,16 +162,16 @@ public class OpenAiResponseFactory {
                 outputIndex,
                 sequence++
             )));
-            if ("message".equals(item.path("type").asText())) {
+            if ("message".equals(item.path("type").asString(""))) {
                 appendMessageStreamEvents(events, responseId, item, outputIndex, sequence);
                 sequence += messageEventCount(item);
-            } else if ("reasoning".equals(item.path("type").asText())) {
+            } else if ("reasoning".equals(item.path("type").asString(""))) {
                 appendReasoningStreamEvents(events, responseId, item, outputIndex, sequence);
                 sequence += reasoningEventCount(item);
-            } else if ("function_call".equals(item.path("type").asText())) {
+            } else if ("function_call".equals(item.path("type").asString(""))) {
                 appendFunctionCallStreamEvents(events, responseId, item, outputIndex, sequence);
                 sequence += functionCallEventCount(item);
-            } else if ("custom_tool_call".equals(item.path("type").asText())) {
+            } else if ("custom_tool_call".equals(item.path("type").asString(""))) {
                 appendCustomToolCallStreamEvents(events, responseId, item, outputIndex, sequence);
                 sequence += customToolCallEventCount(item);
             }
@@ -229,7 +229,7 @@ public class OpenAiResponseFactory {
         }
         for (int contentIndex = 0; contentIndex < content.size(); contentIndex++) {
             JsonNode part = content.get(contentIndex);
-            if (!"output_text".equals(part.path("type").asText())) {
+            if (!"output_text".equals(part.path("type").asString(""))) {
                 continue;
             }
             events.add(responseSse(contentPartEvent(
@@ -241,7 +241,7 @@ public class OpenAiResponseFactory {
                 contentIndex,
                 sequence++
             )));
-            String text = part.path("text").asText("");
+            String text = part.path("text").asString("");
             if (!text.isEmpty()) {
                 events.add(responseSse(outputTextDeltaEvent(responseId, item, outputIndex, contentIndex, text, sequence++)));
             }
@@ -265,10 +265,10 @@ public class OpenAiResponseFactory {
         }
         int count = 0;
         for (JsonNode part : content) {
-            if (!"output_text".equals(part.path("type").asText())) {
+            if (!"output_text".equals(part.path("type").asString(""))) {
                 continue;
             }
-            count += part.path("text").asText("").isEmpty() ? 3 : 4;
+            count += part.path("text").asString("").isEmpty() ? 3 : 4;
         }
         return count;
     }
@@ -314,7 +314,7 @@ public class OpenAiResponseFactory {
         int outputIndex,
         int sequence
     ) {
-        String arguments = item.path("arguments").asText("");
+        String arguments = item.path("arguments").asString("");
         if (!arguments.isEmpty()) {
             events.add(responseSse(functionCallArgumentsEvent(
                 "response.function_call_arguments.delta",
@@ -338,7 +338,7 @@ public class OpenAiResponseFactory {
     }
 
     private int functionCallEventCount(JsonNode item) {
-        return item.path("arguments").asText("").isEmpty() ? 1 : 2;
+        return item.path("arguments").asString("").isEmpty() ? 1 : 2;
     }
 
     private ObjectNode responseEvent(String type, int sequence) {
@@ -350,7 +350,7 @@ public class OpenAiResponseFactory {
 
     private ServerSentEvent<String> responseSse(ObjectNode event) {
         return ServerSentEvent.<String>builder(event.toString())
-            .event(event.path("type").asText())
+            .event(event.path("type").asString(""))
             .build();
     }
 
@@ -370,15 +370,15 @@ public class OpenAiResponseFactory {
         if (!item.isObject()) {
             return item;
         }
-        ObjectNode copy = item.deepCopy();
-        String type = copy.path("type").asText("");
+        ObjectNode copy = (ObjectNode) item.deepCopy();
+        String type = copy.path("type").asString("");
         if ("function_call".equals(type)) {
             copy.put("arguments", "");
         } else if ("custom_tool_call".equals(type)) {
             copy.put("input", "");
         } else if ("reasoning".equals(type) && copy.path("content").isArray()) {
             for (JsonNode part : copy.path("content")) {
-                if (part.isObject() && "reasoning_text".equals(part.path("type").asText())) {
+                if (part.isObject() && "reasoning_text".equals(part.path("type").asString(""))) {
                     ((ObjectNode) part).put("text", "");
                 }
             }
@@ -397,7 +397,7 @@ public class OpenAiResponseFactory {
     ) {
         ObjectNode event = responseEvent(type, sequence);
         event.put("response_id", responseId);
-        event.put("item_id", item.path("id").asText());
+        event.put("item_id", item.path("id").asString(""));
         event.put("output_index", outputIndex);
         event.put("content_index", contentIndex);
         event.set("part", part.deepCopy());
@@ -414,7 +414,7 @@ public class OpenAiResponseFactory {
     ) {
         ObjectNode event = responseEvent("response.output_text.delta", sequence);
         event.put("response_id", responseId);
-        event.put("item_id", item.path("id").asText());
+        event.put("item_id", item.path("id").asString(""));
         event.put("output_index", outputIndex);
         event.put("content_index", contentIndex);
         event.put("delta", text);
@@ -431,7 +431,7 @@ public class OpenAiResponseFactory {
     ) {
         ObjectNode event = responseEvent("response.output_text.done", sequence);
         event.put("response_id", responseId);
-        event.put("item_id", item.path("id").asText());
+        event.put("item_id", item.path("id").asString(""));
         event.put("output_index", outputIndex);
         event.put("content_index", contentIndex);
         event.put("text", text);
@@ -449,7 +449,7 @@ public class OpenAiResponseFactory {
     ) {
         ObjectNode event = responseEvent(type, sequence);
         event.put("response_id", responseId);
-        event.put("item_id", item.path("id").asText());
+        event.put("item_id", item.path("id").asString(""));
         event.put("output_index", outputIndex);
         event.put("content_index", 0);
         event.put(valueName, text);
@@ -467,8 +467,8 @@ public class OpenAiResponseFactory {
     ) {
         ObjectNode event = responseEvent(type, sequence);
         event.put("response_id", responseId);
-        event.put("item_id", item.path("id").asText());
-        event.put("name", item.path("name").asText());
+        event.put("item_id", item.path("id").asString(""));
+        event.put("name", item.path("name").asString(""));
         event.put("output_index", outputIndex);
         event.put(valueName, arguments);
         return event;
@@ -530,7 +530,7 @@ public class OpenAiResponseFactory {
 
     private ObjectNode responseToolCallItem(PlatformToolUse toolUse) {
         ObjectNode call = toolUse.rawOutputItem() != null && toolUse.rawOutputItem().isObject()
-            ? toolUse.rawOutputItem().deepCopy()
+            ? (ObjectNode) toolUse.rawOutputItem().deepCopy()
             : objectMapper.createObjectNode();
         String type = toolUse.type() == null || toolUse.type().isBlank() ? "function_call" : toolUse.type();
         call.put("type", type);
@@ -565,10 +565,10 @@ public class OpenAiResponseFactory {
         }
         StringBuilder builder = new StringBuilder();
         for (JsonNode part : content) {
-            if (!"reasoning_text".equals(part.path("type").asText())) {
+            if (!"reasoning_text".equals(part.path("type").asString(""))) {
                 continue;
             }
-            String text = part.path("text").asText("");
+            String text = part.path("text").asString("");
             if (!text.isBlank()) {
                 if (builder.length() > 0) {
                     builder.append('\n');
@@ -586,7 +586,7 @@ public class OpenAiResponseFactory {
         int outputIndex,
         int sequence
     ) {
-        String input = item.path("input").asText("");
+        String input = item.path("input").asString("");
         if (!input.isEmpty()) {
             events.add(responseSse(customToolCallInputEvent(
                 "response.custom_tool_call_input.delta",
@@ -610,7 +610,7 @@ public class OpenAiResponseFactory {
     }
 
     private int customToolCallEventCount(JsonNode item) {
-        return item.path("input").asText("").isEmpty() ? 1 : 2;
+        return item.path("input").asString("").isEmpty() ? 1 : 2;
     }
 
     private ObjectNode customToolCallInputEvent(
@@ -624,9 +624,9 @@ public class OpenAiResponseFactory {
     ) {
         ObjectNode event = responseEvent(type, sequence);
         event.put("response_id", responseId);
-        event.put("item_id", item.path("id").asText());
-        event.put("call_id", item.path("call_id").asText());
-        event.put("name", item.path("name").asText());
+        event.put("item_id", item.path("id").asString(""));
+        event.put("call_id", item.path("call_id").asString(""));
+        event.put("name", item.path("name").asString(""));
         event.put("output_index", outputIndex);
         event.put(valueName, input);
         return event;
@@ -637,7 +637,7 @@ public class OpenAiResponseFactory {
             return;
         }
         JsonNode current = node.path(field);
-        if (current.isMissingNode() || current.isNull() || current.asText("").isBlank()) {
+        if (current.isMissingNode() || current.isNull() || current.asString("").isBlank()) {
             node.put(field, value);
         }
     }
@@ -653,7 +653,7 @@ public class OpenAiResponseFactory {
             return "{}";
         }
         if (input.has("_rawArguments")) {
-            String raw = input.path("_rawArguments").asText("");
+            String raw = input.path("_rawArguments").asString("");
             return applyPatchCustomTool ? normalizeApplyPatchInput(raw) : raw;
         }
         String raw = input.toString();

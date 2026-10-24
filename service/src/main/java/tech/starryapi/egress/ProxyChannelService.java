@@ -1,7 +1,5 @@
 package tech.starryapi.egress;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
 import java.util.*;
 import org.springframework.dao.DuplicateKeyException;
@@ -13,6 +11,8 @@ import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.egress.ClashNodes.Node;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 @Service
 public class ProxyChannelService {
@@ -171,21 +171,20 @@ public class ProxyChannelService {
             var nodes = mapper.createArrayNode();
             if (doc.has("proxies")) {
                 if (!doc.path("proxies").isArray()) return Mono.error(ClashNodes.invalid("Expected a proxies array"));
-                nodes.addAll((com.fasterxml.jackson.databind.node.ArrayNode) doc.path("proxies"));
+                nodes.addAll((tools.jackson.databind.node.ArrayNode) doc.path("proxies"));
             }
             JsonNode providers = doc.path("proxy-providers");
             if (!providers.isMissingNode() && (!providers.isObject() || providers.size() > 16))
                 return Mono.error(ClashNodes.invalid("At most 16 HTTP or inline proxy providers are supported"));
-            List<JsonNode> sources = new ArrayList<>();
-            providers.elements().forEachRemaining(sources::add);
+            List<JsonNode> sources = new ArrayList<>(providers.values());
             return reactor.core.publisher.Flux.fromIterable(sources).concatMap(provider -> {
-                String type = provider.path("type").asText();
+                String type = provider.path("type").asString("");
                 if (type.equals("inline")) return Mono.just(provider.path("payload"));
                 if (!type.equals("http")) return Mono.error(ClashNodes.invalid("Only HTTP and inline proxy providers are supported"));
-                return fetcher.fetch(provider.path("url").asText()).map(parser::document).map(data -> data.path("proxies"));
+                return fetcher.fetch(provider.path("url").asString("")).map(parser::document).map(data -> data.path("proxies"));
             }).doOnNext(list -> {
                 if (!list.isArray()) throw ClashNodes.invalid("Provider contains no proxies array");
-                nodes.addAll((com.fasterxml.jackson.databind.node.ArrayNode) list);
+                nodes.addAll((tools.jackson.databind.node.ArrayNode) list);
                 if (nodes.size() > 500 || nodes.toString().length() > 4 * 1024 * 1024)
                     throw ClashNodes.invalid("Subscription exceeds 500 nodes or 4 MiB of node configuration");
             }).then(Mono.fromSupplier(() -> mapper.createObjectNode().set("proxies", nodes)));
@@ -205,7 +204,7 @@ public class ProxyChannelService {
                     nodes.add(node);
                     if (node.issue() != null) issues.add(node.name() + ": " + node.issue());
                 } catch (ApiException error) {
-                    String name = raw.path("name").asText("Unnamed node").replaceAll("[\\p{Cntrl}]", "");
+                    String name = raw.path("name").asString("Unnamed node").replaceAll("[\\p{Cntrl}]", "");
                     issues.add(name.substring(0, Math.min(100, name.length())) + ": unsupported node format");
                 }
             });
@@ -337,7 +336,7 @@ public class ProxyChannelService {
                 .timeout(properties.getProbeTimeout())
                 .switchIfEmpty(Mono.error(new EgressException(EgressFailure.PROBE_INVALID_RESPONSE)))
                 .map(body -> {
-                    String ip = body.path("ip").asText("");
+                    String ip = body.path("ip").asString("");
                     if (!io.netty.util.NetUtil.isValidIpV4Address(ip) && !io.netty.util.NetUtil.isValidIpV6Address(ip))
                         throw new EgressException(EgressFailure.PROBE_INVALID_RESPONSE);
                     return new ProxyChannelDtos.ProbeResult(true, ip,

@@ -1,8 +1,5 @@
 package tech.starryapi.egress;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -19,6 +16,9 @@ import org.springframework.web.reactive.function.client.WebClient;
 import org.springframework.web.reactive.function.client.WebClientResponseException;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 @Component
 public class MihomoRuntime {
@@ -246,7 +246,7 @@ public class MihomoRuntime {
     /** The node a rejection names, if it names one of these rows; the proxies are in row order. */
     private Route rejectedNode(String body, List<Route> rows) {
         try {
-            var matcher = REJECTED_PROXY.matcher(mapper.readTree(body).path("message").asText(""));
+            var matcher = REJECTED_PROXY.matcher(mapper.readTree(body).path("message").asString(""));
             if (!matcher.find()) return null;
             int index = Integer.parseInt(matcher.group(1));
             return index < rows.size() ? rows.get(index) : null;

@@ -3,12 +3,12 @@ package tech.starryapi.account;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Base64;
 import org.junit.jupiter.api.Test;
 import tech.starryapi.common.ApiException;
+import tools.jackson.databind.ObjectMapper;
 
 class AccountImportParserTest {
 

@@ -2,7 +2,6 @@ package tech.starryapi.postgresql;
 
 import static org.assertj.core.api.Assertions.*;
 import static org.mockito.Mockito.*;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
@@ -26,6 +25,7 @@ import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.config.ProxyProperties;
 import tech.starryapi.egress.*;
+import tools.jackson.databind.ObjectMapper;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE, properties = {
     "spring.main.lazy-initialization=true", "spring.jmx.enabled=false", "starry.stats.aggregation-enabled=false"

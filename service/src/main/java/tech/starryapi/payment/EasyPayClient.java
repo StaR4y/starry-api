@@ -1,7 +1,5 @@
 package tech.starryapi.payment;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.net.URLEncoder;
@@ -19,6 +17,8 @@ import org.springframework.web.reactive.function.BodyInserters;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 import tech.starryapi.payment.PaymentSettingsService.PaymentConfig;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 
 @Component
 public class EasyPayClient {
@@ -120,12 +120,12 @@ public class EasyPayClient {
             JsonNode root = objectMapper.readTree(body);
             int code = root.path("code").asInt(0);
             if (code != 1) {
-                throw new IllegalStateException("EasyPay create payment failed: " + root.path("msg").asText(body));
+                throw new IllegalStateException("EasyPay create payment failed: " + root.path("msg").asString(body));
             }
             return new CreatePaymentResult(
-                firstNonBlank(root.path("payurl").asText(null), root.path("payurl2").asText(null)),
-                blankToNull(root.path("qrcode").asText(null)),
-                blankToNull(root.path("trade_no").asText(null))
+                firstNonBlank(root.path("payurl").asString(null), root.path("payurl2").asString(null)),
+                blankToNull(root.path("qrcode").asString(null)),
+                blankToNull(root.path("trade_no").asString(null))
             );
         } catch (Exception error) {
             throw new IllegalStateException("EasyPay create payment response is invalid: " + error.getMessage(), error);
@@ -139,11 +139,11 @@ public class EasyPayClient {
             if (code != 1) {
                 return new OrderQueryResult(expectedOutTradeNo, null, BigDecimal.ZERO, false, body);
             }
-            String outTradeNo = firstNonBlank(root.path("out_trade_no").asText(null), expectedOutTradeNo);
-            String status = firstNonBlank(root.path("trade_status").asText(null), root.path("status").asText(null));
+            String outTradeNo = firstNonBlank(root.path("out_trade_no").asString(null), expectedOutTradeNo);
+            String status = firstNonBlank(root.path("trade_status").asString(null), root.path("status").asString(null));
             boolean paid = "1".equals(status) || TRADE_SUCCESS.equalsIgnoreCase(status);
-            BigDecimal amount = parseAmount(firstNonBlank(root.path("money").asText(null), root.path("amount").asText(null)));
-            return new OrderQueryResult(outTradeNo, blankToNull(root.path("trade_no").asText(null)), amount, paid, body);
+            BigDecimal amount = parseAmount(firstNonBlank(root.path("money").asString(null), root.path("amount").asString(null)));
+            return new OrderQueryResult(outTradeNo, blankToNull(root.path("trade_no").asString(null)), amount, paid, body);
         } catch (Exception error) {
             throw new IllegalStateException("EasyPay order query response is invalid: " + error.getMessage(), error);
         }
