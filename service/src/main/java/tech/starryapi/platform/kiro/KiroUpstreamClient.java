@@ -8,6 +8,7 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import org.springframework.http.HttpHeaders;
@@ -60,16 +61,25 @@ public class KiroUpstreamClient {
     }
 
     public Mono<PlatformCompletionResult> complete(ProxyAccountEntity account, ObjectNode payload, String model) {
-        return Mono.defer(() -> callFirstEndpoint(account, payload, model))
-            .timeout(properties.getRequestTimeout())
-            .retryWhen(Retry.backoff(properties.getMaxRetries(), Duration.ofMillis(250))
-                .maxBackoff(Duration.ofSeconds(2))
-                .filter(error -> error instanceof UpstreamException upstream && upstream.isRecoverable()
-                    // Quota exhaustion (402) and rate limits (429) do not clear within a few hundred milliseconds. Retrying
-                    // the same account just multiplies the load on an account that is already refusing us; the proxy
-                    // moves on to another account instead.
-                    && !isRateOrQuotaFailure(upstream))
-                .onRetryExhaustedThrow((spec, signal) -> signal.failure()));
+        return Mono.defer(() -> {
+            // Every endpoint and every retry parses its own response, and the error that is finally thrown belongs to the
+            // last of them. This flag outlives the attempts so that it can still say an earlier one produced output.
+            AtomicBoolean generationStarted = new AtomicBoolean();
+            return Mono.defer(() -> callFirstEndpoint(account, payload, model, generationStarted))
+                .timeout(properties.getRequestTimeout())
+                .retryWhen(Retry.backoff(properties.getMaxRetries(), Duration.ofMillis(250))
+                    .maxBackoff(Duration.ofSeconds(2))
+                    .filter(error -> error instanceof UpstreamException upstream && upstream.isRecoverable()
+                        // Quota exhaustion (402) and rate limits (429) do not clear within a few hundred milliseconds. Retrying
+                        // the same account just multiplies the load on an account that is already refusing us; the proxy
+                        // moves on to another account instead.
+                        && !isRateOrQuotaFailure(upstream))
+                    .onRetryExhaustedThrow((spec, signal) -> signal.failure()))
+                .onErrorMap(
+                    error -> generationStarted.get() && error instanceof UpstreamException upstream,
+                    error -> ((UpstreamException) error).withGenerationStarted()
+                );
+        });
     }
 
     public void invalidateAllCaches() {
@@ -77,12 +87,17 @@ public class KiroUpstreamClient {
         codeWhispererModelCache.invalidateAll();
     }
 
-    private Mono<PlatformCompletionResult> callFirstEndpoint(ProxyAccountEntity account, ObjectNode payload, String model) {
+    private Mono<PlatformCompletionResult> callFirstEndpoint(
+        ProxyAccountEntity account,
+        ObjectNode payload,
+        String model,
+        AtomicBoolean generationStarted
+    ) {
         List<ProxyProperties.Endpoint> endpoints = sortedEndpoints();
         if (endpoints.isEmpty()) {
             return Mono.error(new UpstreamException(503, "No upstream endpoints configured", true));
         }
-        return callEndpoint(account, payload, model, endpoints, 0, false);
+        return callEndpoint(account, payload, model, endpoints, 0, false, generationStarted);
     }
 
     private Mono<PlatformCompletionResult> callEndpoint(
@@ -91,7 +106,8 @@ public class KiroUpstreamClient {
         String model,
         List<ProxyProperties.Endpoint> endpoints,
         int index,
-        boolean refreshed
+        boolean refreshed,
+        AtomicBoolean generationStarted
     ) {
         ProxyProperties.Endpoint endpoint = endpoints.get(index);
         return preparePayloadForEndpoint(account, payload, endpoint)
@@ -104,14 +120,20 @@ public class KiroUpstreamClient {
                     .bodyValue(requestBytes)
                     .exchangeToMono(response -> handleResponse(response, requestBytes, model, endpoint));
             })
+            // Noted before the fallbacks below, which replace or swallow this error.
+            .doOnError(error -> {
+                if (error instanceof UpstreamException upstream && upstream.isGenerationStarted()) {
+                    generationStarted.set(true);
+                }
+            })
             .onErrorResume(error -> {
                 if (!refreshed && isInvalidBearerToken(error) && tokenRefreshService.canRefresh(account)) {
                     return tokenRefreshService.refresh(account)
-                        .flatMap(refreshedAccount -> callFirstEndpoint(refreshedAccount, payload, model, true))
+                        .flatMap(refreshedAccount -> callFirstEndpoint(refreshedAccount, payload, model, true, generationStarted))
                         .onErrorResume(refreshError -> Mono.error(error));
                 }
                 if (index + 1 < endpoints.size() && isRecoverable(error)) {
-                    return callEndpoint(account, payload, model, endpoints, index + 1, refreshed);
+                    return callEndpoint(account, payload, model, endpoints, index + 1, refreshed, generationStarted);
                 }
                 return Mono.error(error);
             });
@@ -121,13 +143,14 @@ public class KiroUpstreamClient {
         ProxyAccountEntity account,
         ObjectNode payload,
         String model,
-        boolean refreshed
+        boolean refreshed,
+        AtomicBoolean generationStarted
     ) {
         List<ProxyProperties.Endpoint> endpoints = sortedEndpoints();
         if (endpoints.isEmpty()) {
             return Mono.error(new UpstreamException(503, "No upstream endpoints configured", true));
         }
-        return callEndpoint(account, payload, model, endpoints, 0, refreshed);
+        return callEndpoint(account, payload, model, endpoints, 0, refreshed, generationStarted);
     }
 
     private Mono<ObjectNode> preparePayloadForEndpoint(

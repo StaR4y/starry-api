@@ -34,7 +34,7 @@ public class GeminiResponseFactory {
             functionCall.put("name", toolUse.name());
             functionCall.set("args", toolUse.input());
         }
-        candidate.put("finishReason", "STOP");
+        candidate.put("finishReason", finishReason(result));
         candidate.put("index", 0);
 
         ObjectNode usage = root.putObject("usageMetadata");
@@ -44,5 +44,16 @@ public class GeminiResponseFactory {
         root.put("modelVersion", model);
         root.put("responseId", "gen-" + UUID.randomUUID());
         return root;
+    }
+
+    /** Only a non-null MAX_TOKENS or CONTENT_FILTER changes the answer; every other result keeps STOP. */
+    private String finishReason(PlatformCompletionResult result) {
+        if (result.stopReason() == PlatformCompletionResult.StopReason.MAX_TOKENS) {
+            return "MAX_TOKENS";
+        }
+        if (result.stopReason() == PlatformCompletionResult.StopReason.CONTENT_FILTER) {
+            return "SAFETY";
+        }
+        return "STOP";
     }
 }

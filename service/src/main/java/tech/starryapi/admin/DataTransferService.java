@@ -64,7 +64,7 @@ public class DataTransferService {
     private static final String POSTGRES_OWNER_ROLE = "starry_api_owner";
     private static final String POSTGRES_RUNTIME_ROLE = "starry_api_runtime";
     private static final String POSTGRES_RUNTIME_LOGIN = "starry_api";
-    private static final String REQUIRED_FLYWAY_VERSION = "28";
+    private static final String REQUIRED_FLYWAY_VERSION = "29";
     private static final List<FlywayMigration> REQUIRED_FLYWAY_MIGRATIONS = List.of(
         new FlywayMigration("1", "V1__postgresql_baseline.sql", "SQL", null, true),
         new FlywayMigration("2", "V2__model_family_account_pool_circuits.sql", "SQL", null, true),
@@ -93,7 +93,8 @@ public class DataTransferService {
         new FlywayMigration("25", "V25__account_egress_proxy_channels.sql", "SQL", null, true),
         new FlywayMigration("26", "V26__account_egress_policy.sql", "SQL", null, true),
         new FlywayMigration("27", "V27__egress_listener_ports_and_probe_results.sql", "SQL", null, true),
-        new FlywayMigration("28", "V28__account_allocation_defaults.sql", "SQL", null, true)
+        new FlywayMigration("28", "V28__account_allocation_defaults.sql", "SQL", null, true),
+        new FlywayMigration("29", "V29__source_tiers.sql", "SQL", null, true)
     );
     private static final long DATA_TRANSFER_LOCK_KEY = 0x5354415252594150L;
     private static final int COPY_BUFFER_BYTES = 64 * 1024;
@@ -113,7 +114,9 @@ public class DataTransferService {
         "subscription_ledger", "billing_reservations", "billing_reservation_allocations", "billing_review_actions",
         "support_tickets", "support_ticket_messages", "support_ticket_attachments",
         "announcements", "announcement_recipients",
-        "documentation_pages", "documentation_attachments", "proxy_subscriptions", "proxy_channels"
+        "documentation_pages", "documentation_attachments", "proxy_subscriptions", "proxy_channels",
+        "source_tier_vendors", "source_tiers", "source_tier_members", "source_tier_member_models",
+        "source_tier_pair_gates"
     );
     private static final Set<String> GLOBAL_TOC_TYPES = Set.of(
         "ENCODING",

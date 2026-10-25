@@ -13,6 +13,7 @@ import tech.starryapi.model.ModelPricingService;
 import tech.starryapi.payment.PaymentSettingsService;
 import tech.starryapi.platform.kiro.KiroUpstreamClient;
 import tech.starryapi.proxy.RateLimiterService;
+import tech.starryapi.sourcetier.SourceTierRegistry;
 
 @Component
 public class RuntimeStateInvalidator {
@@ -30,6 +31,7 @@ public class RuntimeStateInvalidator {
     private final KiroUpstreamClient kiroUpstreamClient;
     private final RateLimiterService rateLimiterService;
     private final AppearanceSettingsService appearanceSettingsService;
+    private final SourceTierRegistry sourceTierRegistry;
 
     public RuntimeStateInvalidator(
         AdminSessionService adminSessionService,
@@ -42,7 +44,8 @@ public class RuntimeStateInvalidator {
         ModelPricingService modelPricingService,
         KiroUpstreamClient kiroUpstreamClient,
         RateLimiterService rateLimiterService,
-        AppearanceSettingsService appearanceSettingsService
+        AppearanceSettingsService appearanceSettingsService,
+        SourceTierRegistry sourceTierRegistry
     ) {
         this.adminSessionService = adminSessionService;
         this.accountPoolService = accountPoolService;
@@ -55,6 +58,7 @@ public class RuntimeStateInvalidator {
         this.kiroUpstreamClient = kiroUpstreamClient;
         this.rateLimiterService = rateLimiterService;
         this.appearanceSettingsService = appearanceSettingsService;
+        this.sourceTierRegistry = sourceTierRegistry;
     }
 
     public void invalidateAll() {
@@ -69,13 +73,17 @@ public class RuntimeStateInvalidator {
         rateLimiterService.invalidateAllBuckets();
         appearanceSettingsService.invalidateCache();
 
+        // The tier snapshot is read again but not dropped first, unlike the caches above: dropping it would make every
+        // request refuse until the read ends, and a read that fails would leave the request path without a configuration.
+        // See SourceTierRegistry.
         Mono.whenDelayError(
             accountPoolService.refreshCache(),
             accountPoolPolicyService.refreshSettings(),
             modelMappingService.refresh(),
             modelCatalogManagementService.refresh(),
             modelPricingService.refresh(),
-            appearanceSettingsService.settings()
+            appearanceSettingsService.settings(),
+            sourceTierRegistry.refresh()
         )
             .subscribe(null, error -> log.warn("Failed to warm runtime caches after database state invalidation", error));
     }
@@ -93,6 +101,10 @@ public class RuntimeStateInvalidator {
         if (accountPoolPolicyService.managesSetting(settingKey)) {
             accountPoolPolicyService.refreshSettings()
                 .subscribe(null, error -> log.warn("Failed to refresh account pool policy settings", error));
+        }
+        if (sourceTierRegistry.managesSetting(settingKey)) {
+            sourceTierRegistry.refresh()
+                .subscribe(null, error -> log.warn("Failed to refresh source tier configuration", error));
         }
     }
 }

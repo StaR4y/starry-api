@@ -336,6 +336,115 @@ class OpenAiResponseFactoryTest {
         assertThat(toolDone.path("item").path("input").asString("")).endsWith("*** End Patch\n");
     }
 
+    @Test
+    void endTurnAndToolUseKeepTheFinishReasonDerivedFromTheToolUses() throws Exception {
+        PlatformCompletionResult text = withStopReason(textResult(), PlatformCompletionResult.StopReason.END_TURN);
+        PlatformCompletionResult tools = withStopReason(toolResult(), PlatformCompletionResult.StopReason.TOOL_USE);
+        PlatformCompletionResult inconsistent = withStopReason(toolResult(), PlatformCompletionResult.StopReason.END_TURN);
+
+        assertThat(chatFinishReason(text)).isEqualTo("stop");
+        assertThat(chatFinishReason(tools)).isEqualTo("tool_calls");
+        assertThat(chatFinishReason(inconsistent)).isEqualTo("tool_calls");
+        assertThat(chatStreamFinishReason(text)).isEqualTo("stop");
+        assertThat(chatStreamFinishReason(tools)).isEqualTo("tool_calls");
+        for (PlatformCompletionResult result : List.of(text, tools, inconsistent)) {
+            JsonNode response = factory.responses("gpt-5", result, null);
+            assertThat(response.path("status").asString("")).isEqualTo("completed");
+            assertThat(response.path("incomplete_details").isNull()).isTrue();
+        }
+    }
+
+    @Test
+    void maxTokensIsRenderedAsLengthAndAnIncompleteResponse() throws Exception {
+        PlatformCompletionResult text = withStopReason(textResult(), PlatformCompletionResult.StopReason.MAX_TOKENS);
+        PlatformCompletionResult tools = withStopReason(toolResult(), PlatformCompletionResult.StopReason.MAX_TOKENS);
+
+        assertThat(chatFinishReason(text)).isEqualTo("length");
+        assertThat(chatFinishReason(tools)).isEqualTo("length");
+        assertThat(chatStreamFinishReason(text)).isEqualTo("length");
+        assertThat(chatStreamFinishReason(tools)).isEqualTo("length");
+        assertThat(factory.chatCompletion("gpt-5", tools).path("choices").get(0).path("message").path("tool_calls"))
+            .hasSize(1);
+
+        JsonNode response = factory.responses("gpt-5", text, null);
+        assertThat(response.path("status").asString("")).isEqualTo("incomplete");
+        assertThat(response.path("incomplete_details").path("reason").asString("")).isEqualTo("max_output_tokens");
+        assertThat(response.path("output_text").asString("")).isEqualTo("Hello");
+        assertThat(factory.responses("gpt-5", tools, null).path("status").asString("")).isEqualTo("incomplete");
+    }
+
+    @Test
+    void contentFilterIsRenderedAsContentFilter() throws Exception {
+        PlatformCompletionResult text = withStopReason(textResult(), PlatformCompletionResult.StopReason.CONTENT_FILTER);
+
+        assertThat(chatFinishReason(text)).isEqualTo("content_filter");
+        assertThat(chatStreamFinishReason(text)).isEqualTo("content_filter");
+        assertThat(chatStreamFinishReason(withStopReason(toolResult(), PlatformCompletionResult.StopReason.CONTENT_FILTER)))
+            .isEqualTo("content_filter");
+
+        JsonNode response = factory.responses("gpt-5", text, null);
+        assertThat(response.path("status").asString("")).isEqualTo("incomplete");
+        assertThat(response.path("incomplete_details").path("reason").asString("")).isEqualTo("content_filter");
+    }
+
+    @Test
+    void anIncompleteResponseEndsItsStreamWithResponseIncomplete() {
+        PlatformCompletionResult truncated = withStopReason(textResult(), PlatformCompletionResult.StopReason.MAX_TOKENS);
+
+        List<ServerSentEvent<String>> events = factory.responsesStreamEvents("gpt-5", truncated, null)
+            .collectList()
+            .block();
+
+        assertThat(events).isNotNull();
+        assertThat(events).extracting(ServerSentEvent::event)
+            .contains("response.created", "response.incomplete")
+            .doesNotContain("response.completed");
+        assertThat(events.get(events.size() - 1).data()).isEqualTo("[DONE]");
+        List<JsonNode> json = jsonEvents(events);
+        JsonNode created = json.get(0);
+        assertThat(created.path("type").asString("")).isEqualTo("response.created");
+        assertThat(created.path("response").path("status").asString("")).isEqualTo("in_progress");
+        assertThat(created.path("response").path("incomplete_details").isNull()).isTrue();
+        JsonNode terminal = json.get(json.size() - 1);
+        assertThat(terminal.path("type").asString("")).isEqualTo("response.incomplete");
+        assertThat(terminal.path("response").path("status").asString("")).isEqualTo("incomplete");
+        assertThat(terminal.path("response").path("incomplete_details").path("reason").asString(""))
+            .isEqualTo("max_output_tokens");
+    }
+
+    private PlatformCompletionResult textResult() {
+        return new PlatformCompletionResult("Hello", new PlatformUsage(10, 2, java.math.BigDecimal.ZERO, 0, 0, 0));
+    }
+
+    private PlatformCompletionResult reasoningResult() {
+        return new PlatformCompletionResult(
+            "Hello", "thought about it", List.of(), new PlatformUsage(10, 2, java.math.BigDecimal.ZERO, 0, 0, 1)
+        );
+    }
+
+    private PlatformCompletionResult toolResult() throws Exception {
+        return new PlatformCompletionResult(
+            "",
+            List.of(new PlatformToolUse("toolu_1", "Bash", objectMapper.readTree("{\"command\":\"pwd\"}"))),
+            new PlatformUsage(10, 2, java.math.BigDecimal.ZERO, 0, 0, 0)
+        );
+    }
+
+    private PlatformCompletionResult withStopReason(PlatformCompletionResult plain, PlatformCompletionResult.StopReason stopReason) {
+        return new PlatformCompletionResult(
+            plain.content(), plain.reasoningContent(), plain.toolUses(), plain.usage(), stopReason, null, null
+        );
+    }
+
+    private String chatFinishReason(PlatformCompletionResult result) {
+        return factory.chatCompletion("gpt-5", result).path("choices").get(0).path("finish_reason").asString("");
+    }
+
+    private String chatStreamFinishReason(PlatformCompletionResult result) {
+        List<JsonNode> chunks = jsonEvents(factory.chatStreamEvents("gpt-5", result).collectList().block());
+        return chunks.get(chunks.size() - 1).path("choices").get(0).path("finish_reason").asString("");
+    }
+
     private List<JsonNode> jsonEvents(List<ServerSentEvent<String>> events) {
         return events.stream()
             .map(ServerSentEvent::data)

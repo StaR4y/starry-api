@@ -29,6 +29,9 @@ public class AwsEventStreamParser {
         ToolUseAccumulator toolUses = new ToolUseAccumulator();
         UsageAccumulator usage = new UsageAccumulator(estimateTokens(requestPayload), 0, BigDecimal.ZERO, 0, 0, 0);
         int offset = 0;
+        // Set once a frame carried content, a tool call or usage. From then on a failure no longer means "nothing was
+        // generated", which only tiered routing reads.
+        boolean generationStarted = false;
         while (offset + 16 <= bytes.length) {
             int totalLength = readInt(bytes, offset);
             int headersLength = readInt(bytes, offset + 4);
@@ -39,18 +42,18 @@ public class AwsEventStreamParser {
             int payloadEnd = offset + totalLength - 4;
             String messageType = extractHeader(bytes, offset + 12, headersLength, ":message-type");
             if ("exception".equals(messageType) || "error".equals(messageType)) {
-                throw frameError(bytes, offset, headersLength, payloadStart, payloadEnd, messageType);
+                throw frameError(bytes, offset, headersLength, payloadStart, payloadEnd, messageType, generationStarted);
             }
             String eventType = extractEventType(bytes, offset + 12, headersLength);
             if (payloadStart >= 12 && payloadStart < payloadEnd && payloadEnd <= bytes.length) {
-                parsePayload(bytes, payloadStart, payloadEnd, content, toolUses, usage, fallbackModel, eventType);
+                generationStarted |= parsePayload(bytes, payloadStart, payloadEnd, content, toolUses, usage, fallbackModel, eventType);
             }
             offset += totalLength;
         }
         if (offset > 0 && offset < bytes.length) {
             // At least one complete frame was read and then the stream stopped mid-frame. Returning what we
             // have would bill a partial answer as a success.
-            throw new UpstreamException(502, "Kiro upstream event stream was truncated", true);
+            throw new UpstreamException(502, "Kiro upstream event stream was truncated", true, null, generationStarted);
         }
         toolUses.finish();
         if (content.isEmpty()) {
@@ -76,7 +79,8 @@ public class AwsEventStreamParser {
         int headersLength,
         int payloadStart,
         int payloadEnd,
-        String messageType
+        String messageType,
+        boolean generationStarted
     ) {
         String kind = firstNonBlank(
             extractHeader(bytes, offset + 12, headersLength, ":exception-type"),
@@ -94,10 +98,10 @@ public class AwsEventStreamParser {
             default -> 500;
         };
         boolean recoverable = status >= 500 || status == 429;
-        return new UpstreamException(status, "Kiro upstream " + messageType + " " + name + ": " + detail, recoverable);
+        return new UpstreamException(status, "Kiro upstream " + messageType + " " + name + ": " + detail, recoverable, null, generationStarted);
     }
 
-    private void parsePayload(
+    private boolean parsePayload(
         byte[] bytes,
         int payloadStart,
         int payloadEnd,
@@ -110,34 +114,38 @@ public class AwsEventStreamParser {
         String payloadText = new String(bytes, payloadStart, payloadEnd - payloadStart, StandardCharsets.UTF_8);
         JsonNode json = readJsonOrNull(payloadText);
         if (json == null) {
-            return;
+            return false;
         }
-        extractContent(json, content, eventType);
-        extractToolUse(json, toolUses, eventType);
-        extractUsage(json, usage, fallbackModel, eventType);
+        // |= keeps all three extractors running on every frame.
+        boolean carried = extractContent(json, content, eventType);
+        carried |= extractToolUse(json, toolUses, eventType);
+        carried |= extractUsage(json, usage, fallbackModel, eventType);
+        return carried;
     }
 
     private void extractContent(JsonNode event, StringBuilder content) {
         extractContent(event, content, "");
     }
 
-    private void extractContent(JsonNode event, StringBuilder content, String eventType) {
+    private boolean extractContent(JsonNode event, StringBuilder content, String eventType) {
         JsonNode assistant = firstExisting(event, "assistantResponseEvent", "codeEvent");
         if (assistant == null && isEventType(eventType, "assistantResponseEvent", "codeEvent")) {
             assistant = event;
         }
         if (assistant != null && assistant.has("content")) {
             content.append(assistant.path("content").asString(""));
+            return true;
         }
+        return false;
     }
 
-    private void extractToolUse(JsonNode event, ToolUseAccumulator toolUses, String eventType) {
+    private boolean extractToolUse(JsonNode event, ToolUseAccumulator toolUses, String eventType) {
         JsonNode toolUse = firstExisting(event, "toolUseEvent");
         if (toolUse == null && isEventType(eventType, "toolUseEvent")) {
             toolUse = event;
         }
         if (toolUse == null) {
-            return;
+            return false;
         }
         String id = firstNonBlank(toolUse.path("toolUseId").asString(null), toolUse.path("id").asString(null));
         String name = firstNonBlank(toolUse.path("name").asString(null), toolUse.path("toolName").asString(null));
@@ -151,18 +159,21 @@ public class AwsEventStreamParser {
         if (toolUse.path("stop").asBoolean(false)) {
             toolUses.finish();
         }
+        return true;
     }
 
     private void extractUsage(JsonNode event, UsageAccumulator usage, String fallbackModel) {
         extractUsage(event, usage, fallbackModel, "");
     }
 
-    private void extractUsage(JsonNode event, UsageAccumulator usage, String fallbackModel, String eventType) {
+    private boolean extractUsage(JsonNode event, UsageAccumulator usage, String fallbackModel, String eventType) {
+        boolean carried = false;
         JsonNode metadata = firstExisting(event, "messageMetadataEvent", "metadataEvent");
         if (metadata == null && isEventType(eventType, "messageMetadataEvent", "metadataEvent")) {
             metadata = event;
         }
         if (metadata != null) {
+            carried = true;
             JsonNode tokenUsage = metadata.path("tokenUsage");
             if (!tokenUsage.isMissingNode()) {
                 long uncached = tokenUsage.path("uncachedInputTokens").asLong(0);
@@ -173,7 +184,7 @@ public class AwsEventStreamParser {
                 if (tokenUsage.has("outputTokens")) usage.outputTokens = tokenUsage.path("outputTokens").asLong(0);
                 usage.cacheReadTokens = cacheRead;
                 usage.cacheWriteTokens = cacheWrite;
-                return;
+                return true;
             }
             if (metadata.has("inputTokens")) usage.inputTokens = metadata.path("inputTokens").asLong(0L);
             if (metadata.has("outputTokens")) usage.outputTokens = metadata.path("outputTokens").asLong(0L);
@@ -183,17 +194,21 @@ public class AwsEventStreamParser {
             usageEvent = event;
         }
         if (usageEvent != null) {
+            carried = true;
             if (usageEvent.has("inputTokens")) usage.inputTokens = usageEvent.path("inputTokens").asLong(0L);
             if (usageEvent.has("outputTokens")) usage.outputTokens = usageEvent.path("outputTokens").asLong(0L);
         }
         JsonNode metering = event.path("meteringEvent");
+        carried |= !metering.isMissingNode() && !metering.isNull();
         if (!metering.isMissingNode() && metering.has("usage")) {
             usage.credits = usage.credits.add(metering.path("usage").decimalValue(BigDecimal.ZERO));
         }
         JsonNode contextUsage = event.path("contextUsageEvent");
+        carried |= !contextUsage.isMissingNode() && !contextUsage.isNull();
         if (!contextUsage.isMissingNode() && usage.inputTokens == 0 && contextUsage.has("contextUsagePercentage")) {
             usage.inputTokens = Math.round(contextWindow(fallbackModel) * contextUsage.path("contextUsagePercentage").asDouble(0.0) / 100.0);
         }
+        return carried;
     }
 
     private boolean isEventType(String eventType, String... candidates) {

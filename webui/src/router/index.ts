@@ -264,6 +264,12 @@ const routes: RouteRecordRaw[] = [
             meta: { title: '路由与限制' },
           },
           {
+            path: 'source-tiers',
+            name: 'settings-source-tiers',
+            component: () => import('@/views/settings/SourceTiersSettingsView.vue'),
+            meta: { title: '号源分级' },
+          },
+          {
             path: 'appearance',
             name: 'settings-appearance',
             component: () => import('@/views/settings/AppearanceSettingsView.vue'),

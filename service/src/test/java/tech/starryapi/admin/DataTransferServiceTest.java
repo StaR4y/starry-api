@@ -13,6 +13,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import tech.starryapi.common.ApiException;
@@ -167,6 +168,26 @@ class DataTransferServiceTest {
     }
 
     @Test
+    void rejectsArchiveMissingAnySourceTierTable() {
+        for (String table : List.of(
+            "source_tier_vendors", "source_tiers", "source_tier_members", "source_tier_member_models",
+            "source_tier_pair_gates"
+        )) {
+            String withoutTable = validToc("17.6", "17.6", "").lines()
+                .filter(line -> !line.contains("TABLE starry_api " + table + " "))
+                .collect(Collectors.joining("\n"));
+            assertThat(withoutTable).doesNotContain(" " + table + " ");
+
+            assertThatThrownBy(() -> DataTransferService.validateRestoreToc(withoutTable))
+                .as(table)
+                .isInstanceOfSatisfying(ApiException.class, exception -> {
+                    assertThat(exception.getCode()).isEqualTo("DATA_IMPORT_INCOMPATIBLE_ARCHIVE");
+                    assertThat(exception.getMessage()).contains("missing required Starry API tables: [" + table + "]");
+                });
+        }
+    }
+
+    @Test
     void freshClusterOwnerHasOnlyTheApplicationRoleMembershipNeededToTerminateRuntimeBackends() throws Exception {
         try (InputStream input = getClass().getResourceAsStream("/postgresql/init-test-roles.sql")) {
             assertThat(input).isNotNull();
@@ -199,7 +220,7 @@ class DataTransferServiceTest {
     }
 
     @Test
-    void requiresExactFlywayV28HistoryAndMatchingChecksumsForRestore() {
+    void requiresExactFlywayV29HistoryAndMatchingChecksumsForRestore() {
         List<DataTransferService.FlywayMigration> current = currentMigrationHistory();
 
         assertThatCode(() -> DataTransferService.validateMigrationHistory(current)).doesNotThrowAnyException();
@@ -208,19 +229,29 @@ class DataTransferServiceTest {
 
         assertThatThrownBy(() -> DataTransferService.validateMigrationHistory(current.subList(0, 9)))
             .isInstanceOf(SQLException.class)
-            .hasMessageContaining("V1-V28");
+            .hasMessageContaining("V1-V29");
+
+        // A backup taken before the tiered source pools migration cannot be restored from the console.
+        List<DataTransferService.FlywayMigration> beforeSourceTiers = current.subList(0, 28);
+        assertThat(beforeSourceTiers.get(27).version()).isEqualTo("28");
+        assertThatThrownBy(() -> DataTransferService.validateMigrationHistory(beforeSourceTiers))
+            .isInstanceOf(SQLException.class)
+            .hasMessageContaining("V1-V29");
+        assertThatThrownBy(() -> DataTransferService.verifyRestoreMigrationHistory(current, beforeSourceTiers))
+            .isInstanceOf(SQLException.class)
+            .hasMessageContaining("V1-V29");
 
         List<DataTransferService.FlywayMigration> future = new ArrayList<>(current);
         future.add(new DataTransferService.FlywayMigration(
-            "29",
-            "V29__unknown_future.sql",
+            "30",
+            "V30__unknown_future.sql",
             "SQL",
             8008,
             true
         ));
         assertThatThrownBy(() -> DataTransferService.validateMigrationHistory(future))
             .isInstanceOf(SQLException.class)
-            .hasMessageContaining("V1-V28");
+            .hasMessageContaining("V1-V29");
 
         List<DataTransferService.FlywayMigration> changedChecksum = new ArrayList<>(current);
         DataTransferService.FlywayMigration v5 = changedChecksum.get(4);
@@ -356,6 +387,11 @@ class DataTransferServiceTest {
             38; 1259 38 TABLE starry_api support_ticket_attachments starry_api_owner
             39; 1259 39 TABLE starry_api announcements starry_api_owner
             40; 1259 40 TABLE starry_api announcement_recipients starry_api_owner
+            47; 1259 47 TABLE starry_api source_tier_vendors starry_api_owner
+            48; 1259 48 TABLE starry_api source_tiers starry_api_owner
+            49; 1259 49 TABLE starry_api source_tier_members starry_api_owner
+            50; 1259 50 TABLE starry_api source_tier_member_models starry_api_owner
+            51; 1259 51 TABLE starry_api source_tier_pair_gates starry_api_owner
             %s""".formatted(databaseVersion, dumpVersion, extraEntry);
     }
 
@@ -442,7 +478,8 @@ class DataTransferServiceTest {
             new DataTransferService.FlywayMigration("25", "V25__account_egress_proxy_channels.sql", "SQL", 1025, true),
             new DataTransferService.FlywayMigration("26", "V26__account_egress_policy.sql", "SQL", 1026, true),
             new DataTransferService.FlywayMigration("27", "V27__egress_listener_ports_and_probe_results.sql", "SQL", 1027, true),
-            new DataTransferService.FlywayMigration("28", "V28__account_allocation_defaults.sql", "SQL", 1028, true)
+            new DataTransferService.FlywayMigration("28", "V28__account_allocation_defaults.sql", "SQL", 1028, true),
+            new DataTransferService.FlywayMigration("29", "V29__source_tiers.sql", "SQL", 1029, true)
         );
     }
 }

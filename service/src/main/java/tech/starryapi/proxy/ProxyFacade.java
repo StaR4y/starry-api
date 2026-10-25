@@ -58,6 +58,7 @@ import tech.starryapi.platform.openai.OpenAiResponseStateStore;
 import tech.starryapi.platform.openai.OpenAiUpstreamClient;
 import tech.starryapi.platform.upstream.UpstreamException;
 import tech.starryapi.payment.PaymentSettingsService;
+import tech.starryapi.proxy.tier.TierRuntime;
 import tech.starryapi.stats.StatsService;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.ObjectNode;
@@ -105,6 +106,7 @@ public class ProxyFacade {
     private final StatsService statsService;
     private AccountAdmissionStore admissionStore;
     private OpenAiResponseOwnerStore openAiResponseOwnerStore;
+    private TierRuntime tierRuntime;
 
     public ProxyFacade(
         ApiKeyService apiKeyService,
@@ -154,9 +156,9 @@ public class ProxyFacade {
         this.statsService = statsService;
         this.admissionStore = AccountAdmissionStore.permissive();
         this.openAiResponseOwnerStore = null;
+        this.tierRuntime = TierRuntime.disabled();
     }
 
-    @Autowired
     public ProxyFacade(
         ApiKeyService apiKeyService,
         AccountPoolService accountPoolService,
@@ -211,6 +213,68 @@ public class ProxyFacade {
         this.openAiResponseOwnerStore = openAiResponseOwnerStore;
     }
 
+    // Spring builds the facade with this one; a second constructor marked for injection fails startup.
+    @Autowired
+    public ProxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        AccountAutoSuspendService accountAutoSuspendService,
+        AccountSettingsService accountSettingsService,
+        DisabledAccountScheduledTestService disabledAccountScheduledTestService,
+        ModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroPayloadFactory payloadFactory,
+        KiroUpstreamClient upstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        OpenAiRequestAdapter openAiRequestAdapter,
+        OpenAiResponseFactory openAiResponseFactory,
+        OpenAiResponseStateStore openAiResponseStateStore,
+        AnthropicRequestAdapter anthropicRequestAdapter,
+        AnthropicResponseFactory anthropicResponseFactory,
+        AnthropicUpstreamClient anthropicUpstreamClient,
+        GeminiRequestAdapter geminiRequestAdapter,
+        GeminiResponseFactory geminiResponseFactory,
+        PaymentSettingsService paymentSettingsService,
+        ModelPricingService modelPricingService,
+        StatsService statsService,
+        AccountAdmissionStore admissionStore,
+        OpenAiResponseOwnerStore openAiResponseOwnerStore,
+        TierRuntime tierRuntime
+    ) {
+        this(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            accountSettingsService,
+            disabledAccountScheduledTestService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            payloadFactory,
+            upstreamClient,
+            openAiUpstreamClient,
+            openAiRequestAdapter,
+            openAiResponseFactory,
+            openAiResponseStateStore,
+            anthropicRequestAdapter,
+            anthropicResponseFactory,
+            anthropicUpstreamClient,
+            geminiRequestAdapter,
+            geminiResponseFactory,
+            paymentSettingsService,
+            modelPricingService,
+            statsService,
+            admissionStore,
+            openAiResponseOwnerStore
+        );
+        this.tierRuntime = tierRuntime;
+    }
+
+    TierRuntime tierRuntime() {
+        return tierRuntime;
+    }
+
     public Mono<ResponseEntity<?>> chat(JsonNode request, ServerWebExchange exchange) {
         return authenticateAndLimit(exchange)
             .zipWith(routingPolicy())
@@ -220,7 +284,8 @@ public class ProxyFacade {
                 tuple.getT1(),
                 "/v1/chat/completions",
                 ResponseMode.OPENAI_CHAT,
-                tuple.getT2()
+                tuple.getT2(),
+                request
             ));
     }
 
@@ -247,7 +312,8 @@ public class ProxyFacade {
                 principal,
                 "/v1/chat/completions",
                 ResponseMode.OPENAI_CHAT,
-                policy
+                policy,
+                copy
             ))
             .map(ProxyFacade::assistantText);
     }
@@ -279,7 +345,8 @@ public class ProxyFacade {
                 tuple.getT1(),
                 "/v1/messages",
                 ResponseMode.ANTHROPIC_MESSAGES,
-                tuple.getT2()
+                tuple.getT2(),
+                null
             ));
     }
 
@@ -294,7 +361,8 @@ public class ProxyFacade {
                 tuple.getT1(),
                 path,
                 ResponseMode.GEMINI_GENERATE_CONTENT,
-                tuple.getT2()
+                tuple.getT2(),
+                null
             ));
     }
 
@@ -306,13 +374,18 @@ public class ProxyFacade {
         return loaded.defaultIfEmpty(AccountDtos.RoutingPolicySettings.defaults());
     }
 
+    // rawEntryBody is the body as the client sent it. For Chat it is `request` itself. Messages and Gemini convert the
+    // body before this point and pass null for now: nothing reads it yet, and capturing it in the reactive chain would
+    // keep a body with large base64 images alive for the whole upstream call. Whoever reads it must derive what they
+    // need from the raw body before building the chain, and capture only that.
     private Mono<ResponseEntity<?>> invokeChat(
         JsonNode request,
         ServerWebExchange exchange,
         ApiKeyPrincipal principal,
         String path,
         ResponseMode responseMode,
-        AccountDtos.RoutingPolicySettings routingPolicy
+        AccountDtos.RoutingPolicySettings routingPolicy,
+        JsonNode rawEntryBody
     ) {
         validateChatRequest(request);
         Instant start = Instant.now();

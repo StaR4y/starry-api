@@ -152,6 +152,7 @@ http.interceptors.response.use(
       url.includes('/admin/accounts/chatgpt-oauth') ||
       url.includes('/admin/usage-tracker/me') ||
       url.includes('/admin/logs/me') ||
+      url.includes('/admin/source-tiers/') ||
       url.includes('/plugin-assets/');
     // 这些错误由页面自行展示：409 列出仍绑定节点的账号，默认限制的校验错误显示在编辑框内
     const shownByCaller =

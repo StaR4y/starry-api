@@ -7,6 +7,7 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import org.junit.jupiter.api.Test;
 import tech.starryapi.platform.core.PlatformCompletionResult;
+import tech.starryapi.platform.upstream.UpstreamException;
 import tools.jackson.databind.ObjectMapper;
 
 class AwsEventStreamParserTest {
@@ -87,6 +88,124 @@ class AwsEventStreamParserTest {
                 assertThat(error.getStatusCode()).isEqualTo(502);
                 assertThat(error.isRecoverable()).isTrue();
             });
+    }
+
+    @Test
+    void aTruncatedStreamAfterContentMarksGenerationAsStartedWithoutChangingStatusOrRecoverability() {
+        UpstreamException error = parseFailure(truncated(event("{\"assistantResponseEvent\":{\"content\":\"hello\"}}")));
+
+        assertThat(error.isGenerationStarted()).isTrue();
+        assertThat(error.getStatusCode()).isEqualTo(502);
+        assertThat(error.isRecoverable()).isTrue();
+        assertThat(error.getMessage()).isEqualTo("Kiro upstream event stream was truncated");
+    }
+
+    @Test
+    void aTruncatedStreamAfterAToolCallMarksGenerationAsStarted() {
+        UpstreamException error = parseFailure(truncated(
+            event("toolUseEvent", "{\"toolUseId\":\"toolu_1\",\"name\":\"Bash\",\"input\":\"{\\\"command\\\":\"}")));
+
+        assertThat(error.isGenerationStarted()).isTrue();
+    }
+
+    @Test
+    void aTruncatedStreamAfterAUsageFrameMarksGenerationAsStarted() {
+        assertThat(parseFailure(truncated(
+            event("{\"messageMetadataEvent\":{\"tokenUsage\":{\"uncachedInputTokens\":4,\"outputTokens\":2}}}"))).isGenerationStarted()).isTrue();
+        assertThat(parseFailure(truncated(
+            event("{\"usageEvent\":{\"inputTokens\":4,\"outputTokens\":2}}"))).isGenerationStarted()).isTrue();
+        assertThat(parseFailure(truncated(
+            event("{\"meteringEvent\":{\"usage\":0.02}}"))).isGenerationStarted()).isTrue();
+        assertThat(parseFailure(truncated(
+            event("{\"contextUsageEvent\":{\"contextUsagePercentage\":12.5}}"))).isGenerationStarted()).isTrue();
+    }
+
+    @Test
+    void aTruncatedStreamWhoseCompleteFramesCarriedNothingIsNotStarted() {
+        byte[] framesWithoutOutput = concat(
+            event("initial-response", "{}"),
+            event("{\"unrelatedEvent\":{\"x\":1}}")
+        );
+        byte[] notJson = concat(framesWithoutOutput, event("initial-response", "not json"));
+
+        assertThat(parseFailure(truncated(framesWithoutOutput)).isGenerationStarted()).isFalse();
+        assertThat(parseFailure(truncated(notJson)).isGenerationStarted()).isFalse();
+    }
+
+    @Test
+    void anExceptionFrameAfterOutputMarksGenerationAsStartedWithoutChangingStatusOrRecoverability() {
+        byte[] throttled = concat(
+            event("{\"assistantResponseEvent\":{\"content\":\"partial\"}}"),
+            frameWithHeaders(":message-type", "exception", ":exception-type", "ThrottlingException", "{\"message\":\"slow down\"}")
+        );
+        byte[] unavailable = concat(
+            event("toolUseEvent", "{\"toolUseId\":\"toolu_1\",\"name\":\"Bash\"}"),
+            frameWithHeaders(":message-type", "exception", ":exception-type", "ServiceUnavailableException", "{}")
+        );
+        byte[] internal = concat(
+            event("{\"messageMetadataEvent\":{\"tokenUsage\":{\"uncachedInputTokens\":4,\"outputTokens\":2}}}"),
+            frameWithHeaders(":message-type", "error", ":error-code", "InternalFailure", "{}")
+        );
+
+        UpstreamException first = parseFailure(throttled);
+        assertThat(first.isGenerationStarted()).isTrue();
+        assertThat(first.getStatusCode()).isEqualTo(429);
+        assertThat(first.isRecoverable()).isTrue();
+        UpstreamException second = parseFailure(unavailable);
+        assertThat(second.isGenerationStarted()).isTrue();
+        assertThat(second.getStatusCode()).isEqualTo(503);
+        assertThat(second.isRecoverable()).isTrue();
+        UpstreamException third = parseFailure(internal);
+        assertThat(third.isGenerationStarted()).isTrue();
+        assertThat(third.getStatusCode()).isEqualTo(500);
+        assertThat(third.isRecoverable()).isTrue();
+    }
+
+    @Test
+    void anExceptionFrameAsTheFirstFrameIsNotStarted() {
+        UpstreamException throttled = parseFailure(
+            frameWithHeaders(":message-type", "exception", ":exception-type", "ThrottlingException", "{\"message\":\"slow down\"}"));
+        UpstreamException denied = parseFailure(
+            frameWithHeaders(":message-type", "exception", ":exception-type", "AccessDeniedException", "{}"));
+
+        assertThat(throttled.isGenerationStarted()).isFalse();
+        assertThat(throttled.getStatusCode()).isEqualTo(429);
+        assertThat(throttled.isRecoverable()).isTrue();
+        assertThat(denied.isGenerationStarted()).isFalse();
+        assertThat(denied.getStatusCode()).isEqualTo(403);
+        assertThat(denied.isRecoverable()).isFalse();
+    }
+
+    @Test
+    void anExceptionFrameAfterOnlyFramesWithoutOutputIsNotStarted() {
+        byte[] bytes = concat(
+            event("initial-response", "{}"),
+            frameWithHeaders(":message-type", "exception", ":exception-type", "ThrottlingException", "{\"message\":\"slow down\"}")
+        );
+
+        assertThat(parseFailure(bytes).isGenerationStarted()).isFalse();
+    }
+
+    @Test
+    void theStartedFlagIsPerParseAndDoesNotLeakBetweenStreams() {
+        byte[] started = truncated(event("{\"assistantResponseEvent\":{\"content\":\"hello\"}}"));
+        byte[] notStarted = frameWithHeaders(":message-type", "exception", ":exception-type", "ThrottlingException", "{}");
+
+        assertThat(parseFailure(started).isGenerationStarted()).isTrue();
+        assertThat(parseFailure(notStarted).isGenerationStarted()).isFalse();
+        assertThat(parseFailure(started).isGenerationStarted()).isTrue();
+    }
+
+    private UpstreamException parseFailure(byte[] bytes) {
+        return org.assertj.core.api.Assertions.catchThrowableOfType(
+            UpstreamException.class,
+            () -> parser.parse(bytes, "claude-sonnet-4.5", "{}".getBytes(StandardCharsets.UTF_8)));
+    }
+
+    /** The given complete frames, then a second frame cut off mid-way (parse() reports that as a truncated stream). */
+    private byte[] truncated(byte[] completeFrames) {
+        byte[] next = event("{\"assistantResponseEvent\":{\"content\":\" world\"}}");
+        return concat(completeFrames, java.util.Arrays.copyOf(next, next.length - 5));
     }
 
     private byte[] frameWithHeaders(String name1, String value1, String name2, String value2, String json) {

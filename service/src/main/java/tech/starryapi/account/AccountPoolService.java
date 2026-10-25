@@ -365,7 +365,7 @@ public class AccountPoolService {
         String sessionHint,
         AccountPoolRequestContext context
     ) {
-        return selectAccount(sessionHint, AccountPlatforms::isKiroCompatible, "No available Kiro upstream account", context);
+        return selectAccount(sessionHint, PoolCell.KIRO_COMPATIBLE.predicate(), "No available Kiro upstream account", context);
     }
 
     public Mono<ProxyAccountEntity> selectKiroAccount(String sessionHint, Collection<String> excludedAccountIds) {
@@ -379,7 +379,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            account -> AccountPlatforms.isKiroCompatible(account) && !isExcluded(account, excludedAccountIds),
+            PoolCell.KIRO_COMPATIBLE.predicate(excludedAccountIds),
             "No available Kiro upstream account",
             context
         );
@@ -395,7 +395,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            account -> AccountPlatforms.isOfficialOpenAiApiKey(account) || AccountPlatforms.isCodex(account),
+            PoolCell.OFFICIAL_OR_CODEX.predicate(),
             "No available OpenAI upstream account",
             context
         );
@@ -412,8 +412,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            account -> (AccountPlatforms.isOfficialOpenAiApiKey(account) || AccountPlatforms.isCodex(account))
-                && !isExcluded(account, excludedAccountIds),
+            PoolCell.OFFICIAL_OR_CODEX.predicate(excludedAccountIds),
             "No available OpenAI upstream account",
             context
         );
@@ -425,7 +424,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            AccountPlatforms::isOfficialOpenAiApiKey,
+            PoolCell.OFFICIAL_OPENAI.predicate(),
             "No available OpenAI upstream account",
             context
         );
@@ -438,7 +437,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            account -> AccountPlatforms.isOfficialOpenAiApiKey(account) && !isExcluded(account, excludedAccountIds),
+            PoolCell.OFFICIAL_OPENAI.predicate(excludedAccountIds),
             "No available OpenAI upstream account",
             context
         );
@@ -450,7 +449,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            AccountPlatforms::isOpenAiCompatibleApiKey,
+            PoolCell.OPENAI_COMPATIBLE.predicate(),
             "No available OpenAI-compatible upstream account",
             context
         );
@@ -463,8 +462,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            account -> AccountPlatforms.isOpenAiCompatibleApiKey(account)
-                && !isExcluded(account, excludedAccountIds),
+            PoolCell.OPENAI_COMPATIBLE.predicate(excludedAccountIds),
             "No available OpenAI-compatible upstream account",
             context
         );
@@ -491,7 +489,7 @@ public class AccountPoolService {
         String sessionHint,
         AccountPoolRequestContext context
     ) {
-        return selectAccount(sessionHint, AccountPlatforms::isAnthropicApiKey, "No available Anthropic upstream account", context);
+        return selectAccount(sessionHint, PoolCell.ANTHROPIC_KEY.predicate(), "No available Anthropic upstream account", context);
     }
 
     public Mono<ProxyAccountEntity> selectAnthropicAccount(String sessionHint, Collection<String> excludedAccountIds) {
@@ -505,7 +503,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            account -> AccountPlatforms.isAnthropicApiKey(account) && !isExcluded(account, excludedAccountIds),
+            PoolCell.ANTHROPIC_KEY.predicate(excludedAccountIds),
             "No available Anthropic upstream account",
             context
         );
@@ -519,7 +517,7 @@ public class AccountPoolService {
         String sessionHint,
         AccountPoolRequestContext context
     ) {
-        return selectAccount(sessionHint, AccountPlatforms::isCodex, "No available Codex upstream account", context);
+        return selectAccount(sessionHint, PoolCell.CODEX.predicate(), "No available Codex upstream account", context);
     }
 
     public Mono<ProxyAccountEntity> selectCodexOpenAiAccount(String sessionHint, Collection<String> excludedAccountIds) {
@@ -533,7 +531,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            account -> AccountPlatforms.isCodex(account) && !isExcluded(account, excludedAccountIds),
+            PoolCell.CODEX.predicate(excludedAccountIds),
             "No available Codex upstream account",
             context
         );
@@ -549,7 +547,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            AccountPlatforms::isDeepSeek,
+            PoolCell.DEEPSEEK.predicate(),
             "No available DeepSeek upstream account",
             context
         );
@@ -566,7 +564,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            account -> AccountPlatforms.isDeepSeek(account) && !isExcluded(account, excludedAccountIds),
+            PoolCell.DEEPSEEK.predicate(excludedAccountIds),
             "No available DeepSeek upstream account",
             context
         );
@@ -639,13 +637,6 @@ public class AccountPoolService {
                 }
                 return Mono.empty();
             }));
-    }
-
-    private boolean isExcluded(ProxyAccountEntity account, Collection<String> excludedAccountIds) {
-        return account != null
-            && account.getAccountId() != null
-            && excludedAccountIds != null
-            && excludedAccountIds.contains(account.getAccountId());
     }
 
     public String circuitKey(AccountPoolRequestContext context) {

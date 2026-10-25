@@ -1,0 +1,171 @@
+import http, { unwrap } from '@/utils/http';
+import type { ApiResponse } from '@/types/api';
+import type { AllocationCategory } from '@/api/allocationDefaults';
+
+/**
+ * 号源分级：把一个厂商的账号分成有序的号池（级别，1 最好），每个号池有名称和价格系数。
+ * 对应后端 /admin/source-tiers，类型与 SourceTierDtos 一一对应；GET 读到的 Tier / Member / Gate
+ * 原样用于 PUT，可选字段缺省（或 null）表示取默认值。后端不输出值为 null 的字段（Jackson 的
+ * default-property-inclusion 是 non_null），所以可空字段读到时可能是缺省，写成 `?: T | null`。
+ */
+
+/** 跨协议号源（OpenAI 格式中转）的协议；本版本的后端只实现 OPENAI_CHAT */
+export type SourceTierProtocol = 'OPENAI_CHAT' | 'OPENAI_RESPONSES' | 'ANTHROPIC_MESSAGES';
+export type SourceTierEntryEndpoint = 'CHAT' | 'MESSAGES' | 'RESPONSES' | 'GEMINI';
+export type SourceTierGateState = 'OFF' | 'KEYS' | 'ON';
+/** NOT_OFFERED 未提供；EXPERIMENTAL 只能给白名单 Key；VERIFIED 可以对所有 Key 打开 */
+export type SourceTierPairStatusName = 'NOT_OFFERED' | 'EXPERIMENTAL' | 'VERIFIED';
+
+export interface SourceTierPairStatus {
+  vendor: string;
+  sourceProtocol: SourceTierProtocol;
+  entryEndpoint: SourceTierEntryEndpoint;
+  status: SourceTierPairStatusName;
+}
+
+/**
+ * 当前版本能运行什么。需要某项能力才能生效的设置（enabled 需要 nativeTiers，unifyEndpoints 需要同名能力，
+ * 跨协议成员行和非 OFF 的门控需要 xpMembers）在能力为假时被拒绝（409 SOURCE_TIER_RUNTIME_UNSUPPORTED），
+ * 不会出现先存后静默生效的配置。
+ */
+export interface SourceTierRuntime {
+  nativeTiers: boolean;
+  unifyEndpoints: boolean;
+  xpMembers: boolean;
+  pairs: SourceTierPairStatus[];
+}
+
+export interface SourceTier {
+  /** 小写字母、数字和连字符（最多 32 位）；不能是 auto、L2 或纯数字，它们是选号写法 */
+  tierId: string;
+  /** 1 到 9，1 最好 */
+  level: number;
+  name: string;
+  /** 大于 0、至多 1000、至多 6 位小数 */
+  priceFactor: number;
+  memberCategories: AllocationCategory[];
+  userSelectable: boolean;
+  enabled: boolean;
+  description?: string | null;
+}
+
+export interface SourceTierMemberModel {
+  modelId: string;
+  upstreamModel: string;
+  maxContextTokens: number;
+  imageTokenCap?: number | null;
+  enabled?: boolean | null;
+  /** 只读：映射验证通过的时间；设置、账号提供方或 base URL 变化后失效 */
+  verifiedAt?: string | null;
+  verified?: boolean | null;
+}
+
+/**
+ * 手动放进某个号池的账号。没有 protocol 时只把原生账号固定到 tierId（其余字段不适用，读出为 null）；
+ * 有 protocol 时登记一个 OpenAI 兼容 Key 作为别的厂商模型的中转。
+ */
+export interface SourceTierMember {
+  accountId: string;
+  tierId: string;
+  protocol?: SourceTierProtocol | null;
+  exclusive?: boolean | null;
+  vision?: boolean | null;
+  jsonSchema?: boolean | null;
+  priorityTier?: boolean | null;
+  cacheControlPassthrough?: boolean | null;
+  upstreamStream?: boolean | null;
+  reasoningMode?: 'NONE' | 'EFFORT' | null;
+  maxDurationSeconds?: number | null;
+  usageCacheReadInPrompt?: boolean | null;
+  usageCacheWriteInPrompt?: boolean | null;
+  models?: SourceTierMemberModel[] | null;
+}
+
+export interface SourceTierGate {
+  sourceProtocol?: SourceTierProtocol | null;
+  entryEndpoint: SourceTierEntryEndpoint;
+  state: SourceTierGateState;
+  allowKeyIds?: string[] | null;
+}
+
+/** 已保存配置里允许、但多半不是本意的情况；code 决定控制台怎么措辞，message 是后端的英文原文 */
+export interface SourceTierWarning {
+  code: 'LOWEST_TIER_COLLECTS_OFFICIAL_KEYS' | 'MEMBER_NOT_SERVING_VENDOR' | string;
+  tierId?: string | null;
+  count: number;
+  accountIds: string[];
+  message: string;
+}
+
+export interface SourceTierVendor {
+  vendor: string;
+  label: string;
+  /** false：这个厂商从未配置过（version 为 0，开关取默认值，没有号池） */
+  configured: boolean;
+  /** 保存时作为 expectedVersion 带回；期间被别人改过则返回 409 SOURCE_TIER_VERSION_CONFLICT */
+  version: number;
+  enabled: boolean;
+  unifyEndpoints: boolean;
+  publicListing: boolean;
+  stickySessions: boolean;
+  refusalCap: number;
+  crossTierReservedSlot: boolean;
+  tiers: SourceTier[];
+  members: SourceTierMember[];
+  gates: SourceTierGate[];
+  warnings: SourceTierWarning[];
+  /** 已保存配置里每个号池（按 tierId）收下的启用账号数，含指定、按类别和落入最低级的；没有账号的号池缺省 */
+  tierAccounts?: Record<string, number> | null;
+}
+
+export interface SourceTierOverview {
+  /** 所有厂商的配置共用的版本，各节点据此刷新 */
+  configVersion: number;
+  runtime: SourceTierRuntime;
+  vendors: SourceTierVendor[];
+}
+
+/** 整体替换一个厂商的配置：请求里没有的号池、成员、门控都会被删除 */
+export interface ReplaceSourceTierVendor {
+  expectedVersion: number;
+  enabled: boolean;
+  unifyEndpoints?: boolean;
+  publicListing?: boolean;
+  stickySessions?: boolean;
+  /** 4 到 64，缺省 16 */
+  refusalCap?: number;
+  crossTierReservedSlot?: boolean;
+  tiers: SourceTier[];
+  members: SourceTierMember[];
+  gates: SourceTierGate[];
+}
+
+/** 不重发整份配置，只增改、移除成员行（账号列表批量设置号池、中转对话框保存用） */
+export interface UpsertSourceTierMembers {
+  expectedVersion: number;
+  members?: SourceTierMember[];
+  removeAccountIds?: string[];
+}
+
+/** 后端的业务错误码：控制台对它们有专门的提示 */
+export const SOURCE_TIER_VERSION_CONFLICT = 'SOURCE_TIER_VERSION_CONFLICT';
+export const SOURCE_TIER_RUNTIME_UNSUPPORTED = 'SOURCE_TIER_RUNTIME_UNSUPPORTED';
+
+export const sourceTiersApi = {
+  overview: () =>
+    unwrap<SourceTierOverview>(http.get<ApiResponse<SourceTierOverview>>('/admin/source-tiers')),
+  replace: (vendor: string, payload: ReplaceSourceTierVendor) =>
+    unwrap<SourceTierVendor>(
+      http.put<ApiResponse<SourceTierVendor>>(
+        `/admin/source-tiers/${encodeURIComponent(vendor)}`,
+        payload,
+      ),
+    ),
+  upsertMembers: (vendor: string, payload: UpsertSourceTierMembers) =>
+    unwrap<SourceTierVendor>(
+      http.post<ApiResponse<SourceTierVendor>>(
+        `/admin/source-tiers/${encodeURIComponent(vendor)}/members`,
+        payload,
+      ),
+    ),
+};

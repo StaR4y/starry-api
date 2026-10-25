@@ -5,16 +5,45 @@ public class UpstreamException extends RuntimeException {
     private final int statusCode;
     private final boolean recoverable;
     private final int retryAfterSeconds;
+    private final boolean generationStarted;
 
     public UpstreamException(int statusCode, String message, boolean recoverable) {
         this(statusCode, message, recoverable, null);
     }
 
     public UpstreamException(int statusCode, String message, boolean recoverable, String retryAfter) {
+        this(statusCode, message, recoverable, retryAfter, false);
+    }
+
+    /**
+     * {@code generationStarted} says the upstream had already produced output (content, tool calls or usage) before it
+     * failed, so a retry elsewhere would generate the answer a second time. The status code and {@code recoverable} are
+     * not affected; only tiered routing reads it.
+     */
+    public UpstreamException(int statusCode, String message, boolean recoverable, String retryAfter, boolean generationStarted) {
         super(message);
         this.statusCode = statusCode;
         this.recoverable = recoverable;
         this.retryAfterSeconds = parseRetryAfter(retryAfter);
+        this.generationStarted = generationStarted;
+    }
+
+    private UpstreamException(UpstreamException source) {
+        super(source.getMessage());
+        this.statusCode = source.statusCode;
+        this.recoverable = source.recoverable;
+        this.retryAfterSeconds = source.retryAfterSeconds;
+        this.generationStarted = true;
+        setStackTrace(source.getStackTrace());
+    }
+
+    /**
+     * The same failure with {@code generationStarted} set: status, recoverability, message and Retry-After are kept.
+     * For a client that retries on its own, so that the error it finally throws still says an earlier attempt already
+     * produced output.
+     */
+    public UpstreamException withGenerationStarted() {
+        return generationStarted ? this : new UpstreamException(this);
     }
 
     public static int retryAfterSeconds(Throwable error) {
@@ -40,5 +69,9 @@ public class UpstreamException extends RuntimeException {
 
     public boolean isRecoverable() {
         return recoverable;
+    }
+
+    public boolean isGenerationStarted() {
+        return generationStarted;
     }
 }

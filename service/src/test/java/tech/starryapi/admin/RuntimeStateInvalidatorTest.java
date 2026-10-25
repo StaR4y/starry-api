@@ -1,7 +1,9 @@
 package tech.starryapi.admin;
 
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import org.junit.jupiter.api.Test;
@@ -15,6 +17,7 @@ import tech.starryapi.model.ModelPricingService;
 import tech.starryapi.payment.PaymentSettingsService;
 import tech.starryapi.platform.kiro.KiroUpstreamClient;
 import tech.starryapi.proxy.RateLimiterService;
+import tech.starryapi.sourcetier.SourceTierRegistry;
 
 class RuntimeStateInvalidatorTest {
 
@@ -31,12 +34,14 @@ class RuntimeStateInvalidatorTest {
         KiroUpstreamClient kiro = mock(KiroUpstreamClient.class);
         RateLimiterService rateLimiter = mock(RateLimiterService.class);
         AppearanceSettingsService appearance = mock(AppearanceSettingsService.class);
+        SourceTierRegistry sourceTiers = mock(SourceTierRegistry.class);
         when(accountPool.refreshCache()).thenReturn(Mono.empty());
         when(poolPolicy.refreshSettings()).thenReturn(Mono.empty());
         when(modelMappings.refresh()).thenReturn(Mono.empty());
         when(modelCatalog.refresh()).thenReturn(Mono.empty());
         when(modelPricing.refresh()).thenReturn(Mono.empty());
         when(appearance.settings()).thenReturn(Mono.just(AppearanceSettingsService.defaults()));
+        when(sourceTiers.refresh()).thenReturn(Mono.empty());
 
         RuntimeStateInvalidator invalidator = new RuntimeStateInvalidator(
             adminSessions,
@@ -49,7 +54,8 @@ class RuntimeStateInvalidatorTest {
             modelPricing,
             kiro,
             rateLimiter,
-            appearance
+            appearance,
+            sourceTiers
         );
 
         invalidator.invalidateAll();
@@ -69,6 +75,9 @@ class RuntimeStateInvalidatorTest {
         verify(modelMappings).refresh();
         verify(modelCatalog).refresh();
         verify(modelPricing).refresh();
+        // Read again, never dropped: see the note in RuntimeStateInvalidator.invalidateAll.
+        verify(sourceTiers).refresh();
+        verifyNoMoreInteractions(sourceTiers);
     }
 
     @Test
@@ -111,12 +120,50 @@ class RuntimeStateInvalidatorTest {
             modelPricing,
             mock(KiroUpstreamClient.class),
             mock(RateLimiterService.class),
-            mock(AppearanceSettingsService.class)
+            mock(AppearanceSettingsService.class),
+            mock(SourceTierRegistry.class)
         );
 
         invalidator.invalidateSetting("account_pool_policy_enabled");
 
         verify(poolPolicy).refreshSettings();
+    }
+
+    @Test
+    void sourceTierVersionNotificationRefreshesTheTierConfiguration() {
+        SourceTierRegistry sourceTiers = mock(SourceTierRegistry.class);
+        when(sourceTiers.managesSetting("source_tier_config_version")).thenReturn(true);
+        when(sourceTiers.refresh()).thenReturn(Mono.empty());
+
+        invalidator(sourceTiers).invalidateSetting("source_tier_config_version");
+
+        verify(sourceTiers).refresh();
+    }
+
+    @Test
+    void otherSettingNotificationsLeaveTheTierConfigurationAlone() {
+        SourceTierRegistry sourceTiers = mock(SourceTierRegistry.class);
+
+        invalidator(sourceTiers).invalidateSetting("payment_enabled");
+
+        verify(sourceTiers, never()).refresh();
+    }
+
+    private RuntimeStateInvalidator invalidator(SourceTierRegistry sourceTiers) {
+        return new RuntimeStateInvalidator(
+            mock(AdminSessionService.class),
+            mock(AccountPoolService.class),
+            mock(AccountPoolPolicyService.class),
+            mock(AccountSettingsService.class),
+            mock(PaymentSettingsService.class),
+            mock(ModelMappingService.class),
+            mock(ModelCatalogManagementService.class),
+            mock(ModelPricingService.class),
+            mock(KiroUpstreamClient.class),
+            mock(RateLimiterService.class),
+            mock(AppearanceSettingsService.class),
+            sourceTiers
+        );
     }
 
     private RuntimeStateInvalidator invalidator(
@@ -136,7 +183,8 @@ class RuntimeStateInvalidatorTest {
             modelPricing,
             mock(KiroUpstreamClient.class),
             mock(RateLimiterService.class),
-            mock(AppearanceSettingsService.class)
+            mock(AppearanceSettingsService.class),
+            mock(SourceTierRegistry.class)
         );
     }
 }

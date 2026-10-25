@@ -11,10 +11,11 @@ import tech.starryapi.platform.anthropic.AnthropicResponseFactory;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.core.PlatformToolUse;
 import tech.starryapi.platform.core.PlatformUsage;
+import tech.starryapi.platform.gemini.GeminiResponseFactory;
 import tech.starryapi.platform.openai.OpenAiResponseFactory;
 
 /**
- * The OpenAI-compatible and Anthropic bodies the proxy builds as JSON trees. SDKs parse these strictly, so key order,
+ * The OpenAI-compatible, Anthropic and Gemini bodies the proxy builds as JSON trees. SDKs parse these strictly, so key order,
  * null members, escaping and number formatting are asserted exactly. Expected strings were recorded from the Jackson 2
  * application. Random ids and clock values are replaced by placeholders before comparing.
  */
@@ -150,6 +151,31 @@ class ProxyWireFormatTest {
                 data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":7}}
                 event: message_stop
                 data: {"type":"message_stop"}""");
+        });
+    }
+
+    /** Written from the factory as it was before stop reasons existed: a result without one finishes with STOP. */
+    @Test
+    void geminiGenerateContentKeepsItsShape() {
+        ProductionJson.run(json -> {
+            var mapper = json.mapper();
+            var gemini = new GeminiResponseFactory(mapper);
+            var usage = new PlatformUsage(25, 7, new BigDecimal("0.001500"), 3, 2, 1);
+            var text = new PlatformCompletionResult("你好 \"quoted\" \\ <b>&</b>\n", usage);
+            var tools = new PlatformCompletionResult("Running", List.of(new PlatformToolUse("toolu_1", "Bash",
+                mapper.readTree("{\"command\":\"ls -la\",\"timeout\":1.5,\"retries\":3,\"big\":12345678901234567890,\"z\":null,\"a\":[1,2.0]}"))),
+                usage);
+            var toolsOnly = new PlatformCompletionResult("", List.of(new PlatformToolUse("toolu_1", "Bash", mapper.readTree("{}"))), usage);
+
+            check("geminiText", json.write(gemini.generateContent("gemini-2.5-pro", text)),
+                """
+                {"candidates":[{"content":{"role":"model","parts":[{"text":"你好 \\"quoted\\" \\\\ <b>&</b>\\n"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":25,"candidatesTokenCount":7,"totalTokenCount":32},"modelVersion":"gemini-2.5-pro","responseId":"gen-<uuid>"}""");
+            check("geminiToolCall", json.write(gemini.generateContent("gemini-2.5-pro", tools)),
+                """
+                {"candidates":[{"content":{"role":"model","parts":[{"text":"Running"},{"functionCall":{"id":"toolu_1","name":"Bash","args":{"command":"ls -la","timeout":1.5,"retries":3,"big":12345678901234567890,"z":null,"a":[1,2.0]}}}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":25,"candidatesTokenCount":7,"totalTokenCount":32},"modelVersion":"gemini-2.5-pro","responseId":"gen-<uuid>"}""");
+            check("geminiToolCallWithoutText", json.write(gemini.generateContent("gemini-2.5-pro", toolsOnly)),
+                """
+                {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"toolu_1","name":"Bash","args":{}}}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":25,"candidatesTokenCount":7,"totalTokenCount":32},"modelVersion":"gemini-2.5-pro","responseId":"gen-<uuid>"}""");
         });
     }
 

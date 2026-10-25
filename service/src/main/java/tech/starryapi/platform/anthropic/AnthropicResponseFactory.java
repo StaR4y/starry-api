@@ -29,7 +29,7 @@ public class AnthropicResponseFactory {
         root.put("model", model);
         ArrayNode content = root.putArray("content");
         appendContentBlocks(content, result);
-        root.put("stop_reason", result.toolUses().isEmpty() ? "end_turn" : "tool_use");
+        root.put("stop_reason", stopReason(result));
         root.putNull("stop_sequence");
         ObjectNode usage = root.putObject("usage");
         usage.put("input_tokens", result.usage().inputTokens());
@@ -72,7 +72,7 @@ public class AnthropicResponseFactory {
         ObjectNode messageDelta = objectMapper.createObjectNode();
         messageDelta.put("type", "message_delta");
         ObjectNode stopDelta = messageDelta.putObject("delta");
-        stopDelta.put("stop_reason", result.toolUses().isEmpty() ? "end_turn" : "tool_use");
+        stopDelta.put("stop_reason", stopReason(result));
         stopDelta.putNull("stop_sequence");
         ObjectNode deltaUsage = messageDelta.putObject("usage");
         deltaUsage.put("output_tokens", result.usage().outputTokens());
@@ -83,6 +83,17 @@ public class AnthropicResponseFactory {
         events.add(sse("message_delta", messageDelta));
         events.add(sse("message_stop", messageStop));
         return Flux.fromIterable(events);
+    }
+
+    /** Only a non-null MAX_TOKENS or CONTENT_FILTER changes the answer; every other result keeps the derived value. */
+    private String stopReason(PlatformCompletionResult result) {
+        if (result.stopReason() == PlatformCompletionResult.StopReason.MAX_TOKENS) {
+            return "max_tokens";
+        }
+        if (result.stopReason() == PlatformCompletionResult.StopReason.CONTENT_FILTER) {
+            return "refusal";
+        }
+        return result.toolUses().isEmpty() ? "end_turn" : "tool_use";
     }
 
     private void appendContentBlocks(ArrayNode content, PlatformCompletionResult result) {

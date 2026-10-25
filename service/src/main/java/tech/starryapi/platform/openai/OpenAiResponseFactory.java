@@ -40,7 +40,7 @@ public class OpenAiResponseFactory {
         }
         if (result.toolUses().isEmpty()) {
             message.put("content", result.content());
-            choice.put("finish_reason", "stop");
+            choice.put("finish_reason", chatFinishReason(result, "stop"));
         } else {
             message.put("content", result.content().isBlank() ? null : result.content());
             ArrayNode toolCalls = message.putArray("tool_calls");
@@ -52,7 +52,7 @@ public class OpenAiResponseFactory {
                 function.put("name", toolUse.name());
                 function.put("arguments", toolInputString(toolUse));
             }
-            choice.put("finish_reason", "tool_calls");
+            choice.put("finish_reason", chatFinishReason(result, "tool_calls"));
         }
         appendUsage(root, result.usage(), "prompt_tokens", "completion_tokens");
         return root;
@@ -63,9 +63,14 @@ public class OpenAiResponseFactory {
         root.put("id", generatedId("resp_"));
         root.put("object", "response");
         root.put("created_at", Instant.now().getEpochSecond());
-        root.put("status", "completed");
+        String incompleteReason = responsesIncompleteReason(result);
+        root.put("status", incompleteReason == null ? "completed" : "incomplete");
         root.putNull("error");
-        root.putNull("incomplete_details");
+        if (incompleteReason == null) {
+            root.putNull("incomplete_details");
+        } else {
+            root.putObject("incomplete_details").put("reason", incompleteReason);
+        }
         root.put("model", model);
         if (previousResponseId != null) {
             root.put("previous_response_id", previousResponseId);
@@ -118,7 +123,7 @@ public class OpenAiResponseFactory {
             ? chatToolStreamEvents(model, result)
             : Flux.just(
             ServerSentEvent.builder(chatStreamChunkBody(model, result.content()).toString()).build(),
-            ServerSentEvent.builder(chatStreamStopBody(model).toString()).build(),
+            ServerSentEvent.builder(chatStreamStopBody(model, chatFinishReason(result, "stop")).toString()).build(),
             ServerSentEvent.builder("[DONE]").build()
         );
         if (result.reasoningContent().isBlank()) {
@@ -149,6 +154,10 @@ public class OpenAiResponseFactory {
         ObjectNode created = responseEvent("response.created", sequence++);
         ObjectNode inProgress = response.deepCopy();
         inProgress.put("status", "in_progress");
+        boolean incomplete = "incomplete".equals(response.path("status").asString(""));
+        if (incomplete) {
+            inProgress.putNull("incomplete_details");
+        }
         inProgress.set("output", objectMapper.createArrayNode());
         created.set("response", inProgress);
         events.add(responseSse(created));
@@ -178,11 +187,33 @@ public class OpenAiResponseFactory {
             events.add(responseSse(outputItemEvent("response.output_item.done", responseId, item, outputIndex, sequence++)));
         }
 
-        ObjectNode completed = responseEvent("response.completed", sequence);
+        ObjectNode completed = responseEvent(incomplete ? "response.incomplete" : "response.completed", sequence);
         completed.set("response", response);
         events.add(responseSse(completed));
         events.add(ServerSentEvent.builder("[DONE]").build());
         return Flux.fromIterable(events);
+    }
+
+    /** Only a non-null MAX_TOKENS or CONTENT_FILTER changes the answer; every other result keeps {@code derived}. */
+    private String chatFinishReason(PlatformCompletionResult result, String derived) {
+        if (result.stopReason() == PlatformCompletionResult.StopReason.MAX_TOKENS) {
+            return "length";
+        }
+        if (result.stopReason() == PlatformCompletionResult.StopReason.CONTENT_FILTER) {
+            return "content_filter";
+        }
+        return derived;
+    }
+
+    /** The {@code incomplete_details.reason} for a truncated or filtered result, or null when the response completes. */
+    private String responsesIncompleteReason(PlatformCompletionResult result) {
+        if (result.stopReason() == PlatformCompletionResult.StopReason.MAX_TOKENS) {
+            return "max_output_tokens";
+        }
+        if (result.stopReason() == PlatformCompletionResult.StopReason.CONTENT_FILTER) {
+            return "content_filter";
+        }
+        return null;
     }
 
     private ObjectNode chatStreamChunkBody(String model, String content) {
@@ -501,7 +532,7 @@ public class OpenAiResponseFactory {
         for (int i = 0; i < result.toolUses().size(); i++) {
             events.add(ServerSentEvent.builder(chatToolCallChunkBody(model, i, result.toolUses().get(i)).toString()).build());
         }
-        events.add(ServerSentEvent.builder(chatStreamStopBody(model, "tool_calls").toString()).build());
+        events.add(ServerSentEvent.builder(chatStreamStopBody(model, chatFinishReason(result, "tool_calls")).toString()).build());
         events.add(ServerSentEvent.builder("[DONE]").build());
         return Flux.fromIterable(events);
     }
