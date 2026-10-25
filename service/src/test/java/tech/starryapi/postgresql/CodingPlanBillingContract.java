@@ -128,6 +128,16 @@ abstract class CodingPlanBillingContract {
         keys.accountUsage(key,"sent",new BigDecimal("0.4"),1,1).block(); assertThat(balance(user)).isEqualByComparingTo("9.6");
     }
 
+    @Test void definitiveFailureReleasesDispatchedHoldWithoutReview() {
+        // An upstream refusal that generated nothing (a 402 quota or balance refusal) arrives after dispatch.
+        var user=user("10"); var key=key(user,"BALANCE","OpenAI");
+        keys.reserveUsage(key,"refused",BigDecimal.ONE,"{}").block(); keys.markUsageDispatched(key,"refused").block();
+        keys.releaseUsage(key,"refused",true,"Request failed").block();
+        assertThat(reservationStatus(key,"refused")).isEqualTo("RELEASED");
+        assertThat(balance(user)).isEqualByComparingTo("10");
+        keys.reserveUsage(key,"next",BigDecimal.ONE,"{}").block(); assertThat(balance(user)).isEqualByComparingTo("9");
+    }
+
     @Test void quotaLimitIncludesInFlightReservations() {
         var user=user("10"); var key=key(user,"BALANCE","OpenAI");
         db.sql("UPDATE api_keys SET credits_limit=1 WHERE key_id=:id").bind("id",key.keyId()).fetch().rowsUpdated().block();
@@ -253,6 +263,11 @@ abstract class CodingPlanBillingContract {
     private ApiKeyPrincipal key(AdminPrincipal user,String source,String provider) {
         var created=keys.create(user,new ApiKeyDtos.CreateApiKeyRequest("Test",null,provider,source)).block();
         return new ApiKeyPrincipal(created.keyId(),user.userId(),"USER","Test",null,BigDecimal.ZERO,balance(user),provider,true,source);
+    }
+    private String reservationStatus(ApiKeyPrincipal key,String requestId) {
+        String hash=tech.starryapi.common.Hashing.sha256(key.keyId().length()+":"+key.keyId()+requestId);
+        return db.sql("SELECT status FROM billing_reservations WHERE request_hash=:hash").bind("hash",hash)
+            .map((r,m)->r.get("status",String.class)).one().block();
     }
     private BigDecimal balance(AdminPrincipal user) {
         return db.sql("SELECT balance FROM admin_users WHERE user_id=:id").bind("id",user.userId())

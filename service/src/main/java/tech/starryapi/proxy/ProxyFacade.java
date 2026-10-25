@@ -623,12 +623,13 @@ public class ProxyFacade {
     private boolean definitiveBillingFailure(Throwable error) {
         Throwable root = rootFailure(error);
         if (root instanceof ApiException api) {
-            return java.util.Set.of(400, 401, 403, 404, 422, 429).contains(api.getStatus().value());
+            return java.util.Set.of(400, 401, 402, 403, 404, 422, 429).contains(api.getStatus().value());
         }
         UpstreamException upstream = findUpstreamException(error);
         if (upstream != null) {
             int status = upstream.getStatusCode();
-            if (java.util.Set.of(400, 401, 403, 404, 422, 429).contains(status)) {
+            // 402 is a payment or quota refusal (an exhausted Kiro quota, a relay without balance): nothing was generated.
+            if (java.util.Set.of(400, 401, 402, 403, 404, 422, 429).contains(status)) {
                 return true;
             }
             // A genuine provider error response (overloaded, unavailable, internal error) is not billed. A 502 that
