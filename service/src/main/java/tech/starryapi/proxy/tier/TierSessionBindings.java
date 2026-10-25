@@ -20,6 +20,12 @@ import tech.starryapi.config.ProxyProperties;
  * <p>Like the account affinity it is local to the node and does not outlive a restart. It follows the same switch:
  * with {@code session-affinity-enabled} off nothing is read or written.
  *
+ * <p>What counts as the session being used is any request of it that was served, whichever endpoint it came in through
+ * and however it chose its tier: an automatic request reads and may write the binding, and one that named its tier
+ * leaves the binding as it is and {@link #serve notes} that the session is in use (as does the hand-over of a response
+ * chain's binding to the next turn, {@link #alias}). A session that keeps working with pinned requests is not idle, so
+ * it is not sent back to the best tier by the time its next automatic request comes.
+ *
  * <p>The store also counts, per session and tier, the dispatches in flight on this node. An account that refuses a
  * request because the same session still has requests running on it (a client that runs sub-agents in parallel) says
  * nothing about the tier being busy, and does not push the session down.
@@ -99,7 +105,10 @@ public class TierSessionBindings {
         }
     }
 
-    /** Records that the session was served again, which counts as using its binding: a session in use does not expire. */
+    /**
+     * Records that the session was served again, which counts as using its binding: a session in use does not expire.
+     * Any request of the session does this, one that named its tier too.
+     */
     public void serve(String key) {
         if (enabled() && key != null) {
             bindings.getIfPresent(key);

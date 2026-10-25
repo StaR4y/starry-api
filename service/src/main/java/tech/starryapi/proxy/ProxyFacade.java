@@ -70,13 +70,16 @@ import tech.starryapi.payment.PaymentSettingsService;
 import tech.starryapi.proxy.tier.RequestBounds;
 import tech.starryapi.proxy.tier.TierBilling;
 import tech.starryapi.proxy.tier.TierDispatch;
+import tech.starryapi.proxy.tier.TierEntry;
 import tech.starryapi.proxy.tier.TierPlan;
 import tech.starryapi.proxy.tier.TierPlan.Level;
 import tech.starryapi.proxy.tier.TierPlanRequest;
+import tech.starryapi.proxy.tier.TierResponseHeaders;
 import tech.starryapi.proxy.tier.TierRetryPolicy;
 import tech.starryapi.proxy.tier.TierRoute;
 import tech.starryapi.proxy.tier.TierRuntime;
 import tech.starryapi.proxy.tier.TierSelection;
+import tech.starryapi.proxy.tier.TierSelectorParser;
 import tech.starryapi.proxy.tier.TierSessionBindings;
 import tech.starryapi.proxy.tier.TierSessionKeys;
 import tech.starryapi.proxy.tier.TierWalk;
@@ -90,12 +93,24 @@ public class ProxyFacade {
     static final int MAX_MODEL_ID_LENGTH = 256;
     /** How many accounts may refuse admission before a request stops looking: per dispatch untiered, per request tiered. */
     private static final int MAX_ADMISSION_REFUSALS = 64;
-    /** What a client is told to wait when the source pool it chose has no account to offer: about the age of the account cache. */
+    /** What a client is told to wait when the tier it chose has no account to offer: about the age of the account cache. */
     private static final String TIER_UNAVAILABLE_RETRY_AFTER_SECONDS = "5";
     /** The reasons admission refuses an account that a session's own parallel requests can also cause. */
     private static final java.util.Set<String> SESSION_CONCURRENCY_REFUSALS =
         java.util.Set.of("CONCURRENCY_LIMIT", "INFLIGHT_TOKEN_LIMIT", "SESSION_LIMIT");
     private static final Logger log = LoggerFactory.getLogger(ProxyFacade.class);
+
+    /**
+     * What a Responses chain that cannot leave its owner is told when the owner cannot serve it: the 503
+     * NO_AVAILABLE_ACCOUNT of an untiered request, with the same text. It is told apart from a pool that has nothing to
+     * offer by its type, not by its text, because a request that named its pool is answered differently for the two
+     * ({@link #servedByTiers}): it is not the pool's fault, and waiting a few seconds does not help.
+     */
+    static final class ResponseOwnerUnavailableException extends ApiException {
+        ResponseOwnerUnavailableException() {
+            super(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "The account that owns the OpenAI response is unavailable");
+        }
+    }
 
     enum ResponseMode {
         OPENAI_CHAT,
@@ -380,7 +395,7 @@ public class ProxyFacade {
 
     public Mono<ResponseEntity<?>> geminiGenerateContent(String model, JsonNode request, ServerWebExchange exchange) {
         ObjectNode chat = geminiRequestAdapter.generateContentToChat(model, request);
-        String path = "/v1beta/models/" + model + ":generateContent";
+        String path = geminiPath(model);
         return authenticateAndLimit(exchange)
             .zipWith(routingPolicy())
             .flatMap(tuple -> invokeChat(
@@ -394,6 +409,29 @@ public class ProxyFacade {
             ));
     }
 
+    private static final String GEMINI_PATH_PREFIX = "/v1beta/models/";
+    private static final String GEMINI_PATH_SUFFIX = ":generateContent";
+
+    private static String geminiPath(String model) {
+        return GEMINI_PATH_PREFIX + model + GEMINI_PATH_SUFFIX;
+    }
+
+    /**
+     * The Gemini endpoint of a request whose model had a tier suffix, without it: the path carries the model as the client
+     * wrote it, and everything after the entry (the endpoint scope of the admission, the failure evidence, the request log)
+     * sees the plain id only, like the model, the price and the reservation do. A path that is not one {@link #geminiPath}
+     * built is returned as it is.
+     */
+    private static String withoutTierSuffix(String path) {
+        if (!path.startsWith(GEMINI_PATH_PREFIX) || !path.endsWith(GEMINI_PATH_SUFFIX)
+            || path.length() < GEMINI_PATH_PREFIX.length() + GEMINI_PATH_SUFFIX.length()) {
+            return path;
+        }
+        String model = path.substring(GEMINI_PATH_PREFIX.length(), path.length() - GEMINI_PATH_SUFFIX.length());
+        int at = model.lastIndexOf('@');
+        return at < 0 ? path : geminiPath(model.substring(0, at));
+    }
+
     private Mono<AccountDtos.RoutingPolicySettings> routingPolicy() {
         Mono<AccountDtos.RoutingPolicySettings> loaded = accountSettingsService.routingPolicy();
         if (loaded == null) {
@@ -402,32 +440,40 @@ public class ProxyFacade {
         return loaded.defaultIfEmpty(AccountDtos.RoutingPolicySettings.defaults());
     }
 
-    // rawEntryBody is the body as the client sent it. For Chat it is `request` itself. Messages and Gemini convert the
-    // body before this point and pass null for now: nothing reads it yet, and capturing it in the reactive chain would
-    // keep a body with large base64 images alive for the whole upstream call. Whoever reads it must derive what they
-    // need from the raw body before building the chain, and capture only that.
+    // rawEntryBody is the body as the client sent it. For Chat it is `clientRequest` itself (`request` is its copy with the
+    // tier suffix taken off the model, when there was one). Messages and Gemini convert the body before this point and
+    // pass null for now: nothing reads it yet, and capturing it in the reactive chain would keep a body with large
+    // base64 images alive for the whole upstream call. Whoever reads it must derive what they need from the raw body
+    // before building the chain, and capture only that.
     private Mono<ResponseEntity<?>> invokeChat(
-        JsonNode request,
+        JsonNode clientRequest,
         ServerWebExchange exchange,
         ApiKeyPrincipal principal,
-        String path,
+        String entryPath,
         ResponseMode responseMode,
         AccountDtos.RoutingPolicySettings routingPolicy,
         JsonNode rawEntryBody
     ) {
-        validateChatRequest(request);
+        validateChatRequest(clientRequest);
         Instant start = Instant.now();
         String requestId = UUID.randomUUID().toString();
+        ClientTierChoice tierChoice = clientTierChoice(clientRequest, exchange, principal, responseMode, routingPolicy);
+        // Only the Gemini path has the model in it. A request that had no suffix taken off keeps the path it came with.
+        String path = tierChoice.suffixTaken() && responseMode == ResponseMode.GEMINI_GENERATE_CONTENT
+            ? withoutTierSuffix(entryPath)
+            : entryPath;
+        JsonNode request = tierChoice.request();
         String requestedModel = request.path("model").asString(modelCatalog.defaultTargetModelId());
-        String mappedModel = modelMappingService.apply(requestedModel, principal.keyId());
+        String mappedModel = tierChoice.mappedModel();
         ModelProviderAccessPolicy.verify(modelCatalog, principal, requestedModel, mappedModel);
-        boolean requestedFastMode = isFastRequested(request, requestedModel, mappedModel);
-        String upstreamModel = upstreamModelFor(mappedModel, requestedFastMode);
+        RouteFacts routeFacts = routeFacts(request, requestedModel, mappedModel, responseMode, exchange, routingPolicy);
+        boolean requestedFastMode = routeFacts.requestedFastMode();
+        String upstreamModel = routeFacts.upstreamModel();
         String sessionHint = sessionHint(exchange, request, principal.keyId(), responseMode, null);
         boolean stream = responseMode != ResponseMode.GEMINI_GENERATE_CONTENT && request.path("stream").asBoolean(false);
-        UpstreamRoute route = routeFor(upstreamModel, responseMode);
-        boolean preferDeepSeekAccounts = isDeepSeekRouteModel(route, upstreamModel);
-        boolean preferCodexAccounts = preferCodexAccounts(route, preferDeepSeekAccounts, upstreamModel, exchange, routingPolicy);
+        UpstreamRoute route = routeFacts.route();
+        boolean preferDeepSeekAccounts = routeFacts.preferDeepSeekAccounts();
+        boolean preferCodexAccounts = routeFacts.preferCodexAccounts();
         boolean fastMode = requestedFastMode && route == UpstreamRoute.OPENAI && !preferDeepSeekAccounts;
         JsonNode upstreamRequest = boundedBillingRequest(preferDeepSeekAccounts
             ? deepSeekRequest(request)
@@ -451,7 +497,9 @@ public class ProxyFacade {
             upstreamRequest,
             null,
             false
-        ).withSessionName(TierSessionKeys.named(sessionHint)));
+        ).withSessionName(TierSessionKeys.named(sessionHint, codexSessionName(exchange, principal.keyId())))
+            .withSelector(tierChoice.selector())
+            .withEntry(tierEntry(responseMode)));
 
         return requireFastModeAllowed(fastMode).then(tierPlan).flatMap(plan -> {
             if (plan.tiered()) {
@@ -464,7 +512,7 @@ public class ProxyFacade {
                     upstreamModel,
                     sessionHint,
                     stream,
-                    route,
+                    servedRoute(plan, route),
                     fastMode,
                     preferCodexAccounts,
                     preferDeepSeekAccounts,
@@ -476,7 +524,7 @@ public class ProxyFacade {
                     true
                 ), responseMode));
             }
-            return withBilling(principal, requestId, requestedModel, upstreamRequest, fastMode, Mono.defer(() -> attemptChat(
+            return withSelectorStatus(plan, withBilling(principal, requestId, requestedModel, upstreamRequest, fastMode, Mono.defer(() -> attemptChat(
                 upstreamRequest,
                 request,
                 principal,
@@ -496,7 +544,7 @@ public class ProxyFacade {
                 start,
                 List.of(),
                 new AtomicBoolean(false)
-            )));
+            ))));
         });
     }
 
@@ -622,20 +670,23 @@ public class ProxyFacade {
     }
 
     private Mono<ResponseEntity<?>> invokeResponses(
-        JsonNode request,
+        JsonNode clientRequest,
         ServerWebExchange exchange,
         ApiKeyPrincipal principal,
         AccountDtos.RoutingPolicySettings routingPolicy
     ) {
-        validateResponsesRequest(request);
+        validateResponsesRequest(clientRequest);
         Instant start = Instant.now();
         String requestId = UUID.randomUUID().toString();
+        ClientTierChoice tierChoice = clientTierChoice(clientRequest, exchange, principal, ResponseMode.OPENAI_RESPONSES, routingPolicy);
+        JsonNode request = tierChoice.request();
         String path = "/v1/responses";
         String requestedModel = request.path("model").asString(modelCatalog.defaultTargetModelId());
-        String mappedModel = modelMappingService.apply(requestedModel, principal.keyId());
+        String mappedModel = tierChoice.mappedModel();
         ModelProviderAccessPolicy.verify(modelCatalog, principal, requestedModel, mappedModel);
-        boolean requestedFastMode = isFastRequested(request, requestedModel, mappedModel);
-        String upstreamModel = upstreamModelFor(mappedModel, requestedFastMode);
+        RouteFacts routeFacts = routeFacts(request, requestedModel, mappedModel, ResponseMode.OPENAI_RESPONSES, exchange, routingPolicy);
+        boolean requestedFastMode = routeFacts.requestedFastMode();
+        String upstreamModel = routeFacts.upstreamModel();
         String previousResponseId = firstNonBlank(request.path("previous_response_id").asString(null));
         String sessionHint = sessionHint(
             exchange,
@@ -645,17 +696,10 @@ public class ProxyFacade {
             previousResponseId
         );
         boolean stream = request.path("stream").asBoolean(false);
-        UpstreamRoute route = routeFor(upstreamModel, ResponseMode.OPENAI_RESPONSES);
-        boolean preferDeepSeekAccounts = isDeepSeekRouteModel(route, upstreamModel);
+        UpstreamRoute route = routeFacts.route();
+        boolean preferDeepSeekAccounts = routeFacts.preferDeepSeekAccounts();
         boolean fastMode = requestedFastMode && route == UpstreamRoute.OPENAI && !preferDeepSeekAccounts;
-        boolean preferCodexAccounts = preferCodexAccounts(
-            route,
-            preferDeepSeekAccounts,
-            upstreamModel,
-            exchange,
-            routingPolicy
-        ) || isCodexOnlyResponsesModel(requestedModel)
-            || isCodexOnlyResponsesModel(mappedModel);
+        boolean preferCodexAccounts = routeFacts.preferCodexAccounts();
         JsonNode expandedRequest = openAiResponseStateStore.expand(request);
         JsonNode upstreamRequest = boundedBillingRequest(preferDeepSeekAccounts
             ? deepSeekRequest(expandedRequest)
@@ -672,6 +716,7 @@ public class ProxyFacade {
         String tierSessionName = TierSessionKeys.ofResponses(
             principal.keyId(),
             sessionHint(exchange, request, principal.keyId(), ResponseMode.OPENAI_RESPONSES, null),
+            codexSessionName(exchange, principal.keyId()),
             previousResponseId
         );
 
@@ -690,7 +735,7 @@ public class ProxyFacade {
                 upstreamRequest,
                 responseAffinity.accountId(),
                 responseAffinity.movable()
-            ).withSessionName(tierSessionName)).flatMap(plan -> {
+            ).withSessionName(tierSessionName).withSelector(tierChoice.selector()).withEntry(TierEntry.RESPONSES)).flatMap(plan -> {
                 if (plan.tiered()) {
                     return servedByTiers(plan, exchange, serveTieredResponses(new TieredRequest(
                         plan,
@@ -701,7 +746,7 @@ public class ProxyFacade {
                         upstreamModel,
                         sessionHint,
                         stream,
-                        route,
+                        servedRoute(plan, route),
                         fastMode,
                         preferCodexAccounts,
                         preferDeepSeekAccounts,
@@ -713,7 +758,7 @@ public class ProxyFacade {
                         responseAffinity.movable()
                     )));
                 }
-                return withBilling(principal, requestId, requestedModel, upstreamRequest, fastMode, Mono.defer(() -> attemptResponses(
+                return withSelectorStatus(plan, withBilling(principal, requestId, requestedModel, upstreamRequest, fastMode, Mono.defer(() -> attemptResponses(
                     upstreamRequest,
                     request,
                     principal,
@@ -733,8 +778,34 @@ public class ProxyFacade {
                     start,
                     List.of(),
                     new AtomicBoolean(false)
-                )));
+                ))));
             }));
+    }
+
+    /** The session the Codex CLI names in its own header, as the tier sessions call it; null when the request has none. */
+    private static String codexSessionName(ServerWebExchange exchange, String keyId) {
+        return TierSessionKeys.ofCodexSession(
+            keyId,
+            exchange.getRequest().getHeaders().getFirst(TierSessionKeys.CODEX_SESSION_HEADER)
+        );
+    }
+
+    private static TierEntry tierEntry(ResponseMode responseMode) {
+        return switch (responseMode) {
+            case OPENAI_CHAT -> TierEntry.CHAT;
+            case OPENAI_RESPONSES -> TierEntry.RESPONSES;
+            case ANTHROPIC_MESSAGES -> TierEntry.MESSAGES;
+            case GEMINI_GENERATE_CONTENT -> TierEntry.GEMINI;
+        };
+    }
+
+    /**
+     * The route a tiered request is dispatched on. It is the route the facade chose, unless the all-endpoints switch of
+     * its vendor moved it onto the Anthropic route (design 4.9): everything the request does from selection to
+     * settlement, and the retries it is allowed, then follow that route, as a request of the Messages endpoint's do.
+     */
+    private static UpstreamRoute servedRoute(TierPlan plan, UpstreamRoute route) {
+        return plan.unified() ? UpstreamRoute.ANTHROPIC : route;
     }
 
     private TierPlanRequest tierPlanRequest(
@@ -754,7 +825,7 @@ public class ProxyFacade {
             poolContext.requestToken(),
             requestedModel,
             poolContext.upstreamModel(),
-            poolContext.providerHint(),
+            tierProviderHint(route, poolContext.upstreamModel(), preferDeepSeekAccounts, preferCodexAccounts),
             TierRoute.valueOf(route.name()),
             preferDeepSeekAccounts,
             route == UpstreamRoute.OPENAI && isOpenAiCompatibleModel(poolContext.upstreamModel()),
@@ -767,25 +838,177 @@ public class ProxyFacade {
             responseMovable,
             principal.keyId(),
             null
-        );
+        ).withKeyHoldsPreference(tiedToOneProvider(principal))
+            .withSuffixTakenOff(spelling -> !modelMappingService.hasAtSource(spelling, principal.keyId()));
+    }
+
+    /**
+     * The request without the tier selector that was on the end of its model, the tier the client named by the channel
+     * that wins (design 6.1), and the model the key's mapping makes of the model the request is left with. {@code
+     * suffixTaken} says that a suffix was taken off the model, which the Gemini endpoint (it carries the model in its
+     * path) must follow.
+     */
+    private record ClientTierChoice(JsonNode request, TierSelectorParser.Selector selector, String mappedModel, boolean suffixTaken) {
+    }
+
+    /**
+     * Reads what the client said about the tier it wants, before anything else looks at the request: the suffix is taken
+     * off the model id here, once, so that model mapping, the access check, the price and the logs only ever see the
+     * plain id. Whether an {@code @} is a suffix is decided by the vendor that will serve the model, after the key's model
+     * mapping and the route have had their say, and an id that a mapping rule of the key is written around (a Vertex-style
+     * "claude-sonnet-4@20250514", or a pattern such as {@code claude-sonnet-4@*}) is left whole. The suffix wins over the
+     * {@value TierSelectorParser#REQUEST_HEADER} header, and the header over the preference of the key. A key that is not
+     * tied to one provider (an old key, {@code *}) has no preference to follow: the tiers are named per vendor, and such a
+     * key may call any of them. The anonymous caller (the console's own assistant, or a deployment that allows
+     * unauthenticated proxying) may not choose a tier at all: what it names is read like anyone's, so that a suffix never
+     * reaches the upstream as part of the model, and then dropped as a hint that cannot be followed.
+     *
+     * <p>The key's mapping is applied here, once, and its answer is the model the request goes on with: a rule that picks
+     * among several targets at random (a {@code loadbalance} rule) must not be asked again, or the vendor that decided
+     * whether the {@code @} is a suffix could be another one than the vendor that serves the request.
+     */
+    private ClientTierChoice clientTierChoice(
+        JsonNode request,
+        ServerWebExchange exchange,
+        ApiKeyPrincipal principal,
+        ResponseMode responseMode,
+        AccountDtos.RoutingPolicySettings routingPolicy
+    ) {
+        String keyId = principal.keyId();
+        String model = request.path("model").asString(modelCatalog.defaultTargetModelId());
+        // The suffix is decided by the vendor the model goes to, which the mapping may change.
+        TierSelectorParser.Stripped stripped = model.indexOf('@') < 0 || modelMappingService.hasAtSource(model, keyId)
+            ? TierSelectorParser.Stripped.plain(model)
+            : tierRuntime.planner().stripSelector(model, base -> {
+                String mapped = modelMappingService.apply(base, keyId);
+                return tierDestination(request, base, mapped, responseMode, exchange, routingPolicy);
+            });
+        JsonNode plain = request;
+        String mappedModel;
+        if (stripped.selector() != null) {
+            ObjectNode copy = JsonNodes.shallowCopy((ObjectNode) request);
+            copy.put("model", stripped.model());
+            plain = copy;
+            mappedModel = stripped.destination().mappedModel();
+        } else {
+            mappedModel = modelMappingService.apply(model, keyId);
+        }
+        TierSelectorParser.Selector header = TierSelectorParser.fromHeader(
+            exchange.getRequest().getHeaders().getFirst(TierSelectorParser.REQUEST_HEADER));
+        TierSelectorParser.Selector preference = tiedToOneProvider(principal)
+            ? TierSelectorParser.fromPreference(principal.tierPreference())
+            : null;
+        TierSelectorParser.Selector chosen = TierSelectorParser.choose(stripped.selector(), header, preference);
+        return new ClientTierChoice(plain, "anonymous".equals(keyId) ? TierSelectorParser.unchoosable(chosen) : chosen, mappedModel,
+            stripped.selector() != null);
+    }
+
+    /**
+     * Where a request goes: the model as the upstream is asked for it, the route that takes it, and which kinds of
+     * account that route prefers. Worked out once for a request, from its model after the key's mapping, and the same
+     * way for the model in front of a tier suffix before the rest of the request is read ({@link #tierDestination}).
+     */
+    private record RouteFacts(
+        boolean requestedFastMode,
+        String upstreamModel,
+        UpstreamRoute route,
+        boolean preferDeepSeekAccounts,
+        boolean preferCodexAccounts
+    ) {
+    }
+
+    private RouteFacts routeFacts(
+        JsonNode request,
+        String requestedModel,
+        String mappedModel,
+        ResponseMode responseMode,
+        ServerWebExchange exchange,
+        AccountDtos.RoutingPolicySettings routingPolicy
+    ) {
+        boolean requestedFastMode = isFastRequested(request, requestedModel, mappedModel);
+        String upstreamModel = upstreamModelFor(mappedModel, requestedFastMode);
+        UpstreamRoute route = routeFor(upstreamModel, responseMode);
+        boolean preferDeepSeekAccounts = isDeepSeekRouteModel(route, upstreamModel);
+        // GPT Responses also go to Codex seats for the models only Codex accounts serve.
+        boolean preferCodexAccounts = responseMode == ResponseMode.OPENAI_RESPONSES
+            ? preferCodexAccountsForResponses(route, preferDeepSeekAccounts, requestedModel, mappedModel, upstreamModel, exchange, routingPolicy)
+            : preferCodexAccounts(route, preferDeepSeekAccounts, upstreamModel, exchange, routingPolicy);
+        return new RouteFacts(requestedFastMode, upstreamModel, route, preferDeepSeekAccounts, preferCodexAccounts);
+    }
+
+    /**
+     * Where a request for {@code requestedModel}, which the key's mapping made {@code mappedModel}, goes: the route
+     * takes it, and the plan names its vendor by the provider hint of the accounts that serve it.
+     */
+    private TierRuntime.Destination tierDestination(
+        JsonNode request,
+        String requestedModel,
+        String mappedModel,
+        ResponseMode responseMode,
+        ServerWebExchange exchange,
+        AccountDtos.RoutingPolicySettings routingPolicy
+    ) {
+        RouteFacts facts = routeFacts(request, requestedModel, mappedModel, responseMode, exchange, routingPolicy);
+        return new TierRuntime.Destination(mappedModel, facts.upstreamModel(), tierProviderHint(
+            facts.route(), facts.upstreamModel(), facts.preferDeepSeekAccounts(), facts.preferCodexAccounts()));
+    }
+
+    /**
+     * The provider hint the tier plan names its vendor by, for a model the catalog does not list: the vendor of the
+     * accounts that will serve the request. It is the pool context's hint ({@link #providerHint}), except where the
+     * route's name for itself is not the vendor of the accounts: the Kiro route is also what a model of Codex only
+     * (such as {@code codex-mini-latest}, which does not start with {@code gpt}) is sent by, to Codex seats, and what a
+     * Claude model newer than the catalog is served by Kiro accounts on, which sit in the tiers of the anthropic vendor.
+     * The pool context keeps the hint of the route; its pool keys are frozen for requests of vendors without tiers.
+     */
+    private String tierProviderHint(UpstreamRoute route, String upstreamModel, boolean deepSeekRoute, boolean preferCodexAccounts) {
+        if (route != UpstreamRoute.OPENAI && preferCodexAccounts) {
+            return AccountPlatforms.OPENAI_PROVIDER;
+        }
+        if (route == UpstreamRoute.KIRO && routeModel(upstreamModel).startsWith("claude")) {
+            return AccountPlatforms.ANTHROPIC_PROVIDER;
+        }
+        return providerHint(route, upstreamModel, deepSeekRoute);
+    }
+
+    /** Whether the key is limited to the models of one provider, as the access policy reads the provider of a key. */
+    private static boolean tiedToOneProvider(ApiKeyPrincipal principal) {
+        String provider = principal.modelProvider();
+        return provider != null && !provider.isBlank() && !"*".equals(provider);
+    }
+
+    /**
+     * The response of an untiered request, which says that the tier the client named was not used when its vendor
+     * keeps a tier configuration that is switched off (design 6.3). Any other untiered response is returned as it is.
+     */
+    private Mono<ResponseEntity<?>> withSelectorStatus(TierPlan plan, Mono<ResponseEntity<?>> served) {
+        if (!plan.selectorIgnored()) {
+            return served;
+        }
+        return served.map(response -> ResponseEntity.status(response.getStatusCode())
+            .headers(response.getHeaders())
+            .header(TierResponseHeaders.STATUS, TierResponseHeaders.IGNORED)
+            .body(response.getBody()));
     }
 
     /**
      * What the client is answered when a tiered request fails. A request that named its tier gets 503
      * SOURCE_TIER_UNAVAILABLE with a Retry-After when that tier has no account to offer, where an automatic one has the
      * "no available account" of an untiered request. The conversion is outside the billing scope on purpose: the release
-     * of the reservation has already judged the original error, which is not one of the definitive failures.
+     * of the reservation has already judged the original error, which is not one of the definitive failures. A Responses
+     * chain that cannot leave its owner is answered with what is wrong with the owner, as an automatic request is: it is
+     * not the pool that has nothing to offer, and retrying soon does not help when the owner is out of quota.
      */
     private Mono<ResponseEntity<?>> servedByTiers(TierPlan plan, ServerWebExchange exchange, Mono<ResponseEntity<?>> served) {
         if (!plan.pinned()) {
             return served;
         }
-        return served.onErrorResume(this::isNoAvailableAccount, error -> {
+        return served.onErrorResume(error -> isNoAvailableAccount(error) && !isResponseOwnerUnavailable(error), error -> {
             exchange.getResponse().getHeaders().set("Retry-After", TIER_UNAVAILABLE_RETRY_AFTER_SECONDS);
             return Mono.error(new ApiException(
                 HttpStatus.SERVICE_UNAVAILABLE,
                 "SOURCE_TIER_UNAVAILABLE",
-                "The source pool you chose has no account available right now"
+                "The tier you chose has no account available right now"
             ));
         });
     }
@@ -830,7 +1053,7 @@ public class ProxyFacade {
             return Mono.defer(() -> {
                 TierBilling billing = TierBilling.of(plan, model);
                 return reservedFor(principal, requestId, billing.reservation(), billing.pricing(), operation,
-                    context -> context.put(TierBilling.class, billing), this::tierDefinitive);
+                    context -> context.put(TierBilling.class, billing), this::tierDefinitive, error -> lowBalanceAdvice(plan, error));
             });
         }
         long estimatedInput = RequestBounds.nativeInputTokens(request);
@@ -841,8 +1064,20 @@ public class ProxyFacade {
                 pricing.put("model", model).put("input", quote.input()).put("output", quote.output())
                     .put("cacheRead", quote.cacheRead()).put("cacheWrite", quote.cacheWrite()).put("fallback", quote.fallback());
                 return reservedFor(principal, requestId, quote.estimate(estimatedInput, outputBound), pricing.toString(), operation,
-                    context -> context.put(tech.starryapi.model.BillingQuote.class, quote), this::definitiveBillingFailure);
+                    context -> context.put(tech.starryapi.model.BillingQuote.class, quote), this::definitiveBillingFailure, null);
             });
+    }
+
+    /**
+     * The refusal of the reservation of an automatic tiered request for too little balance, with the tiers that would
+     * have reserved less added to what the client is told (design 5.6): the reservation covers the dearest tier the
+     * request may be served from, which a user who could pay for a cheaper one may avoid by naming it.
+     */
+    private static Throwable lowBalanceAdvice(TierPlan plan, Throwable error) {
+        if (plan.lowBalanceHint() != null && error instanceof ApiException api && "INSUFFICIENT_BALANCE".equals(api.getCode())) {
+            return new ApiException(api.getStatus(), api.getCode(), api.getMessage() + plan.lowBalanceHint(), api.getDetails());
+        }
+        return error;
     }
 
     /**
@@ -852,6 +1087,7 @@ public class ProxyFacade {
      * @param billing puts what the settlement needs to price the usage into the operation's context
      * @param definitiveFailure whether a failure is known not to have been billed, so that the reservation is released
      *     rather than left for review
+     * @param reservationFailure what the client is told when the reservation itself is refused; null to tell it as it is
      */
     private <T> Mono<T> reservedFor(
         ApiKeyPrincipal principal,
@@ -860,12 +1096,14 @@ public class ProxyFacade {
         String pricing,
         Mono<T> operation,
         UnaryOperator<Context> billing,
-        Predicate<Throwable> definitiveFailure
+        Predicate<Throwable> definitiveFailure,
+        UnaryOperator<Throwable> reservationFailure
     ) {
         AtomicBoolean uncertainFailure = new AtomicBoolean();
         AtomicBoolean settled = new AtomicBoolean();
+        Mono<Void> reservation = apiKeyService.reserveUsage(principal, requestId, credits, pricing);
         return Mono.usingWhen(
-            apiKeyService.reserveUsage(principal, requestId, credits, pricing).thenReturn(requestId),
+            (reservationFailure == null ? reservation : reservation.onErrorMap(reservationFailure)).thenReturn(requestId),
             ignored -> operation.contextWrite(context -> billing.apply(context)
                 .put(BILLING_UNCERTAINTY, uncertainFailure)
                 .put(BILLING_SETTLED, settled)),
@@ -1513,15 +1751,10 @@ public class ProxyFacade {
                 .concatMap(cell -> selectInCell(plan, level, cell, null, cell.predicate(excluded)
                     .and(account -> owner.accountId().equals(account.getAccountId()))
                     .and(account -> plan.holds(level, account))))
-                .next()
-                .map(TierSelection::asOwner);
+                .next();
             return allowResponseOwnerFallback
                 ? selected
-                : selected.switchIfEmpty(Mono.error(() -> new ApiException(
-                    HttpStatus.SERVICE_UNAVAILABLE,
-                    "NO_AVAILABLE_ACCOUNT",
-                    "The account that owns the OpenAI response is unavailable"
-                )));
+                : selected.switchIfEmpty(Mono.error(ResponseOwnerUnavailableException::new));
         }).orElseGet(Mono::empty);
     }
 
@@ -1668,7 +1901,7 @@ public class ProxyFacade {
                 "The selected account does not belong to the source tier that was chosen for it"
             );
         }
-        return new TierSelection(account, level, cell, TierDispatch.nativeDispatch(), plan.mode(), climbed, false);
+        return new TierSelection(account, level, cell, TierDispatch.nativeDispatch(), plan.mode(), climbed);
     }
 
     private void bindTieredSession(
@@ -1802,8 +2035,7 @@ public class ProxyFacade {
                                 maxDistinctAccounts(
                                     classification, run.route(), run.preferCodexAccounts(), run.preferDeepSeekAccounts(), run.routingPolicy()),
                                 generationStarted.get(),
-                                tierHasAccountsLeft,
-                                selection.owner()
+                                tierHasAccountsLeft
                             ));
                             if (next == TierRetryPolicy.Outcome.STOP) {
                                 return failureRecord.then(Mono.<ResponseEntity<?>>error(mapError(error)));
@@ -1955,15 +2187,24 @@ public class ProxyFacade {
      * climbed back to a better tier as a last resort moves the session up with it, unless what left it nowhere else
      * was the session's own parallel requests. Anything else leaves the session where it is, and only notes that it is
      * still being served.
+     *
+     * <p>A request that named its tier is a request of the session all the same (design 4.7): it leaves the tier the
+     * session is bound to as it is, and notes that the session is being served, so that a session which keeps working
+     * with pinned requests is not idle and does not go back to the best tier in the middle of its work. That holds on
+     * every endpoint, as does the response chain's own hand-over of the binding ({@link #followTierToNextTurn}).
      */
     private void bindTierLevel(TierPlan plan, TierWalk walk, TierSelection served) {
         TierPlan.Session session = plan.session().orElse(null);
         if (session == null) {
             return;
         }
+        TierSessionBindings bindings = tierRuntime.bindings();
+        if (!session.keepsTier()) {
+            bindings.serve(session.bindingKey());
+            return;
+        }
         Level level = served.level();
         TierSessionBindings.Binding binding = new TierSessionBindings.Binding(level.tierId(), level.level());
-        TierSessionBindings bindings = tierRuntime.bindings();
         if (served.climbed() && walk.realClimb()) {
             log.debug("A session of vendor {} climbed back to tier {}", plan.vendor(), level.tierRef());
             bindings.climb(session.bindingKey(), binding);
@@ -2287,14 +2528,8 @@ public class ProxyFacade {
         return request;
     }
 
-    private AccountPoolRequestContext poolContext(
-        String requestId,
-        String requestedModel,
-        String upstreamModel,
-        UpstreamRoute route,
-        boolean deepSeekRoute
-    ) {
-        String providerHint = deepSeekRoute
+    private String providerHint(UpstreamRoute route, String upstreamModel, boolean deepSeekRoute) {
+        return deepSeekRoute
             ? AccountPlatforms.DEEPSEEK_PROVIDER
             : route == UpstreamRoute.OPENAI && isOpenAiCompatibleModel(upstreamModel)
                 ? AccountPlatforms.OPENAI_COMPATIBLE_PROVIDER
@@ -2303,6 +2538,16 @@ public class ProxyFacade {
                 case ANTHROPIC -> AccountPlatforms.ANTHROPIC_PROVIDER;
                 case KIRO -> "Kiro";
             };
+    }
+
+    private AccountPoolRequestContext poolContext(
+        String requestId,
+        String requestedModel,
+        String upstreamModel,
+        UpstreamRoute route,
+        boolean deepSeekRoute
+    ) {
+        String providerHint = providerHint(route, upstreamModel, deepSeekRoute);
         UUID circuitEpoch = accountPoolService.captureCircuitEpoch();
         return new AccountPoolRequestContext(
             requestId,
@@ -2748,6 +2993,11 @@ public class ProxyFacade {
         return Math.min(scopeLimit, routeLimit);
     }
 
+    private boolean isResponseOwnerUnavailable(Throwable error) {
+        Throwable failure = rootFailure(error);
+        return failure instanceof ResponseOwnerUnavailableException;
+    }
+
     private boolean isNoAvailableAccount(Throwable error) {
         Throwable failure = rootFailure(error);
         return failure instanceof ApiException api && "NO_AVAILABLE_ACCOUNT".equals(api.getCode());
@@ -2978,6 +3228,21 @@ public class ProxyFacade {
         }
         return routingPolicy.gptUsesCodexAccountsEnabled()
             || isCodexResponsesClient(exchange);
+    }
+
+    /** Whether a Responses request goes to Codex seats: as above, and for the models only Codex accounts serve. */
+    private boolean preferCodexAccountsForResponses(
+        UpstreamRoute route,
+        boolean preferDeepSeekAccounts,
+        String requestedModel,
+        String mappedModel,
+        String upstreamModel,
+        ServerWebExchange exchange,
+        AccountDtos.RoutingPolicySettings routingPolicy
+    ) {
+        return preferCodexAccounts(route, preferDeepSeekAccounts, upstreamModel, exchange, routingPolicy)
+            || isCodexOnlyResponsesModel(requestedModel)
+            || isCodexOnlyResponsesModel(mappedModel);
     }
 
     private boolean isOpenAiCompatibleModel(String model) {

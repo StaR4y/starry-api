@@ -598,15 +598,58 @@ class DefaultSourceTierPlannerTest {
     }
 
     @Test
-    void theOwnersTierIsNotLeftOutWhenOtherTiersHaveUsableAccounts() {
+    void theOwnersTierIsNotLeftOutWhenItIsWhereTheWalkStartsAndOtherTiersHaveUsableAccounts() {
+        loaded(snapshot(List.of(vendor("openai", true)), openAiTiers(), List.of()));
+        ProxyAccountEntity sibling = account("openai-official-2", "OpenAI", "api-key", null);
+        cached.add(sibling);
+        usable.clear();
+        usable.add(sibling);
+        usable.add(codex);
+        when(accountPool.cachedAccount("openai-official")).thenReturn(Optional.of(officialOpenAi));
+
+        // A chain that can be replayed elsewhere prefers its owner when it sits where the walk starts, and the other
+        // tiers may serve it. The owner itself has nothing to offer (it is out of quota), and its tier stays all the same.
+        TierPlan plan = plan(openAiRequest(false, false, "openai-official", true));
+
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("official", "codex");
+        assertThat(plan.owner()).hasValueSatisfying(owner -> assertThat(owner.level().tierId()).isEqualTo("official"));
+    }
+
+    @Test
+    void theOwnerOfAChainThatCanBeReplayedIsLeftOutWithItsTierWhenItIsNotWhereTheWalkStarts() {
         loaded(snapshot(List.of(vendor("openai", true)), openAiTiers(), List.of()));
         usable.clear();
         usable.add(officialOpenAi);
         when(accountPool.cachedAccount("codex")).thenReturn(Optional.of(codex));
 
-        TierPlan plan = plan(openAiRequest(false, false, "codex", false));
+        // The owner is in the second tier, and the first one can serve: the request starts from the first, owner or not.
+        TierPlan plan = plan(openAiRequest(false, false, "codex", true));
 
-        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("official", "codex");
+        assertThat(plan.owner()).isEmpty();
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("official");
+        assertThat(plan.unavailableTiers()).extracting(Tier::tierId).containsExactly("codex");
+    }
+
+    @Test
+    void aChainThatCannotLeaveItsOwnerIsPlannedHeldAndPricedForTheOwnersTierAlone() {
+        loaded(snapshot(List.of(vendor("openai", true)), openAiTiers(), List.of()));
+        when(accountPool.cachedAccount("codex")).thenReturn(Optional.of(codex));
+        when(accountPool.cachedAccount("openai-official")).thenReturn(Optional.of(officialOpenAi));
+
+        TierPlan onCodex = plan(openAiRequest(false, false, "codex", false));
+        TierPlan onOfficial = plan(openAiRequest(false, false, "openai-official", false));
+        TierPlan replayable = plan(openAiRequest(false, false, "codex", true));
+
+        // No other tier can serve it, so no other tier is planned, held for, or advised; the owner's tier is the whole plan.
+        assertThat(onCodex.levels()).extracting(Level::tierId).containsExactly("codex");
+        assertThat(onCodex.holdLevels()).extracting(Level::tierId).containsExactly("codex");
+        assertThat(onCodex.reservation()).isEqualByComparingTo(onCodex.levels().get(0).estimate());
+        assertThat(onCodex.lowBalanceHint()).isNull();
+        assertThat(onOfficial.levels()).extracting(Level::tierId).containsExactly("official");
+        assertThat(onOfficial.reservation()).isEqualByComparingTo(onOfficial.levels().get(0).estimate());
+        // The dearer tier is the one the replayable chain reserves for, whichever account owns it.
+        assertThat(replayable.holdLevels()).extracting(Level::tierId).containsExactly("official", "codex");
+        assertThat(replayable.reservation()).isGreaterThan(onCodex.reservation());
     }
 
     @Test

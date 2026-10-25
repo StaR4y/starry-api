@@ -497,30 +497,63 @@ class ProxyFacadeTieredRetryTest {
     @Test
     void theOwnerOfAChainThatFailsDefinitivelyIsFollowedByTheWalkFromTheStartOfTheRequest() {
         loaded(openAiTiers());
-        add(officialOpenAi("official-1"), codex("codex-owner"));
-        fails("codex-owner", new UpstreamException(429, "slow down", true));
+        add(officialOpenAi("official-owner"), officialOpenAi("official-1"), codex("codex-1"));
+        fails("official-owner", new UpstreamException(429, "slow down", true));
 
-        ResponseEntity<?> response = responses(openAiPlan("codex-owner"), true).block();
+        ResponseEntity<?> response = responses(openAiPlan("official-owner"), true).block();
 
-        // The owner sits in the second tier and was tried before the tiers were looked at; the first tier was not
+        // The owner sits in the tier the walk starts from and was tried before the tiers were looked at; the tier was not
         // passed and is still offered once the owner has failed.
         assertThat(response).isNotNull();
-        assertThat(dispatched).containsExactly("codex-owner", "official-1");
+        assertThat(dispatched).containsExactly("official-owner", "official-1");
         assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("official");
         verify(apiKeyService, never()).releaseUsage(any(), anyString(), anyBoolean(), anyString());
     }
 
     @Test
-    void theOwnerFailingWithTheBudgetSpentStillLetsTheRequestStartTheWalkOnTheReservedSlot() {
+    void theOwnerFailingWithTheBudgetSpentStillLetsTheRequestMoveToTheNextTierOnTheReservedSlot() {
         policy = new RoutingPolicySettings(true, false, false, false, 1, 1, 3, 2, 2);
         loaded(openAiTiers());
-        add(officialOpenAi("official-1"), codex("codex-owner"));
-        fails("codex-owner", new UpstreamException(429, "slow down", true));
+        add(officialOpenAi("official-owner"), codex("codex-1"));
+        fails("official-owner", new UpstreamException(429, "slow down", true));
 
-        ResponseEntity<?> response = responses(openAiPlan("codex-owner"), true).block();
+        ResponseEntity<?> response = responses(openAiPlan("official-owner"), true).block();
 
         assertThat(response).isNotNull();
-        assertThat(dispatched).containsExactly("codex-owner", "official-1");
+        assertThat(dispatched).containsExactly("official-owner", "codex-1");
+    }
+
+    @Test
+    void theOwnerAndAnotherAccountOfItsTierBothFailingWithTheBudgetSpentCrossToTheNextTier() {
+        policy = new RoutingPolicySettings(true, false, false, false, 1, 1, 3, 2, 2);
+        loaded(openAiTiers());
+        add(officialOpenAi("official-owner"), officialOpenAi("official-1"), codex("codex-1"));
+        fails("official-owner", new UpstreamException(429, "slow down", true));
+        fails("official-1", new UpstreamException(429, "slow down", true));
+
+        ResponseEntity<?> response = responses(openAiPlan("official-owner"), true).block();
+
+        // The account budget is one and was spent on the owner: the reserved slot is for crossing to the next tier, so the
+        // other account of the owner's tier is not dispatched to, and the request is served as it would be without a chain.
+        assertThat(response).isNotNull();
+        assertThat(dispatched).containsExactly("official-owner", "codex-1");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("codex");
+        verify(apiKeyService, never()).releaseUsage(any(), anyString(), anyBoolean(), anyString());
+    }
+
+    @Test
+    void theOwnerFailingAloneWithTheBudgetSpentMakesNoSecondDispatchInItsOwnTier() {
+        policy = new RoutingPolicySettings(true, false, false, false, 1, 1, 3, 2, 2);
+        loaded(openAiTiers());
+        add(officialOpenAi("official-owner"), officialOpenAi("official-1"), codex("codex-1"));
+        fails("official-owner", new UpstreamException(429, "slow down", true));
+
+        ResponseEntity<?> response = responses(openAiPlan("official-owner"), true).block();
+
+        // One dispatch in the tier is what the route allows; official-1 would have answered, and is the second.
+        assertThat(response).isNotNull();
+        assertThat(dispatched).containsExactly("official-owner", "codex-1");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("codex");
     }
 
     @Test
@@ -529,7 +562,7 @@ class ProxyFacadeTieredRetryTest {
         add(officialOpenAi("official-1"), codex("codex-owner"));
         fails("codex-owner", new UpstreamException(429, "slow down", true));
 
-        assertThatThrownBy(() -> responses(openAiPlan("codex-owner"), false).block())
+        assertThatThrownBy(() -> responses(openAiPlan("codex-owner", false), false).block())
             .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS));
 
         assertThat(dispatched).containsExactly("codex-owner");
@@ -538,15 +571,15 @@ class ProxyFacadeTieredRetryTest {
     @Test
     void aFailureOfTheOwnerThatMayHaveBeenBilledKeepsTheRequestInTheOwnersTier() {
         loaded(openAiTiers());
-        add(officialOpenAi("official-1"), codex("codex-owner"), codex("codex-2"));
-        fails("codex-owner", new TimeoutException("no answer"));
+        add(officialOpenAi("official-owner"), officialOpenAi("official-2"), codex("codex-1"));
+        fails("official-owner", new TimeoutException("no answer"));
 
-        ResponseEntity<?> response = responses(openAiPlan("codex-owner"), true).block();
+        ResponseEntity<?> response = responses(openAiPlan("official-owner"), true).block();
 
-        // The owner may still be generating the answer: the first tier is not asked to generate it again.
+        // The owner may still be generating the answer: no other tier is asked to generate it again.
         assertThat(response).isNotNull();
-        assertThat(dispatched).containsExactly("codex-owner", "codex-2");
-        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("codex");
+        assertThat(dispatched).containsExactly("official-owner", "official-2");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("official");
     }
 
     // ---- the lease ----
@@ -866,8 +899,13 @@ class ProxyFacadeTieredRetryTest {
 
     /** The plan of a request that continues a response chain whose owner is {@code owner}; the chain can be replayed elsewhere. */
     private TierPlan openAiPlan(String owner) {
+        return openAiPlan(owner, true);
+    }
+
+    /** The same, for a chain that can or cannot be replayed elsewhere; the request is served as the plan says. */
+    private TierPlan openAiPlan(String owner, boolean movable) {
         return plan(new TierPlanRequest(REQUEST_ID, "gpt-5.5", "gpt-5.5", "OpenAI", TierRoute.OPENAI,
-            false, false, false, false, false, true, responsesBody(), owner, true, null, null));
+            false, false, false, false, false, true, responsesBody(), owner, movable, null, null));
     }
 
     private TierPlan plan(TierPlanRequest request) {

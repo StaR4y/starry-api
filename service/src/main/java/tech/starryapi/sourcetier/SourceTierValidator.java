@@ -26,7 +26,7 @@ import tech.starryapi.account.allocation.AccountAllocationCategory;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.common.Hashing;
 import tech.starryapi.model.ModelCatalogProvider;
-import tech.starryapi.model.ModelDtos.ModelSpec;
+import tech.starryapi.proxy.tier.TierSelectorParser;
 import tech.starryapi.sourcetier.SourceTierDtos.Warning;
 import tech.starryapi.sourcetier.SourceTierRuntimeInfo.PairStatus;
 import tech.starryapi.sourcetier.SourceTierSnapshot.Member;
@@ -69,11 +69,7 @@ public class SourceTierValidator {
     private static final int WARNING_SAMPLE = 5;
     private static final BigDecimal MAX_PRICE_FACTOR = BigDecimal.valueOf(1000);
     private static final Pattern VENDOR = Pattern.compile("[a-z0-9]+(?:[.-][a-z0-9]+)*");
-    private static final Pattern TIER_ID = Pattern.compile("[a-z0-9][a-z0-9-]{0,31}");
-    // auto, L2 and 2 name a tier in the selectors (a model suffix, a header, a key preference), so they cannot be ids.
-    private static final Pattern SELECTOR_WORD = Pattern.compile("(auto|l?[0-9]+)");
     private static final Pattern UPSTREAM_MODEL = Pattern.compile("[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,254}");
-    private static final Set<String> NON_MODEL_FAMILIES = Set.of("Routing Preset", "CodeWhisperer Internal");
     private static final List<String> VENDOR_ORDER = List.of("anthropic", "openai", "google", "deepseek");
     private static final List<String> REASONING_MODES = List.of("NONE", "EFFORT");
     private static final List<String> GATE_STATES = List.of("OFF", "KEYS", "ON");
@@ -231,11 +227,12 @@ public class SourceTierValidator {
 
     private static Tier tier(String vendor, SourceTierDtos.Tier row, String where) {
         String tierId = row.tierId() == null ? "" : row.tierId();
-        if (!TIER_ID.matcher(tierId).matches()) {
+        if (!TierSelectorParser.isTierId(tierId)) {
             throw invalid(where + ".tierId must be lower case letters, digits and hyphens, 1 to 32 characters, starting with"
                 + " a letter or digit: " + abbreviated(tierId));
         }
-        if (SELECTOR_WORD.matcher(tierId).matches()) {
+        // auto, L2 and 2 name a tier in the selectors (a model suffix, a header, a key preference), so they cannot be ids.
+        if (TierSelectorParser.isReservedWord(tierId)) {
             throw invalid(where + ".tierId " + tierId + " is reserved: auto, L<n> and a bare number select a tier by level");
         }
         if (row.level() == null || row.level() < 1 || row.level() > MAX_TIERS) {
@@ -380,13 +377,7 @@ public class SourceTierValidator {
     }
 
     private boolean isCatalogModelOf(String vendor, String modelId) {
-        for (ModelSpec spec : catalog.models()) {
-            if (spec.id() != null && spec.id().equalsIgnoreCase(modelId)) {
-                return !NON_MODEL_FAMILIES.contains(spec.family())
-                    && vendor.equals(resolver.resolve(spec.id(), spec.id(), null).provider());
-            }
-        }
-        return false;
+        return SourceTierCatalogModels.isModelOf(catalog, resolver, vendor, modelId);
     }
 
     private static PairGate gate(String vendor, SourceTierDtos.Gate row, String where) {

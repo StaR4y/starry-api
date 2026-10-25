@@ -9,6 +9,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import tech.starryapi.model.ModelDtos;
 
 /**
  * Tiered source pools: a vendor's accounts split into ordered pools (tiers, level 1 is the best), each with a price
@@ -250,4 +251,20 @@ public final class SourceTierDtos {
         boolean relay,
         boolean active
     ) {}
+
+    /**
+     * What a user may choose from for an API key of {@code provider} (the key form's source pool choice): the pools of the
+     * provider's vendor that clients may ask for, best first, and nothing else about them. {@code tiers} is empty when the
+     * provider has no source tiers in use, or its administrator keeps the pool names to itself (an administrator is shown
+     * them anyway). {@code referenceModel} is the model {@code pricing} is worked out for, the provider's first model in the
+     * public model list that has a price; both are absent when there is no tier or no price.
+     */
+    public record MyTiers(String provider, String referenceModel, List<MyTier> tiers) {}
+
+    /**
+     * {@code id} is what a key preference, a request header or a model suffix names the pool by, {@code priceFactor} what the
+     * standard price is multiplied by, and {@code pricing} the reference model's price with the factor applied, in the form
+     * the public model list shows it.
+     */
+    public record MyTier(String id, int level, String name, BigDecimal priceFactor, ModelDtos.ModelPublicPricing pricing) {}
 }

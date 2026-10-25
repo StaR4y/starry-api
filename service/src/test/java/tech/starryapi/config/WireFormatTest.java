@@ -244,6 +244,58 @@ class WireFormatTest {
         });
     }
 
+    /**
+     * The source pool preference of a key (design 6.1) is one more field at the end of the key records, and only for a key
+     * that has one: the key list of a deployment that never used it is the JSON it was. A request may carry it or leave
+     * it out; left out, it means "no change" when a key is updated.
+     */
+    @Test
+    void aKeyShowsItsPoolPreferenceOnlyWhenItHasOneAndTheRequestsMayCarryIt() {
+        ProductionJson.run(json -> {
+            check(json, "apiKeyWithPreference", ok(new ApiKeyDtos.ApiKeyResponse("key-1", "user-1", "CI key", "sk-starry-abcdef",
+                "sk-star", true, new BigDecimal("25.50"), "Anthropic", "BALANCE", 12L, new BigDecimal("1234.567890"), 4_000_000_000L,
+                0L, T0, T1, null, "kiro+")),
+                """
+                {"success":true,"data":{"keyId":"key-1","userId":"user-1","name":"CI key","key":"sk-starry-abcdef","keyPrefix":"sk-star","enabled":true,"creditsLimit":25.50,"modelProvider":"Anthropic","billingSource":"BALANCE","totalRequests":12,"totalCredits":1234.567890,"totalInputTokens":4000000000,"totalOutputTokens":0,"lastUsedAt":"2026-10-23T06:24:25.123456Z","createdAt":"2026-10-23T06:24:25Z","tierPreference":"kiro+"},"timestamp":"2026-10-23T06:24:25Z"}""");
+            check(json, "createdApiKeyWithPreference", ok(new ApiKeyDtos.CreatedApiKeyResponse("key-3", "user-1", "new",
+                "sk-starry-secret", "sk-star", true, new BigDecimal("100"), "ANTHROPIC", "BALANCE", T1, "kiro+")),
+                """
+                {"success":true,"data":{"keyId":"key-3","userId":"user-1","name":"new","key":"sk-starry-secret","keyPrefix":"sk-star","enabled":true,"creditsLimit":100,"modelProvider":"ANTHROPIC","billingSource":"BALANCE","createdAt":"2026-10-23T06:24:25Z","tierPreference":"kiro+"},"timestamp":"2026-10-23T06:24:25Z"}""");
+            read(json, "createWithPreference",
+                """
+                {"name":"k","modelProvider":"Anthropic","tierPreference":"L2"}""",
+                ApiKeyDtos.CreateApiKeyRequest.class,
+                "CreateApiKeyRequest[name=k, creditsLimit=null, modelProvider=Anthropic, billingSource=null, tierPreference=L2]");
+            read(json, "updateWithPreference",
+                """
+                {"tierPreference":"kiro+","clearCreditsLimit":false}""",
+                ApiKeyDtos.UpdateApiKeyRequest.class,
+                "UpdateApiKeyRequest[name=null, enabled=null, creditsLimit=null, modelProvider=null, billingSource=null, clearCreditsLimit=false, tierPreference=kiro+]");
+            read(json, "updateWithoutPreference",
+                """
+                {"name":"renamed","enabled":false}""",
+                ApiKeyDtos.UpdateApiKeyRequest.class,
+                "UpdateApiKeyRequest[name=renamed, enabled=false, creditsLimit=null, modelProvider=null, billingSource=null, clearCreditsLimit=null, tierPreference=null]");
+        });
+    }
+
+    /** What the key form offers: name, level, factor and price of the pools, and nothing of the accounts behind them. */
+    @Test
+    void thePoolsOfAProviderCarryOnlyWhatTheKeyFormShows() {
+        ProductionJson.run(json -> {
+            ModelDtos.ModelPublicPricing price = new ModelDtos.ModelPublicPricing("input_output", null, new BigDecimal("555.5"),
+                new BigDecimal("111.1"), null, null, null, new BigDecimal("1.8"), new BigDecimal("9"), null, null);
+            check(json, "poolsOfAProvider", ok(new SourceTierDtos.MyTiers("Anthropic", "claude-sonnet-4.5", List.of(
+                new SourceTierDtos.MyTier("official", 1, "官方", new BigDecimal("1.000000"), null),
+                new SourceTierDtos.MyTier("kiro", 2, "kiro反向代理", new BigDecimal("0.600000"), price)))),
+                """
+                {"success":true,"data":{"provider":"Anthropic","referenceModel":"claude-sonnet-4.5","tiers":[{"id":"official","level":1,"name":"官方","priceFactor":1.000000},{"id":"kiro","level":2,"name":"kiro反向代理","priceFactor":0.600000,"pricing":{"billingMode":"input_output","inputTokensPer100Balance":555.5,"outputTokensPer100Balance":111.1,"inputPricePerMillionTokens":1.8,"outputPricePerMillionTokens":9}}]},"timestamp":"2026-10-23T06:24:25Z"}""");
+            check(json, "noPoolsOfAProvider", ok(new SourceTierDtos.MyTiers("OpenAI", null, List.of())),
+                """
+                {"success":true,"data":{"provider":"OpenAI","tiers":[]},"timestamp":"2026-10-23T06:24:25Z"}""");
+        });
+    }
+
     @Test
     void requestBodiesAreReadLeniently() {
         ProductionJson.run(json -> {
@@ -261,11 +313,11 @@ class WireFormatTest {
             read(json, "unknownPropertiesAreIgnored",
                 """
                 {"name":"k","creditsLimit":10.50,"modelProvider":"OPENAI","surprise":{"a":[1,2]},"another":1}""",
-                ApiKeyDtos.CreateApiKeyRequest.class, "CreateApiKeyRequest[name=k, creditsLimit=10.50, modelProvider=OPENAI, billingSource=null]");
+                ApiKeyDtos.CreateApiKeyRequest.class, "CreateApiKeyRequest[name=k, creditsLimit=10.50, modelProvider=OPENAI, billingSource=null, tierPreference=null]");
             read(json, "decimalsKeepTheirScale",
                 """
                 {"name":"k","creditsLimit":10.500,"modelProvider":"OPENAI","billingSource":"BALANCE"}""",
-                ApiKeyDtos.CreateApiKeyRequest.class, "CreateApiKeyRequest[name=k, creditsLimit=10.500, modelProvider=OPENAI, billingSource=BALANCE]");
+                ApiKeyDtos.CreateApiKeyRequest.class, "CreateApiKeyRequest[name=k, creditsLimit=10.500, modelProvider=OPENAI, billingSource=BALANCE, tierPreference=null]");
             read(json, "decimalsFromStringsAndExponents",
                 """
                 {"amount":"10.10","paymentType":"alipay","mobile":false}""",

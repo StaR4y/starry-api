@@ -11,15 +11,18 @@ public class SourceTierAdminController implements SourceTierAdminApi {
 
     private final SourceTierAdminService service;
     private final SourceTierStatusService statusService;
+    private final SourceTierChoices choices;
     private final AdminAuth adminAuth;
 
     public SourceTierAdminController(
         SourceTierAdminService service,
         SourceTierStatusService statusService,
+        SourceTierChoices choices,
         AdminAuth adminAuth
     ) {
         this.service = service;
         this.statusService = statusService;
+        this.choices = choices;
         this.adminAuth = adminAuth;
     }
 
@@ -39,6 +42,11 @@ public class SourceTierAdminController implements SourceTierAdminApi {
     public Mono<ApiResponse<SourceTierDtos.Placements>> placements(ServerWebExchange exchange) {
         adminAuth.verifyAdmin(exchange);
         return statusService.placements().map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<SourceTierDtos.MyTiers>> mine(ServerWebExchange exchange, String provider) {
+        return choices.forProvider(adminAuth.verify(exchange), provider).map(ApiResponse::ok);
     }
 
     @Override

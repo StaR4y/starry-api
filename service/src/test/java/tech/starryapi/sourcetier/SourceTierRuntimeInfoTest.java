@@ -10,14 +10,16 @@ import tech.starryapi.sourcetier.SourceTierRuntimeInfo.PairStatus;
 class SourceTierRuntimeInfoTest {
 
     @Test
-    void thisReleaseRunsTheNativeTiersAndNothingElseOfTheFeatureYet() {
+    void thisReleaseRunsTheNativeTiersTheSelectorsAndTheAllEndpointsSwitchAndNothingElseOfTheFeatureYet() {
         SourceTierRuntimeInfo runtime = new SourceTierRuntimeInfo();
 
-        // Native tiering is the one capability that is complete (P2-09): requests are planned over the tiers.
+        // Native tiering (P2-09), the selectors (P3-01) and the all-endpoints switch (P3-03) are complete: requests are
+        // planned over the tiers, a client can name the one it wants, and a Claude model asked through Chat Completions or
+        // Responses can be served on the Anthropic route.
         assertThat(runtime.nativeTiers()).isTrue();
+        assertThat(runtime.selectors()).isTrue();
+        assertThat(runtime.unifyEndpoints()).isTrue();
         // What the later phases bring is still off, so that nothing is stored that only a later release would run.
-        assertThat(runtime.selectors()).isFalse();
-        assertThat(runtime.unifyEndpoints()).isFalse();
         assertThat(runtime.xpMembers()).isFalse();
         assertThat(runtime.pairs()).isNotEmpty().allSatisfy(pair ->
             assertThat(runtime.pairStatus(pair.vendor(), pair.sourceProtocol(), pair.entryEndpoint())).isEqualTo(PairStatus.NOT_OFFERED));

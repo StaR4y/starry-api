@@ -166,8 +166,9 @@ public final class TierWalk {
      * Whether being served by {@code served} means the session was pushed down to it (design 4.7, invariant I8): the
      * request went through every tier from its start to the one above {@code served} and found each with nothing to
      * offer, none of that came from the budget, and the refusals on the way were not all the session's own
-     * concurrency. A request that started below the best tier, or was served by the owner of its response chain
-     * without the walk looking at the tiers above it, passed nothing and pushed nobody down.
+     * concurrency. A request that started below the best tier passed nothing above its start and pushed nobody down
+     * by that; the owner of a response chain, which the plan keeps only in the tier the walk starts from, serves from
+     * that tier and is no push down either.
      *
      * <p>A tier the plan left out because none of its accounts can serve ({@link TierPlan#unavailableTiers}) was
      * found empty before the walk began, and counts as one it went through. A tier the plan kept though it never had an
@@ -251,11 +252,6 @@ public final class TierWalk {
     /** Whether the request has been restricted to one tier. It is then no longer climbed back to a better tier either. */
     public synchronized boolean narrowed() {
         return narrowedTo != null;
-    }
-
-    /** Whether the tiers the walk may still offer include one besides {@code level}. */
-    public synchronized boolean hasTierBesides(Level level) {
-        return levels().stream().anyMatch(other -> !other.tierRef().equals(level.tierRef()));
     }
 
     /** Whether the plan has a tier below {@code level}, whatever the walk still offers. */

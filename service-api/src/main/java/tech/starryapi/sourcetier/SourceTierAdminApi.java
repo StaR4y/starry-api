@@ -7,6 +7,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 import tech.starryapi.common.ApiResponse;
@@ -29,6 +30,14 @@ public interface SourceTierAdminApi {
     /** The tier each account is in, for the account list ({@link SourceTierDtos.Placements}). */
     @GetMapping("/placements")
     Mono<ApiResponse<SourceTierDtos.Placements>> placements(ServerWebExchange exchange);
+
+    /**
+     * The pools a user can choose from for an API key of {@code provider} ({@link SourceTierDtos.MyTiers}): name, level,
+     * price factor and price, nothing of the accounts behind them. Any signed-in user may ask; a user is only shown the
+     * pools of a vendor that lists them publicly, an administrator always.
+     */
+    @GetMapping("/me")
+    Mono<ApiResponse<SourceTierDtos.MyTiers>> mine(ServerWebExchange exchange, @RequestParam String provider);
 
     /**
      * Replaces the configuration of one vendor. 400 with a {@code SOURCE_*} code for a configuration that is not valid, 409

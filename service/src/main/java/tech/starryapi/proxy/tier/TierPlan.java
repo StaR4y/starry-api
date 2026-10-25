@@ -26,15 +26,23 @@ import tech.starryapi.sourcetier.SourceTierSnapshot.VendorConfig;
  */
 public final class TierPlan {
 
-    public static final TierPlan UNTIERED = new TierPlan();
+    public static final TierPlan UNTIERED = new TierPlan(false);
+
+    /**
+     * The plan of a request that named a tier, for a vendor that has a tier configuration but serves from none of it
+     * (switched off), or whose tiers were deleted after the selector was taken off the model: the selector is not used,
+     * and the response says so. It is {@link #UNTIERED} in every other respect.
+     */
+    public static final TierPlan UNTIERED_IGNORING_SELECTOR = new TierPlan(true);
 
     /** How the tier was chosen. */
     public enum Mode {
         /** The tiers in their order: the best one that can serve, the next when it cannot. */
         AUTO("auto"),
         /**
-         * The client named the tier; the request is served by it or not at all. Nothing produces it before manual
-         * selection exists, but a request that has it is answered differently when its tier has no account left.
+         * The client named the tier (design 6.2); the request is served by it, or by the tiers below it when it named
+         * "or below", and by nothing else. When none of them has an account left it is answered differently from an
+         * automatic request, with SOURCE_TIER_UNAVAILABLE.
          */
         PINNED("pinned");
 
@@ -95,13 +103,23 @@ public final class TierPlan {
     }
 
     /**
-     * The session of a request whose tier is kept (design 4.7).
+     * The session a request belongs to (design 4.7).
      *
      * @param key what the session is called: the client's own name for it, the response it continues or a fingerprint
      *     of its beginning
      * @param bindingKey the key the session's tier is stored under: the session in this vendor, for this model
+     * @param keepsTier whether the request reads the tier its session is bound to and may write it, as an automatic
+     *     request does. A request that named its tier is only part of the session: it counts as one of its dispatches
+     *     while it runs, so that a refusal it causes is not taken for other load, it hands the binding on to the
+     *     next turn of a response chain and, once served, notes that the session is in use (so that the binding does
+     *     not expire in the middle of its work), but it never reads or changes the tier the session is bound to.
      */
-    public record Session(String key, String bindingKey) {
+    public record Session(String key, String bindingKey, boolean keepsTier) {
+
+        /** The session of an automatic request. */
+        public Session(String key, String bindingKey) {
+            this(key, bindingKey, true);
+        }
     }
 
     private final boolean tiered;
@@ -122,8 +140,13 @@ public final class TierPlan {
     private final BigDecimal reservation;
     private final AccountPoolRequestContext poolContext;
     private final SourceTierSnapshot snapshot;
+    private final boolean selectorIgnored;
+    private final Set<String> pinnedScope;
+    private final String lowBalanceHint;
+    private final boolean unified;
 
-    private TierPlan() {
+    private TierPlan(boolean selectorIgnored) {
+        this.selectorIgnored = selectorIgnored;
         this.tiered = false;
         this.vendor = null;
         this.modelKey = null;
@@ -142,6 +165,9 @@ public final class TierPlan {
         this.reservation = null;
         this.poolContext = null;
         this.snapshot = null;
+        this.pinnedScope = Set.of();
+        this.lowBalanceHint = null;
+        this.unified = false;
     }
 
     /**
@@ -151,7 +177,8 @@ public final class TierPlan {
      *     account cache when the plan was made (see {@link #memberless})
      * @param startIndex the index in {@code levels} of the tier the request starts from: the best one, or the one its
      *     session is bound to
-     * @param session the session whose tier is kept, or null when it is not; a pinned plan has none
+     * @param session the session the request belongs to, or null when it has none; a pinned plan has one only to count
+     *     its dispatches (see {@link Session#keepsTier})
      */
     TierPlan(
         String vendor,
@@ -169,6 +196,38 @@ public final class TierPlan {
         long outputBound,
         BillingQuote standardQuote,
         AccountPoolRequestContext poolContext
+    ) {
+        this(vendor, modelKey, mode, snapshot, vendorConfig, levels, holdLevels, unavailableTiers, memberlessTiers,
+            startIndex, session, owner, outputBound, standardQuote, poolContext, Set.of(), null, false);
+    }
+
+    /**
+     * @param pinnedScope for a pinned plan, the ids of all the tiers its selector allows, including those that were
+     *     left out of {@code levels}; empty for an automatic plan, which allows them all
+     * @param lowBalanceHint what to tell a user whose balance does not cover the reservation about the tiers that would
+     *     cost less, or null
+     * @param unified whether the vendor's all-endpoints switch moved the request onto the Anthropic route (see
+     *     {@link #unified()}); the cells of the levels are then the Anthropic route's
+     */
+    TierPlan(
+        String vendor,
+        String modelKey,
+        Mode mode,
+        SourceTierSnapshot snapshot,
+        VendorConfig vendorConfig,
+        List<Level> levels,
+        List<Level> holdLevels,
+        List<Tier> unavailableTiers,
+        Set<String> memberlessTiers,
+        int startIndex,
+        Session session,
+        Owner owner,
+        long outputBound,
+        BillingQuote standardQuote,
+        AccountPoolRequestContext poolContext,
+        Set<String> pinnedScope,
+        String lowBalanceHint,
+        boolean unified
     ) {
         if (levels.isEmpty()) {
             throw new IllegalArgumentException("A tiered plan needs at least one tier");
@@ -188,12 +247,15 @@ public final class TierPlan {
         this.unavailableTiers = List.copyOf(unavailableTiers);
         this.memberlessTiers = Set.copyOf(memberlessTiers);
         this.startIndex = startIndex;
-        // A tier the client named is neither read from nor written to a session: the request is served by it or not at all.
-        this.session = mode == Mode.PINNED ? null : session;
+        this.session = session;
         this.owner = owner;
         this.outputBound = outputBound;
         this.standardQuote = standardQuote;
         this.poolContext = Objects.requireNonNull(poolContext, "poolContext");
+        this.selectorIgnored = false;
+        this.pinnedScope = Set.copyOf(pinnedScope);
+        this.lowBalanceHint = lowBalanceHint;
+        this.unified = unified;
         // A reservation is only an upper bound: the most any tier the request may end up in would reserve.
         this.reservation = this.holdLevels.stream()
             .map(Level::estimate)
@@ -205,6 +267,34 @@ public final class TierPlan {
     /** False for {@link #UNTIERED}. */
     public boolean tiered() {
         return tiered;
+    }
+
+    /**
+     * Whether the request named a tier that was not used, which the response says in its status header: the vendor has
+     * a tier configuration that is switched off ({@link #UNTIERED_IGNORING_SELECTOR}). A tiered plan says it in the
+     * headers of its tiers.
+     */
+    public boolean selectorIgnored() {
+        return selectorIgnored;
+    }
+
+    /**
+     * What to add to the "balance is insufficient" answer of an automatic request, which reserves for the dearest tier it
+     * may be served from: the tiers a client may name that would reserve less, with how to name them. Null when there is
+     * none, and for a request that named its tier.
+     */
+    public String lowBalanceHint() {
+        return lowBalanceHint;
+    }
+
+    /**
+     * Whether the vendor's all-endpoints switch moved the request onto the Anthropic route (design 4.9): a Claude model
+     * asked through Chat Completions or Responses, which would otherwise be served by Kiro alone, is served by the
+     * Anthropic keys and then Kiro, as it is through the Messages endpoint. The request is then dispatched, retried and
+     * logged as an Anthropic one; the facade's own route is the one to put aside.
+     */
+    public boolean unified() {
+        return unified;
     }
 
     /** The vendor whose tiers the request is served from, as the tier configuration names it. */
@@ -252,12 +342,13 @@ public final class TierPlan {
 
     /**
      * The tiers that were left out of {@link #levels()} because none of their accounts can serve right now: they have
-     * accounts of the route's kinds, and every one of them is suspended or out of quota. Only the tiers the request
+     * accounts of the route's kinds, and every one of them is out of quota. Only the tiers the request
      * starts from or is below are kept here. They are tiers the request is found to have gone through when a tier
      * under them serves it, as it would have if they had been in the plan and unavailable: such a request pushes its
-     * session down (design 4.1 counts the quota and the suspension of an account as the account being unavailable). A
+     * session down (design 4.1 counts the quota of an account as the account being unavailable). A
      * tier with no account of the route's kinds at all is something else, one this request cannot be served from, and
-     * is in neither list.
+     * is in neither list; that includes a tier whose accounts are all disabled or suspended, since a suspended account
+     * is disabled and is not in the account cache.
      */
     public List<Tier> unavailableTiers() {
         return unavailableTiers;
@@ -297,7 +388,7 @@ public final class TierPlan {
         return levels.get(startIndex);
     }
 
-    /** The session whose tier is kept, empty when it is not: manual selection, sticky sessions off, no session to tell. */
+    /** The session the request belongs to, empty when it has none: sticky sessions off, no session to tell. */
     public Optional<Session> session() {
         return Optional.ofNullable(session);
     }
@@ -372,6 +463,8 @@ public final class TierPlan {
         }
         return TierMembership.nativeTierOf(snapshot, vendor, account)
             .filter(Tier::enabled)
+            // A request that named its tier has no use for the tiers it left out on purpose.
+            .filter(tier -> pinnedScope.isEmpty() || pinnedScope.contains(tier.tierId()))
             .filter(tier -> levels.stream().noneMatch(level -> level.tierId().equals(tier.tierId())))
             .isPresent();
     }

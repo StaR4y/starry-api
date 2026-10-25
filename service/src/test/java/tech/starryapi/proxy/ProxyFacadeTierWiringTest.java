@@ -1,9 +1,15 @@
 package tech.starryapi.proxy;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockingDetails;
+import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.function.Predicate;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -13,9 +19,12 @@ import tech.starryapi.account.AccountPoolService;
 import tech.starryapi.account.AccountSettingsService;
 import tech.starryapi.account.DisabledAccountScheduledTestService;
 import tech.starryapi.account.ModelPoolKeyResolver;
+import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.account.allocation.AccountAdmissionStore;
+import tech.starryapi.account.allocation.AccountAllocationCategory;
 import tech.starryapi.apikey.ApiKeyService;
 import tech.starryapi.config.ProxyProperties;
+import tech.starryapi.model.DefaultModelCatalogProvider;
 import tech.starryapi.model.ModelCatalogProvider;
 import tech.starryapi.model.ModelMappingService;
 import tech.starryapi.model.ModelPricingService;
@@ -33,13 +42,21 @@ import tech.starryapi.platform.openai.OpenAiResponseOwnerStore;
 import tech.starryapi.platform.openai.OpenAiResponseStateStore;
 import tech.starryapi.platform.openai.OpenAiUpstreamClient;
 import tech.starryapi.proxy.tier.DefaultSourceTierPlanner;
+import tech.starryapi.proxy.tier.TierEntry;
 import tech.starryapi.proxy.tier.TierPlan;
+import tech.starryapi.proxy.tier.TierPlanRequest;
+import tech.starryapi.proxy.tier.TierRoute;
 import tech.starryapi.proxy.tier.TierRuntime;
 import tech.starryapi.proxy.tier.TierRuntimeConfig;
 import tech.starryapi.proxy.tier.TierSessionBindings;
 import tech.starryapi.sourcetier.SourceTierRegistry;
 import tech.starryapi.sourcetier.SourceTierRuntimeInfo;
+import tech.starryapi.sourcetier.SourceTierSnapshot;
+import tech.starryapi.sourcetier.SourceTierSnapshot.Tier;
+import tech.starryapi.sourcetier.SourceTierSnapshot.VendorConfig;
 import tech.starryapi.stats.StatsService;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 /**
  * ProxyFacade has several constructors, so unit tests that call one by hand do not show which one Spring uses. Two
@@ -116,6 +133,70 @@ class ProxyFacadeTierWiringTest {
             assertThat(runtime.bindings()).isSameAs(context.getBean(TierSessionBindings.class));
             assertThat(context.getBean(ProxyFacade.class).tierRuntime()).isSameAs(runtime);
         }
+    }
+
+    @Test
+    void thePlannerIsHonouringTheAllEndpointsSwitchOnlyWhereTheReleaseCanRunIt() {
+        // The release as it is shipped runs the switch; one that does not has the planner leave the setting alone.
+        assertThat(isClaudeOnChatPlannedOnTheAnthropicRoute(new SourceTierRuntimeInfo())).isTrue();
+        assertThat(isClaudeOnChatPlannedOnTheAnthropicRoute(new SourceTierRuntimeInfo(true, true, false, false,
+            pair -> SourceTierRuntimeInfo.PairStatus.NOT_OFFERED))).isFalse();
+    }
+
+    /**
+     * Asks the planner the runtime factory builds to plan a Claude model asked through Chat Completions, which takes the
+     * Kiro route alone, for an anthropic vendor that has the all-endpoints switch on; whether it moved the request onto
+     * the Anthropic route is what the switch does.
+     */
+    private boolean isClaudeOnChatPlannedOnTheAnthropicRoute(SourceTierRuntimeInfo runtimeInfo) {
+        DefaultModelCatalogProvider catalog = new DefaultModelCatalogProvider();
+        SourceTierRegistry registry = mock(SourceTierRegistry.class);
+        when(registry.snapshot()).thenReturn(SourceTierSnapshot.of(1L,
+            List.of(new VendorConfig("anthropic", true, true, false, true, 16, true, 1L)),
+            List.of(
+                new Tier("anthropic", "official", 1, "official", BigDecimal.ONE,
+                    EnumSet.of(AccountAllocationCategory.OFFICIAL_API_KEY), true, true, null),
+                new Tier("anthropic", "kiro", 2, "kiro", new BigDecimal("0.6"),
+                    EnumSet.of(AccountAllocationCategory.KIRO), true, true, null)),
+            List.of(), List.of(), List.of()));
+        List<ProxyAccountEntity> accounts = List.of(account("official-1", "Anthropic", "api-key"), account("kiro-1", "BuilderId", "idc"));
+        AccountPoolService accountPool = mock(AccountPoolService.class);
+        when(accountPool.cachedAccounts(any())).thenAnswer(invocation ->
+            accounts.stream().filter(invocation.<Predicate<ProxyAccountEntity>>getArgument(0)).toList());
+        when(accountPool.isUsable(any())).thenReturn(true);
+        ObjectNode body = new ObjectMapper().createObjectNode();
+        body.put("model", "claude-sonnet-4.5").put("max_tokens", 4096);
+        body.putArray("messages").addObject().put("role", "user").put("content", "hi");
+
+        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
+            context.getBeanFactory().registerSingleton("sourceTierRuntimeInfo", runtimeInfo);
+            context.getBeanFactory().registerSingleton("sourceTierRegistry", registry);
+            context.getBeanFactory().registerSingleton("modelCatalog", catalog);
+            context.getBeanFactory().registerSingleton("modelPoolKeyResolver", new ModelPoolKeyResolver(catalog));
+            context.getBeanFactory().registerSingleton("accountPoolService", accountPool);
+            context.getBeanFactory().registerSingleton("paymentSettingsService", paymentSettingsService);
+            context.getBeanFactory().registerSingleton("modelPricingService", modelPricingService);
+            context.getBeanFactory().registerSingleton("proxyProperties", new ProxyProperties());
+            context.register(TierRuntimeConfig.class);
+            context.refresh();
+
+            // Not billed (the anonymous caller), so that no price is asked for.
+            TierPlan plan = context.getBean(TierRuntime.class).planner().plan(new TierPlanRequest(
+                "request-1", "claude-sonnet-4.5", "claude-sonnet-4.5", "Kiro", TierRoute.KIRO, false, false, false, true,
+                false, false, body, null, false, "key-1", null, null, TierEntry.CHAT)).block();
+
+            assertThat(plan.tiered()).isTrue();
+            return plan.unified();
+        }
+    }
+
+    private static ProxyAccountEntity account(String accountId, String provider, String authMethod) {
+        ProxyAccountEntity account = new ProxyAccountEntity();
+        account.setAccountId(accountId);
+        account.setProvider(provider);
+        account.setAuthMethod(authMethod);
+        account.setEnabled(true);
+        return account;
     }
 
     @Test

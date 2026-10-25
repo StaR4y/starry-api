@@ -1,5 +1,5 @@
 import http, { unwrap } from '@/utils/http';
-import type { ApiResponse } from '@/types/api';
+import type { ApiResponse, ModelPublicPricing } from '@/types/api';
 import type { AllocationCategory } from '@/api/allocationDefaults';
 
 /**
@@ -225,6 +225,27 @@ export interface SourceTierPlaced {
   active: boolean;
 }
 
+/**
+ * 用户给 API Key 选号源时能选的号池（GET /admin/source-tiers/me?provider=）：只有名称、级别、系数和价格，
+ * 不含账号、类别或协议。tiers 为空表示这个厂商没有启用分级，或管理员没有公开号池名称（管理员本人总能看到）。
+ * pricing 是 referenceModel（这个厂商模型列表里第一个有价格的模型）乘上各号池系数后的价格，同 /v1/models 的写法；
+ * 两者都可能缺省。
+ */
+export interface SourceTierChoices {
+  provider: string;
+  referenceModel?: string | null;
+  tiers: SourceTierChoice[];
+}
+
+export interface SourceTierChoice {
+  /** Key 偏好、请求头和模型后缀都用它指号池 */
+  id: string;
+  level: number;
+  name: string;
+  priceFactor: number;
+  pricing?: ModelPublicPricing | null;
+}
+
 /** 后端的业务错误码：控制台对它们有专门的提示 */
 export const SOURCE_TIER_VERSION_CONFLICT = 'SOURCE_TIER_VERSION_CONFLICT';
 export const SOURCE_TIER_RUNTIME_UNSUPPORTED = 'SOURCE_TIER_RUNTIME_UNSUPPORTED';
@@ -241,6 +262,11 @@ export const sourceTiersApi = {
     ),
   status: () =>
     unwrap<SourceTierStatus>(http.get<ApiResponse<SourceTierStatus>>('/admin/source-tiers/status')),
+  /** 给 API Key 选号源时的可选号池；读取失败由调用方自己处理（这只是附加选项） */
+  choices: (provider: string) =>
+    unwrap<SourceTierChoices>(
+      http.get<ApiResponse<SourceTierChoices>>('/admin/source-tiers/me', { params: { provider } }),
+    ),
   placements: () =>
     unwrap<SourceTierPlacements>(
       http.get<ApiResponse<SourceTierPlacements>>('/admin/source-tiers/placements'),

@@ -27,6 +27,10 @@
   import type { ApiKey, CreateApiKeyRequest, CreatedApiKey, ModelInfo } from '@/types/api';
   import { canonicalCatalogProvider, getProviderOrder, orderOf } from '@/platforms/models';
   import { formatDateTime, formatNumber, shorten } from '@/utils/format';
+  import { AUTO_PREFERENCE, preferenceChoices, preferenceValue } from './tierPreference';
+  import { useSetupTier } from './setupTier';
+  import { useTierChoices } from './tierChoices';
+  import TierChoiceSelect from './components/TierChoiceSelect.vue';
   import {
     createCcSwitchLinks,
     createConnectionText,
@@ -151,7 +155,25 @@
     creditsLimit: undefined as number | undefined,
     modelProvider: '',
     enabled: true,
+    tierPreference: AUTO_PREFERENCE,
   });
+
+  /** 这个厂商能选的号池；没有启用号源分级的部署读到空列表，下面的选项也就不出现 */
+  const tierChoices = useTierChoices(
+    () => form.modelProvider,
+    () => formVisible.value,
+  );
+  const preferenceOptions = computed(() =>
+    preferenceChoices(
+      tierChoices.value?.tiers ?? [],
+      tierChoices.value?.referenceModel,
+      form.tierPreference,
+    ),
+  );
+  /** 没有号池可选、这把 Key 也没有偏好时不显示：表单和以前一样 */
+  const showTierPreference = computed(
+    () => (tierChoices.value?.tiers.length ?? 0) > 0 || form.tierPreference !== AUTO_PREFERENCE,
+  );
 
   const rules: FormRules = {
     name: [
@@ -199,6 +221,7 @@
       creditsLimit: undefined,
       modelProvider: modelProviders.value[0]?.name || '',
       enabled: true,
+      tierPreference: AUTO_PREFERENCE,
     });
   }
 
@@ -218,6 +241,7 @@
       creditsLimit: row.creditsLimit ?? undefined,
       modelProvider: row.modelProvider === '*' ? '' : row.modelProvider,
       enabled: row.enabled,
+      tierPreference: preferenceValue(row.tierPreference),
     });
     formVisible.value = true;
   }
@@ -234,12 +258,38 @@
     return apiKey?.trim() || 'sk-REPLACE_ME';
   }
 
-  function setupContext(apiKey?: string | null): SetupContext {
+  /** 配置里写入的号池（客户端配置里的「号池」选择）；「自动」时不写 */
+  const {
+    selected: newSetupTier,
+    options: newSetupTierOptions,
+    show: showNewSetupTier,
+    tier: newSetupTierRef,
+  } = useSetupTier(
+    () => newKey.value?.modelProvider,
+    () => newKeyVisible.value,
+  );
+
+  const setupTierHint = computed(() =>
+    t(
+      '号池写进配置的请求头 X-Starry-Tier。这个客户端的请求用不上所选号池时（例如它的端点走的路由在号池里没有账号），请求照常服务，只是不按所选号池。只选一个号池时，请求只由它服务，它的账号都暂时不可用就失败；选「及以下」才会改用更低的号池。',
+    ),
+  );
+  const openCodeLinkTierNote = computed(() =>
+    t('OpenCode 的链接不写号池：请用上面的 opencode.json，或在 Key 里设置号源偏好。'),
+  );
+  const claudeLinkTierNote = computed(() =>
+    t(
+      'Claude Code 的链接把号池写在模型名后面（模型@号池），那是对每个请求的要求：所选号池用不了时（它的账号都被停用或挂起，或管理员关闭了它、不再允许选择），请求会被拒绝（400 或 403），不会像请求头那样照常服务。',
+    ),
+  );
+
+  function setupContext(apiKey?: string | null, tier?: string | null): SetupContext {
     return {
       apiOrigin: apiOrigin.value,
       apiBaseUrl: apiBaseUrl.value,
       apiKey: normalizedApiKey(apiKey),
       apiPort: apiPort.value,
+      tier,
     };
   }
 
@@ -247,11 +297,13 @@
     createSetupScriptBlock(
       newSetupClient.value,
       newSetupPlatform.value,
-      setupContext(newKey.value?.key),
+      setupContext(newKey.value?.key, newSetupTierRef.value),
     ),
   );
   const connectionText = computed(() => createConnectionText(setupContext(newKey.value?.key)));
-  const ccSwitchLinks = computed(() => createCcSwitchLinks(setupContext(newKey.value?.key)));
+  const ccSwitchLinks = computed(() =>
+    createCcSwitchLinks(setupContext(newKey.value?.key, newSetupTierRef.value)),
+  );
   const connectionEndpoints = computed(() => [
     { label: 'Codex', value: apiBaseUrl.value },
     { label: 'Claude', value: apiOrigin.value },
@@ -350,6 +402,16 @@
     await copy(key, t('已复制 API Key'));
   }
 
+  const {
+    selected: configSetupTier,
+    options: configSetupTierOptions,
+    show: showConfigSetupTier,
+    tier: configSetupTierRef,
+  } = useSetupTier(
+    () => configKey.value?.modelProvider,
+    () => configVisible.value,
+  );
+
   const configConnectionText = computed(() =>
     createConnectionText(setupContext(configApiKey.value)),
   );
@@ -357,10 +419,12 @@
     createSetupScriptBlock(
       configSetupClient.value,
       configSetupPlatform.value,
-      setupContext(configApiKey.value),
+      setupContext(configApiKey.value, configSetupTierRef.value),
     ),
   );
-  const configCcSwitchLinks = computed(() => createCcSwitchLinks(setupContext(configApiKey.value)));
+  const configCcSwitchLinks = computed(() =>
+    createCcSwitchLinks(setupContext(configApiKey.value, configSetupTierRef.value)),
+  );
 
   function openShellConfig(row: ApiKey) {
     configKey.value = row;
@@ -425,6 +489,7 @@
           name: form.name,
           creditsLimit: form.creditsLimit,
           modelProvider: form.modelProvider,
+          tierPreference: form.tierPreference,
         };
         const created = await apiKeysApi.create(payload);
         formVisible.value = false;
@@ -438,6 +503,7 @@
           creditsLimit: form.creditsLimit,
           modelProvider: form.modelProvider,
           enabled: form.enabled,
+          tierPreference: form.tierPreference,
         });
         ElMessage.success(t('已更新'));
         formVisible.value = false;
@@ -594,9 +660,12 @@
         </el-table-column>
         <el-table-column :label="t('模型分类')" min-width="150">
           <template #default="{ row }">
-            <div class="provider-cell">
+            <div class="provider-cell" :class="{ 'provider-cell--tiered': row.tierPreference }">
               <ProviderLogo :provider="providerLabel(row.modelProvider)" :size="22" />
               <span>{{ providerLabel(row.modelProvider) }}</span>
+              <span v-if="row.tierPreference" class="tier-chip" :title="t('号源偏好')">
+                {{ row.tierPreference }}
+              </span>
             </div>
           </template>
         </el-table-column>
@@ -723,6 +792,7 @@
             :no-data-text="t('暂无可用厂商')"
             class="provider-select"
             :aria-label="t('选择 API Key 模型分类')"
+            @change="form.tierPreference = AUTO_PREFERENCE"
           >
             <template v-if="form.modelProvider" #prefix>
               <ProviderLogo :provider="form.modelProvider" :size="18" />
@@ -740,6 +810,20 @@
               </div>
             </el-option>
           </el-select>
+        </el-form-item>
+        <el-form-item v-if="showTierPreference" :label="t('号源偏好')">
+          <TierChoiceSelect
+            v-model="form.tierPreference"
+            :options="preferenceOptions"
+            :aria-label="t('选择 API Key 的号源偏好')"
+          />
+          <p class="field-hint">
+            {{
+              t(
+                '请求里写了模型后缀（模型@标识）或请求头 X-Starry-Tier 时以请求为准。只选一个号池时，请求只由它服务，它的账号都暂时不可用就失败；选「及以下」才会改用更低的号池。某个入口或模型用不上所选号池时，这个请求忽略它，按自动服务。',
+              )
+            }}
+          </p>
         </el-form-item>
         <div
           v-if="!auth.isAdmin"
@@ -906,6 +990,18 @@
                 </el-radio-button>
               </el-radio-group>
             </div>
+            <div v-if="showConfigSetupTier" class="setup-control">
+              <span class="setup-control__label">{{ t('号池') }}</span>
+              <div class="setup-control__field">
+                <TierChoiceSelect
+                  v-model="configSetupTier"
+                  size="small"
+                  :options="configSetupTierOptions"
+                  :aria-label="t('选择写入配置的号池')"
+                />
+                <p class="field-hint">{{ setupTierHint }}</p>
+              </div>
+            </div>
           </div>
 
           <div class="script-preview">
@@ -939,6 +1035,8 @@
             <div>
               <h3>{{ t('CC Switch 一键连接') }}</h3>
               <p>{{ t('打开 CC Switch 后会导入 Starry API 供应商配置。') }}</p>
+              <p v-if="configSetupTierRef" class="field-hint">{{ openCodeLinkTierNote }}</p>
+              <p v-if="configSetupTierRef" class="field-hint">{{ claudeLinkTierNote }}</p>
             </div>
           </div>
 
@@ -1058,6 +1156,18 @@
                 </el-radio-button>
               </el-radio-group>
             </div>
+            <div v-if="showNewSetupTier" class="setup-control">
+              <span class="setup-control__label">{{ t('号池') }}</span>
+              <div class="setup-control__field">
+                <TierChoiceSelect
+                  v-model="newSetupTier"
+                  size="small"
+                  :options="newSetupTierOptions"
+                  :aria-label="t('选择写入配置的号池')"
+                />
+                <p class="field-hint">{{ setupTierHint }}</p>
+              </div>
+            </div>
           </div>
 
           <div class="script-preview">
@@ -1087,6 +1197,8 @@
             <div>
               <h3>{{ t('CC Switch 一键连接') }}</h3>
               <p>{{ t('打开 CC Switch 后会导入 Starry API 供应商配置。') }}</p>
+              <p v-if="newSetupTierRef" class="field-hint">{{ openCodeLinkTierNote }}</p>
+              <p v-if="newSetupTierRef" class="field-hint">{{ claudeLinkTierNote }}</p>
             </div>
           </div>
 
@@ -1325,6 +1437,12 @@
       text-overflow: ellipsis;
       white-space: nowrap;
     }
+
+    /* 只有设了号源偏好的 Key 多一个标记，它才允许换到第二行；其余的行和以前一样，标签过长时截断 */
+    &--tiered {
+      flex-wrap: wrap;
+      gap: 4px 8px;
+    }
   }
 
   .api-key-table {
@@ -1399,6 +1517,16 @@
     :deep(.el-select__prefix) {
       align-items: center;
     }
+  }
+
+  .provider-cell .tier-chip {
+    flex: none;
+    padding: 1px 7px;
+    border: 1px solid color-mix(in srgb, var(--kp-primary) 22%, transparent);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--kp-primary) 8%, transparent);
+    color: var(--kp-text-secondary);
+    font-size: 11px;
   }
 
   .provider-option {
@@ -1565,6 +1693,10 @@
     grid-template-columns: 68px minmax(0, 1fr);
     align-items: center;
     gap: 10px;
+
+    &__field {
+      min-width: 0;
+    }
 
     &__label {
       color: var(--kp-text-secondary);

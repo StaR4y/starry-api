@@ -16,6 +16,7 @@ import tech.starryapi.common.Hashing;
 import tech.starryapi.config.ProxyProperties;
 import tech.starryapi.model.ModelCatalogProvider;
 import tech.starryapi.platform.catalog.PlatformModelCatalogSupport;
+import tech.starryapi.proxy.tier.TierSelectorParser;
 
 @Service
 public class ApiKeyService {
@@ -57,6 +58,7 @@ public class ApiKeyService {
         entity.setCreditsLimit(request.creditsLimit());
         entity.setModelProvider(normalizeModelProvider(request.modelProvider()));
         entity.setBillingSource(normalizeBillingSource(request.billingSource()));
+        entity.setTierPreference(normalizeTierPreference(request.tierPreference()));
         entity.setBillingMinimumCredits(BigDecimal.ZERO);
         entity.setTotalRequests(0L);
         entity.setTotalCredits(BigDecimal.ZERO);
@@ -73,7 +75,8 @@ public class ApiKeyService {
                 saved.getCreditsLimit(),
                 saved.getModelProvider(),
                 saved.getBillingSource(),
-                saved.getCreatedAt()
+                saved.getCreatedAt(),
+                ApiKeyMapper.tierPreference(saved.getTierPreference())
             ));
     }
 
@@ -85,11 +88,24 @@ public class ApiKeyService {
                 credits_limit = CASE WHEN :clearCreditsLimit THEN NULL WHEN :setCreditsLimit THEN :creditsLimit ELSE credits_limit END,
                 model_provider = CASE WHEN :setModelProvider THEN :modelProvider ELSE model_provider END,
                 billing_source = CASE WHEN :setBillingSource THEN :billingSource ELSE billing_source END,
+                tier_preference = CASE
+                    WHEN :setTierPreference THEN :tierPreference
+                    WHEN :setModelProvider AND lower(model_provider) IS DISTINCT FROM lower(:modelProvider) THEN 'auto'
+                    ELSE tier_preference
+                END,
                 updated_at = clock_timestamp()
             WHERE key_id = :keyId
               AND (:isAdmin OR user_id = :userId)
+              AND (NOT :requireProvider OR model_provider <> '*')
             RETURNING *
             """;
+        // A preference names a pool of one vendor, so the key has to be tied to one provider (design 6.1): the request
+        // gives the provider, or the key already has it. The provider the request gives is never "*", which is refused.
+        // And it stays with that vendor: a request that moves the key to another provider without giving a preference
+        // clears it (the right-hand sides of an UPDATE read the old row), since a name or a level that meant a pool of the
+        // one vendor would otherwise start to pin the key to whatever the other happens to have under it.
+        String tierPreference = normalizeTierPreference(request.tierPreference());
+        boolean requireProvider = request.tierPreference() != null && !"auto".equals(tierPreference) && request.modelProvider() == null;
         GenericExecuteSpec spec = template.getDatabaseClient().sql(sql)
             .bind("setName", request.name() != null)
             .bind("setEnabled", request.enabled() != null)
@@ -98,6 +114,9 @@ public class ApiKeyService {
             .bind("setModelProvider", request.modelProvider() != null)
             .bind("setBillingSource", request.billingSource() != null)
             .bind("billingSource", normalizeBillingSource(request.billingSource()))
+            .bind("setTierPreference", request.tierPreference() != null)
+            .bind("tierPreference", tierPreference)
+            .bind("requireProvider", requireProvider)
             .bind("keyId", keyId)
             .bind("isAdmin", isAdmin(principal))
             .bind("userId", principal.userId());
@@ -113,8 +132,29 @@ public class ApiKeyService {
         return spec
             .map((row, metadata) -> template.getConverter().read(ApiKeyEntity.class, row, metadata))
             .one()
-            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "API_KEY_NOT_FOUND", "API key not found")))
+            .switchIfEmpty(Mono.defer(() -> requireProvider ? notUpdatedForWantOfProvider(principal, keyId) : keyNotFound()))
             .onErrorMap(ApiKeyService::mapBillingConstraint);
+    }
+
+    private static Mono<ApiKeyEntity> keyNotFound() {
+        return Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "API_KEY_NOT_FOUND", "API key not found"));
+    }
+
+    /**
+     * Why an update that wanted a preference for a key of the request's own provider changed nothing: there is no such
+     * key of the caller's (404), or there is, and it is a legacy key that any provider may call, which no pool of one
+     * vendor can be preferred by.
+     */
+    private Mono<ApiKeyEntity> notUpdatedForWantOfProvider(AdminPrincipal principal, String keyId) {
+        Mono<ApiKeyEntity> own = isAdmin(principal)
+            ? repository.findByKeyId(keyId)
+            : repository.findByKeyIdAndUserId(keyId, principal.userId());
+        return own.flatMap(found -> Mono.<ApiKeyEntity>error(new ApiException(
+                HttpStatus.BAD_REQUEST,
+                "API_KEY_TIER_PREFERENCE_INVALID",
+                "A tier preference needs a key tied to one model provider; choose the provider first"
+            )))
+            .switchIfEmpty(keyNotFound());
     }
 
     public Mono<Void> delete(AdminPrincipal principal, String keyId) {
@@ -175,7 +215,8 @@ public class ApiKeyService {
                             user.balance(),
                             entity.getModelProvider(),
                             user.hasActiveSubscription(),
-                            entity.getBillingSource()
+                            entity.getBillingSource(),
+                            entity.getTierPreference()
                         ));
                     });
             });
@@ -412,6 +453,15 @@ public class ApiKeyService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "BILLING_SOURCE_INVALID", "Choose BALANCE or CODING_PLAN");
         }
         return value;
+    }
+
+    /** The preference as it is stored; omitted or blank is {@code auto}. */
+    private static String normalizeTierPreference(String preference) {
+        return TierSelectorParser.storedPreference(preference).orElseThrow(() -> new ApiException(
+            HttpStatus.BAD_REQUEST,
+            "API_KEY_TIER_PREFERENCE_INVALID",
+            "Choose auto, a tier identifier, L<level> or <level> (1 to 9), optionally followed by +"
+        ));
     }
 
     private static BigDecimal nonNegative(BigDecimal value) {

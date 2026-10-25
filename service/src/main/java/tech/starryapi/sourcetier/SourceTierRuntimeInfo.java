@@ -13,9 +13,9 @@ import org.springframework.stereotype.Component;
  * SOURCE_TIER_RUNTIME_UNSUPPORTED): nothing is stored that a later upgrade would switch on without anyone deciding to.
  *
  * <p>A capability is true only once the task that completes its runtime has landed: {@link #nativeTiers()} was set by
- * the end-to-end task of native tiering (P2-09), {@link #selectors()} is for the selector task (P3-01),
- * {@link #unifyEndpoints()} for the all-endpoints switch (P3-03) and {@link #xpMembers()} for the exclusive-relay task
- * (P4-10); those three are still false. Until the pair registry (P4-01) exists no pair is offered.
+ * the end-to-end task of native tiering (P2-09) and {@link #selectors()} by the selector task (P3-01), which the key
+ * preference (P3-02) joined; {@link #unifyEndpoints()} by the all-endpoints switch (P3-03). {@link #xpMembers()} is for
+ * the exclusive-relay task (P4-10) and is still false. Until the pair registry (P4-01) exists no pair is offered.
  */
 @Component
 public class SourceTierRuntimeInfo {
@@ -42,7 +42,7 @@ public class SourceTierRuntimeInfo {
 
     @Autowired
     public SourceTierRuntimeInfo() {
-        this(true, false, false, false, pair -> PairStatus.NOT_OFFERED);
+        this(true, true, true, false, pair -> PairStatus.NOT_OFFERED);
     }
 
     /** For tests, and for the day the pair registry decides {@code pairStatuses}. */
@@ -76,13 +76,18 @@ public class SourceTierRuntimeInfo {
 
     /**
      * Whether a client can name the tier it wants: the {@code model@tier} suffix, the {@code X-Starry-Tier} header and
-     * the key's preference. Nothing is stored for it, so it refuses no setting; the console only offers to copy the
-     * suffix form when it works.
+     * the preference of the API key. Nothing about the tiers is stored for it, so it refuses no setting; the console only
+     * offers to copy the suffix form, and to choose a pool for a key, when it works.
      */
     public boolean selectors() {
         return selectors;
     }
 
+    /**
+     * Whether the anthropic vendor's all-endpoints switch works: with it on, a Claude model asked through Chat
+     * Completions or Responses is served by the Anthropic keys and then Kiro, as it is through the Messages endpoint
+     * (design 4.9).
+     */
     public boolean unifyEndpoints() {
         return unifyEndpoints;
     }

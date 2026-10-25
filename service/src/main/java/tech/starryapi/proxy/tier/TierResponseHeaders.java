@@ -18,6 +18,8 @@ public final class TierResponseHeaders {
     public static final String NAME = "X-Starry-Tier-Name";
     public static final String MODE = "X-Starry-Tier-Mode";
     public static final String STATUS = "X-Starry-Tier-Status";
+    /** The status of a response whose request named a tier that was not used. */
+    public static final String IGNORED = "ignored";
 
     private static final char[] HEX = "0123456789ABCDEF".toCharArray();
 
@@ -26,12 +28,20 @@ public final class TierResponseHeaders {
 
     /** The headers of a response served by {@code tier}. The name is administrator text, so it travels percent-encoded. */
     static Map<String, String> served(Tier tier, TierPlan.Mode mode) {
+        return served(tier, mode, false);
+    }
+
+    /**
+     * {@link #served(Tier, TierPlan.Mode)}, saying whether the tier the client named was ignored: the request was served
+     * from the tiers in their order and the status says that the selector was not used (design 6.3).
+     */
+    static Map<String, String> served(Tier tier, TierPlan.Mode mode, boolean selectorIgnored) {
         Map<String, String> headers = new LinkedHashMap<>();
         headers.put(TIER, tier.tierId());
         headers.put(LEVEL, Integer.toString(tier.level()));
         headers.put(NAME, percentEncode(tier.name()));
         headers.put(MODE, mode.headerValue());
-        headers.put(STATUS, "served");
+        headers.put(STATUS, selectorIgnored ? IGNORED : "served");
         return Collections.unmodifiableMap(headers);
     }
 

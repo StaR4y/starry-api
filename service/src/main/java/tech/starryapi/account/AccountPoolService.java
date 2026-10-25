@@ -45,6 +45,7 @@ public class AccountPoolService {
 
     private static final Logger log = LoggerFactory.getLogger(AccountPoolService.class);
     private static final Duration CACHE_MISS_REFRESH_INTERVAL = Duration.ofSeconds(5);
+    private static final Duration SWITCHED_OFF_ACCOUNTS_TTL = Duration.ofSeconds(30);
     private static final int CACHE_UPDATE_SKIPPED = -1;
     private static final int CACHE_CONTENT_CHANGED = 0;
     private static final int CACHE_TOPOLOGY_CHANGED = 1;
@@ -68,6 +69,7 @@ public class AccountPoolService {
     private volatile long lastCacheClearVersion;
     private volatile Mono<Void> inFlightCacheRefresh;
     private long inFlightCacheRefreshGeneration;
+    private volatile SwitchedOffAccounts switchedOffRead = SwitchedOffAccounts.STALE;
 
     public AccountPoolService(
         ProxyAccountRepository repository,
@@ -394,6 +396,33 @@ public class AccountPoolService {
     public Optional<ProxyAccountEntity> cachedAccount(String accountId) {
         CachedAccountEntry entry = accountId == null ? null : accountCache.get(accountId);
         return entry != null && entry.active() ? Optional.of(entry.account()) : Optional.empty();
+    }
+
+    /**
+     * The accounts that are switched off, which the cache leaves out: disabled ones and suspended ones alike, since
+     * suspending an account disables it. Only what tells the kind of account is read, so they are good for the account
+     * predicates and the tier rules and nothing else. A tier uses them to tell a pool whose accounts are all out of
+     * service from a pool the route has no account in at all. What was read stays valid until the account cache is
+     * reloaded or this node changes an account, and for 30 seconds at most. Empty when the table cannot be read, so
+     * that the caller knows no more than the cache does.
+     */
+    public Mono<List<ProxyAccountEntity>> switchedOffAccounts() {
+        return Mono.defer(() -> {
+            SwitchedOffAccounts known = switchedOffRead;
+            if (known.readAt().isAfter(Instant.now().minus(SWITCHED_OFF_ACCOUNTS_TTL))) {
+                return Mono.just(known.accounts());
+            }
+            Flux<ProxyAccountEntity> read = repository.findSwitchedOffByKind();
+            if (read == null) {
+                return Mono.just(List.<ProxyAccountEntity>of());
+            }
+            return read.collectList()
+                .doOnNext(accounts -> switchedOffRead = new SwitchedOffAccounts(Instant.now(), List.copyOf(accounts)))
+                .onErrorResume(error -> {
+                    log.warn("Failed to read the switched-off accounts", error);
+                    return Mono.just(List.<ProxyAccountEntity>of());
+                });
+        });
     }
 
     public Mono<ProxyAccountEntity> selectAccount(String sessionHint) {
@@ -1195,6 +1224,7 @@ public class AccountPoolService {
             snapshot.merge(account.getAccountId(), account, AccountPoolService::newerAccount);
         }
 
+        switchedOffRead = SwitchedOffAccounts.STALE;
         snapshot.forEach((accountId, account) -> accountCache.compute(accountId, (ignored, current) -> {
             if (current != null && current.version() > refreshVersion) {
                 return current;
@@ -1218,6 +1248,7 @@ public class AccountPoolService {
         }
         String accountId = updated.getAccountId();
         long version = cacheVersion.incrementAndGet();
+        switchedOffRead = SwitchedOffAccounts.STALE;
         boolean enabled = Boolean.TRUE.equals(updated.getEnabled());
         int cacheChange = replaceCachedEntry(
             accountId,
@@ -1236,6 +1267,7 @@ public class AccountPoolService {
             return;
         }
         long version = cacheVersion.incrementAndGet();
+        switchedOffRead = SwitchedOffAccounts.STALE;
         int cacheChange = replaceCachedEntry(accountId, CachedAccountEntry.tombstone(version));
         if (cacheChange == CACHE_TOPOLOGY_CHANGED) {
             rebuildAccountTopology();
@@ -1938,6 +1970,11 @@ public class AccountPoolService {
     }
 
     private record SqlValue(Object value, Class<?> type) {
+    }
+
+    /** The switched-off accounts as of {@code readAt}. */
+    private record SwitchedOffAccounts(Instant readAt, List<ProxyAccountEntity> accounts) {
+        static final SwitchedOffAccounts STALE = new SwitchedOffAccounts(Instant.EPOCH, List.of());
     }
 
     private record CachedAccountEntry(ProxyAccountEntity account, long version) {

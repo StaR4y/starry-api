@@ -218,7 +218,6 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
     void nothingThisReleaseCannotRunIsStored() {
         String relay = relayAccount();
         List<SourceTierDtos.ReplaceVendor> unsupported = List.of(
-            new SourceTierDtos.ReplaceVendor(0L, false, true, null, null, null, null, OWNER_TIERS, List.of(), List.of()),
             replace(0L, false, List.of(tier("relay", 1, "Relay")), List.of(relay(relay, "relay", false,
                 mapping("claude-sonnet-4.5", "relay/sonnet", 200_000))), List.of()),
             replace(0L, false, OWNER_TIERS, List.of(), List.of(new SourceTierDtos.Gate(null, "MESSAGES", "KEYS", List.of("key-1")))),
@@ -235,6 +234,20 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
         assertThat(count("SELECT count(*) FROM source_tier_members")).isZero();
         assertThat(count("SELECT count(*) FROM source_tier_pair_gates")).isZero();
         assertThat(configVersion()).as("a refused change is not a change").isZero();
+    }
+
+    @Test
+    void theAllEndpointsSwitchIsStoredBecauseTheReleaseRunsIt() {
+        SourceTierDtos.Vendor saved = thisRelease.replace("anthropic",
+            new SourceTierDtos.ReplaceVendor(0L, true, true, null, null, null, null, OWNER_TIERS, List.of(), List.of())).block();
+
+        assertThat(saved.enabled()).isTrue();
+        assertThat(saved.unifyEndpoints()).isTrue();
+        assertThat(count("SELECT count(*) FROM source_tier_vendors WHERE unify_endpoints")).isEqualTo(1L);
+        // The switch only exists for the vendor whose Claude models two routes serve.
+        ApiException elsewhere = rejection(thisRelease.replace("openai",
+            new SourceTierDtos.ReplaceVendor(0L, false, true, null, null, null, null, OWNER_TIERS, List.of(), List.of())));
+        assertThat(elsewhere.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
     }
 
     @Test
@@ -398,10 +411,11 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
         SourceTierDtos.Overview overview = thisRelease.overview().block();
 
         assertThat(overview.configVersion()).isZero();
-        // Native tiering is complete in this release; what the later phases bring is still off.
+        // Native tiering, the selectors and the all-endpoints switch are complete in this release; what the later phases
+        // bring is still off.
         assertThat(overview.runtime().nativeTiers()).isTrue();
-        assertThat(overview.runtime().selectors()).isFalse();
-        assertThat(overview.runtime().unifyEndpoints()).isFalse();
+        assertThat(overview.runtime().selectors()).isTrue();
+        assertThat(overview.runtime().unifyEndpoints()).isTrue();
         assertThat(overview.runtime().xpMembers()).isFalse();
         assertThat(overview.runtime().pairs()).hasSize(12).allSatisfy(pair -> assertThat(pair.status()).isEqualTo("NOT_OFFERED"));
         assertThat(overview.vendors()).extracting(SourceTierDtos.Vendor::vendor).startsWith("anthropic", "openai", "google", "deepseek");

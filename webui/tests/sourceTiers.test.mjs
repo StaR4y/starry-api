@@ -12,7 +12,7 @@ Object.defineProperty(globalThis, 'navigator', { value: dom.window.navigator, co
 // Bundle the draft model in memory (it imports the i18n module through the `@` alias).
 const compiled = await build({
   stdin: {
-    contents: `export * from './src/views/settings/components/source-tiers/sourceTiersMeta'; export * from './src/views/settings/components/source-tiers/tierStatusMeta'; export * from './src/views/settings/billingReviewTiers'; export * from './src/views/logs/logSource'; export { setLocale } from './src/i18n';`,
+    contents: `export * from './src/views/settings/components/source-tiers/sourceTiersMeta'; export * from './src/views/settings/components/source-tiers/tierStatusMeta'; export * from './src/views/settings/billingReviewTiers'; export * from './src/views/logs/logSource'; export * from './src/views/api-keys/tierPreference'; export * from './src/views/models/modelTiers'; export { createSetupScriptBlock, createCcSwitchLinks } from './src/platforms/clientSetup'; export { tierReference, TIER_HEADER } from './src/platforms/setupShared'; export { setLocale } from './src/i18n';`,
     resolveDir: process.cwd(),
     loader: 'ts',
   },
@@ -24,12 +24,14 @@ const compiled = await build({
 });
 const meta = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputFiles[0].text).toString('base64')}`);
 const {
-  draftOf, replaceRequest, draftSignature, tierProblems, validateDraft, unsupportedMessage, enableNote, tierPresets, placedCounts,
+  draftOf, replaceRequest, draftSignature, tierProblems, validateDraft, unsupportedMessage, enableNote, unifyNote, tierPresets, placedCounts,
   pinChoices, DEFAULT_REFUSAL_CAP,
   layerSegments, layerTotal, degradedPercent, degradedTone, notServingReason, placementsByAccount, tierFilterOptions,
   matchesTierFilter, placedLabel, placedHint, placementVendorCount, batchPlan, UNPIN, NO_TIER_FILTER, MAX_BATCH_MEMBERS,
   vendorOfProvider, previewTiers, reviewTier, reviewTierLabel, suggestedCredits, perMillion, reservedMinusEstimate,
   hasSourceTiers, sourceTierLabel, priceFactorLabel,
+  AUTO_PREFERENCE, preferenceValue, preferenceChoices, priceText,
+  tierSuffix, modelTierChips, createSetupScriptBlock, createCcSwitchLinks, tierReference, TIER_HEADER,
 } = meta;
 meta.setLocale('zh-CN');
 
@@ -280,6 +282,38 @@ test('switching a vendor on warns that every node must run a version with source
   assert.notEqual(enableNote(false, false, false), warning);
 });
 
+test('the all-endpoints switch says why it cannot be turned on, when it has no effect and when other nodes must be upgraded first', () => {
+  // A version that cannot run the switch says why instead.
+  assert.ok(unifyNote(false, false, false, true).includes('暂时不能打开'));
+  assert.ok(unifyNote(false, true, true, true).includes('需要关闭后才能保存'));
+  // A version that can: a vendor that does not use tiers has nothing for the switch to act on.
+  const idle = unifyNote(true, true, true, false);
+  assert.ok(idle.includes('启用'), 'the switch is on in the draft but the vendor is off');
+  assert.equal(unifyNote(true, true, false, false), null, 'a switch that is off has nothing to say');
+  // Rolling upgrade: nodes that predate the switch keep Chat and Responses on Kiro alone until it is saved on.
+  const upgrade = unifyNote(true, false, false, true);
+  assert.ok(upgrade.includes('所有节点') && upgrade.includes('Kiro'));
+  assert.equal(unifyNote(true, false, true, true), upgrade, 'still shown while the switch is on but not saved');
+  assert.equal(unifyNote(true, true, true, true), null, 'a vendor that already runs it has been through that');
+  assert.notEqual(idle, upgrade);
+});
+
+test('the all-endpoints switch is off in the draft of a vendor nobody configured, and no preset turns it on', () => {
+  const fresh = draftOf({
+    ...vendor({ tiers: [], members: [], gates: [] }), configured: false, version: 0, unifyEndpoints: false,
+  });
+  assert.equal(fresh.unifyEndpoints, false);
+  assert.equal(replaceRequest(0, fresh).unifyEndpoints, false);
+  for (const preset of tierPresets('anthropic')) {
+    const tiers = preset.build();
+    const applied = { ...fresh, tiers };
+    assert.equal(applied.unifyEndpoints, false);
+    assert.equal(replaceRequest(0, applied).unifyEndpoints, false);
+  }
+  // The switch is saved as the draft has it, so that turning it on is one decision made on one page.
+  assert.equal(replaceRequest(7, { ...draftOf(vendor()), unifyEndpoints: true }).unifyEndpoints, true);
+});
+
 test('presets are drafts that pass validation and never set a price', () => {
   assert.deepEqual(tierPresets('google'), []);
   assert.deepEqual(tierPresets('deepseek'), []);
@@ -517,4 +551,270 @@ test('the request log gets a source column only when some row was served from ti
   assert.equal(priceFactorLabel(served), '×0.6');
   assert.equal(priceFactorLabel({ ...served, priceFactor: 1.000000 }), '×1');
   assert.equal(priceFactorLabel(plain), '');
+});
+
+/* ---------- API Key 的号源偏好 ---------- */
+
+const choiceOfficial = { id: 'official', level: 1, name: '官方', priceFactor: 1 };
+const choiceKiro = {
+  id: 'kiro', level: 2, name: 'kiro反向代理', priceFactor: 0.6,
+  pricing: { billingMode: 'input_output', inputPricePerMillionTokens: 1.8, outputPricePerMillionTokens: 9 },
+};
+
+test('a key without a preference, or with auto in any case, is automatic; anything else is read in lower case', () => {
+  assert.equal(AUTO_PREFERENCE, 'auto');
+  for (const stored of [undefined, null, '', '  ', 'auto', 'AUTO', ' Auto ']) {
+    assert.equal(preferenceValue(stored), 'auto', JSON.stringify(stored));
+  }
+  assert.equal(preferenceValue('Kiro+'), 'kiro+');
+  assert.equal(preferenceValue(' L2 '), 'l2');
+});
+
+test('the form offers automatic first and, for each pool, the pool alone and the pool with those below it', () => {
+  const choices = preferenceChoices([choiceKiro, choiceOfficial], 'claude-sonnet-4.5', 'auto');
+
+  assert.deepEqual(choices.map((choice) => choice.value), ['auto', 'official', 'official+', 'kiro', 'kiro+']);
+  assert.equal(choices[0].label, '自动');
+  assert.equal(choices[1].label, '官方（1 级，系数 ×1）');
+  assert.equal(choices[2].label, '官方 及以下');
+  assert.equal(choices[3].label, 'kiro反向代理（2 级，系数 ×0.6）');
+  assert.equal(choices[4].label, 'kiro反向代理 及以下');
+});
+
+test('a pool shows its factor, and its price when the server could work one out', () => {
+  const choices = preferenceChoices([choiceOfficial, choiceKiro], 'claude-sonnet-4.5', 'auto');
+
+  assert.equal(choices[1].hint, '标准价 × 1');
+  assert.equal(choices[3].hint, '标准价 × 0.6；以 claude-sonnet-4.5 计：输入 1.8、输出 9（每百万 token）');
+  // Without a reference model the price has nothing to be read against.
+  assert.equal(preferenceChoices([choiceKiro], null, 'auto')[1].hint, '标准价 × 0.6');
+});
+
+test('a price is read from the input and output, else from the total, else not at all', () => {
+  assert.equal(priceText(choiceKiro.pricing), '输入 1.8、输出 9（每百万 token）');
+  assert.equal(priceText({ billingMode: 'total', totalPricePerMillionTokens: 4.5 }), '4.5（每百万 token）');
+  assert.equal(priceText({ billingMode: 'unavailable' }), null);
+  assert.equal(priceText(undefined), null);
+  assert.equal(priceText({ billingMode: 'input_output', inputPricePerMillionTokens: 0.1 + 0.2, outputPricePerMillionTokens: 1 }), '输入 0.3、输出 1（每百万 token）');
+});
+
+test('a price is a number of balance units with no currency sign, and reads like the price of the same pool on the model page', () => {
+  // 3 / 15 dollars under a billing multiplier of 7.2: the balance is not dollars, so the form must not say it is.
+  const multiplied = { billingMode: 'input_output', inputPricePerMillionTokens: 21.6, outputPricePerMillionTokens: 108 };
+  const pool = { ...choiceKiro, priceFactor: 1, pricing: multiplied };
+  try {
+    for (const language of ['zh-CN', 'en-US']) {
+      meta.setLocale(language);
+      assert.doesNotMatch(priceText(multiplied), /[$¥￥]/, language);
+      assert.doesNotMatch(priceText({ billingMode: 'total', totalPricePerMillionTokens: 64.8 }), /[$¥￥]/, language);
+      assert.doesNotMatch(preferenceChoices([pool], 'claude-sonnet-4.5', 'auto')[1].hint, /[$¥￥]/, language);
+    }
+    meta.setLocale('en-US');
+    assert.equal(priceText(multiplied), 'Input 21.6, output 108 (per million tokens)');
+    meta.setLocale('zh-CN');
+    assert.equal(priceText(multiplied), '输入 21.6、输出 108（每百万 token）');
+    // The numbers are the ones the model page shows for the pool, formatted the same way (with grouping, no rounding noise).
+    assert.equal(modelTierChips('claude-sonnet-4.5', [{ id: 'kiro', level: 2, name: 'kiro', priceFactor: 1, selectable: true, pricing: multiplied }])[0].price, '64.8 / MTok');
+    assert.equal(priceText({ billingMode: 'input_output', inputPricePerMillionTokens: 1234.5, outputPricePerMillionTokens: 12345.678901234 }), '输入 1,234.5、输出 12,345.678901（每百万 token）');
+  } finally {
+    meta.setLocale('zh-CN');
+  }
+});
+
+test('a preference that is not among the pools stays as an option of its own so that saving does not change it', () => {
+  const kept = preferenceChoices([choiceOfficial], null, 'kiro+');
+  assert.deepEqual(kept.map((choice) => choice.value), ['auto', 'official', 'official+', 'kiro+']);
+  assert.equal(kept.at(-1).label, 'kiro+');
+  // A value the pools do offer is not added a second time, whatever case it was stored in.
+  assert.equal(preferenceChoices([choiceOfficial], null, 'Official+').length, 3);
+  assert.equal(preferenceChoices([], null, 'auto').length, 1);
+});
+
+test('the option that keeps a preference says it is not listed, not that requests ignore it', () => {
+  // A user of a vendor that keeps its pool names private sees this too, and requests are still served by the pool.
+  const hint = preferenceChoices([], null, 'kiro').at(-1).hint;
+  assert.match(hint, /没有列出/);
+  assert.match(hint, /仍按它服务/);
+  assert.doesNotMatch(hint, /请求会忽略/);
+});
+
+test('a preference written as a level is named after the pool of that level and says it was chosen by level', () => {
+  const pools = [choiceOfficial, choiceKiro];
+  for (const stored of ['l2', 'L2', ' 2 ']) {
+    const kept = preferenceChoices(pools, 'claude-sonnet-4.5', stored).at(-1);
+    assert.equal(kept.value, preferenceValue(stored), stored);
+    assert.equal(kept.label, 'kiro反向代理（2 级）', stored);
+    assert.match(kept.hint, /按级别选择/, stored);
+    assert.match(kept.hint, /由 2 级的号池服务/, stored);
+    assert.doesNotMatch(kept.hint, /没有列出/, stored);
+  }
+  for (const stored of ['l1+', '1+']) {
+    const kept = preferenceChoices(pools, null, stored).at(-1);
+    assert.equal(kept.value, stored);
+    assert.equal(kept.label, '官方 及以下（1 级起）', stored);
+    assert.match(kept.hint, /按级别选择/, stored);
+    assert.match(kept.hint, /1 级的号池和它以下的号池/, stored);
+    assert.doesNotMatch(kept.hint, /没有列出/, stored);
+  }
+  // Saving keeps what it was: the option is the value as it is stored, once.
+  assert.equal(preferenceChoices(pools, null, '2+').filter((choice) => choice.value === '2+').length, 1);
+});
+
+test('every spelling of a level the backend stores is recognised, up to the deepest level a pool can have', () => {
+  // The backend writes a level without zeros (L02 is saved as l2, 002+ as 2+), so these are the only forms there are.
+  const deepest = { id: 'spare', level: 9, name: '备用', priceFactor: 0.3 };
+  const pools = [choiceOfficial, deepest];
+  for (const stored of ['l9', '9', 'l9+', '9+', 'l1', '1+']) {
+    const kept = preferenceChoices(pools, null, stored).at(-1);
+    assert.equal(kept.value, stored);
+    assert.notEqual(kept.label, stored, stored);
+    assert.match(kept.hint, /按级别选择/, stored);
+    assert.doesNotMatch(kept.hint, /没有列出/, stored);
+  }
+});
+
+test('a level that no listed pool has, and any other reference, is still said not to be listed', () => {
+  for (const stored of ['l3', '3', '3+', 'l9', 'l0', '10', 'kiro++']) {
+    const kept = preferenceChoices([choiceOfficial, choiceKiro], null, stored).at(-1);
+    assert.equal(kept.value, stored);
+    assert.equal(kept.label, stored);
+    assert.match(kept.hint, /没有列出/, stored);
+  }
+  // A vendor that keeps its pool names private lists none, so a level cannot be put to a name either.
+  const hidden = preferenceChoices([], null, 'l2').at(-1);
+  assert.equal(hidden.label, 'l2');
+  assert.match(hidden.hint, /没有列出/);
+});
+
+test('the held level reads in English too', () => {
+  meta.setLocale('en-US');
+  try {
+    const pools = [choiceOfficial, choiceKiro];
+    const exact = preferenceChoices(pools, null, 'l2').at(-1);
+    assert.equal(exact.label, 'kiro反向代理 (tier 2)');
+    assert.match(exact.hint, /chosen by level/);
+    assert.match(exact.hint, /level 2/);
+    assert.doesNotMatch(exact.hint, /not listed/);
+    const orBelow = preferenceChoices(pools, null, '1+').at(-1);
+    assert.equal(orBelow.label, '官方 and below (from tier 1)');
+    assert.match(orBelow.hint, /and the tiers below it/);
+    assert.match(preferenceChoices(pools, null, 'l7').at(-1).hint, /not listed/);
+  } finally {
+    meta.setLocale('zh-CN');
+  }
+});
+
+test('a key form of a deployment without pools offers only automatic', () => {
+  assert.deepEqual(preferenceChoices([], undefined, undefined).map((choice) => choice.value), ['auto']);
+});
+
+// ---- the tier in the client snippets (design 6.5) ----
+
+const setup = { apiOrigin: 'https://example.com', apiBaseUrl: 'https://example.com/v1', apiKey: 'sk-test-user-key', apiPort: '443' };
+const scriptOf = (client, platform, tier) => createSetupScriptBlock(client, platform, { ...setup, tier }).script;
+const everyScript = (tier) => ['codex', 'claude', 'opencode'].flatMap((client) => ['unix', 'cmd', 'powershell'].map((platform) => scriptOf(client, platform, tier)));
+const linksOf = (tier) => createCcSwitchLinks({ ...setup, tier });
+const linkParams = (link) => new URL(link.url).searchParams;
+
+test('a tier is a pool id, a level or a number, with + for the pool and those below it, in lower case', () => {
+  assert.equal(TIER_HEADER, 'X-Starry-Tier');
+  assert.equal(tierReference('kiro'), 'kiro');
+  assert.equal(tierReference(' Kiro+ '), 'kiro+');
+  assert.equal(tierReference('L2'), 'l2');
+  assert.equal(tierReference('2+'), '2+');
+  assert.equal(tierReference('a'.repeat(32)), 'a'.repeat(32));
+});
+
+test('automatic, nothing and anything the server would not take as a tier write nothing', () => {
+  for (const tier of [undefined, null, '', '  ', 'auto', 'AUTO', 'auto+', '+', '-kiro', 'a'.repeat(33), 'kiro pool', 'kiro"', "kiro'; rm -rf ~", 'kiro\nevil', '模型', 'kiro++', '@kiro']) {
+    assert.equal(tierReference(tier), null, JSON.stringify(tier));
+    assert.deepEqual(everyScript(tier), everyScript(undefined), JSON.stringify(tier));
+    assert.deepEqual(linksOf(tier).map((link) => link.url), linksOf(undefined).map((link) => link.url), JSON.stringify(tier));
+  }
+});
+
+test('Claude Code gets the tier as the custom header its environment variable carries, in each shell\'s own syntax', () => {
+  const unix = scriptOf('claude', 'unix', 'kiro').split('\n');
+  assert.ok(unix.includes("export ANTHROPIC_CUSTOM_HEADERS='X-Starry-Tier: kiro'"));
+  // It sits among the other variables and changes none of them.
+  assert.deepEqual(unix.filter((line) => !line.includes('CUSTOM_HEADERS')), scriptOf('claude', 'unix', undefined).split('\n'));
+  assert.ok(scriptOf('claude', 'cmd', 'kiro+').split('\n').includes('set "ANTHROPIC_CUSTOM_HEADERS=X-Starry-Tier: kiro+"'));
+  assert.ok(scriptOf('claude', 'powershell', 'L2').split('\n').includes("$env:ANTHROPIC_CUSTOM_HEADERS = 'X-Starry-Tier: l2'"));
+});
+
+test('Codex gets the tier as a header of its provider, after the settings it already had, and its auth file is untouched', () => {
+  const lines = scriptOf('codex', 'unix', 'Kiro+').split('\n');
+  const at = lines.indexOf('supports_websockets = false');
+  assert.equal(lines[at + 1], 'http_headers = { "X-Starry-Tier" = "kiro+" }');
+  assert.equal(lines.filter((line) => line.includes('X-Starry-Tier')).length, 1);
+  const files = createSetupScriptBlock('codex', 'unix', { ...setup, tier: 'kiro' }).files;
+  const plain = createSetupScriptBlock('codex', 'unix', setup).files;
+  assert.equal(files[1].content, plain[1].content);
+  assert.equal(files[0].content.split('\n').filter((line) => line !== 'http_headers = { "X-Starry-Tier" = "kiro" }').join('\n'), plain[0].content);
+});
+
+test('OpenCode gets the tier as a header of its provider options', () => {
+  const config = JSON.parse(scriptOf('opencode', 'unix', 'kiro'));
+  assert.deepEqual(config.provider.starry.options, { baseURL: 'https://example.com/v1', apiKey: 'sk-test-user-key', headers: { 'X-Starry-Tier': 'kiro' } });
+  const plain = JSON.parse(scriptOf('opencode', 'unix', undefined));
+  delete config.provider.starry.options.headers;
+  assert.deepEqual(config, plain);
+});
+
+test('the CC Switch link of Claude Code puts the tier after every model name, the Codex link carries the header in its config, the OpenCode link nothing', () => {
+  const [claude, codex, opencode] = linksOf('kiro+');
+  const [plainClaude, plainCodex, plainOpencode] = linksOf(undefined);
+  const params = linkParams(claude);
+  assert.deepEqual(['model', 'haikuModel', 'sonnetModel', 'opusModel'].map((name) => params.get(name)), [
+    'claude-opus-4.8@kiro+', 'claude-haiku-4.5@kiro+', 'claude-opus-4.8@kiro+', 'claude-opus-4.8@kiro+',
+  ]);
+  assert.equal(params.get('apiKey'), linkParams(plainClaude).get('apiKey'));
+  assert.equal(params.get('endpoint'), linkParams(plainClaude).get('endpoint'));
+
+  const config = JSON.parse(Buffer.from(linkParams(codex).get('config'), 'base64').toString('utf8'));
+  assert.ok(config.config.split('\n').includes('http_headers = { "X-Starry-Tier" = "kiro+" }'));
+  assert.deepEqual(config.auth, JSON.parse(Buffer.from(linkParams(plainCodex).get('config'), 'base64').toString('utf8')).auth);
+
+  assert.equal(opencode.url, plainOpencode.url);
+});
+
+test('the snippets and links are the same in every language', () => {
+  meta.setLocale('zh-CN');
+  const chinese = JSON.stringify([everyScript('kiro+'), linksOf('kiro+').map((link) => link.url)]);
+  meta.setLocale('en-US');
+  assert.equal(JSON.stringify([everyScript('kiro+'), linksOf('kiro+').map((link) => link.url)]), chinese);
+  meta.setLocale('zh-CN');
+});
+
+// ---- the tiers of a model on the model page ----
+
+const listedTiers = [
+  { id: 'kiro', level: 2, name: 'kiro反向代理', priceFactor: 0.6, selectable: true, pricing: { billingMode: 'input_output', inputPricePerMillionTokens: 1.8, outputPricePerMillionTokens: 9 } },
+  { id: 'official', level: 1, name: '官方', priceFactor: 1, selectable: true, pricing: { billingMode: 'input_output', inputPricePerMillionTokens: 3, outputPricePerMillionTokens: 15 } },
+  { id: 'internal', level: 3, name: '内部', priceFactor: 0.250000, selectable: false, pricing: null },
+];
+
+test('a model is asked for from a pool with its id, an @ and the pool id', () => {
+  assert.equal(tierSuffix('claude-sonnet-4.5', 'kiro'), 'claude-sonnet-4.5@kiro');
+});
+
+test('the model page lists the pools best first, with the factor, the price and what to copy', () => {
+  const chips = modelTierChips('claude-sonnet-4.5', listedTiers);
+
+  assert.deepEqual(chips.map((chip) => chip.id), ['official', 'kiro', 'internal']);
+  assert.deepEqual(chips.map((chip) => chip.factor), ['×1', '×0.6', '×0.25']);
+  assert.deepEqual(chips.map((chip) => chip.suffix), ['claude-sonnet-4.5@official', 'claude-sonnet-4.5@kiro', null]);
+  assert.equal(chips[0].price, '9 / MTok');
+  assert.equal(chips[1].price, '5.4 / MTok');
+  assert.equal(chips[2].price, null);
+  assert.equal(chips[1].title, '2 级。复制 claude-sonnet-4.5@kiro：请求只由这个号池服务');
+  assert.equal(chips[2].title, '3 级。请求不能指定这个号池');
+  // The list the server sent is not reordered.
+  assert.deepEqual(listedTiers.map((tier) => tier.id), ['kiro', 'official', 'internal']);
+});
+
+test('a model without pools, or whose vendor keeps its pool names private, shows none', () => {
+  assert.deepEqual(modelTierChips('gpt-5.5', undefined), []);
+  assert.deepEqual(modelTierChips('gpt-5.5', null), []);
+  assert.deepEqual(modelTierChips('gpt-5.5', []), []);
 });

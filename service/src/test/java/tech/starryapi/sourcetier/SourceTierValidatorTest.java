@@ -22,6 +22,7 @@ import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.account.allocation.AccountAllocationCategory;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.model.DefaultModelCatalogProvider;
+import tech.starryapi.proxy.tier.TierSelectorParser;
 import tech.starryapi.sourcetier.SourceTierDtos.Warning;
 import tech.starryapi.sourcetier.SourceTierRuntimeInfo.PairStatus;
 import tech.starryapi.sourcetier.SourceTierSnapshot.Member;
@@ -217,6 +218,43 @@ class SourceTierValidatorTest {
     @ValueSource(strings = {"auto", "l2", "2", "12", "l10", "0"})
     void aTierIdThatASelectorWouldReadAsAnotherThingIsReserved(String id) {
         assertInvalid("anthropic", tiersOnly(tier(id, 1, "A")), "is reserved");
+    }
+
+    /**
+     * The validator decides which ids a tier may have and the selector parser which text names a tier, and they have to
+     * agree: an id the validator lets through is one that a suffix, a header or a preference reads back as that tier (with
+     * or without the plus), and one it refuses is never read as a tier of that name.
+     */
+    @ParameterizedTest
+    @MethodSource("tierIdCandidates")
+    void theValidatorAndTheSelectorParserAgreeOnWhatTierIdsAre(String id) {
+        boolean accepted;
+        try {
+            validator.normalize("anthropic", tiersOnly(tier(id, 1, "A")));
+            accepted = true;
+        } catch (ApiException refused) {
+            accepted = false;
+        }
+        TierSelectorParser.Selector read = TierSelectorParser.parse(TierSelectorParser.Source.HEADER, id);
+        TierSelectorParser.Selector readWithPlus = TierSelectorParser.parse(TierSelectorParser.Source.HEADER, id + "+");
+        boolean readAsTheTier = read.kind() == TierSelectorParser.Kind.TIER && read.tierId().equals(id);
+
+        if (accepted) {
+            assertThat(readAsTheTier).as("%s is read back as the tier", id).isTrue();
+            assertThat(readWithPlus.kind()).isEqualTo(TierSelectorParser.Kind.TIER);
+            assertThat(readWithPlus.tierId()).isEqualTo(id);
+            assertThat(readWithPlus.orBelow()).isTrue();
+        } else if (!TierSelectorParser.isReservedWord(id)) {
+            // Not a tier of that name; a word the selectors give a meaning (auto, a level) is read as that, or as no tier.
+            assertThat(readAsTheTier).as("%s is refused, yet read as a tier", id).isFalse();
+        }
+        assertThat(accepted).isEqualTo(TierSelectorParser.isTierId(id) && !TierSelectorParser.isReservedWord(id));
+    }
+
+    static Stream<String> tierIdCandidates() {
+        return Stream.of("official", "kiro", "a", "0kiro", "2fast", "l2x", "l1234x", "openai-relay", "a--b", "x-",
+            "x".repeat(32), "x".repeat(33), "auto", "autos", "auto-", "l2", "2", "12", "l10", "0", "00", "l0", "l1234",
+            "L2", "Official", "-x", "a b", "a_b", "x.y", "官方", "", "ki+ro");
     }
 
     @Test
@@ -703,16 +741,13 @@ class SourceTierValidatorTest {
     }
 
     @Test
-    void theAllEndpointsSwitchCrossProtocolRowsAndOpenGatesAreRefusedWhileTheRuntimeLacksThem() {
-        Config unify = validator.normalize("anthropic", new SourceTierDtos.ReplaceVendor(0L, false, true, null, null, null, null,
-            OWNER_TIERS, null, null));
+    void crossProtocolRowsAndOpenGatesAreRefusedWhileTheRuntimeLacksThem() {
         Config relay = validator.normalize("anthropic", replace(false, RELAY_TIERS,
             List.of(relay("relay-1", "relay", mapping("claude-sonnet-4.5", "x"))), List.of()));
         Config keysGate = validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("MESSAGES", "KEYS", "k"))));
         Config onGate = validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("CHAT", "ON"))));
         Config offGate = validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("CHAT", "OFF"))));
 
-        assertUnsupported(unify, "unifyEndpoints");
         assertUnsupported(relay, "crossProtocolMembers");
         assertUnsupported(keysGate, "pairGates");
         assertUnsupported(onGate, "pairGates");
@@ -720,15 +755,28 @@ class SourceTierValidatorTest {
     }
 
     @Test
-    void everythingThatIsRefusedIsNamedInOneAnswer() {
-        Config everything = validator.normalize("anthropic", new SourceTierDtos.ReplaceVendor(0L, true, true, null, null, null, null,
-            RELAY_TIERS, List.of(relay("relay-1", "relay", mapping("claude-sonnet-4.5", "x"))), List.of(gate("CHAT", "ON"))));
+    void theAllEndpointsSwitchIsRefusedOnlyByARuntimeThatCannotRunIt() {
+        SourceTierDtos.ReplaceVendor request = new SourceTierDtos.ReplaceVendor(0L, false, true, null, null, null, null,
+            OWNER_TIERS, null, null);
 
-        assertUnsupported(everything, "unifyEndpoints", "crossProtocolMembers", "pairGates");
-        // A release that cannot tier natively refuses the vendor's own switch as well.
+        // This release runs it (P3-03): the switch is stored and takes effect.
+        assertThatCode(() -> validator.requireSupported(validator.normalize("anthropic", request))).doesNotThrowAnyException();
+
+        SourceTierValidator without = withRuntime(true, false, false, PairStatus.NOT_OFFERED);
+        assertUnsupported(without, without.normalize("anthropic", request), "unifyEndpoints");
+    }
+
+    @Test
+    void everythingThatIsRefusedIsNamedInOneAnswer() {
+        SourceTierDtos.ReplaceVendor request = new SourceTierDtos.ReplaceVendor(0L, true, true, null, null, null, null,
+            RELAY_TIERS, List.of(relay("relay-1", "relay", mapping("claude-sonnet-4.5", "x"))), List.of(gate("CHAT", "ON")));
+        Config everything = validator.normalize("anthropic", request);
+
+        assertUnsupported(everything, "crossProtocolMembers", "pairGates");
+        // A release that cannot unify the endpoints names that too, and one that cannot tier natively refuses the vendor's
+        // own switch as well.
         SourceTierValidator nothing = withRuntime(false, false, false, PairStatus.NOT_OFFERED);
-        assertUnsupported(nothing, nothing.normalize("anthropic", new SourceTierDtos.ReplaceVendor(0L, true, true, null, null, null, null,
-            RELAY_TIERS, List.of(relay("relay-1", "relay", mapping("claude-sonnet-4.5", "x"))), List.of(gate("CHAT", "ON")))),
+        assertUnsupported(nothing, nothing.normalize("anthropic", request),
             "enabled", "unifyEndpoints", "crossProtocolMembers", "pairGates");
     }
 

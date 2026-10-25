@@ -30,6 +30,7 @@ import tech.starryapi.proxy.tier.TierPlan.Level;
 import tech.starryapi.proxy.tier.TierSessionBindings.Binding;
 import tech.starryapi.sourcetier.SourceTierRegistry;
 import tech.starryapi.sourcetier.SourceTierSnapshot;
+import tech.starryapi.sourcetier.SourceTierSnapshot.Member;
 import tech.starryapi.sourcetier.SourceTierSnapshot.Tier;
 import tech.starryapi.sourcetier.SourceTierSnapshot.VendorConfig;
 import tools.jackson.databind.ObjectMapper;
@@ -162,16 +163,33 @@ class DefaultSourceTierPlannerSessionTest {
     }
 
     @Test
-    void aPlanForATierTheClientNamedKeepsNoSession() {
+    void aPlanForATierTheClientNamedIsPartOfTheSessionWithoutKeepingItsTier() {
         loaded(vendor(true), threeTiers("1", "1", "1"));
+        bindings.downgrade(BINDING_KEY, new Binding("kiro", 3), Binding::level);
+
         TierPlan auto = plan(request(SESSION));
-        SourceTierSnapshot snapshot = registry.snapshot();
+        TierPlan pinned = plan(request(SESSION).withSelector(TierSelectorParser.parse(TierSelectorParser.Source.SUFFIX, "official")));
 
-        TierPlan pinned = new TierPlan("anthropic", auto.modelKey(), TierPlan.Mode.PINNED, snapshot,
-            snapshot.vendor("anthropic").orElseThrow(), auto.levels(), auto.holdLevels(), List.of(), java.util.Set.of(), 0, auto.session().orElseThrow(),
-            null, auto.outputBound(), auto.standardQuote(), auto.poolContext());
+        // The automatic request starts where the session fell to; the pinned one is counted as one of the session's
+        // requests (it is named, and keyed, like them) but does not read the tier the session is bound to.
+        assertThat(auto.startLevel().tierId()).isEqualTo("kiro");
+        assertThat(auto.session()).hasValueSatisfying(session -> assertThat(session.keepsTier()).isTrue());
+        assertThat(pinned.pinned()).isTrue();
+        assertThat(pinned.startLevel().tierId()).isEqualTo("official");
+        assertThat(pinned.session()).hasValueSatisfying(session -> {
+            assertThat(session.key()).isEqualTo(SESSION);
+            assertThat(session.bindingKey()).isEqualTo(BINDING_KEY);
+            assertThat(session.keepsTier()).isFalse();
+        });
+    }
 
-        assertThat(auto.session()).isPresent();
+    @Test
+    void aPlanForATierTheClientNamedHasNoSessionWhereSessionsAreNotKept() {
+        loaded(vendor(false), threeTiers("1", "1", "1"));
+
+        TierPlan pinned = plan(request(SESSION).withSelector(TierSelectorParser.parse(TierSelectorParser.Source.SUFFIX, "official")));
+
+        assertThat(pinned.pinned()).isTrue();
         assertThat(pinned.session()).isEmpty();
     }
 
@@ -358,33 +376,171 @@ class DefaultSourceTierPlannerSessionTest {
     }
 
     @Test
-    void theOwnerOfAResponseChainStaysCoveredWhereverTheSessionStarts() {
-        // The owner is tried first and billed at its tier, so the reservation must cover that tier even when the session
-        // is bound to a cheaper one.
+    void aChainThatCanBeReplayedHasNoUseForAnOwnerAboveTheTierItsSessionIsBoundTo() {
+        // The session fell to Codex and a turn of the chain was pinned to the official key, which owns the chain from then
+        // on. The turns after it are automatic again, and the session stays where it is (design 4.7): the owner is not
+        // tried first, the walk starts at Codex, and the reservation is not sized by the official tier.
+        openAiPlan(true);
+
+        TierPlan plan = plan(responsesChain("openai-official", true));
+
+        assertThat(plan.owner()).isEmpty();
+        assertThat(plan.startLevel().tierId()).isEqualTo("codex");
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("official", "codex");
+        assertThat(plan.holdLevels()).extracting(Level::tierId).containsExactly("codex");
+        assertThat(plan.reservation()).isEqualTo(level(plan, "codex").estimate());
+        assertThat(plan.reservation()).isLessThan(level(plan, "official").estimate());
+    }
+
+    @Test
+    void anOwnerInTheTierTheSessionIsBoundToOrBelowItIsStillTriedFirst() {
+        openAiPlan(true);
+
+        TierPlan plan = plan(responsesChain("codex", true));
+
+        assertThat(plan.owner()).hasValueSatisfying(owner -> {
+            assertThat(owner.accountId()).isEqualTo("codex");
+            assertThat(owner.level().tierId()).isEqualTo("codex");
+        });
+        assertThat(plan.startLevel().tierId()).isEqualTo("codex");
+        assertThat(plan.holdLevels()).extracting(Level::tierId).containsExactly("codex");
+    }
+
+    @Test
+    void aSessionThatIsNotBoundKeepsTheOwnerOfItsChainInTheBestTier() {
+        openAiPlan(false);
+
+        TierPlan plan = plan(responsesChain("openai-official", true));
+
+        assertThat(plan.owner()).hasValueSatisfying(owner -> assertThat(owner.level().tierId()).isEqualTo("official"));
+        assertThat(plan.startIndex()).isZero();
+        assertThat(plan.holdLevels()).isEqualTo(plan.levels());
+    }
+
+    @Test
+    void aSessionThatIsNotBoundStartsFromTheBestTierWhateverTierTheOwnerOfItsChainIsIn() {
+        // A pinned turn left the chain with a Codex owner while the session was never pushed down, or the binding of a
+        // session that was has expired (D4). The turns after it are automatic and the best tier has an account, so they are
+        // served by it and priced by it (design 4.7).
+        openAiPlan(false);
+
+        TierPlan plan = plan(responsesChain("codex", true));
+
+        assertThat(plan.owner()).isEmpty();
+        assertThat(plan.startIndex()).isZero();
+        assertThat(plan.startLevel().tierId()).isEqualTo("official");
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("official", "codex");
+        assertThat(plan.holdLevels()).isEqualTo(plan.levels());
+    }
+
+    @Test
+    void aChainThatCanBeReplayedHasNoUseForAnOwnerBelowTheTierItsSessionIsBoundTo() {
+        // The session is in Codex and a turn of the chain was pinned to a tier below it. That owner is the pinned turn's
+        // doing as much as one above would be: the turns after it start in Codex and are priced by Codex.
+        openAiPlanWithSpareTier("codex");
+
+        TierPlan plan = plan(responsesChain("openai-spare", true));
+
+        assertThat(plan.owner()).isEmpty();
+        assertThat(plan.startLevel().tierId()).isEqualTo("codex");
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("official", "codex", "spare");
+        assertThat(plan.holdLevels()).extracting(Level::tierId).containsExactly("codex", "spare");
+    }
+
+    @Test
+    void anOwnerInTheTierTheWalkMovesToBecauseTheBoundTierHasNothingToOfferIsStillTriedFirst() {
+        // The tier the session is bound to has no account to serve with right now, so the walk starts in the next tier
+        // that is not above it, and an owner sitting there is where the walk begins.
+        openAiPlanWithSpareTier("codex");
+        usable.removeIf(account -> account.getAccountId().equals("codex"));
+
+        TierPlan plan = plan(responsesChain("openai-spare", true));
+
+        assertThat(plan.startLevel().tierId()).isEqualTo("spare");
+        assertThat(plan.owner()).hasValueSatisfying(owner -> assertThat(owner.level().tierId()).isEqualTo("spare"));
+    }
+
+    @Test
+    void aVendorThatDoesNotKeepSessionsInTheirTierStartsEveryTurnOfAChainFromTheBestTier() {
+        openAiPlan(false, false);
+
+        TierPlan plan = plan(responsesChain("codex", true));
+
+        assertThat(plan.session()).isEmpty();
+        assertThat(plan.owner()).isEmpty();
+        assertThat(plan.startLevel().tierId()).isEqualTo("official");
+    }
+
+    @Test
+    void aChainThatCannotLeaveItsOwnerIsServedByTheOwnersTierWhereverTheSessionIsBound() {
+        // Only the owner can continue the chain, so it is the one tier of the plan and the session's binding has no say.
+        openAiPlan(true);
+
+        TierPlan plan = plan(responsesChain("openai-official", false));
+
+        assertThat(plan.owner()).hasValueSatisfying(owner -> assertThat(owner.level().tierId()).isEqualTo("official"));
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("official");
+        assertThat(plan.holdLevels()).extracting(Level::tierId).containsExactly("official");
+        assertThat(plan.startIndex()).isZero();
+    }
+
+    // ---- fixtures ----
+
+    /** Official OpenAI key and Codex account, the tiers of both, and (when {@code bound}) the chain's session bound to Codex. */
+    private void openAiPlan(boolean bound) {
+        openAiPlan(bound, true);
+    }
+
+    private void openAiPlan(boolean bound, boolean sticky) {
         ProxyAccountEntity owner = account("openai-official", "OpenAI", "api-key");
         ProxyAccountEntity codex = account("codex", "OpenAI", "codex");
         cached.addAll(List.of(owner, codex));
         usable.addAll(List.of(owner, codex));
         when(accountPool.cachedAccount("openai-official")).thenReturn(Optional.of(owner));
+        when(accountPool.cachedAccount("codex")).thenReturn(Optional.of(codex));
         when(registry.snapshot()).thenReturn(SourceTierSnapshot.of(7L,
-            List.of(new VendorConfig("openai", true, false, false, true, 16, true, 7L)),
+            List.of(new VendorConfig("openai", true, false, false, sticky, 16, true, 7L)),
             List.of(
                 openAiTier("official", 1, "1", AccountAllocationCategory.OFFICIAL_API_KEY),
                 openAiTier("codex", 2, "0.5", AccountAllocationCategory.CODEX)),
             List.of(), List.of(), List.of()));
-        String key = TierSessionKeys.bindingKey("openai", "gpt-5.5", "key-1:resp:resp_1");
-        bindings.downgrade(key, new Binding("codex", 2), Binding::level);
-        TierPlanRequest chain = new TierPlanRequest("request-1", "gpt-5.5", "gpt-5.5", "OpenAI", TierRoute.OPENAI,
-            false, false, false, false, false, true, body(), "openai-official", true, "key-1", "key-1:resp:resp_1");
-
-        TierPlan plan = plan(chain);
-
-        assertThat(plan.startLevel().tierId()).isEqualTo("codex");
-        assertThat(plan.holdLevels()).extracting(Level::tierId).containsExactly("official", "codex");
-        assertThat(plan.reservation()).isEqualTo(level(plan, "official").estimate());
+        if (bound) {
+            bindings.downgrade(TierSessionKeys.bindingKey("openai", "gpt-5.5", "key-1:resp:resp_1"), new Binding("codex", 2),
+                Binding::level);
+        }
     }
 
-    // ---- fixtures ----
+    /**
+     * The tiers of {@link #openAiPlan} and a third below them that an official key has been placed in by hand
+     * ({@code openai-spare}), with the chain's session bound to {@code boundTier}.
+     */
+    private void openAiPlanWithSpareTier(String boundTier) {
+        ProxyAccountEntity official = account("openai-official", "OpenAI", "api-key");
+        ProxyAccountEntity codex = account("codex", "OpenAI", "codex");
+        ProxyAccountEntity spare = account("openai-spare", "OpenAI", "api-key");
+        cached.addAll(List.of(official, codex, spare));
+        usable.addAll(List.of(official, codex, spare));
+        for (ProxyAccountEntity account : List.of(official, codex, spare)) {
+            when(accountPool.cachedAccount(account.getAccountId())).thenReturn(Optional.of(account));
+        }
+        when(registry.snapshot()).thenReturn(SourceTierSnapshot.of(7L,
+            List.of(new VendorConfig("openai", true, false, false, true, 16, true, 7L)),
+            List.of(
+                openAiTier("official", 1, "1", AccountAllocationCategory.OFFICIAL_API_KEY),
+                openAiTier("codex", 2, "0.5", AccountAllocationCategory.CODEX),
+                new Tier("openai", "spare", 3, "spare", new BigDecimal("0.25"), EnumSet.noneOf(AccountAllocationCategory.class),
+                    true, true, null)),
+            List.of(new Member("openai", "openai-spare", "spare", null, true, false, false, false, false, true, "NONE", 540, null, null)),
+            List.of(), List.of()));
+        bindings.downgrade(TierSessionKeys.bindingKey("openai", "gpt-5.5", "key-1:resp:resp_1"),
+            new Binding(boundTier, "codex".equals(boundTier) ? 2 : 3), Binding::level);
+    }
+
+    /** The turn of a Responses chain whose last response was served by {@code ownerAccountId}. */
+    private TierPlanRequest responsesChain(String ownerAccountId, boolean movable) {
+        return new TierPlanRequest("request-1", "gpt-5.5", "gpt-5.5", "OpenAI", TierRoute.OPENAI,
+            false, false, false, false, false, true, body(), ownerAccountId, movable, "key-1", "key-1:resp:resp_1");
+    }
 
     private TierPlan plan(TierPlanRequest request) {
         return planner.plan(request).block();

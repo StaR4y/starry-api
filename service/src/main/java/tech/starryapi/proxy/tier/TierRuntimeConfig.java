@@ -23,7 +23,9 @@ public class TierRuntimeConfig {
     /**
      * The facade's only way into the tiered-source feature. A release plans requests over tiers only when it can run
      * them ({@link SourceTierRuntimeInfo#nativeTiers()}); until then the configuration, which the administrator API
-     * does not accept either, is not looked at, and every deployment keeps today's routing, prices and settlement.
+     * does not accept either, is not looked at, and every deployment keeps today's routing, prices and settlement. Clients
+     * may name the tier they want only where {@link SourceTierRuntimeInfo#selectors()} says the release can serve it, and
+     * the all-endpoints switch of a vendor is honoured only where {@link SourceTierRuntimeInfo#unifyEndpoints()} does.
      */
     @Bean
     TierRuntime tierRuntime(
@@ -40,6 +42,8 @@ public class TierRuntimeConfig {
             return TierRuntime.disabled();
         }
         return new TierRuntime(new DefaultSourceTierPlanner(
-            registry, keyResolver, modelCatalog, accountPool, paymentSettings, modelPricing, bindings), bindings);
+            registry, keyResolver, modelCatalog, accountPool, paymentSettings, modelPricing, bindings, runtimeInfo.selectors(),
+            runtimeInfo.unifyEndpoints()),
+            bindings);
     }
 }

@@ -49,7 +49,8 @@ test('switching updates computed UI labels without changing entered data', () =>
 
 test('client protocol, credentials, config files, and import links are language independent', () => {
   const context = { apiOrigin: 'https://example.com', apiBaseUrl: 'https://example.com/v1', apiKey: 'sk-test-user-key', apiPort: '443' };
-  const snapshot = () => JSON.stringify({ connection: createConnectionText(context), links: createCcSwitchLinks(context).map(l => l.url), configs: ['codex', 'claude', 'opencode'].flatMap(c => ['unix', 'cmd', 'powershell'].map(p => createSetupScriptBlock(c, p, context).script)) });
+  // With and without a source pool chosen: the pool is written as data (a header, a model suffix), never as a translated text.
+  const snapshot = () => JSON.stringify([context, { ...context, tier: 'kiro+' }].map(context => ({ connection: createConnectionText(context), links: createCcSwitchLinks(context).map(l => l.url), configs: ['codex', 'claude', 'opencode'].flatMap(c => ['unix', 'cmd', 'powershell'].map(p => createSetupScriptBlock(c, p, context).script)) })));
   setLocale('zh-CN');
   const chinese = snapshot();
   setLocale('en-US');

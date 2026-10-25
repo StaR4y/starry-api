@@ -21,9 +21,10 @@ import tech.starryapi.proxy.tier.TierPlan.Level;
  *       Kiro stream cut off after its first content, or a request that timed out after it was sent, would be
  *       generated a second time by the next tier, and the user would pay for both.
  *   <li>A retry stays in the tier that failed while it has an account to offer, and goes to the tier below it when it
- *       has none. It never goes back up. The one exception is the owner of a response chain, which is tried before the
- *       tiers are looked at: its tier is not one the request went through, so a failure of the owner leaves the retry
- *       starting where the request started, with the tiers above the owner's still to be offered.
+ *       has none. It never goes back up. The owner of a response chain is no exception: a chain that can be replayed
+ *       keeps its owner only when the owner sits in the tier the walk starts from, and it is tried there ahead of the
+ *       other accounts of that tier, so its failure is a failure of that tier like any other (a chain that cannot be
+ *       replayed is never retried).
  *   <li>The retry budget is the one of an untiered request. A tier with accounts left but a spent budget is still left
  *       for the tier below by one reserved slot, which only a crossing can use and only once per request (switched off
  *       by the vendor's {@code cross_tier_reserved_slot}). With two accounts in the first tier and a budget of two, a
@@ -74,8 +75,6 @@ public final class TierRetryPolicy {
      *     can pick right now (cached, available, allowed by the allocation lifecycle) and that the request has neither
      *     tried, including this one, nor been refused by. Only read when the budget is spent and the request is about to
      *     leave the tier on the reserved slot.
-     * @param ownerAttempt whether the account was selected as the owner of the response chain, ahead of the walk of the
-     *     tiers
      */
     public record FailedAttempt(
         Level level,
@@ -85,8 +84,7 @@ public final class TierRetryPolicy {
         boolean retryable,
         int accountLimit,
         boolean generationStarted,
-        boolean accountsLeftInTier,
-        boolean ownerAttempt
+        boolean accountsLeftInTier
     ) {
         public FailedAttempt {
             Objects.requireNonNull(level, "level");
@@ -154,24 +152,19 @@ public final class TierRetryPolicy {
             return Outcome.STOP;
         }
         if (walk.dispatchedAccounts() < failed.accountLimit()) {
-            // The owner was tried before the walk looked at any tier: the tiers above its own are still to be offered.
-            if (!failed.ownerAttempt()) {
-                walk.stayAtOrBelow(level);
-            }
+            walk.stayAtOrBelow(level);
             return Outcome.RETRY;
         }
         if (reservedSlotAvailable(failed)) {
             reservedSlotUsed = true;
-            if (!failed.ownerAttempt()) {
-                if (failed.accountsLeftInTier()) {
-                    // The tier below is reached because the budget ran out, not because this tier had nothing left to offer.
-                    walk.crossedOnBudget();
-                } else {
-                    // The budget ended on the last account of the tier, which the walk will not look at again.
-                    walk.passed(level);
-                }
-                walk.moveBelow(level);
+            if (failed.accountsLeftInTier()) {
+                // The tier below is reached because the budget ran out, not because this tier had nothing left to offer.
+                walk.crossedOnBudget();
+            } else {
+                // The budget ended on the last account of the tier, which the walk will not look at again.
+                walk.passed(level);
             }
+            walk.moveBelow(level);
             log.info("Tiered request leaves tier {} on its reserved slot after {} dispatches", level.tierRef(), walk.dispatchedAccounts());
             return Outcome.RETRY_ON_RESERVED_SLOT;
         }
@@ -203,9 +196,8 @@ public final class TierRetryPolicy {
         return !reservedSlotUsed
             && !walk.narrowed()
             && walk.plan().vendorConfig().crossTierReservedSlot()
-            // There has to be somewhere else to go: below the tier that failed, or, for the owner of a chain that was
-            // tried ahead of the walk, any other tier the walk still offers.
-            && (failed.ownerAttempt() ? walk.hasTierBesides(failed.level()) : walk.hasTierBelow(failed.level()));
+            // There has to be somewhere else to go: a tier below the one that failed.
+            && walk.hasTierBelow(failed.level());
     }
 
     private boolean leaseHasRoomForAnotherDispatch() {

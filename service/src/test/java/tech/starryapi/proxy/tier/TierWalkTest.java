@@ -141,20 +141,6 @@ class TierWalkTest {
     }
 
     @Test
-    void aWalkHasATierBesidesOneAsLongAsItStillOffersAnother() {
-        TierPlan plan = plan();
-        TierWalk walk = new TierWalk(plan);
-
-        assertThat(walk.hasTierBesides(plan.levels().get(1))).isTrue();
-        walk.moveBelow(plan.levels().get(1));
-        // Only the last tier is left, so there is none besides it, though there is one above it in the plan.
-        assertThat(walk.hasTierBesides(plan.levels().get(2))).isFalse();
-        assertThat(walk.hasTierBesides(plan.levels().get(0))).isTrue();
-        walk.narrowTo(plan.levels().get(0));
-        assertThat(walk.hasTierBesides(plan.levels().get(0))).isFalse();
-    }
-
-    @Test
     void aNarrowedWalkSaysSoAndIgnoresWhereItResumes() {
         TierPlan plan = plan();
         TierWalk walk = new TierWalk(plan);
@@ -290,8 +276,9 @@ class TierWalkTest {
 
     @Test
     void theOwnerOfAResponseChainIsOfferedToTheFirstSelectionOnly() {
-        ProxyAccountEntity owner = account("codex-owner", "OpenAI", "codex");
-        when(accountPool.cachedAccount("codex-owner")).thenReturn(Optional.of(owner));
+        // The owner sits in the tier the walk starts from, which is where a chain that can be replayed keeps its owner.
+        ProxyAccountEntity owner = account("official-owner", "OpenAI", "api-key");
+        when(accountPool.cachedAccount("official-owner")).thenReturn(Optional.of(owner));
         when(registry.snapshot()).thenReturn(SourceTierSnapshot.of(7L,
             List.of(new VendorConfig("openai", true, false, false, true, CAP, true, 7L)),
             List.of(
@@ -299,15 +286,15 @@ class TierWalkTest {
                 openAiTier("codex", 2, AccountAllocationCategory.CODEX)),
             List.of(), List.of(), List.of()));
         TierPlan plan = planner.plan(new TierPlanRequest("request-1", "gpt-5.5", "gpt-5.5", "OpenAI", TierRoute.OPENAI,
-            false, false, false, false, false, true, body("gpt-5.5"), "codex-owner", true, null, null)).block();
+            false, false, false, false, false, true, body("gpt-5.5"), "official-owner", true, null, null)).block();
         TierWalk walk = new TierWalk(plan);
 
         Optional<TierPlan.Owner> first = walk.takeOwner();
         Optional<TierPlan.Owner> second = walk.takeOwner();
 
         assertThat(first).hasValueSatisfying(chain -> {
-            assertThat(chain.accountId()).isEqualTo("codex-owner");
-            assertThat(chain.level().tierId()).isEqualTo("codex");
+            assertThat(chain.accountId()).isEqualTo("official-owner");
+            assertThat(chain.level().tierId()).isEqualTo("official");
         });
         assertThat(second).isEmpty();
     }

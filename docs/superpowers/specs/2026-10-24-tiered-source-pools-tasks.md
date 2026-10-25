@@ -331,7 +331,7 @@
 
 - 依赖：P5-07
 - 文件：`docs/API.md`, `docs/OPERATIONS.md`, `docs/CONFIGURATION.md`
-- 内容：运营步骤（成员、口径、验证、上限、KEYS→ON、kill switch、指标、UNBILLED、隐私、多节点、Claude Code 缓存成本）；新错误码；全部节点升级后再开门控。
+- 内容：运营步骤（成员、口径、验证、上限、KEYS→ON、kill switch、指标、UNBILLED、隐私、多节点、Claude Code 缓存成本）；新错误码；全部节点升级后再开门控。另有一项第 3 阶段留下的：控制台「使用文档」里的内置教程（V23/V24 种子）还没有讲号源偏好、客户端配置里的号池、模型页的 `模型@标识` 复制和第 3 阶段的错误码，其中「错误码速查」的 403 一行只讲 `API_KEY_MODEL_PROVIDER_FORBIDDEN`，对 `403 SOURCE_TIER_NOT_SELECTABLE` 的建议不对，也没有 409 `RESPONSE_OWNER_TIER_MISMATCH`、400 `SOURCE_TIER_UNKNOWN` / `SOURCE_TIER_NOT_OFFERED` / `API_KEY_TIER_PREFERENCE_INVALID`、503 `SOURCE_TIER_UNAVAILABLE`（带 `Retry-After`）。新增一个迁移，按 `USER_DOCUMENTATION.md` 的升级规则（V24 的做法：只替换仍是上一版种子的教程，管理员改过、下线或删除的保持原样）更新「创建与管理 API Key」「选择模型与查看价格」「错误码速查」和三个客户端教程，中英文都要。
 - 测试：test:documentation。
 - 验收：覆盖第 7、8 节运营操作。
 

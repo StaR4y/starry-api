@@ -764,6 +764,8 @@ export interface ApiKey {
   lastUsedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** 这把 Key 偏好的号池（写法同模型后缀：号池标识、L2、2，可加 +）；没有偏好（auto）时后端不输出这个字段 */
+  tierPreference?: string | null;
 }
 
 export interface CreateApiKeyRequest {
@@ -771,6 +773,8 @@ export interface CreateApiKeyRequest {
   name: string;
   creditsLimit?: number;
   modelProvider: string;
+  /** 缺省或 auto 表示不指定 */
+  tierPreference?: string;
 }
 
 export interface UpdateApiKeyRequest {
@@ -780,6 +784,8 @@ export interface UpdateApiKeyRequest {
   enabled?: boolean;
   creditsLimit?: number;
   modelProvider?: string;
+  /** 缺省表示不改；auto 清除偏好 */
+  tierPreference?: string;
 }
 
 export interface CreatedApiKey {
@@ -794,6 +800,8 @@ export interface CreatedApiKey {
   creditsLimit: number | null;
   modelProvider: string;
   createdAt: string;
+  /** 创建时选的号池（同 ApiKey.tierPreference）；没有偏好（auto）时后端不输出这个字段 */
+  tierPreference?: string | null;
 }
 
 /* ================== 模型映射 ================== */
@@ -1078,9 +1086,24 @@ export interface ModelInfo {
   icon?: string | null;
   requestFormat?: ModelRequestFormat;
   endpoint?: string;
+  /** 能服务这个模型的号池，从好到差；只有厂商打开「公开号池名称」时才有 */
+  sourceTiers?: ModelSourceTier[] | null;
 }
 
 export type ModelRequestFormat = 'OPENAI_CHAT_COMPLETIONS';
+
+/**
+ * 模型列表里的一个号池：id 是请求里 `模型@id`、请求头 X-Starry-Tier 和 Key 偏好写的标识，pricing 是乘过系数的价格，
+ * selectable 为假的号池不能由请求指定。不含账号、协议或中转信息。
+ */
+export interface ModelSourceTier {
+  id: string;
+  level: number;
+  name: string;
+  priceFactor: number;
+  selectable: boolean;
+  pricing?: ModelPublicPricing | null;
+}
 
 export interface ModelPublicPricing {
   billingMode: 'total' | 'input_output' | string;
@@ -1111,6 +1134,7 @@ export interface ManagedModel {
   builtIn: boolean;
   badgeColor?: string | null;
   pricing?: ModelPublicPricing | null;
+  sourceTiers?: ModelSourceTier[] | null;
 }
 
 export interface UpsertManagedModelRequest {

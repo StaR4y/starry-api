@@ -47,6 +47,53 @@ class TierSessionKeysTest {
         assertThat(TierSessionKeys.ofResponses("key-1", "key-1", " ")).isNull();
     }
 
+    // ---- the session header of the Codex CLI ----
+
+    @Test
+    void theCodexSessionHeaderNamesTheSessionOfAKey() {
+        assertThat(TierSessionKeys.ofCodexSession("key-1", "01a172ab-ca52-71d2"))
+            .isEqualTo("key-1:codex:01a172ab-ca52-71d2");
+        assertThat(TierSessionKeys.ofCodexSession("key-2", "01a172ab-ca52-71d2"))
+            .isNotEqualTo(TierSessionKeys.ofCodexSession("key-1", "01a172ab-ca52-71d2"));
+        assertThat(TierSessionKeys.ofCodexSession("key-1", "  01a172ab-ca52-71d2 "))
+            .isEqualTo("key-1:codex:01a172ab-ca52-71d2");
+    }
+
+    @Test
+    void noKeyOrNoHeaderMeansNoCodexSession() {
+        assertThat(TierSessionKeys.ofCodexSession("key-1", null)).isNull();
+        assertThat(TierSessionKeys.ofCodexSession("key-1", " ")).isNull();
+        assertThat(TierSessionKeys.ofCodexSession(null, "01a172ab")).isNull();
+        assertThat(TierSessionKeys.ofCodexSession(" ", "01a172ab")).isNull();
+    }
+
+    @Test
+    void aVeryLongCodexSessionIdIsCut() {
+        String name = TierSessionKeys.ofCodexSession("key-1", "x".repeat(10_000));
+
+        assertThat(name).isEqualTo("key-1:codex:" + "x".repeat(TierSessionKeys.CLIENT_SESSION_CHARS));
+    }
+
+    @Test
+    void theHintOfTheClientNamesTheSessionBeforeTheCodexHeader() {
+        String codex = TierSessionKeys.ofCodexSession("key-1", "01a172ab");
+
+        assertThat(TierSessionKeys.named("key-1:session-9", codex)).isEqualTo("key-1:session-9");
+        assertThat(TierSessionKeys.named("key-1", codex)).isEqualTo(codex);
+        assertThat(TierSessionKeys.named(null, codex)).isEqualTo(codex);
+        assertThat(TierSessionKeys.named("key-1", null)).isNull();
+    }
+
+    @Test
+    void aResponsesRequestIsNamedByTheCodexHeaderBeforeTheResponseItContinues() {
+        String codex = TierSessionKeys.ofCodexSession("key-1", "01a172ab");
+
+        assertThat(TierSessionKeys.ofResponses("key-1", "key-1", codex, "resp_1")).isEqualTo(codex);
+        assertThat(TierSessionKeys.ofResponses("key-1", "key-1:session-9", codex, "resp_1")).isEqualTo("key-1:session-9");
+        assertThat(TierSessionKeys.ofResponses("key-1", "key-1", null, "resp_1")).isEqualTo("key-1:resp:resp_1");
+        assertThat(TierSessionKeys.ofResponses("key-1", "key-1", null, null)).isNull();
+    }
+
     // ---- the beginning of the conversation ----
 
     @Test

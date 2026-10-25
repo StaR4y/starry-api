@@ -19,17 +19,20 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import reactor.core.publisher.Mono;
+import tech.starryapi.admin.AdminPrincipal;
 import tech.starryapi.common.AdminAuth;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.common.GlobalExceptionHandler;
+import tech.starryapi.model.ModelDtos;
 
 /** The REST contract of the tier administration: shapes in and out, the checks that come before the service, who may call. */
 class SourceTierAdminControllerTest {
 
     private final SourceTierAdminService service = mock(SourceTierAdminService.class);
     private final SourceTierStatusService status = mock(SourceTierStatusService.class);
+    private final SourceTierChoices choices = mock(SourceTierChoices.class);
     private final AdminAuth auth = mock(AdminAuth.class);
-    private final WebTestClient client = WebTestClient.bindToController(new SourceTierAdminController(service, status, auth))
+    private final WebTestClient client = WebTestClient.bindToController(new SourceTierAdminController(service, status, choices, auth))
         .controllerAdvice(new GlobalExceptionHandler()).build();
 
     private static final String PUT_BODY = """
@@ -210,6 +213,45 @@ class SourceTierAdminControllerTest {
             .exchange().expectStatus().isBadRequest().expectBody()
             .jsonPath("$.error.code").isEqualTo("SOURCE_TIER_INVALID")
             .jsonPath("$.error.message").isEqualTo("tiers[0].level must be between 1 and 9");
+    }
+
+    @Test
+    void aUserAsksForThePoolsOfAProviderAndIsToldOnlyTheirNameLevelFactorAndPrice() {
+        AdminPrincipal user = new AdminPrincipal("user-1", "alice", "USER", Instant.parse("2026-10-25T09:00:00Z"), false);
+        ModelDtos.ModelPublicPricing price = new ModelDtos.ModelPublicPricing("token", null, null, null, null, null, null,
+            new BigDecimal("1.8"), new BigDecimal("9"), null, new BigDecimal("0.18"));
+        when(auth.verify(any())).thenReturn(user);
+        when(choices.forProvider(user, "Anthropic")).thenReturn(Mono.just(new SourceTierDtos.MyTiers("Anthropic", "claude-sonnet-4.5", List.of(
+            new SourceTierDtos.MyTier("official", 1, "Official", new BigDecimal("1.000000"), null),
+            new SourceTierDtos.MyTier("kiro", 2, "Kiro", new BigDecimal("0.600000"), price)))));
+
+        client.get().uri("/admin/source-tiers/me?provider=Anthropic").exchange().expectStatus().isOk().expectBody()
+            .jsonPath("$.data.provider").isEqualTo("Anthropic")
+            .jsonPath("$.data.referenceModel").isEqualTo("claude-sonnet-4.5")
+            .jsonPath("$.data.tiers.length()").isEqualTo(2)
+            .jsonPath("$.data.tiers[0].id").isEqualTo("official")
+            .jsonPath("$.data.tiers[0].pricing").doesNotExist()
+            .jsonPath("$.data.tiers[1].id").isEqualTo("kiro")
+            .jsonPath("$.data.tiers[1].level").isEqualTo(2)
+            .jsonPath("$.data.tiers[1].name").isEqualTo("Kiro")
+            .jsonPath("$.data.tiers[1].priceFactor").isEqualTo(0.6)
+            .jsonPath("$.data.tiers[1].pricing.inputPricePerMillionTokens").isEqualTo(1.8)
+            .jsonPath("$.data.tiers[1].pricing.outputPricePerMillionTokens").isEqualTo(9)
+            // The shape holds nothing of the accounts, the categories or the protocol behind a pool.
+            .jsonPath("$.data.tiers[1].memberCategories").doesNotExist()
+            .jsonPath("$.data.tiers[1].userSelectable").doesNotExist()
+            .jsonPath("$.data.tiers[1].description").doesNotExist();
+        verify(auth, never()).verifyAdmin(any());
+    }
+
+    @Test
+    void thePoolsOfAProviderNeedAProviderAndASignedInUser() {
+        client.get().uri("/admin/source-tiers/me").exchange().expectStatus().isBadRequest();
+        verifyNoInteractions(choices);
+
+        when(auth.verify(any())).thenThrow(new ApiException(HttpStatus.UNAUTHORIZED, "ADMIN_UNAUTHORIZED", "Missing admin credentials"));
+        client.get().uri("/admin/source-tiers/me?provider=Anthropic").exchange().expectStatus().isUnauthorized();
+        verifyNoInteractions(choices);
     }
 
     @Test

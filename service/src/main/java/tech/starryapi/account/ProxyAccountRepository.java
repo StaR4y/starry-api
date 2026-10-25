@@ -44,6 +44,14 @@ public interface ProxyAccountRepository extends ReactiveCrudRepository<ProxyAcco
 
     Flux<ProxyAccountEntity> findAllByEnabledTrue();
 
+    /**
+     * The accounts that are switched off (disabled, or suspended, which disables), with only the columns that say which
+     * kind of account each is: provider, auth method and base URL. The entities are good for the account predicates and
+     * the tier rules and for nothing else; the credentials stay in the table.
+     */
+    @Query("SELECT account_id, provider, auth_method, base_url, enabled FROM proxy_accounts WHERE enabled = FALSE")
+    Flux<ProxyAccountEntity> findSwitchedOffByKind();
+
     Flux<ProxyAccountEntity> findAllByEnabledFalseOrSuspendedAtNotNullOrQuotaExhaustedAtNotNull();
 
     Mono<Void> deleteByAccountId(String accountId);

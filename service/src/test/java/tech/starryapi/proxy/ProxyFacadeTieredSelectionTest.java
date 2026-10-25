@@ -525,21 +525,36 @@ class ProxyFacadeTieredSelectionTest {
     @Test
     void theOwnerIsPreferredOnlyOnTheFirstSelectionOfTheRequest() {
         loaded(openAiTiers(16));
-        add(officialOpenAi("official-1"), codex("codex-owner"), codex("codex-2"));
-        TierWalk walk = new TierWalk(openAiPlan(false, "codex-owner", true));
-        assertThat(select(walk, true).account().getAccountId()).isEqualTo("codex-owner");
-        walk.attempted("codex-owner");
+        add(officialOpenAi("official-owner"), officialOpenAi("official-1"), codex("codex-2"));
+        TierWalk walk = new TierWalk(openAiPlan(false, "official-owner", true));
+        assertThat(select(walk, true).account().getAccountId()).isEqualTo("official-owner");
+        walk.attempted("official-owner");
 
         // The retry walks the tiers from the best one, as any dispatch after the first.
         assertThat(select(walk, true).account().getAccountId()).isEqualTo("official-1");
     }
 
     @Test
-    void anOwnerThatIsUnavailableIsLeftForTheTiersWhenTheChainCanBeReplayed() {
+    void theOwnerOfAChainThatCanBeReplayedIsNotPreferredOutsideTheTierTheWalkStartsFrom() {
         loaded(openAiTiers(16));
         add(officialOpenAi("official-1"), codex("codex-owner"));
         TierWalk walk = new TierWalk(openAiPlan(false, "codex-owner", true));
-        unavailable.add("codex-owner");
+
+        // A pinned turn left the owner in the second tier; the automatic turn starts from the best tier, owner or not.
+        ProxyFacade.AccountAttempt attempt = select(walk, true);
+
+        assertThat(walk.plan().owner()).isEmpty();
+        assertThat(attempt.account().getAccountId()).isEqualTo("official-1");
+        assertThat(attempt.selection().level().tierId()).isEqualTo("official");
+        assertThat(admissions).extracting(AdmissionRequest::accountId).containsExactly("official-1");
+    }
+
+    @Test
+    void anOwnerThatIsUnavailableIsLeftForTheTiersWhenTheChainCanBeReplayed() {
+        loaded(openAiTiers(16));
+        add(officialOpenAi("official-owner"), officialOpenAi("official-1"), codex("codex-1"));
+        TierWalk walk = new TierWalk(openAiPlan(false, "official-owner", true));
+        unavailable.add("official-owner");
 
         ProxyFacade.AccountAttempt attempt = select(walk, true);
 
@@ -559,6 +574,8 @@ class ProxyFacadeTieredSelectionTest {
                 assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
                 assertThat(error.getCode()).isEqualTo("NO_AVAILABLE_ACCOUNT");
                 assertThat(error.getMessage()).isEqualTo("The account that owns the OpenAI response is unavailable");
+                // The facade tells it from an empty pool by its type, not by its text.
+                assertThat(error).isInstanceOf(ProxyFacade.ResponseOwnerUnavailableException.class);
             });
 
         // The first tier was never looked at and the cache was not reloaded for it.
@@ -586,14 +603,14 @@ class ProxyFacadeTieredSelectionTest {
     @Test
     void anOwnerThatAdmissionRefusesIsLeftForTheTiersWhenTheChainCanBeReplayed() {
         loaded(openAiTiers(16));
-        add(officialOpenAi("official-1"), codex("codex-owner"));
-        TierWalk walk = new TierWalk(openAiPlan(false, "codex-owner", true));
-        busy.add("codex-owner");
+        add(officialOpenAi("official-owner"), officialOpenAi("official-1"), codex("codex-1"));
+        TierWalk walk = new TierWalk(openAiPlan(false, "official-owner", true));
+        busy.add("official-owner");
 
         ProxyFacade.AccountAttempt attempt = select(walk, true);
 
         assertThat(attempt.account().getAccountId()).isEqualTo("official-1");
-        assertThat(admissions).extracting(AdmissionRequest::accountId).containsExactly("codex-owner", "official-1");
+        assertThat(admissions).extracting(AdmissionRequest::accountId).containsExactly("official-owner", "official-1");
         assertThat(walk.refusals()).isEqualTo(1);
     }
 

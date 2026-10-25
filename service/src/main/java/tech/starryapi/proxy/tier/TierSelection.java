@@ -13,8 +13,6 @@ import tech.starryapi.proxy.tier.TierPlan.Level;
  * @param mode how the plan chose its tiers, which the request log keeps with every attempt
  * @param climbed whether the account was found above the tier the request started from, as a last resort once nothing
  *     from its start down had an account (design 4.3), which is the one case where a session's tier is moved back up
- * @param owner whether the account was taken as the owner of the response chain the request continues, ahead of the
- *     walk of the tiers, and not found by it
  */
 public record TierSelection(
     ProxyAccountEntity account,
@@ -22,8 +20,7 @@ public record TierSelection(
     PoolCell cell,
     TierDispatch dispatch,
     TierPlan.Mode mode,
-    boolean climbed,
-    boolean owner
+    boolean climbed
 ) {
 
     public TierSelection {
@@ -32,10 +29,5 @@ public record TierSelection(
         Objects.requireNonNull(cell, "cell");
         Objects.requireNonNull(dispatch, "dispatch");
         Objects.requireNonNull(mode, "mode");
-    }
-
-    /** The same selection, made as the owner of the response chain. */
-    public TierSelection asOwner() {
-        return new TierSelection(account, level, cell, dispatch, mode, climbed, true);
     }
 }

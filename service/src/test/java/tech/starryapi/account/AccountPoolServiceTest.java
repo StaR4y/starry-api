@@ -292,6 +292,54 @@ class AccountPoolServiceTest {
     }
 
     @Test
+    void theAccountsThatAreSwitchedOffAreReadFromTheTableOnceAndKeptUntilTheCacheMoves() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity healthy = openAiPoolAccount("openai-main");
+        ProxyAccountEntity suspended = openAiPoolAccount("openai-suspended");
+        suspended.setEnabled(false);
+        AtomicInteger reads = new AtomicInteger();
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(healthy));
+        when(repository.deleteByAccountId(anyString())).thenReturn(Mono.empty());
+        when(repository.findSwitchedOffByKind()).thenAnswer(invocation -> {
+            reads.incrementAndGet();
+            return Flux.just(suspended);
+        });
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+        service.refreshCache().block();
+
+        assertThat(service.switchedOffAccounts().block()).extracting(ProxyAccountEntity::getAccountId)
+            .containsExactly("openai-suspended");
+        assertThat(service.switchedOffAccounts().block()).hasSize(1);
+        // They are not in the cache the selection reads, and reading them does not put them there.
+        assertThat(service.cachedAccount("openai-suspended")).isEmpty();
+        assertThat(reads).hasValue(1);
+
+        // A reload of the cache, or a change this node makes to an account, drops what was read.
+        service.refreshCache().block();
+        service.switchedOffAccounts().block();
+        assertThat(reads).hasValue(2);
+        service.delete("openai-main").block();
+        service.switchedOffAccounts().block();
+        assertThat(reads).hasValue(3);
+    }
+
+    @Test
+    void aTableThatCannotBeReadSaysNothingIsSwitchedOffAndTheNextCallTriesAgain() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        AtomicInteger reads = new AtomicInteger();
+        when(repository.findSwitchedOffByKind()).thenAnswer(invocation -> {
+            reads.incrementAndGet();
+            return Flux.error(new IllegalStateException("database is down"));
+        });
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+
+        assertThat(service.switchedOffAccounts().block()).isEmpty();
+        assertThat(service.switchedOffAccounts().block()).isEmpty();
+
+        assertThat(reads).hasValue(2);
+    }
+
+    @Test
     void anAccountIsSelectableOnlyWhenItIsAvailableAndTheAllocationLifecycleLetsItBeScheduled() {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         ProxyAccountEntity ready = openAiPoolAccount("openai-ready");

@@ -385,6 +385,32 @@ export function enableNote(
     : t('当前版本尚不支持按号池选号，暂时不能启用；号池配置可以先保存。');
 }
 
+/**
+ * 「全端点统一」开关下方的提示。不能运行它的版本里，说明为什么。能运行时：厂商没有启用分级，开关保存了也不起作用，要说；
+ * 还没有保存过打开的状态时，提醒先把所有节点升级到支持它的版本（旧节点仍只用 Kiro 服务 Chat 和 Responses 上的 Claude 模型，
+ * 同一个请求在不同节点上走法不同）。没有要说的返回 null。
+ */
+export function unifyNote(
+  supported: boolean,
+  loadedUnify: boolean,
+  draftUnify: boolean,
+  draftEnabled: boolean,
+): string | null {
+  if (!supported) {
+    return draftUnify
+      ? t('当前版本尚不支持全端点统一，这个设置需要关闭后才能保存。')
+      : t('当前版本尚不支持全端点统一，暂时不能打开。');
+  }
+  if (draftUnify && !draftEnabled) {
+    return t('这个厂商还没有启用分级，全端点统一要等「启用」打开后才会生效。');
+  }
+  return loadedUnify
+    ? null
+    : t(
+        '所有节点都升级到支持全端点统一的版本后再打开：旧版本的节点仍只用 Kiro 服务 Chat 和 Responses 入口上的 Claude 模型，同一个请求在不同节点上的走法不同。',
+      );
+}
+
 /* ---------- 展示用的小函数 ---------- */
 
 /** 去掉多余的 0：0.600000 → 0.6 */

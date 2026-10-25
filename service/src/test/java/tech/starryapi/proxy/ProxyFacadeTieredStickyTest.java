@@ -78,6 +78,7 @@ import tech.starryapi.platform.upstream.UpstreamException;
 import tech.starryapi.proxy.tier.DefaultSourceTierPlanner;
 import tech.starryapi.proxy.tier.TierRuntime;
 import tech.starryapi.proxy.tier.TierSessionBindings;
+import tech.starryapi.proxy.tier.TierSessionKeys;
 import tech.starryapi.sourcetier.SourceTierRegistry;
 import tech.starryapi.sourcetier.SourceTierSnapshot;
 import tech.starryapi.sourcetier.SourceTierSnapshot.Tier;
@@ -396,18 +397,58 @@ class ProxyFacadeTieredStickyTest {
         loaded(openAi(true));
         policy = new RoutingPolicySettings(false, false, false, false, 1, 3, 3, 2, 2);
         add(officialOpenAi("openai-1"), codex("codex-1"));
-        ObjectNode earlier = objectMapper.createObjectNode().put("id", "resp_known");
-        earlier.putArray("output");
-        stateStore.remember(earlier, objectMapper.createObjectNode().put("input", "first"), "codex-1");
+        // The chain was started on an account of another node: only its owner can continue it (a chain that can be
+        // replayed anywhere is a preference, and an automatic request does not start from a tier below the best one for it).
+        when(ownerStore.findOwner("resp_elsewhere")).thenReturn(Mono.just("codex-1"));
 
-        // The owner is tried first and served from its own tier without the tiers above it being looked at.
-        responses("gpt-5.4", "resp_known", "session-1", "continue");
+        // The owner serves from its own tier without the tiers above it being looked at.
+        responses("gpt-5.4", "resp_elsewhere", "session-1", "continue");
         assertThat(dispatched).containsExactly("codex-1");
 
         responses("gpt-5.4", null, "session-1", "something else");
 
         assertThat(dispatched).containsExactly("codex-1", "openai-1");
         assertThat(startedFrom()).isEqualTo("openai:official");
+    }
+
+    @Test
+    void theOwnerOfAChainLeavingItsTierOnTheBudgetWithAccountsLeftDoesNotPushTheSessionDown() {
+        loaded(openAi(true));
+        policy = new RoutingPolicySettings(false, false, false, false, 1, 1, 3, 2, 2);
+        add(officialOpenAi("openai-1"), officialOpenAi("openai-2"), codex("codex-1"));
+        String first = responseId(responses("gpt-5.4", null, "session-1", "start the task"));
+        assertThat(dispatched).containsExactly("openai-1");
+        fails("openai-1", new UpstreamException(429, "slow down", true));
+
+        // The owner sits in the tier the walk starts from and fails with the budget of one spent. The slot is for crossing:
+        // the other account of the tier is not tried, and the tier was left because of the budget, not used up.
+        responses("gpt-5.4", first, "session-1", "second turn");
+        assertThat(dispatched).containsExactly("openai-1", "openai-1", "codex-1");
+
+        answers.clear();
+        responses("gpt-5.4", null, "session-1", "another task");
+
+        assertThat(startedFrom()).isEqualTo("openai:official");
+        assertThat(dispatched).endsWith("openai-1");
+    }
+
+    @Test
+    void theOwnerOfAChainBeingTheLastAccountOfItsTierMakesLeavingItAPushDown() {
+        loaded(openAi(true));
+        policy = new RoutingPolicySettings(false, false, false, false, 1, 1, 3, 2, 2);
+        add(officialOpenAi("openai-1"), codex("codex-1"));
+        String first = responseId(responses("gpt-5.4", null, "session-1", "start the task"));
+        fails("openai-1", new UpstreamException(429, "slow down", true));
+
+        responses("gpt-5.4", first, "session-1", "second turn");
+        assertThat(dispatched).containsExactly("openai-1", "openai-1", "codex-1");
+
+        // The tier had nothing more to offer, so the session stays in the tier that served it until it has been idle.
+        answers.clear();
+        responses("gpt-5.4", null, "session-1", "another task");
+
+        assertThat(startedFrom()).isEqualTo("openai:codex");
+        assertThat(dispatched).endsWith("codex-1");
     }
 
     @Test
@@ -507,6 +548,49 @@ class ProxyFacadeTieredStickyTest {
         // The sub-agent was served by the lower tier but did not take the session with it.
         assertThat(dispatched).containsExactly("official-1", "kiro-1", "official-1");
         assertThat(startedFrom()).isEqualTo("anthropic:official");
+    }
+
+    @Test
+    void aRefusalCausedByTheSessionsOwnRequestThatNamedItsTierDoesNotPushItDownEither() {
+        loaded(anthropic(true, "1", "1"));
+        add(officialKey("official-1"), kiro("kiro-1"));
+        Sinks.One<PlatformCompletionResult> slow = Sinks.one();
+        answers.put("official-1", slow::asMono);
+        // The main model of the session is pinned to the official keys (/model claude-sonnet-4.5@official).
+        CompletableFuture<ResponseEntity<?>> pinned = messagesLater("claude-sonnet-4.5@official", "session-1", "a long running turn");
+        assertThat(pinned).isNotDone();
+
+        // The small model of the same session stays automatic; the account is at its limit because of the pinned request.
+        refused.put("official-1", "CONCURRENCY_LIMIT");
+        answers.remove("official-1");
+        messages("session-1", "a small request");
+        assertThat(dispatched).containsExactly("official-1", "kiro-1");
+
+        refused.clear();
+        slow.tryEmitValue(ANSWER);
+        assertThat(pinned).isCompleted();
+        messages("session-1", "the next turn");
+
+        // The small request was served by the lower tier but was not pushed there by anybody else: the session stays put.
+        assertThat(dispatched).containsExactly("official-1", "kiro-1", "official-1");
+        assertThat(startedFrom()).isEqualTo("anthropic:official");
+    }
+
+    @Test
+    void aRequestThatNamedItsTierNeitherReadsNorWritesTheTierOfTheSession() {
+        loaded(anthropic(true, "1", "1"));
+        add(officialKey("official-1"), kiro("kiro-1"));
+        refused.put("official-1", "RPM_LIMIT");
+        messages("session-1", "pushed down");
+        refused.clear();
+        assertThat(dispatched).containsExactly("kiro-1");
+
+        messages("claude-sonnet-4.5@official", "session-1", "pinned to the better tier");
+        messages("session-1", "back to automatic");
+
+        // The pinned request was served by the better tier and neither lifted the session there nor started from Kiro.
+        assertThat(dispatched).containsExactly("kiro-1", "official-1", "kiro-1");
+        assertThat(startedFrom()).isEqualTo("anthropic:kiro");
     }
 
     @Test
@@ -783,6 +867,28 @@ class ProxyFacadeTieredStickyTest {
     }
 
     @Test
+    void aTurnOfAResponsesChainThatNamedItsTierPassesTheTierOfTheChainOn() {
+        loaded(openAi(true));
+        policy = new RoutingPolicySettings(false, false, false, false, 1, 3, 3, 2, 2);
+        add(officialOpenAi("openai-1"), codex("codex-1"));
+        refused.put("openai-1", "RPM_LIMIT");
+        String first = responseId(responses("gpt-5.4", null, null, "start the task"));
+        assertThat(startedFrom()).isEqualTo("openai:official");
+        refused.clear();
+
+        // The second turn names the tiers it accepts and starts from the official one, which is free again: the owner of
+        // the chain, in Codex, is not what it is tried against. It neither reads nor moves the tier the chain fell to ...
+        String second = responseId(responses("gpt-5.4@official+", first, null, "second turn"));
+        assertThat(startedFrom()).isEqualTo("openai:official");
+        // ... but the chain goes on from there: the third turn follows the response of the second, whose owner is the
+        // official key, outside the Codex tier the session is bound to, so it is Codex that serves it.
+        responses("gpt-5.4", second, null, "third turn");
+
+        assertThat(startedFrom()).isEqualTo("openai:codex");
+        assertThat(dispatched).containsExactly("codex-1", "openai-1", "codex-1");
+    }
+
+    @Test
     void aResponsesChainThatWasNeverPushedDownStartsFromTheBestTierEveryTurn() {
         loaded(openAi(true));
         policy = new RoutingPolicySettings(false, false, false, false, 1, 3, 3, 2, 2);
@@ -793,6 +899,80 @@ class ProxyFacadeTieredStickyTest {
 
         assertThat(dispatched).containsExactly("openai-1", "openai-1");
         assertThat(startedFrom()).isEqualTo("openai:official");
+    }
+
+    // ---- the session header of the Codex CLI ----
+
+    @Test
+    void aCodexSessionIsKnownByItsSessionHeaderWhateverEachTurnBeginsWith() {
+        loaded(openAi(true));
+        policy = new RoutingPolicySettings(false, false, false, false, 1, 3, 3, 2, 2);
+        add(officialOpenAi("openai-1"), codex("codex-1"));
+        refused.put("openai-1", "RPM_LIMIT");
+
+        responsesFromCodex("01a172ab-ca52", "start the task");
+        assertThat(dispatched).containsExactly("codex-1");
+
+        // The better tier is free again. The second turn does not begin like the first, so only the header tells the
+        // session; it stays where it fell to.
+        refused.clear();
+        responsesFromCodex("01a172ab-ca52", "something the first turn did not say");
+
+        assertThat(dispatched).containsExactly("codex-1", "codex-1");
+        assertThat(startedFrom()).isEqualTo("openai:codex");
+
+        // Another Codex session of the same key starts from the best tier.
+        responsesFromCodex("01a172ac-3a25", "start the task");
+        assertThat(dispatched).containsExactly("codex-1", "codex-1", "openai-1");
+        assertThat(startedFrom()).isEqualTo("openai:official");
+    }
+
+    @Test
+    void withoutTheSessionHeaderTheSameTurnsAreTwoSessions() {
+        loaded(openAi(true));
+        policy = new RoutingPolicySettings(false, false, false, false, 1, 3, 3, 2, 2);
+        add(officialOpenAi("openai-1"), codex("codex-1"));
+        refused.put("openai-1", "RPM_LIMIT");
+
+        responses("gpt-5.4", null, null, "start the task");
+        refused.clear();
+        responses("gpt-5.4", null, null, "something the first turn did not say");
+
+        assertThat(dispatched).containsExactly("codex-1", "openai-1");
+    }
+
+    @Test
+    void theSessionHintOfTheClientIsUsedBeforeTheCodexSessionHeader() {
+        loaded(openAi(true));
+        policy = new RoutingPolicySettings(false, false, false, false, 1, 3, 3, 2, 2);
+        add(officialOpenAi("openai-1"), codex("codex-1"));
+        refused.put("openai-1", "RPM_LIMIT");
+        MockServerWebExchange first = MockServerWebExchange.from(MockServerHttpRequest.post("/v1/responses")
+            .header("x-session-affinity", "session-1").header(TierSessionKeys.CODEX_SESSION_HEADER, "codex-session-a"));
+        facade.responses(objectMapper.createObjectNode().put("model", "gpt-5.4").put("input", "start the task"), first).block();
+        refused.clear();
+
+        // Another Codex id, the same hint: the hint names the session.
+        MockServerWebExchange second = MockServerWebExchange.from(MockServerHttpRequest.post("/v1/responses")
+            .header("x-session-affinity", "session-1").header(TierSessionKeys.CODEX_SESSION_HEADER, "codex-session-b"));
+        facade.responses(objectMapper.createObjectNode().put("model", "gpt-5.4").put("input", "start the task"), second).block();
+
+        assertThat(dispatched).containsExactly("codex-1", "codex-1");
+    }
+
+    @Test
+    void theSessionHeaderNamesASessionOfAnotherEntryToo() {
+        loaded(anthropic(true, "1", "1"));
+        add(officialKey("official-1"), kiro("kiro-1"));
+        refused.put("official-1", "RPM_LIMIT");
+
+        facade.messages(messagesBody("claude-sonnet-4.5", "Fix the build"),
+            exchange("/v1/messages", TierSessionKeys.CODEX_SESSION_HEADER, "01a172ab-ca52")).block();
+        refused.clear();
+        facade.messages(messagesBody("claude-sonnet-4.5", "Write the release notes"),
+            exchange("/v1/messages", TierSessionKeys.CODEX_SESSION_HEADER, "01a172ab-ca52")).block();
+
+        assertThat(dispatched).containsExactly("kiro-1", "kiro-1");
     }
 
     // ---- when sessions are not kept ----
@@ -858,7 +1038,11 @@ class ProxyFacadeTieredStickyTest {
     }
 
     private CompletableFuture<ResponseEntity<?>> messagesLater(String session, String text) {
-        return facade.messages(messagesBody("claude-sonnet-4.5", text), exchange("/v1/messages", SESSION_HEADER, session))
+        return messagesLater("claude-sonnet-4.5", session, text);
+    }
+
+    private CompletableFuture<ResponseEntity<?>> messagesLater(String model, String session, String text) {
+        return facade.messages(messagesBody(model, text), exchange("/v1/messages", SESSION_HEADER, session))
             .toFuture();
     }
 
@@ -869,6 +1053,12 @@ class ProxyFacadeTieredStickyTest {
             body.put("previous_response_id", previousResponseId);
         }
         return facade.responses(body, exchange("/v1/responses", session == null ? null : "x-session-affinity", session)).block();
+    }
+
+    private ResponseEntity<?> responsesFromCodex(String sessionId, String text) {
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("model", "gpt-5.4").put("input", text).put("store", false);
+        return facade.responses(body, exchange("/v1/responses", TierSessionKeys.CODEX_SESSION_HEADER, sessionId)).block();
     }
 
     private static String responseId(ResponseEntity<?> response) {

@@ -539,7 +539,7 @@ Content-Type: application/json
 
 **号源分级**把一个厂商（Anthropic、OpenAI、Google、DeepSeek 或自定义厂商）的账号分成有序的**号池**（级别，1 最好），每个号池有名称和价格系数。新会话从 1 级开始；一个请求里 1 级的账号**全部**不可用（停用、挂起、额度耗尽、冷却，也包括并发 / 限速 / 在途 token 已满的繁忙）才会用到 2 级。单价是标准价（唯一命中规则的价格，或全局倍率价，快速模式再 ×2）乘**实际服务这个请求的号池**的系数，所以用户从不会为没有服务过他的号池付费。会话真实降级后会停在降级后的号池，直到空闲（可按厂商关闭）；这个状态只记在处理该会话的节点的内存里，多节点部署且负载均衡不把同一个会话固定到同一个节点时，只部分成立，见[运维手册：号源分级](OPERATIONS.md#号源分级)。没有配置的厂商，路由、价格、结算和响应都与分级出现之前完全相同。
 
-这些端点需要管理员会话：
+这些端点需要管理员会话（`/me` 除外，它给 API Key 表单用，任何登录用户都能调用）：
 
 ```http
 GET /admin/source-tiers
@@ -547,9 +547,10 @@ PUT /admin/source-tiers/{vendor}
 POST /admin/source-tiers/{vendor}/members
 GET /admin/source-tiers/status
 GET /admin/source-tiers/placements
+GET /admin/source-tiers/me?provider={provider}
 ```
 
-- `GET /admin/source-tiers` 返回 `configVersion`（所有厂商共用，各节点据此刷新）、`runtime`（这个版本能运行什么）和每个厂商的已保存配置。`runtime.nativeTiers` 为真表示这个版本能按号池选号：厂商的路由本来就能用的账号（官方 Key、Kiro、Claude OAuth、Codex 等）可以分级，`enabled` 能打开；为假时 `enabled` 打不开（保存返回 `409 SOURCE_TIER_RUNTIME_UNSUPPORTED`，`data` 列出被拒的设置）。`unifyEndpoints`、`xpMembers` 和 `pairs` 同理，它们随后续版本提供，现在为假。`selectors` 表示客户端能自己指定号池（`模型@标识` 写法、`X-Starry-Tier` 请求头、Key 的号源偏好），也是后续版本才提供，现在为假；它不拒绝任何设置，只决定控制台是否提供复制「模型@标识」的按钮。厂商里的 `tierAccounts` 是每个号池已收下的启用账号数。
+- `GET /admin/source-tiers` 返回 `configVersion`（所有厂商共用，各节点据此刷新）、`runtime`（这个版本能运行什么）和每个厂商的已保存配置。`runtime.nativeTiers` 为真表示这个版本能按号池选号：厂商的路由本来就能用的账号（官方 Key、Kiro、Claude OAuth、Codex 等）可以分级，`enabled` 能打开；为假时 `enabled` 打不开（保存返回 `409 SOURCE_TIER_RUNTIME_UNSUPPORTED`，`data` 列出被拒的设置）。`unifyEndpoints` 为真表示这个版本能运行 Anthropic 的「全端点统一」开关（见下文「全端点统一」）；`xpMembers` 和 `pairs` 随后续版本提供，现在为假，打开它们的设置同样返回 `409`。`selectors` 表示客户端能自己指定号池（`模型@标识` 写法、`X-Starry-Tier` 请求头、API Key 的号源偏好，见下文「指定号池」）。它不拒绝任何设置，只决定控制台是否提供复制「模型@标识」的按钮，以及 API Key 表单里的「号源偏好」。厂商里的 `tierAccounts` 是每个号池已收下的启用账号数。
 - `PUT /admin/source-tiers/{vendor}` **整体替换**一个厂商的开关、号池、成员行和门控，请求带 `expectedVersion`（从未配置过的厂商为 `0`）；期间被别人改过返回 `409 SOURCE_TIER_VERSION_CONFLICT`（`data.currentVersion` 是现在的版本）。号池的 `tierId` 是小写字母、数字和连字符（至多 32 位），不能是 `auto`、`L2` 或纯数字；`priceFactor` 大于 0、至多 1000、至多 6 位小数，默认 1；`memberCategories` 取 `OFFICIAL_API_KEY`、`COMPATIBLE_API_KEY`、`CODEX`、`CLAUDE_OAUTH`、`KIRO`，一个类别只能属于一个号池。账号归级的规则：有成员行取其号池；否则取列出该账号类别的号池（类别只匹配本厂商的账号）；都没有则落入**最低一级**。
 - `POST /admin/source-tiers/{vendor}/members` 只增改、移除成员行（账号列表批量设置号池用它），带同样的 `expectedVersion`，结果必须是合法的整体配置。
 - `GET /admin/source-tiers/status` 返回**应答节点**此刻的状态和最近 15 分钟的服务情况：
@@ -579,10 +580,59 @@ GET /admin/source-tiers/placements
   - `served`、`servedPinned`、`failed` 取自请求日志，覆盖**所有节点**：最近 15 分钟里该号池服务成功的尝试数（其中客户端指定号池的）和失败的尝试数。一个请求在 1 级失败又由 2 级服务，算 1 级一次失败、2 级一次服务。`autoServed` 是由网关自己选号池服务的请求数，`degraded` 是其中由低于「已启用的最好一级」服务的数；降级率 = `degraded / autoServed`。
   - 配置从未加载成功时返回 `503 TIER_CONFIG_UNAVAILABLE`。
 - `GET /admin/source-tiers/placements` 返回每个账号所在的号池，供账号列表显示「号源级别」列：`{"configVersion":7,"accounts":[{"accountId":"…","tiers":[{"vendor":"anthropic","tierId":"kiro","level":2,"name":"kiro","rule":"CATEGORY","relay":false,"active":true}]}]}`。`rule` 是 `MEMBER_ROW`（手动指定）、`CATEGORY` 或 `LOWEST_TIER`（没有号池列出它的类别，落入最低级）；`active` 是现在是否按这个号池服务。不在任何号池的账号不出现。
+- `GET /admin/source-tiers/me?provider=Anthropic` 返回这个模型分类（API Key 的 `modelProvider`）所属厂商里**客户端可以指定**的号池——已启用、「用户可选」打开的，从好到差：`{"provider":"Anthropic","referenceModel":"claude-sonnet-4.5","tiers":[{"id":"kiro","level":2,"name":"kiro","priceFactor":0.6,"pricing":{…}}]}`。每个号池只有 `id`（Key 偏好、请求头和模型后缀都用它）、`level`、`name`、`priceFactor` 和 `pricing`，不含账号、类别或协议。`pricing` 是 `referenceModel`（这个厂商的模型列表里第一个有价格的模型）乘上号池系数后的价格，写法同 `/v1/models` 的 `sourceTiers[].pricing`，两者都可能缺省。`tiers` 为空表示这个厂商没有启用分级、当前版本不能运行分级，或厂商没有打开「公开号池名称」——普通用户只能看到打开了它的厂商的号池，管理员总能看到。缺少 `provider` 返回 `400`。
 
-**可见性**：按号池服务的请求，响应带 `X-Starry-Tier`（号池标识）、`X-Starry-Tier-Level`、`X-Starry-Tier-Name`（UTF-8 百分号编码）、`X-Starry-Tier-Mode`（`auto` 或 `pinned`）和 `X-Starry-Tier-Status: served`，这些头都在 CORS 的 `exposedHeaders` 里；没有分级的厂商不会有这些头。`/admin/logs` 的每一行（每次尝试一行）在按号池服务时带 `sourceTierRef`（`厂商:号池标识`）、`sourceTierLevel`、`sourceTierName`、`priceFactor` 和 `tierSelection`（`AUTO` 或 `PINNED`），其余号源字段（`sourceDispatch`、`wireModel`、`usageSource`、`stopReason`、`degradedFeatures`）只在号源不是原生账号时出现；没有分级的行不含这些字段。用户自己的日志（`/admin/logs/me`）只含号池的级别、名称和系数。收入按号池汇总：`SELECT source_tier_ref, sum(credits) FROM api_usage_events GROUP BY 1`。
+**可见性**：按号池服务的请求，响应带 `X-Starry-Tier`（号池标识）、`X-Starry-Tier-Level`、`X-Starry-Tier-Name`（UTF-8 百分号编码）、`X-Starry-Tier-Mode`（`auto` 或 `pinned`）和 `X-Starry-Tier-Status`（`served`，客户端指定的号池没有用上时为 `ignored`），这些头都在 CORS 的 `exposedHeaders` 里；没有分级的厂商不会有这些头。`/admin/logs` 的每一行（每次尝试一行）在按号池服务时带 `sourceTierRef`（`厂商:号池标识`）、`sourceTierLevel`、`sourceTierName`、`priceFactor` 和 `tierSelection`（`AUTO` 或 `PINNED`），其余号源字段（`sourceDispatch`、`wireModel`、`usageSource`、`stopReason`、`degradedFeatures`）只在号源不是原生账号时出现；没有分级的行不含这些字段。用户自己的日志（`/admin/logs/me`）只含号池的级别、名称和系数。收入按号池汇总：`SELECT source_tier_ref, sum(credits) FROM api_usage_events GROUP BY 1`。
+
+**全端点统一**：Anthropic 厂商有一个默认关闭的开关 `unifyEndpoints`（`PUT /admin/source-tiers/anthropic`，控制台的「全端点统一」）。Chat 和 Responses 入口上的 Claude 模型本来只由 Kiro 服务，这条路由用不到官方 API Key，分级里放官方 Key 的号池对它们是空的（`模型@官方` 返回 `400 SOURCE_TIER_NOT_OFFERED`）。打开后，这两个入口上的 Claude **目录模型**（`claude-sonnet-4.5`、`sonnet` 等）和 Messages 入口一样走 Anthropic 路由：同一号池里 Anthropic API Key 在前、Kiro 在后，派发、换账号的次数上限（账号路由策略里 Anthropic 那一项）、预留和按号池的价格都按这条路由。请求和响应的格式不变，客户端只会多看到 `X-Starry-Tier*` 响应头里的号池变成官方 Key 的那个。**这会让这些请求先用到官方 Key，成本可能上升。**开关只改这一件事：Gemini 入口（`:generateContent`）、`auto` 和 `simple-task` 这样的路由预设、CodeWhisperer 的内部模型 ID、Gemini 等其他厂商的模型 ID，以及已经带 `anthropic/`、`openai/` 等前缀的模型，都和以前一样；厂商没有启用分级时开关保存了也不起作用。
 
 **与「实验性的分级熔断」的关系**：两者互相独立。按号源分级服务的厂商不进入旧的熔断（它的请求不带熔断纪元，不产生 `ACCOUNT_POOL_CIRCUIT_OPEN`，`pool_tier` 与熔断指标不变）；旧熔断只作用于没有配置号源分级的厂商。
+
+**指定号池**：客户端可以自己指定要用的号池，写在模型名后面（`claude-sonnet-4.5@kiro`、`gpt-5.5@L2`、`claude-opus-4.5@1+`；Chat、Responses、Messages 的 `model` 和 Gemini 路径里的模型都行）或写在请求头 `X-Starry-Tier` 里，或设成 API Key 的**号源偏好**（见下）。同时有几处时，模型后缀优先于请求头，请求头优先于 Key 的偏好；`@auto`（或请求头 `auto`）回到自动，并盖过优先级更低的那几处。写法是 `auto`、号池标识、`L<N>`（按级别）或纯数字，后面可以加 `+`：不加，请求只由这一个号池服务，也只按它预留和计价；加了，由它和它以下的号池服务，预留按其中最贵的一个，结算按实际服务的那个。可以固定到比 1 级更贵的号池，价格仍是标准价乘它的系数；固定不绕过 Key 的厂商限制和 Codex 隔离。固定的请求不读也不改会话停留的号池，但算作会话在使用：一个一直在发固定请求的会话不算空闲，它停留的号池不会因此过期，各个入口都一样（它产生的响应成了 Responses 链最近的一环、它的账号成了链的 owner，也不会让之后的自动请求留在那个号池：续写一条可以在别的账号上重放的链时，自动请求只有在 owner 正好在它本来要开始的号池——会话停留的号池，没有停留就是 1 级——里才先用 owner，否则忽略它，从那个号池开始，按它预留和计价；会话空闲满 10 分钟回到 1 级之后同样如此。带 `+` 的固定请求也一样：它从自己写的号池开始（那里没有可用账号时，从它以下第一个有账号的号池开始），owner 只有在这个号池里才先用。所以某一轮因为忙而改由更低的号池服务、或某一轮固定到了更低的号池之后，之后的轮次只要写的号池能服务，就回到写的号池，不会一直留在更低的号池、一直按它的系数计价），并且不会换到别的号池：号池里的账号都不可用时返回 `503 SOURCE_TIER_UNAVAILABLE`（带 `Retry-After`，冻结的额度整笔退回）。请求头和 Key 的偏好固定的号池，账号都被停用或挂起时也是这样（不会改由别的号池按另一个价格服务）；模型后缀固定的号池，账号都被停用或挂起时是 `400 SOURCE_TIER_NOT_OFFERED`（见下表）。续写一个不能离开 owner 账号的 Responses 链时，owner 在号池里但暂时用不了（额度耗尽、冷却中）返回的是 owner 的说明（`503 NO_AVAILABLE_ACCOUNT`，owner 的并发满了是 `503 RESPONSE_OWNER_UNAVAILABLE`），不是号池的，也不带 `Retry-After`。
+
+模型后缀只有在它确实是选择器时才会被取走，由**服务这个模型的厂商**判断（Key 的模型映射把模型映到哪个厂商就看哪个厂商）：`@` 前面是目录里的模型，而且那个厂商配置过号源分级；或者 `@` 前面不是目录里的模型（比目录新的带日期的 Claude ID、目录里没有的 Codex 模型），但 `@` 后面是那个厂商的一个号池（标识、`L<N>`、数字或 `auto`）。这里的厂商是**服务这个请求的账号**的厂商，与入口无关：Chat 和 Responses 把它送上 Kiro 路由的以 `claude` 开头的模型，由 Kiro 账号服务，算 Anthropic 厂商；Responses 上只有 Codex 账号能服务的模型（`codex-mini-latest` 这样不以 `gpt` 开头的）算 OpenAI 厂商。因此这些模型的请求按它们所在号池的系数计价，也带 `X-Starry-Tier*` 响应头。其余的整个字符串仍是普通的模型 ID，和以前完全一样：从未配置过的厂商不认识选择器（后缀留在模型名里，请求头也被忽略，响应不加任何号源头；号池被删光、只剩厂商一行的厂商同样算没有配置），目录外的模型加 `@20250805` 这样的日期后缀也留在模型名里。目录里的模型加日期后缀（`claude-sonnet-4@20250514`）按不存在的号池拒绝，除非 Key 的模型映射有一条规则的源模型自己带 `@` 而且接得住这个完整字符串——整串（`claude-sonnet-4@20250514`），或围着 `@` 写的带通配符的写法（`claude-sonnet-4@*`、`*@cheap`）——那它就是一个映射源，不当选择器（单独的 `*` 和 `claude-*` 这样自己不带 `@` 的写法不算：它们照常映射 `@` 前面的模型，后缀仍然可以是选择器）。映射只问一次：`@` 前面的模型映到哪个厂商，就由那个厂商决定后缀是不是选择器，也由那个厂商服务；加权随机的映射（`loadbalance`）不会因此在判断后缀和选号时各抽一次而落到两个厂商。后缀的错误都在预留之前返回：
+
+| 情况 | 结果 |
+|---|---|
+| 引用的号池不存在，或写法不对 | `400 SOURCE_TIER_UNKNOWN` |
+| 号池已停用，或这个端点 / 模型上它没有可用的账号类型（账号被停用或挂起的也不算：挂起会同时停用账号，号池的账号全被停用或挂起时就是这一行，不是 `503`） | `400 SOURCE_TIER_NOT_OFFERED` |
+| 号池不允许用户选择（`userSelectable` 关闭） | `403 SOURCE_TIER_NOT_SELECTABLE` |
+| 续写的 Responses 链不能离开它的 owner 账号，而 owner 不在固定的号池里 | `409 RESPONSE_OWNER_TIER_MISMATCH` |
+
+请求头和 Key 的偏好（见下）是提示，不是要求：引用的号池不存在、写法不对、已停用或不可选，或者这个请求用不到它（这个端点的路由在号池里没有账号类型；续写的 Responses 链不能离开它的 owner 账号，而 owner 不在那个号池里）时不报错，请求按自动服务，响应的 `X-Starry-Tier-Status` 是 `ignored`（其余 `X-Starry-Tier*` 头照常说明由哪个号池服务）。这个路由在号池里**有**账号、只是都被停用或挂起时不算「用不到」：请求仍固定在这个号池，返回 `503 SOURCE_TIER_UNAVAILABLE`，不改由别的号池服务。只有写在模型名后面的后缀是对这一个请求的要求，上表的情况都会被拒绝。厂商配置过但没有启用号源分级时，后缀被取走并忽略，请求带了选择器（后缀、请求头或 Key 的偏好，`auto` 除外）才会有 `X-Starry-Tier-Status: ignored`。自动请求余额不足以支付预留（按可能用到的最贵号池定额）时，`402 INSUFFICIENT_BALANCE` 的说明里会列出预留更少的可选号池和写法（`模型@标识` 写的是请求里的模型名，Key 的模型映射名、`openai/` 这样带厂商前缀的写法也照原样写），固定其中一个就只按它预留；厂商没有打开「公开号池名称」时，用户在 Key 表单里也选不了号池，说明里只讲预估按可能服务的最贵号池算，不列出号池。`modelProvider` 为 `*` 或没有的旧 Key 没有号源偏好，说明里只列后缀和请求头两种写法，不让它去 Key 的设置里选。请求的模型 ID 本身是 Key 的映射里围着 `@` 写的规则的源（`claude-sonnet-4@*`，只有不限厂商的旧 Key 能发这样的 ID）时，`模型@标识` 整串仍是映射源，不会被当作选择器，说明里就不再写后缀，号池按标识列出，请用请求头。续写一个不能离开 owner 账号的 Responses 链的请求只能由 owner 所在的号池服务，计划、预留都只算那一个号池，没有更便宜的号池可改，说明里也不列。匿名调用（控制台助手，或部署允许不带 Key 调用时）不能指定号池：厂商配置了分级时，模型后缀照样被取走（上游收到的是不带后缀的模型名），后缀和请求头都被当作用不上的提示，请求按自动服务，响应的 `X-Starry-Tier-Status` 是 `ignored`（`auto` 除外）；厂商没有配置过分级时和别的调用一样，后缀留在模型名里。
+
+**Key 的号源偏好**：给不方便改模型名和请求头的客户端用。在 `POST /admin/api-keys` 或 `PATCH /admin/api-keys/{keyId}` 里带 `tierPreference`（写法同后缀，保存时转成小写，按级别写的去掉前导零：`L02` 存成 `l2`、`002+` 存成 `2+`；创建时省略表示 `auto`，PATCH 里省略表示不改（换模型分类除外，见下），`auto` 清除偏好），Key 列表里的 `tierPreference` 只在设置过时才有。写法不对（包括超过 40 个字符）返回 `400 API_KEY_TIER_PREFERENCE_INVALID`；号池存不存在不在保存时检查，请求遇到时再处理。偏好属于 Key 当前的模型分类（厂商）：PATCH 把 `modelProvider` 改成另一个分类、又没有带 `tierPreference` 时，偏好被清回 `auto`，不会带到新厂商去（改成同一个分类不算），要在新厂商里固定号池，请在同一次 PATCH 里一起带上。偏好生效时和后缀一样固定号池：请求只由它服务（带 `+` 为它和它以下的号池），按它的系数计价，号池的账号都不可用（包括都被停用或挂起）时返回 `503 SOURCE_TIER_UNAVAILABLE`，也不读不改会话停留的号池。
+
+偏好是这把 Key 的默认选择，同一把 Key 可能从不同的客户端和入口调用，所以和请求头一样——**不适用就忽略**：引用的号池不存在、已停用、不可选或写法不对，请求按自动服务，响应的 `X-Starry-Tier-Status` 是 `ignored`；这个请求的路由在号池里没有账号类型（例如偏好官方 Key 的 Key 从 Chat 入口调用 Claude 模型，而「全端点统一」没有打开，那条路由只用 Kiro），或续写的 Responses 链不能离开它的 owner 账号而 owner 不在偏好的号池里，也按自动、`ignored`，而写在模型名后面的后缀在这些情况下会被拒绝（`400 SOURCE_TIER_NOT_OFFERED`、`409 RESPONSE_OWNER_TIER_MISMATCH`）。需要时，请求里的 `@auto` 或请求头 `X-Starry-Tier: auto` 随时盖过偏好。匿名调用和 `modelProvider` 为 `*` 的旧 Key 没有偏好，也存不了：给 `*` 的旧 Key 设偏好返回 `400 API_KEY_TIER_PREFERENCE_INVALID`，要在同一次 `PATCH` 里一起选好 `modelProvider`（旧 Key 在编辑里选了模型分类之后才有）。厂商从未配置分级时偏好无效，响应不加任何号源头；配置过但没有启用时，响应只带 `X-Starry-Tier-Status: ignored`。
+
+**客户端怎么写**：同一个号池，三种写法的差别在它不适用的时候。模型后缀是对这一个请求的要求：号池不存在或这条路由用不到它就被拒绝（`400 SOURCE_TIER_UNKNOWN`、`400 SOURCE_TIER_NOT_OFFERED`）；请求头和 Key 的偏好是客户端或 Key 的默认选择，同一份配置会用在不同的端点、模型和续写的响应链上，不适用时只会被忽略（请求按自动服务，响应带 `X-Starry-Tier-Status: ignored`）。控制台生成的客户端配置（API Key 的「客户端配置」里选「号池」）因此用请求头：选的号池对这个客户端用不上（别的厂商的号池，或这个客户端的端点走的路由在号池里没有账号，例如给 OpenCode 选只放官方 Key 的号池，而它的 Claude 请求走 Kiro），请求照常服务，只是不按所选号池，不会整条配置失效。选了一个号池而它有账号、却都暂时不可用（忙、额度耗尽、被停用或挂起）时，请求不会换到别的号池，返回 `503 SOURCE_TIER_UNAVAILABLE`；选「及以下」才会改用更低的号池。CC Switch 的 Claude Code 链接放不下请求头，写在模型名后面，那是后缀，是对每个请求的要求：号池用不了（账号都被停用或挂起、管理员关闭了它或不再允许选择）就被拒绝（`400` 或 `403`），不像请求头那样照常服务，控制台在链接旁边写了这一点；Codex 的链接带的是同一份 `config.toml`，OpenCode 的链接不写号池（在 Key 里设号源偏好，或用 `opencode.json`）。
+
+| 客户端 | 请求头（控制台生成的写法） | 模型后缀 |
+|---|---|---|
+| Claude Code | 环境变量 `ANTHROPIC_CUSTOM_HEADERS='X-Starry-Tier: kiro'` | `ANTHROPIC_MODEL=claude-sonnet-4.5@kiro`，或 `--model claude-opus-4.5@official` |
+| Codex CLI | `config.toml` 里 `[model_providers.starry]` 下 `http_headers = { "X-Starry-Tier" = "kiro" }` | `model = "gpt-5.5@codex"` |
+| OpenCode | `opencode.json` 里 `provider.starry.options.headers`：`{ "X-Starry-Tier": "kiro" }` | 要先把带后缀的 id 写进 `provider.starry.models`，再 `starry/claude-sonnet-4.5@kiro`；没有声明过的模型 OpenCode 自己就拒绝，请求发不出来 |
+| SDK、curl | `default_headers` / `defaultHeaders` / `-H 'X-Starry-Tier: kiro'` | `model` 字段 |
+
+模型 ID 页给每个有号池的模型列出号池、系数和乘过系数的价格（厂商打开「公开号池名称」时），点一下复制 `模型@标识`。
+
+**核对记录**（2026-10-25，在本机用真实的客户端程序连一个只记录请求的本地服务，Key 是占位值；记录的是客户端实际发出的请求）：
+
+| 客户端（版本） | 模型后缀 | 自定义请求头 | 会话标识（网关读到的） |
+|---|---|---|---|
+| Claude Code 2.1.168，`claude -p` | `ANTHROPIC_MODEL`、`--model` 里的 `@kiro`、`@official`、`@1+` 原样出现在 `/v1/messages` 的 `model` 里 | `ANTHROPIC_CUSTOM_HEADERS` 作为 `X-Starry-Tier` 发出 | 每个请求带头 `X-Claude-Code-Session-Id`，`metadata.user_id`（JSON 字符串）里的 `session_id` 是同一个值；工具往返的两个请求相同，新进程换新值。会话提示已经读这个头，不需要改 |
+| Codex CLI 0.142.5，`codex exec` | `model = "claude-sonnet-4.5@kiro"` 原样发出（客户端本地会提示找不到这个模型的元数据，不影响请求） | `http_headers` 作为 `X-Starry-Tier` 发出 | 头 `session-id`（连字符，不是 `session_id`）和 `thread-id`，另有 `x-client-request-id`、`x-codex-window-id`（`会话:序号`），请求体里的 `prompt_cache_key` 和 `client_metadata.session_id` 也是同一个值；`exec resume` 的后续轮次相同，新会话换新值。`disable_response_storage = true` 时 `store` 为 `false`、每轮带完整历史、没有 `previous_response_id`。**会话提示一个都不读**，所以号池的会话键另读 `session-id`（见下） |
+| OpenCode 1.18.16，`opencode run`，`@ai-sdk/openai-compatible` 供应商（控制台生成的那种） | 声明在 `models` 里的 `claude-sonnet-4.5@kiro` 原样发出；没有声明的模型 id（带不带 `@` 都一样）OpenCode 自己拒绝，没有请求发出 | `options.headers` 作为 `X-Starry-Tier` 发出 | 头 `x-session-affinity` 和 `x-session-id`（同一个值），标题生成用的小模型请求也带；`--continue` 的后续轮次相同，新会话换新值。会话提示已经读 `x-session-affinity`；`x-opencode-session` 只有 OpenCode 自己的供应商才发，自定义供应商没有 |
+
+没有核对的：Claude Code 交互模式里的 `/model`（`--model` 走同一个字符串，没有逐个驱动）、Codex 的子代理（程序里有 `x-openai-subagent`、`x-codex-parent-thread-id`）和 WebSocket 传输、上面三个版本以外的版本，以及 CC Switch 导入后的实际写入。头名和字段名随客户端版本会变，升级客户端后请重新核对。
+
+**会话键与 D4**：「降级后停留」要认得出同一个会话。分级请求按下面的顺序给会话起名，用的只是号池这一层的绑定，账号亲和（会话提示）和未分级厂商都不受影响：
+
+1. 客户端自己给的会话提示：请求头 `x-claude-code-session-id`（只在 Messages 入口读）、`x-opencode-session`（只在其他入口读）、`x-session-affinity`、`x-conversation-id`，请求体里的 `conversation_id`、`conversationId`、`thread_id`、`session_id`，Messages 请求 `metadata` 里的 `session_id`（或 `user_id` 里编码的会话）；没有时再用 Codex 的请求头 `session-id`（每个入口都读；空白的忽略，超过 128 个字符的截断）。
+2. Responses 请求续写的响应（`previous_response_id`）：号池的绑定同时登记在本次产生的响应 id 下，下一轮按它找到。
+3. 都没有（客户端不发会话标识，例如手写的 SDK 脚本、curl，或没有核对过的客户端版本）：对话开头的**内容指纹**：这把 Key、模型、system 文本前 2048 个字符和第一条 user 文本前 2048 个字符的哈希，图片和文件不计。开头相同的两个会话共用一个绑定，其中一个降级，另一个也停在低级；system 文本每轮都变的客户端每轮是一个新会话，哪里也不停留。
+
+按上面核对的结果，Claude Code、Codex 和 OpenCode 在这三个版本上都发会话标识，不依赖内容指纹；依赖它的是不发会话标识的客户端。绑定只记在各节点的内存里，会话的任何一个被服务的请求（包括客户端固定了号池的）都算在使用，空闲 10 分钟过期，多节点见[运维手册：号源分级](OPERATIONS.md#号源分级)。
 
 ### 实验性的分级熔断
 
@@ -662,6 +712,7 @@ DELETE /admin/api-keys/{keyId}
 - 新建的 Key 会把完整的 `sk-...` 值保存在所属用户的 Key 记录里，所以控制台可以直接复制 API Key 和生成的客户端配置。在这种行为之前创建的 Key 只有 `keyHash` 和 `keyPrefix`，完整密钥无法恢复，需要直接复制时请重建。
 - 在 Key 的 PATCH 里，`clearCreditsLimit:true` 显式移除之前配置的限额；省略的字段保持原值。
 - Key 创建时选择 `billingSource: "BALANCE" | "CODING_PLAN"`，没有未完成请求时可以修改。见下文 [Coding Plan 订阅](#coding-plan-订阅)。
+- `tierPreference` 是这把 Key 的号源偏好（`auto`、号池标识、`L2` 或 `2`，可加 `+`，不超过 40 个字符），创建和 PATCH 都可以带，PATCH 换了 `modelProvider` 又没有带它时清回 `auto`，创建、PATCH 和列表的响应里都只在设过偏好时才有这个字段；有未完成请求时也能修改。`modelProvider` 为 `*` 的旧 Key 须在同一次 PATCH 里一起选好 `modelProvider` 才能设偏好，否则返回 `400 API_KEY_TIER_PREFERENCE_INVALID`。规则见 [号源分级：指定号池](#号源分级)，可选的号池用 `GET /admin/source-tiers/me?provider=` 查询。
 
 ---
 

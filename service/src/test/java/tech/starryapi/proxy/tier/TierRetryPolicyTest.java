@@ -66,7 +66,8 @@ class TierRetryPolicyTest {
     /** The accounts of the account cache: one of each kind of tier, so that no tier is left out of a plan for having none. */
     private final List<ProxyAccountEntity> cached = List.of(
         account("official-1", "Anthropic", "api-key"), account("oauth-1", "Anthropic", "oauth"), account("kiro-1", "BuilderId", "idc"),
-        account("openai-1", "OpenAI", "api-key"), account("codex-owner", "OpenAI", "codex"));
+        account("openai-1", "OpenAI", "api-key"), account("official-owner", "OpenAI", "api-key"),
+        account("codex-owner", "OpenAI", "codex"));
 
     @BeforeEach
     void stubTheCollaborators() {
@@ -167,7 +168,7 @@ class TierRetryPolicyTest {
         // The client retried a stream that was cut off, and the retry failed to connect: the error is a plain
         // ConnectException, and the client's flag is the only thing that remembers the first attempt's content.
         FailedAttempt failed = new FailedAttempt(walk.plan().levels().get(0), "kiro-1",
-            new java.net.ConnectException("Connection refused"), true, true, THREE, true, true, false);
+            new java.net.ConnectException("Connection refused"), true, true, THREE, true, true);
 
         Outcome outcome = policy.onFailure(failed);
 
@@ -181,7 +182,7 @@ class TierRetryPolicyTest {
         TierWalk walk = new TierWalk(plan(true));
         TierRetryPolicy policy = policy(walk, true);
         FailedAttempt failed = new FailedAttempt(walk.plan().levels().get(0), "kiro-1",
-            new java.net.ConnectException("Connection refused"), true, true, THREE, false, true, false);
+            new java.net.ConnectException("Connection refused"), true, true, THREE, false, true);
 
         policy.onFailure(failed);
 
@@ -261,76 +262,79 @@ class TierRetryPolicyTest {
     }
 
     // ---- the owner of a response chain ----
+    //
+    // A chain that can be replayed keeps its owner only when the owner sits in the tier the walk starts from, and the owner
+    // is tried ahead of the other accounts of that tier. Its failure is a failure of that tier, like any other account's.
 
     @Test
-    void aFailureOfTheOwnerLeavesTheRetryStartingWhereTheRequestStarted() {
-        TierWalk walk = new TierWalk(openAiPlan(true, "codex-owner"));
+    void aFailureOfTheOwnerKeepsTheRetryInTheOwnersTierWhileTheBudgetHolds() {
+        TierWalk walk = new TierWalk(openAiPlan(true, "official-owner"));
         TierRetryPolicy policy = policy(walk, true);
+        assertThat(walk.plan().owner()).hasValueSatisfying(owner -> assertThat(owner.level().tierId()).isEqualTo("official"));
 
-        // The owner sits in the second tier, ahead of the walk, which has not looked at the first yet.
-        Outcome outcome = policy.onFailure(ownerFailure(walk, 1, rejected(), true, THREE));
+        Outcome outcome = policy.onFailure(failure(walk, 0, "official-owner", rejected(), true, THREE));
 
         assertThat(outcome).isEqualTo(Outcome.RETRY);
         assertThat(tierIds(walk)).containsExactly("official", "codex");
-        assertThat(walk.excluded()).containsExactly("codex-owner");
+        assertThat(walk.excluded()).containsExactly("official-owner");
     }
 
     @Test
-    void aFailureOfAnAccountOfTheSameTierThatWasFoundByTheWalkStillKeepsTheRetryAtOrBelowIt() {
-        TierWalk walk = new TierWalk(openAiPlan(true, "codex-owner"));
+    void theOwnerFailingWithTheBudgetSpentCrossesOnTheReservedSlotInsteadOfSpendingItInItsOwnTier() {
+        TierWalk walk = new TierWalk(openAiPlan(true, "official-owner"));
         TierRetryPolicy policy = policy(walk, true);
+        // The Codex route allows one account, and the owner's tier has another one left.
+        accountsLeftInTier = true;
 
-        policy.onFailure(failure(walk, 1, "codex-2", rejected(), true, THREE));
+        Outcome outcome = policy.onFailure(failure(walk, 0, "official-owner", rejected(), true, 1));
 
-        assertThat(tierIds(walk)).containsExactly("codex");
-    }
-
-    @Test
-    void theOwnerFailingWithTheBudgetSpentStillLetsTheRequestStartTheWalkOnTheReservedSlot() {
-        TierWalk walk = new TierWalk(openAiPlan(true, "codex-owner"));
-        TierRetryPolicy policy = policy(walk, true);
-
-        // The Codex route allows one account: the owner's failure used the budget.
-        Outcome outcome = policy.onFailure(ownerFailure(walk, 1, rejected(), true, 1));
-
+        // The slot is for crossing: the retry goes to the tier below, not to the other account of the owner's tier.
         assertThat(outcome).isEqualTo(Outcome.RETRY_ON_RESERVED_SLOT);
         assertThat(policy.reservedSlotUsed()).isTrue();
-        assertThat(tierIds(walk)).containsExactly("official", "codex");
-        // The owner's tier was not gone through: it is neither passed nor left on the budget, and nobody is pushed down by it.
-        assertThat(walk.wasPassed(walk.plan().levels().get(1))).isFalse();
+        assertThat(tierIds(walk)).containsExactly("codex");
+        assertThat(walk.dispatchedAccounts()).isEqualTo(1);
+        // The budget took the request out of the tier, which had an account left: nobody is pushed down by it.
+        assertThat(walk.wasPassed(walk.plan().levels().get(0))).isFalse();
         assertThat(walk.realDowngradeTo(walk.plan().levels().get(1))).isFalse();
     }
 
     @Test
-    void theOwnerFailingWithNoOtherTierToGoToUsesNoSlot() {
-        TierWalk walk = new TierWalk(openAiPlan(true, "codex-owner"));
+    void theOwnerBeingTheLastAccountOfItsTierMakesTheCrossingARealDowngrade() {
+        TierWalk walk = new TierWalk(openAiPlan(true, "official-owner"));
         TierRetryPolicy policy = policy(walk, true);
-        walk.narrowTo(walk.plan().levels().get(1));
+        accountsLeftInTier = false;
 
-        Outcome outcome = policy.onFailure(ownerFailure(walk, 1, rejected(), true, 1));
+        Outcome outcome = policy.onFailure(failure(walk, 0, "official-owner", rejected(), true, 1));
 
-        assertThat(outcome).isEqualTo(Outcome.STOP);
+        assertThat(outcome).isEqualTo(Outcome.RETRY_ON_RESERVED_SLOT);
+        assertThat(tierIds(walk)).containsExactly("codex");
+        // The owner's tier had nothing more to offer when the slot took the request out of it.
+        assertThat(walk.wasPassed(walk.plan().levels().get(0))).isTrue();
+        assertThat(walk.realDowngradeTo(walk.plan().levels().get(1))).isTrue();
+    }
+
+    @Test
+    void aFailureOfTheOwnerThatMayHaveBeenBilledNarrowsTheRequestToTheOwnersTierAndLeavesNoSlot() {
+        TierWalk walk = new TierWalk(openAiPlan(true, "official-owner"));
+        TierRetryPolicy policy = policy(walk, true);
+
+        Outcome first = policy.onFailure(failure(walk, 0, "official-owner", new TimeoutException("no answer"), false, 2));
+        Outcome second = policy.onFailure(failure(walk, 0, "official-1", rejected(), true, 2));
+
+        assertThat(first).isEqualTo(Outcome.RETRY);
+        assertThat(policy.narrowed()).isTrue();
+        assertThat(tierIds(walk)).containsExactly("official");
+        assertThat(second).isEqualTo(Outcome.STOP);
         assertThat(policy.reservedSlotUsed()).isFalse();
     }
 
     @Test
-    void aFailureOfTheOwnerThatMayHaveBeenBilledNarrowsTheRequestToTheOwnersTier() {
-        TierWalk walk = new TierWalk(openAiPlan(true, "codex-owner"));
-        TierRetryPolicy policy = policy(walk, true);
-
-        Outcome outcome = policy.onFailure(ownerFailure(walk, 1, new TimeoutException("no answer"), false, THREE));
-
-        assertThat(outcome).isEqualTo(Outcome.RETRY);
-        assertThat(policy.narrowed()).isTrue();
-        assertThat(tierIds(walk)).containsExactly("codex");
-    }
-
-    @Test
     void theOwnerFailingWithTheReservedSlotSwitchedOffEndsTheRequestWhenTheBudgetIsSpent() {
-        TierWalk walk = new TierWalk(openAiPlan(false, "codex-owner"));
+        TierWalk walk = new TierWalk(openAiPlan(false, "official-owner"));
         TierRetryPolicy policy = policy(walk, true);
 
-        assertThat(policy.onFailure(ownerFailure(walk, 1, rejected(), true, 1))).isEqualTo(Outcome.STOP);
+        assertThat(policy.onFailure(failure(walk, 0, "official-owner", rejected(), true, 1))).isEqualTo(Outcome.STOP);
+        assertThat(policy.reservedSlotUsed()).isFalse();
     }
 
     @Test
@@ -388,7 +392,7 @@ class TierRetryPolicyTest {
         TierWalk walk = new TierWalk(plan(true));
         TierRetryPolicy policy = policy(walk, true);
 
-        Outcome outcome = policy.onFailure(new FailedAttempt(walk.plan().levels().get(0), "official-1", rejected(), true, false, THREE, false, true, false));
+        Outcome outcome = policy.onFailure(new FailedAttempt(walk.plan().levels().get(0), "official-1", rejected(), true, false, THREE, false, true));
 
         assertThat(outcome).isEqualTo(Outcome.STOP);
     }
@@ -538,12 +542,7 @@ class TierRetryPolicyTest {
 
     private FailedAttempt failure(TierWalk walk, int levelIndex, String accountId, Throwable error, boolean definitive, int limit) {
         return new FailedAttempt(walk.plan().levels().get(levelIndex), accountId, error, definitive, true, limit, false,
-            accountsLeftInTier, false);
-    }
-
-    private FailedAttempt ownerFailure(TierWalk walk, int levelIndex, Throwable error, boolean definitive, int limit) {
-        return new FailedAttempt(walk.plan().levels().get(levelIndex), "codex-owner", error, definitive, true, limit, false,
-            accountsLeftInTier, true);
+            accountsLeftInTier);
     }
 
     private static UpstreamException rejected() {

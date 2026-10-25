@@ -13,7 +13,9 @@ import tools.jackson.databind.JsonNode;
  * <ol>
  *   <li>the hint the client gave (a session header or a conversation id in the body), if it is one that tells sessions
  *       apart, which {@link #named} decides. A hint that is only the key id would put all of the key's traffic into
- *       one session, and one that is only the id of the previous response changes every turn;
+ *       one session, and one that is only the id of the previous response changes every turn. Failing that, the session
+ *       header of the Codex CLI ({@link #CODEX_SESSION_HEADER}), which the hint does not read: a Codex session sends
+ *       its full history each turn and continues no response, so nothing else in the request names it;
  *   <li>the response it continues, for a Responses request ({@link #ofResponse}). The binding of the session is also
  *       registered under the id of the response the request produces, so that the next turn finds it;
  *   <li>what the conversation starts with ({@link #fingerprint}), for a client that sends neither: the first system
@@ -24,6 +26,18 @@ public final class TierSessionKeys {
 
     /** How much of the system text and of the first user text the fingerprint is made from. */
     static final int FINGERPRINT_TEXT_CHARS = 2048;
+
+    /**
+     * The header the Codex CLI names its session with. Codex 0.142.5 sends it, with the same value in {@code thread-id}
+     * and in the body's {@code prompt_cache_key}, on every request of a session including a resumed one and a new value
+     * for a new session (checked against the client; see the client table in docs/API.md). The facade's session hint
+     * reads none of these and is left as it is for every request, so the name is read here and used for the tier
+     * binding only.
+     */
+    public static final String CODEX_SESSION_HEADER = "session-id";
+
+    /** The longest id taken from a session header; a longer one is cut, which only ever merges sessions of one key. */
+    static final int CLIENT_SESSION_CHARS = 128;
 
     private TierSessionKeys() {
     }
@@ -39,13 +53,52 @@ public final class TierSessionKeys {
     }
 
     /**
+     * The hint when it names a session, else the session the Codex header names.
+     *
+     * @param codexSession the result of {@link #ofCodexSession}, or null
+     * @return null when the request names neither
+     */
+    public static String named(String sessionHint, String codexSession) {
+        String named = named(sessionHint);
+        return named != null ? named : codexSession;
+    }
+
+    /**
+     * The name of a session known by the Codex CLI's session header: the key and the id, so that two keys never share a
+     * session. It is told apart from a hint by its own marker.
+     *
+     * @param headerValue what the {@link #CODEX_SESSION_HEADER} header holds, or null
+     * @return null when the key or the header is missing or blank
+     */
+    public static String ofCodexSession(String keyId, String headerValue) {
+        if (keyId == null || keyId.isBlank() || headerValue == null || headerValue.isBlank()) {
+            return null;
+        }
+        String id = headerValue.strip();
+        return keyId + ":codex:" + (id.length() <= CLIENT_SESSION_CHARS ? id : id.substring(0, CLIENT_SESSION_CHARS));
+    }
+
+    /**
      * The name of the session of a Responses request: its own hint if it has one, else the response it continues.
      *
      * @param namedHint the session hint computed without the previous response id as a fallback, or null
      * @return null when the request names neither
      */
     public static String ofResponses(String keyId, String namedHint, String previousResponseId) {
-        String named = named(namedHint);
+        return ofResponses(keyId, namedHint, null, previousResponseId);
+    }
+
+    /**
+     * The name of the session of a Responses request: its own hint, else the Codex session header, else the response it
+     * continues. The header comes before the response because it stays the same for the whole session, where the
+     * response changes every turn.
+     *
+     * @param namedHint the session hint computed without the previous response id as a fallback, or null
+     * @param codexSession the result of {@link #ofCodexSession}, or null
+     * @return null when the request names none of them
+     */
+    public static String ofResponses(String keyId, String namedHint, String codexSession, String previousResponseId) {
+        String named = named(namedHint, codexSession);
         if (named != null) {
             return named;
         }

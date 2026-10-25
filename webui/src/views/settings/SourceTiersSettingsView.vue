@@ -44,6 +44,7 @@
     placedCounts,
     replaceRequest,
     tierPresets,
+    unifyNote,
     unsupportedMessage,
     validateDraft,
     type PinDraft,
@@ -126,6 +127,17 @@
     if (!document.hidden && state.value === 'ready') void loadStatus();
   }
   const unifyEndpoints = computed(() => !!runtime.value?.unifyEndpoints);
+  /** 「全端点统一」下方的提示：不能运行时说明原因，没有启用分级时说明不起作用，还没升级所有节点时提醒先升级 */
+  const unifyNoteText = computed(() =>
+    current.value
+      ? (unifyNote(
+          unifyEndpoints.value,
+          current.value.loaded.unifyEndpoints,
+          current.value.draft.unifyEndpoints,
+          current.value.draft.enabled,
+        ) ?? undefined)
+      : undefined,
+  );
 
   function adopt(vendor: SourceTierVendor) {
     const draft = draftOf(vendor);
@@ -541,16 +553,10 @@
             :title="t('全端点统一')"
             :description="
               t(
-                '让 Chat 和 Responses 入口上的 Claude 模型也走 Anthropic 的号池。这会先用到官方 Key，成本可能上升，所以默认不勾选。',
+                'Chat 和 Responses 入口上的 Claude 模型原本只由 Kiro 服务。打开后，它们和 Messages 入口一样先用官方 API Key，再用 Kiro，号池和系数照常生效；Gemini 入口、auto 等路由预设和其他厂商的模型不变。这会让这些请求先用到官方 Key，成本可能上升，所以默认不勾选。',
               )
             "
-            :note="
-              unifyEndpoints
-                ? undefined
-                : current.draft.unifyEndpoints
-                  ? t('当前版本尚不支持全端点统一，这个设置需要关闭后才能保存。')
-                  : t('当前版本尚不支持全端点统一，暂时不能打开。')
-            "
+            :note="unifyNoteText"
           >
             <el-switch
               :model-value="current.draft.unifyEndpoints"

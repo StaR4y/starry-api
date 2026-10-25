@@ -503,6 +503,7 @@ class ProxyFacadeTieredRetestTest {
             .isInstanceOfSatisfying(ApiException.class, error -> {
                 assertThat(error.getCode()).isEqualTo("NO_AVAILABLE_ACCOUNT");
                 assertThat(error.getMessage()).isEqualTo("The account that owns the OpenAI response is unavailable");
+                assertThat(error).isInstanceOf(ProxyFacade.ResponseOwnerUnavailableException.class);
             });
 
         verify(retestService, never()).runWhenNoAvailableAccounts(any());

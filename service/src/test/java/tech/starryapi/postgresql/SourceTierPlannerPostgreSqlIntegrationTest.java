@@ -15,17 +15,20 @@ import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.ReactiveTransactionManager;
 import tech.starryapi.account.AccountPoolService;
 import tech.starryapi.account.ModelPoolKeyResolver;
+import tech.starryapi.account.PoolCell;
 import tech.starryapi.admin.SystemSettingRepository;
 import tech.starryapi.model.ModelCatalogProvider;
 import tech.starryapi.model.ModelPricingService;
 import tech.starryapi.payment.PaymentSettingsService;
 import tech.starryapi.proxy.ProxyFacade;
 import tech.starryapi.proxy.tier.DefaultSourceTierPlanner;
+import tech.starryapi.proxy.tier.TierEntry;
 import tech.starryapi.proxy.tier.TierSessionBindings;
 import tech.starryapi.proxy.tier.TierPlan;
 import tech.starryapi.proxy.tier.TierPlanRequest;
 import tech.starryapi.proxy.tier.TierRoute;
 import tech.starryapi.proxy.tier.TierRuntime;
+import tech.starryapi.proxy.tier.TierSelectorParser;
 import tech.starryapi.sourcetier.SourceTierAdminService;
 import tech.starryapi.sourcetier.SourceTierDtos;
 import tech.starryapi.sourcetier.SourceTierRegistry;
@@ -113,6 +116,92 @@ class SourceTierPlannerPostgreSqlIntegrationTest extends PostgreSqlIntegrationTe
         assertThat(accountPool.cachedAccount(official)).isPresent();
         assertThat(plan.holds(plan.levels().get(0), accountPool.cachedAccount(official).orElseThrow())).isTrue();
         assertThat(plan.holds(plan.levels().get(1), accountPool.cachedAccount(kiro).orElseThrow())).isTrue();
+    }
+
+    @Test
+    void theAllEndpointsSwitchSavedThroughTheAdministratorApiMovesAChatRequestToTheAnthropicRoute() {
+        account("Anthropic", "api-key", null);
+        account("BuilderId", "idc", null);
+        accountPool.refreshCache().block();
+        assertThat(thisRelease.unifyEndpoints()).isTrue();
+        // The planner the application runs, over the real registry and account cache.
+        TierRuntime.Planner planner = tierRuntime.planner();
+
+        saveOwnersExample(false);
+        TierPlan off = planner.plan(chatRequest()).block();
+        assertThat(off.tiered()).isTrue();
+        assertThat(off.unified()).isFalse();
+        assertThat(off.levels()).extracting(TierPlan.Level::tierId).containsExactly("kiro");
+        assertThat(off.levels().get(0).cells()).containsExactly(PoolCell.KIRO_COMPATIBLE);
+
+        saveOwnersExample(true);
+        TierPlan on = planner.plan(chatRequest()).block();
+        assertThat(on.unified()).isTrue();
+        assertThat(on.levels()).extracting(TierPlan.Level::tierId).containsExactly("official", "kiro");
+        assertThat(on.levels().get(0).cells()).containsExactly(PoolCell.ANTHROPIC_KEY, PoolCell.KIRO_COMPATIBLE);
+        // The configuration travelled through the table: the next version of it is the one the plan was made from.
+        assertThat(on.configVersion()).isGreaterThan(off.configVersion());
+    }
+
+    @Test
+    void aHintForATierWhoseAccountsAreSuspendedStaysPinnedBecauseTheTableStillKnowsThem() {
+        String official = account("Anthropic", "api-key", null);
+        String kiro = account("BuilderId", "idc", null);
+        accountPool.refreshCache().block();
+        saveOwnersExample(false);
+        TierRuntime.Planner planner = tierRuntime.planner();
+        // The health tests of the pool suspend the only official key: it is disabled, and it leaves the account cache.
+        accountPool.suspend(official, "AUTO_TEST_FAILED", "health test failed").block();
+        assertThat(accountPool.cachedAccount(official)).isEmpty();
+
+        // The table gives the accounts that are out of service, with what tells their kind and nothing else.
+        assertThat(accountPool.switchedOffAccounts().block()).extracting(account -> account.getAccountId())
+            .contains(official).doesNotContain(kiro);
+        assertThat(accountPool.switchedOffAccounts().block()).filteredOn(account -> official.equals(account.getAccountId()))
+            .singleElement().satisfies(account -> {
+                assertThat(account.getProvider()).isEqualTo("Anthropic");
+                assertThat(account.getAuthMethod()).isEqualTo("api-key");
+                assertThat(account.getAccessToken()).isNull();
+            });
+
+        // The pool the hint names has an account the route uses, and it cannot serve: the request is kept to that pool.
+        TierPlan plan = planner.plan(request().withSelector(TierSelectorParser.parse(TierSelectorParser.Source.HEADER, "official"))).block();
+        assertThat(plan.pinned()).isTrue();
+        assertThat(plan.levels()).extracting(TierPlan.Level::tierId).containsExactly("official");
+        // A hint for a pool the route has no account in at all is dropped, as ever, and so is the same hint with the account back.
+        TierPlan chat = planner.plan(chatRequest().withSelector(TierSelectorParser.parse(TierSelectorParser.Source.HEADER, "official"))).block();
+        assertThat(chat.pinned()).isFalse();
+        assertThat(chat.levels()).extracting(TierPlan.Level::tierId).containsExactly("kiro");
+        // The suffix is a demand, and is refused for the same pool.
+        assertThat(org.assertj.core.api.Assertions.catchThrowable(() -> planner.plan(request()
+            .withSelector(TierSelectorParser.parse(TierSelectorParser.Source.SUFFIX, "official"))).block()))
+            .isInstanceOfSatisfying(tech.starryapi.common.ApiException.class, error -> assertThat(error.getCode()).isEqualTo("SOURCE_TIER_NOT_OFFERED"));
+
+        accountPool.resetState(official).block();
+        TierPlan back = planner.plan(request().withSelector(TierSelectorParser.parse(TierSelectorParser.Source.HEADER, "official"))).block();
+        assertThat(back.pinned()).isTrue();
+        assertThat(back.memberless(back.levels().get(0))).isFalse();
+    }
+
+    /** The owner's example on the Anthropic vendor, with the all-endpoints switch as given. */
+    private void saveOwnersExample(boolean unify) {
+        SourceTierAdminService admin = new SourceTierAdminService(db, transactionManager, settings, registry,
+            new SourceTierValidator(catalog, resolver, thisRelease), thisRelease);
+        long version = admin.overview().block().vendors().stream().filter(vendor -> vendor.vendor().equals("anthropic"))
+            .findFirst().orElseThrow().version();
+        admin.replace("anthropic", new SourceTierDtos.ReplaceVendor(version, true, unify, null, null, null, null, List.of(
+                new SourceTierDtos.Tier("official", 1, "官方", null, List.of("OFFICIAL_API_KEY"), null, null, null),
+                new SourceTierDtos.Tier("kiro", 2, "kiro反向代理", new java.math.BigDecimal("0.6"),
+                    List.of("KIRO", "CLAUDE_OAUTH"), null, null, null)), List.of(), List.of()))
+            .block();
+    }
+
+    /** What the facade hands the planner for a Claude model asked through Chat Completions: the Kiro route. */
+    private TierPlanRequest chatRequest() {
+        ObjectNode body = new ObjectMapper().createObjectNode().put("model", "claude-sonnet-4.5").put("max_tokens", 100);
+        body.putArray("messages").addObject().put("role", "user").put("content", "hi");
+        return new TierPlanRequest("request-1", "claude-sonnet-4.5", "claude-sonnet-4.5", "Kiro", TierRoute.KIRO,
+            false, false, false, true, false, false, body, null, false, null, null).withEntry(TierEntry.CHAT);
     }
 
     private TierPlanRequest request() {
