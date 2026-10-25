@@ -8,12 +8,14 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
@@ -21,6 +23,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,6 +42,7 @@ import tech.starryapi.account.allocation.AccountCandidateRanker;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.common.Hashing;
 import tech.starryapi.config.ProxyProperties;
+import tech.starryapi.sourcetier.SourceTierRegistry;
 
 @Service
 public class AccountPoolService {
@@ -59,6 +63,7 @@ public class AccountPoolService {
     private final AccountPoolPolicyService poolPolicyService;
     private final SystemMaintenanceTaskGate maintenanceTaskGate;
     private final AccountCandidateRanker candidateRanker;
+    private final Supplier<Set<String>> exclusiveRelayAccountIds;
     private final AtomicInteger nextIndex = new AtomicInteger();
     private final AtomicLong cacheVersion = new AtomicLong();
     private final AtomicLong refreshGeneration = new AtomicLong();
@@ -112,7 +117,6 @@ public class AccountPoolService {
         this(repository, template, properties, poolPolicyService, maintenanceTaskGate, null);
     }
 
-    @Autowired
     public AccountPoolService(
         ProxyAccountRepository repository,
         R2dbcEntityTemplate template,
@@ -121,12 +125,50 @@ public class AccountPoolService {
         SystemMaintenanceTaskGate maintenanceTaskGate,
         AccountCandidateRanker candidateRanker
     ) {
+        this(repository, template, properties, poolPolicyService, maintenanceTaskGate, candidateRanker, Set::of);
+    }
+
+    @Autowired
+    public AccountPoolService(
+        ProxyAccountRepository repository,
+        R2dbcEntityTemplate template,
+        ProxyProperties properties,
+        AccountPoolPolicyService poolPolicyService,
+        SystemMaintenanceTaskGate maintenanceTaskGate,
+        AccountCandidateRanker candidateRanker,
+        SourceTierRegistry sourceTiers
+    ) {
+        this(
+            repository,
+            template,
+            properties,
+            poolPolicyService,
+            maintenanceTaskGate,
+            candidateRanker,
+            Objects.requireNonNull(sourceTiers, "sourceTiers")::exclusiveXpAccountIds
+        );
+    }
+
+    /**
+     * @param exclusiveRelayAccountIds the ids of the accounts registered as the exclusive relay of another protocol
+     *     (design 7.5), read whenever a pool that serves untiered traffic is asked; empty when none is configured
+     */
+    public AccountPoolService(
+        ProxyAccountRepository repository,
+        R2dbcEntityTemplate template,
+        ProxyProperties properties,
+        AccountPoolPolicyService poolPolicyService,
+        SystemMaintenanceTaskGate maintenanceTaskGate,
+        AccountCandidateRanker candidateRanker,
+        Supplier<Set<String>> exclusiveRelayAccountIds
+    ) {
         this.repository = repository;
         this.template = template;
         this.properties = properties;
         this.poolPolicyService = poolPolicyService;
         this.maintenanceTaskGate = maintenanceTaskGate;
         this.candidateRanker = candidateRanker;
+        this.exclusiveRelayAccountIds = Objects.requireNonNull(exclusiveRelayAccountIds, "exclusiveRelayAccountIds");
         this.affinity = Caffeine.newBuilder()
             .maximumSize(Math.max(1, properties.getSessionAffinityMaximumSize()))
             .expireAfterAccess(positiveAffinityTtl(properties.getSessionAffinityTtl()))
@@ -515,16 +557,15 @@ public class AccountPoolService {
         );
     }
 
+    /**
+     * The OpenAI-compatible pool of untiered traffic. An account registered as the exclusive relay of another protocol
+     * is not in it (design 7.5); without such a relay it is every compatible key, as it always was.
+     */
     public Mono<ProxyAccountEntity> selectOpenAiCompatibleAccountForPool(
         String sessionHint,
         AccountPoolRequestContext context
     ) {
-        return selectAccount(
-            sessionHint,
-            PoolCell.OPENAI_COMPATIBLE.predicate(),
-            "No available OpenAI-compatible upstream account",
-            context
-        );
+        return selectOpenAiCompatible(sessionHint, null, context);
     }
 
     public Mono<ProxyAccountEntity> selectOpenAiCompatibleAccountForPool(
@@ -532,25 +573,75 @@ public class AccountPoolService {
         Collection<String> excludedAccountIds,
         AccountPoolRequestContext context
     ) {
+        return selectOpenAiCompatible(sessionHint, excludedAccountIds, context);
+    }
+
+    private Mono<ProxyAccountEntity> selectOpenAiCompatible(
+        String sessionHint,
+        Collection<String> excludedAccountIds,
+        AccountPoolRequestContext context
+    ) {
+        Collection<String> excluded;
+        try {
+            excluded = withExclusiveRelays(excludedAccountIds);
+        } catch (RuntimeException unknown) {
+            return Mono.error(unknown);
+        }
         return selectAccount(
             sessionHint,
-            PoolCell.OPENAI_COMPATIBLE.predicate(excludedAccountIds),
+            PoolCell.OPENAI_COMPATIBLE.predicate(excluded),
             "No available OpenAI-compatible upstream account",
             context
         );
     }
 
+    /** The owner of an OpenAI response chain, unless it is the exclusive relay of another protocol. */
     public Mono<ProxyAccountEntity> selectOpenAiAccountByIdForPool(
         String accountId,
         AccountPoolRequestContext context
     ) {
+        boolean exclusiveRelay;
+        try {
+            exclusiveRelay = accountId != null && exclusiveRelayAccountIds().contains(accountId);
+        } catch (RuntimeException unknown) {
+            return Mono.error(unknown);
+        }
         return selectAccount(
             null,
-            account -> (AccountPlatforms.isOpenAi(account) || AccountPlatforms.isDeepSeek(account))
+            account -> !exclusiveRelay
+                && (AccountPlatforms.isOpenAi(account) || AccountPlatforms.isDeepSeek(account))
                 && Objects.equals(accountId, account.getAccountId()),
             "The account that owns the OpenAI response is unavailable",
             context
         );
+    }
+
+    /**
+     * The accounts registered as the exclusive relay of another protocol (design 7.5): they serve that protocol's
+     * requests only, and none of the untiered traffic that the pools of this class serve. Empty unless such a relay is
+     * configured. Fails like the tier configuration does while that has never been loaded, since nothing is known then.
+     */
+    public Set<String> exclusiveRelayAccountIds() {
+        Set<String> ids = exclusiveRelayAccountIds.get();
+        return ids == null ? Set.of() : ids;
+    }
+
+    /** Whether {@code account} is the exclusive relay of another protocol, which the pools of untiered traffic leave out. */
+    public boolean isExclusiveRelay(ProxyAccountEntity account) {
+        return account != null && account.getAccountId() != null && exclusiveRelayAccountIds().contains(account.getAccountId());
+    }
+
+    /** {@code excluded} and the exclusive relays; {@code excluded} itself, as it was passed, when there are none. */
+    private Collection<String> withExclusiveRelays(Collection<String> excluded) {
+        Set<String> relays = exclusiveRelayAccountIds();
+        if (relays.isEmpty()) {
+            return excluded;
+        }
+        Set<String> merged = new HashSet<>(relays);
+        if (excluded != null) {
+            merged.addAll(excluded);
+        }
+        return merged;
     }
 
     public Mono<ProxyAccountEntity> selectAnthropicAccount(String sessionHint) {

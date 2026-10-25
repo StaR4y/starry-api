@@ -58,4 +58,31 @@ public interface SourceTierAdminApi {
         @PathVariable String vendor,
         @Valid @RequestBody SourceTierDtos.UpsertMembers request
     );
+
+    /**
+     * Probes the mappings of a relay member with the client and the parsers requests are served with (a short answer,
+     * a tool call, a tool loop, a stream, an image, and on request the cache) and stores what it vouches for: a mapping
+     * that passes every probe counts as verified, until the relay, its base URL or the mapping changes. The probes
+     * cost the operator tokens, so an account is verified once in 30 seconds (429 {@code SOURCE_VERIFY_RATE_LIMITED}).
+     * 404 {@code SOURCE_TIER_MEMBER_NOT_FOUND} when the account is no relay of the vendor.
+     */
+    @PostMapping("/{vendor}/members/{accountId}/verify")
+    Mono<ApiResponse<SourceTierDtos.VerifyResult>> verifyMember(
+        ServerWebExchange exchange,
+        @PathVariable String vendor,
+        @PathVariable String accountId,
+        @Valid @RequestBody(required = false) SourceTierDtos.VerifyMember request
+    );
+
+    /**
+     * Asks the account's relay which models it serves, over the account's route, to fill in a mapping. The account need
+     * not be a member yet. 502 {@code SOURCE_UPSTREAM_MODELS_FAILED} when the relay does not answer with a list, and
+     * 429 {@code SOURCE_VERIFY_RATE_LIMITED} when the account was asked a moment ago.
+     */
+    @GetMapping("/{vendor}/members/{accountId}/upstream-models")
+    Mono<ApiResponse<SourceTierDtos.UpstreamModels>> upstreamModels(
+        ServerWebExchange exchange,
+        @PathVariable String vendor,
+        @PathVariable String accountId
+    );
 }

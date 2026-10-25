@@ -73,7 +73,11 @@ class SourceTierStatusServiceTest {
     private final ProxyAccountEntity kiroB = account("kiro-b", "BuilderId", "idc", null);
 
     private SourceTierStatusService service(boolean nativeTiers) {
-        SourceTierRuntimeInfo runtime = new SourceTierRuntimeInfo(nativeTiers, false, false, pair -> PairStatus.NOT_OFFERED);
+        return service(nativeTiers, pair -> PairStatus.NOT_OFFERED);
+    }
+
+    private SourceTierStatusService service(boolean nativeTiers, java.util.function.Function<SourceTierRuntimeInfo.Pair, PairStatus> pairs) {
+        SourceTierRuntimeInfo runtime = new SourceTierRuntimeInfo(nativeTiers, false, false, pairs);
         when(accountPool.cachedAccounts()).thenReturn(enabled);
         doAnswer(call -> !suspended.contains(((ProxyAccountEntity) call.getArgument(0)).getAccountId()))
             .when(accountPool).isUsable(any());
@@ -318,7 +322,98 @@ class SourceTierStatusServiceTest {
         loaded(snapshot(true, anthropicTiers(), List.of(registered)));
         assertThat(placement(service(false).placements().block(), "relay")).as("the release cannot run tiers")
             .allSatisfy(placed -> assertThat(placed.active()).isFalse());
-        assertThat(placement(service(true).placements().block(), "relay")).allSatisfy(placed -> assertThat(placed.active()).isTrue());
+        // Registered, the vendor and the tier on, but nothing asks the relay yet: see the next test.
+        assertThat(placement(service(true).placements().block(), "relay")).allSatisfy(placed -> assertThat(placed.active()).isFalse());
+    }
+
+    @Test
+    void aRelayServesOnlyWhereAnOfferedPairHasAGateThatIsNotOffAndAMappingIsVerified() {
+        ProxyAccountEntity relay = account("relay", "OpenAI-compatible", "api-key", "https://relay.example/v1");
+        Member registered = new Member("anthropic", "relay", "official", "OPENAI_CHAT", true, false, false, false, false, true,
+            "NONE", 540, true, true);
+        SourceTierSnapshot.MemberModel unverified = new SourceTierSnapshot.MemberModel("anthropic", "relay", "claude-sonnet-4.5",
+            "relay/sonnet", 200_000, 8192, true, null, null);
+        SourceTierSnapshot.MemberModel verified = new SourceTierSnapshot.MemberModel("anthropic", "relay", "claude-sonnet-4.5",
+            "relay/sonnet", 200_000, 8192, true, NOW, SourceTierValidator.mappingFingerprint(registered, unverified, relay));
+        SourceTierSnapshot.MemberModel switchedOff = new SourceTierSnapshot.MemberModel("anthropic", "relay", "claude-sonnet-4.5",
+            "relay/sonnet", 200_000, 8192, false, NOW, SourceTierValidator.mappingFingerprint(registered, unverified, relay));
+        SourceTierSnapshot.MemberModel stale = new SourceTierSnapshot.MemberModel("anthropic", "relay", "claude-sonnet-4.5",
+            "relay/sonnet", 200_000, 8192, true, NOW, "0".repeat(64));
+        SourceTierSnapshot.PairGate keys = new SourceTierSnapshot.PairGate("anthropic", "OPENAI_CHAT", "MESSAGES", "KEYS", List.of("key-1"));
+        SourceTierSnapshot.PairGate off = new SourceTierSnapshot.PairGate("anthropic", "OPENAI_CHAT", "MESSAGES", "OFF", List.of());
+        enabled.addAll(List.of(relay, kiroA));
+        java.util.function.Function<SourceTierRuntimeInfo.Pair, PairStatus> offered =
+            pair -> pair.entryEndpoint().equals("MESSAGES") ? PairStatus.EXPERIMENTAL : PairStatus.NOT_OFFERED;
+
+        // Everything there: the relay serves.
+        loaded(withRelay(registered, verified, keys));
+        assertThat(placement(service(true, offered).placements().block(), "relay")).allSatisfy(placed -> {
+            assertThat(placed.relay()).isTrue();
+            assertThat(placed.active()).isTrue();
+        });
+        // The tier of the relay and the native accounts beside it are not asked about any of this.
+        assertThat(placement(service(true, offered).placements().block(), "kiro-a")).allSatisfy(placed -> assertThat(placed.active()).isTrue());
+
+        // Each one missing: the gate is off or there is none, the pair is not offered for the entry of the gate, the mapping
+        // is not verified, was verified for something else, or is switched off.
+        for (SourceTierSnapshot snapshot : List.of(
+            withRelay(registered, verified, off), withRelay(registered, verified), withRelay(registered, unverified, keys),
+            withRelay(registered, stale, keys), withRelay(registered, switchedOff, keys), withRelay(registered, keys))) {
+            loaded(snapshot);
+            assertThat(placement(service(true, offered).placements().block(), "relay")).allSatisfy(placed -> assertThat(placed.active()).isFalse());
+        }
+        loaded(withRelay(registered, verified, keys));
+        assertThat(placement(service(true).placements().block(), "relay")).as("no pair is offered").allSatisfy(placed -> assertThat(placed.active()).isFalse());
+        // The account moved: what was verified is not this relay any more.
+        relay.setBaseUrl("https://elsewhere.example/v1");
+        assertThat(placement(service(true, offered).placements().block(), "relay")).allSatisfy(placed -> assertThat(placed.active()).isFalse());
+    }
+
+    private static SourceTierSnapshot withRelay(Member relay, Object... more) {
+        List<SourceTierSnapshot.MemberModel> models = new ArrayList<>();
+        List<SourceTierSnapshot.PairGate> gates = new ArrayList<>();
+        for (Object one : more) {
+            if (one instanceof SourceTierSnapshot.MemberModel model) {
+                models.add(model);
+            } else if (one instanceof SourceTierSnapshot.PairGate gate) {
+                gates.add(gate);
+            }
+        }
+        return SourceTierSnapshot.of(7L, List.of(new VendorConfig("anthropic", true, false, false, true, 16, true, 7L)), anthropicTiers(),
+            List.of(relay), models, gates);
+    }
+
+    @Test
+    void anExclusiveRelayIsPlacedInTheVendorItServesAndInNoOtherVendor() {
+        ProxyAccountEntity relay = account("relay", "OpenAI-compatible", "api-key", "https://relay.example/v1");
+        ProxyAccountEntity glm = account("glm", "GLM", "api-key", "https://open.bigmodel.cn/api/paas/v4");
+        Member registered = new Member("anthropic", "relay", "official", "OPENAI_CHAT", true, false, false, false, false, true,
+            "NONE", 540, true, true);
+        Member shared = new Member("anthropic", "relay", "official", "OPENAI_CHAT", false, false, false, false, false, true,
+            "NONE", 540, true, true);
+        enabled.addAll(List.of(relay, glm));
+
+        loaded(withMoonshot(registered));
+        SourceTierDtos.Placements exclusive = service(true).placements().block();
+        // GLM's vendor has no row for the relay: it would fall into its lowest tier, where the relay serves nothing.
+        assertThat(placement(exclusive, "relay")).extracting(SourceTierDtos.Placed::vendor).containsExactly("anthropic");
+        assertThat(placement(exclusive, "glm")).extracting(SourceTierDtos.Placed::vendor).containsExactly("moonshot");
+
+        loaded(withMoonshot(shared));
+        SourceTierDtos.Placements notExclusive = service(true).placements().block();
+        assertThat(placement(notExclusive, "relay")).extracting(SourceTierDtos.Placed::vendor)
+            .containsExactlyInAnyOrder("anthropic", "moonshot");
+    }
+
+    /** The Anthropic configuration of these tests, with a second vendor whose models compatible keys such as GLM serve. */
+    private static SourceTierSnapshot withMoonshot(Member relay) {
+        List<Tier> tiers = new ArrayList<>(anthropicTiers());
+        tiers.add(new Tier("moonshot", "direct", 1, "direct", BigDecimal.ONE, EnumSet.noneOf(AccountAllocationCategory.class), true,
+            true, null));
+        return SourceTierSnapshot.of(7L,
+            List.of(new VendorConfig("anthropic", true, false, false, true, 16, true, 7L),
+                new VendorConfig("moonshot", true, false, false, true, 16, true, 7L)),
+            tiers, List.of(relay), List.of(), List.of());
     }
 
     @Test

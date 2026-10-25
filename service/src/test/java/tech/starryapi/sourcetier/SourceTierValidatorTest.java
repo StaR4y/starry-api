@@ -29,6 +29,7 @@ import tech.starryapi.sourcetier.SourceTierSnapshot.Member;
 import tech.starryapi.sourcetier.SourceTierSnapshot.MemberModel;
 import tech.starryapi.sourcetier.SourceTierSnapshot.PairGate;
 import tech.starryapi.sourcetier.SourceTierSnapshot.Tier;
+import tech.starryapi.sourcetier.SourceTierSnapshot.VendorConfig;
 import tech.starryapi.sourcetier.SourceTierValidator.Config;
 import tech.starryapi.sourcetier.SourceTierValidator.MemberChanges;
 
@@ -742,16 +743,32 @@ class SourceTierValidatorTest {
 
     @Test
     void crossProtocolRowsAndOpenGatesAreRefusedWhileTheRuntimeLacksThem() {
+        SourceTierValidator withoutRelays = withRuntime(true, true, false, PairStatus.NOT_OFFERED);
         Config relay = validator.normalize("anthropic", replace(false, RELAY_TIERS,
             List.of(relay("relay-1", "relay", mapping("claude-sonnet-4.5", "x"))), List.of()));
         Config keysGate = validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("MESSAGES", "KEYS", "k"))));
         Config onGate = validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("CHAT", "ON"))));
         Config offGate = validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("CHAT", "OFF"))));
 
-        assertUnsupported(relay, "crossProtocolMembers");
-        assertUnsupported(keysGate, "pairGates");
-        assertUnsupported(onGate, "pairGates");
+        assertUnsupported(withoutRelays, relay, "crossProtocolMembers");
+        assertUnsupported(withoutRelays, keysGate, "pairGates");
+        assertUnsupported(withoutRelays, onGate, "pairGates");
+        assertThatCode(() -> withoutRelays.requireSupported(offGate)).doesNotThrowAnyException();
+    }
+
+    @Test
+    void thisReleaseTakesRelayRowsButOpensNoPairBecauseNoneIsOffered() {
+        Config relay = validator.normalize("anthropic", replace(false, RELAY_TIERS,
+            List.of(relay("relay-1", "relay", mapping("claude-sonnet-4.5", "x"))), List.of()));
+        Config keysGate = validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("MESSAGES", "KEYS", "k"))));
+        Config onGate = validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("CHAT", "ON"))));
+        Config offGate = validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("CHAT", "OFF"))));
+
+        // The relay is registered (and kept out of the untiered pools, P4-10); the pairs come with the cross-protocol phases.
+        assertThatCode(() -> validator.requireSupported(relay)).doesNotThrowAnyException();
         assertThatCode(() -> validator.requireSupported(offGate)).doesNotThrowAnyException();
+        assertRejected(() -> validator.requireSupported(keysGate), HttpStatus.BAD_REQUEST, "SOURCE_PAIR_NOT_OFFERED", "is not offered");
+        assertRejected(() -> validator.requireSupported(onGate), HttpStatus.BAD_REQUEST, "SOURCE_PAIR_NOT_OFFERED", "is not offered");
     }
 
     @Test
@@ -772,16 +789,13 @@ class SourceTierValidatorTest {
             RELAY_TIERS, List.of(relay("relay-1", "relay", mapping("claude-sonnet-4.5", "x"))), List.of(gate("CHAT", "ON")));
         Config everything = validator.normalize("anthropic", request);
 
-        assertUnsupported(everything, "crossProtocolMembers", "pairGates");
+        SourceTierValidator withoutRelays = withRuntime(true, true, false, PairStatus.NOT_OFFERED);
+        assertUnsupported(withoutRelays, everything, "crossProtocolMembers", "pairGates");
         // A release that cannot unify the endpoints names that too, and one that cannot tier natively refuses the vendor's
         // own switch as well.
         SourceTierValidator nothing = withRuntime(false, false, false, PairStatus.NOT_OFFERED);
         assertUnsupported(nothing, nothing.normalize("anthropic", request),
             "enabled", "unifyEndpoints", "crossProtocolMembers", "pairGates");
-    }
-
-    private void assertUnsupported(Config config, String... features) {
-        assertUnsupported(validator, config, features);
     }
 
     private void assertUnsupported(SourceTierValidator checked, Config config, String... features) {
@@ -1067,6 +1081,42 @@ class SourceTierValidatorTest {
         assertThat(unservedPins("moonshot", tiers, accounts, "official-1", "relay-key", "codex-1")).containsExactly("codex-1");
     }
 
+    @Test
+    void aPinnedAccountThatIsTheExclusiveRelayOfAnotherVendorIsWarnedAboutBecauseItIsNoNativeMemberAnywhere() {
+        Tier relayTier = stored("relay", 1, true);
+        Tier direct = new Tier("zhipu", "direct", 1, "direct", BigDecimal.ONE, Set.of(), true, true, null);
+        Member exclusive = new Member("anthropic", "relay-1", "relay", "OPENAI_CHAT", true, false, false, false, false, true, "NONE", 540,
+            true, true);
+        Member shared = new Member("anthropic", "relay-1", "relay", "OPENAI_CHAT", false, false, false, false, false, true, "NONE", 540,
+            true, true);
+        Member pin = new Member("zhipu", "relay-1", "direct", null, true, false, false, false, false, true, "NONE", 540, null, null);
+        Member ordinary = new Member("zhipu", "glm-1", "direct", null, true, false, false, false, false, true, "NONE", 540, null, null);
+        List<ProxyAccountEntity> accounts = List.of(account("relay-1", "OpenAI-compatible", "api-key", "https://relay.example/v1", true),
+            account("glm-1", "OpenAI-compatible", "api-key", "https://open.bigmodel.cn/api/paas/v4", true));
+        List<SourceTierSnapshot.VendorConfig> vendors = List.of(SourceTierSnapshot.VendorConfig.defaults("anthropic"),
+            SourceTierSnapshot.VendorConfig.defaults("zhipu"));
+
+        List<Warning> warnings = SourceTierValidator.warnings("zhipu",
+            SourceTierSnapshot.of(1L, vendors, List.of(relayTier, direct), List.of(exclusive, pin, ordinary), List.of(), List.of()), accounts);
+
+        // The pin is stored and shown, but TierMembership leaves the relay out of every native pool.
+        assertThat(warnings).singleElement().satisfies(warning -> {
+            assertThat(warning.code()).isEqualTo("PIN_ON_EXCLUSIVE_RELAY");
+            assertThat(warning.tierId()).isEqualTo("direct");
+            assertThat(warning.count()).isEqualTo(1);
+            assertThat(warning.accountIds()).containsExactly("relay-1");
+            assertThat(warning.message()).contains("relay-1").contains("exclusive relay");
+        });
+        // A relay that also serves untiered traffic is a native member too: its pin does something.
+        assertThat(SourceTierValidator.warnings("zhipu",
+            SourceTierSnapshot.of(1L, vendors, List.of(relayTier, direct), List.of(shared, pin, ordinary), List.of(), List.of()), accounts))
+            .isEmpty();
+        // And the vendor that registered it has no native row for it at all.
+        assertThat(SourceTierValidator.warnings("anthropic",
+            SourceTierSnapshot.of(1L, vendors, List.of(relayTier, direct), List.of(exclusive, pin, ordinary), List.of(), List.of()), accounts))
+            .isEmpty();
+    }
+
     private static List<String> unservedPins(String vendor, List<Tier> tiers, List<ProxyAccountEntity> accounts, String... pinned) {
         List<Member> members = Stream.of(pinned).map(accountId -> nativePin(accountId, "kiro")).toList();
         return warningsOf(vendor, tiers, members, accounts).stream()
@@ -1135,6 +1185,229 @@ class SourceTierValidatorTest {
         // "ab" + "c" and "a" + "bc" are the same characters in the same order.
         assertThat(SourceTierValidator.mappingFingerprint(RELAY, ab, account("x", "c", "api-key", "d", true)))
             .isNotEqualTo(SourceTierValidator.mappingFingerprint(RELAY, a, account("x", "bc", "api-key", "d", true)));
+    }
+
+    @Test
+    void aMappingIsVerifiedWhileTheHashItWasVerifiedUnderIsTheFingerprintOfWhatIsStored() {
+        String hash = SourceTierValidator.mappingFingerprint(RELAY, MODEL, RELAY_ACCOUNT);
+        MemberModel verified = new MemberModel("anthropic", "relay-1", "claude-sonnet-4.5", "relay/sonnet", 200_000, 8192, true,
+            java.time.Instant.EPOCH, hash);
+
+        assertThat(SourceTierValidator.isVerified(RELAY, verified, RELAY_ACCOUNT)).isTrue();
+        assertThat(SourceTierValidator.isVerified(RELAY, MODEL, RELAY_ACCOUNT)).as("never verified").isFalse();
+        // What the verification vouched for has changed since, whichever part of it.
+        assertThat(SourceTierValidator.isVerified(copy(RELAY, "vision", true), verified, RELAY_ACCOUNT)).isFalse();
+        assertThat(SourceTierValidator.isVerified(copy(RELAY, "usageCacheReadInPrompt", true), verified, RELAY_ACCOUNT)).isFalse();
+        assertThat(SourceTierValidator.isVerified(RELAY, new MemberModel("anthropic", "relay-1", "claude-sonnet-4.5", "relay/other", 200_000,
+            8192, true, java.time.Instant.EPOCH, hash), RELAY_ACCOUNT)).isFalse();
+        assertThat(SourceTierValidator.isVerified(RELAY, verified, account("relay-1", "OpenAI-compatible", "api-key", "https://moved.example/v1", true)))
+            .as("the account points somewhere else").isFalse();
+        assertThat(SourceTierValidator.isVerified(RELAY, verified, null)).isFalse();
+        // What may change without a probe does not end it.
+        assertThat(SourceTierValidator.isVerified(copy(RELAY, "tierId", "kiro"), new MemberModel("anthropic", "relay-1", "claude-sonnet-4.5",
+            "relay/sonnet", 10, 1, false, java.time.Instant.EPOCH, hash), RELAY_ACCOUNT)).isTrue();
+    }
+
+    // ---- the evidence for "not contained" ----
+
+    private static final VendorConfig ANTHROPIC = VendorConfig.defaults("anthropic");
+    private static final Tier RELAY_TIER = new Tier("anthropic", "relay", 1, "Relay", BigDecimal.ONE, Set.of(), true, true, null);
+
+    private static Config configOf(Member member, MemberModel... models) {
+        return SourceTierValidator.assemble(ANTHROPIC, List.of(RELAY_TIER), List.of(member), List.of(models), List.of());
+    }
+
+    private static XpCacheEvidence.Stored evidence(Member member, MemberModel model, Boolean read, Boolean write) {
+        return new XpCacheEvidence.Stored(read, write, XpCacheEvidence.basis(member, model, RELAY_ACCOUNT), java.time.Instant.EPOCH);
+    }
+
+    private static Map<String, XpCacheEvidence.Stored> stored(MemberModel model, XpCacheEvidence.Stored evidence) {
+        return Map.of(XpCacheEvidence.key(model.accountId(), model.modelId()), evidence);
+    }
+
+    private static final Map<String, ProxyAccountEntity> ACCOUNTS = Map.of("relay-1", RELAY_ACCOUNT);
+
+    @Test
+    void aMemberWhosePromptIsSaidToContainTheCacheNeedsNoEvidence() {
+        Member contained = copy(copy(RELAY, "usageCacheReadInPrompt", true), "usageCacheWriteInPrompt", true);
+
+        validator.checkCacheEvidence(configOf(contained, MODEL), ACCOUNTS, Map.of());
+        // A native pin has no such setting, and nothing is asked of it.
+        validator.checkCacheEvidence(SourceTierValidator.assemble(ANTHROPIC, List.of(RELAY_TIER),
+            List.of(new Member("anthropic", "claude-1", "relay", null, true, false, false, false, false, true, "NONE", 540, false, false)),
+            List.of(), List.of()), ACCOUNTS, Map.of());
+    }
+
+    @Test
+    void aMemberWhosePromptIsSaidNotToContainTheReadNeedsTheEvidenceOfTheProbeForEveryMappingThatIsOn() {
+        Member notContained = copy(copy(RELAY, "usageCacheReadInPrompt", false), "usageCacheWriteInPrompt", true);
+
+        assertRejected(() -> validator.checkCacheEvidence(configOf(notContained, MODEL), ACCOUNTS, Map.of()), HttpStatus.BAD_REQUEST,
+            "SOURCE_TIER_CACHE_EVIDENCE_REQUIRED", "Account relay-1, model claude-sonnet-4.5: the relay's prompt tokens are said not to contain"
+                + " the cache read");
+        validator.checkCacheEvidence(configOf(notContained, MODEL), ACCOUNTS,
+            stored(MODEL, evidence(notContained, MODEL, false, null)));
+
+        // A second mapping that is on needs its own; one that is off needs none.
+        MemberModel haiku = new MemberModel("anthropic", "relay-1", "claude-haiku-4.5", "relay/haiku", 200_000, 8192, true, null, null);
+        MemberModel opus = new MemberModel("anthropic", "relay-1", "claude-opus-4.5", "relay/opus", 200_000, 8192, false, null, null);
+        Map<String, XpCacheEvidence.Stored> sonnetOnly = stored(MODEL, evidence(notContained, MODEL, false, null));
+        assertRejected(() -> validator.checkCacheEvidence(configOf(notContained, MODEL, haiku), ACCOUNTS, sonnetOnly), HttpStatus.BAD_REQUEST,
+            "SOURCE_TIER_CACHE_EVIDENCE_REQUIRED", "model claude-haiku-4.5");
+        validator.checkCacheEvidence(configOf(notContained, MODEL, opus), ACCOUNTS, sonnetOnly);
+    }
+
+    @Test
+    void theWriteIsAskedForSeparatelyAndBothWhenBothAreSaidNotToBeContained() {
+        Member writeNot = copy(copy(RELAY, "usageCacheReadInPrompt", true), "usageCacheWriteInPrompt", false);
+        Member bothNot = copy(copy(RELAY, "usageCacheReadInPrompt", false), "usageCacheWriteInPrompt", false);
+
+        assertRejected(() -> validator.checkCacheEvidence(configOf(writeNot, MODEL), ACCOUNTS, stored(MODEL, evidence(writeNot, MODEL, false, null))),
+            HttpStatus.BAD_REQUEST, "SOURCE_TIER_CACHE_EVIDENCE_REQUIRED", "cache write");
+        validator.checkCacheEvidence(configOf(writeNot, MODEL), ACCOUNTS, stored(MODEL, evidence(writeNot, MODEL, null, false)));
+        assertRejected(() -> validator.checkCacheEvidence(configOf(bothNot, MODEL), ACCOUNTS, stored(MODEL, evidence(bothNot, MODEL, false, null))),
+            HttpStatus.BAD_REQUEST, "SOURCE_TIER_CACHE_EVIDENCE_REQUIRED", "cache write");
+        assertRejected(() -> validator.checkCacheEvidence(configOf(bothNot, MODEL), ACCOUNTS, stored(MODEL, evidence(bothNot, MODEL, null, null))),
+            HttpStatus.BAD_REQUEST, "SOURCE_TIER_CACHE_EVIDENCE_REQUIRED", "cache read and the cache write");
+        validator.checkCacheEvidence(configOf(bothNot, MODEL), ACCOUNTS, stored(MODEL, evidence(bothNot, MODEL, false, false)));
+    }
+
+    @Test
+    void evidenceThatSaysContainedOrNothingIsNoEvidenceForNotContained() {
+        Member notContained = copy(copy(RELAY, "usageCacheReadInPrompt", false), "usageCacheWriteInPrompt", true);
+
+        for (Boolean concluded : new Boolean[] {true, null}) {
+            assertRejected(() -> validator.checkCacheEvidence(configOf(notContained, MODEL), ACCOUNTS,
+                stored(MODEL, evidence(notContained, MODEL, concluded, null))), HttpStatus.BAD_REQUEST, "SOURCE_TIER_CACHE_EVIDENCE_REQUIRED", "cache read");
+        }
+    }
+
+    @Test
+    void evidenceOfAnotherRelayNameOrWayOfReadingTheAnswerIsNoEvidence() {
+        Member notContained = copy(copy(RELAY, "usageCacheReadInPrompt", false), "usageCacheWriteInPrompt", true);
+        XpCacheEvidence.Stored proved = evidence(notContained, MODEL, false, null);
+
+        // The account was pointed at another relay since.
+        Map<String, ProxyAccountEntity> moved = Map.of("relay-1", account("relay-1", "OpenAI-compatible", "api-key", "https://other.example/v1", true));
+        assertRejected(() -> validator.checkCacheEvidence(configOf(notContained, MODEL), moved, stored(MODEL, proved)), HttpStatus.BAD_REQUEST,
+            "SOURCE_TIER_CACHE_EVIDENCE_REQUIRED", "cache read");
+        // The relay is called by another name.
+        MemberModel renamed = new MemberModel("anthropic", "relay-1", "claude-sonnet-4.5", "relay/sonnet-v2", 200_000, 8192, true, null, null);
+        assertRejected(() -> validator.checkCacheEvidence(configOf(notContained, renamed), ACCOUNTS, stored(renamed, proved)), HttpStatus.BAD_REQUEST,
+            "SOURCE_TIER_CACHE_EVIDENCE_REQUIRED", "cache read");
+        // The answer is read as a stream now, not as JSON.
+        Member streaming = copy(notContained, "upstreamStream", !notContained.upstreamStream());
+        assertRejected(() -> validator.checkCacheEvidence(configOf(streaming, MODEL), ACCOUNTS, stored(MODEL, proved)), HttpStatus.BAD_REQUEST,
+            "SOURCE_TIER_CACHE_EVIDENCE_REQUIRED", "cache read");
+        // The tier, the limits and the switch itself are not what it was seen for.
+        Member acted = copy(copy(notContained, "exclusive", false), "maxDurationSeconds", 60);
+        validator.checkCacheEvidence(configOf(acted, MODEL), ACCOUNTS, stored(MODEL, proved));
+    }
+
+    @Test
+    void theEvidenceOfAModelIsFoundWhateverTheCaseOfItsId() {
+        Member notContained = copy(copy(RELAY, "usageCacheReadInPrompt", false), "usageCacheWriteInPrompt", true);
+        MemberModel upper = new MemberModel("anthropic", "relay-1", "Claude-Sonnet-4.5", "relay/sonnet", 200_000, 8192, true, null, null);
+
+        validator.checkCacheEvidence(configOf(notContained, upper), ACCOUNTS, stored(MODEL, evidence(notContained, MODEL, false, null)));
+    }
+
+    @Test
+    void whatTheMemberSaysIsNotContainedAndNoEvidenceShowsIsNamed() {
+        String basis = XpCacheEvidence.basis(RELAY, MODEL, RELAY_ACCOUNT);
+        Member readNot = copy(copy(RELAY, "usageCacheReadInPrompt", false), "usageCacheWriteInPrompt", true);
+        Member writeNot = copy(copy(RELAY, "usageCacheReadInPrompt", true), "usageCacheWriteInPrompt", false);
+        Member bothNot = RELAY;
+        Member neither = copy(copy(RELAY, "usageCacheReadInPrompt", true), "usageCacheWriteInPrompt", true);
+        XpCacheEvidence.Stored readShown = new XpCacheEvidence.Stored(false, null, basis, java.time.Instant.EPOCH);
+        XpCacheEvidence.Stored writeShown = new XpCacheEvidence.Stored(null, false, basis, java.time.Instant.EPOCH);
+
+        assertThat(SourceTierValidator.unprovenCache(neither, null, basis)).isNull();
+        assertThat(SourceTierValidator.unprovenCache(readNot, null, basis)).isEqualTo("cache read");
+        assertThat(SourceTierValidator.unprovenCache(writeNot, null, basis)).isEqualTo("cache write");
+        assertThat(SourceTierValidator.unprovenCache(bothNot, null, basis)).isEqualTo("cache read and the cache write");
+        assertThat(SourceTierValidator.unprovenCache(readNot, readShown, basis)).isNull();
+        assertThat(SourceTierValidator.unprovenCache(bothNot, readShown, basis)).isEqualTo("cache write");
+        assertThat(SourceTierValidator.unprovenCache(bothNot, writeShown, basis)).isEqualTo("cache read");
+        assertThat(SourceTierValidator.unprovenCache(readNot, readShown, "another basis")).isEqualTo("cache read");
+        // A native pin says nothing about a relay's prompt.
+        assertThat(SourceTierValidator.unprovenCache(new Member("anthropic", "claude-1", "relay", null, true, false, false, false, false, true,
+            "NONE", 540, false, false), null, basis)).isNull();
+    }
+
+    @Test
+    void aMappingTheWriteLeavesAsItWasIsNotAskedForEvidenceAgainWhenTheRelayHasMovedSince() {
+        Member notContained = copy(copy(RELAY, "usageCacheReadInPrompt", false), "usageCacheWriteInPrompt", true);
+        XpCacheEvidence.Stored proved = evidence(notContained, MODEL, false, null);
+        Config before = configOf(notContained, MODEL);
+        Map<String, ProxyAccountEntity> moved = Map.of("relay-1", account("relay-1", "OpenAI-compatible", "api-key", "https://other.example/v1", true));
+
+        // Checked in full, a relay that moved refuses every save of its vendor...
+        assertRejected(() -> validator.checkCacheEvidence(configOf(notContained, MODEL), moved, stored(MODEL, proved)), HttpStatus.BAD_REQUEST,
+            "SOURCE_TIER_CACHE_EVIDENCE_REQUIRED", "cache read");
+        // ...and a save that changes the tier, the limits or anything else but what the evidence is about does not.
+        Member otherwise = copy(copy(copy(notContained, "tierId", "relay"), "maxDurationSeconds", 60), "vision", true);
+        validator.checkCacheEvidence(configOf(otherwise, MODEL), moved, stored(MODEL, proved), before);
+        validator.checkCacheEvidence(configOf(notContained, MODEL), moved, Map.of(), before);
+        // The mapping is not on any more: nothing to ask either way.
+        MemberModel off = new MemberModel("anthropic", "relay-1", "claude-sonnet-4.5", "relay/sonnet", 200_000, 8192, false, null, null);
+        validator.checkCacheEvidence(configOf(notContained, off), moved, Map.of(), before);
+    }
+
+    @Test
+    void aMappingTheWriteLeavesAsItWasIsStillRefusedWhenTheEvidenceOfThisRelayShowsTheSettingToBeWrong() {
+        Member notContained = copy(copy(RELAY, "usageCacheReadInPrompt", false), "usageCacheWriteInPrompt", false);
+        Config before = configOf(notContained, MODEL);
+
+        // The probe found the read inside the prompt of this relay: "not contained" bills the cache twice.
+        assertRejected(() -> validator.checkCacheEvidence(configOf(notContained, MODEL), ACCOUNTS,
+            stored(MODEL, evidence(notContained, MODEL, true, false)), before), HttpStatus.BAD_REQUEST, "SOURCE_TIER_CACHE_EVIDENCE_REQUIRED", "cache");
+        assertRejected(() -> validator.checkCacheEvidence(configOf(notContained, MODEL), ACCOUNTS,
+            stored(MODEL, evidence(notContained, MODEL, false, true)), before), HttpStatus.BAD_REQUEST, "SOURCE_TIER_CACHE_EVIDENCE_REQUIRED", "cache");
+        // Evidence about another address says nothing of this one, whatever it concluded.
+        Map<String, ProxyAccountEntity> moved = Map.of("relay-1", account("relay-1", "OpenAI-compatible", "api-key", "https://other.example/v1", true));
+        validator.checkCacheEvidence(configOf(notContained, MODEL), moved, stored(MODEL, evidence(notContained, MODEL, true, true)), before);
+    }
+
+    @Test
+    void aMappingTheWriteChangesIsAskedForItsEvidenceEvenWhenTheVendorHadItBefore() {
+        Member notContained = copy(copy(RELAY, "usageCacheReadInPrompt", false), "usageCacheWriteInPrompt", true);
+        Member contained = copy(copy(RELAY, "usageCacheReadInPrompt", true), "usageCacheWriteInPrompt", true);
+        Config before = configOf(notContained, MODEL);
+        Config containedBefore = configOf(contained, MODEL);
+        String reason = "SOURCE_TIER_CACHE_EVIDENCE_REQUIRED";
+
+        // The switch is new.
+        assertRejected(() -> validator.checkCacheEvidence(configOf(notContained, MODEL), ACCOUNTS, Map.of(), containedBefore),
+            HttpStatus.BAD_REQUEST, reason, "cache read");
+        // The relay is called by another name, or its answer is read the other way.
+        MemberModel renamed = new MemberModel("anthropic", "relay-1", "claude-sonnet-4.5", "relay/sonnet-v2", 200_000, 8192, true, null, null);
+        assertRejected(() -> validator.checkCacheEvidence(configOf(notContained, renamed), ACCOUNTS, Map.of(), before),
+            HttpStatus.BAD_REQUEST, reason, "cache read");
+        Member streaming = copy(notContained, "upstreamStream", !notContained.upstreamStream());
+        assertRejected(() -> validator.checkCacheEvidence(configOf(streaming, MODEL), ACCOUNTS, Map.of(), before),
+            HttpStatus.BAD_REQUEST, reason, "cache read");
+        // A mapping the vendor did not have, on a member it did.
+        MemberModel haiku = new MemberModel("anthropic", "relay-1", "claude-haiku-4.5", "relay/haiku", 200_000, 8192, true, null, null);
+        assertRejected(() -> validator.checkCacheEvidence(configOf(notContained, MODEL, haiku), ACCOUNTS,
+            stored(MODEL, evidence(notContained, MODEL, false, null)), before), HttpStatus.BAD_REQUEST, reason, "model claude-haiku-4.5");
+        // A member that was not there, or was a native pin.
+        assertRejected(() -> validator.checkCacheEvidence(configOf(notContained, MODEL), ACCOUNTS, Map.of(),
+            SourceTierValidator.assemble(ANTHROPIC, List.of(RELAY_TIER), List.of(), List.of(), List.of())), HttpStatus.BAD_REQUEST, reason, "cache read");
+        Member pin = new Member("anthropic", "relay-1", "relay", null, true, false, false, false, false, true, "NONE", 540, null, null);
+        assertRejected(() -> validator.checkCacheEvidence(configOf(notContained, MODEL), ACCOUNTS, Map.of(),
+            SourceTierValidator.assemble(ANTHROPIC, List.of(RELAY_TIER), List.of(pin), List.of(), List.of())), HttpStatus.BAD_REQUEST, reason, "cache read");
+        // The case of the id is not a change.
+        MemberModel upper = new MemberModel("anthropic", "relay-1", "Claude-Sonnet-4.5", "relay/sonnet", 200_000, 8192, true, null, null);
+        validator.checkCacheEvidence(configOf(notContained, upper), Map.of(), Map.of(), before);
+    }
+
+    @Test
+    void aMissingAccountCannotHaveGivenEvidence() {
+        Member notContained = copy(copy(RELAY, "usageCacheReadInPrompt", false), "usageCacheWriteInPrompt", true);
+
+        assertRejected(() -> validator.checkCacheEvidence(configOf(notContained, MODEL), Map.of(),
+            stored(MODEL, evidence(notContained, MODEL, false, null))), HttpStatus.BAD_REQUEST, "SOURCE_TIER_CACHE_EVIDENCE_REQUIRED", "cache read");
     }
 
     private static Member copy(Member member, String field, Object value) {

@@ -12,17 +12,20 @@ public class SourceTierAdminController implements SourceTierAdminApi {
     private final SourceTierAdminService service;
     private final SourceTierStatusService statusService;
     private final SourceTierChoices choices;
+    private final XpMappingVerifier verifier;
     private final AdminAuth adminAuth;
 
     public SourceTierAdminController(
         SourceTierAdminService service,
         SourceTierStatusService statusService,
         SourceTierChoices choices,
+        XpMappingVerifier verifier,
         AdminAuth adminAuth
     ) {
         this.service = service;
         this.statusService = statusService;
         this.choices = choices;
+        this.verifier = verifier;
         this.adminAuth = adminAuth;
     }
 
@@ -63,5 +66,21 @@ public class SourceTierAdminController implements SourceTierAdminApi {
     ) {
         adminAuth.verifyAdmin(exchange);
         return service.upsertMembers(vendor, request).map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<SourceTierDtos.VerifyResult>> verifyMember(
+        ServerWebExchange exchange, String vendor, String accountId, SourceTierDtos.VerifyMember request
+    ) {
+        adminAuth.verifyAdmin(exchange);
+        return verifier.verify(vendor, accountId, request).map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<SourceTierDtos.UpstreamModels>> upstreamModels(
+        ServerWebExchange exchange, String vendor, String accountId
+    ) {
+        adminAuth.verifyAdmin(exchange);
+        return verifier.upstreamModels(vendor, accountId).map(ApiResponse::ok);
     }
 }

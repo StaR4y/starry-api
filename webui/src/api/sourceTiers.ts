@@ -92,7 +92,11 @@ export interface SourceTierGate {
 
 /** 已保存配置里允许、但多半不是本意的情况；code 决定控制台怎么措辞，message 是后端的英文原文 */
 export interface SourceTierWarning {
-  code: 'LOWEST_TIER_COLLECTS_OFFICIAL_KEYS' | 'MEMBER_NOT_SERVING_VENDOR' | string;
+  code:
+    | 'LOWEST_TIER_COLLECTS_OFFICIAL_KEYS'
+    | 'MEMBER_NOT_SERVING_VENDOR'
+    | 'PIN_ON_EXCLUSIVE_RELAY'
+    | string;
   tierId?: string | null;
   count: number;
   accountIds: string[];

@@ -275,7 +275,7 @@
 
 - 依赖：P2-09, P3-01, P4-01, P4-06, P4-07, P4-09
 - 文件：`service/src/main/java/tech/starryapi/proxy/tier/DefaultSourceTierPlanner.java`, `service/src/main/java/tech/starryapi/proxy/tier/XpModelResolver.java`, `service/src/test/java/tech/starryapi/proxy/tier/TierPlannerXpTest.java`
-- 内容：设计 3 步骤 4、5b：XP 单元、映射查找、七个资格条件、线上体按签名生成、跳过原因、HARD/门控错误（含 PIN）。
+- 内容：设计 3 步骤 4、5b：XP 单元、映射查找、七个资格条件、线上体按签名生成、跳过原因、HARD/门控错误（含 PIN）。生成 `ChatWireSanitizer.Settings` 时 `continuationDropsReasoning` 取 `ChatWireSanitizer.dropsReasoningOnContinuation(厂商)`（设计 7.6，第 4 阶段评审）：净化器与 `FeaturePolicy` 读同一个标志，签名里要带上它。
 - 测试：负责人配置下两个入口的计划；门控三态；别名与精确行；PIN 到 relay 且含 HARD → 400。
 - 验收：无跨协议行时计划同第 2 阶段。
 
@@ -357,7 +357,7 @@
 
 - 依赖：P6-01
 - 文件：`service/src/main/java/tech/starryapi/platform/xproto/RequestFeatureDetector.java`, `service/src/main/java/tech/starryapi/proxy/tier/DefaultSourceTierPlanner.java`
-- 内容：7.9 RESPONSES 表（透传基线）；不可展开链 HARD 与 409；owner 为跨协议成员时忽略。
+- 内容：7.9 RESPONSES 表（透传基线）；不可展开链 HARD 与 409；owner 为跨协议成员时忽略；开始前取得负责人对设计 O9（`text.verbosity` 的 low/high 在透传基线下 HARD 还是 SOFT）的决定。
 - 测试：Codex 请求无 HARD；内置工具 HARD；只剩跨协议时 409。
 - 验收：与设计一致。
 

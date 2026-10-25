@@ -31,8 +31,9 @@ class SourceTierAdminControllerTest {
     private final SourceTierAdminService service = mock(SourceTierAdminService.class);
     private final SourceTierStatusService status = mock(SourceTierStatusService.class);
     private final SourceTierChoices choices = mock(SourceTierChoices.class);
+    private final XpMappingVerifier verifier = mock(XpMappingVerifier.class);
     private final AdminAuth auth = mock(AdminAuth.class);
-    private final WebTestClient client = WebTestClient.bindToController(new SourceTierAdminController(service, status, choices, auth))
+    private final WebTestClient client = WebTestClient.bindToController(new SourceTierAdminController(service, status, choices, verifier, auth))
         .controllerAdvice(new GlobalExceptionHandler()).build();
 
     private static final String PUT_BODY = """
@@ -265,6 +266,67 @@ class SourceTierAdminControllerTest {
             .exchange().expectStatus().isForbidden();
         client.post().uri("/admin/source-tiers/anthropic/members").contentType(MediaType.APPLICATION_JSON)
             .bodyValue("{\"expectedVersion\":0,\"removeAccountIds\":[\"x\"]}").exchange().expectStatus().isForbidden();
-        verifyNoInteractions(service, status);
+        client.post().uri("/admin/source-tiers/anthropic/members/relay-1/verify").exchange().expectStatus().isForbidden();
+        client.get().uri("/admin/source-tiers/anthropic/members/relay-1/upstream-models").exchange().expectStatus().isForbidden();
+        verifyNoInteractions(service, status, verifier);
+    }
+
+    @Test
+    void aVerificationIsAskedWithOrWithoutABodyAndAnswersWhatEachProbeFound() {
+        SourceTierDtos.VerifyResult result = new SourceTierDtos.VerifyResult("anthropic", "relay-1", Instant.parse("2026-10-26T08:00:00Z"), false, List.of(
+            new SourceTierDtos.ModelVerification("claude-sonnet-4.5", "relay/sonnet", false, false, List.of(
+                new SourceTierDtos.ProbeResult("basic", "PASSED", "ok", 812, 12L, 3L),
+                new SourceTierDtos.ProbeResult("tool_call", "FAILED", "The relay did not call the function it was asked to call", 640, null, null)),
+                new SourceTierDtos.CacheAdvice(false, null, "call 1: prompt 3", null, "no write", List.of(new SourceTierDtos.CacheCall(3L, 0, 1240))))));
+        when(verifier.verify(eq("anthropic"), eq("relay-1"), any())).thenReturn(Mono.just(result));
+
+        client.post().uri("/admin/source-tiers/anthropic/members/relay-1/verify").exchange().expectStatus().isOk().expectBody()
+            .jsonPath("$.data.vendor").isEqualTo("anthropic")
+            .jsonPath("$.data.verified").isEqualTo(false)
+            .jsonPath("$.data.models[0].modelId").isEqualTo("claude-sonnet-4.5")
+            .jsonPath("$.data.models[0].probes[0].status").isEqualTo("PASSED")
+            .jsonPath("$.data.models[0].probes[0].promptTokens").isEqualTo(12)
+            .jsonPath("$.data.models[0].probes[1].message").isEqualTo("The relay did not call the function it was asked to call")
+            .jsonPath("$.data.models[0].cache.readInPrompt").isEqualTo(false)
+            .jsonPath("$.data.models[0].cache.calls[0].cacheWriteTokens").isEqualTo(1240);
+        client.post().uri("/admin/source-tiers/anthropic/members/relay-1/verify").contentType(MediaType.APPLICATION_JSON)
+            .bodyValue("{\"modelIds\":[\"claude-sonnet-4.5\"],\"cacheProbe\":true}").exchange().expectStatus().isOk();
+
+        ArgumentCaptor<SourceTierDtos.VerifyMember> captured = ArgumentCaptor.forClass(SourceTierDtos.VerifyMember.class);
+        verify(verifier, org.mockito.Mockito.times(2)).verify(eq("anthropic"), eq("relay-1"), captured.capture());
+        assertThat(captured.getAllValues().get(0)).isNull();
+        assertThat(captured.getAllValues().get(1).modelIds()).containsExactly("claude-sonnet-4.5");
+        assertThat(captured.getAllValues().get(1).cacheProbe()).isTrue();
+    }
+
+    @Test
+    void aVerificationOfMoreMappingsThanItProbesIsRefusedBeforeTheVerifierSeesIt() {
+        client.post().uri("/admin/source-tiers/anthropic/members/relay-1/verify").contentType(MediaType.APPLICATION_JSON)
+            .bodyValue("{\"modelIds\":[\"a\",\"b\",\"c\",\"d\",\"e\",\"f\",\"g\",\"h\",\"i\"]}").exchange().expectStatus().isBadRequest();
+        verifyNoInteractions(verifier);
+    }
+
+    @Test
+    void theErrorsOfAVerificationAndOfAModelListKeepTheirCodesAndData() {
+        when(verifier.verify(any(), any(), any())).thenReturn(
+            Mono.error(new ApiException(HttpStatus.TOO_MANY_REQUESTS, "SOURCE_VERIFY_RATE_LIMITED", "wait", Map.of("retryAfterSeconds", 12L))),
+            Mono.error(new ApiException(HttpStatus.NOT_FOUND, "SOURCE_TIER_MEMBER_NOT_FOUND", "not a relay")));
+        client.post().uri("/admin/source-tiers/anthropic/members/relay-1/verify").exchange().expectStatus().isEqualTo(HttpStatus.TOO_MANY_REQUESTS).expectBody()
+            .jsonPath("$.error.code").isEqualTo("SOURCE_VERIFY_RATE_LIMITED")
+            .jsonPath("$.data.retryAfterSeconds").isEqualTo(12);
+        client.post().uri("/admin/source-tiers/anthropic/members/relay-1/verify").exchange().expectStatus().isNotFound().expectBody()
+            .jsonPath("$.error.code").isEqualTo("SOURCE_TIER_MEMBER_NOT_FOUND");
+    }
+
+    @Test
+    void theModelsOfARelayAreListedWithTheWindowTheRelayStates() {
+        when(verifier.upstreamModels("anthropic", "relay-1")).thenReturn(Mono.just(new SourceTierDtos.UpstreamModels(List.of(
+            new SourceTierDtos.UpstreamModel("relay/sonnet", 200_000), new SourceTierDtos.UpstreamModel("relay/haiku", null)), true)));
+
+        client.get().uri("/admin/source-tiers/anthropic/members/relay-1/upstream-models").exchange().expectStatus().isOk().expectBody()
+            .jsonPath("$.data.truncated").isEqualTo(true)
+            .jsonPath("$.data.models[0].id").isEqualTo("relay/sonnet")
+            .jsonPath("$.data.models[0].contextLength").isEqualTo(200000)
+            .jsonPath("$.data.models[1].id").isEqualTo("relay/haiku");
     }
 }

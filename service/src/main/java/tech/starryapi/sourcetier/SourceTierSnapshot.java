@@ -297,6 +297,55 @@ public final class SourceTierSnapshot {
         return exclusiveXpAccountIds;
     }
 
+    /** Whether the account is registered as the exclusive relay of another protocol in any vendor. */
+    public boolean isExclusiveRelay(String accountId) {
+        return accountId != null && exclusiveXpAccountIds.contains(accountId);
+    }
+
+    /**
+     * The model name an account that is registered as a relay is tested with (design 7.4, "tests and retests use the
+     * mapping's wire name"): the name the relay serves a mapped model under, which is not a name the account tests of a
+     * compatible key know (they would turn {@code claude-*} into the vendor's default test model). Empty for an account
+     * that is no relay, and then the test is what it always was.
+     *
+     * <p>A model the administrator named that is one of the relay's mappings is tested under its wire name, and a wire name
+     * is tested as it is. Without a model, or with {@code auto} or {@code simple-task} (the preset the scheduled tests
+     * use), it is the first mapping, in the order of the vendors and then of the catalog ids, those that are switched
+     * on first. Any other model is the first mapping too when the relay is exclusive, since it serves nothing else; a
+     * relay that also serves other models is tested with the model asked for.
+     *
+     * <p>Known consequence, left as design 7.4 says it: the health check of a relay that is not exclusive and also serves
+     * untiered traffic (GLM, say) is the automatic and scheduled test, which asks for {@code auto} and so tests the first
+     * mapping, a Claude model, and may suspend or revive the account for the untiered pool by it. The console warns
+     * about a relay that is not exclusive (design 7.5); whether a preset test of such a relay should keep the model it had
+     * is the owner's decision.
+     */
+    public Optional<String> relayTestModel(String accountId, String requestedModel) {
+        if (accountId == null) {
+            return Optional.empty();
+        }
+        List<Member> relays = vendors.values().stream()
+            .map(index -> index.members.get(accountId))
+            .filter(member -> member != null && member.crossProtocol())
+            .sorted(Comparator.comparing(Member::vendor))
+            .toList();
+        List<MemberModel> models = relays.stream()
+            .flatMap(member -> models(member.vendor(), accountId).stream()
+                .sorted(Comparator.comparing((MemberModel model) -> !model.enabled()).thenComparing(MemberModel::modelId)))
+            .toList();
+        if (models.isEmpty()) {
+            return Optional.empty();
+        }
+        String wanted = requestedModel == null ? "" : requestedModel.strip();
+        for (MemberModel model : models) {
+            if (model.modelId().equalsIgnoreCase(wanted) || model.upstreamModel().equals(wanted)) {
+                return Optional.of(model.upstreamModel());
+            }
+        }
+        boolean preset = wanted.isEmpty() || wanted.equalsIgnoreCase("auto") || wanted.equalsIgnoreCase("simple-task");
+        return preset || relays.stream().anyMatch(Member::exclusive) ? Optional.of(models.getFirst().upstreamModel()) : Optional.empty();
+    }
+
     /** Which of the three rules of {@link #tierOf} put an account into its tier. */
     public enum Rule {
         MEMBER_ROW, CATEGORY, LOWEST_TIER
@@ -345,12 +394,13 @@ public final class SourceTierSnapshot {
      * The enabled accounts of {@code accounts} that {@link #tierOf} puts into each tier of a vendor, by tier id (a tier
      * with none is absent): what the page shows as the size of a tier. Only accounts the vendor's models can reach
      * count, see {@link #routedFor}; a switched-off tier counts its accounts too, since they are placed there and wait.
+     * An exclusive relay of another protocol is no native member of any tier and is not counted.
      */
     public Map<String, Integer> placedAccounts(String vendor, Collection<ProxyAccountEntity> accounts) {
         Predicate<ProxyAccountEntity> reachable = routedFor(vendor);
         Map<String, Integer> counts = new LinkedHashMap<>();
         for (ProxyAccountEntity account : accounts) {
-            if (Boolean.TRUE.equals(account.getEnabled()) && reachable.test(account)) {
+            if (Boolean.TRUE.equals(account.getEnabled()) && reachable.test(account) && !isExclusiveRelay(account.getAccountId())) {
                 placementOf(vendor, account).ifPresent(placement -> counts.merge(placement.tier().tierId(), 1, Integer::sum));
             }
         }

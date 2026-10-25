@@ -20,6 +20,7 @@ import org.springframework.transaction.ReactiveTransactionManager;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
+import tech.starryapi.account.AccountPoolService;
 import tech.starryapi.account.ModelPoolKeyResolver;
 import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.admin.SystemSettingRepository;
@@ -49,6 +50,7 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
     @Autowired ReactiveTransactionManager transactionManager;
     @Autowired SystemSettingRepository settings;
     @Autowired SourceTierRegistry registry;
+    @Autowired AccountPoolService accountPool;
     @Autowired SourceTierAdminService thisRelease;
     @Autowired ModelCatalogProvider catalog;
     @Autowired ModelPoolKeyResolver resolver;
@@ -77,9 +79,15 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
         return new SourceTierDtos.Member(accountId, tierId, null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
+    /** A relay whose prompt tokens contain both caches, the setting that needs no evidence. */
     private static SourceTierDtos.Member relay(String accountId, String tierId, boolean vision, SourceTierDtos.MemberModel... models) {
+        return relay(accountId, tierId, vision, true, true, models);
+    }
+
+    private static SourceTierDtos.Member relay(String accountId, String tierId, boolean vision, boolean readInPrompt, boolean writeInPrompt,
+                                               SourceTierDtos.MemberModel... models) {
         return new SourceTierDtos.Member(accountId, tierId, "OPENAI_CHAT", null, vision, null, null, null, null, null, null,
-            false, true, List.of(models));
+            readInPrompt, writeInPrompt, List.of(models));
     }
 
     private static SourceTierDtos.MemberModel mapping(String modelId, String wire, int context) {
@@ -215,18 +223,15 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
     // ---- what is refused ----
 
     @Test
-    void nothingThisReleaseCannotRunIsStored() {
-        String relay = relayAccount();
-        List<SourceTierDtos.ReplaceVendor> unsupported = List.of(
-            replace(0L, false, List.of(tier("relay", 1, "Relay")), List.of(relay(relay, "relay", false,
-                mapping("claude-sonnet-4.5", "relay/sonnet", 200_000))), List.of()),
+    void aGateThatOpensAPairNoReleaseOffersIsNotStored() {
+        List<SourceTierDtos.ReplaceVendor> notOffered = List.of(
             replace(0L, false, OWNER_TIERS, List.of(), List.of(new SourceTierDtos.Gate(null, "MESSAGES", "KEYS", List.of("key-1")))),
             replace(0L, false, OWNER_TIERS, List.of(), List.of(new SourceTierDtos.Gate(null, "CHAT", "ON", null))));
 
-        for (SourceTierDtos.ReplaceVendor request : unsupported) {
+        for (SourceTierDtos.ReplaceVendor request : notOffered) {
             ApiException refused = rejection(thisRelease.replace("anthropic", request));
-            assertThat(refused.getStatus()).isEqualTo(HttpStatus.CONFLICT);
-            assertThat(refused.getCode()).isEqualTo("SOURCE_TIER_RUNTIME_UNSUPPORTED");
+            assertThat(refused.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+            assertThat(refused.getCode()).isEqualTo("SOURCE_PAIR_NOT_OFFERED");
         }
 
         assertThat(count("SELECT count(*) FROM source_tier_vendors")).isZero();
@@ -234,6 +239,26 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
         assertThat(count("SELECT count(*) FROM source_tier_members")).isZero();
         assertThat(count("SELECT count(*) FROM source_tier_pair_gates")).isZero();
         assertThat(configVersion()).as("a refused change is not a change").isZero();
+    }
+
+    @Test
+    void aRelayRowIsStoredByThisReleaseAndKeepsTheRelayOutOfTheUntieredPools() {
+        String relay = relayAccount();
+
+        SourceTierDtos.Vendor saved = thisRelease.replace("anthropic", replace(0L, false, List.of(tier("relay", 1, "Relay")),
+            List.of(relay(relay, "relay", false, mapping("claude-sonnet-4.5", "relay/sonnet", 200_000))), List.of())).block();
+
+        assertThat(saved.members().getFirst().protocol()).isEqualTo("OPENAI_CHAT");
+        assertThat(saved.members().getFirst().exclusive()).isTrue();
+        // The registry reloads on the configuration version; from then on the exclusion applies to this node.
+        assertThat(registry.exclusiveXpAccountIds()).containsExactly(relay);
+        // The account pool the application runs with reads the same configuration.
+        assertThat(accountPool.exclusiveRelayAccountIds()).containsExactly(relay);
+        assertThat(count("SELECT count(*) FROM source_tier_members")).isEqualTo(1L);
+
+        // Removing the row, or making the relay a shared one, gives the untiered pools their account back.
+        thisRelease.replace("anthropic", replace(saved.version(), false, List.of(tier("relay", 1, "Relay")), List.of(), List.of())).block();
+        assertThat(accountPool.exclusiveRelayAccountIds()).isEmpty();
     }
 
     @Test
@@ -411,12 +436,12 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
         SourceTierDtos.Overview overview = thisRelease.overview().block();
 
         assertThat(overview.configVersion()).isZero();
-        // Native tiering, the selectors and the all-endpoints switch are complete in this release; what the later phases
-        // bring is still off.
+        // Native tiering, the selectors, the all-endpoints switch and the relay rows are complete in this release; no pair
+        // is offered yet.
         assertThat(overview.runtime().nativeTiers()).isTrue();
         assertThat(overview.runtime().selectors()).isTrue();
         assertThat(overview.runtime().unifyEndpoints()).isTrue();
-        assertThat(overview.runtime().xpMembers()).isFalse();
+        assertThat(overview.runtime().xpMembers()).isTrue();
         assertThat(overview.runtime().pairs()).hasSize(12).allSatisfy(pair -> assertThat(pair.status()).isEqualTo("NOT_OFFERED"));
         assertThat(overview.vendors()).extracting(SourceTierDtos.Vendor::vendor).startsWith("anthropic", "openai", "google", "deepseek");
         assertThat(overview.vendors()).allSatisfy(vendor -> {
@@ -477,7 +502,7 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
         assertThat(stored.exclusive()).isTrue();
         assertThat(stored.upstreamStream()).isTrue();
         assertThat(stored.maxDurationSeconds()).isEqualTo(540);
-        assertThat(stored.usageCacheReadInPrompt()).isFalse();
+        assertThat(stored.usageCacheReadInPrompt()).isTrue();
         assertThat(stored.usageCacheWriteInPrompt()).isTrue();
         assertThat(stored.models()).extracting(SourceTierDtos.MemberModel::modelId).containsExactly("claude-haiku-4.5", "claude-sonnet-4.5");
         assertThat(stored.models()).allSatisfy(model -> {
@@ -494,7 +519,7 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
 
         // Saving the same mapping again keeps the verification, summary included; limits and tier do not count.
         SourceTierDtos.Member resaved = new SourceTierDtos.Member(relay, "kiro", "OPENAI_CHAT", false, false, null, null, null, null, null, 300,
-            false, true, List.of(mapping("claude-sonnet-4.5", "relay/sonnet", 50_000)));
+            true, true, List.of(mapping("claude-sonnet-4.5", "relay/sonnet", 50_000)));
         capable.replace("anthropic", replace(1L, true, tiers, List.of(resaved), List.of())).block();
         SourceTierDtos.MemberModel kept = model(capable.overview().block(), relay, "claude-sonnet-4.5");
         assertThat(kept.verified()).isTrue();
@@ -605,17 +630,16 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
     }
 
     @Test
-    void thisReleaseRefusesARelayRowEvenThroughTheMemberEndpoint() {
+    void thisReleaseTakesARelayRowThroughTheMemberEndpointToo() {
         String relay = relayAccount();
         thisRelease.replace("anthropic", replace(0L, false, List.of(tier("relay", 1, "Relay")), List.of(), List.of())).block();
 
-        ApiException refused = rejection(thisRelease.upsertMembers("anthropic", new SourceTierDtos.UpsertMembers(1L,
-            List.of(relay(relay, "relay", false, mapping("claude-sonnet-4.5", "x", 1000))), null)));
+        SourceTierDtos.Vendor saved = thisRelease.upsertMembers("anthropic", new SourceTierDtos.UpsertMembers(1L,
+            List.of(relay(relay, "relay", false, mapping("claude-sonnet-4.5", "x", 1000))), null)).block();
 
-        assertThat(refused.getStatus()).isEqualTo(HttpStatus.CONFLICT);
-        assertThat(refused.getCode()).isEqualTo("SOURCE_TIER_RUNTIME_UNSUPPORTED");
-        assertThat(count("SELECT count(*) FROM source_tier_members")).isZero();
-        assertThat(configVersion()).isEqualTo(1L);
+        assertThat(saved.members()).extracting(SourceTierDtos.Member::accountId).containsExactly(relay);
+        assertThat(count("SELECT count(*) FROM source_tier_members")).isEqualTo(1L);
+        assertThat(configVersion()).isEqualTo(2L);
     }
 
     @Test
@@ -632,7 +656,10 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
 
     // ---- helpers ----
 
-    /** What the verifier of a later task does: stores the fingerprint of the stored mapping and its findings. */
+    /**
+     * Stands in for a verification: stores the fingerprint of the stored mapping and the findings given. The verifier
+     * itself, with its probes, is tested against a relay in XpMappingVerifierPostgreSqlIntegrationTest.
+     */
     private void verify(String accountId, String modelId, String summary) {
         SourceTierSnapshot snapshot = registry.snapshot();
         SourceTierSnapshot.Member member = snapshot.member("anthropic", accountId).orElseThrow();

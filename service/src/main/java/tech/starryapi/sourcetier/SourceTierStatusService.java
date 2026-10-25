@@ -311,6 +311,10 @@ public class SourceTierStatusService {
                 if (!relay && !reaches.test(account)) {
                     return;
                 }
+                // An exclusive relay of another vendor serves none of this vendor's requests either (design 7.5).
+                if (!relay && snapshot.isExclusiveRelay(account.getAccountId())) {
+                    return;
+                }
                 Placement placement = snapshot.placementOf(vendor, account).orElse(null);
                 if (placement == null) {
                     return;
@@ -325,6 +329,7 @@ public class SourceTierStatusService {
                     placement.rule().name(),
                     relay,
                     config.enabled() && runtime.nativeTiers() && placement.tier().enabled()
+                        && (!relay || relayCanServe(snapshot, vendor, member, account))
                 ));
             });
             if (!tiers.isEmpty()) {
@@ -332,6 +337,19 @@ public class SourceTierStatusService {
             }
         }
         return placed;
+    }
+
+    /**
+     * Whether a relay is asked for anything now: an entry of the vendor has a gate that is not off for a pair this
+     * release offers, and one of its mappings that is switched on is verified for what the relay and the account are now
+     * (the planner's conditions 1 and 3, design 3 step 5b). Until then the relay sits in its tier and serves nothing,
+     * and an exclusive one is kept out of the pools of untiered traffic as well.
+     */
+    private boolean relayCanServe(SourceTierSnapshot snapshot, String vendor, Member relay, ProxyAccountEntity account) {
+        boolean opened = snapshot.gates(vendor).stream().anyMatch(gate -> !"OFF".equals(gate.state())
+            && runtime.pairStatus(vendor, gate.sourceProtocol(), gate.entryEndpoint()) != SourceTierRuntimeInfo.PairStatus.NOT_OFFERED);
+        return opened && snapshot.models(vendor, relay.accountId()).stream()
+            .anyMatch(model -> model.enabled() && SourceTierValidator.isVerified(relay, model, account));
     }
 
     // ---- vendors ----

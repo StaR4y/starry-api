@@ -30,6 +30,8 @@ import tech.starryapi.sourcetier.SourceTierSnapshot.Tier;
 import tech.starryapi.sourcetier.SourceTierSnapshot.VendorConfig;
 import tech.starryapi.sourcetier.SourceTierValidator.Config;
 import tech.starryapi.sourcetier.SourceTierValidator.MemberChanges;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
 
 /**
  * Reads and writes the tier configuration for the administrator API. A write replaces everything of one vendor in one
@@ -165,8 +167,7 @@ public class SourceTierAdminService {
         List<SourceTierDtos.MemberModel> models = snapshot.models(member.vendor(), member.accountId()).stream()
             .sorted(Comparator.comparing(MemberModel::modelId))
             .map(model -> new SourceTierDtos.MemberModel(model.modelId(), model.upstreamModel(), model.maxContextTokens(),
-                model.imageTokenCap(), model.enabled(), model.verifiedAt(),
-                model.verifiedHash() != null && model.verifiedHash().equals(SourceTierValidator.mappingFingerprint(member, model, account))))
+                model.imageTokenCap(), model.enabled(), model.verifiedAt(), SourceTierValidator.isVerified(member, model, account)))
             .toList();
         return new SourceTierDtos.Member(member.accountId(), member.tierId(), member.protocol(), member.exclusive(),
             member.vision(), member.jsonSchema(), member.priorityTier(), member.cacheControlPassthrough(),
@@ -199,6 +200,114 @@ public class SourceTierAdminService {
         });
     }
 
+    /** The stored configuration as a snapshot, read from the database and not from this node's copy, which can be 30 seconds behind. */
+    Mono<SourceTierSnapshot> storedSnapshot() {
+        return loader.load();
+    }
+
+    /**
+     * What a run of probes found about the mappings of one relay, as the verifier hands it over. {@code fingerprint} is
+     * the fingerprint of the mapping as it was probed, {@code summary} the report of the probes (an object), {@code
+     * cache} what the cache probe concluded when it ran. {@code passed} is whether every probe passed.
+     */
+    record Probed(String modelId, String fingerprint, boolean passed, Instant at, ObjectNode summary, XpCacheEvidence.Finding cache) {
+    }
+
+    /** What was stored for a mapping: whether it counts as verified now, and the "not contained" setting no evidence shows, if any. */
+    record Recorded(boolean verified, String unprovenCache) {
+    }
+
+    /**
+     * Stores what the probes found, and returns what became of each mapping that was written, by {@link
+     * XpCacheEvidence#key}. A mapping is written only if its fingerprint is still the one it was probed under: the
+     * probes take a while and the administrator may have changed the relay in the meantime, and a verification of a
+     * configuration that is not the stored one must not vouch for it. The write takes the lock of every other write, so
+     * that it cannot meet the replacement of the rows, and bumps the configuration version without the vendor's, so that
+     * a page open for editing is not made to reload because of a probe. A run that passed stores the verification; one
+     * that failed takes it away.
+     *
+     * <p>A passed run is stored as verified only if the member's "not contained" settings are shown by the evidence of
+     * the cache probe, this run's or one stored before for the same relay and name ({@link XpCacheEvidence#merged}).
+     * Saving such a setting asks for it already (see {@link SourceTierValidator#checkCacheEvidence}), but the relay can
+     * move afterwards, and a mapping verified again for the new address must not go on being billed on a setting nobody
+     * showed for it.
+     */
+    Mono<Map<String, Recorded>> recordVerification(String vendor, String accountId, List<Probed> probed) {
+        Mono<Map<String, Recorded>> written = settings.acquireTransactionLock(LOCK)
+            .then(Mono.defer(loader::load))
+            .flatMap(snapshot -> accounts(List.of(accountId)).flatMap(accounts -> {
+                Member member = snapshot.member(vendor, accountId).filter(Member::crossProtocol).orElse(null);
+                if (member == null) {
+                    return Mono.just(Map.<String, Recorded>of());
+                }
+                Map<String, MemberModel> models = new HashMap<>();
+                snapshot.models(vendor, accountId).forEach(model -> models.put(model.modelId().toLowerCase(Locale.ROOT), model));
+                ProxyAccountEntity account = accounts.get(accountId);
+                return storedSummaries(vendor, accountId).flatMap(summaries -> Flux.fromIterable(probed)
+                    .concatMap(run -> {
+                        MemberModel model = models.get(run.modelId().toLowerCase(Locale.ROOT));
+                        if (model == null || !SourceTierValidator.mappingFingerprint(member, model, account).equals(run.fingerprint())) {
+                            return Mono.<Map.Entry<String, Recorded>>empty();
+                        }
+                        String basis = XpCacheEvidence.basis(member, model, account);
+                        ObjectNode cache = XpCacheEvidence.merged(XpCacheEvidence.cacheOf(summaries.get(model.modelId())), run.cache(), basis, run.at());
+                        String unproven = SourceTierValidator.unprovenCache(member, XpCacheEvidence.read(cache).orElse(null), basis);
+                        boolean verified = run.passed() && unproven == null;
+                        ObjectNode summary = run.summary().deepCopy();
+                        if (run.passed() && unproven != null) {
+                            summary.put("passed", false);
+                            ArrayNode probes = summary.has("probes") && summary.get("probes").isArray()
+                                ? (ArrayNode) summary.get("probes") : summary.putArray("probes");
+                            ObjectNode entry = probes.addObject();
+                            entry.put("name", XpProbes.CACHE_EVIDENCE);
+                            entry.put("status", "FAILED");
+                            entry.put("message", XpCacheEvidence.unprovenMessage(unproven));
+                            entry.put("latencyMs", 0);
+                        }
+                        if (cache != null) {
+                            summary.set(XpCacheEvidence.FIELD, cache);
+                        }
+                        return updateVerification(model, run, verified, summary)
+                            .thenReturn(Map.entry(XpCacheEvidence.key(accountId, model.modelId()), new Recorded(verified, unproven)));
+                    })
+                    .collectMap(Map.Entry::getKey, Map.Entry::getValue));
+            }))
+            .flatMap(done -> done.isEmpty() ? Mono.just(done) : bumpConfigVersion().thenReturn(done));
+        return transactions.transactional(written)
+            .flatMap(done -> registry.refresh().onErrorResume(error -> {
+                log.warn("Failed to refresh the source tier configuration after a verification", error);
+                return Mono.empty();
+            }).thenReturn(done));
+    }
+
+    private Mono<Map<String, String>> storedSummaries(String vendor, String accountId) {
+        return db.sql("""
+                SELECT model_id, CAST(verify_summary AS TEXT) AS verify_summary
+                FROM source_tier_member_models
+                WHERE vendor = :vendor AND account_id = :accountId
+                """)
+            .bind("vendor", vendor)
+            .bind("accountId", accountId)
+            .map((row, metadata) -> Map.entry(row.get("model_id", String.class), row.get("verify_summary", String.class)))
+            .all()
+            .collectMap(Map.Entry::getKey, Map.Entry::getValue);
+    }
+
+    private Mono<Void> updateVerification(MemberModel model, Probed run, boolean verified, ObjectNode summary) {
+        GenericExecuteSpec spec = db.sql("""
+                UPDATE source_tier_member_models
+                SET verified_at = :verifiedAt, verified_hash = :verifiedHash, verify_summary = CAST(:summary AS JSONB)
+                WHERE vendor = :vendor AND account_id = :accountId AND model_id = :modelId
+                """)
+            .bind("summary", summary.toString())
+            .bind("vendor", model.vendor())
+            .bind("accountId", model.accountId())
+            .bind("modelId", model.modelId());
+        spec = nullable(spec, "verifiedAt", verified ? run.at() : null, Instant.class);
+        spec = nullable(spec, "verifiedHash", verified ? run.fingerprint() : null, String.class);
+        return spec.then();
+    }
+
     /**
      * The one write path. {@code desired} runs inside the transaction, after the version is known to be the expected one,
      * so a change that depends on what is stored sees what it will replace.
@@ -220,7 +329,11 @@ public class SourceTierAdminService {
                 List<String> accountIds = config.members().stream().map(Member::accountId).toList();
                 return accounts(accountIds).flatMap(accounts -> {
                     validator.checkAccounts(config, accounts);
-                    return store(config, expectedVersion + 1, accounts);
+                    // The stored configuration is read from the database, not from this node's copy, which can be behind.
+                    return Mono.zip(storedVerifications(vendor), loader.load()).flatMap(read -> {
+                        validator.checkCacheEvidence(config, accounts, evidenceOf(read.getT1()), configOf(read.getT2(), vendor));
+                        return store(config, expectedVersion + 1, accounts, read.getT1());
+                    });
                 });
             });
         return transactions.transactional(stored)
@@ -261,13 +374,13 @@ public class SourceTierAdminService {
      * that the write never depends on the order of its inserts. A mapping keeps its verification when the fingerprint of
      * what the verification vouches for is unchanged.
      */
-    private Mono<Void> store(Config config, long version, Map<String, ProxyAccountEntity> accounts) {
+    private Mono<Void> store(Config config, long version, Map<String, ProxyAccountEntity> accounts,
+                             Map<String, Verification> verifications) {
         VendorConfig vendor = config.vendor();
         Map<String, Member> members = new HashMap<>();
         config.members().forEach(member -> members.put(member.accountId(), member));
         return db.sql("SET CONSTRAINTS ALL DEFERRED").then()
-            .then(Mono.defer(() -> storedVerifications(vendor.vendor())))
-            .flatMap(verifications -> upsertVendor(vendor, version)
+            .then(Mono.defer(() -> upsertVendor(vendor, version)
                 .then(Mono.defer(() -> db.sql("DELETE FROM source_tiers WHERE vendor = :vendor")
                     .bind("vendor", vendor.vendor()).then()))
                 .then(Mono.defer(() -> db.sql("DELETE FROM source_tier_pair_gates WHERE vendor = :vendor")
@@ -275,10 +388,10 @@ public class SourceTierAdminService {
                 .thenMany(Flux.fromIterable(config.tiers()).concatMap(this::insertTier))
                 .thenMany(Flux.fromIterable(config.members()).concatMap(this::insertMember))
                 .thenMany(Flux.fromIterable(config.models()).concatMap(model -> insertModel(model, carried(
-                    model, verifications.get(modelKey(model.accountId(), model.modelId())), members.get(model.accountId()),
+                    model, verifications.get(XpCacheEvidence.key(model.accountId(), model.modelId())), members.get(model.accountId()),
                     accounts.get(model.accountId())))))
                 .thenMany(Flux.fromIterable(config.gates()).concatMap(this::insertGate))
-                .then())
+                .then()))
             .then(Mono.defer(this::bumpConfigVersion));
     }
 
@@ -286,26 +399,36 @@ public class SourceTierAdminService {
         static final Verification NONE = new Verification(null, null, "{}");
     }
 
-    private static String modelKey(String accountId, String modelId) {
-        return accountId + '\u0000' + modelId.toLowerCase(Locale.ROOT);
-    }
-
     private static Verification carried(MemberModel model, Verification stored, Member member, ProxyAccountEntity account) {
-        if (stored == null || stored.hash() == null || member == null) {
+        if (stored == null || member == null) {
             return Verification.NONE;
         }
-        return stored.hash().equals(SourceTierValidator.mappingFingerprint(member, model, account)) ? stored : Verification.NONE;
+        if (stored.hash() != null && stored.hash().equals(SourceTierValidator.mappingFingerprint(member, model, account))) {
+            return stored;
+        }
+        // The verification is gone, but what the cache probe saw of the relay stays while it is still about this relay and
+        // this name: the administrator verifies first, and sets the switch it justifies after.
+        String evidence = XpCacheEvidence.carried(stored.summary(), XpCacheEvidence.basis(member, model, account));
+        return evidence == null ? Verification.NONE : new Verification(null, null, evidence);
     }
 
+    private static Map<String, XpCacheEvidence.Stored> evidenceOf(Map<String, Verification> verifications) {
+        Map<String, XpCacheEvidence.Stored> evidence = new HashMap<>();
+        verifications.forEach((key, verification) ->
+            XpCacheEvidence.fromSummary(verification.summary()).ifPresent(stored -> evidence.put(key, stored)));
+        return evidence;
+    }
+
+    /** What is stored about the mappings of a vendor that were probed: a verification, or the evidence of a cache probe. */
     private Mono<Map<String, Verification>> storedVerifications(String vendor) {
         return db.sql("""
                 SELECT account_id, model_id, verified_at, verified_hash, CAST(verify_summary AS TEXT) AS verify_summary
                 FROM source_tier_member_models
-                WHERE vendor = :vendor AND verified_hash IS NOT NULL
+                WHERE vendor = :vendor AND (verified_hash IS NOT NULL OR (verify_summary -> 'cache') IS NOT NULL)
                 """)
             .bind("vendor", vendor)
             .map((row, metadata) -> Map.entry(
-                modelKey(row.get("account_id", String.class), row.get("model_id", String.class)),
+                XpCacheEvidence.key(row.get("account_id", String.class), row.get("model_id", String.class)),
                 new Verification(row.get("verified_at", Instant.class), row.get("verified_hash", String.class),
                     row.get("verify_summary", String.class))))
             .all()

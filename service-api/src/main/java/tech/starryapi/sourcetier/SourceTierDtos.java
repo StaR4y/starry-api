@@ -142,7 +142,9 @@ public final class SourceTierDtos {
      * Something about the stored configuration that is allowed but probably not meant. {@code code} says what, so the
      * console can word it: LOWEST_TIER_COLLECTS_OFFICIAL_KEYS (official API keys that no tier lists fall into the lowest
      * tier, and so are priced at its factor; {@code count} accounts, {@code accountIds} the first few) and
-     * MEMBER_NOT_SERVING_VENDOR (a pinned account is not of a kind the vendor's route uses, so the pin has no effect).
+     * MEMBER_NOT_SERVING_VENDOR (a pinned account is not of a kind the vendor's route uses, so the pin has no effect) and
+     * PIN_ON_EXCLUSIVE_RELAY (a pinned account is the exclusive relay of another protocol in some vendor, so it is no native
+     * member of any pool and the pin has no effect).
      */
     public record Warning(String code, String tierId, int count, List<String> accountIds, String message) {}
 
@@ -177,6 +179,69 @@ public final class SourceTierDtos {
         @Size(max = 200) List<@Valid Member> members,
         @Size(max = 200) List<@NotBlank String> removeAccountIds
     ) {}
+
+    /**
+     * What to verify of a relay ({@code POST /admin/source-tiers/{vendor}/members/{accountId}/verify}); the body may be
+     * left out. {@code modelIds} are the catalog models whose mappings are probed (at most 8; when absent, the mappings
+     * that are switched on, which must then be at most 8), {@code cacheProbe} adds the cache probe (default false): two
+     * prompts of about 1,200 tokens for each mapping, which the operator pays for like every probe. The cache probe is
+     * advice and never decides whether a mapping is verified.
+     */
+    public record VerifyMember(@Size(max = 8) List<@NotBlank @Size(max = 1024) String> modelIds, Boolean cacheProbe) {}
+
+    /**
+     * What a verification found. {@code verified} is true when every mapping probed is verified now. A mapping the
+     * member changed while it was probed ({@code stale}) is left as it is: the probes were about a configuration that is
+     * not the stored one any more, so nothing is written for it.
+     */
+    public record VerifyResult(String vendor, String accountId, Instant at, boolean verified, List<ModelVerification> models) {}
+
+    /**
+     * The probes of one mapping, in the order they ran. {@code verified} is whether the mapping counts as verified
+     * after this run; a run that fails any probe takes a verification away, since the mapping no longer does what it
+     * did. {@code cache} is present when the cache probe ran.
+     */
+    public record ModelVerification(
+        String modelId,
+        String upstreamModel,
+        boolean verified,
+        boolean stale,
+        List<ProbeResult> probes,
+        CacheAdvice cache
+    ) {}
+
+    /**
+     * One probe: {@code name} is basic, tool_call, tool_loop, stream, vision or cache; {@code status} PASSED, FAILED or
+     * SKIPPED. {@code message} is the gateway's own words (a failure of the relay is its status and the type it gave,
+     * never its text). The token counts are what the relay reported, when it reported them.
+     */
+    public record ProbeResult(String name, String status, String message, long latencyMs, Long promptTokens, Long completionTokens) {}
+
+    /**
+     * What the cache probe makes of the relay's cache: {@code readInPrompt} and {@code writeInPrompt} say whether the
+     * relay's prompt tokens already contain the cache read / write, and are null where the probe settles nothing, with
+     * {@code message} then saying why. A member's "not contained" setting is accepted only where this says false for
+     * the mapping. {@code calls} are the counts of the two answers the conclusion rests on.
+     */
+    public record CacheAdvice(
+        Boolean readInPrompt,
+        Boolean writeInPrompt,
+        String readEvidence,
+        String writeEvidence,
+        String message,
+        List<CacheCall> calls
+    ) {}
+
+    public record CacheCall(Long promptTokens, long cacheReadTokens, long cacheWriteTokens) {}
+
+    /**
+     * The models a relay lists ({@code GET /admin/source-tiers/{vendor}/members/{accountId}/upstream-models}), for
+     * filling in the names of a mapping: only names a mapping can use, each once. {@code contextLength} is the window
+     * the relay states for the model, null when it states none. {@code truncated} says that it listed more than 2000.
+     */
+    public record UpstreamModels(List<UpstreamModel> models, boolean truncated) {}
+
+    public record UpstreamModel(String id, Integer contextLength) {}
 
     /**
      * What the node that answers would do with a request of each vendor right now (design 8): the accounts of every tier
@@ -239,7 +304,8 @@ public final class SourceTierDtos {
     /**
      * {@code vendorLabel} is the display name of the vendor. {@code rule} says what put the account there: MEMBER_ROW (it was set by hand), CATEGORY or LOWEST_TIER (no tier
      * lists its category, so it fell into the lowest one). {@code relay} marks an account registered as a relay for
-     * another protocol. {@code active} is whether requests are served from the tier now.
+     * another protocol. {@code active} is whether requests are served from the tier now; for a relay that also needs a
+     * gate that is not off for a pair the release offers, and a mapping that is verified.
      */
     public record Placed(
         String vendor,

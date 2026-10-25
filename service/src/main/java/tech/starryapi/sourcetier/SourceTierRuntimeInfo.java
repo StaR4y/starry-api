@@ -6,6 +6,7 @@ import java.util.Objects;
 import java.util.function.Function;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import tech.starryapi.platform.xproto.PairRegistry;
 
 /**
  * What this release can run of the tiered-source feature. The configuration is stored in the database and outlives the
@@ -14,8 +15,10 @@ import org.springframework.stereotype.Component;
  *
  * <p>A capability is true only once the task that completes its runtime has landed: {@link #nativeTiers()} was set by
  * the end-to-end task of native tiering (P2-09) and {@link #selectors()} by the selector task (P3-01), which the key
- * preference (P3-02) joined; {@link #unifyEndpoints()} by the all-endpoints switch (P3-03). {@link #xpMembers()} is for
- * the exclusive-relay task (P4-10) and is still false. Until the pair registry (P4-01) exists no pair is offered.
+ * preference (P3-02) joined; {@link #unifyEndpoints()} by the all-endpoints switch (P3-03); {@link #xpMembers()} by the
+ * exclusive-relay task (P4-10), which keeps a registered relay out of the pools of untiered traffic. The status of a
+ * pair is what the code's {@link PairRegistry} lists, and it lists none until the converters and fixtures of the first
+ * pairs are written, so a relay can be registered but no pair that would send it requests can be opened yet.
  */
 @Component
 public class SourceTierRuntimeInfo {
@@ -42,10 +45,10 @@ public class SourceTierRuntimeInfo {
 
     @Autowired
     public SourceTierRuntimeInfo() {
-        this(true, true, true, false, pair -> PairStatus.NOT_OFFERED);
+        this(true, true, true, true, statusesOf(PairRegistry.defaults()));
     }
 
-    /** For tests, and for the day the pair registry decides {@code pairStatuses}. */
+    /** For tests that need another answer than the registry's. */
     public SourceTierRuntimeInfo(
         boolean nativeTiers,
         boolean unifyEndpoints,
@@ -67,6 +70,12 @@ public class SourceTierRuntimeInfo {
         this.unifyEndpoints = unifyEndpoints;
         this.xpMembers = xpMembers;
         this.pairStatuses = Objects.requireNonNull(pairStatuses, "pairStatuses");
+    }
+
+    /** The status of a pair as {@code registry} lists it, in the terms of the gate validation. */
+    public static Function<Pair, PairStatus> statusesOf(PairRegistry registry) {
+        Objects.requireNonNull(registry, "registry");
+        return pair -> PairStatus.valueOf(registry.status(pair.vendor(), pair.sourceProtocol(), pair.entryEndpoint()).name());
     }
 
     /** Whether a request is planned over tiers at all, which is what a vendor's {@code enabled} asks for. */

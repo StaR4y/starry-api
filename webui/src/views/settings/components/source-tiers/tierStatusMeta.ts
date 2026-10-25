@@ -202,22 +202,31 @@ export interface BatchPlan {
   unchanged: string[];
   /** 在这个厂商里登记为别的协议的中转的账号，不能当原生账号指定，已跳过 */
   skippedRelay: string[];
+  /** 在别的厂商登记为专用中转的账号：它们不是任何厂商的原生成员，指定了也不会生效，已跳过（取消指定不受影响） */
+  skippedElsewhere: string[];
 }
 
 /**
  * 把一批账号设为某个号池，或取消它们的手动指定。一个账号在一个厂商里只有一行，所以中转账号被跳过；
- * 已经在目标号池里的不重复写。超过 200 行时拆成几条，版本依次加一。
+ * 在别的厂商登记为专用中转的账号（exclusiveElsewhere）设为号池时也被跳过，取消指定时照常处理，好让
+ * 管理员清掉已经无效的旧指定。已经在目标号池里的不重复写。超过 200 行时拆成几条，版本依次加一。
  */
-export function batchPlan(vendor: SourceTierVendor, accountIds: string[], target: string): BatchPlan {
+export function batchPlan(
+  vendor: SourceTierVendor,
+  accountIds: string[],
+  target: string,
+  exclusiveElsewhere: ReadonlySet<string> = new Set(),
+): BatchPlan {
   const relays = new Set(
     vendor.members.filter((member) => member.protocol).map((member) => member.accountId),
   );
   const pinned = new Map(
     vendor.members.filter((member) => !member.protocol).map((member) => [member.accountId, member.tierId]),
   );
-  const plan: BatchPlan = { requests: [], pin: [], unpin: [], unchanged: [], skippedRelay: [] };
+  const plan: BatchPlan = { requests: [], pin: [], unpin: [], unchanged: [], skippedRelay: [], skippedElsewhere: [] };
   for (const accountId of new Set(accountIds)) {
     if (relays.has(accountId)) plan.skippedRelay.push(accountId);
+    else if (target !== UNPIN && exclusiveElsewhere.has(accountId)) plan.skippedElsewhere.push(accountId);
     else if (target === UNPIN) (pinned.has(accountId) ? plan.unpin : plan.unchanged).push(accountId);
     else (pinned.get(accountId) === target ? plan.unchanged : plan.pin).push(accountId);
   }

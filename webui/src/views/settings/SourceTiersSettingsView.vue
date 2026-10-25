@@ -40,6 +40,7 @@
     draftOf,
     draftSignature,
     enableNote,
+    exclusiveRelayIds,
     newTier,
     placedCounts,
     replaceRequest,
@@ -352,9 +353,18 @@
   const placed = computed(() =>
     current.value ? placedCounts(current.value.loaded, current.value.draft) : {},
   );
-  const relayAccountIds = computed(
-    () => current.value?.draft.relayMembers.map((member) => member.accountId) ?? [],
-  );
+  /**
+   * 不能再被固定的账号：这个厂商草稿里登记为中转的（它们已有成员行），以及在别的厂商登记为专用中转的
+   * （按已保存的配置；它们不是任何厂商的原生成员，固定了也不会生效）
+   */
+  const relayAccountIds = computed(() => [
+    ...(current.value?.draft.relayMembers.map((member) => member.accountId) ?? []),
+    ...exclusiveRelayIds(
+      Object.entries(vendors)
+        .filter(([vendorId]) => vendorId !== active.value)
+        .map(([, entry]) => entry.loaded),
+    ),
+  ]);
 
   /* ---------- 警告与说明 ---------- */
 
@@ -388,6 +398,16 @@
             p0: warning.accountIds.join('、'),
             p1: name,
           }),
+          detail: '',
+        };
+      }
+      if (warning.code === 'PIN_ON_EXCLUSIVE_RELAY') {
+        return {
+          key: `${warning.code}:${warning.accountIds.join(',')}`,
+          title: t(
+            '账号 {p0} 在别的厂商登记为专用中转，不是任何号池的原生成员，固定到「{p1}」不会生效。',
+            { p0: warning.accountIds.join('、'), p1: name },
+          ),
           detail: '',
         };
       }

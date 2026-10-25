@@ -2420,5 +2420,8 @@
   "Claude Code 的链接把号池写在模型名后面（模型@号池），那是对每个请求的要求：所选号池用不了时（它的账号都被停用或挂起，或管理员关闭了它、不再允许选择），请求会被拒绝（400 或 403），不会像请求头那样照常服务。": "The Claude Code link writes the tier after the model name (model@tier), which is a demand on every request: when the chosen tier cannot be used (all its accounts are disabled or suspended, or the administrator closed it or no longer lets it be chosen), requests are refused (400 or 403) and are not served as usual, as they are with the header.",
   "配置里不写号池；请求按这把 Key 的号源偏好，没有就自动": "No tier is written into the configuration; requests follow the tier preference of this key, or automatic when it has none",
   "{p0} 级。复制 {p1}：请求只由这个号池服务": "Tier {p0}. Copy {p1}: requests are served by this tier alone",
-  "{p0} 级。请求不能指定这个号池": "Tier {p0}. Requests cannot name this tier"
+  "{p0} 级。请求不能指定这个号池": "Tier {p0}. Requests cannot name this tier",
+  "账号 {p0} 在别的厂商登记为专用中转，不是任何号池的原生成员，固定到「{p1}」不会生效。": "Account {p0} is registered as an exclusive relay in another vendor and is no native member of any tier, so pinning it to \"{p1}\" has no effect.",
+  "是别的厂商的专用中转，固定无效": "An exclusive relay of another vendor; the pin has no effect",
+  "{p0} 个账号在别的厂商登记为专用中转，不属于任何号池的原生账号，已跳过": "{p0} accounts are registered as exclusive relays in another vendor and are no native members of any tier; they were skipped"
 }

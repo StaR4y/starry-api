@@ -379,6 +379,39 @@ class DefaultSourceTierPlannerTest {
     }
 
     @Test
+    void anExclusiveRelayIsNoMemberOfTheCompatibleCellOfAVendorThatHasNoRowForIt() {
+        // The relay serves Claude (its row is in the anthropic vendor). The openai vendor has no row for it, which would
+        // put it into its lowest tier through the OpenAI-compatible cell, where GLM-like traffic is served.
+        loaded(snapshot(List.of(vendor("anthropic", true), vendor("openai", true)),
+            concat(anthropicTiers(), openAiTiers()), List.of(relayMember("anthropic", "relay", "official"))));
+        cached.add(relay);
+        usable.add(relay);
+
+        TierPlan plan = plan(with(openAiRequest(false, false), false, true, false, false));
+
+        assertThat(plan.levels()).isNotEmpty().allSatisfy(level -> {
+            assertThat(level.cells()).containsExactly(PoolCell.OPENAI_COMPATIBLE);
+            assertThat(plan.holds(level, relay)).as(level.tierRef()).isFalse();
+            assertThat(plan.permits(level, PoolCell.OPENAI_COMPATIBLE, relay)).as(level.tierRef()).isFalse();
+        });
+    }
+
+    @Test
+    void aRelayThatIsNotExclusiveStaysInTheLowestTierOfTheCompatibleCellOfOtherVendors() {
+        loaded(snapshot(List.of(vendor("anthropic", true), vendor("openai", true)),
+            concat(anthropicTiers(), openAiTiers()), List.of(relayMember("anthropic", "relay", "official", false))));
+        cached.add(relay);
+        usable.add(relay);
+
+        TierPlan plan = plan(with(openAiRequest(false, false), false, true, false, false));
+
+        Level lowest = plan.levels().getLast();
+        assertThat(lowest.tierId()).isEqualTo("codex");
+        assertThat(plan.holds(lowest, relay)).isTrue();
+        assertThat(plan.permits(lowest, PoolCell.OPENAI_COMPATIBLE, relay)).isTrue();
+    }
+
+    @Test
     void anAccountOfAnotherFamilyIsNotHeldByATierOfACategoryItSharesWithOpenAiKeys() {
         loaded(snapshot(List.of(vendor("openai", true)), openAiTiers(), List.of()));
         TierPlan plan = plan(openAiRequest(false, false));
@@ -827,8 +860,18 @@ class DefaultSourceTierPlannerTest {
     }
 
     private static Member relayMember(String vendor, String accountId, String tierId) {
-        return new Member(vendor, accountId, tierId, "OPENAI_CHAT", true, false, false, false, false, true, "NONE", 540,
+        return relayMember(vendor, accountId, tierId, true);
+    }
+
+    private static Member relayMember(String vendor, String accountId, String tierId, boolean exclusive) {
+        return new Member(vendor, accountId, tierId, "OPENAI_CHAT", exclusive, false, false, false, false, true, "NONE", 540,
             true, true);
+    }
+
+    private static <T> List<T> concat(List<T> first, List<T> second) {
+        List<T> all = new ArrayList<>(first);
+        all.addAll(second);
+        return all;
     }
 
     private static ProxyAccountEntity account(String accountId, String provider, String authMethod, String baseUrl) {

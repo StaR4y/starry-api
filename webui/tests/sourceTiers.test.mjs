@@ -25,7 +25,7 @@ const compiled = await build({
 const meta = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputFiles[0].text).toString('base64')}`);
 const {
   draftOf, replaceRequest, draftSignature, tierProblems, validateDraft, unsupportedMessage, enableNote, unifyNote, tierPresets, placedCounts,
-  pinChoices, DEFAULT_REFUSAL_CAP,
+  pinChoices, exclusiveRelayIds, DEFAULT_REFUSAL_CAP,
   layerSegments, layerTotal, degradedPercent, degradedTone, notServingReason, placementsByAccount, tierFilterOptions,
   matchesTierFilter, placedLabel, placedHint, placementVendorCount, batchPlan, UNPIN, NO_TIER_FILTER, MAX_BATCH_MEMBERS,
   vendorOfProvider, previewTiers, reviewTier, reviewTierLabel, suggestedCredits, perMillion, reservedMinusEstimate,
@@ -372,6 +372,44 @@ test('only accounts without a member row can be pinned, found by e-mail or accou
   assert.deepEqual(pinChoices(accounts, pins, ['relay-1'], '  TWO@exa ').map((a) => a.accountId), ['acc-2']);
   assert.deepEqual(pinChoices(accounts, pins, ['relay-1'], 'ACC-4').map((a) => a.accountId), ['acc-4']);
   assert.deepEqual(pinChoices(accounts, pins, ['relay-1'], 'relay').map((a) => a.accountId), []);
+});
+
+test('an exclusive relay of another vendor is no native member anywhere, so it cannot be pinned', () => {
+  const sharedRelay = { ...relay, accountId: 'shared-relay', exclusive: false };
+  const unspecified = { ...relay, accountId: 'default-relay', exclusive: null };
+  const anthropic = vendor({ members: [nativeRow('pinned-kiro', 'kiro'), relay, sharedRelay, unspecified] });
+  const zhipu = vendor({ vendor: 'zhipu', members: [nativeRow('glm-1', 'direct')] });
+
+  // Exclusive is the default; only a relay that also serves untiered traffic (exclusive: false) is a native member too.
+  assert.deepEqual(exclusiveRelayIds([anthropic, zhipu]).sort(), ['default-relay', 'relay-1']);
+  assert.deepEqual(exclusiveRelayIds([zhipu]), []);
+  assert.deepEqual(exclusiveRelayIds([]), []);
+
+  const accounts = [{ accountId: 'relay-1', email: 'r@example.com' }, { accountId: 'glm-1', email: 'g@example.com' }, { accountId: 'glm-2', email: 'h@example.com' }];
+  const taken = [...exclusiveRelayIds([anthropic])];
+  assert.deepEqual(pinChoices(accounts, [{ accountId: 'glm-1', tierKey: 'k' }], taken, '').map((a) => a.accountId), ['glm-2']);
+});
+
+test('setting accounts to a tier skips the exclusive relays of other vendors, but not when taking the pinning away', () => {
+  const zhipu = vendor({ vendor: 'zhipu', version: 3, tiers: [tier('direct', 1)], members: [nativeRow('stale-pin', 'direct')] });
+  const elsewhere = new Set(['relay-1', 'stale-pin']);
+
+  const pinning = batchPlan(zhipu, ['glm-1', 'relay-1', 'stale-pin'], 'direct', elsewhere);
+  assert.deepEqual(pinning.pin, ['glm-1']);
+  assert.deepEqual(pinning.skippedElsewhere, ['relay-1', 'stale-pin']);
+  assert.deepEqual(pinning.skippedRelay, []);
+  assert.deepEqual(pinning.requests.map((request) => request.members.map((member) => member.accountId)), [['glm-1']]);
+
+  // A pin that was saved before the relay was registered can be removed.
+  const unpinning = batchPlan(zhipu, ['glm-1', 'relay-1', 'stale-pin'], UNPIN, elsewhere);
+  assert.deepEqual(unpinning.unpin, ['stale-pin']);
+  assert.deepEqual(unpinning.unchanged, ['glm-1', 'relay-1']);
+  assert.deepEqual(unpinning.skippedElsewhere, []);
+  assert.deepEqual(unpinning.requests, [{ expectedVersion: 3, removeAccountIds: ['stale-pin'] }]);
+
+  // Without the set, as before.
+  assert.deepEqual(batchPlan(zhipu, ['relay-1'], 'direct').pin, ['relay-1']);
+  assert.deepEqual(batchPlan(zhipu, ['relay-1'], 'direct').skippedElsewhere, []);
 });
 
 /* ---------- status panel, account list, pricing preview, billing review, request log (P2-07) ---------- */

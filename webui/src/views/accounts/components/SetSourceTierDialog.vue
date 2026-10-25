@@ -16,6 +16,7 @@
     type SourceTierVendor,
   } from '@/api/sourceTiers';
   import type { Account } from '@/types/api';
+  import { exclusiveRelayIds } from '@/views/settings/components/source-tiers/sourceTiersMeta';
   import { UNPIN, batchPlan } from '@/views/settings/components/source-tiers/tierStatusMeta';
 
   const props = defineProps<{
@@ -36,6 +37,8 @@
   const state = ref<'loading' | 'ready' | 'error'>('loading');
   const loadError = ref('');
   const vendors = ref<SourceTierVendor[]>([]);
+  /** 所有厂商（含还没有号池的），用来找出在别的厂商登记为专用中转的账号 */
+  const allVendors = ref<SourceTierVendor[]>([]);
   const vendorId = ref('');
   const target = ref('');
   const saving = ref(false);
@@ -45,12 +48,18 @@
   const tiers = computed(() =>
     [...(vendor.value?.tiers ?? [])].sort((a, b) => a.level - b.level),
   );
+  /** 在别的厂商登记为专用中转的账号：它们不是任何厂商的原生成员，指定到这个厂商也不会生效 */
+  const exclusiveElsewhere = computed(
+    () =>
+      new Set(exclusiveRelayIds(allVendors.value.filter((item) => item.vendor !== vendorId.value))),
+  );
   const plan = computed(() =>
     vendor.value && target.value
       ? batchPlan(
           vendor.value,
           props.accounts.map((account) => account.accountId),
           target.value,
+          exclusiveElsewhere.value,
         )
       : null,
   );
@@ -62,6 +71,7 @@
     loadError.value = '';
     try {
       const overview = await sourceTiersApi.overview();
+      allVendors.value = overview.vendors;
       // 只有已经有号池的厂商才能把账号放进去
       vendors.value = overview.vendors.filter((item) => item.tiers.length > 0);
       if (!vendors.value.some((item) => item.vendor === vendorId.value)) {
@@ -218,6 +228,13 @@
           {{
             t('{p0} 个账号在这个厂商里登记为跨协议中转，不能在这里改，已跳过', {
               p0: plan.skippedRelay.length,
+            })
+          }}
+        </li>
+        <li v-if="plan.skippedElsewhere.length" class="is-muted">
+          {{
+            t('{p0} 个账号在别的厂商登记为专用中转，不属于任何号池的原生账号，已跳过', {
+              p0: plan.skippedElsewhere.length,
             })
           }}
         </li>

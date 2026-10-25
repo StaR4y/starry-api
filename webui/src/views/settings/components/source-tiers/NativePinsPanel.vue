@@ -21,9 +21,9 @@
     pins: PinDraft[];
     tiers: TierDraft[];
     accounts: Account[];
-    /** 草稿里登记为中转的账号：它们已有成员行，不能再被固定 */
+    /** 不能再被固定的账号：草稿里登记为中转的（已有成员行），以及在别的厂商登记为专用中转的（固定无效） */
     relayAccountIds: string[];
-    /** 已保存配置的警告：这里只用 MEMBER_NOT_SERVING_VENDOR 标出无效的固定 */
+    /** 已保存配置的警告：这里只用 MEMBER_NOT_SERVING_VENDOR 和 PIN_ON_EXCLUSIVE_RELAY 标出无效的固定 */
     warnings: SourceTierWarning[];
     disabled?: boolean;
   }>();
@@ -37,6 +37,14 @@
       new Set(
         props.warnings
           .filter((warning) => warning.code === 'MEMBER_NOT_SERVING_VENDOR')
+          .flatMap((warning) => warning.accountIds),
+      ),
+  );
+  const exclusiveRelays = computed(
+    () =>
+      new Set(
+        props.warnings
+          .filter((warning) => warning.code === 'PIN_ON_EXCLUSIVE_RELAY')
           .flatMap((warning) => warning.accountIds),
       ),
   );
@@ -122,6 +130,14 @@
           />
           <el-tag v-if="notServing.has(pin.accountId)" size="small" type="warning" effect="plain">
             {{ t('不属于该厂商的路由，固定无效') }}
+          </el-tag>
+          <el-tag
+            v-if="exclusiveRelays.has(pin.accountId)"
+            size="small"
+            type="warning"
+            effect="plain"
+          >
+            {{ t('是别的厂商的专用中转，固定无效') }}
           </el-tag>
         </span>
         <span class="pin-tier" role="cell">

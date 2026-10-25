@@ -24,6 +24,7 @@ import tech.starryapi.platform.kiro.KiroPayloadFactory;
 import tech.starryapi.platform.kiro.KiroUpstreamClient;
 import tech.starryapi.platform.openai.OpenAiAccountTestClient;
 import tech.starryapi.platform.upstream.UpstreamException;
+import tech.starryapi.sourcetier.SourceTierRegistry;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
@@ -107,6 +108,7 @@ public class AccountTestService {
     private final OpenAiAccountTestClient openAiAccountTestClient;
     private final AnthropicUpstreamClient anthropicUpstreamClient;
     private final DefaultModelCatalogProvider modelCatalog;
+    private final SourceTierRegistry tierRegistry;
 
     public AccountTestService(
         ObjectMapper objectMapper,
@@ -129,7 +131,6 @@ public class AccountTestService {
         );
     }
 
-    @Autowired
     public AccountTestService(
         ObjectMapper objectMapper,
         ProxyAccountRepository repository,
@@ -140,6 +141,35 @@ public class AccountTestService {
         AnthropicUpstreamClient anthropicUpstreamClient,
         DefaultModelCatalogProvider modelCatalog
     ) {
+        this(
+            objectMapper,
+            repository,
+            accountPoolService,
+            payloadFactory,
+            upstreamClient,
+            openAiAccountTestClient,
+            anthropicUpstreamClient,
+            modelCatalog,
+            null
+        );
+    }
+
+    /**
+     * @param tierRegistry tells which accounts are relays for another vendor's models and what the relay calls them; null
+     *                     (or a registry that has not loaded) tests every account as before
+     */
+    @Autowired
+    public AccountTestService(
+        ObjectMapper objectMapper,
+        ProxyAccountRepository repository,
+        AccountPoolService accountPoolService,
+        KiroPayloadFactory payloadFactory,
+        KiroUpstreamClient upstreamClient,
+        OpenAiAccountTestClient openAiAccountTestClient,
+        AnthropicUpstreamClient anthropicUpstreamClient,
+        DefaultModelCatalogProvider modelCatalog,
+        SourceTierRegistry tierRegistry
+    ) {
         this.objectMapper = objectMapper;
         this.repository = repository;
         this.accountPoolService = accountPoolService;
@@ -148,6 +178,7 @@ public class AccountTestService {
         this.openAiAccountTestClient = openAiAccountTestClient;
         this.anthropicUpstreamClient = anthropicUpstreamClient;
         this.modelCatalog = modelCatalog == null ? new DefaultModelCatalogProvider() : modelCatalog;
+        this.tierRegistry = tierRegistry;
     }
 
     public Mono<AccountDtos.TestAccountsResponse> test(AccountDtos.TestAccountsRequest request) {
@@ -204,7 +235,7 @@ public class AccountTestService {
 
         ProxyAccountEntity account = target.account();
         String requestedModel = firstNonBlank(request.model(), DEFAULT_MODEL);
-        String model = testModel(requestedModel, account);
+        String model = relayTestModel(account, requestedModel).orElseGet(() -> testModel(requestedModel, account));
         boolean updateStatus = !Boolean.FALSE.equals(request.updateStatus());
         String skipReason = skipReason(account, request, updateStatus);
         if (skipReason != null) {
@@ -267,6 +298,18 @@ public class AccountTestService {
                         model
                     ));
             });
+    }
+
+    /**
+     * The name a relay for another vendor's models is tested with: the name it serves a mapped model under (design 7.4).
+     * What {@link #testModel} makes of a Claude model for a compatible key is the vendor's default test model, which the
+     * relay may not serve at all and which would fail a healthy relay or pass a broken one.
+     */
+    private Optional<String> relayTestModel(ProxyAccountEntity account, String requestedModel) {
+        if (tierRegistry == null || !tierRegistry.loaded()) {
+            return Optional.empty();
+        }
+        return tierRegistry.snapshot().relayTestModel(account.getAccountId(), requestedModel);
     }
 
     private Mono<PlatformCompletionResult> testKiro(

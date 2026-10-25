@@ -11,6 +11,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -57,9 +58,11 @@ public class SourceTierValidator {
     static final String PAIR_NOT_OFFERED = "SOURCE_PAIR_NOT_OFFERED";
     static final String PAIR_GATE_FORBIDDEN = "SOURCE_PAIR_GATE_FORBIDDEN";
     static final String RUNTIME_UNSUPPORTED = "SOURCE_TIER_RUNTIME_UNSUPPORTED";
+    static final String CACHE_EVIDENCE_REQUIRED = "SOURCE_TIER_CACHE_EVIDENCE_REQUIRED";
 
     public static final String WARNING_LOWEST_TIER_COLLECTS_OFFICIAL_KEYS = "LOWEST_TIER_COLLECTS_OFFICIAL_KEYS";
     public static final String WARNING_MEMBER_NOT_SERVING_VENDOR = "MEMBER_NOT_SERVING_VENDOR";
+    public static final String WARNING_PIN_ON_EXCLUSIVE_RELAY = "PIN_ON_EXCLUSIVE_RELAY";
 
     private static final int DEFAULT_IMAGE_TOKEN_CAP = 8192;
     private static final int DEFAULT_MAX_DURATION_SECONDS = 540;
@@ -535,6 +538,101 @@ public class SourceTierValidator {
         }
     }
 
+    /**
+     * Refuses a member that says the relay's prompt tokens do not contain its cache read or write without the evidence
+     * of a cache probe (design 5.8, 7.4). Billing adds those counts to the input for such a member, so a switch set
+     * there by mistake bills the cache twice, where the other way only bills too little. The evidence is looked for
+     * on every mapping of the member that is switched on, for the very relay and name it was seen for
+     * ({@link XpCacheEvidence#basis}); it is stored by the verification and survives a save, which is what lets the
+     * administrator verify first and set the switch after.
+     *
+     * @param evidence what the probes stored, by {@link XpCacheEvidence#key}
+     */
+    void checkCacheEvidence(Config config, Map<String, ProxyAccountEntity> accounts, Map<String, XpCacheEvidence.Stored> evidence) {
+        checkCacheEvidence(config, accounts, evidence, null);
+    }
+
+    /**
+     * As above, but a mapping this write leaves as the vendor had it is not asked again. What the evidence is about
+     * includes where the account sends the request, which the account page can change at any time: a relay that was moved
+     * would otherwise refuse every change to the vendor, the tier factors and the pins of other accounts included, and
+     * nothing in the console can put that right. A moved relay does not serve in the meantime, as the verification is
+     * gone with it ({@link #mappingFingerprint}), and cannot be verified again without the evidence ({@code
+     * SourceTierAdminService#recordVerification}). What the evidence shows against the setting, for this very relay and
+     * name, is still refused: that is no lack of evidence but a setting that is known to bill the cache twice.
+     *
+     * @param stored the vendor as it was before the write; null checks every mapping
+     */
+    void checkCacheEvidence(
+        Config config,
+        Map<String, ProxyAccountEntity> accounts,
+        Map<String, XpCacheEvidence.Stored> evidence,
+        Config stored
+    ) {
+        for (Member member : config.members()) {
+            ProxyAccountEntity account = accounts.get(member.accountId());
+            for (MemberModel model : config.models()) {
+                if (!model.accountId().equals(member.accountId()) || !model.enabled()) {
+                    continue;
+                }
+                XpCacheEvidence.Stored seen = evidence.get(XpCacheEvidence.key(model.accountId(), model.modelId()));
+                String basis = XpCacheEvidence.basis(member, model, account);
+                if (unchanged(stored, member, model) && !contradicts(member, seen, basis)) {
+                    continue;
+                }
+                String unproven = unprovenCache(member, seen, basis);
+                if (unproven != null) {
+                    throw new ApiException(HttpStatus.BAD_REQUEST, CACHE_EVIDENCE_REQUIRED, "Account " + member.accountId() + ", model "
+                        + model.modelId() + ": the relay's prompt tokens are said not to contain the " + unproven + ", which only the"
+                        + " cache probe of the verification can show for this relay and model. Verify the relay with the cache probe"
+                        + " first, and save the setting after.");
+                }
+            }
+        }
+    }
+
+    /** Whether the evidence, which fits this relay and name, shows the prompt to contain what the member says it does not. */
+    private static boolean contradicts(Member member, XpCacheEvidence.Stored seen, String basis) {
+        if (seen == null || !seen.basis().equals(basis)) {
+            return false;
+        }
+        return (member.crossProtocol() && Boolean.FALSE.equals(member.usageCacheReadInPrompt()) && Boolean.TRUE.equals(seen.readInPrompt()))
+            || (member.crossProtocol() && Boolean.FALSE.equals(member.usageCacheWriteInPrompt()) && Boolean.TRUE.equals(seen.writeInPrompt()));
+    }
+
+    /**
+     * Whether the vendor already had this mapping of this member, with the settings the evidence depends on (the two cache
+     * switches, the stream setting and the relay's name for the model) as they are now: the write does not touch it.
+     */
+    private static boolean unchanged(Config stored, Member member, MemberModel model) {
+        if (stored == null) {
+            return false;
+        }
+        Member before = stored.members().stream().filter(candidate -> candidate.accountId().equals(member.accountId())).findFirst()
+            .orElse(null);
+        if (before == null || !before.crossProtocol() || !Objects.equals(before.usageCacheReadInPrompt(), member.usageCacheReadInPrompt())
+            || !Objects.equals(before.usageCacheWriteInPrompt(), member.usageCacheWriteInPrompt())
+            || before.upstreamStream() != member.upstreamStream()) {
+            return false;
+        }
+        return stored.models().stream().anyMatch(candidate -> candidate.accountId().equals(member.accountId())
+            && candidate.modelId().equalsIgnoreCase(model.modelId()) && candidate.upstreamModel().equals(model.upstreamModel()));
+    }
+
+    /**
+     * What the member says its relay's prompt does not contain that {@code seen} does not show for the relay and name
+     * {@code basis} stands for: "cache read", "cache write", both, or null when everything it says is shown (or it says
+     * nothing that needs showing). "Contained" is the safe thing to say and is never asked for evidence.
+     */
+    static String unprovenCache(Member member, XpCacheEvidence.Stored seen, String basis) {
+        boolean readNotContained = member.crossProtocol() && Boolean.FALSE.equals(member.usageCacheReadInPrompt());
+        boolean writeNotContained = member.crossProtocol() && Boolean.FALSE.equals(member.usageCacheWriteInPrompt());
+        boolean fits = seen != null && seen.basis().equals(basis);
+        boolean readUnproved = readNotContained && !(fits && Boolean.FALSE.equals(seen.readInPrompt()));
+        boolean writeUnproved = writeNotContained && !(fits && Boolean.FALSE.equals(seen.writeInPrompt()));
+        return readUnproved && writeUnproved ? "cache read and the cache write" : readUnproved ? "cache read" : writeUnproved ? "cache write" : null;
+    }
+
     // ---- warnings ----
 
     /**
@@ -571,14 +669,20 @@ public class SourceTierValidator {
                     + " List OFFICIAL_API_KEY in the tier that should own them."));
         }
 
-        // A pin matters for the accounts the vendor's models can reach.
+        // A pin matters for the accounts the vendor's models can reach, and for accounts that are not the exclusive relay of another protocol.
         Predicate<ProxyAccountEntity> reachable = SourceTierSnapshot.routedFor(vendor);
         Map<String, ProxyAccountEntity> byId = new HashMap<>();
         accounts.forEach(account -> byId.put(account.getAccountId(), account));
         snapshot.members(vendor).stream().filter(member -> !member.crossProtocol()).sorted(Comparator.comparing(Member::accountId))
             .forEach(member -> {
                 ProxyAccountEntity account = byId.get(member.accountId());
-                if (account != null && !reachable.test(account)) {
+                if (snapshot.isExclusiveRelay(member.accountId())) {
+                    // The relay of another vendor serves nothing natively, here included (TierMembership.nativeTierOf).
+                    warnings.add(new Warning(WARNING_PIN_ON_EXCLUSIVE_RELAY, member.tierId(), 1, List.of(member.accountId()),
+                        "Account " + member.accountId() + " is pinned to tier " + member.tierId() + " but is registered as the"
+                            + " exclusive relay of another protocol, which serves no native requests of any vendor, so the pin"
+                            + " has no effect."));
+                } else if (account != null && !reachable.test(account)) {
                     warnings.add(new Warning(WARNING_MEMBER_NOT_SERVING_VENDOR, member.tierId(), 1, List.of(member.accountId()),
                         "Account " + member.accountId() + " is pinned to tier " + member.tierId() + " but is not a kind of account"
                             + " that any route to " + vendor + " models uses, so the pin has no effect."));
@@ -588,6 +692,15 @@ public class SourceTierValidator {
     }
 
     // ---- fingerprint ----
+
+    /**
+     * Whether a mapping counts as verified: a verification is stored and what it vouched for is what the mapping, the
+     * member and the account are now. This is the question the planner asks before a mapping may serve (design 3 step 5b,
+     * condition 3); the console shows the same answer.
+     */
+    public static boolean isVerified(Member member, MemberModel model, ProxyAccountEntity account) {
+        return model.verifiedHash() != null && model.verifiedHash().equals(mappingFingerprint(member, model, account));
+    }
 
     /**
      * Identifies what a verification of a mapping vouches for: the relay settings that shape the request and the reading
@@ -615,7 +728,7 @@ public class SourceTierValidator {
     }
 
     // The length first, so that no two lists of values can read the same.
-    private static void field(StringBuilder canonical, Object value) {
+    static void field(StringBuilder canonical, Object value) {
         String text = value == null ? "" : value.toString();
         canonical.append(text.length()).append(':').append(text).append(';');
     }
@@ -642,7 +755,7 @@ public class SourceTierValidator {
         return new ApiException(HttpStatus.BAD_REQUEST, MEMBER_INVALID, message);
     }
 
-    private static ApiException notApplicable(String vendor) {
+    static ApiException notApplicable(String vendor) {
         return new ApiException(HttpStatus.BAD_REQUEST, PROFILE_NOT_APPLICABLE, "Cross-protocol relays only serve "
             + String.join(", ", SourceTierRuntimeInfo.CROSS_PROTOCOL_VENDORS) + "; " + vendor
             + " already uses compatible API keys as its own accounts");

@@ -10,7 +10,7 @@ import tech.starryapi.sourcetier.SourceTierRuntimeInfo.PairStatus;
 class SourceTierRuntimeInfoTest {
 
     @Test
-    void thisReleaseRunsTheNativeTiersTheSelectorsAndTheAllEndpointsSwitchAndNothingElseOfTheFeatureYet() {
+    void thisReleaseRunsTheNativeTiersTheSelectorsTheAllEndpointsSwitchAndTheRelayRowsAndOpensNoPairYet() {
         SourceTierRuntimeInfo runtime = new SourceTierRuntimeInfo();
 
         // Native tiering (P2-09), the selectors (P3-01) and the all-endpoints switch (P3-03) are complete: requests are
@@ -19,8 +19,9 @@ class SourceTierRuntimeInfoTest {
         assertThat(runtime.nativeTiers()).isTrue();
         assertThat(runtime.selectors()).isTrue();
         assertThat(runtime.unifyEndpoints()).isTrue();
-        // What the later phases bring is still off, so that nothing is stored that only a later release would run.
-        assertThat(runtime.xpMembers()).isFalse();
+        // A relay can be registered (P4-10): the pools of untiered traffic leave it out from then on.
+        assertThat(runtime.xpMembers()).isTrue();
+        // What the cross-protocol phases bring is still off: no pair is offered, so no gate can be opened.
         assertThat(runtime.pairs()).isNotEmpty().allSatisfy(pair ->
             assertThat(runtime.pairStatus(pair.vendor(), pair.sourceProtocol(), pair.entryEndpoint())).isEqualTo(PairStatus.NOT_OFFERED));
     }

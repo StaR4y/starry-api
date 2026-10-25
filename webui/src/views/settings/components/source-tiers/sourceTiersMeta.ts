@@ -210,8 +210,23 @@ export function placedCounts(loaded: SourceTierVendor, draft: VendorDraft): Reco
 }
 
 /**
+ * 在这些厂商里登记为专用中转（exclusive，缺省为是）的账号。它们不是任何厂商的原生成员，固定到别的厂商
+ * 也不会生效（后端路由和状态页都把它们排除在外），所以不能再被固定。
+ */
+export function exclusiveRelayIds(vendors: Iterable<SourceTierVendor>): string[] {
+  const ids = new Set<string>();
+  for (const vendor of vendors) {
+    for (const member of vendor.members) {
+      if (member.protocol && member.exclusive !== false) ids.add(member.accountId);
+    }
+  }
+  return [...ids];
+}
+
+/**
  * 「添加指定账号」里可选的账号：已经有成员行的不能再选（固定过的，以及登记为中转的——一个账号在一个厂商里
- * 只能有一行，否则保存会被后端拒绝）；输入的文字按邮箱或账号 ID 过滤。
+ * 只能有一行，否则保存会被后端拒绝；在别的厂商登记为专用中转的账号也不能选，固定了也不会生效，由调用方一并传入）；
+ * 输入的文字按邮箱或账号 ID 过滤。
  */
 export function pinChoices(
   accounts: Account[],

@@ -2331,7 +2331,8 @@ public class ProxyFacade {
         if (route == UpstreamRoute.OPENAI
             && poolContext != null
             && isOpenAiCompatibleModel(poolContext.upstreamModel())) {
-            return AccountPlatforms::isOpenAiCompatibleApiKey;
+            // The exclusive relay of another protocol is not part of this pool (design 7.5), so it is not tested for it either.
+            return account -> AccountPlatforms.isOpenAiCompatibleApiKey(account) && !accountPoolService.isExclusiveRelay(account);
         }
         if (preferCodexAccounts) {
             return AccountPlatforms::isCodex;

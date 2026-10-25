@@ -269,6 +269,32 @@ class SourceTierSnapshotTest {
     }
 
     @Test
+    void anExclusiveRelayIsCountedInNoTierOfAnyVendor() {
+        ProxyAccountEntity glm = account("glm", "GLM", "api-key", "https://open.bigmodel.cn/api/paas/v4");
+        List<Tier> tiers = List.of(tier("anthropic", "relay", 1, true), tier("moonshot", "direct", 1, true));
+        SourceTierSnapshot exclusive = snapshot(List.of(vendor("anthropic"), vendor("moonshot")), tiers,
+            List.of(relayMember("anthropic", "relay", "relay", true)));
+        SourceTierSnapshot shared = snapshot(List.of(vendor("anthropic"), vendor("moonshot")), tiers,
+            List.of(relayMember("anthropic", "relay", "relay", false)));
+
+        // GLM's vendor has no row for the relay and would otherwise put it into its lowest tier.
+        assertThat(exclusive.placedAccounts("moonshot", List.of(relay, glm))).containsExactlyEntriesOf(java.util.Map.of("direct", 1));
+        assertThat(shared.placedAccounts("moonshot", List.of(relay, glm))).containsExactlyEntriesOf(java.util.Map.of("direct", 2));
+    }
+
+    @Test
+    void anAccountIsAnExclusiveRelayByItsIdInAnyVendor() {
+        SourceTierSnapshot snapshot = snapshot(List.of(vendor("anthropic")), List.of(tier("anthropic", "relay", 1, true)),
+            List.of(relayMember("anthropic", "relay", "relay", true), relayMember("anthropic", "shared", "relay", false)));
+
+        assertThat(snapshot.isExclusiveRelay("relay")).isTrue();
+        assertThat(snapshot.isExclusiveRelay("shared")).isFalse();
+        assertThat(snapshot.isExclusiveRelay("somebody-else")).isFalse();
+        assertThat(snapshot.isExclusiveRelay(null)).isFalse();
+        assertThat(SourceTierSnapshot.EMPTY.isExclusiveRelay("relay")).isFalse();
+    }
+
+    @Test
     void anUnconfiguredVendorHasTheDefaultsOfTheTable() {
         VendorConfig defaults = VendorConfig.defaults("anthropic");
 
@@ -384,6 +410,77 @@ class SourceTierSnapshotTest {
         assertThat(snapshot.models("anthropic", "to-nowhere")).isEmpty();
         assertThat(snapshot.gates("ghost")).isEmpty();
         assertThat(snapshot.exclusiveXpAccountIds()).isEmpty();
+    }
+
+    // ---- the name a relay is tested with ----
+
+    private static SourceTierSnapshot relays(boolean exclusive, MemberModel... models) {
+        return SourceTierSnapshot.of(1L, List.of(vendor("anthropic"), vendor("openai")),
+            List.of(tier("anthropic", "relay", 1, true), tier("openai", "relay", 1, true)),
+            List.of(relayMember("anthropic", "relay-a", "relay", exclusive), nativeMember("anthropic", "pinned", "relay"),
+                relayMember("openai", "relay-a", "relay", exclusive)),
+            List.of(models), List.of());
+    }
+
+    private static MemberModel model(String vendor, String modelId, String wire, boolean enabled) {
+        return new MemberModel(vendor, "relay-a", modelId, wire, 200_000, 8192, enabled, null, null);
+    }
+
+    @Test
+    void anAccountThatIsNoRelayIsTestedAsItAlwaysWas() {
+        SourceTierSnapshot snapshot = relays(true, model("anthropic", "claude-sonnet-4.5", "relay/sonnet", true));
+
+        assertThat(snapshot.relayTestModel("pinned", "auto")).as("a native pin").isEmpty();
+        assertThat(snapshot.relayTestModel("someone-else", "auto")).isEmpty();
+        assertThat(snapshot.relayTestModel(null, "auto")).isEmpty();
+        assertThat(SourceTierSnapshot.EMPTY.relayTestModel("relay-a", "auto")).isEmpty();
+        assertThat(snapshot(List.of(vendor("anthropic")), List.of(), List.of()).relayTestModel("relay-a", "auto")).isEmpty();
+        assertThat(relays(true).relayTestModel("relay-a", "auto")).as("a relay with no mapping at all").isEmpty();
+    }
+
+    @Test
+    void aRelayIsTestedWithTheNameItServesTheFirstMappingUnder() {
+        SourceTierSnapshot snapshot = relays(true, model("anthropic", "claude-sonnet-4.5", "relay/sonnet", true),
+            model("anthropic", "claude-haiku-4.5", "relay/haiku", true), model("anthropic", "claude-opus-4.5", "relay/opus", false));
+
+        // The models in the order of their catalog ids, the ones that are on first.
+        for (String requested : new String[] {null, "", "  ", "auto", "AUTO", "simple-task"}) {
+            assertThat(snapshot.relayTestModel("relay-a", requested)).as("%s", requested).hasValue("relay/haiku");
+        }
+        assertThat(relays(true, model("anthropic", "claude-aaa", "relay/off", false), model("anthropic", "claude-zzz", "relay/on", true))
+            .relayTestModel("relay-a", "auto")).as("a mapping that is on comes first").hasValue("relay/on");
+        assertThat(relays(true, model("anthropic", "claude-aaa", "relay/off", false)).relayTestModel("relay-a", "auto"))
+            .as("and one that is off is better than none").hasValue("relay/off");
+    }
+
+    @Test
+    void aModelThatTheRelayMapsIsTestedUnderItsOwnWireNameWhateverTheCase() {
+        SourceTierSnapshot snapshot = relays(false, model("anthropic", "claude-sonnet-4.5", "relay/sonnet", true),
+            model("anthropic", "claude-haiku-4.5", "relay/haiku", true));
+
+        assertThat(snapshot.relayTestModel("relay-a", "claude-sonnet-4.5")).hasValue("relay/sonnet");
+        assertThat(snapshot.relayTestModel("relay-a", " CLAUDE-SONNET-4.5 ")).hasValue("relay/sonnet");
+        assertThat(snapshot.relayTestModel("relay-a", "relay/sonnet")).as("a wire name stays itself").hasValue("relay/sonnet");
+    }
+
+    @Test
+    void aModelThatIsNotMappedFollowsWhetherTheRelayServesAnythingElse() {
+        MemberModel sonnet = model("anthropic", "claude-sonnet-4.5", "relay/sonnet", true);
+
+        // An exclusive relay serves nothing but its mappings, so whatever else is asked is a mapping too.
+        assertThat(relays(true, sonnet).relayTestModel("relay-a", "glm-4.6")).hasValue("relay/sonnet");
+        assertThat(relays(true, sonnet).relayTestModel("relay-a", "claude-opus-4.5")).hasValue("relay/sonnet");
+        // One that also serves other models is tested with the model asked for, which is the test it always had.
+        assertThat(relays(false, sonnet).relayTestModel("relay-a", "glm-4.6")).isEmpty();
+        assertThat(relays(false, sonnet).relayTestModel("relay-a", "auto")).hasValue("relay/sonnet");
+    }
+
+    @Test
+    void aRelayOfSeveralVendorsIsTestedWithTheFirstVendorsFirstMapping() {
+        SourceTierSnapshot snapshot = relays(true, model("openai", "gpt-5", "relay/gpt", true), model("anthropic", "claude-sonnet-4.5", "relay/sonnet", true));
+
+        assertThat(snapshot.relayTestModel("relay-a", "auto")).hasValue("relay/sonnet");
+        assertThat(snapshot.relayTestModel("relay-a", "gpt-5")).hasValue("relay/gpt");
     }
 
     // ---- fixtures ----
