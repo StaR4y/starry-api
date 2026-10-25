@@ -106,6 +106,8 @@ const SILENT_PATHS = [
   '/assistant/settings',
   '/assistant/chat',
   '/system/plugin-settings',
+  // 号源分级的总览：号源分级页、账号页的批量对话框和价格预览各自处理读取失败（后者只是附加信息）
+  '/admin/source-tiers',
 ];
 
 http.interceptors.response.use(

@@ -26,6 +26,7 @@ import reactor.core.Disposable;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
 import reactor.test.StepVerifier;
+import reactor.test.scheduler.VirtualTimeScheduler;
 import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.account.allocation.AccountAllocationCategory;
 import tech.starryapi.admin.DataManagementSecurityService;
@@ -104,7 +105,7 @@ class SourceTierRegistryTest {
         SourceTierRegistry registry = new SourceTierRegistry(() -> {
             calls.incrementAndGet();
             return Mono.error(new IllegalStateException("database down"));
-        }, OPERATIONAL);
+        }, OPERATIONAL, VirtualTimeScheduler.create());
 
         registry.afterSingletonsInstantiated();
 
@@ -113,9 +114,105 @@ class SourceTierRegistryTest {
     }
 
     @Test
+    void aFailedFirstLoadIsTriedAgainWithinSecondsAndNotLeftToTheThirtySecondRefresh() {
+        VirtualTimeScheduler clock = VirtualTimeScheduler.create();
+        AtomicInteger calls = new AtomicInteger();
+        Supplier<Mono<SourceTierSnapshot>> scripted = script(null, null, snapshotAt(4));
+        SourceTierRegistry registry = new SourceTierRegistry(() -> {
+            calls.incrementAndGet();
+            return scripted.get();
+        }, OPERATIONAL, clock);
+
+        registry.afterSingletonsInstantiated();
+
+        assertThat(calls).hasValue(1);
+        assertThat(registry.loaded()).isFalse();
+        // The first retry comes after a second, the next after two, so the third read is made within three seconds.
+        clock.advanceTimeBy(Duration.ofMillis(999));
+        assertThat(calls).hasValue(1);
+        clock.advanceTimeBy(Duration.ofMillis(1));
+        assertThat(calls).hasValue(2);
+        assertThat(registry.loaded()).isFalse();
+        clock.advanceTimeBy(Duration.ofMillis(1_999));
+        assertThat(calls).hasValue(2);
+        clock.advanceTimeBy(Duration.ofMillis(1));
+        assertThat(calls).hasValue(3);
+        assertThat(registry.loaded()).isTrue();
+        assertThat(registry.snapshot().configVersion()).isEqualTo(4);
+    }
+
+    @Test
+    void theWaitBetweenTriesOfAFailedFirstLoadGrowsToFiveSecondsAtMost() {
+        VirtualTimeScheduler clock = VirtualTimeScheduler.create();
+        AtomicInteger calls = new AtomicInteger();
+        SourceTierRegistry registry = new SourceTierRegistry(() -> {
+            calls.incrementAndGet();
+            return Mono.error(new IllegalStateException("database down"));
+        }, OPERATIONAL, clock);
+
+        registry.afterSingletonsInstantiated();
+        // 1 s, 2 s, 4 s and then 5 s each: tries at 1, 3, 7, 12, 17 and 22 seconds.
+        clock.advanceTimeBy(Duration.ofSeconds(22));
+
+        assertThat(calls).hasValue(7);
+        assertThat(registry.loaded()).isFalse();
+    }
+
+    @Test
+    void theTriesStopOnceALoadHasWorkedWhoeverMadeIt() {
+        VirtualTimeScheduler clock = VirtualTimeScheduler.create();
+        AtomicInteger calls = new AtomicInteger();
+        Supplier<Mono<SourceTierSnapshot>> scripted = script(null, snapshotAt(6));
+        SourceTierRegistry registry = new SourceTierRegistry(() -> {
+            calls.incrementAndGet();
+            return scripted.get();
+        }, OPERATIONAL, clock);
+        registry.afterSingletonsInstantiated();
+        assertThat(registry.loaded()).isFalse();
+
+        // The 30-second refresh (or a change notification) got there first.
+        registry.refresh().block();
+        assertThat(registry.loaded()).isTrue();
+        clock.advanceTimeBy(Duration.ofMinutes(5));
+
+        assertThat(calls).hasValue(2);
+    }
+
+    @Test
+    void theTriesOfAFailedFirstLoadEndWhenTheApplicationShutsDown() {
+        VirtualTimeScheduler clock = VirtualTimeScheduler.create();
+        AtomicInteger calls = new AtomicInteger();
+        SourceTierRegistry registry = new SourceTierRegistry(() -> {
+            calls.incrementAndGet();
+            return Mono.error(new IllegalStateException("database down"));
+        }, OPERATIONAL, clock);
+        registry.afterSingletonsInstantiated();
+
+        registry.stopFirstLoadRetry();
+        clock.advanceTimeBy(Duration.ofMinutes(1));
+
+        assertThat(calls).hasValue(1);
+    }
+
+    @Test
+    void aFirstLoadThatWorksStartsNoRetryAtAll() {
+        VirtualTimeScheduler clock = VirtualTimeScheduler.create();
+        AtomicInteger calls = new AtomicInteger();
+        SourceTierRegistry registry = new SourceTierRegistry(() -> {
+            calls.incrementAndGet();
+            return Mono.just(snapshotAt(1));
+        }, OPERATIONAL, clock);
+
+        registry.afterSingletonsInstantiated();
+        clock.advanceTimeBy(Duration.ofMinutes(1));
+
+        assertThat(calls).hasValue(1);
+    }
+
+    @Test
     void beforeTheFirstLoadNothingIsKnownAndEveryAccessorRefusesInsteadOfAnsweringAsIfNothingWereConfigured() {
         SourceTierRegistry registry = new SourceTierRegistry(() -> Mono.error(new IllegalStateException("database down")),
-            OPERATIONAL);
+            OPERATIONAL, VirtualTimeScheduler.create());
         registry.afterSingletonsInstantiated();
         ProxyAccountEntity account = new ProxyAccountEntity();
         account.setAccountId("any");
@@ -128,7 +225,7 @@ class SourceTierRegistryTest {
 
     @Test
     void theAccessorsAnswerAgainOnceALoadHasSucceeded() {
-        SourceTierRegistry registry = new SourceTierRegistry(script(null, snapshotAt(5)), OPERATIONAL);
+        SourceTierRegistry registry = new SourceTierRegistry(script(null, snapshotAt(5)), OPERATIONAL, VirtualTimeScheduler.create());
         registry.afterSingletonsInstantiated();
         assertThatThrownBy(registry::snapshot).satisfies(UNAVAILABLE);
 
@@ -142,7 +239,7 @@ class SourceTierRegistryTest {
     void aLoaderThatThrowsInsteadOfFailingTheMonoIsTreatedTheSame() {
         SourceTierRegistry registry = new SourceTierRegistry(() -> {
             throw new IllegalStateException("could not even start");
-        }, OPERATIONAL);
+        }, OPERATIONAL, VirtualTimeScheduler.create());
 
         registry.afterSingletonsInstantiated();
 
@@ -151,7 +248,7 @@ class SourceTierRegistryTest {
 
     @Test
     void aLaterRefreshLoadsWhatTheFirstOneMissed() {
-        SourceTierRegistry registry = new SourceTierRegistry(script(null, snapshotAt(5)), OPERATIONAL);
+        SourceTierRegistry registry = new SourceTierRegistry(script(null, snapshotAt(5)), OPERATIONAL, VirtualTimeScheduler.create());
         registry.afterSingletonsInstantiated();
         assertThat(registry.loaded()).isFalse();
 

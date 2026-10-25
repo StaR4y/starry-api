@@ -10,10 +10,16 @@ import tech.starryapi.common.ApiResponse;
 public class SourceTierAdminController implements SourceTierAdminApi {
 
     private final SourceTierAdminService service;
+    private final SourceTierStatusService statusService;
     private final AdminAuth adminAuth;
 
-    public SourceTierAdminController(SourceTierAdminService service, AdminAuth adminAuth) {
+    public SourceTierAdminController(
+        SourceTierAdminService service,
+        SourceTierStatusService statusService,
+        AdminAuth adminAuth
+    ) {
         this.service = service;
+        this.statusService = statusService;
         this.adminAuth = adminAuth;
     }
 
@@ -21,6 +27,18 @@ public class SourceTierAdminController implements SourceTierAdminApi {
     public Mono<ApiResponse<SourceTierDtos.Overview>> overview(ServerWebExchange exchange) {
         adminAuth.verifyAdmin(exchange);
         return service.overview().map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<SourceTierDtos.Status>> status(ServerWebExchange exchange) {
+        adminAuth.verifyAdmin(exchange);
+        return statusService.status().map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<SourceTierDtos.Placements>> placements(ServerWebExchange exchange) {
+        adminAuth.verifyAdmin(exchange);
+        return statusService.placements().map(ApiResponse::ok);
     }
 
     @Override

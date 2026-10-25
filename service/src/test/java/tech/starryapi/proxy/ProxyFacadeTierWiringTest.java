@@ -7,12 +7,15 @@ import static org.mockito.Mockito.mockingDetails;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.test.util.ReflectionTestUtils;
+import reactor.core.publisher.Mono;
 import tech.starryapi.account.AccountAutoSuspendService;
 import tech.starryapi.account.AccountPoolService;
 import tech.starryapi.account.AccountSettingsService;
 import tech.starryapi.account.DisabledAccountScheduledTestService;
+import tech.starryapi.account.ModelPoolKeyResolver;
 import tech.starryapi.account.allocation.AccountAdmissionStore;
 import tech.starryapi.apikey.ApiKeyService;
+import tech.starryapi.config.ProxyProperties;
 import tech.starryapi.model.ModelCatalogProvider;
 import tech.starryapi.model.ModelMappingService;
 import tech.starryapi.model.ModelPricingService;
@@ -29,8 +32,13 @@ import tech.starryapi.platform.openai.OpenAiResponseFactory;
 import tech.starryapi.platform.openai.OpenAiResponseOwnerStore;
 import tech.starryapi.platform.openai.OpenAiResponseStateStore;
 import tech.starryapi.platform.openai.OpenAiUpstreamClient;
+import tech.starryapi.proxy.tier.DefaultSourceTierPlanner;
+import tech.starryapi.proxy.tier.TierPlan;
 import tech.starryapi.proxy.tier.TierRuntime;
 import tech.starryapi.proxy.tier.TierRuntimeConfig;
+import tech.starryapi.proxy.tier.TierSessionBindings;
+import tech.starryapi.sourcetier.SourceTierRegistry;
+import tech.starryapi.sourcetier.SourceTierRuntimeInfo;
 import tech.starryapi.stats.StatsService;
 
 /**
@@ -67,7 +75,7 @@ class ProxyFacadeTierWiringTest {
 
     @Test
     void springBuildsTheFacadeWithTheTierRuntimeBean() {
-        TierRuntime configured = new TierRuntime((requestedModel, rawEntryBody) -> TierRuntime.Plan.UNTIERED);
+        TierRuntime configured = new TierRuntime(request -> Mono.just(TierPlan.UNTIERED));
 
         try (AnnotationConfigApplicationContext context = context()) {
             context.getBeanFactory().registerSingleton("tierRuntime", configured);
@@ -81,13 +89,32 @@ class ProxyFacadeTierWiringTest {
     }
 
     @Test
-    void theRuntimeFactoryGivesEveryDeploymentTheDisabledRuntime() {
+    void theRuntimeFactoryGivesEveryDeploymentTheDisabledRuntimeForAReleaseThatCannotRunTiers() {
+        SourceTierRuntimeInfo cannotRunTiers = new SourceTierRuntimeInfo(false, false, false, pair -> SourceTierRuntimeInfo.PairStatus.NOT_OFFERED);
+
         try (AnnotationConfigApplicationContext context = context()) {
+            context.getBeanFactory().registerSingleton("sourceTierRuntimeInfo", cannotRunTiers);
             context.register(TierRuntimeConfig.class);
             context.refresh();
 
             assertThat(context.getBean(TierRuntime.class)).isSameAs(TierRuntime.disabled());
             assertThat(context.getBean(ProxyFacade.class).tierRuntime()).isSameAs(TierRuntime.disabled());
+        }
+    }
+
+    @Test
+    void theRuntimeFactoryPlansOverTiersInTheReleaseAsItIsShipped() {
+        try (AnnotationConfigApplicationContext context = context()) {
+            // The capabilities as the application declares them: native tiering is complete in this release.
+            context.getBeanFactory().registerSingleton("sourceTierRuntimeInfo", new SourceTierRuntimeInfo());
+            context.register(TierRuntimeConfig.class);
+            context.refresh();
+
+            TierRuntime runtime = context.getBean(TierRuntime.class);
+            assertThat(runtime).isNotSameAs(TierRuntime.disabled());
+            assertThat(runtime.planner()).isInstanceOf(DefaultSourceTierPlanner.class);
+            assertThat(runtime.bindings()).isSameAs(context.getBean(TierSessionBindings.class));
+            assertThat(context.getBean(ProxyFacade.class).tierRuntime()).isSameAs(runtime);
         }
     }
 
@@ -151,6 +178,9 @@ class ProxyFacadeTierWiringTest {
         context.getBeanFactory().registerSingleton("statsService", statsService);
         context.getBeanFactory().registerSingleton("admissionStore", admissionStore);
         context.getBeanFactory().registerSingleton("openAiResponseOwnerStore", responseOwnerStore);
+        context.getBeanFactory().registerSingleton("proxyProperties", new ProxyProperties());
+        context.getBeanFactory().registerSingleton("sourceTierRegistry", mock(SourceTierRegistry.class));
+        context.getBeanFactory().registerSingleton("modelPoolKeyResolver", mock(ModelPoolKeyResolver.class));
         context.register(ProxyFacade.class);
         return context;
     }

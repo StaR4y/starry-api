@@ -61,10 +61,11 @@ public class KiroUpstreamClient {
     }
 
     public Mono<PlatformCompletionResult> complete(ProxyAccountEntity account, ObjectNode payload, String model) {
-        return Mono.defer(() -> {
+        return Mono.deferContextual(context -> {
             // Every endpoint and every retry parses its own response, and the error that is finally thrown belongs to the
-            // last of them. This flag outlives the attempts so that it can still say an earlier one produced output.
-            AtomicBoolean generationStarted = new AtomicBoolean();
+            // last of them. This flag outlives the attempts so that it can still say an earlier one produced output; the
+            // caller's own, if it gave one, also covers the error that is not an UpstreamException and cannot say it.
+            AtomicBoolean generationStarted = context.getOrDefault(UpstreamException.GENERATION_STARTED_CONTEXT_KEY, new AtomicBoolean());
             return Mono.defer(() -> callFirstEndpoint(account, payload, model, generationStarted))
                 .timeout(properties.getRequestTimeout())
                 .retryWhen(Retry.backoff(properties.getMaxRetries(), Duration.ofMillis(250))

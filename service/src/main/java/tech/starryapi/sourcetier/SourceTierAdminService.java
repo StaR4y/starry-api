@@ -1,6 +1,5 @@
 package tech.starryapi.sourcetier;
 
-import io.r2dbc.spi.Readable;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -46,11 +45,6 @@ public class SourceTierAdminService {
 
     /** Taken by every write, whatever the vendor, so that writes run one after the other (SystemSettingRepository.acquireTransactionLock). */
     public static final String LOCK = "starry_api:source_tiers";
-
-    // Only the columns the tier rules read (provider, auth method, base URL, enabled). The credential columns of every
-    // account stay out of memory, which is why this does not use ProxyAccountRepository, and why the entities built from
-    // it are only good for AccountPlatforms, PoolCell, AccountAllocationCategory and the mapping fingerprint.
-    private static final String ACCOUNTS = "SELECT account_id, provider, auth_method, base_url, enabled FROM proxy_accounts";
 
     private final DatabaseClient db;
     private final TransactionalOperator transactions;
@@ -108,7 +102,8 @@ public class SourceTierAdminService {
             runtime.pairs().stream()
                 .map(pair -> new SourceTierDtos.PairStatus(pair.vendor(), pair.sourceProtocol(), pair.entryEndpoint(),
                     runtime.pairStatus(pair.vendor(), pair.sourceProtocol(), pair.entryEndpoint()).name()))
-                .toList()
+                .toList(),
+            runtime.selectors()
         );
     }
 
@@ -435,7 +430,7 @@ public class SourceTierAdminService {
     // ---- accounts ----
 
     private Mono<Map<String, ProxyAccountEntity>> accounts() {
-        return db.sql(ACCOUNTS).map((row, metadata) -> account(row)).all()
+        return db.sql(SourceTierAccounts.SELECT).map((row, metadata) -> SourceTierAccounts.read(row)).all()
             .collectMap(ProxyAccountEntity::getAccountId);
     }
 
@@ -443,19 +438,9 @@ public class SourceTierAdminService {
         if (ids.isEmpty()) {
             return Mono.just(Map.of());
         }
-        return db.sql(ACCOUNTS + " WHERE account_id = ANY(CAST(:ids AS VARCHAR[]))")
+        return db.sql(SourceTierAccounts.SELECT + " WHERE account_id = ANY(CAST(:ids AS VARCHAR[]))")
             .bind("ids", ids.toArray(String[]::new))
-            .map((row, metadata) -> account(row)).all()
+            .map((row, metadata) -> SourceTierAccounts.read(row)).all()
             .collectMap(ProxyAccountEntity::getAccountId);
-    }
-
-    private static ProxyAccountEntity account(Readable row) {
-        ProxyAccountEntity account = new ProxyAccountEntity();
-        account.setAccountId(row.get("account_id", String.class));
-        account.setProvider(row.get("provider", String.class));
-        account.setAuthMethod(row.get("auth_method", String.class));
-        account.setBaseUrl(row.get("base_url", String.class));
-        account.setEnabled(row.get("enabled", Boolean.class));
-        return account;
     }
 }

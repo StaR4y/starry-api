@@ -110,7 +110,7 @@
 
 - 依赖：P2-02, P1-01
 - 文件：`service/src/main/java/tech/starryapi/proxy/ProxyFacade.java`, `service/src/main/java/tech/starryapi/proxy/tier/TierBilling.java`, `service/src/main/java/tech/starryapi/apikey/ApiKeyService.java`, `service/src/test/java/tech/starryapi/apikey/SettleServedSqlTest.java`
-- 内容：设计 5.2-5.4、4.6：预留按 holdLevels 最大值（本任务先按全部级别，P2-05 接入起点）；pricing.tierPlan；上下文放 TierBilling；level 非空的分级尝试类型；settle_api_usage_served；markUsageDispatchedTiered 续租与截止；503 SOURCE_TIER_UNAVAILABLE 在外层转换。
+- 内容：设计 5.2-5.4、4.6：预留按 holdLevels 最大值（本任务先按全部级别，P2-05 接入起点）；pricing.tierPlan；上下文放 TierBilling；level 非空的分级尝试类型；settle_api_usage_served；markUsageDispatchedTiered 续租，派发运行期间由 renewDispatchLease 每 W/4 续期（不截断派发）；503 SOURCE_TIER_UNAVAILABLE 在外层转换。
 - 测试：结算 0.0234 示例；调用 SQL 字符串单元测试（p_level 为 INTEGER）；未分级回归（BillingQuote.class、4 参数 settle、原 markUsageDispatched、pricing JSON 相同）；PG 续租不超 60 分钟。
 - 验收：符合 I2、I3。
 

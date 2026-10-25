@@ -872,6 +872,8 @@ export interface ModelPricingPreview {
   matchedRuleIds: string[];
   basePricing: ModelPublicPricing;
   pricing: ModelPublicPricing;
+  /** 请求带了号池系数 factors 时才有，与 factors 同序：规则只命中一条，系数在它之后再乘 */
+  factorPricing?: { factor: number; pricing: ModelPublicPricing }[] | null;
 }
 
 export interface ModelPricingSourceStatus {
@@ -933,6 +935,22 @@ export interface RequestLog {
   latencyMs: number | null;
   errorMessage: string | null;
   createdAt: string;
+  /**
+   * 号源列：只有按号源分级服务的请求的行才有（后端不输出为 null 的字段）。用户自己的日志只含级别、名称和系数，
+   * 其余是管理员才看得到的号源细节。
+   */
+  sourceTierRef?: string | null;
+  sourceTierLevel?: number | null;
+  sourceTierName?: string | null;
+  priceFactor?: number | null;
+  /** AUTO 网关选号池；PINNED 客户端指定 */
+  tierSelection?: string | null;
+  /** 号源不是原生账号时，请求是怎么发给它的 */
+  sourceDispatch?: string | null;
+  wireModel?: string | null;
+  usageSource?: string | null;
+  stopReason?: string | null;
+  degradedFeatures?: string | null;
 }
 
 export interface ActiveUserUsage {

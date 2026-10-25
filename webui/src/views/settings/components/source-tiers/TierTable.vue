@@ -37,7 +37,7 @@
     pinCounts: Record<string, number>;
     /** 每个号池（按行 key）在已保存配置里实际收下的启用账号数；没有已保存对应的号池没有数字 */
     placedCounts: Record<string, number>;
-    /** 当前版本是否能按号池选号；为假时「模型@标识」写法还不会生效，复制按钮禁用 */
+    /** 当前版本是否支持客户端用「模型@标识」指定号池；为假时这个写法还不会生效，复制按钮禁用 */
     copyEnabled: boolean;
     disabled?: boolean;
   }>();
@@ -279,7 +279,7 @@
             :content="
               copyEnabled
                 ? t('复制「模型@标识」写法')
-                : t('当前版本尚不支持按号池选号，这个写法暂时不会生效')
+                : t('当前版本还不支持用「模型@标识」指定号池，这个写法暂时不会生效')
             "
             placement="top"
           >

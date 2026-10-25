@@ -6,6 +6,8 @@
    * 每个厂商有自己的草稿和版本。保存是整体替换：请求带上草稿所基于的版本，期间被别人改过
    * 就返回 409，页面提示重新加载，不会覆盖别人的修改。本页不编辑的部分（跨协议成员行、门控）
    * 放在草稿里原样带回。后端报告当前版本能运行什么（能力位），不能运行的开关在这里禁用并说明。
+   *
+   * 页面下方的「运行状态」每 15 秒读一次（页面不可见时暂停）：它不属于草稿，读取失败只影响那一块。
    */
   import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
   import { onBeforeRouteLeave } from 'vue-router';
@@ -20,6 +22,7 @@
     SOURCE_TIER_VERSION_CONFLICT,
     sourceTiersApi,
     type SourceTierRuntime,
+    type SourceTierStatus,
     type SourceTierVendor,
     type SourceTierWarning,
   } from '@/api/sourceTiers';
@@ -27,6 +30,7 @@
   import NativePinsPanel from './components/source-tiers/NativePinsPanel.vue';
   import TierSectionHead from './components/source-tiers/TierSectionHead.vue';
   import TierSettingRow from './components/source-tiers/TierSettingRow.vue';
+  import TierStatusPanel from './components/source-tiers/TierStatusPanel.vue';
   import TierTable from './components/source-tiers/TierTable.vue';
   import {
     DEFAULT_REFUSAL_CAP,
@@ -35,6 +39,7 @@
     MIN_REFUSAL_CAP,
     draftOf,
     draftSignature,
+    enableNote,
     newTier,
     placedCounts,
     replaceRequest,
@@ -75,6 +80,51 @@
     conflict.value = false;
   });
   const nativeTiers = computed(() => !!runtime.value?.nativeTiers);
+  /** 「启用」下方的提示：能启用时提醒先升级所有节点，不能启用时说明原因 */
+  const enableNoteText = computed(() =>
+    current.value
+      ? (enableNote(nativeTiers.value, current.value.loaded.enabled, current.value.draft.enabled) ??
+        undefined)
+      : undefined,
+  );
+  const selectors = computed(() => !!runtime.value?.selectors);
+
+  /* ---------- 运行状态 ---------- */
+
+  /** 状态每隔这么久读一次 */
+  const STATUS_INTERVAL_MS = 15_000;
+  const status = ref<SourceTierStatus | null>(null);
+  const statusState = ref<'loading' | 'ready' | 'error'>('loading');
+  const statusError = ref('');
+  const statusRefreshing = ref(false);
+  let statusTimer: ReturnType<typeof setInterval> | undefined;
+  let statusLoading = false;
+
+  const currentStatus = computed(
+    () => status.value?.vendors.find((vendor) => vendor.vendor === active.value) ?? null,
+  );
+
+  async function loadStatus(manual = false) {
+    if (statusLoading) return;
+    statusLoading = true;
+    if (manual) statusRefreshing.value = true;
+    try {
+      status.value = await sourceTiersApi.status();
+      statusState.value = 'ready';
+      statusError.value = '';
+    } catch (err) {
+      statusState.value = 'error';
+      statusError.value = err instanceof ApiError ? err.message : t('服务暂时不可用');
+    } finally {
+      statusLoading = false;
+      statusRefreshing.value = false;
+    }
+  }
+
+  /** 页面看不见时不读，回到页面时马上读一次 */
+  function refreshStatusIfVisible() {
+    if (!document.hidden && state.value === 'ready') void loadStatus();
+  }
   const unifyEndpoints = computed(() => !!runtime.value?.unifyEndpoints);
 
   function adopt(vendor: SourceTierVendor) {
@@ -109,6 +159,7 @@
       saveError.value = '';
       conflict.value = false;
       state.value = 'ready';
+      void loadStatus();
     } catch (err) {
       if (initial || state.value !== 'ready') {
         loadError.value = err instanceof ApiError ? err.message : t('服务暂时不可用');
@@ -199,6 +250,7 @@
       );
       adopt(saved);
       ElMessage.success(t('已保存'));
+      void loadStatus();
     } catch (err) {
       saveError.value = describeSaveError(err);
     } finally {
@@ -371,9 +423,15 @@
 
   onMounted(() => {
     window.addEventListener('beforeunload', beforeUnload);
+    document.addEventListener('visibilitychange', refreshStatusIfVisible);
+    statusTimer = setInterval(refreshStatusIfVisible, STATUS_INTERVAL_MS);
     void load(true);
   });
-  onBeforeUnmount(() => window.removeEventListener('beforeunload', beforeUnload));
+  onBeforeUnmount(() => {
+    window.removeEventListener('beforeunload', beforeUnload);
+    document.removeEventListener('visibilitychange', refreshStatusIfVisible);
+    clearInterval(statusTimer);
+  });
 </script>
 
 <template>
@@ -467,13 +525,7 @@
             :description="
               t('打开后，这个厂商的请求按号池分级选号，并按号池系数计费；关闭时一切照旧。')
             "
-            :note="
-              nativeTiers
-                ? undefined
-                : current.draft.enabled
-                  ? t('当前版本尚不支持按号池选号，这个设置需要关闭后才能保存。')
-                  : t('当前版本尚不支持按号池选号，暂时不能启用；号池配置可以先保存。')
-            "
+            :note="enableNoteText"
           >
             <el-switch
               :model-value="current.draft.enabled"
@@ -528,7 +580,7 @@
             :title="t('会话保持在降级号池')"
             :description="
               t(
-                '默认开启：会话降级后一直留在降级后的号池，空闲 10 分钟后回到 1 级。低级比 1 级贵时，已降级的会话在 1 级恢复后仍按低级价计费，直到空闲。',
+                '默认开启：会话降级后一直留在降级后的号池，空闲 10 分钟后回到 1 级。低级比 1 级贵时，已降级的会话在 1 级恢复后仍按低级价计费，直到空闲。会话所在的号池只记在处理它的那个节点上：多节点部署时，负载均衡若不把同一个会话固定到同一个节点，换了节点的请求会从 1 级重新开始。',
               )
             "
           >
@@ -636,12 +688,23 @@
             :vendor="active"
             :pin-counts="pinCounts"
             :placed-counts="placed"
-            :copy-enabled="nativeTiers"
+            :copy-enabled="selectors"
             :disabled="saving"
             @update:tiers="setTiers"
             @remove="removeTier"
           />
         </section>
+
+        <TierStatusPanel
+          :vendor="currentStatus"
+          :state="statusState"
+          :error="statusError"
+          :refreshing="statusRefreshing"
+          :at="status?.at ?? null"
+          :window-minutes="status?.windowMinutes ?? 15"
+          :native-tiers="nativeTiers"
+          @refresh="loadStatus(true)"
+        />
 
         <NativePinsPanel
           :pins="current.draft.pins"

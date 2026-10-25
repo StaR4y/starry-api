@@ -30,9 +30,15 @@ public final class SourceTierDtos {
      * {@code SOURCE_TIER_RUNTIME_UNSUPPORTED} instead of being stored and taking effect after a later upgrade:
      * {@code nativeTiers} for a vendor with {@code enabled}, {@code unifyEndpoints} for the all-endpoints switch,
      * {@code xpMembers} for cross-protocol member rows and gates other than OFF. {@code pairs} lists the status of every
-     * (vendor, source protocol, entry endpoint) a gate can open.
+     * (vendor, source protocol, entry endpoint) a gate can open. {@code selectors} says that a client can name the tier it
+     * wants (the {@code model@tier} form), which refuses no setting.
      */
-    public record Runtime(boolean nativeTiers, boolean unifyEndpoints, boolean xpMembers, List<PairStatus> pairs) {}
+    public record Runtime(boolean nativeTiers, boolean unifyEndpoints, boolean xpMembers, List<PairStatus> pairs, boolean selectors) {
+
+        public Runtime(boolean nativeTiers, boolean unifyEndpoints, boolean xpMembers, List<PairStatus> pairs) {
+            this(nativeTiers, unifyEndpoints, xpMembers, pairs, false);
+        }
+    }
 
     /** {@code status} is NOT_OFFERED, EXPERIMENTAL (a gate may only list API keys) or VERIFIED (a gate may be ON). */
     public record PairStatus(String vendor, String sourceProtocol, String entryEndpoint, String status) {}
@@ -169,5 +175,79 @@ public final class SourceTierDtos {
         @NotNull @Min(0) Long expectedVersion,
         @Size(max = 200) List<@Valid Member> members,
         @Size(max = 200) List<@NotBlank String> removeAccountIds
+    ) {}
+
+    /**
+     * What the node that answers would do with a request of each vendor right now (design 8): the accounts of every tier
+     * by the layer that keeps them from serving, which tiers could serve, and how the last {@code windowMinutes} minutes
+     * were served. The account figures are this node's (its cache is up to 30 seconds old); the figures of the window
+     * are those of every node, read from the request log. Only vendors that have tiers are listed.
+     */
+    public record Status(Instant at, long configVersion, int windowMinutes, List<VendorStatus> vendors) {}
+
+    /**
+     * {@code serving} is whether requests of the vendor are planned over its tiers by this release at all (the vendor is
+     * switched on and {@code nativeTiers} holds). {@code autoServed} counts the requests of the window that were served
+     * with the tier chosen by the gateway, {@code degraded} those among them that were served below the best tier that
+     * is switched on.
+     */
+    public record VendorStatus(
+        String vendor,
+        String label,
+        boolean enabled,
+        boolean serving,
+        long autoServed,
+        long degraded,
+        List<TierStatus> tiers
+    ) {}
+
+    /**
+     * {@code serves} is whether this node would serve a request from the tier now: it is switched on, the vendor is
+     * serving, and an account of it is ready. {@code served} counts the attempts of the window that were served from
+     * the tier ({@code servedPinned} of them because the client named the tier), {@code failed} the attempts that went to
+     * it and failed.
+     */
+    public record TierStatus(
+        String tierId,
+        int level,
+        String name,
+        boolean enabled,
+        boolean serves,
+        TierAccounts accounts,
+        long served,
+        long servedPinned,
+        long failed
+    ) {}
+
+    /**
+     * The accounts a tier holds, each counted once by the first layer of design 4.1 that keeps it from serving:
+     * {@code disabled} (switched off), {@code unavailable} (suspended, or out of quota), {@code resting} (cooling down
+     * or quarantined by the allocation lifecycle), {@code busy} (at its concurrency or in-flight token limit; the
+     * request-rate limits and the per-model cooldowns show only when a request asks), and {@code ready}.
+     */
+    public record TierAccounts(int disabled, int unavailable, int resting, int busy, int ready) {}
+
+    /**
+     * The tier each account is in, for the account list: an account that is in no tier of any vendor is absent. A
+     * vendor's tiers count whether or not the vendor is switched on, so the list shows where an account will be when it is.
+     */
+    public record Placements(long configVersion, List<AccountPlacement> accounts) {}
+
+    public record AccountPlacement(String accountId, List<Placed> tiers) {}
+
+    /**
+     * {@code vendorLabel} is the display name of the vendor. {@code rule} says what put the account there: MEMBER_ROW (it was set by hand), CATEGORY or LOWEST_TIER (no tier
+     * lists its category, so it fell into the lowest one). {@code relay} marks an account registered as a relay for
+     * another protocol. {@code active} is whether requests are served from the tier now.
+     */
+    public record Placed(
+        String vendor,
+        String vendorLabel,
+        String tierId,
+        int level,
+        String name,
+        String rule,
+        boolean relay,
+        boolean active
     ) {}
 }

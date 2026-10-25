@@ -4,13 +4,18 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiFunction;
 import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.function.UnaryOperator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -20,15 +25,19 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ServerWebExchange;
+import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.util.context.Context;
 import tech.starryapi.account.AccountAutoSuspendService;
 import tech.starryapi.account.AccountDtos;
 import tech.starryapi.account.AccountPoolService;
 import tech.starryapi.account.AccountPoolRequestContext;
 import tech.starryapi.account.AccountPlatforms;
 import tech.starryapi.account.AccountSettingsService;
+import tech.starryapi.account.CodexOnlyModels;
 import tech.starryapi.account.DisabledAccountScheduledTestService;
+import tech.starryapi.account.PoolCell;
 import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.account.allocation.AccountAdmissionStore;
 import tech.starryapi.account.allocation.AccountFailureScope;
@@ -58,7 +67,19 @@ import tech.starryapi.platform.openai.OpenAiResponseStateStore;
 import tech.starryapi.platform.openai.OpenAiUpstreamClient;
 import tech.starryapi.platform.upstream.UpstreamException;
 import tech.starryapi.payment.PaymentSettingsService;
+import tech.starryapi.proxy.tier.RequestBounds;
+import tech.starryapi.proxy.tier.TierBilling;
+import tech.starryapi.proxy.tier.TierDispatch;
+import tech.starryapi.proxy.tier.TierPlan;
+import tech.starryapi.proxy.tier.TierPlan.Level;
+import tech.starryapi.proxy.tier.TierPlanRequest;
+import tech.starryapi.proxy.tier.TierRetryPolicy;
+import tech.starryapi.proxy.tier.TierRoute;
 import tech.starryapi.proxy.tier.TierRuntime;
+import tech.starryapi.proxy.tier.TierSelection;
+import tech.starryapi.proxy.tier.TierSessionBindings;
+import tech.starryapi.proxy.tier.TierSessionKeys;
+import tech.starryapi.proxy.tier.TierWalk;
 import tech.starryapi.stats.StatsService;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.ObjectNode;
@@ -67,16 +88,23 @@ import tools.jackson.databind.node.ObjectNode;
 public class ProxyFacade {
 
     static final int MAX_MODEL_ID_LENGTH = 256;
+    /** How many accounts may refuse admission before a request stops looking: per dispatch untiered, per request tiered. */
+    private static final int MAX_ADMISSION_REFUSALS = 64;
+    /** What a client is told to wait when the source pool it chose has no account to offer: about the age of the account cache. */
+    private static final String TIER_UNAVAILABLE_RETRY_AFTER_SECONDS = "5";
+    /** The reasons admission refuses an account that a session's own parallel requests can also cause. */
+    private static final java.util.Set<String> SESSION_CONCURRENCY_REFUSALS =
+        java.util.Set.of("CONCURRENCY_LIMIT", "INFLIGHT_TOKEN_LIMIT", "SESSION_LIMIT");
     private static final Logger log = LoggerFactory.getLogger(ProxyFacade.class);
 
-    private enum ResponseMode {
+    enum ResponseMode {
         OPENAI_CHAT,
         OPENAI_RESPONSES,
         ANTHROPIC_MESSAGES,
         GEMINI_GENERATE_CONTENT
     }
 
-    private enum UpstreamRoute {
+    enum UpstreamRoute {
         KIRO,
         OPENAI,
         ANTHROPIC
@@ -411,28 +439,65 @@ public class ProxyFacade {
             route,
             preferDeepSeekAccounts
         );
-
-        return requireFastModeAllowed(fastMode).then(withBilling(principal, requestId, requestedModel, upstreamRequest, fastMode, Mono.defer(() -> attemptChat(
-            upstreamRequest,
-            request,
+        Mono<TierPlan> tierPlan = tierRuntime.planner().plan(tierPlanRequest(
             principal,
-            path,
-            responseMode,
-            requestedModel,
-            upstreamModel,
-            sessionHint,
-            stream,
-            route,
-            fastMode,
-            preferCodexAccounts,
-            preferDeepSeekAccounts,
             poolContext,
+            requestedModel,
+            route,
+            preferDeepSeekAccounts,
+            preferCodexAccounts,
+            fastMode,
             routingPolicy,
-            requestId,
-            start,
-            List.of(),
-            new AtomicBoolean(false)
-        ))));
+            upstreamRequest,
+            null,
+            false
+        ).withSessionName(TierSessionKeys.named(sessionHint)));
+
+        return requireFastModeAllowed(fastMode).then(tierPlan).flatMap(plan -> {
+            if (plan.tiered()) {
+                return servedByTiers(plan, exchange, serveTieredChat(new TieredRequest(
+                    plan,
+                    principal,
+                    requestId,
+                    path,
+                    requestedModel,
+                    upstreamModel,
+                    sessionHint,
+                    stream,
+                    route,
+                    fastMode,
+                    preferCodexAccounts,
+                    preferDeepSeekAccounts,
+                    routingPolicy,
+                    upstreamRequest,
+                    request,
+                    start,
+                    true,
+                    true
+                ), responseMode));
+            }
+            return withBilling(principal, requestId, requestedModel, upstreamRequest, fastMode, Mono.defer(() -> attemptChat(
+                upstreamRequest,
+                request,
+                principal,
+                path,
+                responseMode,
+                requestedModel,
+                upstreamModel,
+                sessionHint,
+                stream,
+                route,
+                fastMode,
+                preferCodexAccounts,
+                preferDeepSeekAccounts,
+                poolContext,
+                routingPolicy,
+                requestId,
+                start,
+                List.of(),
+                new AtomicBoolean(false)
+            )));
+        });
     }
 
     private Mono<ResponseEntity<?>> attemptChat(
@@ -602,11 +667,53 @@ public class ProxyFacade {
             route,
             preferDeepSeekAccounts
         );
+        // A response chain is told apart by the response it continues, not by the session hint, which falls back to that
+        // id and so changes with every turn; a chain with neither is told by what its turns begin with.
+        String tierSessionName = TierSessionKeys.ofResponses(
+            principal.keyId(),
+            sessionHint(exchange, request, principal.keyId(), ResponseMode.OPENAI_RESPONSES, null),
+            previousResponseId
+        );
 
         return requireDeepSeekResponsesSupported(preferDeepSeekAccounts, upstreamModel)
             .then(requireFastModeAllowed(fastMode))
             .then(responseAffinity(previousResponseId, route))
-            .flatMap(responseAffinity -> withBilling(principal, requestId, requestedModel, upstreamRequest, fastMode, Mono.defer(() -> attemptResponses(
+            .flatMap(responseAffinity -> tierRuntime.planner().plan(tierPlanRequest(
+                principal,
+                poolContext,
+                requestedModel,
+                route,
+                preferDeepSeekAccounts,
+                preferCodexAccounts,
+                fastMode,
+                routingPolicy,
+                upstreamRequest,
+                responseAffinity.accountId(),
+                responseAffinity.movable()
+            ).withSessionName(tierSessionName)).flatMap(plan -> {
+                if (plan.tiered()) {
+                    return servedByTiers(plan, exchange, serveTieredResponses(new TieredRequest(
+                        plan,
+                        principal,
+                        requestId,
+                        path,
+                        requestedModel,
+                        upstreamModel,
+                        sessionHint,
+                        stream,
+                        route,
+                        fastMode,
+                        preferCodexAccounts,
+                        preferDeepSeekAccounts,
+                        routingPolicy,
+                        upstreamRequest,
+                        request,
+                        start,
+                        !responseAffinity.responseChain() || responseAffinity.movable(),
+                        responseAffinity.movable()
+                    )));
+                }
+                return withBilling(principal, requestId, requestedModel, upstreamRequest, fastMode, Mono.defer(() -> attemptResponses(
                     upstreamRequest,
                     request,
                     principal,
@@ -626,7 +733,61 @@ public class ProxyFacade {
                     start,
                     List.of(),
                     new AtomicBoolean(false)
-                ))));
+                )));
+            }));
+    }
+
+    private TierPlanRequest tierPlanRequest(
+        ApiKeyPrincipal principal,
+        AccountPoolRequestContext poolContext,
+        String requestedModel,
+        UpstreamRoute route,
+        boolean preferDeepSeekAccounts,
+        boolean preferCodexAccounts,
+        boolean fastMode,
+        AccountDtos.RoutingPolicySettings routingPolicy,
+        JsonNode upstreamRequest,
+        String responseOwnerAccountId,
+        boolean responseMovable
+    ) {
+        return new TierPlanRequest(
+            poolContext.requestToken(),
+            requestedModel,
+            poolContext.upstreamModel(),
+            poolContext.providerHint(),
+            TierRoute.valueOf(route.name()),
+            preferDeepSeekAccounts,
+            route == UpstreamRoute.OPENAI && isOpenAiCompatibleModel(poolContext.upstreamModel()),
+            preferCodexAccounts,
+            routingPolicy.isolateCodexPoolEnabled(),
+            fastMode,
+            !"anonymous".equals(principal.keyId()),
+            upstreamRequest,
+            responseOwnerAccountId,
+            responseMovable,
+            principal.keyId(),
+            null
+        );
+    }
+
+    /**
+     * What the client is answered when a tiered request fails. A request that named its tier gets 503
+     * SOURCE_TIER_UNAVAILABLE with a Retry-After when that tier has no account to offer, where an automatic one has the
+     * "no available account" of an untiered request. The conversion is outside the billing scope on purpose: the release
+     * of the reservation has already judged the original error, which is not one of the definitive failures.
+     */
+    private Mono<ResponseEntity<?>> servedByTiers(TierPlan plan, ServerWebExchange exchange, Mono<ResponseEntity<?>> served) {
+        if (!plan.pinned()) {
+            return served;
+        }
+        return served.onErrorResume(this::isNoAvailableAccount, error -> {
+            exchange.getResponse().getHeaders().set("Retry-After", TIER_UNAVAILABLE_RETRY_AFTER_SECONDS);
+            return Mono.error(new ApiException(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "SOURCE_TIER_UNAVAILABLE",
+                "The source pool you chose has no account available right now"
+            ));
+        });
     }
 
     private Mono<Void> requireFastModeAllowed(boolean fastMode) {
@@ -655,37 +816,68 @@ public class ProxyFacade {
 
     private <T> Mono<T> withBilling(ApiKeyPrincipal principal, String requestId, String model, JsonNode request,
                                     boolean fastMode, Mono<T> operation) {
+        return withBilling(principal, requestId, model, request, fastMode, TierPlan.UNTIERED, operation);
+    }
+
+    // A tiered plan brings its own reservation and prices (TierBilling): it reserves the most any tier it may be served
+    // from would need and is charged the price of the tier that served. What it shares with an untiered request is how the
+    // reservation is held and released; the release counts a failure as unbilled by tierDefinitive, which also takes the
+    // 402 of a source that has no quota left.
+    private <T> Mono<T> withBilling(ApiKeyPrincipal principal, String requestId, String model, JsonNode request,
+                                    boolean fastMode, TierPlan plan, Mono<T> operation) {
         if ("anonymous".equals(principal.keyId())) return operation;
-        long inputBound = JsonNodes.utf8Length(request) + 1024L;
-        // Server-side response chains and remote media can hide input tokens from the local request.
-        if (request.hasNonNull("previous_response_id") || containsRemoteBillingInput(request)) {
-            inputBound = Math.max(inputBound, 1_000_000L);
+        if (plan.tiered()) {
+            return Mono.defer(() -> {
+                TierBilling billing = TierBilling.of(plan, model);
+                return reservedFor(principal, requestId, billing.reservation(), billing.pricing(), operation,
+                    context -> context.put(TierBilling.class, billing), this::tierDefinitive);
+            });
         }
-        long outputBound = Math.max(request.path("max_completion_tokens").asLong(0),
-            Math.max(request.path("max_tokens").asLong(0), request.path("max_output_tokens").asLong(4096)));
-        long estimatedInput = inputBound;
+        long estimatedInput = RequestBounds.nativeInputTokens(request);
+        long outputBound = RequestBounds.outputTokens(request);
         return paymentSettingsService.config().flatMap(config -> modelPricingService.billingQuote(model, fastMode, config.apiBillingMultiplier()))
             .flatMap(quote -> {
-                AtomicBoolean uncertainFailure = new AtomicBoolean();
-                AtomicBoolean settled = new AtomicBoolean();
                 ObjectNode pricing = tools.jackson.databind.node.JsonNodeFactory.instance.objectNode();
                 pricing.put("model", model).put("input", quote.input()).put("output", quote.output())
                     .put("cacheRead", quote.cacheRead()).put("cacheWrite", quote.cacheWrite()).put("fallback", quote.fallback());
-                return Mono.usingWhen(
-                    apiKeyService.reserveUsage(principal, requestId, quote.estimate(estimatedInput, outputBound), pricing.toString()).thenReturn(requestId),
-                    ignored -> operation.contextWrite(context -> context.put(tech.starryapi.model.BillingQuote.class, quote)
-                        .put(BILLING_UNCERTAINTY, uncertainFailure)
-                        .put(BILLING_SETTLED, settled)),
-                    // Once the usage has been settled the reservation is closed; releasing it again would only take the
-                    // user and key row locks to find that out. Release only when nothing was charged.
-                    ignored -> settled.get()
-                        ? Mono.empty()
-                        : apiKeyService.releaseUsage(principal, requestId, true, "Completed without charge"),
-                    (ignored, error) -> apiKeyService.releaseUsage(principal, requestId,
-                        !uncertainFailure.get() && definitiveBillingFailure(error), "Request failed"),
-                    ignored -> apiKeyService.releaseUsage(principal, requestId, false, "Client disconnected after dispatch")
-                );
+                return reservedFor(principal, requestId, quote.estimate(estimatedInput, outputBound), pricing.toString(), operation,
+                    context -> context.put(tech.starryapi.model.BillingQuote.class, quote), this::definitiveBillingFailure);
             });
+    }
+
+    /**
+     * Holds a reservation of {@code credits} for as long as {@code operation} runs and releases it unless the usage was
+     * settled.
+     *
+     * @param billing puts what the settlement needs to price the usage into the operation's context
+     * @param definitiveFailure whether a failure is known not to have been billed, so that the reservation is released
+     *     rather than left for review
+     */
+    private <T> Mono<T> reservedFor(
+        ApiKeyPrincipal principal,
+        String requestId,
+        BigDecimal credits,
+        String pricing,
+        Mono<T> operation,
+        UnaryOperator<Context> billing,
+        Predicate<Throwable> definitiveFailure
+    ) {
+        AtomicBoolean uncertainFailure = new AtomicBoolean();
+        AtomicBoolean settled = new AtomicBoolean();
+        return Mono.usingWhen(
+            apiKeyService.reserveUsage(principal, requestId, credits, pricing).thenReturn(requestId),
+            ignored -> operation.contextWrite(context -> billing.apply(context)
+                .put(BILLING_UNCERTAINTY, uncertainFailure)
+                .put(BILLING_SETTLED, settled)),
+            // Once the usage has been settled the reservation is closed; releasing it again would only take the
+            // user and key row locks to find that out. Release only when nothing was charged.
+            ignored -> settled.get()
+                ? Mono.empty()
+                : apiKeyService.releaseUsage(principal, requestId, true, "Completed without charge"),
+            (ignored, error) -> apiKeyService.releaseUsage(principal, requestId,
+                !uncertainFailure.get() && definitiveFailure.test(error), "Request failed"),
+            ignored -> apiKeyService.releaseUsage(principal, requestId, false, "Client disconnected after dispatch")
+        );
     }
 
     /**
@@ -711,6 +903,19 @@ public class ProxyFacade {
         return UpstreamFailureClassifier.neverReachedUpstream(error);
     }
 
+    /**
+     * {@link #definitiveBillingFailure} for a tiered request, which also counts the 402 of a source that has no quota
+     * left: it is a refusal to serve, never a generation. Untiered, the same 402 stays billing-uncertain as it always
+     * was, and the first of them locks the key's user into review; correcting that for every request is its own change.
+     */
+    boolean tierDefinitive(Throwable error) {
+        if (definitiveBillingFailure(error)) {
+            return true;
+        }
+        UpstreamException upstream = findUpstreamException(error);
+        return upstream != null && upstream.getStatusCode() == 402;
+    }
+
     private static UpstreamException findUpstreamException(Throwable error) {
         Throwable current = error;
         while (current != null) {
@@ -724,16 +929,6 @@ public class ProxyFacade {
             current = cause;
         }
         return null;
-    }
-
-    private boolean containsRemoteBillingInput(JsonNode node) {
-        if (node.isObject() && (node.hasNonNull("image_url") || node.hasNonNull("file_id")
-            || node.hasNonNull("file_url") || java.util.Set.of("input_image", "input_file", "input_audio", "image", "document")
-                .contains(node.path("type").asString("")))) return true;
-        if (node.isContainer()) {
-            for (JsonNode child : node) if (containsRemoteBillingInput(child)) return true;
-        }
-        return false;
     }
 
     private Mono<Void> requireDeepSeekResponsesSupported(boolean deepSeekRoute, String model) {
@@ -1091,12 +1286,8 @@ public class ProxyFacade {
         List<String> admissionRejectedAccountIds,
         long estimatedInput
     ) {
-        if (admissionRejectedAccountIds.size() >= 64) {
-            return Mono.error(new ApiException(
-                HttpStatus.SERVICE_UNAVAILABLE,
-                "ACCOUNT_ADMISSION_EXHAUSTED",
-                "No upstream account has admission capacity"
-            ));
+        if (admissionRejectedAccountIds.size() >= MAX_ADMISSION_REFUSALS) {
+            return Mono.error(admissionExhausted());
         }
         List<String> excluded = mergedAccountIds(attemptedAccountIds, admissionRejectedAccountIds);
         Mono<ProxyAccountEntity> selection;
@@ -1129,18 +1320,8 @@ public class ProxyFacade {
             );
         }
 
-        return selection.flatMap(account -> admissionStore.acquire(new AccountAdmissionStore.AdmissionRequest(
-                account.getAccountId(),
-                requestId,
-                null,
-                Hashing.sha256(reliableSessionHint(sessionHint) ? sessionHint : "request:" + requestId),
-                AccountPlatforms.isAnthropicApiKey(account),
-                estimatedInput,
-                estimatedOutputTokens(request),
-                Duration.ofMinutes(10),
-                poolContext == null ? null : poolContext.upstreamModel(),
-                endpointScope
-            ))
+        return selection.flatMap(account -> admissionStore.acquire(
+                admissionRequest(account, requestId, sessionHint, request, estimatedInput, poolContext, endpointScope))
             .flatMap(decision -> {
                 if (decision.accepted() && decision.leaseId() != null) {
                     // Bind after admission so later requests in the same session keep this account
@@ -1177,6 +1358,642 @@ public class ProxyFacade {
                     estimatedInput
                 );
             }));
+    }
+
+    private AccountAdmissionStore.AdmissionRequest admissionRequest(
+        ProxyAccountEntity account,
+        String requestId,
+        String sessionHint,
+        JsonNode request,
+        long estimatedInput,
+        AccountPoolRequestContext poolContext,
+        String endpointScope
+    ) {
+        return new AccountAdmissionStore.AdmissionRequest(
+            account.getAccountId(),
+            requestId,
+            null,
+            Hashing.sha256(reliableSessionHint(sessionHint) ? sessionHint : "request:" + requestId),
+            AccountPlatforms.isAnthropicApiKey(account),
+            estimatedInput,
+            estimatedOutputTokens(request),
+            Duration.ofMinutes(10),
+            poolContext == null ? null : poolContext.upstreamModel(),
+            endpointScope
+        );
+    }
+
+    private ApiException admissionExhausted() {
+        return new ApiException(
+            HttpStatus.SERVICE_UNAVAILABLE,
+            "ACCOUNT_ADMISSION_EXHAUSTED",
+            "No upstream account has admission capacity"
+        );
+    }
+
+    /**
+     * The tiered counterpart of {@link #selectAccountWithAdmission}: selects an account of the plan's tiers and takes
+     * its admission lease (design 4.3 and 4.4). An account that admission refuses stays out of the rest of the request
+     * and counts against its tier, so that a tier which keeps refusing is left to the next one; and the request as a
+     * whole stops looking after as many refusals as one untiered dispatch puts up with.
+     *
+     * @param allowResponseOwnerFallback whether the request may leave the owner of its response chain when that owner
+     *     cannot serve it
+     */
+    Mono<AccountAttempt> selectTieredAccountWithAdmission(
+        TierWalk walk,
+        String sessionHint,
+        AccountDtos.RoutingPolicySettings routingPolicy,
+        boolean allowResponseOwnerFallback,
+        String requestId,
+        JsonNode request,
+        String endpointScope
+    ) {
+        return selectTieredAccountWithAdmission(
+            walk,
+            sessionHint,
+            routingPolicy,
+            allowResponseOwnerFallback,
+            requestId,
+            request,
+            endpointScope,
+            estimatedInputTokens(request)
+        );
+    }
+
+    private Mono<AccountAttempt> selectTieredAccountWithAdmission(
+        TierWalk walk,
+        String sessionHint,
+        AccountDtos.RoutingPolicySettings routingPolicy,
+        boolean allowResponseOwnerFallback,
+        String requestId,
+        JsonNode request,
+        String endpointScope,
+        long estimatedInput
+    ) {
+        return Mono.defer(() -> {
+            if (walk.refusals() >= MAX_ADMISSION_REFUSALS) {
+                return Mono.error(admissionExhausted());
+            }
+            TierPlan plan = walk.plan();
+            String ownerAccountId = plan.owner().map(TierPlan.Owner::accountId).orElse(null);
+            return selectTiered(walk, sessionHint, allowResponseOwnerFallback)
+                .flatMap(selection -> {
+                    ProxyAccountEntity account = selection.account();
+                    return admissionStore.acquire(admissionRequest(
+                            account, requestId, sessionHint, request, estimatedInput, plan.poolContext(), endpointScope))
+                        .flatMap(decision -> {
+                            if (decision.accepted() && decision.leaseId() != null) {
+                                // Bind after admission, as an untiered request does, but within the tier: later requests of
+                                // the session find this account again only while it is still offered from this tier.
+                                if (routingPolicy.bindSessionOnAdmissionEnabled()) {
+                                    bindTieredSession(plan, selection.level(), sessionHint, account.getAccountId(), routingPolicy);
+                                }
+                                return Mono.just(new AccountAttempt(selection, decision.leaseId()));
+                            }
+                            if (!allowResponseOwnerFallback && account.getAccountId().equals(ownerAccountId)) {
+                                return Mono.error(new ApiException(
+                                    HttpStatus.SERVICE_UNAVAILABLE,
+                                    "RESPONSE_OWNER_UNAVAILABLE",
+                                    "The account that owns the OpenAI response has no admission capacity"
+                                ));
+                            }
+                            walk.refused(selection.level(), account.getAccountId(),
+                                refusedByOwnSession(plan, selection.level(), decision.rejectionReason()));
+                            return selectTieredAccountWithAdmission(
+                                walk,
+                                sessionHint,
+                                routingPolicy,
+                                allowResponseOwnerFallback,
+                                requestId,
+                                request,
+                                endpointScope,
+                                estimatedInput
+                            );
+                        });
+                });
+        });
+    }
+
+    /**
+     * Selects the account of the next dispatch of a tiered request (design 4.3). The owner of the response chain the
+     * request continues comes first, if it is available. Then the tiers in order, and in each the cells in the order
+     * the route tries them, take the first account that is available and that the request has not tried: a tier or a
+     * cell with nothing to offer costs a look at the account cache and nothing more. Only when no tier has anything is
+     * the cache reloaded, once, and the tiers walked again; and a request whose session was pushed down to a lower tier
+     * then climbs back to a tier above it, as a last resort, rather than fail. If that finds nothing either, the accounts
+     * of the tiers the request can still be served from that are out of service are tested once (design 4.10), and the
+     * tiers are walked a last time when any of them came back.
+     */
+    Mono<TierSelection> selectTiered(TierWalk walk, String sessionHint, boolean allowResponseOwnerFallback) {
+        return Mono.defer(() -> selectResponseOwner(walk, allowResponseOwnerFallback)
+            .switchIfEmpty(Mono.defer(() -> walkTiers(walk, sessionHint)))
+            .switchIfEmpty(Mono.defer(() -> accountPoolService.refreshCacheIfStale()
+                .then(Mono.defer(() -> walkTiers(walk, sessionHint)))))
+            .switchIfEmpty(Mono.defer(() -> climbTiers(walk, sessionHint)))
+            .switchIfEmpty(Mono.defer(() -> retestTiers(walk, sessionHint)))
+            .switchIfEmpty(Mono.error(() -> new ApiException(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "NO_AVAILABLE_ACCOUNT",
+                "No available upstream account"
+            ))));
+    }
+
+    /**
+     * The owner of the response chain, from the cells of its tier, when the request still has one to prefer. A chain
+     * that can be replayed elsewhere goes on without its owner; one that cannot is left unserved, as an untiered request
+     * does.
+     */
+    private Mono<TierSelection> selectResponseOwner(TierWalk walk, boolean allowResponseOwnerFallback) {
+        return walk.takeOwner().map(owner -> {
+            TierPlan plan = walk.plan();
+            Level level = owner.level();
+            List<String> excluded = walk.excluded();
+            Mono<TierSelection> selected = Flux.fromIterable(level.cells())
+                .concatMap(cell -> selectInCell(plan, level, cell, null, cell.predicate(excluded)
+                    .and(account -> owner.accountId().equals(account.getAccountId()))
+                    .and(account -> plan.holds(level, account))))
+                .next()
+                .map(TierSelection::asOwner);
+            return allowResponseOwnerFallback
+                ? selected
+                : selected.switchIfEmpty(Mono.error(() -> new ApiException(
+                    HttpStatus.SERVICE_UNAVAILABLE,
+                    "NO_AVAILABLE_ACCOUNT",
+                    "The account that owns the OpenAI response is unavailable"
+                )));
+        }).orElseGet(Mono::empty);
+    }
+
+    private Mono<TierSelection> walkTiers(TierWalk walk, String sessionHint) {
+        TierPlan plan = walk.plan();
+        List<String> excluded = walk.excluded();
+        return Flux.fromIterable(walk.openLevels())
+            .concatMap(level -> Flux.fromIterable(level.cells())
+                .concatMap(cell -> selectInCell(plan, level, cell, sessionHint,
+                    cell.predicate(excluded).and(account -> plan.holds(level, account))))
+                // A tier that has nothing to offer is one the request went through; if a lower tier then serves it, whether
+                // that is a downgrade of its session depends on having been through every tier above.
+                .switchIfEmpty(Mono.fromRunnable(() -> walk.passed(level))))
+            .next()
+            .doOnNext(selection -> walk.selected(selection.level()));
+    }
+
+    /**
+     * The last resort of a request whose session was pushed down to a lower tier: the tiers above its start that the
+     * reservation covers, in order, for an account to serve it. Nothing is climbed to by a request that was restricted
+     * to one tier, and a tier the reservation does not cover could cost more than was reserved.
+     */
+    private Mono<TierSelection> climbTiers(TierWalk walk, String sessionHint) {
+        TierPlan plan = walk.plan();
+        List<String> excluded = walk.excluded();
+        return Flux.fromIterable(walk.climbLevels())
+            .concatMap(level -> Flux.fromIterable(level.cells())
+                .concatMap(cell -> selectInCell(plan, level, cell, sessionHint,
+                    cell.predicate(excluded).and(account -> plan.holds(level, account)), true)))
+            .next();
+    }
+
+    /**
+     * The auto retest of a request that found no account (design 4.10), the tiered counterpart of what
+     * {@link #selectAccountWithAutoRetest} does for the untiered route: once per request, when a whole round of the tiers
+     * is empty, the accounts that were disabled, suspended or out of quota are tested again, as the setting allows, and
+     * when one of them is back the tiers are walked once more. Only the accounts the request could be served from are
+     * tested ({@link #retestFilter}), not the whole pool of a route.
+     */
+    private Mono<TierSelection> retestTiers(TierWalk walk, String sessionHint) {
+        if (!walk.takeRetest()) {
+            return Mono.empty();
+        }
+        var retest = disabledAccountScheduledTestService.runWhenNoAvailableAccounts(retestFilter(walk));
+        if (retest == null) {
+            return Mono.empty();
+        }
+        return retest.doOnNext(response -> log.info(
+                "Auto disabled account retest after no available account completed: vendor={}, total={}, success={}, failed={}, skipped={}",
+                walk.plan().vendor(),
+                response.total(),
+                response.success(),
+                response.failed(),
+                response.skipped()
+            ))
+            .onErrorResume(retestError -> {
+                log.warn("Auto disabled account retest failed after no available account", retestError);
+                return Mono.empty();
+            })
+            .filter(response -> response.success() != null && response.success() > 0)
+            .flatMap(response -> walkTiers(walk, sessionHint)
+                .switchIfEmpty(Mono.defer(() -> climbTiers(walk, sessionHint))));
+    }
+
+    /**
+     * The accounts a retest is worth its upstream calls for: those of the cells of the tiers the request can still be
+     * served from (the ones its walk offers and the ones it may climb back to) that the tier holds, which is what
+     * {@link TierPlan#permits} says about an account the walk selects. A tier the request has left, was restricted
+     * away from or has been refused by too often is not tested for it. The accounts of the tiers the plan left out
+     * are tested too ({@link TierPlan#leftOut}): this request cannot be served by them, but the tier would never come
+     * back if the only retest there is left them out. This replaces {@link #accountFilterFor}, which knows the pool of
+     * the untiered route, not its tiers.
+     */
+    private Predicate<ProxyAccountEntity> retestFilter(TierWalk walk) {
+        TierPlan plan = walk.plan();
+        List<Level> levels = new ArrayList<>(walk.openLevels());
+        levels.addAll(walk.climbLevels());
+        // The tiers the plan left out (nothing in them could serve, or every account is disabled) are the ones that most
+        // need their accounts tested: without it they never come back. A request restricted to one tier is not tested for
+        // the others.
+        boolean leftOutToo = !walk.narrowed();
+        return account -> levels.stream()
+            .anyMatch(level -> level.cells().stream().anyMatch(cell -> plan.permits(level, cell, account)))
+            || (leftOutToo && plan.leftOut(account));
+    }
+
+    /**
+     * Whether the tier still has an account the request could be sent to: one of the tier's cells that selection can
+     * pick right now, which is what the walk would find (cached and enabled, available, and let through by the
+     * allocation lifecycle: not disabled, not cooling down or quarantined), that the request has neither tried nor been
+     * refused by. {@code failedAccountId} is the account that has just failed and is not yet among the ones tried.
+     */
+    private Mono<Boolean> hasUntriedAccount(TierWalk walk, Level level, String failedAccountId) {
+        TierPlan plan = walk.plan();
+        Set<String> excluded = new HashSet<>(walk.excluded());
+        excluded.add(failedAccountId);
+        return accountPoolService.hasSelectableAccount(account -> !excluded.contains(account.getAccountId())
+            && level.cells().stream().anyMatch(cell -> plan.permits(level, cell, account)));
+    }
+
+    /** One cell of one tier; empty when it has no account to offer. */
+    private Mono<TierSelection> selectInCell(
+        TierPlan plan,
+        Level level,
+        PoolCell cell,
+        String sessionHint,
+        Predicate<ProxyAccountEntity> filter
+    ) {
+        return selectInCell(plan, level, cell, sessionHint, filter, false);
+    }
+
+    private Mono<TierSelection> selectInCell(
+        TierPlan plan,
+        Level level,
+        PoolCell cell,
+        String sessionHint,
+        Predicate<ProxyAccountEntity> filter,
+        boolean climbed
+    ) {
+        return accountPoolService.selectInScope(
+                sessionHint,
+                filter,
+                "No available upstream account",
+                plan.poolContext(),
+                plan.affinityScope(level),
+                false
+            )
+            .map(account -> tierSelection(plan, level, cell, account, climbed))
+            .onErrorResume(this::isNoAvailableAccount, error -> Mono.empty());
+    }
+
+    /**
+     * Writes where in the plan the account was found and checks it against the plan. The check can only fail through a
+     * mistake in selection; it fails before the account is dispatched, with the reservation untouched and refunded in
+     * full when it is released.
+     */
+    private TierSelection tierSelection(TierPlan plan, Level level, PoolCell cell, ProxyAccountEntity account, boolean climbed) {
+        if (!plan.permits(level, cell, account)) {
+            log.error("Tiered selection returned account {} for tier {} cell {}, which the plan does not allow",
+                account.getAccountId(), level.tierRef(), cell);
+            throw new ApiException(
+                HttpStatus.INTERNAL_SERVER_ERROR,
+                "SOURCE_TIER_SELECTION_INVALID",
+                "The selected account does not belong to the source tier that was chosen for it"
+            );
+        }
+        return new TierSelection(account, level, cell, TierDispatch.nativeDispatch(), plan.mode(), climbed, false);
+    }
+
+    private void bindTieredSession(
+        TierPlan plan,
+        Level level,
+        String sessionHint,
+        String accountId,
+        AccountDtos.RoutingPolicySettings routingPolicy
+    ) {
+        accountPoolService.commitSessionAffinity(
+            plan.poolContext(),
+            plan.affinityScope(level),
+            sessionHint,
+            accountId,
+            routingPolicy.bindSessionByApiKeyEnabled()
+        );
+    }
+
+    /**
+     * Serves a request whose plan is tiered, chat-shaped: reserves the most any of the plan's tiers would need, then
+     * dispatches over the tiers until an account answers or the retry rules end the request, and charges the price of the
+     * tier that answered.
+     */
+    Mono<ResponseEntity<?>> serveTieredChat(TieredRequest run, ResponseMode responseMode) {
+        TierWalk walk = new TierWalk(run.plan());
+        TierRetryPolicy retry = new TierRetryPolicy(walk, run.start(), run.requestMovable());
+        TieredEndpoint endpoint = new TieredEndpoint(
+            account -> callWithAccount(run.route(), account, run.upstreamRequest(), run.upstreamModel(), run.sessionHint()),
+            (result, account) -> Mono.<ResponseEntity<?>>fromSupplier(() -> run.stream()
+                ? streamResponse(responseMode, run.responseRequest(), run.upstreamModel(), result)
+                : jsonResponse(responseMode, run.responseRequest(), run.upstreamModel(), result))
+        );
+        return withBilling(run.principal(), run.requestId(), run.requestedModel(), run.upstreamRequest(), run.fastMode(),
+            run.plan(), Mono.defer(() -> attemptTiered(run, walk, retry, endpoint)));
+    }
+
+    /** {@link #serveTieredChat} for the Responses endpoint, whose answer is remembered with the account that gave it. */
+    Mono<ResponseEntity<?>> serveTieredResponses(TieredRequest run) {
+        TierWalk walk = new TierWalk(run.plan());
+        TierRetryPolicy retry = new TierRetryPolicy(walk, run.start(), run.requestMovable());
+        TieredEndpoint endpoint = new TieredEndpoint(
+            account -> callResponsesWithAccount(run.route(), account, run.upstreamRequest(), run.upstreamModel(), run.sessionHint()),
+            (result, account) -> Mono.defer(() -> {
+                PreparedResponse response = run.stream()
+                    ? prepareResponsesStreamResponse(run.responseRequest(), run.upstreamRequest(), run.upstreamModel(), result, account)
+                    : prepareResponsesJsonResponse(run.responseRequest(), run.upstreamRequest(), run.upstreamModel(), result, account);
+                followTierToNextTurn(run, response.responseId());
+                return rememberResponseOwner(response, account).thenReturn(response.response());
+            })
+        );
+        return withBilling(run.principal(), run.requestId(), run.requestedModel(), run.upstreamRequest(), run.fastMode(),
+            run.plan(), Mono.defer(() -> attemptTiered(run, walk, retry, endpoint)));
+    }
+
+    /**
+     * One dispatch of a tiered request and, when it fails and {@link TierRetryPolicy} allows, the ones after it: what
+     * {@link #attemptChat} and {@link #attemptResponses} do for the untiered route, over the tiers of the plan. The
+     * account comes from the plan and through admission. A failure is recorded, and the retry policy (not the untiered
+     * count of accounts) decides where the request goes next; when it has nowhere to go, the error of the failed
+     * attempt is returned. No circuit probe is taken or cancelled, since a tiered request has no circuit epoch.
+     */
+    private Mono<ResponseEntity<?>> attemptTiered(TieredRequest run, TierWalk walk, TierRetryPolicy retry, TieredEndpoint endpoint) {
+        TierPlan plan = run.plan();
+        return selectTieredAccountWithAdmission(
+                walk,
+                run.sessionHint(),
+                run.routingPolicy(),
+                run.ownerMayBeLeft(),
+                run.requestId(),
+                run.upstreamRequest(),
+                run.path()
+            )
+            .flatMap(attempt -> withAdmissionLease(attempt, guardedAttempt -> {
+                ProxyAccountEntity account = attempt.account();
+                // An upstream client that retries on its own says here that one of its attempts produced output, which the
+                // error it finally throws may not (a retry that cannot connect after a stream was cut off).
+                AtomicBoolean generationStarted = new AtomicBoolean();
+                TierSelection selection = attempt.selection();
+                return inFlight(plan, selection.level(), markDispatched(attempt)
+                    .then(markDispatchedTiered(run, selection.level(), retry))
+                    .flatMap(lease -> captureUpstreamCall(
+                        Mono.defer(() -> holdingLease(run, selection, lease, endpoint.call().apply(account)))
+                            .contextWrite(context -> context.put(UpstreamException.GENERATION_STARTED_CONTEXT_KEY, generationStarted)))))
+                    .flatMap(outcome -> {
+                        if (outcome.failure() == null) {
+                            PlatformCompletionResult result = outcome.result();
+                            bindTieredSession(plan, attempt.selection().level(), run.sessionHint(), account.getAccountId(), run.routingPolicy());
+                            bindTierLevel(plan, walk, attempt.selection());
+                            return recordSuccess(
+                                run.requestId(),
+                                run.principal(),
+                                account,
+                                run.path(),
+                                run.requestedModel(),
+                                result,
+                                run.route(),
+                                run.fastMode(),
+                                guardedAttempt,
+                                plan.poolContext(),
+                                run.start()
+                            ).then(Mono.defer(() -> endpoint.respond().apply(result, account))
+                                .map(response -> withTierHeaders(response, attempt.selection().level())));
+                        }
+
+                        Throwable error = outcome.failure();
+                        UpstreamFailureClassifier.Classification classification = UpstreamFailureClassifier.classify(error, account);
+                        Mono<Void> failureRecord = recordFailure(
+                            run.requestId(),
+                            run.principal(),
+                            account,
+                            run.path(),
+                            run.requestedModel(),
+                            error,
+                            classification,
+                            guardedAttempt,
+                            plan.poolContext(),
+                            run.start()
+                        );
+                        boolean retryable = classification.retryable() && classification.crossAccountRetryAllowed();
+                        // Whether the tier has another account to offer is only of use to a request that goes on at all.
+                        Mono<Boolean> accountsLeft = retryable && run.requestMovable()
+                            ? hasUntriedAccount(walk, selection.level(), account.getAccountId())
+                            : Mono.just(false);
+                        return accountsLeft.<ResponseEntity<?>>flatMap(tierHasAccountsLeft -> {
+                            TierRetryPolicy.Outcome next = retry.onFailure(new TierRetryPolicy.FailedAttempt(
+                                selection.level(),
+                                account.getAccountId(),
+                                error,
+                                tierDefinitive(error),
+                                retryable,
+                                maxDistinctAccounts(
+                                    classification, run.route(), run.preferCodexAccounts(), run.preferDeepSeekAccounts(), run.routingPolicy()),
+                                generationStarted.get(),
+                                tierHasAccountsLeft,
+                                selection.owner()
+                            ));
+                            if (next == TierRetryPolicy.Outcome.STOP) {
+                                return failureRecord.then(Mono.<ResponseEntity<?>>error(mapError(error)));
+                            }
+                            // A retry that finds no account, or no admission capacity, returns the error that sent it there.
+                            // The 503 of exhausted admission is not a definitive failure: it would send the reservation of a
+                            // request that was already dispatched to review.
+                            return failureRecord.then(attemptTiered(run, walk, retry, endpoint)
+                                .onErrorResume(retryError -> isNoAvailableAccount(retryError) || isAdmissionExhausted(retryError)
+                                    ? Mono.<ResponseEntity<?>>error(mapError(error))
+                                    : Mono.<ResponseEntity<?>>error(retryError)));
+                        });
+                    });
+            }));
+    }
+
+    /**
+     * The response with the headers that name the tier that served it (design 6.4). They were worked out with the plan
+     * and are only put in here, after the settlement: building a response must not fail for a request that was charged.
+     */
+    private static ResponseEntity<?> withTierHeaders(ResponseEntity<?> response, Level served) {
+        return ResponseEntity.status(response.getStatusCode())
+            .headers(response.getHeaders())
+            .headers(headers -> served.responseHeaders().forEach(headers::set))
+            .body(response.getBody());
+    }
+
+    /**
+     * What the request log keeps of the source of an attempt (design 5.7), or null for an attempt of an untiered request,
+     * whose row stays what it always was. A native dispatch has nothing to add to the tier, the factor and how the tier
+     * was chosen; the other columns describe a source that is reached through a conversion.
+     */
+    private static StatsService.SourceColumns sourceColumns(TierSelection tier) {
+        if (tier == null) {
+            return null;
+        }
+        Level level = tier.level();
+        TierDispatch.Kind dispatch = tier.dispatch().kind();
+        return new StatsService.SourceColumns(
+            level.tierRef(),
+            level.level(),
+            level.name(),
+            level.factor(),
+            tier.mode().name(),
+            dispatch == TierDispatch.Kind.NATIVE ? null : dispatch.name(),
+            null,
+            null,
+            null,
+            null
+        );
+    }
+
+    /**
+     * Marks the reservation dispatched to the tier of the attempt and renews its lease for the time the dispatch may
+     * take (design 4.6). The retry policy is told what the lease leaves, so that no dispatch is made which could outlive
+     * the reservation.
+     *
+     * @return the lease the dispatch holds; empty for a request without a reservation
+     */
+    private Mono<Optional<ApiKeyService.DispatchLease>> markDispatchedTiered(TieredRequest run, Level level, TierRetryPolicy retry) {
+        return apiKeyService.markUsageDispatchedTiered(run.principal(), run.requestId(), level.tierRef())
+            .doOnNext(lease -> retry.leaseGranted(lease.window(), lease.untilCap()))
+            .map(Optional::of)
+            .defaultIfEmpty(Optional.empty());
+    }
+
+    /**
+     * Keeps the lease on the reservation renewed while a dispatch runs (design 4.6). The lease covers what Kiro allows
+     * itself, each of its tries bounded by the request timeout; the other upstream clients are only bounded by the time
+     * between two reads of the response, so a stream that keeps trickling in can run for longer than any lease. It is
+     * not cut off for that: the answer would be thrown away and the reservation left for review for good. Its lease is
+     * renewed instead, a quarter of the window at a time, until the hour past which a reservation cannot be leased. A
+     * dispatch that goes on beyond that, or whose node stops renewing (a failed renewal is tried again at the next
+     * tick, and two in a row still leave a quarter of the window to spare), has its reservation turned into a review by
+     * the sweeper; the settlement at the end of the stream clears that review, as it does for an untiered request that
+     * runs past its lease. The renewal ends with the dispatch, however it ends.
+     */
+    private <T> Mono<T> holdingLease(
+        TieredRequest run,
+        TierSelection selection,
+        Optional<ApiKeyService.DispatchLease> lease,
+        Mono<T> call
+    ) {
+        if (lease.isEmpty() || selection.cell() == PoolCell.KIRO_COMPATIBLE) {
+            return call;
+        }
+        Duration period = lease.get().renewalPeriod();
+        long renewals = lease.get().renewalsUntilCap();
+        if (renewals <= 0) {
+            return call;
+        }
+        return Mono.defer(() -> {
+            Disposable renewing = Flux.interval(period)
+                .onBackpressureDrop()
+                .take(renewals)
+                .concatMap(tick -> Mono.defer(() -> apiKeyService.renewDispatchLease(run.principal(), run.requestId()))
+                    .onErrorResume(error -> {
+                        log.warn("The billing lease of request {} could not be renewed; it is tried again at the next tick", run.requestId(), error);
+                        return Mono.just(true);
+                    }))
+                // A reservation that is no longer dispatched (a review, a settlement, a release) has nothing to renew.
+                .takeWhile(renewed -> renewed)
+                .subscribe(renewed -> {}, error -> log.warn("Renewing the billing lease of request {} stopped", run.requestId(), error));
+            return call.doFinally(signal -> renewing.dispose());
+        });
+    }
+
+    /**
+     * Counts the dispatch in the session's tier while it runs, so that the refusal of a parallel request of the same
+     * session (see {@link #refusedByOwnSession}) can be told from a tier that is busy with other users.
+     */
+    private <T> Mono<T> inFlight(TierPlan plan, Level level, Mono<T> dispatch) {
+        TierPlan.Session session = plan.session().orElse(null);
+        if (session == null) {
+            return dispatch;
+        }
+        TierSessionBindings bindings = tierRuntime.bindings();
+        return Mono.defer(() -> {
+            AtomicBoolean ended = new AtomicBoolean();
+            // Ended when the outcome is known, before the rest of the request goes on: a retry of this request is not
+            // refused by the attempt it follows.
+            Runnable end = () -> {
+                if (ended.compareAndSet(false, true)) {
+                    bindings.dispatchEnded(session.key(), level.tierRef());
+                }
+            };
+            bindings.dispatchStarted(session.key(), level.tierRef());
+            return dispatch.doOnNext(outcome -> end.run()).doOnTerminate(end).doOnCancel(end);
+        });
+    }
+
+    /**
+     * Whether the account refused because of requests of the session itself: it is at its limit of concurrent requests,
+     * tokens or sessions and the session has a request being served by this tier. A session that runs requests in
+     * parallel fills a small tier by itself, which does not mean the tier is busy with others.
+     */
+    private boolean refusedByOwnSession(TierPlan plan, Level level, String rejectionReason) {
+        TierPlan.Session session = plan.session().orElse(null);
+        return session != null
+            && rejectionReason != null
+            && SESSION_CONCURRENCY_REFUSALS.contains(rejectionReason)
+            && tierRuntime.bindings().hasInFlight(session.key(), level.tierRef());
+    }
+
+    /**
+     * Keeps the session to the tier that served it, when that tier is one it was pushed down to (design 4.7, invariant
+     * I8): only a request that went through every tier above its start and found them all without an account, for
+     * reasons other than its own budget and its own session's parallel requests, writes anything. A request that
+     * climbed back to a better tier as a last resort moves the session up with it, unless what left it nowhere else
+     * was the session's own parallel requests. Anything else leaves the session where it is, and only notes that it is
+     * still being served.
+     */
+    private void bindTierLevel(TierPlan plan, TierWalk walk, TierSelection served) {
+        TierPlan.Session session = plan.session().orElse(null);
+        if (session == null) {
+            return;
+        }
+        Level level = served.level();
+        TierSessionBindings.Binding binding = new TierSessionBindings.Binding(level.tierId(), level.level());
+        TierSessionBindings bindings = tierRuntime.bindings();
+        if (served.climbed() && walk.realClimb()) {
+            log.debug("A session of vendor {} climbed back to tier {}", plan.vendor(), level.tierRef());
+            bindings.climb(session.bindingKey(), binding);
+        } else if (!served.climbed() && walk.realDowngradeTo(level)) {
+            log.debug("A session of vendor {} was pushed down to tier {}", plan.vendor(), level.tierRef());
+            bindings.downgrade(session.bindingKey(), binding, plan::levelOf);
+        } else {
+            bindings.serve(session.bindingKey());
+        }
+    }
+
+    /**
+     * The next turn of a response chain names its session by the response it continues, so the tier of the session is
+     * also registered under the id of the response this turn produced.
+     */
+    private void followTierToNextTurn(TieredRequest run, String responseId) {
+        TierPlan.Session session = run.plan().session().orElse(null);
+        if (session == null || responseId == null || responseId.isBlank()) {
+            return;
+        }
+        String next = TierSessionKeys.ofResponse(run.principal().keyId(), responseId);
+        tierRuntime.bindings().alias(
+            session.bindingKey(),
+            TierSessionKeys.bindingKey(run.plan().vendor(), run.plan().modelKey(), next)
+        );
+    }
+
+    private boolean isAdmissionExhausted(Throwable error) {
+        Throwable failure = rootFailure(error);
+        return failure instanceof ApiException api && "ACCOUNT_ADMISSION_EXHAUSTED".equals(api.getCode());
     }
 
     private Mono<Void> markDispatched(AccountAttempt attempt) {
@@ -1400,16 +2217,7 @@ public class ProxyFacade {
     }
 
     private boolean isCodexOnlyResponsesModel(String model) {
-        String normalized = routeModel(model);
-        if (normalized.startsWith("openai/")) {
-            normalized = normalized.substring("openai/".length());
-        } else if (normalized.startsWith("openai-compatible/")) {
-            normalized = normalized.substring("openai-compatible/".length());
-        }
-        normalized = normalized.toLowerCase(Locale.ROOT);
-        return normalized.contains("codex")
-            || "codex-mini-latest".equals(normalized)
-            || normalized.matches("gpt-5\\.5.*");
+        return CodexOnlyModels.isCodexOnly(model);
     }
 
     private boolean isFastRequested(JsonNode request, String requestedModel, String mappedModel) {
@@ -1559,20 +2367,37 @@ public class ProxyFacade {
         );
         long circuitOutcomeId = accountPoolService.recordCircuitSuccess(poolContext, account);
         AtomicBoolean circuitOutcomeResolved = new AtomicBoolean(circuitOutcomeId <= 0);
+        // A tiered attempt is charged the price of the tier it was selected from and settled under that tier; there is no
+        // other price to fall back to, so a context without the plan's billing fails the settlement.
+        TierSelection tier = attempt.selection();
         Mono<BigDecimal> billedCredits = "anonymous".equals(principal.keyId())
             ? Mono.just(BigDecimal.ZERO)
-            : Mono.deferContextual(context -> context.hasKey(tech.starryapi.model.BillingQuote.class)
-                ? Mono.just(context.get(tech.starryapi.model.BillingQuote.class).cost(usage))
-                : paymentSettingsService.config().flatMap(config -> modelPricingService.cost(model, usage, fastMode, config.apiBillingMultiplier())));
+            : tier != null
+                ? Mono.deferContextual(context -> Mono.just(context.<TierBilling>get(TierBilling.class).cost(tier.level(), usage)))
+                : Mono.deferContextual(context -> context.hasKey(tech.starryapi.model.BillingQuote.class)
+                    ? Mono.just(context.get(tech.starryapi.model.BillingQuote.class).cost(usage))
+                    : paymentSettingsService.config().flatMap(config -> modelPricingService.cost(model, usage, fastMode, config.apiBillingMultiplier())));
         Mono<Void> completion = billedCredits
             .flatMap(credits -> {
-                Mono<Void> keyAccounting = apiKeyService.accountUsage(
-                    principal,
-                    requestId,
-                    credits,
-                    usage.inputTokens(),
-                    usage.outputTokens()
-                ).then(Mono.deferContextual(context -> {
+                Mono<Void> settlement = tier == null
+                    ? apiKeyService.accountUsage(
+                        principal,
+                        requestId,
+                        credits,
+                        usage.inputTokens(),
+                        usage.outputTokens()
+                    )
+                    : apiKeyService.accountUsageServed(
+                        principal,
+                        requestId,
+                        credits,
+                        usage.inputTokens(),
+                        usage.outputTokens(),
+                        tier.level().tierRef(),
+                        tier.level().level(),
+                        tier.level().factor()
+                    );
+                Mono<Void> keyAccounting = settlement.then(Mono.deferContextual(context -> {
                     if (context.hasKey(BILLING_SETTLED)) {
                         context.<AtomicBoolean>get(BILLING_SETTLED).set(true);
                     }
@@ -1591,7 +2416,8 @@ public class ProxyFacade {
                         circuitOutcomeId,
                         circuitOutcomeResolved,
                         poolContext,
-                        start
+                        start,
+                        tier
                     )
                         .then(bestEffort("record upstream account success", Mono.defer(
                             () -> accountPoolService.recordSuccess(
@@ -1629,7 +2455,7 @@ public class ProxyFacade {
                                 poolContext.upstreamModel(),
                                 true,
                                 accountPoolService.circuitEpoch(poolContext)
-                            )),
+                            ).withSource(sourceColumns(tier))),
                             poolContext,
                             circuitOutcomeId,
                             circuitOutcomeResolved
@@ -1662,7 +2488,8 @@ public class ProxyFacade {
         long circuitOutcomeId,
         AtomicBoolean circuitOutcomeResolved,
         AccountPoolRequestContext poolContext,
-        Instant start
+        Instant start,
+        TierSelection tier
     ) {
         Throwable failure = rootFailure(error);
         int statusCode = failure instanceof ApiException api
@@ -1688,7 +2515,7 @@ public class ProxyFacade {
                 poolContext.upstreamModel(),
                 true,
                 accountPoolService.circuitEpoch(poolContext)
-            )),
+            ).withSource(sourceColumns(tier))),
             poolContext,
             circuitOutcomeId,
             circuitOutcomeResolved
@@ -1851,14 +2678,15 @@ public class ProxyFacade {
                 poolContext.upstreamModel(),
                 classification.circuitFailure() ? false : null,
                 accountPoolService.circuitEpoch(poolContext)
-            )),
+            ).withSource(sourceColumns(attempt.selection()))),
             poolContext,
             circuitOutcomeId,
             circuitOutcomeResolved
         )));
         return Mono.deferContextual(context -> {
             // A later request rejection cannot prove that an earlier timed-out retry was free.
-            if (context.hasKey(BILLING_UNCERTAINTY) && !definitiveBillingFailure(error)) {
+            boolean definitive = attempt.selection() != null ? tierDefinitive(error) : definitiveBillingFailure(error);
+            if (context.hasKey(BILLING_UNCERTAINTY) && !definitive) {
                 context.<AtomicBoolean>get(BILLING_UNCERTAINTY).set(true);
             }
             return Mono.whenDelayError(admissionReconciliation, accountStats, log).then();
@@ -1895,17 +2723,29 @@ public class ProxyFacade {
         boolean preferDeepSeekAccounts,
         AccountDtos.RoutingPolicySettings routingPolicy
     ) {
-        int scopeLimit = switch (classification.scope()) {
-            case TRANSPORT, PROXY_EDGE, REGIONAL_POLICY, UNKNOWN, CREDENTIAL -> 2;
-            default -> Integer.valueOf(529).equals(classification.statusCode()) ? 2 : 3;
-        };
-        int routeLimit = routingPolicy.maxRetryAccounts(preferDeepSeekAccounts, preferCodexAccounts, route.name());
-        int maxDistinctAccounts = Math.min(scopeLimit, routeLimit);
+        int maxDistinctAccounts = maxDistinctAccounts(
+            classification, route, preferCodexAccounts, preferDeepSeekAccounts, routingPolicy);
         return nextAttemptedAccountIds.size() > attemptedAccountIds.size()
             && nextAttemptedAccountIds.size() < maxDistinctAccounts
             && requestMovable
             && classification.retryable()
             && classification.crossAccountRetryAllowed();
+    }
+
+    /** How many different accounts a request may be dispatched to after a failure of this kind on this route. */
+    private int maxDistinctAccounts(
+        UpstreamFailureClassifier.Classification classification,
+        UpstreamRoute route,
+        boolean preferCodexAccounts,
+        boolean preferDeepSeekAccounts,
+        AccountDtos.RoutingPolicySettings routingPolicy
+    ) {
+        int scopeLimit = switch (classification.scope()) {
+            case TRANSPORT, PROXY_EDGE, REGIONAL_POLICY, UNKNOWN, CREDENTIAL -> 2;
+            default -> Integer.valueOf(529).equals(classification.statusCode()) ? 2 : 3;
+        };
+        int routeLimit = routingPolicy.maxRetryAccounts(preferDeepSeekAccounts, preferCodexAccounts, route.name());
+        return Math.min(scopeLimit, routeLimit);
     }
 
     private boolean isNoAvailableAccount(Throwable error) {
@@ -2218,25 +3058,79 @@ public class ProxyFacade {
     private record UpstreamCallOutcome(PlatformCompletionResult result, Throwable failure) {
     }
 
-    private static final class AccountAttempt {
+    /**
+     * What a tiered request keeps the same from its first dispatch to its last: the values the endpoint has settled by
+     * the time an untiered request starts its attempts, and the plan.
+     *
+     * @param upstreamModel the model after mapping, which the upstream client and the response are given
+     * @param upstreamRequest the body that is dispatched, with its output limit forced
+     * @param responseRequest the client's request, which the response is shaped by
+     * @param requestMovable whether the request may be sent to another account after a failure
+     * @param ownerMayBeLeft whether the request may leave the account that owns its response chain
+     */
+    record TieredRequest(
+        TierPlan plan,
+        ApiKeyPrincipal principal,
+        String requestId,
+        String path,
+        String requestedModel,
+        String upstreamModel,
+        String sessionHint,
+        boolean stream,
+        UpstreamRoute route,
+        boolean fastMode,
+        boolean preferCodexAccounts,
+        boolean preferDeepSeekAccounts,
+        AccountDtos.RoutingPolicySettings routingPolicy,
+        JsonNode upstreamRequest,
+        JsonNode responseRequest,
+        Instant start,
+        boolean requestMovable,
+        boolean ownerMayBeLeft
+    ) {
+    }
+
+    /** What differs between the endpoints in the dispatch loop of a tiered request. */
+    private record TieredEndpoint(
+        Function<ProxyAccountEntity, Mono<PlatformCompletionResult>> call,
+        BiFunction<PlatformCompletionResult, ProxyAccountEntity, Mono<ResponseEntity<?>>> respond
+    ) {
+    }
+
+    static final class AccountAttempt {
 
         private final ProxyAccountEntity account;
         private final UUID leaseId;
+        private final TierSelection selection;
         private final Instant startedAt;
         private final AtomicBoolean leaseFinalized = new AtomicBoolean();
 
         private AccountAttempt(ProxyAccountEntity account, UUID leaseId) {
+            this(account, leaseId, null);
+        }
+
+        private AccountAttempt(TierSelection selection, UUID leaseId) {
+            this(selection.account(), leaseId, selection);
+        }
+
+        private AccountAttempt(ProxyAccountEntity account, UUID leaseId, TierSelection selection) {
             this.account = account;
             this.leaseId = leaseId;
+            this.selection = selection;
             this.startedAt = Instant.now();
         }
 
-        private ProxyAccountEntity account() {
+        ProxyAccountEntity account() {
             return account;
         }
 
-        private UUID leaseId() {
+        UUID leaseId() {
             return leaseId;
+        }
+
+        /** Where in the plan the account was selected, fixed from then on; null for an untiered request. */
+        TierSelection selection() {
+            return selection;
         }
 
         private Instant startedAt() {

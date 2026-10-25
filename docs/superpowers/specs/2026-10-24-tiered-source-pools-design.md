@@ -105,7 +105,7 @@ CREATE FUNCTION starry_api.settle_api_usage_served(p_hash VARCHAR, p_credits NUM
 4. **单元**：原生单元按 817-857 映射：DeepSeek `[DEEPSEEK]`；OPENAI 兼容模型 `[OPENAI_COMPATIBLE]`；偏好 Codex `[CODEX]`（隔离关为 `[CODEX, OFFICIAL_OR_CODEX]`）；OPENAI `[OFFICIAL_OPENAI]`（隔离关 `[OFFICIAL_OR_CODEX]`）；ANTHROPIC `[ANTHROPIC_KEY, KIRO_COMPATIBLE]`；KIRO `[KIRO_COMPATIBLE]`。某级有跨协议成员行且对允许、门控对本 Key 开放 → 追加 `XP_OPENAI_CHAT`。谓词定义在 `PoolCell`，`select*ForPool`（AccountPoolService.java:364-573）共用；单元同质，排序器 allMatch 策略不变（AccountCandidateRanker.java:48-54、216-222）。`openai-compatible/` 前缀（1269-1276）不产生跨协议单元。
    **Responses owner**（OPENAI 路由且 responseAffinity 给出 owner；AUTO、PIN 相同）：在成员快照里查 owner；是某级原生单元成员 → 记 ownerLevel；否则（号池停用、成员移除、跨协议成员、不满足任何单元，如单元为 `[OFFICIAL_OPENAI]` 时的 Codex owner）链可迁移就忽略 owner，不可迁移 → 预留前 409 `RESPONSE_OWNER_TIER_MISMATCH`。
 5. **级别**：已启用号池按 level 升序；AUTO 全保留，PIN(t) 只留 t，PIN(t+) 留 t 及以下。**5b 跨协议资格**（预留前）：在原始请求体上检测特性；成员 m 有资格当且仅当 (1) 注册表与门控允许；(2) 仍是 `isOpenAiCompatibleApiKey`；(3) modelKey 解析到已启用、已验证、指纹有效的映射；(4) 无 HARD 特性（7.9，以本路由原生单元种类为基线）；(5) 估算输入 ≤ 映射的 max_context_tokens 和本节点学到的上限（7.8）；(6) m 不在本会话的短期排除里（7.8）；(7) 线上请求体通过规范化与 lint（7.6，按配置签名只算一次）。跳过原因冻结并按（厂商，级别，原因）计数。
-6. **剪枝**：结构剪枝（所有单元结构为空，含 5b 全部跳过）永不回补；可用性剪枝（缓存里无"启用 ∧ 谓词 ∧ 属于该级 ∧ isAvailable"的账号），若全剪光则保留结构剪枝后的全部级别；owner 所在级不做可用性剪枝。结构剪光：含 HARD → 400 `SOURCE_TIER_FEATURE_UNSUPPORTED {feature}`；门控/映射 → 今天的 `NO_AVAILABLE_ACCOUNT` 路径。
+6. **剪枝**：结构剪枝（所有单元结构为空，含 5b 全部跳过）永不回补；可用性剪枝（缓存里无"启用 ∧ 谓词 ∧ 属于该级 ∧ isAvailable"的账号），若全剪光则保留结构剪枝后的全部级别（即缓存里有本路由单元账号的级别；没有账号的级别不留，免得它按最贵的一级撑大预留，也免得下级服务时被算成"已走过"）；结构剪枝后也一个不剩时（缓存里这条路由一个账号都没有）所有级别保留，因为计划至少要有一级，并标为"无成员"，缓存重载后无论哪一级找到账号，D4 都不把这些级别算作已走过；owner 所在级不做可用性剪枝。可用性剪枝只为给预留定额；被剪掉的级别若缓存里有本路由单元的账号（它们全部额度耗尽或被挂起，4.1 第 2 层），记入计划的 `unavailableTiers`，会话被它之下的级服务时按"已走过"算（4.7）。缓存里没有本路由单元账号的级别（包括账号全被停用的）是结构性的，不记。结构剪光：含 HARD → 400 `SOURCE_TIER_FEATURE_UNSUPPORTED {feature}`；门控/映射 → 今天的 `NO_AVAILABLE_ACCOUNT` 路径。
 7. **报价**：base = 今天的 `billingQuote(requestedModel, fastMode, multiplier)` 只算一次；`quote = base.scaled(factor)`（1 返回原对象，否则五项费率精确相乘；estimate CEILING、cost HALF_UP，BillingQuote.java:9-24）。
 8. **输入上界** = 单元最大值：原生用今天的公式（586-592）；例外是分级计划里的 KIRO_COMPATIBLE 单元只发文本（KiroPayloadFactory.java:609-627），界 = 去 base64 的 UTF-8 长度 + 1024，不因图片升到 1M（不可展开的 previous_response_id 仍升到 1M）。跨协议见 5.2。
 9. 读 D4 绑定得到起点（4.7），算 holdLevels（5.2），预先算好响应头（6.4），冻结。
@@ -152,13 +152,13 @@ selectTiered(plan, walk, excluded, refusals, ctx):   # walk = {startIndex, narro
 规则：
 
 1. **跨级只限"确定且未开始"**：此前每次失败都满足 `tierDefinitive ∧ notStarted` 才能进入其他级别；否则计划收窄为失败账号所在级，用尽后返回原始上游错误（474-476、791-793）。Kiro 超时、发送后 IOException（KiroUpstreamClient.java:62-70；UpstreamFailureClassifier.java:248-273）、截断的 Kiro 流都不会在另一级再生成一次。
-2. **级内优先 + 跨级保留槽**：失败级别仍有可选账号（启用 ∧ isAvailable ∧ 可调度 ∧ 未尝试 ∧ 未被拒）且预算未用尽 → 留在本级；本级无可选账号或预算用尽 → 规则 1 允许且有更低级时进入下一级。`cross_tier_reserved_slot=true`（默认）时，另有一个只能用于跨级的保留槽，每请求一次：默认预算 2、两个 1 级中转都确定失败时仍能到 Kiro，派发数最多比今天多 1 且之前全部未生成；关闭则上限同今天（O1）。因预算或保留槽跨级（本级还有未试账号）不是真实降级，不写 D4 绑定。
+2. **级内优先 + 跨级保留槽**（"本级还有可选账号"与走查用同一组层：缓存、isAvailable、排序器可调度，再除去本请求已试或被拒的账号；Responses owner 在走查之前先试，它失败不改变走查的起点——owner 所在级之上的级别仍会被提供，用保留槽时也不会因此跳过它们）：失败级别仍有可选账号（启用 ∧ isAvailable ∧ 可调度 ∧ 未尝试 ∧ 未被拒）且预算未用尽 → 留在本级；本级无可选账号或预算用尽 → 规则 1 允许且有更低级时进入下一级。`cross_tier_reserved_slot=true`（默认）时，另有一个只能用于跨级的保留槽，每请求一次：默认预算 2、两个 1 级中转都确定失败时仍能到 Kiro，派发数最多比今天多 1 且之前全部未生成；关闭则上限同今天（O1）。因预算或保留槽跨级（本级还有未试账号）不是真实降级，不写 D4 绑定；保留槽跨级时本级已没有可选的未试账号（负责人的例子：两个 1 级源头都确定失败）则是本级用尽，算真实降级。
 3. **准入耗尽按无账号处理**：重试中遇到 `ACCOUNT_ADMISSION_EXHAUSTED` 同 `NO_AVAILABLE_ACCOUNT` 返回原始错误，否则非确定的 503 会把已派发预留送进核对。
 4. 跨协议覆盖规则见 7.8。
 5. **时间守卫**：距请求开始超过 240 秒不再跨级，返回原始错误（240 = Claude Code 约 600 秒默认超时〔外部〕− Kiro 300 秒 − 60 秒）。否则客户端会在原生尝试中断开，原生断开非确定释放（ProxyFacade.java:613）。
 6. **收窄的后果**：收窄后本请求不再做最后手段回升、保留槽跨级、crossTierOnly 和上下文超长跨级；同级与同账号重试（含 Kiro `retryWhen`）保持今天（风险 4）。
 
-**4.6 租约**：现状租期 15 分钟（V15:52），`markUsageDispatched` 不续租（ApiKeyService.java:204-212），清扫器每 60 秒把过期 DISPATCHED 转核对（BillingMaintenanceService.java:15-19）。分级用 `markUsageDispatchedTiered`：同一 UPDATE 写 last_dispatched_tier_ref/at，`expires_at = LEAST(created_at+60min, GREATEST(expires_at, now()+W))`，`W = max(15min, requestTimeout×(maxRetries+1)+60s, 跨协议时限+60s)`，默认 960 秒；`now+W > created_at+60min` 时不再跨账号重试。跨协议单次时限 = `min(max_duration_seconds, created_at+60min−now−60s)`，不足 30 秒不发起（真正的约束是 60 分钟绝对上限，W 本身总覆盖时限）。
+**4.6 租约**：现状租期 15 分钟（V15:52），`markUsageDispatched` 不续租（ApiKeyService.java:204-212），清扫器每 60 秒把过期 DISPATCHED 转核对（BillingMaintenanceService.java:15-19）。分级用 `markUsageDispatchedTiered`：同一 UPDATE 写 last_dispatched_tier_ref/at，`expires_at = LEAST(created_at+60min, GREATEST(expires_at, now()+W))`，`W = max(15min, requestTimeout×(maxRetries+1)+60s, 跨协议时限+60s)`，默认 960 秒；`now+W > created_at+60min` 时不再跨账号重试。每次派发还会在运行期间续租：Kiro 自己对每次重试用 `.timeout(requestTimeout)` 限时，已在 W 之内；Anthropic、OpenAI、Codex 只受 reactor-netty 的 responseTimeout（两次读取之间）限制，流式响应可以一直有数据而超出 W。不能靠网关截断它们：截断后答案被丢弃，预留以非确定释放转核对且没有人再结算；而不处理时清扫器只是把预留暂转核对，流结束时的 `settle_api_usage` 接受 REVIEW_REQUIRED 行并结算它。所以改为续租：派发运行期间每隔 W/4（默认 240 秒）执行一次 `renewDispatchLease`，`UPDATE billing_reservations SET expires_at = LEAST(created_at+60min, GREATEST(expires_at, now()+W)) WHERE request_hash = :hash AND status = 'DISPATCHED'`，返回是否续上（行不再是 DISPATCHED——已被清扫器转核对、已结算或已释放——则不再续）；次数为 `untilCap / (W/4)`，最后一次把租约续到 60 分钟的上限；派发结束（完成、失败、取消）即停止；一次续期失败只记警告，下个节拍再试，连续失败两次租约仍有 W/4 的余量（周期取 W/3 时第三次续期恰落在到期时刻，所以取 W/4）；连续失败三次则租约可能到期，清扫器把预留转核对，流结束时的结算清掉。清扫器先选出过期预留、再另行调用 `release_api_reservation`，后者只检查状态与实际额度而不再检查 expires_at，所以刚好在这个间隙里被续上的预留仍可能被转核对，结果同样由结算清掉；续期对已过期但清扫器尚未选中的租约有效，是尽力而为。不再对派发设总时限：超过 60 分钟的派发无法再续，清扫器把预留转核对，流结束时的结算清掉核对并按服务级结算（未分级请求超过 15 分钟租约时同样如此）。多节点：续期由处理请求的节点发出、写在共享库里，该节点中途停止则无人续期，租约在 W 内到期，由任一节点的清扫器转核对。未分级与匿名（无预留）不受此影响，Kiro 不续租。跨协议单次时限 = `min(max_duration_seconds, created_at+60min−now−60s)`，不足 30 秒不发起（真正的约束是 60 分钟绝对上限，W 本身总覆盖时限）。
 
 **4.7 会话粘滞（D4）**
 
@@ -170,15 +170,15 @@ selectTiered(plan, walk, excluded, refusals, ctx):   # walk = {startIndex, narro
 
 **写入（I8）**：在 X 级成功后，以下全部成立才 put 为 X：计划里有更高级别且走查确实访问过（未被起点、收窄、预算跨级跳过）；每个被访问的更高级都按 4.2 不可用；离开更高级不是因为结构剪枝（HARD、NO_MAPPING、CONTEXT 含学到的上限、CONVERSION、门控、白名单、短期排除）、预算/保留槽跨级、crossTierOnly 或上下文超长跨级；更高级的拒绝不全是本会话自己的并发（节点按（tierSessionKey, 级别）记录在途数，原因为并发/在途 token/会话数且本会话在该级有在途请求的拒绝不计入；请求照样按 D2 降级服务，只是不改绑定，Claude Code 并行子代理不会把会话推下去）。写入单调：只往低改，例外只有最后手段回升；晚完成的 1 级并发请求不满足条件、不写，不会改回去。
 
-**读取**（sticky=true，AUTO）：按 tierId 在当前计划找绑定级（重排后仍跟随）；找到就从它开始、不查更高级；该级被本请求结构剪掉（例如带 HARD 特性）则从第一个不高于原 level 的级别开始，绑定不变；都没有从头开始。级内优先绑定账号，它不可用就换同级再往低，不回高。最后手段回升：起点及以下整轮不可用且未收窄，才进入 holdLevels 中更高的级别，成功后改写绑定。读取刷新访问时间，空闲 10 分钟过期；新会话从 1 级开始；派发协议随成员冻结，会话不在中转与 Kiro（注入身份提示，KiroPayloadFactory.java:161-179）间来回切换。
+**读取**（sticky=true，AUTO）：按 tierId 在当前计划找绑定级（重排后仍跟随）；找到就从它开始、不查更高级；该级被本请求结构剪掉（例如带 HARD 特性）则从第一个不高于原 level 的级别开始，绑定不变；都没有从头开始。级内优先绑定账号，它不可用就换同级再往低，不回高。最后手段回升：起点及以下整轮不可用且未收窄，才进入 holdLevels 中更高的级别，成功后改写绑定；起点及以下的拒绝全是本会话自己的并发时，请求照样由更高级服务，但不改写绑定（同真实降级的判定）。写入"只往低改"按写入时计划里各级的当前顺序（按 tierId 查），不按绑定里存的 level。读取刷新访问时间，空闲 10 分钟过期；新会话从 1 级开始；派发协议随成员冻结，会话不在中转与 Kiro（注入身份提示，KiroPayloadFactory.java:161-179）间来回切换。
 
-**其他**：sticky=false 或 PIN 不读不写；`session-affinity-enabled=false`（application.yml:171）时级别绑定与级内亲和都不生效；账号删除或停用时像 `invalidateAffinityForAccount`（AccountPoolService.java:1218-1220）清掉指向它的条目（级别绑定只清 accountId）；绑定每节点独立。低级比 1 级贵时，降级会话在 1 级恢复后仍按低级价付费直到空闲，控制台开关旁写明。
+**其他**：sticky=false 或 PIN 不读不写；`session-affinity-enabled=false`（application.yml:171）时级别绑定与级内亲和都不生效；账号删除或停用时级内账号亲和像 `invalidateAffinityForAccount`（AccountPoolService.java:1218-1220）那样清掉指向它的条目；级别绑定不记账号（记了就得在每次账号失效时重写全部绑定，Caffeine 把每次重写算作访问，空闲会话就永不过期）；绑定每节点独立：多节点部署时，负载均衡不把同一个会话固定到同一个节点，换了节点的请求就从 1 级重新开始、按 1 级计费，「停留」只部分成立，控制台开关旁和运维手册都写明。低级比 1 级贵时，降级会话在 1 级恢复后仍按低级价付费直到空闲，控制台开关旁写明。
 
 **4.8 Responses 链**：只有 OPENAI 路由固定 owner（1950-1966）；owner 在计划阶段解析（3 步骤 4），在计划内时那一级不做可用性剪枝、按它计费。owner 选号和 owner 不可用后的回退都经 `selectTiered`，不再走无级别过滤的 `selectOpenAiAccountByIdForPool`（AccountPoolService.java:473-484，谓词只有 isOpenAi∨isDeepSeek + id）和 `selectAccountWithAutoRetest`（ProxyFacade.java:1030-1042）。跨协议尝试不记录 owner：今天 `attemptResponses` 对每个服务账号调用 `rememberResponseOwner`（739），状态存储也记 ownerAccountId（1920、1936），中转成为 owner 后未分级的 OPENAI 链会对它调 `/responses`。本节点无法展开的 previous_response_id（OpenAiResponseStateStore.java:37 的 6 小时等）对跨协议是 HARD，原生 Kiro 照旧；剪完只剩跨协议级 → 预留前 409 `RESPONSE_CHAIN_NOT_PORTABLE`。
 
 **4.9 全端点统一（第 3 阶段，可选范围，O2）**：负责人没有要求，且会提高成本，向导**默认不勾选**。打开后（仅 anthropic、真实 Claude 目录模型）Chat/Responses 入口按 ANTHROPIC 路由：单元 `[ANTHROPIC_KEY, KIRO_COMPATIBLE]`，派发与预算按 ANTHROPIC（1218-1253）；Gemini id 与路由预设不扩展（routeFor 1261-1279）。这是唯一改变路由的开关。
 
-**4.10 自动复测**：每请求最多一次，整轮为空后（904-968）；过滤器是计划内"单元谓词 ∧ 级别成员"的并集，取代 `accountFilterFor`（1190-1216）；跨协议成员用第一条映射的 wire 名和跨协议客户端（7.4）；跨协议中断不触发复测与回升。
+**4.10 自动复测**：每请求最多一次，整轮为空后（904-968）；过滤器是计划内"单元谓词 ∧ 级别成员"的并集，再加上计划略去的级别（可用性剪枝与结构剪枝，含账号全被停用的级别）里这条路由用得上的账号（否则那一级永远不会经这条路径恢复；本请求计划已冻结，不会改用它们，下一个请求才会；被收窄的请求不含这部分），取代 `accountFilterFor`（1190-1216）；跨协议成员用第一条映射的 wire 名和跨协议客户端（7.4）；跨协议中断不触发复测与回升。
 
 **4.11 恢复与多实例**：无共享"当前级别"；恢复时间取决于挡住它的层（准入/额度/冷却实时，生命周期 2 秒，启停 30 秒，配置 NOTIFY + 30 秒兜底）；各节点按自己的快照计价，请求内一致，快照记 configVersion。
 
@@ -346,7 +346,7 @@ selectTiered(plan, walk, excluded, refusals, ctx):   # walk = {startIndex, narro
 
 ## 8. 管理端与用户端
 
-- **号池分级页**（`settings-source-tiers`，加入 SystemSettingsLayout.vue:47、186，路由在 router/index.ts:254-266 旁）：厂商标签；开关「启用」「全端点统一」（默认不勾选，附成本提示）「公开号池名称」「会话保持在降级号池」（默认开，写明空闲 10 分钟回到 1 级、低级更贵时继续按低级价）「每级拒绝上限」「跨级保留槽」；号池表（拖拽排序、名称、标识与"复制 `模型@标识`"、系数与"标准价 × 系数"示例、成员统计、可选、启用；最低级标注"未归类账号归入此级"，收进 OFFICIAL_API_KEY 时警告）；能力位为假时显示"本版本尚不支持"并禁用对应开关。
+- **号池分级页**（`settings-source-tiers`，加入 SystemSettingsLayout.vue:47、186，路由在 router/index.ts:254-266 旁）：厂商标签；开关「启用」「全端点统一」（默认不勾选，附成本提示）「公开号池名称」「会话保持在降级号池」（默认开，写明空闲 10 分钟回到 1 级、低级更贵时继续按低级价、绑定只记在各节点上）「每级拒绝上限」「跨级保留槽」；号池表（拖拽排序、名称、标识与"复制 `模型@标识`"、系数与"标准价 × 系数"示例、成员统计、可选、启用；最低级标注"未归类账号归入此级"，收进 OFFICIAL_API_KEY 时警告）；能力位为假时显示"本版本尚不支持"并禁用对应开关。
 - **跨协议成员对话框**：只列兼容 Key；配置项逐项说明（vision、两个缓存口径开关——"不含"需探针证据、上游流式、思考映射、json_schema、priority、单次时限）；专用开关（关闭时警告 404 风险）；映射表（目录模型、wire 名、覆盖的别名、上下文上限必填、图片上限、启用、验证状态），「从上游拉取」预填；验证按钮与探针结果；隐私提示；未设并发/RPM 上限时提示（兼容 Key 默认不限，AccountAllocationCategory.java:16，D2 的繁忙几乎不会触发）；Claude Code 无提示缓存的成本警告（7.15）。
 - **门控面板**：每入口 OFF/白名单 Key/ON，注册表徽标，降级摘要。**状态**：每级在各层的账号数、本节点会服务的级别、15 分钟服务分布与降级率、跨协议指标。保存整体替换带 version，409 提示刷新。
 - **其他页面**：账号列表新增「号源级别」列、按级筛选、批量「设为号池…」（`AccountResponse` 与 formModel.ts:110-137 不改）；旧熔断卡片（SettingsView.vue:186-254）说明只作用于未分级厂商，并修正 OPERATIONS.md:308-309、API.md:545；日志新增号源列（管理员另见派发方式、wire 名、用量来源、停止原因、降级特性）；**计费核对**（CodingPlanSettingsView.vue 的核对列表）显示 tierPlan、served 与最后派发的级别及**该级报价估算**，不只显示最大预留，避免管理员按最大预留结算；定价面板写明"规则只命中一条，号池系数在其后再乘"。

@@ -224,7 +224,10 @@ public class StatsAnalyticsService {
                 credits,
                 latency_ms,
                 error_message,
-                created_at
+                created_at,
+                source_tier_level,
+                source_tier_name,
+                price_factor
             FROM request_logs
             WHERE user_id = :userId
               AND created_at >= :fromInclusive
@@ -558,6 +561,8 @@ public class StatsAnalyticsService {
         );
     }
 
+    // A user sees the name, level and factor of the tier that served a request, and nothing else about its source
+    // (design 5.7): the other source columns of the row are neither selected nor returned.
     private StatsDtos.RequestLogResponse requestLog(Row row) {
         return new StatsDtos.RequestLogResponse(
             stringValue(row, "request_id"),
@@ -572,7 +577,17 @@ public class StatsAnalyticsService {
             decimalValue(row, "credits"),
             longValue(row, "latency_ms"),
             stringValue(row, "error_message"),
-            instantValue(row, "created_at")
+            instantValue(row, "created_at"),
+            null, // source_tier_ref
+            integerValue(row, "source_tier_level"),
+            stringValue(row, "source_tier_name"),
+            row.get("price_factor") == null ? null : decimalValue(row, "price_factor"),
+            null, // tier_selection, source_dispatch, wire_model, usage_source, stop_reason, degraded_features
+            null,
+            null,
+            null,
+            null,
+            null
         );
     }
 

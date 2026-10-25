@@ -29,6 +29,7 @@ import org.springframework.r2dbc.core.RowsFetchSpec;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
+import tech.starryapi.account.allocation.AccountCandidateRanker;
 import tech.starryapi.admin.DataManagementSecurityService;
 import tech.starryapi.admin.SystemMaintenanceTaskGate;
 import tech.starryapi.common.ApiException;
@@ -243,6 +244,107 @@ class AccountPoolServiceTest {
     }
 
     @Test
+    void cachedAccountFindsAnEnabledAccountWhateverItsStateAndNothingElse() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity healthy = openAiPoolAccount("openai-main");
+        ProxyAccountEntity suspended = openAiPoolAccount("openai-suspended");
+        suspended.setSuspendedAt(Instant.parse("2026-01-01T00:00:00Z"));
+        ProxyAccountEntity disabled = openAiPoolAccount("openai-disabled");
+        disabled.setEnabled(false);
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(healthy, suspended, disabled));
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+        service.refreshCache().block();
+
+        assertThat(service.cachedAccount("openai-main")).containsSame(healthy);
+        // An account that is suspended is still cached; it is the selection that skips it.
+        assertThat(service.cachedAccount("openai-suspended")).containsSame(suspended);
+        assertThat(service.cachedAccount("openai-disabled")).isEmpty();
+        assertThat(service.cachedAccount("never-existed")).isEmpty();
+        assertThat(service.cachedAccount(null)).isEmpty();
+    }
+
+    @Test
+    void theStatusPageSeesTheEnabledAccountsOfTheCacheAndWhetherEachIsUsable() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity healthy = openAiPoolAccount("openai-main");
+        ProxyAccountEntity suspended = openAiPoolAccount("openai-suspended");
+        suspended.setSuspendedAt(Instant.parse("2026-01-01T00:00:00Z"));
+        ProxyAccountEntity exhausted = openAiPoolAccount("openai-exhausted");
+        exhausted.setQuotaUsed(100L);
+        exhausted.setQuotaLimit(100L);
+        ProxyAccountEntity disabled = openAiPoolAccount("openai-disabled");
+        disabled.setEnabled(false);
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(healthy, suspended, exhausted, disabled));
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+        service.refreshCache().block();
+
+        assertThat(service.cachedAccounts()).extracting(ProxyAccountEntity::getAccountId)
+            .containsExactlyInAnyOrder("openai-main", "openai-suspended", "openai-exhausted");
+        assertThat(service.isUsable(healthy)).isTrue();
+        assertThat(service.isUsable(suspended)).isFalse();
+        assertThat(service.isUsable(exhausted)).isFalse();
+        assertThat(service.isUsable(null)).isFalse();
+        // The same view narrowed by a filter: still whatever their state, still only the enabled ones.
+        assertThat(service.cachedAccounts(account -> !"openai-main".equals(account.getAccountId())))
+            .extracting(ProxyAccountEntity::getAccountId)
+            .containsExactlyInAnyOrder("openai-suspended", "openai-exhausted");
+        assertThat(service.cachedAccounts(null)).hasSize(3);
+    }
+
+    @Test
+    void anAccountIsSelectableOnlyWhenItIsAvailableAndTheAllocationLifecycleLetsItBeScheduled() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity ready = openAiPoolAccount("openai-ready");
+        ProxyAccountEntity cooling = openAiPoolAccount("openai-cooling");
+        ProxyAccountEntity suspended = openAiPoolAccount("openai-suspended");
+        suspended.setSuspendedAt(Instant.parse("2026-01-01T00:00:00Z"));
+        ProxyAccountEntity exhausted = openAiPoolAccount("openai-exhausted");
+        exhausted.setQuotaUsed(100L);
+        exhausted.setQuotaLimit(100L);
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(ready, cooling, suspended, exhausted));
+        AccountCandidateRanker ranker = mock(AccountCandidateRanker.class);
+        List<List<String>> askedAbout = new java.util.ArrayList<>();
+        when(ranker.schedulable(any())).thenAnswer(invocation -> {
+            List<ProxyAccountEntity> candidates = invocation.getArgument(0);
+            askedAbout.add(candidates.stream().map(ProxyAccountEntity::getAccountId).toList());
+            // The allocation tables keep the cooling account from being scheduled.
+            return Mono.just(candidates.stream().filter(account -> !"openai-cooling".equals(account.getAccountId())).toList());
+        });
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties(), null,
+            SystemMaintenanceTaskGate.alwaysOperationalForDirectConstruction(), ranker);
+        service.refreshCache().block();
+
+        assertThat(service.hasSelectableAccount(account -> true).block()).isTrue();
+        assertThat(service.hasSelectableAccount(account -> "openai-ready".equals(account.getAccountId())).block()).isTrue();
+        // Usable by the cache's own rules, but not schedulable: the lifecycle is the layer that holds it back.
+        assertThat(service.isUsable(cooling)).isTrue();
+        assertThat(service.hasSelectableAccount(account -> "openai-cooling".equals(account.getAccountId())).block()).isFalse();
+        assertThat(service.hasSelectableAccount(account -> "openai-suspended".equals(account.getAccountId())).block()).isFalse();
+        assertThat(service.hasSelectableAccount(account -> "openai-exhausted".equals(account.getAccountId())).block()).isFalse();
+        assertThat(service.hasSelectableAccount(account -> false).block()).isFalse();
+        // The lifecycle is only asked about the accounts that passed the cheaper layers.
+        assertThat(askedAbout).hasSize(3);
+        assertThat(askedAbout.get(0)).containsExactlyInAnyOrder("openai-ready", "openai-cooling");
+        assertThat(askedAbout.get(1)).containsExactly("openai-ready");
+        assertThat(askedAbout.get(2)).containsExactly("openai-cooling");
+    }
+
+    @Test
+    void withoutAnAllocationLifecycleAnAvailableAccountInTheCacheIsSelectable() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity ready = openAiPoolAccount("openai-ready");
+        ProxyAccountEntity suspended = openAiPoolAccount("openai-suspended");
+        suspended.setSuspendedAt(Instant.parse("2026-01-01T00:00:00Z"));
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(ready, suspended));
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+        service.refreshCache().block();
+
+        assertThat(service.hasSelectableAccount(account -> "openai-ready".equals(account.getAccountId())).block()).isTrue();
+        assertThat(service.hasSelectableAccount(account -> "openai-suspended".equals(account.getAccountId())).block()).isFalse();
+        assertThat(service.hasSelectableAccount(null).block()).isTrue();
+    }
+
+    @Test
     void openAiAndDeepSeekAccountPoolsRemainIsolated() {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         ProxyAccountEntity openAi = openAiPoolAccount("openai-main");
@@ -382,6 +484,102 @@ class AccountPoolServiceTest {
         assertThat(service.selectOpenAiAccount("key-1").block())
             .extracting(ProxyAccountEntity::getAccountId)
             .isEqualTo("openai-backup");
+    }
+
+    @Test
+    void selectInScopeKeepsABindingToTheScopeItWasMadeIn() {
+        AccountPoolService service = scopedPool(true);
+        service.commitSessionAffinity(null, "tier:openai:official|gpt-5", "key-1:session-1", "openai-backup", false);
+
+        assertThat(selectedIn(service, "tier:openai:official|gpt-5")).isEqualTo("openai-backup");
+        // Another tier, another model or no scope at all is not steered by it, nor is a select*ForPool.
+        assertThat(selectedIn(service, "tier:openai:codex|gpt-5")).isEqualTo("openai-main");
+        assertThat(selectedIn(service, "tier:openai:official|gpt-5.5")).isEqualTo("openai-main");
+        assertThat(selectedIn(service, null)).isEqualTo("openai-main");
+        assertThat(service.selectOpenAiAccount("key-1:session-1").block().getAccountId()).isEqualTo("openai-main");
+    }
+
+    @Test
+    void aBindingMadeWithoutAScopeIsNotFoundInOne() {
+        AccountPoolService service = scopedPool(true);
+        service.commitSessionAffinity(null, "key-1:session-1", "openai-backup", false);
+
+        assertThat(selectedIn(service, null)).isEqualTo("openai-backup");
+        assertThat(selectedIn(service, "tier:openai:official|gpt-5")).isEqualTo("openai-main");
+    }
+
+    @Test
+    void aBindingInAScopeFollowsTheRulesOfAnyOtherBinding() {
+        AccountPoolService service = scopedPool(true);
+
+        // A session that is only an API key id is bound when the policy says so, and not otherwise.
+        service.commitSessionAffinity(null, "tier:openai:official|gpt-5", "key-1", "openai-backup", false);
+        assertThat(service.selectInScope("key-1", account -> true, "none", null, "tier:openai:official|gpt-5", false)
+            .block().getAccountId()).isEqualTo("openai-main");
+        service.commitSessionAffinity(null, "tier:openai:official|gpt-5", "key-1", "openai-backup", true);
+        assertThat(service.selectInScope("key-1", account -> true, "none", null, "tier:openai:official|gpt-5", false)
+            .block().getAccountId()).isEqualTo("openai-backup");
+
+        // With session affinity off nothing is bound.
+        AccountPoolService unbound = scopedPool(false);
+        unbound.commitSessionAffinity(null, "tier:openai:official|gpt-5", "key-1:session-1", "openai-backup", true);
+        assertThat(selectedIn(unbound, "tier:openai:official|gpt-5")).isEqualTo("openai-main");
+    }
+
+    @Test
+    void aBoundAccountThatTheFilterLeavesOutIsNotFollowed() {
+        AccountPoolService service = scopedPool(true);
+        service.commitSessionAffinity(null, "tier:openai:official|gpt-5", "key-1:session-1", "openai-backup", false);
+
+        // The filter of a tiered selection leaves out the accounts the request has met, the bound one among them.
+        assertThat(service.selectInScope("key-1:session-1", account -> !"openai-backup".equals(account.getAccountId()),
+            "none", null, "tier:openai:official|gpt-5", false).block().getAccountId()).isEqualTo("openai-main");
+    }
+
+    @Test
+    void selectInScopeReloadsTheCacheForAnEmptyFilterOnlyWhenAskedTo() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(openAiPoolAccount("openai-main")));
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+
+        assertThatThrownBy(() -> service.selectInScope("session-1", account -> true, "nothing in this cell", null, "scope", false).block())
+            .isInstanceOfSatisfying(ApiException.class, error -> {
+                assertThat(error.getCode()).isEqualTo("NO_AVAILABLE_ACCOUNT");
+                assertThat(error.getMessage()).isEqualTo("nothing in this cell");
+            });
+        verify(repository, never()).findAllByEnabledTrue();
+
+        assertThat(service.selectInScope("session-1", account -> true, "nothing in this cell", null, "scope", true)
+            .block().getAccountId()).isEqualTo("openai-main");
+        verify(repository).findAllByEnabledTrue();
+    }
+
+    @Test
+    void selectInScopeSkipsAnAccountThatIsNotAvailableWithoutReloading() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity suspended = openAiPoolAccount("openai-suspended");
+        suspended.setSuspendedAt(Instant.parse("2026-01-01T00:00:00Z"));
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(suspended));
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+        service.refreshCache().block();
+
+        assertThatThrownBy(() -> service.selectInScope("session-1", account -> true, "none", null, "scope", true).block())
+            .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("NO_AVAILABLE_ACCOUNT"));
+        // The cache has an account that matches, only it is not available; that is no reason to reload it.
+        verify(repository).findAllByEnabledTrue();
+    }
+
+    @Test
+    void refreshCacheIfStaleReloadsOnlyOnceWithinTheMissInterval() {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(openAiPoolAccount("openai-main")));
+        AccountPoolService service = new AccountPoolService(repository, null, new ProxyProperties());
+
+        service.refreshCacheIfStale().block();
+        service.refreshCacheIfStale().block();
+
+        verify(repository, times(1)).findAllByEnabledTrue();
+        assertThat(service.cachedAccount("openai-main")).isPresent();
     }
 
     @Test
@@ -1164,6 +1362,26 @@ class AccountPoolServiceTest {
             null,
             null
         );
+    }
+
+    /** A pool of two OpenAI keys that always offers the first one unless a binding says otherwise. */
+    private AccountPoolService scopedPool(boolean sessionAffinity) {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        ProxyAccountEntity first = openAiPoolAccount("openai-main");
+        first.setId(1L);
+        ProxyAccountEntity second = openAiPoolAccount("openai-backup");
+        second.setId(2L);
+        when(repository.findAllByEnabledTrue()).thenReturn(Flux.just(first, second));
+        ProxyProperties properties = new ProxyProperties();
+        properties.setSessionAffinityEnabled(sessionAffinity);
+        properties.setAccountSelectionStrategy(ProxyProperties.AccountSelectionStrategy.STICKY);
+        AccountPoolService service = new AccountPoolService(repository, null, properties);
+        service.refreshCache().block();
+        return service;
+    }
+
+    private String selectedIn(AccountPoolService service, String scope) {
+        return service.selectInScope("key-1:session-1", account -> true, "none", null, scope, false).block().getAccountId();
     }
 
     private ProxyAccountEntity account(String accountId) {

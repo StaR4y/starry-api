@@ -7,6 +7,7 @@
    * - 列表 / 新增 / 编辑 / 删除
    * - 启用/停用、挂起/恢复（reset）
    * - 批量 JSON 导入（支持 upsert）
+   * - 号源分级：「号源级别」列、按号池筛选、勾选账号后批量设为号池
    *
    * 各对话框已抽离至 ./components/（AccountFormDialog / ImportDialog /
    * TestDetailDialog），本组件只保留列表与调度逻辑。
@@ -14,7 +15,7 @@
    */
   import { computed, onMounted, reactive, ref } from 'vue';
   import { ElMessage, ElMessageBox } from 'element-plus';
-  import { CreditCard, MoreFilled, Plus, Refresh, Search } from '@element-plus/icons-vue';
+  import { CreditCard, MoreFilled, Paperclip, Plus, Refresh, Search } from '@element-plus/icons-vue';
   import PageSection from '@/components/PageSection.vue';
   import MetricsPanel, { type MetricPanelItem } from '@/components/MetricsPanel.vue';
   import AppIcon from './components/AppIcon.vue';
@@ -25,7 +26,18 @@
   import ImportDialog from './components/ImportDialog.vue';
   import TestDetailDialog from './components/TestDetailDialog.vue';
   import ChatGptOAuthDialog from './components/ChatGptOAuthDialog.vue';
+  import SetSourceTierDialog from './components/SetSourceTierDialog.vue';
   import { accountsApi } from '@/api';
+  import { sourceTiersApi, type SourceTierPlacements } from '@/api/sourceTiers';
+  import {
+    NO_TIER_FILTER,
+    matchesTierFilter,
+    placedHint,
+    placedLabel,
+    placementVendorCount,
+    placementsByAccount,
+    tierFilterOptions,
+  } from '@/views/settings/components/source-tiers/tierStatusMeta';
   import { ApiError } from '@/utils/http';
   import type {
     Account,
@@ -45,7 +57,43 @@
   const keyword = ref('');
   const statusFilter = ref<'all' | 'active' | 'abnormal'>('all');
   const clearingAccounts = ref(false);
-  const hasFilter = computed(() => Boolean(keyword.value.trim() || statusFilter.value !== 'all'));
+  const tierFilter = ref('');
+  const hasFilter = computed(() =>
+    Boolean(keyword.value.trim() || statusFilter.value !== 'all' || tierFilter.value),
+  );
+
+  /* ============= 号源分级 ============= */
+
+  // 账号所在的号池；没有配置号源分级的部署读到空表（或读取失败），这时不显示相关的列和筛选
+  const placements = ref<SourceTierPlacements | null>(null);
+  const placementIndex = computed(() => placementsByAccount(placements.value));
+  const tierOptions = computed(() => tierFilterOptions(placements.value));
+  const showTiers = computed(() => !!placements.value?.accounts.length);
+  const tiersWithVendor = computed(() => placementVendorCount(placements.value) > 1);
+  const selection = ref<Account[]>([]);
+  const setTierVisible = ref(false);
+
+  async function loadPlacements() {
+    try {
+      placements.value = await sourceTiersApi.placements();
+    } catch {
+      // 号源级别只是附加信息：读不到就不显示，账号列表照常工作
+      placements.value = null;
+    }
+    // 筛选的号池已经没有账号（或整个号源分级都没了）时，不能让列表停在一个选不到的筛选上
+    const filter = tierFilter.value;
+    if (
+      filter &&
+      (!showTiers.value ||
+        (filter !== NO_TIER_FILTER && !tierOptions.value.some((option) => option.value === filter)))
+    ) {
+      tierFilter.value = '';
+    }
+  }
+
+  function onTiersSaved() {
+    void loadPlacements();
+  }
 
   const visibleAccounts = computed(() => {
     const q = keyword.value.trim().toLowerCase();
@@ -53,6 +101,9 @@
       const available = account.enabled && !account.suspendedAt && !account.quotaExhaustedAt;
       if (statusFilter.value === 'active' && !available) return false;
       if (statusFilter.value === 'abnormal' && available) return false;
+      if (!matchesTierFilter(placementIndex.value.get(account.accountId), tierFilter.value)) {
+        return false;
+      }
       if (!q) return true;
       return (
         account.accountId.toLowerCase().includes(q) ||
@@ -159,6 +210,7 @@
       const nextAccounts = await accountsApi.list();
       if (generation !== accountDataGeneration) return;
       accounts.value = nextAccounts;
+      void loadPlacements();
       if (loadQuotas) loadOpenAiQuotas(generation);
     } catch (err) {
       if (generation !== accountDataGeneration) return;
@@ -563,6 +615,24 @@
           <el-option :label="t('正常运行')" value="active" />
           <el-option :label="t('异常 / 停用')" value="abnormal" />
         </el-select>
+        <el-select
+          v-if="showTiers"
+          v-model="tierFilter"
+          clearable
+          :placeholder="t('全部号池')"
+          :aria-label="t('筛选号池')"
+        >
+          <el-option
+            v-for="option in tierOptions"
+            :key="option.value"
+            :label="option.label"
+            :value="option.value"
+          />
+          <el-option :label="t('不在任何号池')" :value="NO_TIER_FILTER" />
+        </el-select>
+        <el-button v-if="showTiers" :disabled="!selection.length" @click="setTierVisible = true">
+          {{ t('设为号池…') }}{{ selection.length ? ` (${selection.length})` : '' }}
+        </el-button>
         <span class="toolbar-count">
           {{
             hasFilter
@@ -580,7 +650,12 @@
         </el-tooltip>
       </template>
 
-      <el-table v-loading="loading" class="account-table" :data="visibleAccounts">
+      <el-table
+        v-loading="loading"
+        class="account-table"
+        :data="visibleAccounts"
+        @selection-change="(rows: Account[]) => (selection = rows)"
+      >
         <template #empty>
           <el-empty
             :image-size="88"
@@ -596,6 +671,7 @@
             </template>
           </el-empty>
         </template>
+        <el-table-column v-if="showTiers" type="selection" width="44" />
         <el-table-column :label="t('账号类型')" min-width="168" width="180">
           <template #default="{ row }">
             <ProviderBadge
@@ -631,6 +707,24 @@
             <span class="account-state" :class="`is-${statusOf(row).tone}`">
               <i />{{ statusOf(row).label }}
             </span>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="showTiers" :label="t('号源级别')" min-width="150">
+          <template #default="{ row }">
+            <div class="tier-cell">
+              <el-tooltip
+                v-for="placed in placementIndex.get(row.accountId) ?? []"
+                :key="placed.vendor"
+                :content="placedHint(placed)"
+                placement="top"
+              >
+                <el-tag size="small" effect="light" :type="placed.active ? 'primary' : 'info'">
+                  <el-icon v-if="placed.rule === 'MEMBER_ROW'" class="tier-pin"><Paperclip /></el-icon>
+                  {{ placedLabel(placed, tiersWithVendor) }}
+                </el-tag>
+              </el-tooltip>
+              <span v-if="!placementIndex.has(row.accountId)" class="region-text">—</span>
+            </div>
           </template>
         </el-table-column>
         <el-table-column :label="t('请求 / 错误')" width="120">
@@ -731,6 +825,13 @@
       :account-id="chatGptOAuthAccountId"
       @saved="() => loadAccounts()"
     />
+
+    <!-- 批量设为号池（号源分级） -->
+    <SetSourceTierDialog
+      v-model:visible="setTierVisible"
+      :accounts="selection"
+      @saved="onTiersSaved"
+    />
   </div>
 </template>
 
@@ -787,6 +888,27 @@
 
   .url-text {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+
+  .tier-cell {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+
+    // 厂商名加号池名可能很长：标签在列里折行，不被截断
+    :deep(.el-tag) {
+      height: auto;
+      max-width: 100%;
+      padding-block: 2px;
+      line-height: 1.5;
+      white-space: normal;
+    }
+
+    .tier-pin {
+      margin-right: 2px;
+      vertical-align: -2px;
+    }
   }
 
   .account-state {

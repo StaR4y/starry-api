@@ -10,8 +10,15 @@ import type {
 } from '@/types/api';
 
 export const modelPricingApi = {
-  preview(model: string, rules: UpdateModelPricingRequest['rules']) {
-    return unwrap<ModelPricingPreview>(http.post('/admin/model-pricing/preview', { model, rules }));
+  /** factors：要一并算价的号池价格系数（号源分级）；省略则不算 */
+  preview(model: string, rules: UpdateModelPricingRequest['rules'], factors?: number[]) {
+    return unwrap<ModelPricingPreview>(
+      http.post('/admin/model-pricing/preview', {
+        model,
+        rules,
+        ...(factors?.length ? { factors } : {}),
+      }),
+    );
   },
   settings() {
     return unwrap<ModelPricingSettings>(

@@ -20,6 +20,17 @@ public interface SourceTierAdminApi {
     Mono<ApiResponse<SourceTierDtos.Overview>> overview(ServerWebExchange exchange);
 
     /**
+     * What the answering node would do with requests now and how the last 15 minutes were served ({@link
+     * SourceTierDtos.Status}). 503 {@code TIER_CONFIG_UNAVAILABLE} before the configuration has loaded.
+     */
+    @GetMapping("/status")
+    Mono<ApiResponse<SourceTierDtos.Status>> status(ServerWebExchange exchange);
+
+    /** The tier each account is in, for the account list ({@link SourceTierDtos.Placements}). */
+    @GetMapping("/placements")
+    Mono<ApiResponse<SourceTierDtos.Placements>> placements(ServerWebExchange exchange);
+
+    /**
      * Replaces the configuration of one vendor. 400 with a {@code SOURCE_*} code for a configuration that is not valid, 409
      * {@code SOURCE_TIER_VERSION_CONFLICT} when it changed since {@code expectedVersion}, 409
      * {@code SOURCE_TIER_RUNTIME_UNSUPPORTED} for a setting this release cannot run.

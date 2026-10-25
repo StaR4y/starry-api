@@ -114,7 +114,8 @@ export function roundFactor(value: number): number {
   return Math.round(value * 1_000_000) / 1_000_000;
 }
 
-function nativeMember(accountId: string, tierId: string): SourceTierMember {
+/** 只把一个原生账号固定到号池的成员行：没有 protocol，其余字段不适用 */
+export function nativeMember(accountId: string, tierId: string): SourceTierMember {
   return {
     accountId,
     tierId,
@@ -361,6 +362,27 @@ export function unsupportedMessage(items: unknown): string | null {
     }
   });
   return t('当前版本尚不支持：{p0}。关闭它们后可以保存其余设置。', { p0: labels.join('、') });
+}
+
+/**
+ * 「启用」开关下方的提示。能启用的版本里，厂商还没启用时提醒先把所有节点升级到支持分级的版本：旧节点不认识这份配置，
+ * 照旧按标准价计费，同一个请求在不同节点上价格就不一样。不能启用的版本里，说明为什么。没有要说的返回 null。
+ */
+export function enableNote(
+  nativeTiers: boolean,
+  loadedEnabled: boolean,
+  draftEnabled: boolean,
+): string | null {
+  if (nativeTiers) {
+    return loadedEnabled
+      ? null
+      : t(
+          '所有节点都升级到支持号源分级的版本后再启用：旧版本的节点不按号池选号，会按标准价计费，同一个请求在不同节点上价格不同。',
+        );
+  }
+  return draftEnabled
+    ? t('当前版本尚不支持按号池选号，这个设置需要关闭后才能保存。')
+    : t('当前版本尚不支持按号池选号，暂时不能启用；号池配置可以先保存。');
 }
 
 /* ---------- 展示用的小函数 ---------- */

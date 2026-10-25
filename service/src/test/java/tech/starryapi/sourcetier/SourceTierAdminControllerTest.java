@@ -10,6 +10,7 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
@@ -26,8 +27,9 @@ import tech.starryapi.common.GlobalExceptionHandler;
 class SourceTierAdminControllerTest {
 
     private final SourceTierAdminService service = mock(SourceTierAdminService.class);
+    private final SourceTierStatusService status = mock(SourceTierStatusService.class);
     private final AdminAuth auth = mock(AdminAuth.class);
-    private final WebTestClient client = WebTestClient.bindToController(new SourceTierAdminController(service, auth))
+    private final WebTestClient client = WebTestClient.bindToController(new SourceTierAdminController(service, status, auth))
         .controllerAdvice(new GlobalExceptionHandler()).build();
 
     private static final String PUT_BODY = """
@@ -52,13 +54,14 @@ class SourceTierAdminControllerTest {
     @Test
     void theOverviewCarriesTheCapabilitiesThePairsAndEveryVendor() {
         when(service.overview()).thenReturn(Mono.just(new SourceTierDtos.Overview(7L,
-            new SourceTierDtos.Runtime(false, false, false, List.of(new SourceTierDtos.PairStatus("anthropic", "OPENAI_CHAT", "CHAT", "NOT_OFFERED"))),
+            new SourceTierDtos.Runtime(true, false, false, List.of(new SourceTierDtos.PairStatus("anthropic", "OPENAI_CHAT", "CHAT", "NOT_OFFERED")), false),
             List.of(vendor("anthropic", 3), vendor("openai", 0)))));
 
         client.get().uri("/admin/source-tiers").exchange().expectStatus().isOk().expectBody()
             .jsonPath("$.success").isEqualTo(true)
             .jsonPath("$.data.configVersion").isEqualTo(7)
-            .jsonPath("$.data.runtime.nativeTiers").isEqualTo(false)
+            .jsonPath("$.data.runtime.nativeTiers").isEqualTo(true)
+            .jsonPath("$.data.runtime.selectors").isEqualTo(false)
             .jsonPath("$.data.runtime.unifyEndpoints").isEqualTo(false)
             .jsonPath("$.data.runtime.xpMembers").isEqualTo(false)
             .jsonPath("$.data.runtime.pairs[0].vendor").isEqualTo("anthropic")
@@ -73,6 +76,47 @@ class SourceTierAdminControllerTest {
             .jsonPath("$.data.vendors[0].warnings[0].code").isEqualTo("LOWEST_TIER_COLLECTS_OFFICIAL_KEYS")
             .jsonPath("$.data.vendors[1].configured").isEqualTo(false)
             .jsonPath("$.data.vendors[1].version").isEqualTo(0);
+    }
+
+    @Test
+    void theStatusCarriesTheLayersTheServingFlagsAndTheWindowOfEveryVendor() {
+        when(status.status()).thenReturn(Mono.just(new SourceTierDtos.Status(Instant.parse("2026-10-25T08:00:00Z"), 7L, 15, List.of(
+            new SourceTierDtos.VendorStatus("anthropic", "Anthropic", true, true, 100, 30, List.of(
+                new SourceTierDtos.TierStatus("official", 1, "Official", true, true,
+                    new SourceTierDtos.TierAccounts(0, 1, 1, 1, 2), 70, 0, 4),
+                new SourceTierDtos.TierStatus("kiro", 2, "Kiro", true, false,
+                    new SourceTierDtos.TierAccounts(2, 0, 0, 0, 0), 30, 5, 0)))))));
+
+        client.get().uri("/admin/source-tiers/status").exchange().expectStatus().isOk().expectBody()
+            .jsonPath("$.success").isEqualTo(true)
+            .jsonPath("$.data.windowMinutes").isEqualTo(15)
+            .jsonPath("$.data.configVersion").isEqualTo(7)
+            .jsonPath("$.data.vendors[0].vendor").isEqualTo("anthropic")
+            .jsonPath("$.data.vendors[0].serving").isEqualTo(true)
+            .jsonPath("$.data.vendors[0].autoServed").isEqualTo(100)
+            .jsonPath("$.data.vendors[0].degraded").isEqualTo(30)
+            .jsonPath("$.data.vendors[0].tiers[0].accounts.unavailable").isEqualTo(1)
+            .jsonPath("$.data.vendors[0].tiers[0].accounts.ready").isEqualTo(2)
+            .jsonPath("$.data.vendors[0].tiers[0].failed").isEqualTo(4)
+            .jsonPath("$.data.vendors[0].tiers[1].serves").isEqualTo(false)
+            .jsonPath("$.data.vendors[0].tiers[1].servedPinned").isEqualTo(5)
+            .jsonPath("$.data.vendors[0].tiers[1].accounts.disabled").isEqualTo(2);
+    }
+
+    @Test
+    void thePlacementsListTheTierOfEachAccountThatIsInOne() {
+        when(status.placements()).thenReturn(Mono.just(new SourceTierDtos.Placements(7L, List.of(
+            new SourceTierDtos.AccountPlacement("claude-1", List.of(
+                new SourceTierDtos.Placed("anthropic", "Anthropic", "kiro", 2, "Kiro", "CATEGORY", false, true)))))));
+
+        client.get().uri("/admin/source-tiers/placements").exchange().expectStatus().isOk().expectBody()
+            .jsonPath("$.data.configVersion").isEqualTo(7)
+            .jsonPath("$.data.accounts[0].accountId").isEqualTo("claude-1")
+            .jsonPath("$.data.accounts[0].tiers[0].vendorLabel").isEqualTo("Anthropic")
+            .jsonPath("$.data.accounts[0].tiers[0].tierId").isEqualTo("kiro")
+            .jsonPath("$.data.accounts[0].tiers[0].rule").isEqualTo("CATEGORY")
+            .jsonPath("$.data.accounts[0].tiers[0].relay").isEqualTo(false)
+            .jsonPath("$.data.accounts[0].tiers[0].active").isEqualTo(true);
     }
 
     @Test
@@ -173,10 +217,12 @@ class SourceTierAdminControllerTest {
         when(auth.verifyAdmin(any())).thenThrow(new ApiException(HttpStatus.FORBIDDEN, "ADMIN_ROLE_REQUIRED", "Administrator role is required"));
 
         client.get().uri("/admin/source-tiers").exchange().expectStatus().isForbidden();
+        client.get().uri("/admin/source-tiers/status").exchange().expectStatus().isForbidden();
+        client.get().uri("/admin/source-tiers/placements").exchange().expectStatus().isForbidden();
         client.put().uri("/admin/source-tiers/anthropic").contentType(MediaType.APPLICATION_JSON).bodyValue(PUT_BODY)
             .exchange().expectStatus().isForbidden();
         client.post().uri("/admin/source-tiers/anthropic/members").contentType(MediaType.APPLICATION_JSON)
             .bodyValue("{\"expectedVersion\":0,\"removeAccountIds\":[\"x\"]}").exchange().expectStatus().isForbidden();
-        verifyNoInteractions(service);
+        verifyNoInteractions(service, status);
     }
 }

@@ -161,6 +161,7 @@ GET /models
 - 逐项计费的模型会填充四个详细的 `*PricePerMillionTokens` 字段，同时把 `totalPricePerMillionTokens` 作为面向用户的「50% 输入 + 50% 输出」参考价。**实际计费仍按真实的 token 类别**。旧版固定总价的规则则暴露其真实的固定总价，包括通配规则。
 - **价格解析是确定的**：启用的规则按优先级升序，同优先级时 精确模型 → 目录系列 → 目录厂商 → 通配符；通配符按字面长度降序。请求别名的精确匹配先于目标的精确匹配；其余并列用模式和规则 ID。**只有胜出的规则生效**，它的倍率直接替换全局倍率，所以 `0.1` 永远表示官方价的 10%。已知前缀（`starry/`、`openai-compatible/`、`openai/`、`anthropic/`、`google/`、`gemini/`、`deepseek/`）在精确规则和价格查找时都会规范化。优先使用模型自己的精确 / 规范化官方价格，否则沿着配置的目录目标走；**不会**使用系列 / 厂商中位数。
 - 既没有经验证的价格、也没有显式旧版固定价的条目，会暴露 `billingMode: "unavailable"` 且不含数值价格；计费请求会在预留和派发之前返回 `503 MODEL_PRICE_UNAVAILABLE`。
+- **号源分级**（见下文[号源分级](#号源分级)）：没有开启分级的厂商，列表**逐字节**不变。开启了分级的厂商，它的模型按「请求最先会被送去的号池」标价：标准价（上一条的解析结果）乘该号池的价格系数，号池是**第一个有账号能服务这个模型的**——只有 Codex 账号能服务的模型，按第一个有 Codex 账号的号池标价，排在它前面的官方 Key 号池不起作用。该厂商打开「公开号池名称」时，条目另带 `sourceTiers` 数组，按级别从好到坏列出能服务这个模型的号池：`id`（号池标识）、`level`、`name`、`priceFactor`、`selectable` 和乘过系数的 `pricing`（结构同条目自己的价格字段）；不含账号、协议或中转信息。
 
 **当前的厂商分组**：
 
@@ -534,6 +535,55 @@ Content-Type: application/json
 
 各 `*MaxRetryAccounts` 取 1–5，限制**调用已经派发之后**最多还能尝试多少个不同的上游账号；准入容量拒绝仍会尝试另一个账号，且**不计为重试**。要走官方 API Key 路由，请保持 `gptUsesCodexAccounts` 的默认值 `false`；只有普通 GPT 流量应该消耗 Codex 账号时才设成 `true`。
 
+### 号源分级
+
+**号源分级**把一个厂商（Anthropic、OpenAI、Google、DeepSeek 或自定义厂商）的账号分成有序的**号池**（级别，1 最好），每个号池有名称和价格系数。新会话从 1 级开始；一个请求里 1 级的账号**全部**不可用（停用、挂起、额度耗尽、冷却，也包括并发 / 限速 / 在途 token 已满的繁忙）才会用到 2 级。单价是标准价（唯一命中规则的价格，或全局倍率价，快速模式再 ×2）乘**实际服务这个请求的号池**的系数，所以用户从不会为没有服务过他的号池付费。会话真实降级后会停在降级后的号池，直到空闲（可按厂商关闭）；这个状态只记在处理该会话的节点的内存里，多节点部署且负载均衡不把同一个会话固定到同一个节点时，只部分成立，见[运维手册：号源分级](OPERATIONS.md#号源分级)。没有配置的厂商，路由、价格、结算和响应都与分级出现之前完全相同。
+
+这些端点需要管理员会话：
+
+```http
+GET /admin/source-tiers
+PUT /admin/source-tiers/{vendor}
+POST /admin/source-tiers/{vendor}/members
+GET /admin/source-tiers/status
+GET /admin/source-tiers/placements
+```
+
+- `GET /admin/source-tiers` 返回 `configVersion`（所有厂商共用，各节点据此刷新）、`runtime`（这个版本能运行什么）和每个厂商的已保存配置。`runtime.nativeTiers` 为真表示这个版本能按号池选号：厂商的路由本来就能用的账号（官方 Key、Kiro、Claude OAuth、Codex 等）可以分级，`enabled` 能打开；为假时 `enabled` 打不开（保存返回 `409 SOURCE_TIER_RUNTIME_UNSUPPORTED`，`data` 列出被拒的设置）。`unifyEndpoints`、`xpMembers` 和 `pairs` 同理，它们随后续版本提供，现在为假。`selectors` 表示客户端能自己指定号池（`模型@标识` 写法、`X-Starry-Tier` 请求头、Key 的号源偏好），也是后续版本才提供，现在为假；它不拒绝任何设置，只决定控制台是否提供复制「模型@标识」的按钮。厂商里的 `tierAccounts` 是每个号池已收下的启用账号数。
+- `PUT /admin/source-tiers/{vendor}` **整体替换**一个厂商的开关、号池、成员行和门控，请求带 `expectedVersion`（从未配置过的厂商为 `0`）；期间被别人改过返回 `409 SOURCE_TIER_VERSION_CONFLICT`（`data.currentVersion` 是现在的版本）。号池的 `tierId` 是小写字母、数字和连字符（至多 32 位），不能是 `auto`、`L2` 或纯数字；`priceFactor` 大于 0、至多 1000、至多 6 位小数，默认 1；`memberCategories` 取 `OFFICIAL_API_KEY`、`COMPATIBLE_API_KEY`、`CODEX`、`CLAUDE_OAUTH`、`KIRO`，一个类别只能属于一个号池。账号归级的规则：有成员行取其号池；否则取列出该账号类别的号池（类别只匹配本厂商的账号）；都没有则落入**最低一级**。
+- `POST /admin/source-tiers/{vendor}/members` 只增改、移除成员行（账号列表批量设置号池用它），带同样的 `expectedVersion`，结果必须是合法的整体配置。
+- `GET /admin/source-tiers/status` 返回**应答节点**此刻的状态和最近 15 分钟的服务情况：
+
+```json
+{
+  "success": true,
+  "data": {
+    "at": "2026-10-25T08:00:00Z", "configVersion": 7, "windowMinutes": 15,
+    "vendors": [
+      {
+        "vendor": "anthropic", "label": "Anthropic", "enabled": true, "serving": true,
+        "autoServed": 100, "degraded": 30,
+        "tiers": [
+          { "tierId": "official", "level": 1, "name": "官方", "enabled": true, "serves": true,
+            "accounts": { "disabled": 0, "unavailable": 1, "resting": 1, "busy": 1, "ready": 2 },
+            "served": 76, "servedPinned": 6, "failed": 4 }
+        ]
+      }
+    ]
+  }
+}
+```
+
+  - `accounts` 把号池收下的每个账号只计入第一个让它不能服务的层：`disabled`（已停用）、`unavailable`（被挂起或额度耗尽）、`resting`（分配生命周期里冷却或隔离中）、`busy`（并发或在途 token 已到上限；每分钟请求数、突发和会话数的限制，以及按模型的冷却，只在请求到来时才知道，不在这里计）、`ready`。数字是**这个节点**的（账号缓存最多晚 30 秒）。
+  - `serves`：这个节点现在会从该号池服务（厂商已启用、版本能运行、号池已启用、至少一个 `ready` 账号）；`serving` 是厂商一级的前两个条件。
+  - `served`、`servedPinned`、`failed` 取自请求日志，覆盖**所有节点**：最近 15 分钟里该号池服务成功的尝试数（其中客户端指定号池的）和失败的尝试数。一个请求在 1 级失败又由 2 级服务，算 1 级一次失败、2 级一次服务。`autoServed` 是由网关自己选号池服务的请求数，`degraded` 是其中由低于「已启用的最好一级」服务的数；降级率 = `degraded / autoServed`。
+  - 配置从未加载成功时返回 `503 TIER_CONFIG_UNAVAILABLE`。
+- `GET /admin/source-tiers/placements` 返回每个账号所在的号池，供账号列表显示「号源级别」列：`{"configVersion":7,"accounts":[{"accountId":"…","tiers":[{"vendor":"anthropic","tierId":"kiro","level":2,"name":"kiro","rule":"CATEGORY","relay":false,"active":true}]}]}`。`rule` 是 `MEMBER_ROW`（手动指定）、`CATEGORY` 或 `LOWEST_TIER`（没有号池列出它的类别，落入最低级）；`active` 是现在是否按这个号池服务。不在任何号池的账号不出现。
+
+**可见性**：按号池服务的请求，响应带 `X-Starry-Tier`（号池标识）、`X-Starry-Tier-Level`、`X-Starry-Tier-Name`（UTF-8 百分号编码）、`X-Starry-Tier-Mode`（`auto` 或 `pinned`）和 `X-Starry-Tier-Status: served`，这些头都在 CORS 的 `exposedHeaders` 里；没有分级的厂商不会有这些头。`/admin/logs` 的每一行（每次尝试一行）在按号池服务时带 `sourceTierRef`（`厂商:号池标识`）、`sourceTierLevel`、`sourceTierName`、`priceFactor` 和 `tierSelection`（`AUTO` 或 `PINNED`），其余号源字段（`sourceDispatch`、`wireModel`、`usageSource`、`stopReason`、`degradedFeatures`）只在号源不是原生账号时出现；没有分级的行不含这些字段。用户自己的日志（`/admin/logs/me`）只含号池的级别、名称和系数。收入按号池汇总：`SELECT source_tier_ref, sum(credits) FROM api_usage_events GROUP BY 1`。
+
+**与「实验性的分级熔断」的关系**：两者互相独立。按号源分级服务的厂商不进入旧的熔断（它的请求不带熔断纪元，不产生 `ACCOUNT_POOL_CIRCUIT_OPEN`，`pool_tier` 与熔断指标不变）；旧熔断只作用于没有配置号源分级的厂商。
+
 ### 实验性的分级熔断
 
 **账号池分级熔断策略**是实验性功能，**默认关闭**，用 `PATCH /admin/accounts/settings` 开关：
@@ -542,7 +592,7 @@ Content-Type: application/json
 { "poolPolicy": { "enabled": true } }
 ```
 
-关闭时，账号选择忽略 `poolTier` 的熔断路由，控制台保持普通的账号管理模式：隐藏熔断指标、分层控件、权重和策略横幅，页头只暴露一个「启用实验功能」入口。启用需要确认「不稳定」提示，然后控制台切换成只读的熔断监控布局，并隐藏账号变更操作。启用后的布局始终显示实验标签、不稳定警告和关闭开关，因为实验期间仍可能发生误熔断、路由抖动和监控口径变化。
+关闭时，账号选择忽略 `poolTier` 的熔断路由。熔断策略、模型池监控和关闭开关都在控制台的「系统设置 → 账号池设置」页（「账号池分级熔断策略」卡片）里；账号页始终是普通的账号管理，不会因为启用而变成只读。启用需要确认「不稳定」提示，卡片里始终显示实验标签和不稳定警告，因为实验期间仍可能发生误熔断、路由抖动和监控口径变化。这个策略只作用于**没有配置[号源分级](#号源分级)**的厂商。
 
 每个熔断器有一个有界的 `厂商:模型族` 键，派生自解析后的上游模型目录，如 `openai:gpt-5` 或 `deepseek:deepseek-v4`。未知的模型 ID 被归入厂商受控的 `厂商:other` 池，而不是创建无界的键。账号的 `poolTier` 取 `primary` 或 `secondary`；启用策略前通过账号创建 / 更新 API 配置。因为 `OPEN` 的池只路由给备用层，生产部署应当为每个启用的厂商至少准备一个可用的备用账号。
 
@@ -682,6 +732,8 @@ POST  /admin/model-pricing/refresh
 - `matchedRuleIds`：按应用顺序列出的启用且匹配的规则，第一条胜出；
 - `basePricing`：1.0 倍的官方价格；`pricing`：提交的草稿下的有效价格，两者都用公开的价格结构。
 
+请求可以另带 `factors`（号池价格系数的列表，每个大于 0、至多 1000，至多 9 个；越界返回 `400 MODEL_PRICE_FACTOR_INVALID`）。规则只命中**一条**，系数在它**之后**再乘——同一个预览里先找出生效的规则，再把它的结果乘上每个系数。响应此时多一个 `factorPricing`，与 `factors` 同序，每项是 `{ "factor": 0.6, "pricing": {…} }`，`pricing` 的结构同 `pricing`；不带 `factors` 时没有这个字段。
+
 空草稿会预览默认值，即使已有保存的规则。预览使用标准的非快速定价；请求的快速模式仍然应用它原有的 2 倍附加费。缺失的价格在预览里表示为 `unavailable`，而不是让预览请求失败。旧版的原始 `*Multiplier` 字段仍被接受，并由界面保留；显式设置 `priceMultiplier` 会在保存时清除旧版价格。
 
 规则的范围字段：
@@ -817,7 +869,7 @@ POST  /admin/billing/reviews/{requestHash}/resolve
 - 手动发放用 `{"userId":"user-1","planId":"plan-1"}` 加一个 `Idempotency-Key` 请求头。状态变更必须给出原因，例如 `{"status":"REVOKED","reason":"Entitlement correction"}`。恢复一个已过期的订阅，或与已经推进的续订重叠的期限，会返回 409。
 - 订阅响应包含 `planVersion`、`reservedCredits`、`availableCredits` 和有效状态（`ACTIVE`、`SCHEDULED`、`EXHAUSTED`、`EXPIRED`、`REVOKED`、`CANCELLED`）。`remainingCredits` 是额度减去已消耗的用量；`availableCredits` 还会额外扣除冻结额度。**在把一行当作可花费之前先检查状态。**汇总端点在服务端聚合所有匹配的订阅，包括已撤销 / 过期期限上未结清的冻结。分页响应含 `items,total,page,pageSize`（页大小最大 200）；账本分页最多 100 条，用最后一条的 ID 作 `before`。旧版的列表端点最多返回 200 行。
 
-**余额不足与计费复核**：余额或匹配的套餐额度不足，会在派发之前返回 `402`。请求在已经发出之后断开 / 读超时 / 响应不完整，其未知成本会保留冻结并需要复核；该用户（所有 Key）之后的调用会返回 `409 BILLING_REVIEW_REQUIRED`。上游明确返回的错误响应，以及请求根本没发出去的失败，会直接释放冻结，不进入复核。管理员用 `{"action":"SETTLE","credits":"0.15","reason":"Verified upstream usage"}` 或 `{"action":"WAIVE","reason":"Confirmed no charge"}` 处理。每个操作都会被审计。在计费未完成时修改 Key 的厂商 / 计费来源或删除它，会返回 `409 API_KEY_BILLING_BUSY`。
+**余额不足与计费复核**：余额或匹配的套餐额度不足，会在派发之前返回 `402`。请求在已经发出之后断开 / 读超时 / 响应不完整，其未知成本会保留冻结并需要复核；该用户（所有 Key）之后的调用会返回 `409 BILLING_REVIEW_REQUIRED`。上游明确返回的错误响应，以及请求根本没发出去的失败，会直接释放冻结，不进入复核。管理员用 `{"action":"SETTLE","credits":"0.15","reason":"Verified upstream usage"}` 或 `{"action":"WAIVE","reason":"Confirmed no charge"}` 处理。`GET /admin/billing/reviews` 里，按号源分级服务的请求的预留按它**可能**被服务的最贵号池定额，所以按预留金额结算会让用户为没有服务过他的号池付费；这类行因此另带 `tier_plan`（预留时冻结的号池计划）、`served`（实际服务的号池，含级别、系数、报价 `quote` 和该级的预留估算 `estimate`）和 `last_dispatched`（最后派发到的号池及时间，同样带报价）。核对时请按 `served`（没有则按 `last_dispatched`）的报价估算金额，而不是预留金额；没有分级的请求不含这些字段。每个操作都会被审计。在计费未完成时修改 Key 的厂商 / 计费来源或删除它，会返回 `409 API_KEY_BILLING_BUSY`。
 
 套餐兑换码用 `planId` 取代 `balance`（前缀 `PLN-`）；兑换时遵循固定的版本，即使该产品之后被更新或下架。目前的结账方式是钱包购买、管理员发放或兑换码；**套餐的网关直付尚未实现**。迁移和恢复的细节见 [Coding Plan 重建与验证](CODING_PLAN_REBUILD.md)。
 

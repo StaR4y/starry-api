@@ -12,9 +12,10 @@ import org.springframework.stereotype.Component;
  * release, so the administrator API refuses a setting whose capability is false here (409
  * SOURCE_TIER_RUNTIME_UNSUPPORTED): nothing is stored that a later upgrade would switch on without anyone deciding to.
  *
- * <p>Every capability starts false and is set by the task that completes its runtime: {@link #nativeTiers()} by the
- * end-to-end task of native tiering (P2-09), {@link #unifyEndpoints()} by the all-endpoints switch (P3-03),
- * {@link #xpMembers()} by the exclusive-relay task (P4-10). Until the pair registry (P4-01) exists no pair is offered.
+ * <p>A capability is true only once the task that completes its runtime has landed: {@link #nativeTiers()} was set by
+ * the end-to-end task of native tiering (P2-09), {@link #selectors()} is for the selector task (P3-01),
+ * {@link #unifyEndpoints()} for the all-endpoints switch (P3-03) and {@link #xpMembers()} for the exclusive-relay task
+ * (P4-10); those three are still false. Until the pair registry (P4-01) exists no pair is offered.
  */
 @Component
 public class SourceTierRuntimeInfo {
@@ -34,13 +35,14 @@ public class SourceTierRuntimeInfo {
     public static final List<String> CROSS_PROTOCOL_VENDORS = List.of("anthropic", "openai", "google");
 
     private final boolean nativeTiers;
+    private final boolean selectors;
     private final boolean unifyEndpoints;
     private final boolean xpMembers;
     private final Function<Pair, PairStatus> pairStatuses;
 
     @Autowired
     public SourceTierRuntimeInfo() {
-        this(false, false, false, pair -> PairStatus.NOT_OFFERED);
+        this(true, false, false, false, pair -> PairStatus.NOT_OFFERED);
     }
 
     /** For tests, and for the day the pair registry decides {@code pairStatuses}. */
@@ -50,7 +52,18 @@ public class SourceTierRuntimeInfo {
         boolean xpMembers,
         Function<Pair, PairStatus> pairStatuses
     ) {
+        this(nativeTiers, false, unifyEndpoints, xpMembers, pairStatuses);
+    }
+
+    public SourceTierRuntimeInfo(
+        boolean nativeTiers,
+        boolean selectors,
+        boolean unifyEndpoints,
+        boolean xpMembers,
+        Function<Pair, PairStatus> pairStatuses
+    ) {
         this.nativeTiers = nativeTiers;
+        this.selectors = selectors;
         this.unifyEndpoints = unifyEndpoints;
         this.xpMembers = xpMembers;
         this.pairStatuses = Objects.requireNonNull(pairStatuses, "pairStatuses");
@@ -59,6 +72,15 @@ public class SourceTierRuntimeInfo {
     /** Whether a request is planned over tiers at all, which is what a vendor's {@code enabled} asks for. */
     public boolean nativeTiers() {
         return nativeTiers;
+    }
+
+    /**
+     * Whether a client can name the tier it wants: the {@code model@tier} suffix, the {@code X-Starry-Tier} header and
+     * the key's preference. Nothing is stored for it, so it refuses no setting; the console only offers to copy the
+     * suffix form when it works.
+     */
+    public boolean selectors() {
+        return selectors;
     }
 
     public boolean unifyEndpoints() {

@@ -218,7 +218,6 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
     void nothingThisReleaseCannotRunIsStored() {
         String relay = relayAccount();
         List<SourceTierDtos.ReplaceVendor> unsupported = List.of(
-            replace(0L, true, OWNER_TIERS, List.of(), List.of()),
             new SourceTierDtos.ReplaceVendor(0L, false, true, null, null, null, null, OWNER_TIERS, List.of(), List.of()),
             replace(0L, false, List.of(tier("relay", 1, "Relay")), List.of(relay(relay, "relay", false,
                 mapping("claude-sonnet-4.5", "relay/sonnet", 200_000))), List.of()),
@@ -236,6 +235,15 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
         assertThat(count("SELECT count(*) FROM source_tier_members")).isZero();
         assertThat(count("SELECT count(*) FROM source_tier_pair_gates")).isZero();
         assertThat(configVersion()).as("a refused change is not a change").isZero();
+    }
+
+    @Test
+    void aVendorCanBeEnabledBecauseTheReleaseTiersNatively() {
+        SourceTierDtos.Vendor enabled = thisRelease.replace("anthropic", replace(0L, true, OWNER_TIERS, List.of(), List.of())).block();
+
+        assertThat(enabled.enabled()).isTrue();
+        assertThat(enabled.tiers()).extracting(SourceTierDtos.Tier::tierId).containsExactly("official", "kiro");
+        assertThat(count("SELECT count(*) FROM source_tier_vendors WHERE enabled")).isEqualTo(1L);
     }
 
     @Test
@@ -390,7 +398,9 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
         SourceTierDtos.Overview overview = thisRelease.overview().block();
 
         assertThat(overview.configVersion()).isZero();
-        assertThat(overview.runtime().nativeTiers()).isFalse();
+        // Native tiering is complete in this release; what the later phases bring is still off.
+        assertThat(overview.runtime().nativeTiers()).isTrue();
+        assertThat(overview.runtime().selectors()).isFalse();
         assertThat(overview.runtime().unifyEndpoints()).isFalse();
         assertThat(overview.runtime().xpMembers()).isFalse();
         assertThat(overview.runtime().pairs()).hasSize(12).allSatisfy(pair -> assertThat(pair.status()).isEqualTo("NOT_OFFERED"));

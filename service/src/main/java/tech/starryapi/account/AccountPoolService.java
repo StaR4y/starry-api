@@ -353,6 +353,49 @@ public class AccountPoolService {
         return !cachedAccountsSnapshot(account -> matcher.test(account) && isAvailable(account)).isEmpty();
     }
 
+    /** The enabled accounts of the cache, whatever their state: what the status page of the source tiers classifies. */
+    public List<ProxyAccountEntity> cachedAccounts() {
+        return cachedAccountsSnapshot(account -> true);
+    }
+
+    /** The enabled accounts of the cache that {@code filter} takes, whatever their state: what a plan classifies by tier. */
+    public List<ProxyAccountEntity> cachedAccounts(Predicate<ProxyAccountEntity> filter) {
+        return cachedAccountsSnapshot(filter == null ? account -> true : filter);
+    }
+
+    /** Whether the account is neither suspended nor out of quota, the layer of design 4.1 that {@link #hasUsableAccount} tests. */
+    public boolean isUsable(ProxyAccountEntity account) {
+        return account != null && isAvailable(account);
+    }
+
+    /**
+     * Whether selection could pick an account that satisfies {@code filter} right now: one in the cache of enabled
+     * accounts, available (not suspended, not out of quota) and that the allocation lifecycle lets be scheduled (not
+     * disabled, not cooling down or quarantined before the cooldown ends). These are the layers {@code selectFromPool}
+     * passes an account through; what only a request meets (admission: concurrency, rate, cooldown per model) is not
+     * counted. Nothing is selected, reserved or changed.
+     */
+    public Mono<Boolean> hasSelectableAccount(Predicate<ProxyAccountEntity> filter) {
+        return Mono.defer(() -> {
+            List<ProxyAccountEntity> available = cachedAccountsSnapshot(filter == null ? account -> true : filter).stream()
+                .filter(this::isAvailable)
+                .toList();
+            if (available.isEmpty()) {
+                return Mono.just(false);
+            }
+            if (candidateRanker == null) {
+                return Mono.just(true);
+            }
+            return candidateRanker.schedulable(available).map(schedulable -> !schedulable.isEmpty());
+        });
+    }
+
+    /** An enabled account from the cache, whatever its state; empty for an account that is disabled, deleted or unknown. */
+    public Optional<ProxyAccountEntity> cachedAccount(String accountId) {
+        CachedAccountEntry entry = accountId == null ? null : accountCache.get(accountId);
+        return entry != null && entry.active() ? Optional.of(entry.account()) : Optional.empty();
+    }
+
     public Mono<ProxyAccountEntity> selectAccount(String sessionHint) {
         return selectAccount(sessionHint, account -> true, "No available upstream account");
     }
@@ -584,12 +627,46 @@ public class AccountPoolService {
         String unavailableMessage,
         AccountPoolRequestContext context
     ) {
-        String affinityKey = poolPolicyService == null
+        return selectAccount(sessionHint, filter, unavailableMessage, context, null, true);
+    }
+
+    /**
+     * Selects among the accounts that satisfy {@code filter} exactly as the select*ForPool methods do: the account the
+     * session is bound to if it is still available, otherwise the ranker's choice. This is the selection of one cell of
+     * one tier of a tiered request, whose filter is the cell's accounts that the tier holds and the request has not yet
+     * tried.
+     *
+     * @param scope what the session's binding is kept under besides the session itself, so that a session bound to an
+     *     account of one tier, or for one model, does not steer the selection in another; null for none
+     * @param refreshOnEmpty whether to reload the account cache, when it is stale, if no account in it satisfies the
+     *     filter. A cell that no account can belong to is empty on every request, and the caller that walks all the
+     *     cells of a tiered request reloads once for the whole round instead of once per empty cell.
+     */
+    public Mono<ProxyAccountEntity> selectInScope(
+        String sessionHint,
+        Predicate<ProxyAccountEntity> filter,
+        String unavailableMessage,
+        AccountPoolRequestContext context,
+        String scope,
+        boolean refreshOnEmpty
+    ) {
+        return selectAccount(sessionHint, filter, unavailableMessage, context, scope, refreshOnEmpty);
+    }
+
+    private Mono<ProxyAccountEntity> selectAccount(
+        String sessionHint,
+        Predicate<ProxyAccountEntity> filter,
+        String unavailableMessage,
+        AccountPoolRequestContext context,
+        String scope,
+        boolean refreshOnEmpty
+    ) {
+        String affinityKey = scopedAffinityKey(scope, poolPolicyService == null
             ? sessionHint
-            : poolPolicyService.affinityKey(context, sessionHint);
+            : poolPolicyService.affinityKey(context, sessionHint));
         List<ProxyAccountEntity> accounts = applyTierPolicy(cachedAccountsSnapshot(filter), context);
         if (accounts.isEmpty()) {
-            return refreshCacheIfStale()
+            return (refreshOnEmpty ? refreshCacheIfStale() : Mono.<Void>empty())
                 .then(Mono.defer(() -> {
                     List<ProxyAccountEntity> refreshed = cachedAccountsSnapshot(filter);
                     List<ProxyAccountEntity> routed = applyTierPolicy(refreshed, context);
@@ -1089,7 +1166,8 @@ public class AccountPoolService {
         return created;
     }
 
-    private Mono<Void> refreshCacheIfStale() {
+    /** Reloads the account cache unless it was reloaded in the last few seconds. */
+    public Mono<Void> refreshCacheIfStale() {
         return Mono.defer(() -> {
             if (lastCacheRefreshAt.isAfter(Instant.now().minus(CACHE_MISS_REFRESH_INTERVAL))) {
                 return Mono.empty();
@@ -1257,6 +1335,17 @@ public class AccountPoolService {
         String accountId,
         boolean bindByApiKey
     ) {
+        commitSessionAffinity(context, null, sessionHint, accountId, bindByApiKey);
+    }
+
+    /** {@link #commitSessionAffinity(AccountPoolRequestContext, String, String, boolean)} under the {@code scope} of {@link #selectInScope}. */
+    public void commitSessionAffinity(
+        AccountPoolRequestContext context,
+        String scope,
+        String sessionHint,
+        String accountId,
+        boolean bindByApiKey
+    ) {
         if (!properties.isSessionAffinityEnabled()
             || sessionHint == null
             || sessionHint.isBlank()
@@ -1267,10 +1356,15 @@ public class AccountPoolService {
         if (!bindByApiKey && sessionHint.indexOf(':') <= 0) {
             return;
         }
-        String affinityKey = poolPolicyService == null
+        String affinityKey = scopedAffinityKey(scope, poolPolicyService == null
             ? sessionHint
-            : poolPolicyService.affinityKey(context, sessionHint);
+            : poolPolicyService.affinityKey(context, sessionHint));
         affinity.asMap().putIfAbsent(affinityKey, accountId);
+    }
+
+    /** The key a binding is kept under: the session's own key, behind the scope of the tier and model it was made for. */
+    private static String scopedAffinityKey(String scope, String affinityKey) {
+        return scope == null || affinityKey == null || affinityKey.isBlank() ? affinityKey : scope + '|' + affinityKey;
     }
 
     private boolean shouldUseWeights(List<ProxyAccountEntity> accounts) {

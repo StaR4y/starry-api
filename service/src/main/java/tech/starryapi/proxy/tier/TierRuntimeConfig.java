@@ -2,16 +2,44 @@ package tech.starryapi.proxy.tier;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import tech.starryapi.account.AccountPoolService;
+import tech.starryapi.account.ModelPoolKeyResolver;
+import tech.starryapi.config.ProxyProperties;
+import tech.starryapi.model.ModelCatalogProvider;
+import tech.starryapi.model.ModelPricingService;
+import tech.starryapi.payment.PaymentSettingsService;
+import tech.starryapi.sourcetier.SourceTierRegistry;
+import tech.starryapi.sourcetier.SourceTierRuntimeInfo;
 
 @Configuration
 public class TierRuntimeConfig {
 
+    /** The tier each session was pushed down to. */
+    @Bean
+    TierSessionBindings tierSessionBindings(ProxyProperties properties) {
+        return new TierSessionBindings(properties);
+    }
+
     /**
-     * The facade's only way into the tiered-source feature. Nothing builds a real planner yet, so every deployment gets
-     * the disabled runtime and keeps today's routing, prices and settlement.
+     * The facade's only way into the tiered-source feature. A release plans requests over tiers only when it can run
+     * them ({@link SourceTierRuntimeInfo#nativeTiers()}); until then the configuration, which the administrator API
+     * does not accept either, is not looked at, and every deployment keeps today's routing, prices and settlement.
      */
     @Bean
-    TierRuntime tierRuntime() {
-        return TierRuntime.disabled();
+    TierRuntime tierRuntime(
+        SourceTierRuntimeInfo runtimeInfo,
+        SourceTierRegistry registry,
+        ModelPoolKeyResolver keyResolver,
+        ModelCatalogProvider modelCatalog,
+        AccountPoolService accountPool,
+        PaymentSettingsService paymentSettings,
+        ModelPricingService modelPricing,
+        TierSessionBindings bindings
+    ) {
+        if (!runtimeInfo.nativeTiers()) {
+            return TierRuntime.disabled();
+        }
+        return new TierRuntime(new DefaultSourceTierPlanner(
+            registry, keyResolver, modelCatalog, accountPool, paymentSettings, modelPricing, bindings), bindings);
     }
 }

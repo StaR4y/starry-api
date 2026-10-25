@@ -8,16 +8,25 @@ import tools.jackson.databind.ObjectMapper;
 
 class TierRuntimeTest {
 
+    private final ObjectMapper mapper = new ObjectMapper();
+
     @Test
     void disabledPlannerAnswersUntieredForEveryRequest() {
         TierRuntime runtime = TierRuntime.disabled();
-        ObjectMapper mapper = new ObjectMapper();
 
-        assertThat(runtime.planner().plan("claude-sonnet-4.5", mapper.createObjectNode().put("model", "x")))
-            .isEqualTo(TierRuntime.Plan.UNTIERED);
-        assertThat(runtime.planner().plan("gpt-5", mapper.createArrayNode())).isEqualTo(TierRuntime.Plan.UNTIERED);
-        assertThat(runtime.planner().plan("deepseek-chat", null)).isEqualTo(TierRuntime.Plan.UNTIERED);
-        assertThat(runtime.planner().plan(null, null)).isEqualTo(TierRuntime.Plan.UNTIERED);
+        assertThat(runtime.planner().plan(request("claude-sonnet-4.5", TierRoute.ANTHROPIC)).block())
+            .isSameAs(TierPlan.UNTIERED);
+        assertThat(runtime.planner().plan(request("gpt-5", TierRoute.OPENAI)).block()).isSameAs(TierPlan.UNTIERED);
+        assertThat(runtime.planner().plan(request("deepseek-chat", TierRoute.OPENAI)).block()).isSameAs(TierPlan.UNTIERED);
+    }
+
+    @Test
+    void theUntieredPlanIsNotTiered() {
+        assertThat(TierPlan.UNTIERED.tiered()).isFalse();
+        assertThat(TierPlan.UNTIERED.levels()).isEmpty();
+        assertThat(TierPlan.UNTIERED.holdLevels()).isEmpty();
+        assertThat(TierPlan.UNTIERED.owner()).isEmpty();
+        assertThat(TierPlan.UNTIERED.reservation()).isNull();
     }
 
     @Test
@@ -30,5 +39,10 @@ class TierRuntimeTest {
         assertThatThrownBy(() -> new TierRuntime(null))
             .isInstanceOf(NullPointerException.class)
             .hasMessageContaining("planner");
+    }
+
+    private TierPlanRequest request(String model, TierRoute route) {
+        return new TierPlanRequest("request-1", model, model, "Provider", route, false, false, false, true, false, true,
+            mapper.createObjectNode().put("model", model), null, false, null, null);
     }
 }

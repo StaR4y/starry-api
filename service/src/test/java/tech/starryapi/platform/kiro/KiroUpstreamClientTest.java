@@ -9,6 +9,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -257,6 +258,79 @@ class KiroUpstreamClientTest {
 
         assertThat(failure).isSameAs(original);
         assertThat(((UpstreamException) failure).isGenerationStarted()).isFalse();
+    }
+
+    @Test
+    void aRetryThatCannotConnectAfterACutOffStreamLeavesTheErrorAsItIsAndSetsTheCallersFlag() {
+        AtomicInteger calls = new AtomicInteger();
+        ExchangeFunction exchange = request -> calls.incrementAndGet() == 1
+            ? Mono.just(ClientResponse.create(HttpStatus.OK).header("Content-Type", "application/octet-stream").body("cut").build())
+            : Mono.error(new java.net.ConnectException("Connection refused"));
+        AwsEventStreamParser parser = mock(AwsEventStreamParser.class);
+        when(parser.parse(any(byte[].class), eq("auto"), any(byte[].class)))
+            .thenThrow(new UpstreamException(502, "Kiro upstream event stream was truncated", true, null, true));
+        KiroUpstreamClient client = new KiroUpstreamClient(
+            WebClient.builder().exchangeFunction(exchange).build(),
+            properties(1, endpoint("primary", "AI_EDITOR", "https://one.example.com")),
+            parser,
+            mock(AccountTokenRefreshService.class)
+        );
+        AtomicBoolean generationStarted = new AtomicBoolean();
+
+        Throwable failure = org.assertj.core.api.Assertions.catchThrowable(() ->
+            client.complete(account("access"), payload("auto", "AI_EDITOR"), "auto")
+                .contextWrite(context -> context.put(UpstreamException.GENERATION_STARTED_CONTEXT_KEY, generationStarted))
+                .block()
+        );
+
+        // The error is not rewritten (an untiered request classifies it as it always did); the flag is what remembers.
+        assertThat(calls).hasValue(2);
+        Throwable thrown = reactor.core.Exceptions.unwrap(failure);
+        assertThat(thrown).isInstanceOf(java.net.ConnectException.class);
+        assertThat(thrown).hasMessage("Connection refused").hasNoCause();
+        assertThat(generationStarted).isTrue();
+    }
+
+    @Test
+    void theCallersFlagStaysDownWhenNoAttemptProducedOutput() {
+        ExchangeFunction exchange = request -> Mono.error(new java.net.ConnectException("Connection refused"));
+        KiroUpstreamClient client = new KiroUpstreamClient(
+            WebClient.builder().exchangeFunction(exchange).build(),
+            properties(0, endpoint("primary", "AI_EDITOR", "https://one.example.com")),
+            mock(AwsEventStreamParser.class),
+            mock(AccountTokenRefreshService.class)
+        );
+        AtomicBoolean generationStarted = new AtomicBoolean();
+
+        Throwable failure = org.assertj.core.api.Assertions.catchThrowable(() ->
+            client.complete(account("access"), payload("auto", "AI_EDITOR"), "auto")
+                .contextWrite(context -> context.put(UpstreamException.GENERATION_STARTED_CONTEXT_KEY, generationStarted))
+                .block()
+        );
+
+        assertThat(reactor.core.Exceptions.unwrap(failure)).isInstanceOf(java.net.ConnectException.class);
+        assertThat(generationStarted).isFalse();
+    }
+
+    @Test
+    void aCallerThatGivesNoFlagIsServedAsBefore() {
+        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.OK)
+            .header("Content-Type", "application/octet-stream").body("cut").build());
+        AwsEventStreamParser parser = mock(AwsEventStreamParser.class);
+        when(parser.parse(any(byte[].class), eq("auto"), any(byte[].class)))
+            .thenThrow(new UpstreamException(502, "Kiro upstream event stream was truncated", true, null, true));
+        KiroUpstreamClient client = new KiroUpstreamClient(
+            WebClient.builder().exchangeFunction(exchange).build(),
+            properties(0, endpoint("primary", "AI_EDITOR", "https://one.example.com")),
+            parser,
+            mock(AccountTokenRefreshService.class)
+        );
+
+        Throwable failure = org.assertj.core.api.Assertions.catchThrowable(() ->
+            client.complete(account("access"), payload("auto", "AI_EDITOR"), "auto").block()
+        );
+
+        assertThat(failure).isInstanceOfSatisfying(UpstreamException.class, error -> assertThat(error.isGenerationStarted()).isTrue());
     }
 
     private ObjectNode payload(String modelId, String origin) {

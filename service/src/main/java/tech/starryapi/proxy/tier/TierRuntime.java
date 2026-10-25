@@ -1,36 +1,40 @@
 package tech.starryapi.proxy.tier;
 
 import java.util.Objects;
-import tools.jackson.databind.JsonNode;
+import reactor.core.publisher.Mono;
 
 /**
  * What the proxy facade needs from the tiered-source feature, handed over as one value so its constructor does not
- * grow with every phase. While no tiers are configured, or the tiered path is not built yet, this is
- * {@link #disabled()}: the planner says {@link Plan#UNTIERED} for every request and the facade runs exactly the code
- * it ran before.
+ * grow with every phase. A release that cannot run tiers has {@link #disabled()}, whose planner says
+ * {@link TierPlan#UNTIERED} for every request. One that can has the real planner, which says the same for a vendor
+ * without tiers in use. Either way the facade runs exactly the code it ran before for that request.
+ *
+ * @param bindings where the tier each session was pushed down to is kept (design 4.7); the planner reads it, and the
+ *     facade writes it when a request is served
  */
-public record TierRuntime(Planner planner) {
+public record TierRuntime(Planner planner, TierSessionBindings bindings) {
 
-    private static final TierRuntime DISABLED = new TierRuntime((requestedModel, rawEntryBody) -> Plan.UNTIERED);
+    private static final TierRuntime DISABLED = new TierRuntime(request -> Mono.just(TierPlan.UNTIERED));
 
     public TierRuntime {
         Objects.requireNonNull(planner, "planner");
+        Objects.requireNonNull(bindings, "bindings");
+    }
+
+    /** A runtime that keeps no session to its tier. */
+    public TierRuntime(Planner planner) {
+        this(planner, TierSessionBindings.disabled());
     }
 
     public static TierRuntime disabled() {
         return DISABLED;
     }
 
-    /** The planner's verdict for one request. UNTIERED is the only one until the planner builds real plans. */
-    public enum Plan {
-        UNTIERED
-    }
-
     @FunctionalInterface
     public interface Planner {
         /**
-         * @param rawEntryBody the body as the client sent it, before an adapter turned it into a chat request
+         * Plans one request before anything is reserved. An error ends the request there: nothing was reserved yet.
          */
-        Plan plan(String requestedModel, JsonNode rawEntryBody);
+        Mono<TierPlan> plan(TierPlanRequest request);
     }
 }

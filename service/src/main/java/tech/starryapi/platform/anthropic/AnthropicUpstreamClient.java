@@ -358,6 +358,9 @@ public class AnthropicUpstreamClient {
         List<PlatformToolUse> toolUses = new ArrayList<>();
         Map<Integer, PendingToolUse> pendingToolUses = new LinkedHashMap<>();
         long[] tokens = new long[4];
+        // Whether the upstream had begun to generate when the stream broke: once it has, the same request must not be
+        // sent to another source, which would generate (and cost) the answer a second time.
+        boolean generationStarted = false;
 
         for (String payload : sseDataPayloads(rawBody)) {
             String data = payload.trim();
@@ -369,15 +372,20 @@ public class AnthropicUpstreamClient {
             if ("error".equals(type)) {
                 // A 200 response can still carry an error event (e.g. overloaded_error). Treating the partial
                 // text as a success would bill the user and report the account healthy.
-                throw inBandError(event.path("error"));
+                throw inBandError(event.path("error"), generationStarted);
             }
             if ("message_start".equals(type)) {
                 updateUsage(tokens, event.path("message").path("usage"));
+                // The message is created reporting the first output token (output_tokens is 1 or more), as it is billed.
+                generationStarted |= tokens[1] > 0;
             } else if ("message_delta".equals(type)) {
                 updateUsage(tokens, event.path("usage"));
+                generationStarted = true;
             } else if ("content_block_start".equals(type)) {
+                generationStarted = true;
                 rememberToolUseStart(pendingToolUses, event);
             } else if ("content_block_delta".equals(type)) {
+                generationStarted = true;
                 JsonNode delta = event.path("delta");
                 String deltaType = delta.path("type").asString("");
                 if ("text_delta".equals(deltaType)) {
@@ -388,6 +396,7 @@ public class AnthropicUpstreamClient {
                         .append(delta.path("partial_json").asString(""));
                 }
             } else if ("content_block_stop".equals(type)) {
+                generationStarted = true;
                 PendingToolUse pending = pendingToolUses.remove(event.path("index").asInt(0));
                 if (pending != null && !pending.name.isBlank()) {
                     toolUses.add(pending.toToolUse(objectMapper));
@@ -406,7 +415,7 @@ public class AnthropicUpstreamClient {
         );
     }
 
-    private UpstreamException inBandError(JsonNode error) {
+    private UpstreamException inBandError(JsonNode error, boolean generationStarted) {
         String errorType = error.path("type").asString("api_error");
         String message = error.path("message").asString("");
         int status = switch (errorType) {
@@ -423,7 +432,9 @@ public class AnthropicUpstreamClient {
         return new UpstreamException(
             status,
             "Anthropic upstream error " + status + " (" + errorType + "): " + message,
-            isRecoverableStatus(status)
+            isRecoverableStatus(status),
+            null,
+            generationStarted
         );
     }
 

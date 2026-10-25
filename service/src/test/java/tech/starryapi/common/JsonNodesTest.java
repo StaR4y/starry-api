@@ -233,4 +233,20 @@ class JsonNodesTest {
         assertThat(JsonNodes.charLength(root)).isGreaterThan(4_000_000);
         assertThat(root).isEqualTo(before);
     }
+
+    @Test
+    void thePayloadBytesAreWhatTheMediaStatsLeaveOut() throws Exception {
+        JsonNode node = mapper.readTree("""
+            {"messages":[{"role":"user","content":[
+              {"type":"image_url","image_url":{"url":"data:image/png;base64,QUJDREVGRw=="}},
+              {"type":"input_audio","input_audio":{"data":"QUJDREVGRw==","format":"wav"}},
+              {"type":"text","text":"base64,QUJD stays"}]}]}
+            """);
+
+        assertThat(JsonNodes.base64PayloadBytes(node))
+            .isEqualTo(JsonNodes.utf8Length(node) - JsonNodes.mediaStats(node).bytesWithoutBase64())
+            .isEqualTo(2 * "QUJDREVGRw==".length());
+        assertThat(JsonNodes.base64PayloadBytes(null)).isZero();
+        assertThat(JsonNodes.base64PayloadBytes(mapper.readTree("{\"text\":\"plain\"}"))).isZero();
+    }
 }

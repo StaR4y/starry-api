@@ -22,8 +22,40 @@ public final class StatsDtos {
         BigDecimal credits,
         Long latencyMs,
         String errorMessage,
-        Instant createdAt
+        Instant createdAt,
+        String sourceTierRef,
+        Integer sourceTierLevel,
+        String sourceTierName,
+        BigDecimal priceFactor,
+        String tierSelection,
+        String sourceDispatch,
+        String wireModel,
+        String usageSource,
+        String stopReason,
+        String degradedFeatures
     ) {
+        /**
+         * A row of a request that was not served from source tiers, or a row a user reads: the source columns are
+         * left out of the JSON when they are null.
+         */
+        public RequestLogResponse(
+            String requestId,
+            String apiKeyId,
+            String accountId,
+            String path,
+            String model,
+            Integer statusCode,
+            Boolean success,
+            Long inputTokens,
+            Long outputTokens,
+            BigDecimal credits,
+            Long latencyMs,
+            String errorMessage,
+            Instant createdAt
+        ) {
+            this(requestId, apiKeyId, accountId, path, model, statusCode, success, inputTokens, outputTokens, credits,
+                latencyMs, errorMessage, createdAt, null, null, null, null, null, null, null, null, null, null);
+        }
     }
 
     public record PerformanceMetricResponse(

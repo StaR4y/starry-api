@@ -29,6 +29,16 @@ public class RequestLogEntity {
     private String upstreamModel;
     private Boolean upstreamSuccess;
     private UUID circuitEpoch;
+    private String sourceTierRef;
+    private Integer sourceTierLevel;
+    private String sourceTierName;
+    private BigDecimal priceFactor;
+    private String tierSelection;
+    private String sourceDispatch;
+    private String wireModel;
+    private String usageSource;
+    private String stopReason;
+    private String degradedFeatures;
     private Instant createdAt;
 
     public Long getId() {
@@ -181,6 +191,86 @@ public class RequestLogEntity {
 
     public void setCircuitEpoch(UUID circuitEpoch) {
         this.circuitEpoch = circuitEpoch;
+    }
+
+    public String getSourceTierRef() {
+        return sourceTierRef;
+    }
+
+    public void setSourceTierRef(String sourceTierRef) {
+        this.sourceTierRef = sourceTierRef;
+    }
+
+    public Integer getSourceTierLevel() {
+        return sourceTierLevel;
+    }
+
+    public void setSourceTierLevel(Integer sourceTierLevel) {
+        this.sourceTierLevel = sourceTierLevel;
+    }
+
+    public String getSourceTierName() {
+        return sourceTierName;
+    }
+
+    public void setSourceTierName(String sourceTierName) {
+        this.sourceTierName = sourceTierName;
+    }
+
+    public BigDecimal getPriceFactor() {
+        return priceFactor;
+    }
+
+    public void setPriceFactor(BigDecimal priceFactor) {
+        this.priceFactor = priceFactor;
+    }
+
+    public String getTierSelection() {
+        return tierSelection;
+    }
+
+    public void setTierSelection(String tierSelection) {
+        this.tierSelection = tierSelection;
+    }
+
+    public String getSourceDispatch() {
+        return sourceDispatch;
+    }
+
+    public void setSourceDispatch(String sourceDispatch) {
+        this.sourceDispatch = sourceDispatch;
+    }
+
+    public String getWireModel() {
+        return wireModel;
+    }
+
+    public void setWireModel(String wireModel) {
+        this.wireModel = wireModel;
+    }
+
+    public String getUsageSource() {
+        return usageSource;
+    }
+
+    public void setUsageSource(String usageSource) {
+        this.usageSource = usageSource;
+    }
+
+    public String getStopReason() {
+        return stopReason;
+    }
+
+    public void setStopReason(String stopReason) {
+        this.stopReason = stopReason;
+    }
+
+    public String getDegradedFeatures() {
+        return degradedFeatures;
+    }
+
+    public void setDegradedFeatures(String degradedFeatures) {
+        this.degradedFeatures = degradedFeatures;
     }
 
     public Instant getCreatedAt() {

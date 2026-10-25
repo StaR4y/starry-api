@@ -33,6 +33,8 @@ export interface SourceTierRuntime {
   unifyEndpoints: boolean;
   xpMembers: boolean;
   pairs: SourceTierPairStatus[];
+  /** 客户端能否指定号池（`模型@标识` 写法）；不影响任何设置能否保存，旧版本的响应里没有这一项 */
+  selectors?: boolean;
 }
 
 export interface SourceTier {
@@ -147,6 +149,82 @@ export interface UpsertSourceTierMembers {
   removeAccountIds?: string[];
 }
 
+/**
+ * 运行状态（GET /admin/source-tiers/status）：应答节点此刻的账号状态，加上最近 windowMinutes 分钟里请求怎么被服务的。
+ * 账号数是这个节点的（账号缓存最多晚 30 秒），服务 / 失败次数取自请求日志，覆盖所有节点。
+ */
+export interface SourceTierStatus {
+  at: string;
+  configVersion: number;
+  windowMinutes: number;
+  /** 只含有号池的厂商 */
+  vendors: SourceTierVendorStatus[];
+}
+
+export interface SourceTierVendorStatus {
+  vendor: string;
+  label: string;
+  enabled: boolean;
+  /** 厂商已启用、当前版本能运行分级、且至少有一个号池启用：请求才会按号池服务 */
+  serving: boolean;
+  /** 窗口里由网关自己选号池服务的请求数 */
+  autoServed: number;
+  /** 其中由低于「已启用的最好一级」服务的请求数 */
+  degraded: number;
+  tiers: SourceTierTierStatus[];
+}
+
+export interface SourceTierTierStatus {
+  tierId: string;
+  level: number;
+  name: string;
+  enabled: boolean;
+  /** 这个节点现在会从该号池服务：厂商在服务、号池已启用、至少一个账号就绪 */
+  serves: boolean;
+  accounts: SourceTierAccountLayers;
+  /** 窗口里该号池服务成功的尝试数，其中 servedPinned 是客户端指定号池的 */
+  served: number;
+  servedPinned: number;
+  /** 窗口里派发到该号池并失败的尝试数 */
+  failed: number;
+}
+
+/** 号池收下的每个账号只计入第一个让它不能服务的层 */
+export interface SourceTierAccountLayers {
+  disabled: number;
+  unavailable: number;
+  resting: number;
+  busy: number;
+  ready: number;
+}
+
+/** 每个账号所在的号池（GET /admin/source-tiers/placements），供账号列表的「号源级别」列使用；不在任何号池的账号不出现 */
+export interface SourceTierPlacements {
+  configVersion: number;
+  accounts: SourceTierAccountPlacement[];
+}
+
+export interface SourceTierAccountPlacement {
+  accountId: string;
+  tiers: SourceTierPlaced[];
+}
+
+/** rule：MEMBER_ROW 手动指定；CATEGORY 按类别；LOWEST_TIER 没有号池列出它的类别，落入最低级 */
+export type SourceTierPlacementRule = 'MEMBER_ROW' | 'CATEGORY' | 'LOWEST_TIER';
+
+export interface SourceTierPlaced {
+  vendor: string;
+  vendorLabel: string;
+  tierId: string;
+  level: number;
+  name: string;
+  rule: SourceTierPlacementRule;
+  /** 登记为别的协议的中转 */
+  relay: boolean;
+  /** 现在是否按这个号池服务（厂商已启用、号池已启用、版本能运行） */
+  active: boolean;
+}
+
 /** 后端的业务错误码：控制台对它们有专门的提示 */
 export const SOURCE_TIER_VERSION_CONFLICT = 'SOURCE_TIER_VERSION_CONFLICT';
 export const SOURCE_TIER_RUNTIME_UNSUPPORTED = 'SOURCE_TIER_RUNTIME_UNSUPPORTED';
@@ -160,6 +238,12 @@ export const sourceTiersApi = {
         `/admin/source-tiers/${encodeURIComponent(vendor)}`,
         payload,
       ),
+    ),
+  status: () =>
+    unwrap<SourceTierStatus>(http.get<ApiResponse<SourceTierStatus>>('/admin/source-tiers/status')),
+  placements: () =>
+    unwrap<SourceTierPlacements>(
+      http.get<ApiResponse<SourceTierPlacements>>('/admin/source-tiers/placements'),
     ),
   upsertMembers: (vendor: string, payload: UpsertSourceTierMembers) =>
     unwrap<SourceTierVendor>(

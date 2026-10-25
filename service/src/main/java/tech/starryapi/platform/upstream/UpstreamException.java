@@ -2,6 +2,15 @@ package tech.starryapi.platform.upstream;
 
 public class UpstreamException extends RuntimeException {
 
+    /**
+     * Reactor context key under which a caller may hand an {@link java.util.concurrent.atomic.AtomicBoolean} to an
+     * upstream client that retries on its own. The client sets it as soon as one of its attempts produced output. The
+     * error the client finally throws says so itself only when it is an UpstreamException (see
+     * {@link #withGenerationStarted()}); a connection refused by the retry of a stream that was cut off cannot, and is
+     * left as it is so that its classification does not change. Only tiered routing reads the flag.
+     */
+    public static final String GENERATION_STARTED_CONTEXT_KEY = "starry.upstream.generationStarted";
+
     private final int statusCode;
     private final boolean recoverable;
     private final int retryAfterSeconds;
@@ -18,7 +27,11 @@ public class UpstreamException extends RuntimeException {
     /**
      * {@code generationStarted} says the upstream had already produced output (content, tool calls or usage) before it
      * failed, so a retry elsewhere would generate the answer a second time. The status code and {@code recoverable} are
-     * not affected; only tiered routing reads it.
+     * not affected; only tiered routing reads it. Set by every client whose parser can raise a recoverable error once
+     * output has been parsed: the Kiro event stream and the in-band {@code error} event of an Anthropic stream. The
+     * OpenAI and Codex parsers have no such branch (a body that breaks after output is an unparseable one, a
+     * non-recoverable 502, and a transport failure is not an UpstreamException at all), so neither can be taken for a
+     * failure that cost nothing.
      */
     public UpstreamException(int statusCode, String message, boolean recoverable, String retryAfter, boolean generationStarted) {
         super(message);

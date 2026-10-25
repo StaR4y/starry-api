@@ -37,7 +37,7 @@ class SourceTierValidatorTest {
     private static final DefaultModelCatalogProvider CATALOG = new DefaultModelCatalogProvider();
     private static final ModelPoolKeyResolver RESOLVER = new ModelPoolKeyResolver(CATALOG);
 
-    /** This release: nothing of the runtime is there yet. */
+    /** This release: native tiering runs, nothing of the later phases does. */
     private final SourceTierValidator validator = new SourceTierValidator(CATALOG, RESOLVER, new SourceTierRuntimeInfo());
 
     // ---- fixtures ----
@@ -680,17 +680,25 @@ class SourceTierValidatorTest {
     // ---- what the release runs ----
 
     @Test
-    void enablingAVendorIsRefusedWhileTheRuntimeCannotTierNatively() {
+    void enablingAVendorIsAcceptedOnceTheRuntimeTiersNatively() {
         Config config = validator.normalize("anthropic", replace(true, OWNER_TIERS, List.of(), List.of()));
 
-        assertThatThrownBy(() -> validator.requireSupported(config)).isInstanceOfSatisfying(ApiException.class, error -> {
+        assertThatCode(() -> validator.requireSupported(config)).doesNotThrowAnyException();
+    }
+
+    @Test
+    void enablingAVendorIsRefusedWhileTheRuntimeCannotTierNatively() {
+        SourceTierValidator cannotTier = withRuntime(false, false, false, PairStatus.NOT_OFFERED);
+        Config config = cannotTier.normalize("anthropic", replace(true, OWNER_TIERS, List.of(), List.of()));
+
+        assertThatThrownBy(() -> cannotTier.requireSupported(config)).isInstanceOfSatisfying(ApiException.class, error -> {
             assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
             assertThat(error.getCode()).isEqualTo("SOURCE_TIER_RUNTIME_UNSUPPORTED");
             assertThat(error.getDetails()).isEqualTo(List.of("enabled"));
             assertThat(error.getMessage()).contains("enabling a vendor");
         });
         // The same configuration with the vendor off is fine: the tiers can be prepared.
-        assertThatCode(() -> validator.requireSupported(validator.normalize("anthropic", replace(false, OWNER_TIERS, List.of(), List.of()))))
+        assertThatCode(() -> cannotTier.requireSupported(cannotTier.normalize("anthropic", replace(false, OWNER_TIERS, List.of(), List.of()))))
             .doesNotThrowAnyException();
     }
 
@@ -716,11 +724,20 @@ class SourceTierValidatorTest {
         Config everything = validator.normalize("anthropic", new SourceTierDtos.ReplaceVendor(0L, true, true, null, null, null, null,
             RELAY_TIERS, List.of(relay("relay-1", "relay", mapping("claude-sonnet-4.5", "x"))), List.of(gate("CHAT", "ON"))));
 
-        assertUnsupported(everything, "enabled", "unifyEndpoints", "crossProtocolMembers", "pairGates");
+        assertUnsupported(everything, "unifyEndpoints", "crossProtocolMembers", "pairGates");
+        // A release that cannot tier natively refuses the vendor's own switch as well.
+        SourceTierValidator nothing = withRuntime(false, false, false, PairStatus.NOT_OFFERED);
+        assertUnsupported(nothing, nothing.normalize("anthropic", new SourceTierDtos.ReplaceVendor(0L, true, true, null, null, null, null,
+            RELAY_TIERS, List.of(relay("relay-1", "relay", mapping("claude-sonnet-4.5", "x"))), List.of(gate("CHAT", "ON")))),
+            "enabled", "unifyEndpoints", "crossProtocolMembers", "pairGates");
     }
 
     private void assertUnsupported(Config config, String... features) {
-        assertThatThrownBy(() -> validator.requireSupported(config)).isInstanceOfSatisfying(ApiException.class, error -> {
+        assertUnsupported(validator, config, features);
+    }
+
+    private void assertUnsupported(SourceTierValidator checked, Config config, String... features) {
+        assertThatThrownBy(() -> checked.requireSupported(config)).isInstanceOfSatisfying(ApiException.class, error -> {
             assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
             assertThat(error.getCode()).isEqualTo("SOURCE_TIER_RUNTIME_UNSUPPORTED");
             assertThat(error.getDetails()).isEqualTo(List.of(features));

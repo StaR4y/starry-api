@@ -18,6 +18,14 @@
   import type { AdminUser, CodingPlan, CodingPlanSubscription } from '@/types/api';
   import { credits, stateLabel, stateType, subscriptionStates } from '../payment/codingPlanDisplay';
   import { formatDateTime } from '@/utils/format';
+  import {
+    perMillion,
+    reservedMinusEstimate,
+    reviewTier,
+    reviewTierKind,
+    reviewTierLabel,
+    suggestedCredits,
+  } from './billingReviewTiers';
   import SubscriptionLedgerDrawer from '../payment/SubscriptionLedgerDrawer.vue';
   import ProviderLogo from '@/components/ProviderLogo.vue';
   import PageSection from '@/components/PageSection.vue';
@@ -76,6 +84,8 @@
   const ledgerVisible = ref(false);
   const selectedSubscription = ref<CodingPlanSubscription | null>(null);
   const selectedReview = ref<BillingReview | null>(null);
+  // 核对的请求如果是按号源分级服务的：实际服务（或最后派发到）的号池，核对要按它的报价
+  const selectedTier = computed(() => (selectedReview.value ? reviewTier(selectedReview.value) : null));
   const reviewVisible = ref(false);
   const resolution = reactive({ action: 'SETTLE', reason: '', credits: '0' });
   const published = computed(() => plans.value.filter((p) => p.enabled).length);
@@ -240,7 +250,8 @@
     selectedReview.value = item;
     Object.assign(resolution, {
       action: 'SETTLE',
-      credits: String(item.actual_credits ?? item.reserved_credits),
+      // 按号池服务的请求，预占是按最贵号池留的：默认值取实际服务（或最后派发到）的号池的估算
+      credits: suggestedCredits(item),
       reason: '',
     });
     reviewVisible.value = true;
@@ -488,6 +499,19 @@
                 {{ credits(row.reserved_credits) }} /
                 {{ row.actual_credits == null ? t('待确认') : credits(row.actual_credits) }}
               </template>
+            </el-table-column><el-table-column :label="t('号源')" min-width="150">
+              <template #default="{ row }">
+                <template v-if="reviewTier(row)">
+                  <strong>{{ reviewTierLabel(reviewTier(row)!) }}</strong>
+                  <small>
+                    {{ reviewTierKind(row) }}
+                    <template v-if="reviewTier(row)!.estimate != null">
+                      · {{ t('估算') }} {{ credits(reviewTier(row)!.estimate) }}
+                    </template>
+                  </small>
+                </template>
+                <span v-else class="muted">—</span>
+              </template>
             </el-table-column><el-table-column prop="reason" :label="t('原因')" min-width="200" /><el-table-column
               :label="t('操作')"
               width="90"
@@ -605,6 +629,55 @@
         :title="t('费用核对')"
         width="min(460px, calc(100vw - 32px))"
       >
+        <div v-if="selectedReview && selectedTier" class="review-tier">
+          <p class="review-tier__title">
+            {{ t('按号源分级服务：{p0}', { p0: reviewTierLabel(selectedTier) }) }}
+            <el-tag size="small" effect="plain">{{ reviewTierKind(selectedReview) }}</el-tag>
+          </p>
+          <dl>
+            <dt>{{ t('预占金额') }}</dt>
+            <dd>{{ credits(selectedReview.reserved_credits) }}</dd>
+            <template v-if="selectedTier.estimate != null">
+              <dt>{{ t('该号池的估算') }}</dt>
+              <dd>
+                {{ credits(selectedTier.estimate) }}
+                <small v-if="reservedMinusEstimate(selectedReview, selectedTier) !== null">
+                  {{
+                    t('比预占少 {p0}', {
+                      p0: credits(reservedMinusEstimate(selectedReview, selectedTier)),
+                    })
+                  }}
+                </small>
+              </dd>
+            </template>
+            <template v-if="selectedTier.factor != null">
+              <dt>{{ t('价格系数') }}</dt>
+              <dd>×{{ Number(selectedTier.factor) }}</dd>
+            </template>
+            <template v-if="selectedTier.quote">
+              <dt>{{ t('报价（每百万 token）') }}</dt>
+              <dd>
+                {{ t('输入') }} {{ perMillion(selectedTier.quote.input) }} ·
+                {{ t('输出') }} {{ perMillion(selectedTier.quote.output) }} ·
+                {{ t('缓存读取') }} {{ perMillion(selectedTier.quote.cacheRead) }} ·
+                {{ t('缓存写入') }} {{ perMillion(selectedTier.quote.cacheWrite) }}
+              </dd>
+            </template>
+          </dl>
+          <p class="review-tier__hint">
+            {{
+              t(
+                '预占是按这个请求可能被服务的最贵号池留的。请按上面这个号池的报价核对金额，不要按预占金额结算，否则用户会为没有服务过他的号池付费。',
+              )
+            }}
+          </p>
+          <ul v-if="selectedReview.tier_plan?.levels?.length" class="review-tier__plan">
+            <li v-for="level in selectedReview.tier_plan.levels" :key="level.tierRef">
+              <span>L{{ level.level }} {{ level.name }} ×{{ level.factor }}</span>
+              <span v-if="level.estimate != null">{{ credits(level.estimate) }}</span>
+            </li>
+          </ul>
+        </div>
         <el-form label-position="top">
           <el-form-item :label="t('处理方式')">
             <el-radio-group v-model="resolution.action">
@@ -690,6 +763,58 @@
   .muted {
     color: var(--kp-text-muted);
     font-size: 12px;
+  }
+  .review-tier {
+    margin-bottom: 16px;
+    padding: 12px 14px;
+    border: 1px solid var(--kp-divider);
+    border-radius: 8px;
+    font-size: 13px;
+  }
+  .review-tier__title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 8px;
+    font-weight: 600;
+  }
+  .review-tier dl {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 4px 14px;
+    margin: 0;
+  }
+  .review-tier dt {
+    color: var(--kp-text-muted);
+  }
+  .review-tier dd {
+    margin: 0;
+    font-variant-numeric: tabular-nums;
+  }
+  .review-tier dd small {
+    margin-left: 6px;
+    color: var(--kp-text-muted);
+  }
+  .review-tier__hint {
+    margin: 10px 0 0;
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--kp-text-secondary);
+  }
+  .review-tier__plan {
+    display: grid;
+    gap: 2px;
+    margin: 8px 0 0;
+    padding: 0;
+    list-style: none;
+    font-size: 12px;
+    color: var(--kp-text-muted);
+  }
+  .review-tier__plan li {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    font-variant-numeric: tabular-nums;
   }
   .subscription-toolbar {
     display: flex;

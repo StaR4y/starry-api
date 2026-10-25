@@ -82,6 +82,20 @@ public final class JsonNodes {
     }
 
     /**
+     * The UTF-8 bytes of the inline base64 payloads {@link #mediaStats} leaves out of its sizes: how much shorter the
+     * compact JSON form of the node is without them. Counting only these takes one walk of the tree and no streaming
+     * of the whole node, for a caller that already knows the size of the part and wants it less its media.
+     */
+    public static long base64PayloadBytes(JsonNode node) {
+        if (node == null) {
+            return 0;
+        }
+        MediaCensus census = new MediaCensus();
+        census.visit(node);
+        return census.utf8;
+    }
+
+    /**
      * @param charsWithoutBase64 UTF-16 chars of the compact JSON form, not counting inline base64 payloads
      * @param bytesWithoutBase64 UTF-8 bytes of the compact JSON form, not counting inline base64 payloads
      * @param inlineImages images carried inline as base64

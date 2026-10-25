@@ -10,10 +10,13 @@ import tech.starryapi.sourcetier.SourceTierRuntimeInfo.PairStatus;
 class SourceTierRuntimeInfoTest {
 
     @Test
-    void thisReleaseRunsNothingOfTheFeatureYet() {
+    void thisReleaseRunsTheNativeTiersAndNothingElseOfTheFeatureYet() {
         SourceTierRuntimeInfo runtime = new SourceTierRuntimeInfo();
 
-        assertThat(runtime.nativeTiers()).isFalse();
+        // Native tiering is the one capability that is complete (P2-09): requests are planned over the tiers.
+        assertThat(runtime.nativeTiers()).isTrue();
+        // What the later phases bring is still off, so that nothing is stored that only a later release would run.
+        assertThat(runtime.selectors()).isFalse();
         assertThat(runtime.unifyEndpoints()).isFalse();
         assertThat(runtime.xpMembers()).isFalse();
         assertThat(runtime.pairs()).isNotEmpty().allSatisfy(pair ->
@@ -37,6 +40,9 @@ class SourceTierRuntimeInfoTest {
         assertThat(runtime.nativeTiers()).isTrue();
         assertThat(runtime.unifyEndpoints()).isTrue();
         assertThat(runtime.xpMembers()).isTrue();
+        // The constructor without the selectors capability is the release before the selector task.
+        assertThat(runtime.selectors()).isFalse();
+        assertThat(new SourceTierRuntimeInfo(true, true, false, false, pair -> PairStatus.NOT_OFFERED).selectors()).isTrue();
         assertThat(runtime.pairStatus("anthropic", "OPENAI_CHAT", "CHAT")).isEqualTo(PairStatus.VERIFIED);
         assertThat(runtime.pairStatus("anthropic", "OPENAI_CHAT", "MESSAGES")).isEqualTo(PairStatus.EXPERIMENTAL);
         // A registry that has no answer is a pair that is not offered.

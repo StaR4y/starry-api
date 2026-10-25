@@ -12,7 +12,7 @@ Object.defineProperty(globalThis, 'navigator', { value: dom.window.navigator, co
 // Bundle the draft model in memory (it imports the i18n module through the `@` alias).
 const compiled = await build({
   stdin: {
-    contents: `export * from './src/views/settings/components/source-tiers/sourceTiersMeta'; export { setLocale } from './src/i18n';`,
+    contents: `export * from './src/views/settings/components/source-tiers/sourceTiersMeta'; export * from './src/views/settings/components/source-tiers/tierStatusMeta'; export * from './src/views/settings/billingReviewTiers'; export * from './src/views/logs/logSource'; export { setLocale } from './src/i18n';`,
     resolveDir: process.cwd(),
     loader: 'ts',
   },
@@ -24,8 +24,12 @@ const compiled = await build({
 });
 const meta = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputFiles[0].text).toString('base64')}`);
 const {
-  draftOf, replaceRequest, draftSignature, tierProblems, validateDraft, unsupportedMessage, tierPresets, placedCounts,
+  draftOf, replaceRequest, draftSignature, tierProblems, validateDraft, unsupportedMessage, enableNote, tierPresets, placedCounts,
   pinChoices, DEFAULT_REFUSAL_CAP,
+  layerSegments, layerTotal, degradedPercent, degradedTone, notServingReason, placementsByAccount, tierFilterOptions,
+  matchesTierFilter, placedLabel, placedHint, placementVendorCount, batchPlan, UNPIN, NO_TIER_FILTER, MAX_BATCH_MEMBERS,
+  vendorOfProvider, previewTiers, reviewTier, reviewTierLabel, suggestedCredits, perMillion, reservedMinusEstimate,
+  hasSourceTiers, sourceTierLabel, priceFactorLabel,
 } = meta;
 meta.setLocale('zh-CN');
 
@@ -264,6 +268,18 @@ test('the runtime-unsupported detail names what this release cannot run', () => 
   assert.ok(message.includes('启用分级') && message.includes('跨协议门控'));
 });
 
+test('switching a vendor on warns that every node must run a version with source tiers first', () => {
+  // A version that can run tiers: the warning is for a vendor that is still off, in a rolling upgrade.
+  const warning = enableNote(true, false, false);
+  assert.ok(warning.includes('所有节点') && warning.includes('标准价'));
+  assert.equal(enableNote(true, false, true), warning, 'still shown while the switch is on but not saved');
+  assert.equal(enableNote(true, true, true), null, 'a vendor that already runs tiers has been through that');
+  // A version that cannot run them says why instead.
+  assert.ok(enableNote(false, false, false).includes('暂时不能启用'));
+  assert.ok(enableNote(false, true, true).includes('需要关闭后才能保存'));
+  assert.notEqual(enableNote(false, false, false), warning);
+});
+
 test('presets are drafts that pass validation and never set a price', () => {
   assert.deepEqual(tierPresets('google'), []);
   assert.deepEqual(tierPresets('deepseek'), []);
@@ -322,4 +338,183 @@ test('only accounts without a member row can be pinned, found by e-mail or accou
   assert.deepEqual(pinChoices(accounts, pins, ['relay-1'], '  TWO@exa ').map((a) => a.accountId), ['acc-2']);
   assert.deepEqual(pinChoices(accounts, pins, ['relay-1'], 'ACC-4').map((a) => a.accountId), ['acc-4']);
   assert.deepEqual(pinChoices(accounts, pins, ['relay-1'], 'relay').map((a) => a.accountId), []);
+});
+
+/* ---------- status panel, account list, pricing preview, billing review, request log (P2-07) ---------- */
+
+test('the layer bar has a segment for every layer that holds accounts, in the order of the layers', () => {
+  const segments = layerSegments({ disabled: 1, unavailable: 0, resting: 1, busy: 0, ready: 2 });
+  assert.deepEqual(segments.map((segment) => [segment.key, segment.count]), [['ready', 2], ['resting', 1], ['disabled', 1]]);
+  assert.deepEqual(segments.map((segment) => segment.percent), [50, 25, 25]);
+  assert.deepEqual(layerSegments({ disabled: 0, unavailable: 0, resting: 0, busy: 0, ready: 0 }), []);
+  assert.equal(layerTotal({ disabled: 1, unavailable: 2, resting: 3, busy: 4, ready: 5 }), 15);
+});
+
+test('the downgrade rate is a share of the gateway-chosen requests, with one decimal, and unknown without them', () => {
+  assert.equal(degradedPercent({ autoServed: 0, degraded: 0 }), null);
+  assert.equal(degradedPercent({ autoServed: 100, degraded: 30 }), 30);
+  assert.equal(degradedPercent({ autoServed: 3, degraded: 1 }), 33.3);
+  assert.equal(degradedTone(null), 'info');
+  assert.equal(degradedTone(0), 'success');
+  assert.equal(degradedTone(12.5), 'warning');
+  assert.equal(degradedTone(50), 'danger');
+});
+
+test('a vendor that is not serving says why: the release first, then the switch, then the tiers', () => {
+  const serving = { vendor: 'anthropic', label: 'Anthropic', enabled: true, serving: true, autoServed: 0, degraded: 0, tiers: [] };
+  assert.equal(notServingReason(serving, true), null);
+  assert.match(notServingReason({ ...serving, serving: false }, false), /版本尚不支持/);
+  assert.match(notServingReason({ ...serving, serving: false, enabled: false }, true), /还没有启用分级/);
+  assert.match(notServingReason({ ...serving, serving: false }, true), /没有已启用的号池/);
+});
+
+const placements = {
+  configVersion: 3,
+  accounts: [
+    { accountId: 'a1', tiers: [{ vendor: 'anthropic', vendorLabel: 'Anthropic', tierId: 'official', level: 1, name: '官方', rule: 'CATEGORY', relay: false, active: true }] },
+    { accountId: 'a2', tiers: [
+      { vendor: 'anthropic', vendorLabel: 'Anthropic', tierId: 'kiro', level: 2, name: 'Kiro', rule: 'MEMBER_ROW', relay: false, active: true },
+      { vendor: 'openai', vendorLabel: 'OpenAI', tierId: 'codex', level: 2, name: 'Codex', rule: 'LOWEST_TIER', relay: false, active: false },
+    ] },
+  ],
+};
+
+test('the account list reads each account\'s tiers, filters by one, and names the vendor only when there are several', () => {
+  const index = placementsByAccount(placements);
+  assert.equal(index.get('a1')[0].tierId, 'official');
+  assert.equal(index.get('missing'), undefined);
+  assert.equal(placementsByAccount(null).size, 0);
+  assert.equal(placementVendorCount(placements), 2);
+  assert.equal(placementVendorCount({ configVersion: 1, accounts: [placements.accounts[0]] }), 1);
+  assert.equal(placedLabel(placements.accounts[1].tiers[0], false), 'L2 Kiro');
+  assert.equal(placedLabel(placements.accounts[1].tiers[0], true), 'Anthropic · L2 Kiro');
+  assert.deepEqual(tierFilterOptions(placements), [
+    { value: 'anthropic:official', label: 'Anthropic · L1 官方' },
+    { value: 'anthropic:kiro', label: 'Anthropic · L2 Kiro' },
+    { value: 'openai:codex', label: 'OpenAI · L2 Codex' },
+  ]);
+  assert.deepEqual(tierFilterOptions({ configVersion: 1, accounts: [placements.accounts[0]] }), [{ value: 'anthropic:official', label: 'L1 官方' }]);
+  assert.equal(matchesTierFilter(index.get('a2'), ''), true);
+  assert.equal(matchesTierFilter(index.get('a2'), 'openai:codex'), true);
+  assert.equal(matchesTierFilter(index.get('a1'), 'openai:codex'), false);
+  assert.equal(matchesTierFilter(undefined, NO_TIER_FILTER), true);
+  assert.equal(matchesTierFilter(index.get('a1'), NO_TIER_FILTER), false);
+});
+
+test('a placement says why the account is there and whether the tier serves', () => {
+  const [byCategory] = placements.accounts[0].tiers;
+  const [pinned, lowest] = placements.accounts[1].tiers;
+  assert.match(placedHint(byCategory), /按账号类别归入「官方」/);
+  assert.match(placedHint(pinned), /手动指定到「Kiro」/);
+  assert.doesNotMatch(placedHint(pinned), /现在没有按这个号池服务/);
+  assert.match(placedHint(lowest), /最低一级「Codex」/);
+  assert.match(placedHint(lowest), /现在没有按这个号池服务/);
+  assert.match(placedHint({ ...pinned, relay: true }), /跨协议中转/);
+});
+
+function memberVendor(extra = {}) {
+  return vendor({
+    version: 7,
+    members: [nativeRow('pinned-kiro', 'kiro'), nativeRow('pinned-official', 'official'), relay],
+    ...extra,
+  });
+}
+
+test('setting accounts to a tier writes only the ones that change and skips relays', () => {
+  const plan = batchPlan(memberVendor(), ['new-1', 'pinned-kiro', 'pinned-official', 'relay-1', 'new-1'], 'official');
+  assert.deepEqual(plan.pin, ['new-1', 'pinned-kiro']);
+  assert.deepEqual(plan.unchanged, ['pinned-official']);
+  assert.deepEqual(plan.skippedRelay, ['relay-1']);
+  assert.deepEqual(plan.unpin, []);
+  assert.equal(plan.requests.length, 1);
+  assert.equal(plan.requests[0].expectedVersion, 7);
+  assert.deepEqual(plan.requests[0].members.map((member) => [member.accountId, member.tierId, member.protocol]), [
+    ['new-1', 'official', null], ['pinned-kiro', 'official', null],
+  ]);
+  assert.equal(plan.requests[0].removeAccountIds, undefined);
+});
+
+test('removing the pinning removes only accounts that have a pin, and does nothing when none has', () => {
+  const plan = batchPlan(memberVendor(), ['pinned-kiro', 'never-pinned', 'relay-1'], UNPIN);
+  assert.deepEqual(plan.unpin, ['pinned-kiro']);
+  assert.deepEqual(plan.unchanged, ['never-pinned']);
+  assert.deepEqual(plan.skippedRelay, ['relay-1']);
+  assert.deepEqual(plan.requests, [{ expectedVersion: 7, removeAccountIds: ['pinned-kiro'] }]);
+  assert.deepEqual(batchPlan(memberVendor(), ['never-pinned'], UNPIN).requests, []);
+  assert.deepEqual(batchPlan(memberVendor(), ['pinned-kiro'], 'kiro').requests, []);
+});
+
+test('a batch larger than the server accepts is split, each request one version after the last', () => {
+  const ids = Array.from({ length: MAX_BATCH_MEMBERS * 2 + 5 }, (_, index) => `acc-${index}`);
+  const plan = batchPlan(memberVendor({ version: 4 }), ids, 'official');
+  assert.deepEqual(plan.requests.map((request) => [request.expectedVersion, request.members.length]), [
+    [4, MAX_BATCH_MEMBERS], [5, MAX_BATCH_MEMBERS], [6, 5],
+  ]);
+  assert.equal(new Set(plan.requests.flatMap((request) => request.members.map((member) => member.accountId))).size, ids.length);
+  const unpin = batchPlan(vendor({ version: 9, members: ids.map((id) => nativeRow(id, 'kiro')) }), ids, UNPIN);
+  assert.deepEqual(unpin.requests.map((request) => [request.expectedVersion, request.removeAccountIds.length]), [
+    [9, MAX_BATCH_MEMBERS], [10, MAX_BATCH_MEMBERS], [11, 5],
+  ]);
+});
+
+test('the price preview prices the tiers of an enabled vendor, best first, and nothing otherwise', () => {
+  assert.equal(vendorOfProvider('Anthropic'), 'anthropic');
+  assert.equal(vendorOfProvider('Claude'), 'anthropic');
+  assert.equal(vendorOfProvider('Gemini'), 'google');
+  assert.equal(vendorOfProvider('Google'), 'google');
+  assert.equal(vendorOfProvider('OpenAI'), 'openai');
+  assert.equal(vendorOfProvider('Open Router'), 'open-router');
+  assert.equal(vendorOfProvider(undefined), '');
+  const enabled = vendor({ enabled: true, tiers: [tier('kiro', 2, { priceFactor: 0.6 }), tier('official', 1), tier('off', 3, { enabled: false })] });
+  assert.deepEqual(previewTiers(enabled, true).map((row) => [row.tierId, row.level, row.factor]), [['official', 1, 1], ['kiro', 2, 0.6]]);
+  assert.deepEqual(previewTiers(enabled, false), []);
+  assert.deepEqual(previewTiers({ ...enabled, enabled: false }, true), []);
+  assert.deepEqual(previewTiers(undefined, true), []);
+});
+
+const reviewRow = {
+  request_hash: 'h', request_id: 'r', user_id: 'u', billing_source: 'BALANCE', reserved_credits: 0.05, actual_credits: null,
+  reason: 'x', created_at: '2026-10-25T00:00:00Z',
+};
+const kiroTier = {
+  tierRef: 'anthropic:kiro', level: 2, name: 'kiro', factor: '0.6', estimate: '0.03', at: '2026-10-25T01:02:03Z',
+  quote: { input: '0.0000018', output: '0.000009', cacheRead: '0.00000018', cacheWrite: '0.00000225', fallback: '0.0000018' },
+};
+
+test('a review of a tiered request is settled by the tier that served it, not by the reservation', () => {
+  assert.equal(reviewTier(reviewRow), null);
+  assert.equal(suggestedCredits(reviewRow), '0.05');
+  const dispatched = { ...reviewRow, last_dispatched: kiroTier };
+  assert.equal(reviewTier(dispatched), kiroTier);
+  assert.equal(suggestedCredits(dispatched), '0.03');
+  const served = { ...dispatched, served: { ...kiroTier, estimate: '0.02' } };
+  assert.equal(reviewTier(served).estimate, '0.02');
+  assert.equal(suggestedCredits(served), '0.02');
+  assert.equal(suggestedCredits({ ...served, actual_credits: 0.0234 }), '0.0234');
+  assert.equal(reviewTierLabel(kiroTier), 'L2 kiro');
+  assert.equal(reviewTierLabel({ tierRef: 'anthropic:kiro' }), 'anthropic:kiro');
+  assert.equal(reservedMinusEstimate(dispatched, kiroTier), 0.02);
+  assert.equal(reservedMinusEstimate(dispatched, { ...kiroTier, estimate: '0.05' }), null);
+  assert.equal(reservedMinusEstimate(dispatched, { tierRef: 'x' }), null);
+});
+
+test('a quote per token is shown per million tokens without float noise', () => {
+  assert.equal(perMillion('0.0000018'), '1.8');
+  assert.equal(perMillion('0.000009'), '9');
+  assert.equal(perMillion('0.00000225'), '2.25');
+  assert.equal(perMillion(undefined), '—');
+  assert.equal(perMillion('n/a'), 'n/a');
+});
+
+test('the request log gets a source column only when some row was served from tiers', () => {
+  const plain = { requestId: 'a', path: '/v1/chat/completions', success: true };
+  const served = { ...plain, sourceTierRef: 'anthropic:kiro', sourceTierLevel: 2, sourceTierName: 'kiro', priceFactor: 0.6 };
+  assert.equal(hasSourceTiers([plain]), false);
+  assert.equal(hasSourceTiers([plain, served]), true);
+  assert.equal(sourceTierLabel(plain), '');
+  assert.equal(sourceTierLabel(served), 'L2 kiro');
+  assert.equal(sourceTierLabel({ ...plain, sourceTierLevel: 1, sourceTierName: '官方' }), 'L1 官方');
+  assert.equal(priceFactorLabel(served), '×0.6');
+  assert.equal(priceFactorLabel({ ...served, priceFactor: 1.000000 }), '×1');
+  assert.equal(priceFactorLabel(plain), '');
 });
