@@ -16,6 +16,7 @@
     degradedPercent,
     degradedTone,
     formatPercent,
+    layerCount,
     layerHint,
     layerLabel,
     layerSegments,
@@ -150,7 +151,9 @@
               class="layer-bar"
               role="img"
               :aria-label="
-                LAYERS.map((key) => `${layerLabel(key)} ${tier.accounts[key]}`).join('，')
+                LAYERS.map((key) => `${layerLabel(key)} ${layerCount(tier.accounts, key)}`).join(
+                  '，',
+                )
               "
             >
               <i
@@ -163,13 +166,13 @@
             <span v-else class="tier-status__none">{{ t('没有账号') }}</span>
             <span class="layer-legend">
               <el-tooltip
-                v-for="key in LAYERS.filter((layer) => tier.accounts[layer] > 0)"
+                v-for="key in LAYERS.filter((layer) => layerCount(tier.accounts, layer) > 0)"
                 :key="key"
                 :content="layerHint(key)"
                 placement="top"
               >
                 <span class="layer-legend__item" :class="`layer-${key}`" tabindex="0">
-                  <i />{{ layerLabel(key) }} {{ tier.accounts[key] }}
+                  <i />{{ layerLabel(key) }} {{ layerCount(tier.accounts, key) }}
                 </span>
               </el-tooltip>
             </span>
@@ -347,6 +350,10 @@
 
   .layer-unavailable {
     --layer-color: var(--kp-danger);
+  }
+
+  .layer-unopened {
+    --layer-color: var(--el-color-primary);
   }
 
   .layer-disabled {

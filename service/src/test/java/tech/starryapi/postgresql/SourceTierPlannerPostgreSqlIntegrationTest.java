@@ -20,9 +20,14 @@ import tech.starryapi.admin.SystemSettingRepository;
 import tech.starryapi.model.ModelCatalogProvider;
 import tech.starryapi.model.ModelPricingService;
 import tech.starryapi.payment.PaymentSettingsService;
+import tech.starryapi.platform.anthropic.AnthropicRequestAdapter;
+import tech.starryapi.platform.xproto.PairRegistry;
 import tech.starryapi.proxy.ProxyFacade;
 import tech.starryapi.proxy.tier.DefaultSourceTierPlanner;
 import tech.starryapi.proxy.tier.TierEntry;
+import tech.starryapi.proxy.tier.TierEntryFacts;
+import tech.starryapi.proxy.tier.XpSkip;
+import tech.starryapi.proxy.tier.XpSkipCounts;
 import tech.starryapi.proxy.tier.TierSessionBindings;
 import tech.starryapi.proxy.tier.TierPlan;
 import tech.starryapi.proxy.tier.TierPlanRequest;
@@ -181,6 +186,82 @@ class SourceTierPlannerPostgreSqlIntegrationTest extends PostgreSqlIntegrationTe
         TierPlan back = planner.plan(request().withSelector(TierSelectorParser.parse(TierSelectorParser.Source.HEADER, "official"))).block();
         assertThat(back.pinned()).isTrue();
         assertThat(back.memberless(back.levels().get(0))).isFalse();
+    }
+
+    @Test
+    void aRelayStoredThroughTheAdministratorApiIsPlannedAsTheFirstTierForTheKeysItsGateLists() {
+        String relay = account("OpenAI-compatible", "api-key", "https://relay.example/v1");
+        String kiro = account("BuilderId", "idc", null);
+        accountPool.refreshCache().block();
+        SourceTierRuntimeInfo everything = new SourceTierRuntimeInfo(true, true, true, pair -> PairStatus.VERIFIED);
+        new SourceTierAdminService(db, transactionManager, settings, registry,
+            new SourceTierValidator(catalog, resolver, everything), everything)
+            .replace("anthropic", new SourceTierDtos.ReplaceVendor(0L, true, null, null, null, null, null, List.of(
+                new SourceTierDtos.Tier("relay", 1, "openai源头", null, List.of(), null, null, null),
+                new SourceTierDtos.Tier("kiro", 2, "kiro反向代理", new java.math.BigDecimal("0.6"),
+                    List.of("KIRO", "CLAUDE_OAUTH"), null, null, null)), List.of(
+                new SourceTierDtos.Member(relay, "relay", "OPENAI_CHAT", null, null, null, null, null, null, "EFFORT", null,
+                    true, true, List.of(new SourceTierDtos.MemberModel("claude-sonnet-4.5", "relay-sonnet", 200_000, null, null, null,
+                        null)))),
+                List.of(new SourceTierDtos.Gate(null, "MESSAGES", "KEYS", List.of("key-1")))))
+            .block();
+        PairRegistry experimental = new PairRegistry(List.of(new PairRegistry.Registration(PairRegistry.SourceKind.OPENAI_CHAT_RELAY,
+            PairRegistry.Entry.MESSAGES, "anthropic", PairRegistry.Status.EXPERIMENTAL)));
+        XpSkipCounts counts = new XpSkipCounts();
+        DefaultSourceTierPlanner planner = new DefaultSourceTierPlanner(registry, resolver, catalog, accountPool, payments, pricing,
+            TierSessionBindings.disabled(), true, true, experimental, counts);
+
+        // A mapping is verified by a probe of the relay, never by saving it: until then the relay serves nothing.
+        TierPlan unverified = planner.plan(messagesRequest("key-1")).block();
+        assertThat(unverified.levels()).extracting(TierPlan.Level::tierId).containsExactly("kiro");
+        assertThat(unverified.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.UNVERIFIED);
+
+        // What the probes leave in the table for a mapping that passed: when, and the fingerprint of what it vouched for.
+        var member = registry.snapshot().member("anthropic", relay).orElseThrow();
+        var mapping = registry.snapshot().models("anthropic", relay).getFirst();
+        String fingerprint = SourceTierValidator.mappingFingerprint(member, mapping, accountPool.cachedAccount(relay).orElseThrow());
+        db.sql("UPDATE source_tier_member_models SET verified_at = now(), verified_hash = :hash"
+                + " WHERE vendor = 'anthropic' AND account_id = :id")
+            .bind("hash", fingerprint).bind("id", relay).fetch().rowsUpdated().block();
+        registry.refresh().block();
+
+        TierPlan plan = planner.plan(messagesRequest("key-1")).block();
+        assertThat(plan.levels()).extracting(TierPlan.Level::tierId).containsExactly("relay", "kiro");
+        assertThat(plan.xpSkips()).isEmpty();
+        assertThat(plan.levels().get(0).cells()).containsExactly(PoolCell.ANTHROPIC_KEY, PoolCell.KIRO_COMPATIBLE, PoolCell.XP_OPENAI_CHAT);
+        TierPlan.Relay served = plan.levels().get(0).relay(relay).orElseThrow();
+        assertThat(served.dispatch().wireModel()).isEqualTo("relay-sonnet");
+        assertThat(served.mapping().maxContextTokens()).isEqualTo(200_000);
+        assertThat(served.dispatch().member().reasoningMode()).isEqualTo("EFFORT");
+        assertThat(plan.permits(plan.levels().get(0), PoolCell.XP_OPENAI_CHAT, accountPool.cachedAccount(relay).orElseThrow())).isTrue();
+        assertThat(plan.holds(plan.levels().get(1), accountPool.cachedAccount(kiro).orElseThrow())).isTrue();
+
+        // The gate names the keys that may use it; any other key is served as it was before.
+        TierPlan stranger = planner.plan(messagesRequest("key-2")).block();
+        assertThat(stranger.levels()).extracting(TierPlan.Level::tierId).containsExactly("kiro");
+        assertThat(stranger.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.GATE);
+        assertThat(counts.snapshot()).containsEntry(new XpSkipCounts.Key("anthropic", "relay", XpSkip.Reason.GATE), 1L)
+            .containsEntry(new XpSkipCounts.Key("anthropic", "relay", XpSkip.Reason.UNVERIFIED), 1L);
+        // The application's own runtime offers the Messages pair on trial (P5-05): it reads a request of that entry for the
+        // relays and plans it as the planner above does, for the key the gate lists and for no other.
+        assertThat(tierRuntime.planner().wantsEntryFacts(TierEntry.MESSAGES)).isTrue();
+        assertThat(tierRuntime.planner().wantsEntryFacts(TierEntry.RESPONSES)).isFalse();
+        assertThat(tierRuntime.planner().plan(messagesRequest("key-1")).block().levels())
+            .extracting(TierPlan.Level::tierId).containsExactly("relay", "kiro");
+        assertThat(tierRuntime.planner().plan(messagesRequest("key-2")).block().levels())
+            .extracting(TierPlan.Level::tierId).containsExactly("kiro");
+    }
+
+    /** A Claude Code request as the facade hands it to the planner: converted for the plan, the original read for relays. */
+    private TierPlanRequest messagesRequest(String keyId) {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode raw = mapper.createObjectNode().put("model", "claude-sonnet-4.5").put("max_tokens", 100);
+        raw.putObject("thinking").put("type", "adaptive");
+        raw.putObject("output_config").put("effort", "low");
+        raw.putArray("messages").addObject().put("role", "user").put("content", "hi");
+        return new TierPlanRequest("request-1", "claude-sonnet-4.5", "claude-sonnet-4.5", "Anthropic", TierRoute.ANTHROPIC,
+            false, false, false, true, false, false, new AnthropicRequestAdapter(mapper, catalog).messagesToChat(raw), null, false,
+            keyId, null).withEntry(TierEntry.MESSAGES).withEntryFacts(TierEntryFacts.of(TierEntry.MESSAGES, raw));
     }
 
     /** The owner's example on the Anthropic vendor, with the all-endpoints switch as given. */

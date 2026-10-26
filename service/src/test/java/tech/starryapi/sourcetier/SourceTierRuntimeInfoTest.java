@@ -3,6 +3,7 @@ package tech.starryapi.sourcetier;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.util.List;
 import org.junit.jupiter.api.Test;
 import tech.starryapi.sourcetier.SourceTierRuntimeInfo.Pair;
 import tech.starryapi.sourcetier.SourceTierRuntimeInfo.PairStatus;
@@ -10,7 +11,7 @@ import tech.starryapi.sourcetier.SourceTierRuntimeInfo.PairStatus;
 class SourceTierRuntimeInfoTest {
 
     @Test
-    void thisReleaseRunsTheNativeTiersTheSelectorsTheAllEndpointsSwitchAndTheRelayRowsAndOpensNoPairYet() {
+    void thisReleaseRunsTheNativeTiersTheSelectorsTheAllEndpointsSwitchTheRelayRowsAndTheChatAndMessagesPairsOnTrial() {
         SourceTierRuntimeInfo runtime = new SourceTierRuntimeInfo();
 
         // Native tiering (P2-09), the selectors (P3-01) and the all-endpoints switch (P3-03) are complete: requests are
@@ -21,9 +22,14 @@ class SourceTierRuntimeInfoTest {
         assertThat(runtime.unifyEndpoints()).isTrue();
         // A relay can be registered (P4-10): the pools of untiered traffic leave it out from then on.
         assertThat(runtime.xpMembers()).isTrue();
-        // What the cross-protocol phases bring is still off: no pair is offered, so no gate can be opened.
-        assertThat(runtime.pairs()).isNotEmpty().allSatisfy(pair ->
-            assertThat(runtime.pairStatus(pair.vendor(), pair.sourceProtocol(), pair.entryEndpoint())).isEqualTo(PairStatus.NOT_OFFERED));
+        // The Chat and Messages pairs of the anthropic and openai vendors are offered on trial (P5-05): their gates open
+        // to listed keys only. Everything else the cross-protocol phases bring is still off.
+        assertThat(runtime.pairs()).isNotEmpty().allSatisfy(pair -> {
+            boolean offered = List.of("CHAT", "MESSAGES").contains(pair.entryEndpoint())
+                && List.of("anthropic", "openai").contains(pair.vendor());
+            assertThat(runtime.pairStatus(pair.vendor(), pair.sourceProtocol(), pair.entryEndpoint()))
+                .as(pair.toString()).isEqualTo(offered ? PairStatus.EXPERIMENTAL : PairStatus.NOT_OFFERED);
+        });
     }
 
     @Test

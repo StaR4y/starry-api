@@ -566,6 +566,11 @@ final class UpstreamFailureClassifier {
             return relayFailure == RelayFailure.INTERRUPTED;
         }
 
+        /** The relay refused the prompt for its length, which this node keeps (design 7.8) so as not to ask for the same again. */
+        boolean contextExceeded() {
+            return relayFailure == RelayFailure.CONTEXT_EXCEEDED;
+        }
+
         /**
          * The request cannot be answered by another source of the kind that failed, but may by a native one: a relay
          * that could not take the converted request or its length says nothing about a tier whose first source is an
@@ -573,7 +578,7 @@ final class UpstreamFailureClassifier {
          * a way out, and only one crossing is made.
          */
         boolean crossTierOnly() {
-            return relayFailure == RelayFailure.CONTEXT_EXCEEDED || relayFailure == RelayFailure.CONVERSION_REJECTED;
+            return contextExceeded() || relayFailure == RelayFailure.CONVERSION_REJECTED;
         }
     }
 }

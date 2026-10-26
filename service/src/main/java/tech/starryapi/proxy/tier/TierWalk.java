@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import tech.starryapi.account.PoolCell;
 import tech.starryapi.proxy.tier.TierPlan.Level;
 
 /**
@@ -38,7 +39,8 @@ public final class TierWalk {
     private final Map<String, Integer> sessionRefusalsByTier = new HashMap<>();
     private int refusals;
     private boolean ownerPending;
-    private boolean crossedOnBudget;
+    private boolean crossedWithoutPushDown;
+    private boolean nativeOnly;
     private boolean retestTaken;
 
     /**
@@ -159,7 +161,32 @@ public final class TierWalk {
      * The tier below served it because of the budget, so the session is not one that was pushed down.
      */
     public synchronized void crossedOnBudget() {
-        this.crossedOnBudget = true;
+        this.crossedWithoutPushDown = true;
+    }
+
+    /**
+     * Moves the request below {@code from}, where only the native accounts are offered from now on: a relay refused the
+     * request itself (it is longer than the relay's window, or the conversion for the relay was not taken), which says
+     * nothing about the tiers whose accounts get the request in their own form and everything about asking another
+     * relay the same (design 4.5, 7.8). The tier below served it for the request's sake, so the session is not one
+     * that was pushed down, as after a crossing on the budget.
+     */
+    public synchronized void crossedToNative(Level from) {
+        this.crossedWithoutPushDown = true;
+        this.nativeOnly = true;
+        moveBelow(from);
+    }
+
+    /** Whether the relays are left out of the rest of the request ({@link #crossedToNative}). */
+    public synchronized boolean nativeOnly() {
+        return nativeOnly;
+    }
+
+    /** The cells of {@code level} the request may still be sent to: all of them, or the native ones once a relay refused it. */
+    public synchronized List<PoolCell> cells(Level level) {
+        return nativeOnly
+            ? level.cells().stream().filter(cell -> cell != PoolCell.XP_OPENAI_CHAT).toList()
+            : level.cells();
     }
 
     /**
@@ -174,9 +201,14 @@ public final class TierWalk {
      * found empty before the walk began, and counts as one it went through. A tier the plan kept though it never had an
      * account ({@link TierPlan#memberless}) is neither: there was nothing in it to push the session out of, so it is
      * skipped, and a request that went through no other tier above the one that served it pushed nobody down.
+     *
+     * <p>Nor does a tier that had a relay left out for this request (its size, a feature, the conversion) or for a moment
+     * (an interruption) count, whatever its other members did: they may have been busy, but the relay that did not take
+     * part would have served a request of the same session that is smaller, plainer or later, and the binding written
+     * here would keep all of them away from it (design 0, 4.7).
      */
     public synchronized boolean realDowngradeTo(Level served) {
-        if (crossedOnBudget) {
+        if (crossedWithoutPushDown || plan.requestBoundAbove(served)) {
             return false;
         }
         int servedIndex = indexOf(served);

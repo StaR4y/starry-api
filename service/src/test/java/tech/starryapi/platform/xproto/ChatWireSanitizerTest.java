@@ -836,4 +836,59 @@ class ChatWireSanitizerTest {
 
         assertThat(wire.degraded()).containsExactly("image", "file");
     }
+
+    // ---------------------------------------------------------------------------------------- the digest of the entry body
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        // A budget, the adaptive kind with an effort, one without, disabled, enabled without a budget.
+        "{\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":9000,\"display\":\"x\"}}",
+        "{\"thinking\":{\"type\":\"adaptive\"},\"output_config\":{\"effort\":\"max\",\"format\":{\"type\":\"json_schema\"}}}",
+        "{\"thinking\":{\"type\":\"adaptive\"}}",
+        "{\"thinking\":{\"type\":\"adaptive\"},\"output_config\":{\"effort\":\"unheard-of\"}}",
+        "{\"thinking\":{\"type\":\"disabled\"},\"output_config\":{\"effort\":\"low\"}}",
+        "{\"thinking\":{\"type\":\"enabled\"}}",
+        "{\"thinking\":{}}",
+        // The tool search tools, by type and name, and a choice of one of them.
+        "{\"tools\":[{\"type\":\"tool_search_tool_regex_20251119\",\"name\":\"tool_search_tool_regex\"},{\"name\":\"Read\",\"input_schema\":{}},"
+            + "{\"type\":\"tool_search_tool_bm25_20251119\"}],\"tool_choice\":{\"type\":\"tool\",\"name\":\"tool_search_tool_regex\"}}",
+        // Gemini: a budget or a level, in the generation config or at the top.
+        "{\"generationConfig\":{\"thinkingConfig\":{\"thinkingBudget\":20000,\"includeThoughts\":true}}}",
+        "{\"thinkingConfig\":{\"thinkingLevel\":\"LOW\"}}",
+        "{\"generationConfig\":{\"temperature\":1},\"thinkingConfig\":{\"thinkingBudget\":100}}",
+        "{}"
+    })
+    void sanitizingFromTheDigestOfTheEntryBodyGivesWhatSanitizingFromTheBodyGives(String entry) {
+        String chat = """
+            {"messages":[{"role":"user","content":"hello"}],"max_tokens":512,
+             "tools":[{"type":"function","function":{"name":"tool_search_tool_regex","parameters":{}}},
+                      {"type":"function","function":{"name":"Read","parameters":{}}},
+                      {"type":"function","function":{"name":"","parameters":{}}}],
+             "tool_choice":{"type":"function","function":{"name":"tool_search_tool_regex"}}}
+            """;
+        JsonNode entryBody = tree(entry);
+
+        for (Settings settings : List.of(settings("effort"), settings("effort", "claude"), settings())) {
+            Wire whole = ChatWireSanitizer.sanitize(tree(chat), entryBody, settings, "m");
+            Wire digested = ChatWireSanitizer.sanitize(tree(chat), ChatWireSanitizer.entryDigest(entryBody), settings, "m");
+
+            assertThat(digested.body()).isEqualTo(whole.body());
+            assertThat(digested.degraded()).isEqualTo(whole.degraded());
+        }
+    }
+
+    @Test
+    void theDigestOfAnEntryBodyHoldsNothingButWhatTheSanitizerReads() {
+        JsonNode digest = ChatWireSanitizer.entryDigest(tree("""
+            {"model":"claude-sonnet-4.5","system":"secret","messages":[{"role":"user","content":"secret"}],
+             "metadata":{"user_id":"user_secret_1"},"thinking":{"type":"adaptive","display":"secret"},
+             "output_config":{"effort":"high","format":"secret"},
+             "tools":[{"type":"tool_search_tool_regex_20251119","name":"search","description":"secret"},{"name":"Bash","description":"secret"}]}
+            """));
+
+        assertThat(digest.toString()).doesNotContain("secret", "Bash", "messages", "user_id");
+        assertThat(digest.path("tools")).hasSize(1);
+        assertThat(ChatWireSanitizer.entryDigest(null).isEmpty()).isTrue();
+        assertThat(ChatWireSanitizer.entryDigest(tree("[1]")).isEmpty()).isTrue();
+    }
 }

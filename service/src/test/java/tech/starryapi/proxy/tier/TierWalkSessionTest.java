@@ -101,6 +101,20 @@ class TierWalkSessionTest {
     }
 
     @Test
+    void aCrossingToTheNativeAccountsAfterARelayRefusedTheRequestPushesNobodyDown() {
+        TierPlan plan = plan("1", "1", "1");
+        TierWalk walk = new TierWalk(plan);
+        walk.passed(level(plan, "official"));
+        assertThat(walk.realDowngradeTo(level(plan, "oauth"))).isTrue();
+
+        // The same walk, left for the request's own sake: the tier below serves it, and the session stays where it was.
+        walk.crossedToNative(level(plan, "official"));
+
+        assertThat(walk.realDowngradeTo(level(plan, "oauth"))).isFalse();
+        assertThat(walk.realDowngradeTo(level(plan, "kiro"))).isFalse();
+    }
+
+    @Test
     void beingServedByTheTierItStartedFromPushesNobodyDown() {
         TierPlan plan = plan("1", "1", "1");
         TierWalk walk = new TierWalk(plan);

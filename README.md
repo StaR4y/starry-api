@@ -37,6 +37,7 @@ OpenAI · Anthropic · DeepSeek · Kiro(AWS) · 其他 OpenAI 兼容站点
 - **多协议入口**：`/v1/chat/completions`、`/v1/responses`（OpenAI），`/v1/messages`（Anthropic），`/v1beta/models/{model}:generateContent`（Gemini）。
 - **多种上游账号**：Kiro、OpenAI API Key、ChatGPT 浏览器授权（Codex）、手动 Codex Token、DeepSeek、Anthropic API Key，以及任意 OpenAI 兼容站点。
 - **智能账号池**：按厂商隔离、预热分级、并发与 RPM 保护、失败重试与冷却，可选实验性的分级熔断。
+- **号源分级**：把一个厂商的账号分成有序的号池（官方 Key 一级、Kiro 二级……），每级一个价格系数，按实际服务请求的号池计价；客户端可以用 `模型@号池` 或请求头指定；可选地把 OpenAI 格式的中转登记为别的厂商的一级。见 [运维手册](docs/OPERATIONS.md#号源分级)。
 - **API Key 与计费**：按用户发放、绑定模型厂商、额度上限、余额计费或 Coding Plan 订阅计费；内置官方价格目录并自动校验更新。
 - **完整的管理控制台**：仪表盘、请求日志、用户、兑换码、在线充值、工单、使用文档、模型目录与价格倍率、外观定制，中英文界面。
 - **数据安全**：Root 专属的「数据管理」（备份 / 导出 / 恢复），所有高危操作要二次验证。

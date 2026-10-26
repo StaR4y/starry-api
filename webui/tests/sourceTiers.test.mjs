@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { build } from 'esbuild';
@@ -12,7 +13,7 @@ Object.defineProperty(globalThis, 'navigator', { value: dom.window.navigator, co
 // Bundle the draft model in memory (it imports the i18n module through the `@` alias).
 const compiled = await build({
   stdin: {
-    contents: `export * from './src/views/settings/components/source-tiers/sourceTiersMeta'; export * from './src/views/settings/components/source-tiers/tierStatusMeta'; export * from './src/views/settings/billingReviewTiers'; export * from './src/views/logs/logSource'; export * from './src/views/api-keys/tierPreference'; export * from './src/views/models/modelTiers'; export { createSetupScriptBlock, createCcSwitchLinks } from './src/platforms/clientSetup'; export { tierReference, TIER_HEADER } from './src/platforms/setupShared'; export { setLocale } from './src/i18n';`,
+    contents: `export * from './src/views/settings/components/source-tiers/sourceTiersMeta'; export * from './src/views/settings/components/source-tiers/tierStatusMeta'; export * from './src/views/settings/billingReviewTiers'; export * from './src/views/logs/logSource'; export * from './src/views/api-keys/tierPreference'; export * from './src/views/models/modelTiers'; export { createSetupScriptBlock, createCcSwitchLinks } from './src/platforms/clientSetup'; export { tierReference, TIER_HEADER } from './src/platforms/setupShared'; export * from './src/views/settings/components/source-tiers/xpMeta'; export { setLocale } from './src/i18n';`,
     resolveDir: process.cwd(),
     loader: 'ts',
   },
@@ -32,6 +33,14 @@ const {
   hasSourceTiers, sourceTierLabel, priceFactorLabel,
   AUTO_PREFERENCE, preferenceValue, preferenceChoices, priceText,
   tierSuffix, modelTierChips, createSetupScriptBlock, createCcSwitchLinks, tierReference, TIER_HEADER,
+  layerCount, layerLabel, LAYERS, gateStateLabel,
+  supportsRelays, newRelayDraft, newMapping, relayDraftOf, relayMemberOf, relaySignature, mappingProblems, relayProblem,
+  invalidatedMappings, mappingStatus, mappingStatusLabel, unprovenCache, cacheSuggestion, applyCacheSuggestion, cacheVerdict,
+  cacheCostWarning, exclusiveWarning, limitsNote, durationNote, isOpenAiCompatibleKey, relayCandidates, catalogModelsOf,
+  coveredAliases, catalogWindow, prefillContext, prefillContexts, suggestWireName, pairStatusOf, allowedGateStates, gateOf,
+  gateState, gateKeys, setGate, gateProblem, blockingGateProblem, percentOf, successPercent, estimatedPercent, unbilledPercent,
+  conversionRejectedPercent, figureTone, formatLatency, skipReasonLabel, criterionValue, unmetCriteria, evidenceFileName,
+  relayErrorMessage, verificationOf, probeLabel, verifyTargets, ENTRY_ENDPOINTS,
 } = meta;
 meta.setLocale('zh-CN');
 
@@ -331,6 +340,9 @@ test('presets are drafts that pass validation and never set a price', () => {
   }
   const anthropic = tierPresets('anthropic')[0].build();
   assert.deepEqual(anthropic.map((row) => [row.tierId, row.memberCategories]), [['official', ['OFFICIAL_API_KEY']], ['kiro', ['KIRO', 'CLAUDE_OAUTH']]]);
+  // The owner's example: an OpenAI-format relay in front of Kiro; the relay is registered afterwards, so its tier lists no category.
+  const relayKiro = tierPresets('anthropic').find((preset) => preset.id === 'relay-kiro').build();
+  assert.deepEqual(relayKiro.map((row) => [row.tierId, row.memberCategories]), [['relay', []], ['kiro', ['KIRO', 'CLAUDE_OAUTH']]]);
   const openai = tierPresets('openai')[0].build();
   assert.deepEqual(openai.map((row) => [row.tierId, row.memberCategories]), [['official', ['OFFICIAL_API_KEY']], ['codex', ['CODEX']]]);
 });
@@ -855,4 +867,416 @@ test('a model without pools, or whose vendor keeps its pool names private, shows
   assert.deepEqual(modelTierChips('gpt-5.5', undefined), []);
   assert.deepEqual(modelTierChips('gpt-5.5', null), []);
   assert.deepEqual(modelTierChips('gpt-5.5', []), []);
+});
+
+
+// ---- cross-protocol members (relays), mappings and gates ----
+
+/** What the server sends of a relay: nulls left out, the models with their verification. */
+const savedRelay = {
+  accountId: 'relay-1', tierId: 'relay', protocol: 'OPENAI_CHAT', usageCacheReadInPrompt: true, usageCacheWriteInPrompt: false,
+  models: [
+    { modelId: 'claude-sonnet-4.5', upstreamModel: 'relay/sonnet', maxContextTokens: 200000, imageTokenCap: 8192, enabled: true, verifiedAt: '2026-10-26T08:00:00Z', verified: true },
+    { modelId: 'claude-haiku-4.5', upstreamModel: 'relay/haiku', maxContextTokens: 100000, imageTokenCap: 4096, enabled: false, verified: false },
+  ],
+};
+
+function filled(extra = {}) {
+  const draft = newRelayDraft('relay-1', 'relay');
+  const mapping = newMapping('claude-sonnet-4.5', 'relay/sonnet');
+  mapping.maxContextTokens = 200000;
+  return { ...draft, mappings: [mapping], ...extra };
+}
+
+test('only the vendors whose own accounts are not already OpenAI-format keys can have relays', () => {
+  assert.deepEqual(['anthropic', 'openai', 'google', 'deepseek', 'moonshot'].filter(supportsRelays), ['anthropic', 'openai', 'google']);
+});
+
+test('a relay the server sent reads with the same defaults the server applies and writes back without the verification', () => {
+  const draft = relayDraftOf(savedRelay);
+
+  assert.equal(draft.exclusive, true);
+  assert.equal(draft.upstreamStream, true);
+  assert.equal(draft.vision, false);
+  assert.equal(draft.reasoningMode, 'NONE');
+  assert.equal(draft.maxDurationSeconds, 540);
+  assert.deepEqual([draft.usageCacheReadInPrompt, draft.usageCacheWriteInPrompt], [true, false]);
+  assert.deepEqual(draft.mappings.map((row) => [row.modelId, row.verified, row.enabled]), [['claude-haiku-4.5', false, false], ['claude-sonnet-4.5', true, true]]);
+  const member = relayMemberOf(draft);
+  assert.equal(member.protocol, 'OPENAI_CHAT');
+  assert.deepEqual(member.models[1], { modelId: 'claude-sonnet-4.5', upstreamModel: 'relay/sonnet', maxContextTokens: 200000, imageTokenCap: 8192, enabled: true });
+  assert.equal('verified' in member.models[1], false);
+  // A verification that came or went is no edit of the relay.
+  const verifiedLater = relayDraftOf({ ...savedRelay, models: savedRelay.models.map((model) => ({ ...model, verified: !model.verified })) });
+  assert.equal(relaySignature(verifiedLater), relaySignature(draft));
+  draft.maxDurationSeconds = 600;
+  assert.notEqual(relaySignature(draft), relaySignature(verifiedLater));
+});
+
+test('a new relay is dedicated, streams upstream and takes the safe reading of the cache', () => {
+  const draft = newRelayDraft('relay-1', 'relay');
+
+  assert.deepEqual([draft.exclusive, draft.upstreamStream, draft.vision, draft.jsonSchema, draft.priorityTier, draft.cacheControlPassthrough], [true, true, false, false, false, false]);
+  assert.deepEqual([draft.usageCacheReadInPrompt, draft.usageCacheWriteInPrompt, draft.reasoningMode, draft.maxDurationSeconds], [true, true, 'NONE', 540]);
+  assert.deepEqual(draft.mappings, []);
+});
+
+test('a relay is checked against the rules the server enforces before it is sent', () => {
+  assert.equal(relayProblem(filled()), null);
+  assert.match(relayProblem(filled({ accountId: '' })), /选择要登记为中转的账号/);
+  assert.match(relayProblem(filled({ tierId: '' })), /选择中转所在的号池/);
+  assert.match(relayProblem(filled({ maxDurationSeconds: 20 })), /30 到 900/);
+  assert.match(relayProblem(filled({ maxDurationSeconds: 901 })), /30 到 900/);
+  assert.match(relayProblem(filled({ mappings: [] })), /至少需要一条映射/);
+
+  const row = (change) => { const base = filled().mappings[0]; return { ...base, ...change }; };
+  const only = (change) => { const changed = row(change); return mappingProblems([changed])[changed.key]; };
+  assert.match(relayProblem(filled({ mappings: [row({ maxContextTokens: null })] })), /第 1 条映射：上下文上限必填/);
+  assert.match(relayProblem(filled({ mappings: [row({ maxContextTokens: 0 })] })), /上下文上限必填/);
+  assert.match(relayProblem(filled({ mappings: [row({ modelId: ' ' })] })), /选择一个目录模型/);
+  assert.match(relayProblem(filled({ mappings: [row({ upstreamModel: '' })] })), /填写中转给这个模型起的名字/);
+  assert.match(relayProblem(filled({ mappings: [row({ upstreamModel: 'relay/*' })] })), /不能有通配/);
+  assert.match(relayProblem(filled({ mappings: [row({ imageTokenCap: 1_000_001 })] })), /1 到 1000000/);
+  assert.equal(only({ upstreamModel: 'a'.repeat(255) }), undefined);
+  assert.ok(only({ upstreamModel: 'a'.repeat(256) }).upstream);
+  // A model mapped twice, whatever its case, is a problem of both rows.
+  const twice = filled({ mappings: [row({}), { ...row({ modelId: 'Claude-Sonnet-4.5' }), key: 'other' }] });
+  assert.match(relayProblem(twice), /映射了不止一次/);
+  assert.equal(Object.keys(mappingProblems(twice.mappings)).length, 2);
+});
+
+test('saving a change that a verification depends on makes the mappings unverified again', () => {
+  const saved = savedRelay;
+  const draft = relayDraftOf(saved);
+  assert.deepEqual(invalidatedMappings(saved, draft), []);
+  assert.deepEqual(invalidatedMappings(undefined, draft), []);
+
+  const renamed = relayDraftOf(saved);
+  renamed.mappings.find((row) => row.modelId === 'claude-sonnet-4.5').upstreamModel = 'relay/sonnet-2';
+  assert.deepEqual(invalidatedMappings(saved, renamed), ['claude-sonnet-4.5']);
+
+  const switched = relayDraftOf(saved);
+  switched.vision = true;
+  assert.deepEqual(invalidatedMappings(saved, switched).sort(), ['claude-haiku-4.5', 'claude-sonnet-4.5']);
+
+  // The limits, the image cap, the switch of a row and the time limit do not enter what a verification vouches for.
+  const limits = relayDraftOf(saved);
+  limits.maxDurationSeconds = 120;
+  limits.mappings[0].maxContextTokens = 50;
+  limits.mappings[0].imageTokenCap = 1;
+  limits.mappings[0].enabled = true;
+  assert.deepEqual(invalidatedMappings(saved, limits), []);
+  // A new row has nothing to lose.
+  const added = relayDraftOf(saved);
+  added.mappings.push(newMapping('claude-opus-4.5', 'relay/opus'));
+  assert.deepEqual(invalidatedMappings(saved, added), []);
+});
+
+test('each mapping row says whether it is verified, unverified, switched off or not saved yet', () => {
+  const saved = relayDraftOf(savedRelay);
+  const sonnet = saved.mappings.find((row) => row.modelId === 'claude-sonnet-4.5');
+  const haiku = saved.mappings.find((row) => row.modelId === 'claude-haiku-4.5');
+
+  assert.equal(mappingStatus(sonnet, saved), 'verified');
+  assert.equal(mappingStatus({ ...sonnet, modelId: 'CLAUDE-SONNET-4.5 ' }, saved), 'verified');
+  assert.equal(mappingStatus(haiku, saved), 'off');
+  assert.equal(mappingStatus({ ...haiku, enabled: true }, saved), 'unverified');
+  assert.equal(mappingStatus(newMapping('claude-opus-4.5', 'x'), saved), 'new');
+  assert.equal(mappingStatus(sonnet, null), 'new');
+  assert.equal(mappingStatusLabel('verified'), '已验证');
+  assert.equal(mappingStatusLabel('new'), '未保存');
+});
+
+test('a setting of "not included" needs the evidence of the cache probe, and "included" never does', () => {
+  assert.equal(unprovenCache(filled()), null);
+  assert.equal(unprovenCache(filled({ usageCacheReadInPrompt: false })), 'read');
+  assert.equal(unprovenCache(filled({ usageCacheWriteInPrompt: false })), 'write');
+  assert.equal(unprovenCache(filled({ usageCacheReadInPrompt: false, usageCacheWriteInPrompt: false })), 'both');
+});
+
+test('the advice of the cache probe changes only the switches it is sure about', () => {
+  const draft = filled();
+  assert.deepEqual(cacheSuggestion({ readInPrompt: false, writeInPrompt: null, calls: [] }), { read: false, write: null });
+  assert.deepEqual(cacheSuggestion(null), { read: null, write: null });
+
+  const advised = applyCacheSuggestion(draft, { read: false, write: null });
+  assert.deepEqual([advised.usageCacheReadInPrompt, advised.usageCacheWriteInPrompt], [false, true]);
+  assert.equal(draft.usageCacheReadInPrompt, true, 'the draft it was given is not edited');
+  // Advice that matches what is set changes nothing, and says so by returning the draft itself.
+  assert.equal(applyCacheSuggestion(draft, { read: true, write: null }), draft);
+  assert.equal(applyCacheSuggestion(draft, { read: null, write: null }), draft);
+  assert.deepEqual([cacheVerdict(true), cacheVerdict(false), cacheVerdict(null)], ['已含在 prompt_tokens 内', '不含在 prompt_tokens 内', '判断不了']);
+});
+
+test('the warnings say what a relay costs or risks where it does', () => {
+  assert.match(cacheCostWarning('anthropic'), /没有提示缓存/);
+  assert.equal(cacheCostWarning('openai'), null);
+  assert.equal(exclusiveWarning(filled()), null);
+  assert.match(exclusiveWarning(filled({ exclusive: false })), /GLM/);
+  assert.equal(limitsNote(null), null);
+  assert.equal(limitsNote({ safeConcurrency: 4, safeRpm: 0 }), null);
+  assert.equal(limitsNote({ safeConcurrency: 0, safeRpm: 60 }), null);
+  assert.match(limitsNote({ safeConcurrency: 0, safeRpm: 0 }), /几乎不会触发/);
+  assert.equal(durationNote(filled({ upstreamStream: true, maxDurationSeconds: 900 })), null);
+  assert.equal(durationNote(filled({ upstreamStream: false, maxDurationSeconds: 300 })), null);
+  assert.match(durationNote(filled({ upstreamStream: false, maxDurationSeconds: 301 })), /300 秒/);
+});
+
+test('only an OpenAI-compatible key can be a relay, as the server judges it', () => {
+  const key = (provider, authMethod, baseUrl = null) => isOpenAiCompatibleKey({ provider, authMethod, baseUrl });
+
+  assert.equal(key('OpenAI-compatible', 'api-key', 'https://relay.example/v1'), true);
+  assert.equal(key('GLM', 'api-key', 'https://open.bigmodel.cn/api/paas/v4'), true, 'a custom provider with an API key');
+  assert.equal(key('OpenAI', 'api-key', 'https://relay.example/v1'), true, 'OpenAI\'s name on another address');
+  assert.equal(key('OpenAI', 'api-key', null), false, 'the official address is the default');
+  assert.equal(key('OpenAI', 'api-key', 'https://API.openai.com/v1'), false);
+  assert.equal(key('OpenAI-compatible', 'api-key', 'https://api.openai.com/v1'), true, 'the legacy provider is never official');
+  assert.equal(key('OpenAI-compatible', 'api-key', 'https://api.deepseek.com/v1'), false, 'a DeepSeek account');
+  assert.equal(key('DeepSeek', 'api-key', null), false);
+  assert.equal(key('Codex', 'codex', null), false);
+  assert.equal(key('OpenAI', 'codex', 'https://relay.example'), false);
+  assert.equal(key('Anthropic', 'api-key', null), false);
+  assert.equal(key('Google', 'api-key', null), false);
+  assert.equal(key('BuilderId', 'idc', null), false, 'Kiro');
+});
+
+test('the accounts offered as relays are compatible keys that have no row in the vendor yet', () => {
+  const account = (accountId, provider, email = null) => ({ accountId, email, provider, authMethod: 'api-key', baseUrl: 'https://relay.example/v1' });
+  const accounts = [account('a-1', 'OpenAI-compatible', 'glm@example.com'), account('a-2', 'OpenAI-compatible'), account('a-3', 'Anthropic'), account('a-4', 'GLM')];
+
+  assert.deepEqual(relayCandidates(accounts, ['a-2'], '').map((item) => item.accountId), ['a-1', 'a-4']);
+  assert.deepEqual(relayCandidates(accounts, [], 'GLM@').map((item) => item.accountId), ['a-1']);
+  assert.deepEqual(relayCandidates(accounts, [], 'a-4').map((item) => item.accountId), ['a-4']);
+});
+
+const catalog = [
+  { id: 'claude-sonnet-4.5', name: 'Claude Sonnet 4.5', provider: 'Anthropic', family: 'Claude', targetModelId: 'claude-sonnet-4.5', contextWindow: 200000, enabled: true },
+  { id: 'sonnet', name: 'sonnet', provider: 'Anthropic', family: 'Claude', targetModelId: 'claude-sonnet-4.5', contextWindow: 200000, enabled: true },
+  { id: 'claude-sonnet-4-5-20250929', name: 'dated', provider: 'Anthropic', family: 'Claude', targetModelId: 'Claude-Sonnet-4.5', contextWindow: 0, enabled: true },
+  { id: 'claude-old', name: 'old', provider: 'Anthropic', family: 'Claude', targetModelId: 'claude-sonnet-4.5', contextWindow: 200000, enabled: false },
+  { id: 'auto', name: 'auto', provider: 'Anthropic', family: 'Routing Preset', targetModelId: 'claude-sonnet-4.5', contextWindow: 200000, enabled: true },
+  { id: 'gemini-2.5-pro', name: 'Gemini', provider: 'Google', family: 'Gemini', targetModelId: 'claude-sonnet-4.5', contextWindow: 1000000, enabled: true },
+  { id: 'gpt-5.5', name: 'GPT', provider: 'OpenAI', family: 'GPT', targetModelId: 'claude-sonnet-4.5', contextWindow: 400000, enabled: true },
+];
+
+test('the catalog models a vendor can map leave out presets and the models of other vendors', () => {
+  assert.deepEqual(catalogModelsOf('anthropic', catalog).map((model) => model.id), ['claude-old', 'claude-sonnet-4-5-20250929', 'claude-sonnet-4.5', 'sonnet']);
+  assert.deepEqual(catalogModelsOf('google', catalog).map((model) => model.id), ['gemini-2.5-pro']);
+  assert.deepEqual(catalogModelsOf('deepseek', catalog), []);
+});
+
+test('a mapping also serves the aliases of its model that have no row of their own', () => {
+  const anthropic = catalogModelsOf('anthropic', catalog);
+
+  assert.deepEqual(coveredAliases('claude-sonnet-4.5', anthropic, ['claude-sonnet-4.5']), ['claude-sonnet-4-5-20250929', 'sonnet']);
+  assert.deepEqual(coveredAliases('Claude-Sonnet-4.5', anthropic, ['claude-sonnet-4.5', 'sonnet']), ['claude-sonnet-4-5-20250929'], 'an alias with its own row keeps its own wire name');
+  assert.deepEqual(coveredAliases('', anthropic, []), []);
+  assert.deepEqual(coveredAliases('sonnet', anthropic, ['sonnet']), []);
+});
+
+test('a row without a context limit is prefilled from the window the relay states, else the catalog\'s', () => {
+  const anthropic = catalogModelsOf('anthropic', catalog);
+  const row = newMapping('claude-sonnet-4.5', 'relay/sonnet');
+  const upstream = [{ id: 'relay/sonnet', contextLength: 123000 }, { id: 'relay/other', contextLength: null }];
+
+  assert.equal(prefillContext(row, anthropic, upstream).maxContextTokens, 123000);
+  assert.equal(prefillContext(row, anthropic, []).maxContextTokens, 200000);
+  assert.equal(prefillContext(newMapping('claude-sonnet-4-5-20250929', 'relay/dated'), anthropic, []).maxContextTokens, null, 'no window anywhere');
+  assert.equal(prefillContext({ ...row, maxContextTokens: 50000 }, anthropic, upstream).maxContextTokens, 50000, 'what was entered stays');
+  assert.equal(catalogWindow('SONNET', anthropic), 200000);
+  assert.deepEqual(prefillContexts([row, { ...row, key: 'k', maxContextTokens: 1 }], anthropic, upstream).map((item) => item.maxContextTokens), [123000, 1]);
+});
+
+test('a wire name is suggested only when exactly one name the relay lists fits the model', () => {
+  const listed = (...ids) => ids.map((id) => ({ id, contextLength: null }));
+
+  assert.equal(suggestWireName('claude-sonnet-4.5', listed('claude-sonnet-4-5', 'claude-haiku-4-5')), 'claude-sonnet-4-5');
+  assert.equal(suggestWireName('claude-sonnet-4.5', listed('anthropic/claude-sonnet-4.5', 'gpt-5')), 'anthropic/claude-sonnet-4.5');
+  assert.equal(suggestWireName('claude-sonnet-4.5', listed('Claude_Sonnet_4.5', 'claude-sonnet-4.5-thinking')), 'Claude_Sonnet_4.5', 'an exact fit wins over names that merely contain it');
+  assert.equal(suggestWireName('claude-sonnet-4.5', listed('a/claude-sonnet-4.5', 'b/claude-sonnet-4.5')), null, 'two fit: not for us to choose');
+  assert.equal(suggestWireName('claude-sonnet-4.5', listed('gpt-5')), null);
+  assert.equal(suggestWireName('', listed('gpt-5')), null);
+  assert.equal(suggestWireName('claude-sonnet-4.5', []), null);
+});
+
+test('a gate follows the status of its pair: off for what is not offered, listed keys on trial, everyone once verified', () => {
+  const runtime = { pairs: [
+    { vendor: 'anthropic', sourceProtocol: 'OPENAI_CHAT', entryEndpoint: 'CHAT', status: 'EXPERIMENTAL' },
+    { vendor: 'anthropic', sourceProtocol: 'OPENAI_CHAT', entryEndpoint: 'MESSAGES', status: 'VERIFIED' },
+    { vendor: 'openai', sourceProtocol: 'OPENAI_CHAT', entryEndpoint: 'CHAT', status: 'EXPERIMENTAL' },
+  ] };
+
+  assert.equal(pairStatusOf(runtime, 'anthropic', 'CHAT'), 'EXPERIMENTAL');
+  assert.equal(pairStatusOf(runtime, 'anthropic', 'RESPONSES'), 'NOT_OFFERED');
+  assert.equal(pairStatusOf(runtime, 'google', 'CHAT'), 'NOT_OFFERED');
+  assert.equal(pairStatusOf(null, 'anthropic', 'CHAT'), 'NOT_OFFERED');
+  assert.deepEqual(allowedGateStates('NOT_OFFERED'), ['OFF']);
+  assert.deepEqual(allowedGateStates('EXPERIMENTAL'), ['OFF', 'KEYS']);
+  assert.deepEqual(allowedGateStates('VERIFIED'), ['OFF', 'KEYS', 'ON']);
+  assert.deepEqual(ENTRY_ENDPOINTS, ['CHAT', 'MESSAGES', 'RESPONSES', 'GEMINI']);
+});
+
+test('setting a gate keeps the rest, and a gate that is off with no keys is no row at all', () => {
+  const other = { sourceProtocol: 'OPENAI_CHAT', entryEndpoint: 'MESSAGES', state: 'KEYS', allowKeyIds: ['key-9'] };
+  const gates = [other];
+
+  const opened = setGate(gates, 'CHAT', { state: 'KEYS' });
+  assert.deepEqual(opened.map((gate) => [gate.entryEndpoint, gate.state]), [['MESSAGES', 'KEYS'], ['CHAT', 'KEYS']]);
+  assert.deepEqual(gateKeys(opened, 'CHAT'), []);
+  assert.deepEqual(gates, [other], 'the gates it was given are not edited');
+
+  const listed = setGate(opened, 'CHAT', { allowKeyIds: ['key-1', 'key-2'] });
+  assert.deepEqual(gateKeys(listed, 'CHAT'), ['key-1', 'key-2']);
+  assert.equal(gateState(listed, 'CHAT'), 'KEYS');
+  assert.equal(listed.filter((gate) => gate.entryEndpoint === 'CHAT').length, 1);
+
+  // Off keeps the list so that turning it on again gives the same keys; with none listed the row goes.
+  const off = setGate(listed, 'CHAT', { state: 'OFF' });
+  assert.equal(gateState(off, 'CHAT'), 'OFF');
+  assert.deepEqual(gateKeys(off, 'CHAT'), ['key-1', 'key-2']);
+  assert.equal(gateOf(setGate(setGate(off, 'CHAT', { allowKeyIds: [] }), 'CHAT', {}), 'CHAT'), undefined);
+  assert.equal(gateState([], 'GEMINI'), 'OFF');
+  assert.equal(gateOf([{ entryEndpoint: 'CHAT', state: 'ON' }], 'CHAT').state, 'ON', 'a row without a protocol is the Chat relay\'s');
+});
+
+test('a gate that cannot be saved is told before the server refuses it, and an empty list is only a remark', () => {
+  const runtime = { pairs: [
+    { vendor: 'anthropic', sourceProtocol: 'OPENAI_CHAT', entryEndpoint: 'CHAT', status: 'EXPERIMENTAL' },
+    { vendor: 'anthropic', sourceProtocol: 'OPENAI_CHAT', entryEndpoint: 'MESSAGES', status: 'VERIFIED' },
+  ] };
+  const gate = (entryEndpoint, state, allowKeyIds = []) => ({ sourceProtocol: 'OPENAI_CHAT', entryEndpoint, state, allowKeyIds });
+
+  assert.equal(blockingGateProblem([], runtime, 'anthropic'), null);
+  assert.equal(blockingGateProblem([gate('CHAT', 'KEYS'), gate('MESSAGES', 'ON')], runtime, 'anthropic'), null);
+  assert.match(blockingGateProblem([gate('CHAT', 'ON')], runtime, 'anthropic'), /Chat Completions 入口：这个对现在不能设为「所有 Key」/);
+  assert.match(blockingGateProblem([gate('RESPONSES', 'KEYS', ['k'])], runtime, 'anthropic'), /Responses 入口/);
+  assert.match(blockingGateProblem([gate('MESSAGES', 'KEYS', Array.from({ length: 51 }, (_, i) => `key-${i}`))], runtime, 'anthropic'), /最多 50 把/);
+
+  assert.match(gateProblem([gate('CHAT', 'KEYS')], 'CHAT', 'EXPERIMENTAL'), /名单是空的/);
+  assert.equal(gateProblem([gate('CHAT', 'KEYS', ['k'])], 'CHAT', 'EXPERIMENTAL'), null);
+  assert.equal(gateProblem([], 'CHAT', 'NOT_OFFERED'), null);
+  assert.match(gateProblem([gate('CHAT', 'ON')], 'CHAT', 'EXPERIMENTAL'), /不能设为/);
+});
+
+const figures = (extra = {}) => ({ attempts: 200, served: 190, failed: 10, interrupted: 2, conversionRejected: 1, contextExceeded: 0, modelNotServed: 0, estimated: 19, clamped: 0, degraded: 0, ...extra });
+
+test('the figures of the window are shares of the attempts or of the answered attempts, and absent without a base', () => {
+  assert.equal(percentOf(1, 0), null);
+  assert.equal(percentOf(1, 3), 33.3);
+  assert.equal(successPercent(figures()), 95);
+  assert.equal(estimatedPercent(figures()), 10);
+  assert.equal(unbilledPercent(figures()), 1);
+  assert.equal(conversionRejectedPercent(figures()), 0.5);
+  assert.equal(successPercent(figures({ attempts: 0, served: 0 })), null);
+  assert.equal(estimatedPercent(figures({ served: 0 })), null);
+});
+
+test('a figure turns red at the line the upgrade standard draws', () => {
+  assert.equal(figureTone('estimated', 5), 'success');
+  assert.equal(figureTone('estimated', 5.1), 'danger');
+  assert.equal(figureTone('unbilled', 1.9), 'warning');
+  assert.equal(figureTone('unbilled', 2), 'danger');
+  assert.equal(figureTone('unbilled', 0), 'success');
+  assert.equal(figureTone('conversionRejected', 1), 'danger');
+  assert.equal(figureTone('conversionRejected', 0.4), 'warning');
+  assert.equal(figureTone('success', 89.9), 'warning');
+  assert.equal(figureTone('success', 90), 'success');
+  assert.equal(figureTone('estimated', null), 'info');
+});
+
+test('latencies read in milliseconds below a second and in seconds above', () => {
+  assert.deepEqual([formatLatency(null), formatLatency(undefined), formatLatency(812), formatLatency(1000), formatLatency(8100)], ['—', '—', '812 ms', '1 s', '8.1 s']);
+});
+
+test('every reason a relay is left out of a plan has a name, and one this build does not know shows as it is', () => {
+  for (const reason of ['GATE', 'NOT_A_RELAY', 'NO_MAPPING', 'UNVERIFIED', 'FEATURE', 'INTERRUPTED', 'CONVERSION', 'CONTEXT']) {
+    assert.notEqual(skipReasonLabel(reason), reason, reason);
+  }
+  assert.equal(skipReasonLabel('SOMETHING_NEW'), 'SOMETHING_NEW');
+});
+
+test('a relay\'s layer extends the layers of an account by the one only it has', () => {
+  assert.deepEqual(LAYERS, ['ready', 'busy', 'resting', 'unavailable', 'unopened', 'disabled']);
+  assert.equal(layerLabel('unopened'), '尚未开放');
+  // A tier without a relay has no such figure.
+  assert.equal(layerCount({ disabled: 0, unavailable: 0, resting: 0, busy: 0, ready: 2 }, 'unopened'), 0);
+  assert.equal(layerTotal({ disabled: 0, unavailable: 0, resting: 0, busy: 0, ready: 2 }), 2);
+  const segments = layerSegments({ disabled: 0, unavailable: 0, resting: 0, busy: 0, ready: 1, unopened: 3 });
+  assert.deepEqual(segments.map((segment) => [segment.key, segment.count, segment.percent]), [['ready', 1, 25], ['unopened', 3, 75]]);
+});
+
+test('the layers, the states of a gate and the state of a mapping that is off are told apart in English too', () => {
+  meta.setLocale('en-US');
+  try {
+    // Each of these once reused a Chinese text whose English is another thing: "Close" (a button), "Unavailable" (the layer
+    // of an account that is suspended or out of quota), "Closed".
+    const layers = LAYERS.map(layerLabel);
+    assert.equal(new Set(layers).size, layers.length, layers.join(' | '));
+    assert.equal(layerLabel('unopened'), 'Not open yet');
+    assert.notEqual(layerLabel('unopened'), layerLabel('unavailable'));
+    const gates = ['OFF', 'KEYS', 'ON'].map(gateStateLabel);
+    assert.deepEqual(gates, ['Off', 'Listed keys', 'Every key']);
+    const mappings = ['verified', 'unverified', 'off', 'new'].map(mappingStatusLabel);
+    assert.equal(new Set(mappings).size, mappings.length, mappings.join(' | '));
+    assert.equal(mappingStatusLabel('off'), 'Disabled');
+  } finally {
+    meta.setLocale('zh-CN');
+  }
+  assert.deepEqual(['OFF', 'KEYS', 'ON'].map(gateStateLabel), ['不开放', '名单里的 Key', '所有 Key']);
+  assert.equal(mappingStatusLabel('off'), '已停用');
+});
+
+test('the time limit of a relay is any number of seconds the server takes, and the input does not round it to a step', () => {
+  for (const seconds of [30, 45, 100, 540, 899, 900]) {
+    assert.equal(relayProblem(filled({ maxDurationSeconds: seconds })), null, String(seconds));
+  }
+  // An input that rounds to its step rewrites a value the administrator saved through the API as soon as the dialog opens,
+  // which makes the draft dirty and blocks the verification (element-plus: step-strictly emits update:modelValue on mount).
+  const dialog = readFileSync(path.resolve('src/views/settings/components/source-tiers/XpMemberDialog.vue'), 'utf8');
+  const start = dialog.indexOf(':model-value="draft.maxDurationSeconds"');
+  assert.ok(start > 0, 'the input of the time limit');
+  const input = dialog.slice(start, dialog.indexOf('/>', start));
+  assert.match(input, /:step="30"/);
+  assert.doesNotMatch(input, /step-strictly/);
+});
+
+test('the evidence is read as the standard states it', () => {
+  const criteria = [
+    { name: 'requests', rule: '>= 200', value: 250, met: true },
+    { name: 'lintFailures', rule: '= 0', value: 1, met: false },
+    { name: 'conversionRejected', rule: '< 1%', value: 0.8, met: true },
+    { name: 'estimated', rule: '< 5%', value: null, met: false },
+  ];
+
+  assert.deepEqual(criteria.map(criterionValue), ['250', '1', '0.8%', '—']);
+  assert.deepEqual(unmetCriteria(criteria), ['lintFailures', 'estimated']);
+  assert.equal(evidenceFileName({ at: '2026-10-26T08:00:00Z', days: 30 }), 'starry-pair-evidence-30d-2026-10-26.json');
+});
+
+test('the errors of a relay\'s save, verification and model list are told in the console\'s words', () => {
+  assert.match(relayErrorMessage({ code: 'SOURCE_TIER_CACHE_EVIDENCE_REQUIRED', message: 'english' }), /缓存探针/);
+  assert.match(relayErrorMessage({ code: 'SOURCE_VERIFY_RATE_LIMITED', message: 'english', data: { retryAfterSeconds: 12 } }), /请 12 秒后再试/);
+  assert.match(relayErrorMessage({ code: 'SOURCE_VERIFY_RATE_LIMITED', message: 'english' }), /请稍后再试/);
+  assert.match(relayErrorMessage({ code: 'SOURCE_TIER_MEMBER_NOT_FOUND', message: 'english' }), /先保存/);
+  assert.match(relayErrorMessage({ code: 'SOURCE_UPSTREAM_MODELS_FAILED', message: 'english' }), /手动填写/);
+  // A network error means something only when a verification, which takes minutes, was waiting.
+  assert.match(relayErrorMessage({ code: 'NETWORK_ERROR', message: 'timeout of 270000ms exceeded' }, 'verify'), /仍在服务器上进行/);
+  assert.equal(relayErrorMessage({ code: 'NETWORK_ERROR', message: 'Network Error' }, 'save'), 'Network Error');
+  assert.equal(relayErrorMessage({ code: 'SOURCE_TIER_MEMBER_INVALID', message: 'Account x does not exist' }), 'Account x does not exist');
+  // The refusals of a save of the whole vendor (the gates) are told the same way.
+  assert.match(relayErrorMessage({ code: 'SOURCE_PAIR_GATE_FORBIDDEN', message: 'english' }), /试用中的对只能对名单里的 Key 打开/);
+  assert.match(relayErrorMessage({ code: 'SOURCE_PAIR_NOT_OFFERED', message: 'english' }), /还没有提供/);
+  assert.match(relayErrorMessage({ code: 'SOURCE_TIER_RUNTIME_UNSUPPORTED', message: 'english', data: ['pairGates'] }), /跨协议门控/);
+  assert.equal(relayErrorMessage({ code: 'SOURCE_TIER_RUNTIME_UNSUPPORTED', message: 'english', data: [] }), 'english');
+});
+
+test('the probes of a verification are found by model and named for what they ask', () => {
+  const models = [{ modelId: 'claude-sonnet-4.5', upstreamModel: 'relay/sonnet', verified: true, stale: false, probes: [] }];
+
+  assert.equal(verificationOf(models, ' CLAUDE-SONNET-4.5').upstreamModel, 'relay/sonnet');
+  assert.equal(verificationOf(models, 'other'), undefined);
+  assert.equal(verificationOf(null, 'x'), undefined);
+  assert.deepEqual(['basic', 'tool_call', 'tool_loop', 'stream', 'vision', 'cache', 'cache_evidence', 'new'].map(probeLabel),
+    ['基本问答', '函数调用', '两轮工具循环', '流式', '图片', '缓存探针', '缓存口径证据', 'new']);
+  assert.deepEqual(verifyTargets(relayDraftOf(savedRelay)), ['claude-sonnet-4.5']);
 });

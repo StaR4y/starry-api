@@ -204,7 +204,58 @@ class SettleServedSqlTest {
         verify(harness.databaseClient(), never()).sql(anyString());
     }
 
+    @Test
+    void aDispatchToARelayIsLeasedForItsOwnTimeLimitWhenThatIsLongerThanTheWindowOfTheUpstreamClients() {
+        Harness harness = harness("ACCOUNTED", 3_000L);
+
+        ApiKeyService.DispatchLease lease = harness.service()
+            .markUsageDispatchedTiered(USER, "request-123", "anthropic:relay", Duration.ofSeconds(1_800)).block();
+
+        // The same statement as any dispatch of a tier, with a window that outlasts the relay's limit by a minute.
+        assertThat(harness.sql()).contains("last_dispatched_tier_ref = :tierRef", "GREATEST(expires_at");
+        assertThat(harness.binds()).containsEntry("tierRef", "anthropic:relay").containsEntry("windowSeconds", 1_860L);
+        assertThat(lease).isEqualTo(new ApiKeyService.DispatchLease(Duration.ofSeconds(1_860), Duration.ofSeconds(3_000)));
+    }
+
+    @Test
+    void aRelayWhoseLimitTheWindowAlreadyCoversKeepsTheWindowAndTheOtherDispatchesDoNotChange() {
+        Harness relay = harness("ACCOUNTED", 3_000L);
+        Harness native1 = harness("ACCOUNTED", 3_000L);
+        Harness nativeWithNull = harness("ACCOUNTED", 3_000L);
+
+        relay.service().markUsageDispatchedTiered(USER, "request-123", "anthropic:relay", Duration.ofSeconds(540)).block();
+        native1.service().markUsageDispatchedTiered(USER, "request-123", "anthropic:kiro").block();
+        nativeWithNull.service().markUsageDispatchedTiered(USER, "request-123", "anthropic:kiro", null).block();
+
+        assertThat(relay.binds()).containsEntry("windowSeconds", 960L);
+        assertThat(native1.binds()).containsEntry("windowSeconds", 960L);
+        assertThat(nativeWithNull.binds()).containsEntry("windowSeconds", 960L);
+    }
+
+    @Test
+    void theAnonymousCallerHasNoLeaseForARelayEither() {
+        Harness harness = harness("ACCOUNTED", 3_000L);
+
+        assertThat(harness.service()
+            .markUsageDispatchedTiered(ANONYMOUS, "request-123", "anthropic:relay", Duration.ofSeconds(540)).block()).isNull();
+
+        verify(harness.databaseClient(), never()).sql(anyString());
+    }
+
     // ---- the window ----
+
+    @Test
+    void theWindowOfARelayDispatchCoversItsLimitAndAMinuteOverOrElseIsTheOrdinaryOne() {
+        ProxyProperties properties = new ProxyProperties();
+        properties.setRequestTimeout(Duration.ofSeconds(60));
+        properties.setMaxRetries(0);
+        ApiKeyService service = harness("ACCOUNTED", 1L, properties).service();
+
+        assertThat(service.leaseWindow(null)).isEqualTo(Duration.ofMinutes(15));
+        assertThat(service.leaseWindow(Duration.ofSeconds(540))).isEqualTo(Duration.ofMinutes(15));
+        // A relay allowed 15 minutes needs more than the 15 minutes of an ordinary window.
+        assertThat(service.leaseWindow(Duration.ofSeconds(900))).isEqualTo(Duration.ofSeconds(960));
+    }
 
     @Test
     void aDispatchMayRunForTheClientTimeoutOnEachOfItsTriesAndAMinuteOver() {

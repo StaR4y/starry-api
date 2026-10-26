@@ -62,6 +62,19 @@ public final class RequestBounds {
         return bound;
     }
 
+    /**
+     * The bound for a relay that is sent {@code wireBody}, the request exactly as its settings produce it (design 5.2): its
+     * size without the inline base64, which is no part of what the relay reads as text, and {@code imageTokenCap} tokens
+     * for each inline image in its place, which the mapping states as the most one image costs there. Media the body only
+     * points at (a URL, a file id) has no size to count, so it is the {@link #HIDDEN_INPUT_FLOOR} as it is for the native
+     * accounts. A body with no media is bounded by its size, as the native accounts' is.
+     */
+    public static long xpInputTokens(JsonNode wireBody, int imageTokenCap) {
+        JsonNodes.MediaStats media = JsonNodes.mediaStats(wireBody);
+        long bound = media.bytesWithoutBase64() + ENVELOPE + media.inlineImages() * imageTokenCap;
+        return media.remoteMedia() > 0 ? Math.max(bound, HIDDEN_INPUT_FLOOR) : bound;
+    }
+
     /** The inline base64 of the items of a {@code messages} or {@code input} list that never reaches the Kiro payload. */
     private static long droppedMedia(JsonNode items) {
         if (!items.isArray()) {

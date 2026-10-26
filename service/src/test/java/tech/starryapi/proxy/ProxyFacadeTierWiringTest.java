@@ -49,6 +49,7 @@ import tech.starryapi.proxy.tier.TierRoute;
 import tech.starryapi.proxy.tier.TierRuntime;
 import tech.starryapi.proxy.tier.TierRuntimeConfig;
 import tech.starryapi.proxy.tier.TierSessionBindings;
+import tech.starryapi.proxy.tier.XpLearnedLimits;
 import tech.starryapi.sourcetier.SourceTierRegistry;
 import tech.starryapi.sourcetier.SourceTierRuntimeInfo;
 import tech.starryapi.sourcetier.SourceTierSnapshot;
@@ -89,6 +90,7 @@ class ProxyFacadeTierWiringTest {
     private final StatsService statsService = mock(StatsService.class);
     private final AccountAdmissionStore admissionStore = mock(AccountAdmissionStore.class);
     private final OpenAiResponseOwnerStore responseOwnerStore = mock(OpenAiResponseOwnerStore.class);
+    private final XpDispatcher xpDispatcher = mock(XpDispatcher.class);
 
     @Test
     void springBuildsTheFacadeWithTheTierRuntimeBean() {
@@ -102,6 +104,8 @@ class ProxyFacadeTierWiringTest {
             assertThat(facade.tierRuntime()).isSameAs(configured);
             assertThat(ReflectionTestUtils.getField(facade, "admissionStore")).isSameAs(admissionStore);
             assertThat(ReflectionTestUtils.getField(facade, "openAiResponseOwnerStore")).isSameAs(responseOwnerStore);
+            // The dispatcher of the relays comes through the same constructor.
+            assertThat(ReflectionTestUtils.getField(facade, "xpDispatcher")).isSameAs(xpDispatcher);
         }
     }
 
@@ -131,6 +135,9 @@ class ProxyFacadeTierWiringTest {
             assertThat(runtime).isNotSameAs(TierRuntime.disabled());
             assertThat(runtime.planner()).isInstanceOf(DefaultSourceTierPlanner.class);
             assertThat(runtime.bindings()).isSameAs(context.getBean(TierSessionBindings.class));
+            // What the facade learns of the relays is what the planner plans by: one store, and a real one.
+            assertThat(runtime.learnedLimits()).isSameAs(context.getBean(XpLearnedLimits.class));
+            assertThat(runtime.learnedLimits()).isNotSameAs(XpLearnedLimits.disabled());
             assertThat(context.getBean(ProxyFacade.class).tierRuntime()).isSameAs(runtime);
         }
     }
@@ -214,6 +221,7 @@ class ProxyFacadeTierWiringTest {
         assertThat(admission).isNotNull();
         assertThat(mockingDetails(admission).isMock()).isFalse();
         assertThat(ReflectionTestUtils.getField(facade, "openAiResponseOwnerStore")).isNull();
+        assertThat(ReflectionTestUtils.getField(facade, "xpDispatcher")).isNull();
     }
 
     @Test
@@ -230,6 +238,23 @@ class ProxyFacadeTierWiringTest {
         assertThat(facade.tierRuntime()).isSameAs(TierRuntime.disabled());
         assertThat(ReflectionTestUtils.getField(facade, "admissionStore")).isSameAs(admissionStore);
         assertThat(ReflectionTestUtils.getField(facade, "openAiResponseOwnerStore")).isSameAs(responseOwnerStore);
+        assertThat(ReflectionTestUtils.getField(facade, "xpDispatcher")).isNull();
+    }
+
+    @Test
+    void theConstructorWithTheTierRuntimeKeepsItAndHasNoDispatcherForRelays() {
+        TierRuntime configured = new TierRuntime(request -> Mono.just(TierPlan.UNTIERED));
+        ProxyFacade facade = new ProxyFacade(
+            apiKeyService, accountPoolService, accountAutoSuspendService, accountSettingsService,
+            disabledAccountScheduledTestService, modelCatalog, modelMappingService, rateLimiterService,
+            payloadFactory, kiroUpstreamClient, openAiUpstreamClient, openAiRequestAdapter, openAiResponseFactory,
+            openAiResponseStateStore, anthropicRequestAdapter, anthropicResponseFactory, anthropicUpstreamClient,
+            geminiRequestAdapter, geminiResponseFactory, paymentSettingsService, modelPricingService, statsService,
+            admissionStore, responseOwnerStore, configured
+        );
+
+        assertThat(facade.tierRuntime()).isSameAs(configured);
+        assertThat(ReflectionTestUtils.getField(facade, "xpDispatcher")).isNull();
     }
 
     private AnnotationConfigApplicationContext context() {
@@ -259,6 +284,7 @@ class ProxyFacadeTierWiringTest {
         context.getBeanFactory().registerSingleton("statsService", statsService);
         context.getBeanFactory().registerSingleton("admissionStore", admissionStore);
         context.getBeanFactory().registerSingleton("openAiResponseOwnerStore", responseOwnerStore);
+        context.getBeanFactory().registerSingleton("xpDispatcher", xpDispatcher);
         context.getBeanFactory().registerSingleton("proxyProperties", new ProxyProperties());
         context.getBeanFactory().registerSingleton("sourceTierRegistry", mock(SourceTierRegistry.class));
         context.getBeanFactory().registerSingleton("modelPoolKeyResolver", mock(ModelPoolKeyResolver.class));

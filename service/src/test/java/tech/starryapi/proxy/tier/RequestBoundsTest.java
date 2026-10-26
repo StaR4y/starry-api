@@ -217,6 +217,37 @@ class RequestBoundsTest {
         assertThat(RequestBounds.kiroInputTokens(body)).isEqualTo(RequestBounds.nativeInputTokens(body));
     }
 
+    // ---- a relay ----
+
+    @Test
+    void aRelayIsBoundedByTheSizeOfItsBodyWithoutTheBase64AndTheCapOfEachInlineImage() {
+        ObjectNode body = chatWithImage("data:image/png;base64," + "A".repeat(500_000));
+        long text = tech.starryapi.common.JsonNodes.mediaStats(body).bytesWithoutBase64();
+
+        // One image: the text of the body, the envelope and the cap of the mapping, whatever the image weighs.
+        assertThat(RequestBounds.xpInputTokens(body, 8192)).isEqualTo(text + 1024L + 8192L);
+        assertThat(RequestBounds.xpInputTokens(body, 1)).isEqualTo(text + 1024L + 1L);
+        assertThat(RequestBounds.nativeInputTokens(body)).isEqualTo(1_000_000L);
+    }
+
+    @Test
+    void everyInlineImageCountsItsOwnCap() {
+        ObjectNode body = chatWithImage("data:image/png;base64,AAAA");
+        body.withArray("messages").get(0).withArray("content").addObject().put("type", "image_url")
+            .putObject("image_url").put("url", "data:image/png;base64,BBBB");
+        long text = tech.starryapi.common.JsonNodes.mediaStats(body).bytesWithoutBase64();
+
+        assertThat(RequestBounds.xpInputTokens(body, 5000)).isEqualTo(text + 1024L + 2 * 5000L);
+    }
+
+    @Test
+    void mediaARelayOnlyPointsAtRaisesTheBoundToTheFloorAsItDoesForTheNativeAccounts() {
+        assertThat(RequestBounds.xpInputTokens(chatWithImage("https://example.com/cat.png"), 100)).isEqualTo(1_000_000L);
+        // A body of text is bounded by its size, as the native accounts' is.
+        JsonNode plain = json("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
+        assertThat(RequestBounds.xpInputTokens(plain, 100)).isEqualTo(RequestBounds.nativeInputTokens(plain));
+    }
+
     private String kiroPayload(JsonNode chat) {
         KiroPayloadFactory factory = new KiroPayloadFactory(mapper, new DefaultModelCatalogProvider());
         return factory.fromOpenAiChat(chat, new ProxyAccountEntity(), "claude-sonnet-4.5", "AI_EDITOR", "session-1").toString();

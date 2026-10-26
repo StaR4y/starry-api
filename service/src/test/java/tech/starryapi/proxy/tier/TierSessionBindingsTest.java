@@ -209,6 +209,83 @@ class TierSessionBindingsTest {
         assertThat(bindings.hasInFlight("key-1:session-1", "anthropic:official")).isTrue();
     }
 
+    // ---- the relays that broke off an answer ----
+
+    @Test
+    void aRelayThatBrokeOffAnAnswerIsKeptFromTheSessionForTwoMinutes() {
+        bindings.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+
+        assertThat(bindings.relayExcluded("anthropic", "key-1:session-1", "relay-1")).isTrue();
+
+        nanos.addAndGet(Duration.ofSeconds(119).toNanos());
+        assertThat(bindings.relayExcluded("anthropic", "key-1:session-1", "relay-1")).isTrue();
+
+        nanos.addAndGet(Duration.ofSeconds(2).toNanos());
+        assertThat(bindings.relayExcluded("anthropic", "key-1:session-1", "relay-1")).isFalse();
+    }
+
+    @Test
+    void theExclusionIsTheSessionsAndTheRelaysAndTheVendorsOwn() {
+        bindings.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+
+        assertThat(bindings.relayExcluded("anthropic", "key-1:session-2", "relay-1")).isFalse();
+        assertThat(bindings.relayExcluded("anthropic", "key-1:session-1", "relay-2")).isFalse();
+        // The same account can be a member of the tiers of another vendor, where it is another member.
+        assertThat(bindings.relayExcluded("openai", "key-1:session-1", "relay-1")).isFalse();
+    }
+
+    @Test
+    void anotherInterruptionStartsTheTwoMinutesAgain() {
+        bindings.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+        nanos.addAndGet(Duration.ofSeconds(100).toNanos());
+
+        bindings.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+        nanos.addAndGet(Duration.ofSeconds(100).toNanos());
+
+        assertThat(bindings.relayExcluded("anthropic", "key-1:session-1", "relay-1")).isTrue();
+    }
+
+    @Test
+    void usingTheExclusionDoesNotKeepItAlive() {
+        bindings.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+
+        for (int i = 0; i < 3; i++) {
+            nanos.addAndGet(Duration.ofSeconds(50).toNanos());
+            bindings.relayExcluded("anthropic", "key-1:session-1", "relay-1");
+        }
+
+        assertThat(bindings.relayExcluded("anthropic", "key-1:session-1", "relay-1")).isFalse();
+    }
+
+    @Test
+    void aRequestWithoutASessionExcludesNothing() {
+        bindings.excludeRelay("anthropic", null, "relay-1");
+
+        assertThat(bindings.relayExcluded("anthropic", null, "relay-1")).isFalse();
+        assertThat(bindings.relayExcluded("anthropic", "key-1:session-1", "relay-1")).isFalse();
+    }
+
+    @Test
+    void theExclusionIsNoTierBindingAndMovesNoSession() {
+        bindings.downgrade(KEY, KIRO, Binding::level);
+
+        bindings.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+
+        assertThat(bindings.find(KEY)).contains(KIRO);
+        assertThat(bindings.find("key-1:session-1")).isEmpty();
+        assertThat(bindings.size()).isEqualTo(1);
+    }
+
+    @Test
+    void theExclusionHoldsWithSessionAffinityOffBecauseItIsNotTheAffinity() {
+        properties.setSessionAffinityEnabled(false);
+
+        bindings.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+
+        assertThat(bindings.relayExcluded("anthropic", "key-1:session-1", "relay-1")).isTrue();
+        assertThat(bindings.enabled()).isFalse();
+    }
+
     // ---- switched off ----
 
     @Test
@@ -240,8 +317,11 @@ class TierSessionBindingsTest {
 
         disabled.downgrade(KEY, KIRO, Binding::level);
 
+        disabled.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+
         assertThat(disabled.enabled()).isFalse();
         assertThat(disabled.find(KEY)).isEmpty();
+        assertThat(disabled.relayExcluded("anthropic", "key-1:session-1", "relay-1")).isFalse();
         assertThat(TierSessionBindings.disabled()).isSameAs(disabled);
     }
 }

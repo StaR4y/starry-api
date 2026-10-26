@@ -224,9 +224,11 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
 
     @Test
     void aGateThatOpensAPairNoReleaseOffersIsNotStored() {
+        // The Responses and Gemini entries and the google vendor come with the later phases; the Chat and Messages entries of
+        // the anthropic and openai vendors are on trial (P5-05).
         List<SourceTierDtos.ReplaceVendor> notOffered = List.of(
-            replace(0L, false, OWNER_TIERS, List.of(), List.of(new SourceTierDtos.Gate(null, "MESSAGES", "KEYS", List.of("key-1")))),
-            replace(0L, false, OWNER_TIERS, List.of(), List.of(new SourceTierDtos.Gate(null, "CHAT", "ON", null))));
+            replace(0L, false, OWNER_TIERS, List.of(), List.of(new SourceTierDtos.Gate(null, "RESPONSES", "KEYS", List.of("key-1")))),
+            replace(0L, false, OWNER_TIERS, List.of(), List.of(new SourceTierDtos.Gate(null, "GEMINI", "ON", null))));
 
         for (SourceTierDtos.ReplaceVendor request : notOffered) {
             ApiException refused = rejection(thisRelease.replace("anthropic", request));
@@ -239,6 +241,23 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
         assertThat(count("SELECT count(*) FROM source_tier_members")).isZero();
         assertThat(count("SELECT count(*) FROM source_tier_pair_gates")).isZero();
         assertThat(configVersion()).as("a refused change is not a change").isZero();
+    }
+
+    @Test
+    void aGateOnAPairOnTrialIsStoredForListedKeysAndRefusedForEveryone() {
+        ApiException everyone = rejection(thisRelease.replace("anthropic", replace(0L, false, OWNER_TIERS, List.of(),
+            List.of(new SourceTierDtos.Gate(null, "CHAT", "ON", null)))));
+        assertThat(everyone.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(everyone.getCode()).isEqualTo("SOURCE_PAIR_GATE_FORBIDDEN");
+        assertThat(count("SELECT count(*) FROM source_tier_pair_gates")).isZero();
+        assertThat(configVersion()).as("a refused change is not a change").isZero();
+
+        SourceTierDtos.Vendor saved = thisRelease.replace("anthropic", replace(0L, false, OWNER_TIERS, List.of(),
+            List.of(new SourceTierDtos.Gate(null, "MESSAGES", "KEYS", List.of("key-1"))))).block();
+
+        assertThat(saved.gates()).hasSize(1);
+        assertThat(count("SELECT count(*) FROM source_tier_pair_gates")).isEqualTo(1);
+        assertThat(configVersion()).isEqualTo(1);
     }
 
     @Test
@@ -436,13 +455,15 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
         SourceTierDtos.Overview overview = thisRelease.overview().block();
 
         assertThat(overview.configVersion()).isZero();
-        // Native tiering, the selectors, the all-endpoints switch and the relay rows are complete in this release; no pair
-        // is offered yet.
+        // Native tiering, the selectors, the all-endpoints switch and the relay rows are complete in this release; of the
+        // pairs, the Chat and Messages ones of the anthropic and openai vendors are on trial and the others are not offered.
         assertThat(overview.runtime().nativeTiers()).isTrue();
         assertThat(overview.runtime().selectors()).isTrue();
         assertThat(overview.runtime().unifyEndpoints()).isTrue();
         assertThat(overview.runtime().xpMembers()).isTrue();
-        assertThat(overview.runtime().pairs()).hasSize(12).allSatisfy(pair -> assertThat(pair.status()).isEqualTo("NOT_OFFERED"));
+        assertThat(overview.runtime().pairs()).hasSize(12).allSatisfy(pair -> assertThat(pair.status())
+            .as(pair.toString()).isEqualTo(List.of("CHAT", "MESSAGES").contains(pair.entryEndpoint())
+                && List.of("anthropic", "openai").contains(pair.vendor()) ? "EXPERIMENTAL" : "NOT_OFFERED"));
         assertThat(overview.vendors()).extracting(SourceTierDtos.Vendor::vendor).startsWith("anthropic", "openai", "google", "deepseek");
         assertThat(overview.vendors()).allSatisfy(vendor -> {
             assertThat(vendor.configured()).isFalse();

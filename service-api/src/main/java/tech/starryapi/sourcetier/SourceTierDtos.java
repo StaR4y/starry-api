@@ -264,8 +264,22 @@ public final class SourceTierDtos {
         boolean serving,
         long autoServed,
         long degraded,
-        List<TierStatus> tiers
-    ) {}
+        List<TierStatus> tiers,
+        XpStatus xp
+    ) {
+
+        public VendorStatus(
+            String vendor,
+            String label,
+            boolean enabled,
+            boolean serving,
+            long autoServed,
+            long degraded,
+            List<TierStatus> tiers
+        ) {
+            this(vendor, label, enabled, serving, autoServed, degraded, tiers, null);
+        }
+    }
 
     /**
      * {@code serves} is whether this node would serve a request from the tier now: it is switched on, the vendor is
@@ -289,9 +303,114 @@ public final class SourceTierDtos {
      * The accounts a tier holds, each counted once by the first layer of design 4.1 that keeps it from serving:
      * {@code disabled} (switched off), {@code unavailable} (suspended, or out of quota), {@code resting} (cooling down
      * or quarantined by the allocation lifecycle), {@code busy} (at its concurrency or in-flight token limit; the
-     * request-rate limits and the per-model cooldowns show only when a request asks), and {@code ready}.
+     * request-rate limits and the per-model cooldowns show only when a request asks), and {@code ready}. A relay
+     * (design 7) is counted like the others, and one more layer is its own: {@code unopened}, a relay no request can be
+     * given for lack of a gate that lets requests through for a pair this release offers, or of a mapping that is
+     * verified. It is checked before the layers of the account itself, since it does not change until the administrator
+     * does something about it. Absent in a tier that holds no relay.
      */
-    public record TierAccounts(int disabled, int unavailable, int resting, int busy, int ready) {}
+    public record TierAccounts(int disabled, int unavailable, int resting, int busy, int ready, Integer unopened) {
+
+        public TierAccounts(int disabled, int unavailable, int resting, int busy, int ready) {
+            this(disabled, unavailable, resting, busy, ready, null);
+        }
+    }
+
+    /**
+     * What the status shows of the relays (cross-protocol sources) of a vendor, present for a vendor that has one.
+     * {@code relays} are the relays of its tiers, {@code pairs} the (source protocol, entry) pairs that are offered or in
+     * use with their gates and the attempts of the window, {@code skips} how often this node left a relay out of a
+     * plan and why since {@code skipsSince} (the node's own count, and of relays, not of requests). The figures of the
+     * window are those of every node, read from the request log.
+     */
+    public record XpStatus(Instant skipsSince, List<XpRelay> relays, List<XpPair> pairs, List<XpSkipCount> skips) {}
+
+    /**
+     * {@code layer} is the first layer that keeps the relay from serving, as in {@link TierAccounts} (disabled, unopened,
+     * unavailable, resting, busy, or ready); {@code mappings} are those switched on and {@code verified} the ones among
+     * them that count as verified now. {@code figures} are its attempts of the window.
+     */
+    public record XpRelay(String tierId, String accountId, String layer, int mappings, int verified, XpFigures figures) {}
+
+    /**
+     * One pair: {@code status} is what this release says of it (NOT_OFFERED, EXPERIMENTAL or VERIFIED), {@code gate} the
+     * state of its gate (OFF, KEYS or ON) with {@code allowedKeys} the keys it lists, {@code figures} the attempts of the
+     * window and {@code degradedFeatures} what the answered ones had to leave out of the request, most often first.
+     */
+    public record XpPair(
+        String sourceProtocol,
+        String entryEndpoint,
+        String status,
+        String gate,
+        int allowedKeys,
+        XpFigures figures,
+        List<FeatureCount> degradedFeatures
+    ) {}
+
+    /**
+     * The attempts that were sent to a relay in a window, counted from the request log. {@code attempts} is every one
+     * (answered or failed), {@code served} those that were answered. The failures that the gateway knows the kind of are
+     * counted apart: {@code interrupted} (the relay may have generated and nobody was charged: the operator's loss, the
+     * UNBILLED of the design), {@code conversionRejected} (the relay refused the converted request), {@code
+     * contextExceeded} and {@code modelNotServed}; the rest of {@code failed} is anything else. {@code estimated} and
+     * {@code clamped} are answered attempts whose usage was not what the relay reported, {@code degraded} those that
+     * left a feature of the request out. {@code p95Ms} is the 95th percentile of the latency of the answered ones, absent
+     * when none was.
+     */
+    public record XpFigures(
+        long attempts,
+        long served,
+        long failed,
+        long interrupted,
+        long conversionRejected,
+        long contextExceeded,
+        long modelNotServed,
+        long estimated,
+        long clamped,
+        long degraded,
+        Long p95Ms
+    ) {}
+
+    public record FeatureCount(String feature, long count) {}
+
+    /** How many relays of a tier were left out of plans for a reason (see {@code XpSkip.Reason}) since the node started. */
+    public record XpSkipCount(String tierId, String reason, long count) {}
+
+    /**
+     * The evidence an upgrade of a pair to VERIFIED is decided on (design 7.3): the figures of every offered pair over the
+     * last {@code days} days of the request log, with the standard they are held to and whether each is met. The figures
+     * of attempts are those of every node; {@code lintSkips} of a pair is its vendor's count of relays that failed the
+     * strict lint, which only this node keeps (since {@code skipsSince}), so on several nodes it is the answering node's.
+     * The state of a gate is the one now: a pair that is only EXPERIMENTAL has been open to listed keys only for as long as
+     * it has been open at all.
+     */
+    public record Evidence(Instant at, Instant since, int days, long configVersion, Instant skipsSince, List<PairEvidence> pairs) {}
+
+    public record PairEvidence(
+        String vendor,
+        String label,
+        String sourceProtocol,
+        String entryEndpoint,
+        String status,
+        String gate,
+        int allowedKeys,
+        XpFigures figures,
+        long lintSkips,
+        List<Criterion> criteria,
+        boolean meetsStandard,
+        List<FeatureCount> degradedFeatures,
+        List<MemberEvidence> members
+    ) {}
+
+    /**
+     * One condition of the standard: {@code name} is requests, lintFailures, conversionRejected, estimated or unbilled,
+     * {@code rule} how it is written (">= 200", "= 0", "< 1%", "< 5%", "< 2%"), {@code value} what was found (a count, or
+     * a percentage of the attempts, of the answered attempts for estimated; absent when there is nothing to divide), and
+     * {@code met} whether it holds. A condition that cannot be judged for lack of attempts is not met.
+     */
+    public record Criterion(String name, String rule, Double value, boolean met) {}
+
+    public record MemberEvidence(String tierId, String accountId, XpFigures figures) {}
 
     /**
      * The tier each account is in, for the account list: an account that is in no tier of any vendor is absent. A

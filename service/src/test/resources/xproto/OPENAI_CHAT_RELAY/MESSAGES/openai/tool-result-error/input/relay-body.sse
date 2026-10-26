@@ -1,0 +1,14 @@
+data: {"id":"chatcmpl-relay0001","object":"chat.completion.chunk","created":1700000000,"model":"relay-model","choices":[{"index":0,"delta":{"role":"assistant","content":"Let me read it."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-relay0001","object":"chat.completion.chunk","created":1700000000,"model":"relay-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_Rt5Wv2","type":"function","function":{"name":"Read","arguments":""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-relay0001","object":"chat.completion.chunk","created":1700000000,"model":"relay-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"file_path\":\"/nonexis"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-relay0001","object":"chat.completion.chunk","created":1700000000,"model":"relay-model","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"tent/starry-p5-05.txt\"}"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-relay0001","object":"chat.completion.chunk","created":1700000000,"model":"relay-model","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}
+
+data: {"id":"chatcmpl-relay0001","object":"chat.completion.chunk","created":1700000000,"model":"relay-model","choices":[],"usage":{"prompt_tokens":1300,"completion_tokens":40,"total_tokens":1340}}
+
+data: [DONE]
+

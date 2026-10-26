@@ -35,6 +35,10 @@ import tech.starryapi.proxy.tier.TierPlan.Level;
  *   <li>A request more than {@link #CROSS_TIER_DEADLINE} old does not cross any more: a native attempt in the next tier
  *       can run for minutes, and a client that gives up meanwhile ends the request in a state that is billed for
  *       review. It is narrowed like a request that failed in a way that may have generated.
+ *   <li>A relay that refuses the request itself (a prompt longer than its window, a conversion it will not take) is
+ *       not asked again, in its tier or by another relay, since another relay would be given the same request. The request
+ *       may cross once, and only to the native accounts of a tier below ({@link #onRelayRefusal}); it counts against the
+ *       budget like any dispatch, or takes the reserved slot when the budget is spent.
  *   <li>A request does not go to another account when the lease on its reservation could not be renewed to cover one more
  *       dispatch: a reservation cannot be leased past an hour after it was made, and a dispatch that is still running
  *       when its lease cannot be renewed any more is turned into a billing review by the sweeper. The error of the
@@ -97,6 +101,7 @@ public final class TierRetryPolicy {
     private final Clock clock;
     private final boolean requestMovable;
     private boolean reservedSlotUsed;
+    private boolean nativeCrossingUsed;
     private Duration leaseWindow;
     private Instant leaseCapAt;
 
@@ -169,6 +174,46 @@ public final class TierRetryPolicy {
             return Outcome.RETRY_ON_RESERVED_SLOT;
         }
         return Outcome.STOP;
+    }
+
+    /**
+     * Records the failure of a relay that refused the request itself ({@code crossTierOnly} of the failure
+     * classification: it said the prompt is longer than its window, or would not take the conversion) and says whether
+     * the request goes on, once, to the native accounts of a tier below (design 7.8). Not idempotent either.
+     *
+     * <p>The refusal is a definitive failure that cost nothing, so what stops a crossing is the request's own state: it
+     * has been narrowed, is a chain that must stay with its owner, is older than {@link #CROSS_TIER_DEADLINE}, has crossed
+     * this way already, has no tier below, or the lease on its reservation cannot cover another dispatch. A crossing is a
+     * dispatch like any other: it takes the budget, or the reserved slot when the budget is spent. The walk is moved below
+     * the tier and loses the relays, so that no relay is asked the same again and the session is not pushed down by it.
+     */
+    public synchronized Outcome onRelayRefusal(FailedAttempt failed) {
+        Level level = failed.level();
+        walk.attempted(failed.accountId());
+        if (!(failed.definitive() && !failed.generationStarted() && notStarted(failed.error()))) {
+            narrow(level, "the failure may have started a generation or been billed");
+            return Outcome.STOP;
+        }
+        if (pastDeadline()) {
+            narrow(level, "the request is older than " + CROSS_TIER_DEADLINE.toSeconds() + " seconds");
+            return Outcome.STOP;
+        }
+        if (!requestMovable || walk.narrowed() || nativeCrossingUsed || !walk.hasTierBelow(level)) {
+            return Outcome.STOP;
+        }
+        if (!leaseHasRoomForAnotherDispatch()) {
+            log.info("Tiered request is not dispatched again from tier {}: its billing lease cannot cover another dispatch", level.tierRef());
+            return Outcome.STOP;
+        }
+        boolean onReservedSlot = walk.dispatchedAccounts() >= failed.accountLimit();
+        if (onReservedSlot && !reservedSlotAvailable(failed)) {
+            return Outcome.STOP;
+        }
+        reservedSlotUsed |= onReservedSlot;
+        nativeCrossingUsed = true;
+        walk.crossedToNative(level);
+        log.info("Tiered request leaves tier {} for the native accounts below it: a relay refused the request", level.tierRef());
+        return onReservedSlot ? Outcome.RETRY_ON_RESERVED_SLOT : Outcome.RETRY;
     }
 
     /**

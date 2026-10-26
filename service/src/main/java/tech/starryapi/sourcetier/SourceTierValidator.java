@@ -408,6 +408,11 @@ public class SourceTierValidator {
             if (id.isEmpty() || id.length() > 128) {
                 throw new ApiException(HttpStatus.BAD_REQUEST, GATE_INVALID, where + ".allowKeyIds must be 1 to 128 characters each");
             }
+            if (PairGate.ANONYMOUS_KEY_ID.equals(id)) {
+                // Callers without a key reach the planner under this id; a trial pair is for the keys the administrator lists.
+                throw new ApiException(HttpStatus.BAD_REQUEST, GATE_INVALID,
+                    where + ".allowKeyIds cannot list \"" + PairGate.ANONYMOUS_KEY_ID + "\": it is not an API key");
+            }
             if (!keys.contains(id)) {
                 keys.add(id);
             }

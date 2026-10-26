@@ -27,6 +27,16 @@ public interface SourceTierAdminApi {
     @GetMapping("/status")
     Mono<ApiResponse<SourceTierDtos.Status>> status(ServerWebExchange exchange);
 
+    /**
+     * The evidence an upgrade of a cross-protocol pair to VERIFIED is decided on ({@link SourceTierDtos.Evidence}): per
+     * offered pair, the attempts of the last {@code days} days (1 to 90, default 30) of the request log and the standard of
+     * design 7.3 they are held to. 400 {@code SOURCE_EVIDENCE_WINDOW_INVALID} for another window, 503
+     * {@code TIER_CONFIG_UNAVAILABLE} before the configuration has loaded.
+     */
+    @GetMapping("/evidence")
+    Mono<ApiResponse<SourceTierDtos.Evidence>> evidence(
+        ServerWebExchange exchange, @RequestParam(defaultValue = "30") int days);
+
     /** The tier each account is in, for the account list ({@link SourceTierDtos.Placements}). */
     @GetMapping("/placements")
     Mono<ApiResponse<SourceTierDtos.Placements>> placements(ServerWebExchange exchange);

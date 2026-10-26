@@ -112,8 +112,19 @@ public final class SourceTierSnapshot {
         String state,
         List<String> allowKeyIds
     ) {
+        /**
+         * The key id the callers that have no key go by (an unauthenticated proxy request where the deployment allows one,
+         * and the console's own assistant). It names no API key, so no gate can list it.
+         */
+        public static final String ANONYMOUS_KEY_ID = "anonymous";
+
         public PairGate {
             allowKeyIds = List.copyOf(allowKeyIds);
+        }
+
+        /** Whether the list of keys names this one; the key id of a caller without a key is never listed. */
+        public boolean lists(String keyId) {
+            return keyId != null && !ANONYMOUS_KEY_ID.equals(keyId) && allowKeyIds.contains(keyId);
         }
     }
 
@@ -158,17 +169,23 @@ public final class SourceTierSnapshot {
     private final Map<String, VendorIndex> vendors;
     private final Map<MemberKey, List<MemberModel>> memberModels;
     private final Set<String> exclusiveXpAccountIds;
+    private final boolean crossProtocolMembers;
+    private final Set<String> openRelayEntries;
 
     private SourceTierSnapshot(
         long configVersion,
         Map<String, VendorIndex> vendors,
         Map<MemberKey, List<MemberModel>> memberModels,
-        Set<String> exclusiveXpAccountIds
+        Set<String> exclusiveXpAccountIds,
+        boolean crossProtocolMembers,
+        Set<String> openRelayEntries
     ) {
         this.configVersion = configVersion;
         this.vendors = vendors;
         this.memberModels = memberModels;
         this.exclusiveXpAccountIds = exclusiveXpAccountIds;
+        this.crossProtocolMembers = crossProtocolMembers;
+        this.openRelayEntries = openRelayEntries;
     }
 
     /**
@@ -197,6 +214,7 @@ public final class SourceTierSnapshot {
 
         Map<String, Map<String, Member>> members = new HashMap<>();
         Set<String> exclusive = new HashSet<>();
+        boolean relays = false;
         for (Member member : memberRows) {
             boolean placed = tiers.getOrDefault(member.vendor(), List.of()).stream()
                 .anyMatch(tier -> tier.tierId().equals(member.tierId()));
@@ -205,6 +223,7 @@ public final class SourceTierSnapshot {
             }
             members.computeIfAbsent(member.vendor(), ignored -> new LinkedHashMap<>())
                 .putIfAbsent(member.accountId(), member);
+            relays |= member.crossProtocol();
             if (member.crossProtocol() && member.exclusive()) {
                 exclusive.add(member.accountId());
             }
@@ -234,7 +253,34 @@ public final class SourceTierSnapshot {
             List.copyOf(gates.getOrDefault(vendor, List.of()))
         )));
         models.replaceAll((key, list) -> List.copyOf(list));
-        return new SourceTierSnapshot(configVersion, Map.copyOf(indexes), Map.copyOf(models), Set.copyOf(exclusive));
+        return new SourceTierSnapshot(configVersion, Map.copyOf(indexes), Map.copyOf(models), Set.copyOf(exclusive), relays,
+            Set.copyOf(openRelayEntries(indexes)));
+    }
+
+    /**
+     * The entry endpoints for which some relay could be given a request: a relay of a tier that is switched on, in a vendor
+     * that is switched on, and a gate of the vendor for the relay's protocol and the entry that is not off. The pair's state
+     * in the registry of the code is not looked at here; a pair it does not offer only makes the gate useless.
+     */
+    private static Set<String> openRelayEntries(Map<String, VendorIndex> indexes) {
+        Set<String> entries = new HashSet<>();
+        for (VendorIndex index : indexes.values()) {
+            if (!index.config.enabled()) {
+                continue;
+            }
+            for (Member member : index.members.values()) {
+                Tier tier = index.tiersById.get(member.tierId());
+                if (!member.crossProtocol() || tier == null || !tier.enabled()) {
+                    continue;
+                }
+                for (PairGate gate : index.gates) {
+                    if (gate.sourceProtocol().equals(member.protocol()) && !"OFF".equals(gate.state())) {
+                        entries.add(gate.entryEndpoint());
+                    }
+                }
+            }
+        }
+        return entries;
     }
 
     /** The value of {@code source_tier_config_version} this snapshot was read at; 0 before anything was configured. */
@@ -295,6 +341,24 @@ public final class SourceTierSnapshot {
      */
     public Set<String> exclusiveXpAccountIds() {
         return exclusiveXpAccountIds;
+    }
+
+    /**
+     * Whether any vendor has an account registered as a relay for another protocol. Without one, nothing about a request
+     * has to be read for the sake of relays.
+     */
+    public boolean hasCrossProtocolMembers() {
+        return crossProtocolMembers;
+    }
+
+    /**
+     * Whether any relay could be given a request that comes in through the entry endpoint ({@code CHAT}, {@code MESSAGES}...):
+     * a relay of a tier and a vendor that are switched on, with a gate for that entry that is not off. A request is read for
+     * the sake of relays only where this holds, so that a relay that is registered and not yet opened (or whose vendor is
+     * switched off) costs the traffic of no vendor anything.
+     */
+    public boolean hasOpenRelayFor(String entryEndpoint) {
+        return entryEndpoint != null && openRelayEntries.contains(entryEndpoint);
     }
 
     /** Whether the account is registered as the exclusive relay of another protocol in any vendor. */
@@ -405,6 +469,23 @@ public final class SourceTierSnapshot {
             }
         }
         return counts;
+    }
+
+    /**
+     * Whether the configuration can put an account that is no relay into the tier, by any of the rules of {@link #tierOf}: a
+     * native member row names the tier, the tier lists an allocation category, or it is the lowest enabled tier, which takes
+     * the accounts nothing else places. A tier for which none holds is made of its relays alone, whatever accounts the
+     * cache holds now or after its next reload: this is the configuration, which a request freezes with its plan.
+     */
+    public boolean canHoldNativeAccounts(String vendor, String tierId) {
+        VendorIndex index = vendors.get(vendor);
+        Tier tier = index == null ? null : index.tiersById.get(tierId);
+        if (tier == null) {
+            return false;
+        }
+        return !tier.memberCategories().isEmpty()
+            || (index.lowestEnabled != null && index.lowestEnabled.tierId().equals(tierId))
+            || index.members.values().stream().anyMatch(member -> !member.crossProtocol() && member.tierId().equals(tierId));
     }
 
     /**

@@ -7,7 +7,6 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -277,8 +276,9 @@ public class XpMappingVerifier {
     private Mono<Run> probe(ProxyAccountEntity account, Member member, MemberModel model, boolean cacheProbe, long deadline) {
         return Mono.defer(() -> {
             String fingerprint = SourceTierValidator.mappingFingerprint(member, model, account);
-            Setup setup = new Setup(member, model, ChatWireSanitizer.usesMaxCompletionTokens(
-                catalog.targetFor(model.modelId().toLowerCase(Locale.ROOT)).orElse(model.modelId())));
+            // The catalog model itself: its target is the Claude model that the Kiro route answers a gpt id with, which has
+            // no such rule. The planner builds the traffic's body by the same rule.
+            Setup setup = new Setup(member, model, ChatWireSanitizer.usesMaxCompletionTokens(model.modelId()));
             List<SourceTierDtos.ProbeResult> results = new ArrayList<>();
             AtomicBoolean answers = new AtomicBoolean(true);
             Mono<Void> required = Flux.fromIterable(XpProbes.required(setup)).concatMap(probe -> {

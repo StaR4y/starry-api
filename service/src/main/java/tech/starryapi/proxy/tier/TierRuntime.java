@@ -10,16 +10,25 @@ import reactor.core.publisher.Mono;
  * {@link TierPlan#UNTIERED} for every request. One that can has the real planner, which says the same for a vendor
  * without tiers in use. Either way the facade runs exactly the code it ran before for that request.
  *
- * @param bindings where the tier each session was pushed down to is kept (design 4.7); the planner reads it, and the
- *     facade writes it when a request is served
+ * @param bindings where the tier each session was pushed down to is kept (design 4.7), and the relays that broke off an
+ *     answer for a session (design 7.8); the planner reads it, and the facade writes it when a request is served or a
+ *     relay fails
+ * @param learnedLimits the context windows that the refusals of relays taught this node (design 7.8); the planner reads
+ *     them, and the facade writes them when a relay refuses a prompt for its length
  */
-public record TierRuntime(Planner planner, TierSessionBindings bindings) {
+public record TierRuntime(Planner planner, TierSessionBindings bindings, XpLearnedLimits learnedLimits) {
 
     private static final TierRuntime DISABLED = new TierRuntime(request -> Mono.just(TierPlan.UNTIERED));
 
     public TierRuntime {
         Objects.requireNonNull(planner, "planner");
         Objects.requireNonNull(bindings, "bindings");
+        Objects.requireNonNull(learnedLimits, "learnedLimits");
+    }
+
+    /** A runtime that learns nothing of the relays. */
+    public TierRuntime(Planner planner, TierSessionBindings bindings) {
+        this(planner, bindings, XpLearnedLimits.disabled());
     }
 
     /** A runtime that keeps no session to its tier. */
@@ -67,6 +76,16 @@ public record TierRuntime(Planner planner, TierSessionBindings bindings) {
          */
         default TierSelectorParser.Stripped stripSelector(String model, Function<String, Destination> destination) {
             return TierSelectorParser.Stripped.plain(model);
+        }
+
+        /**
+         * Whether a request that comes in through {@code entry} is to be read for the relays that may serve it
+         * ({@link TierEntryFacts}). The facade asks before it reads anything, since the reading looks at the whole body: a
+         * deployment with no relay, or none whose pair is offered for the entry, or none that a gate of the entry is open
+         * to (a relay that is registered but not opened yet, or whose tier or vendor is switched off), never pays for it.
+         */
+        default boolean wantsEntryFacts(TierEntry entry) {
+            return false;
         }
     }
 }

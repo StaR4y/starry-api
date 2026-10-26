@@ -1,0 +1,10 @@
+data: {"id":"chatcmpl-relay0001","object":"chat.completion.chunk","created":1700000000,"model":"relay-model","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-relay0001","object":"chat.completion.chunk","created":1700000000,"model":"relay-model","choices":[{"index":0,"delta":{"content":"Hello from the relay."},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-relay0001","object":"chat.completion.chunk","created":1700000000,"model":"relay-model","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl-relay0001","object":"chat.completion.chunk","created":1700000000,"model":"relay-model","choices":[],"usage":{"prompt_tokens":2000,"completion_tokens":100,"total_tokens":2100,"prompt_tokens_details":{"cached_tokens":1500,"cache_write_tokens":100}}}
+
+data: [DONE]
+

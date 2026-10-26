@@ -42,6 +42,9 @@ configure(subprojects.findAll { it.name in ['service-api', 'service', 'plugin-ap
 
     tasks.withType(Test).configureEach {
         useJUnitPlatform()
+        // Each kind of PostgreSQL integration test keeps its own Spring context for the rest of the run, and by the end of
+        // the suite they fill most of the 512 MB a test JVM gets by default, so a few more tests make it run out of memory.
+        maxHeapSize = '1g'
         javaLauncher = javaToolchains.launcherFor {
             languageVersion = JavaLanguageVersion.of(25)
         }

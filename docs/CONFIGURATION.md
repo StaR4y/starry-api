@@ -175,8 +175,8 @@ R2DBC 和 Flyway 的 URL 都把 `starry_api` 设成当前 / 默认 schema。
 - ZIP 的导出和导入用 `database.dump` 作为归档条目。归档**只含应用 schema `starry_api`**；只追加的 `starry_security` 审计 / 发件箱 schema 被故意排除，这样恢复应用数据不会抹掉之后的安全证据。
 - 备份取 PostgreSQL 会话级**共享**咨询锁，恢复取对应的**排他**锁，所以跨实例的维护操作也受约束：冲突的跨实例维护会被拒绝，而不是让备份和恢复快照互相重叠。
 - 导入只接受 PostgreSQL 17 的自定义归档：TOC 标明数据库和 schema 为 `starry_api`，含 `flyway_schema_history` 和必需的核心表，且没有来自其他 schema 的对象。然后 `pg_restore --clean --single-transaction` 替换该 schema。这与固定的 PostgreSQL 17 客户端匹配，故意比「接受任何 PostgreSQL 自定义归档」更严格。
-- 恢复期间，迁移连接会撤销 `starry_api_runtime` 的 `CONNECT`，终止现有 `starry_api` 后端连接，从静默的数据库创建回滚备份，并在恢复完成前保持运行时连接禁用。重新开放访问前，同一个所有者会话会要求 **Flyway V1–V29** 的成功历史（版本、脚本名、迁移类型、校验和）与恢复前捕获的完全一致；校验所有必需的核心关系；验证不可变的 `application_root_user_id` 标记解析到恰好一个已启用的 `ADMIN` Root；检查 V5 熔断纪元列、设置和有效的支撑索引；校验外部安全 schema 的只追加触发器、最小权限 ACL 和无密钥列；然后运行 `ANALYZE`，避免新恢复的表带着空的规划器统计服务流量。旧历史、未知的未来迁移、改名的脚本和校验和不匹配都会被拒绝。
-- V29（号源分级）新增 `source_tier_vendors`、`source_tiers`、`source_tier_members`、`source_tier_member_models`、`source_tier_pair_gates` 五张表，它们属于必需的核心关系，缺任何一张的归档都会被拒绝。V28 及更早的备份升级后不能再从控制台恢复，所以**升级完成后请立即重新备份**。
+- 恢复期间，迁移连接会撤销 `starry_api_runtime` 的 `CONNECT`，终止现有 `starry_api` 后端连接，从静默的数据库创建回滚备份，并在恢复完成前保持运行时连接禁用。重新开放访问前，同一个所有者会话会要求 **Flyway V1–V30** 的成功历史（版本、脚本名、迁移类型、校验和）与恢复前捕获的完全一致；校验所有必需的核心关系；验证不可变的 `application_root_user_id` 标记解析到恰好一个已启用的 `ADMIN` Root；检查 V5 熔断纪元列、设置和有效的支撑索引；校验外部安全 schema 的只追加触发器、最小权限 ACL 和无密钥列；然后运行 `ANALYZE`，避免新恢复的表带着空的规划器统计服务流量。旧历史、未知的未来迁移、改名的脚本和校验和不匹配都会被拒绝。
+- V29（号源分级）新增 `source_tier_vendors`、`source_tiers`、`source_tier_members`、`source_tier_member_models`、`source_tier_pair_gates` 五张表，它们属于必需的核心关系，缺任何一张的归档都会被拒绝；V30 只更新「使用文档」里还没被改过的默认教程，不加表。V29 及更早的备份升级后不能再从控制台恢复，所以**升级完成后请立即重新备份**。
 - 如果传入的 `pg_restore` 已提交但任何后置条件失败，服务会**自动恢复恢复前的备份**并再次校验和分析；回滚失败会作为被抑制的诊断信息保留。`CONNECT` 在 `finally` 里恢复，失败的恢复也一样。
 - 只要本实例进入过恢复隔离窗口，就会清空所有源自数据库的缓存和会话；其他实例在它们的 PostgreSQL 通知监听器重连时做同样的事。缓存代数防止更早的在途刷新在失效后重新填充状态。号源分级配置是例外：它立即重新读取、但不先清空，读取失败时继续使用原来的配置，30 秒内重试；清空会让所有请求在读取期间被拒绝，包括没有配置分级的厂商。更早开始的读取之后总会再读一次，不会留下恢复前的数据。**管理员和用户应预期在途请求会失败，且管理员会话在恢复后需要重新登录。**
 - 数据管理安全目前要求**恰好一个活动服务实例**：校验值 / 锁定状态和动作授权是实例本地的，不要在多副本或滚动重叠部署里启用。完整的恢复步骤见 [运维手册](OPERATIONS.md#恢复被锁定的数据管理)。
@@ -264,6 +264,21 @@ OpenAI、Codex、Anthropic、DeepSeek 的凭据，作为上游账号记录**保�
 
 只有绑定的账号仍然可用时，才会在常规排序之前检查会话亲和。安全的默认路由：隔离 Codex 账号、普通 GPT 流量走官方 OpenAI API Key、仅在上游成功之后才绑定显式会话、不为裸 API Key 绑定。这些开关和「换账号次数上限」在「系统设置 → 账号池设置 → 账号路由策略」里管理。`STARRY_ACCOUNT_SELECTION_STRATEGY` 只在分配排序器不存在时作为兼容回退。
 
+### 号源分级与跨协议中转
+
+号源分级（[运维手册：号源分级](OPERATIONS.md#号源分级)）和跨协议中转（[运维手册：跨协议中转](OPERATIONS.md#跨协议中转)）的配置**保存在数据库里**（上面的五张 `source_tier_*` 表），在「系统设置 → 号源分级」里管理，没有专门的环境变量，也不用重启：保存后经数据库通知刷新所有节点，最迟 30 秒。没有配置的厂商完全不受影响。下面这些通用变量会影响它的行为：
+
+| 变量 | 对号源分级的影响 |
+| --- | --- |
+| `STARRY_SESSION_AFFINITY_ENABLED` | `false` 时「降级后停留」和号池内的会话亲和都不生效，每个请求都从 1 级开始 |
+| `STARRY_SESSION_AFFINITY_TTL` | 会话空闲多久后，停留的号池和亲和过期，默认 10 分钟；记在各节点自己的内存里，多节点只部分成立 |
+| `STARRY_SESSION_AFFINITY_MAXIMUM_SIZE` | 每个节点最多保留的停留号池和中转短期排除（中断后 2 分钟）的条目数 |
+| `STARRY_REQUEST_TIMEOUT` | Kiro 每次重试的时限，也是预占租约窗口的一部分；不用上游流式的中转，要在这个时间内给出第一个字节，成员的「单次时限」超过它不起作用 |
+| `STARRY_MAX_RETRIES` | 与上一项一起决定预占租约窗口：`max(15 分钟, 请求时限 × (重试次数 + 1) + 60 秒)`，默认 16 分钟；派发给跨协议中转时再取一项：该中转成员的「单次时限」+ 60 秒，三项取最长 |
+| `STARRY_MAX_REQUEST_BODY_BYTES` | 请求体上限（默认 10 MiB）；发给中转的请求体由受它限制的客户端请求体转换而来，中转的应答最多缓冲 16 MiB |
+
+学到的上下文上限（6 小时）、中断后的短期排除（2 分钟）和会话的号池绑定都只在节点内存里，重启即忘，没有可配置的开关。
+
 ---
 
 ## 客户端配置生成
@@ -276,6 +291,8 @@ OpenAI、Codex、Anthropic、DeepSeek 的凭据，作为上游账号记录**保�
 | Claude Code | Shell 环境变量：`ANTHROPIC_BASE_URL`、`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_MODEL`、`ANTHROPIC_SMALL_FAST_MODEL` 以及 Claude Code 流量开关 |
 | OpenCode | 项目级 `opencode.json`，带一个 `starry` 的 OpenAI 兼容供应商 |
 | CC Switch | 面向 Claude Code、Codex CLI、OpenCode 的 `ccswitch://v1/import?resource=provider...` 深链接 |
+
+厂商启用了号源分级并公开号池名称时，对话框里多一项**号池**，选好后生成的配置带上它：Claude Code 写成环境变量 `ANTHROPIC_CUSTOM_HEADERS`，Codex CLI 写成 `http_headers`，OpenCode 写成 `options.headers`，三者都是请求头 `X-Starry-Tier`；CC Switch 的 Claude Code 链接写成模型名后缀（`模型@标识`）。请求头是默认选择，用不上时请求照常按自动服务；后缀是对每个请求的要求，号池用不了就被拒绝。详见 [API：号源分级](API.md#号源分级)。
 
 这些客户端设置是**按 Key** 生成的，不会取代服务端的运行时变量。对 Codex CLI，如果它报告 refresh token 已被使用，请用生成的 API Key JSON 替换陈旧的 ChatGPT OAuth `auth.json` 内容。
 
@@ -292,6 +309,7 @@ OpenAI、Codex、Anthropic、DeepSeek 的凭据，作为上游账号记录**保�
 | SMTP 设置 | 系统设置 → SMTP 设置 | 共享的邮件传输配置 |
 | 模型管理 | 系统设置 → 模型管理 | 模型目录、显示顺序、官方价格倍率、「模型 ID」画廊样式；添加模型在「模型管理 → 添加模型」 |
 | 账号池设置 | 系统设置 → 账号池设置 | 路由策略和自动复测配置 |
+| 号源分级 | 系统设置 → 号源分级 | 号池、价格系数、跨协议中转和门控，见 [控制台手册](CONSOLE_GUIDE.md#号源分级) |
 | UI 自定义 | 系统设置 → UI 自定义 | 站点名、Logo、配色、控制台风格 |
 
 支付设置和添加模型的旧路径仍然作为重定向保留，以兼容书签；它们不是单独的设置位置。

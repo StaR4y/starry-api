@@ -1,0 +1,16 @@
+{
+  "status": 200,
+  "headers": {
+    "Content-Type": "text/event-stream",
+    "X-Starry-Tier": "relay",
+    "X-Starry-Tier-Level": "1",
+    "X-Starry-Tier-Name": "relay",
+    "X-Starry-Tier-Mode": "auto",
+    "X-Starry-Tier-Status": "served"
+  },
+  "events": [
+    {"data":{"id":"chatcmpl-<id>","object":"chat.completion.chunk","created":0,"model":"gpt-5.5","choices":[{"index":0,"delta":{"role":"assistant","content":"I cannot continue with"},"finish_reason":null}]}},
+    {"data":{"id":"chatcmpl-<id>","object":"chat.completion.chunk","created":0,"model":"gpt-5.5","choices":[{"index":0,"delta":{},"finish_reason":"content_filter"}]}},
+    {"data":"[DONE]"}
+  ]
+}

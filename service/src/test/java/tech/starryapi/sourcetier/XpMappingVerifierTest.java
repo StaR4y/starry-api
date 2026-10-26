@@ -201,6 +201,20 @@ class XpMappingVerifierTest {
     }
 
     @Test
+    void theTokenLimitIsNamedByTheCatalogModelOfTheMappingNotByTheClaudeModelTheCatalogSendsAGptIdTo() {
+        // The catalog answers a gpt id with a Claude model on the Kiro route; the GPT-5 family is what only takes
+        // max_completion_tokens, and the planner builds the traffic's body by the same rule.
+        use(member(false, false, true, false), model("gpt-5.5", "relay/gpt", true));
+
+        ask(null);
+
+        assertThat(relay.chats()).isNotEmpty().allSatisfy(seen -> {
+            assertThat(seen.body().has("max_tokens")).isFalse();
+            assertThat(seen.body().path("max_completion_tokens").asInt()).isPositive();
+        });
+    }
+
+    @Test
     void aMemberThatWantsNoStreamAndNoImageIsAskedThreeQuestions() {
         use(member(false, false, true, false), model("claude-sonnet-4.5", "Relay/Claude-Sonnet-4.5", true));
 

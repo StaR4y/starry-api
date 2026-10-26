@@ -1,0 +1,20 @@
+{
+  "relaysLeftOut": [],
+  "attempts": [
+    {
+      "account": "anthropic-1",
+      "tier": "anthropic:native",
+      "dispatch": "NATIVE",
+      "wireModel": null,
+      "success": true,
+      "status": 200,
+      "inputTokens": 500,
+      "outputTokens": 20,
+      "usageSource": null,
+      "stopReason": null,
+      "degraded": null,
+      "error": null,
+      "nativeToolIds": []
+    }
+  ]
+}

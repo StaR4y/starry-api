@@ -245,6 +245,34 @@ class WireFormatTest {
     }
 
     /**
+     * The relays' part of the status and the evidence of the upgrade of a pair are fields at the end of the records they
+     * join: a tier without a relay shows the status it always did ({@code unopened} and {@code xp} are left out), and a
+     * figure that was not measured is absent and not zero.
+     */
+    @Test
+    void theRelaysOfTheStatusAndTheEvidenceAreAddedAtTheEndAndAreAbsentWhereTheyDoNotApply() {
+        ProductionJson.run(json -> {
+            SourceTierDtos.XpFigures figures = new SourceTierDtos.XpFigures(40, 36, 4, 2, 1, 0, 1, 3, 0, 5, 1800L);
+            SourceTierDtos.XpFigures unmeasured = new SourceTierDtos.XpFigures(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null);
+            check(json, "tierStatusWithRelays", ok(new SourceTierDtos.Status(T1, 7L, 15, List.of(new SourceTierDtos.VendorStatus(
+                "anthropic", "Anthropic", true, true, 100, 30,
+                List.of(new SourceTierDtos.TierStatus("relay", 1, "relay", true, true, new SourceTierDtos.TierAccounts(0, 0, 0, 0, 1, 0), 36, 0, 4)),
+                new SourceTierDtos.XpStatus(T2, List.of(new SourceTierDtos.XpRelay("relay", "relay-1", "ready", 2, 1, figures)),
+                    List.of(new SourceTierDtos.XpPair("OPENAI_CHAT", "MESSAGES", "EXPERIMENTAL", "KEYS", 2, unmeasured,
+                        List.of(new SourceTierDtos.FeatureCount("image", 5)))),
+                    List.of(new SourceTierDtos.XpSkipCount("relay", "GATE", 12))))))),
+                """
+                {"success":true,"data":{"at":"2026-10-23T06:24:25Z","configVersion":7,"windowMinutes":15,"vendors":[{"vendor":"anthropic","label":"Anthropic","enabled":true,"serving":true,"autoServed":100,"degraded":30,"tiers":[{"tierId":"relay","level":1,"name":"relay","enabled":true,"serves":true,"accounts":{"disabled":0,"unavailable":0,"resting":0,"busy":0,"ready":1,"unopened":0},"served":36,"servedPinned":0,"failed":4}],"xp":{"skipsSince":"2026-01-02T03:04:05.100Z","relays":[{"tierId":"relay","accountId":"relay-1","layer":"ready","mappings":2,"verified":1,"figures":{"attempts":40,"served":36,"failed":4,"interrupted":2,"conversionRejected":1,"contextExceeded":0,"modelNotServed":1,"estimated":3,"clamped":0,"degraded":5,"p95Ms":1800}}],"pairs":[{"sourceProtocol":"OPENAI_CHAT","entryEndpoint":"MESSAGES","status":"EXPERIMENTAL","gate":"KEYS","allowedKeys":2,"figures":{"attempts":0,"served":0,"failed":0,"interrupted":0,"conversionRejected":0,"contextExceeded":0,"modelNotServed":0,"estimated":0,"clamped":0,"degraded":0},"degradedFeatures":[{"feature":"image","count":5}]}],"skips":[{"tierId":"relay","reason":"GATE","count":12}]}}]},"timestamp":"2026-10-23T06:24:25Z"}""");
+            check(json, "tierEvidence", ok(new SourceTierDtos.Evidence(T1, T2, 30, 7L, T2, List.of(new SourceTierDtos.PairEvidence(
+                "anthropic", "Anthropic", "OPENAI_CHAT", "MESSAGES", "EXPERIMENTAL", "KEYS", 1, unmeasured, 0,
+                List.of(new SourceTierDtos.Criterion("requests", ">= 200", 0.0, false), new SourceTierDtos.Criterion("estimated", "< 5%", null, false)),
+                false, List.of(), List.of(new SourceTierDtos.MemberEvidence("relay", "relay-1", unmeasured)))))),
+                """
+                {"success":true,"data":{"at":"2026-10-23T06:24:25Z","since":"2026-01-02T03:04:05.100Z","days":30,"configVersion":7,"skipsSince":"2026-01-02T03:04:05.100Z","pairs":[{"vendor":"anthropic","label":"Anthropic","sourceProtocol":"OPENAI_CHAT","entryEndpoint":"MESSAGES","status":"EXPERIMENTAL","gate":"KEYS","allowedKeys":1,"figures":{"attempts":0,"served":0,"failed":0,"interrupted":0,"conversionRejected":0,"contextExceeded":0,"modelNotServed":0,"estimated":0,"clamped":0,"degraded":0},"lintSkips":0,"criteria":[{"name":"requests","rule":">= 200","value":0.0,"met":false},{"name":"estimated","rule":"< 5%","met":false}],"meetsStandard":false,"degradedFeatures":[],"members":[{"tierId":"relay","accountId":"relay-1","figures":{"attempts":0,"served":0,"failed":0,"interrupted":0,"conversionRejected":0,"contextExceeded":0,"modelNotServed":0,"estimated":0,"clamped":0,"degraded":0}}]}]},"timestamp":"2026-10-23T06:24:25Z"}""");
+        });
+    }
+
+    /**
      * The source pool preference of a key (design 6.1) is one more field at the end of the key records, and only for a key
      * that has one: the key list of a deployment that never used it is the JSON it was. A request may carry it or leave
      * it out; left out, it means "no change" when a key is updated.

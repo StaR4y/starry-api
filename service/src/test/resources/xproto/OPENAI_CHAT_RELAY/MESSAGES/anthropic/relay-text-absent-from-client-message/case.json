@@ -1,0 +1,1 @@
+{"origin": "Claude Code 2.1.168: the relay breaks off the answer with an error that names its host, its URL, its key and a piece of the prompt; none of it may reach the client. The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

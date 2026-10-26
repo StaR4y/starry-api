@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
 import tools.jackson.databind.ObjectMapper;
 
 class TierRuntimeTest {
@@ -21,6 +22,13 @@ class TierRuntimeTest {
     }
 
     @Test
+    void aPlannerThatSaysNothingOfRelaysIsNotAskedToReadAnyRequestForThem() {
+        for (TierEntry entry : TierEntry.values()) {
+            assertThat(TierRuntime.disabled().planner().wantsEntryFacts(entry)).isFalse();
+        }
+    }
+
+    @Test
     void theUntieredPlanIsNotTiered() {
         assertThat(TierPlan.UNTIERED.tiered()).isFalse();
         assertThat(TierPlan.UNTIERED.levels()).isEmpty();
@@ -35,10 +43,22 @@ class TierRuntimeTest {
     }
 
     @Test
+    void aRuntimeWithoutLearnedLimitsLearnsNothingOfTheRelays() {
+        TierRuntime runtime = new TierRuntime(request -> Mono.just(TierPlan.UNTIERED), TierSessionBindings.disabled());
+
+        assertThat(runtime.learnedLimits()).isSameAs(XpLearnedLimits.disabled());
+        assertThat(TierRuntime.disabled().learnedLimits()).isSameAs(XpLearnedLimits.disabled());
+    }
+
+    @Test
     void aRuntimeNeedsAPlanner() {
         assertThatThrownBy(() -> new TierRuntime(null))
             .isInstanceOf(NullPointerException.class)
             .hasMessageContaining("planner");
+        assertThatThrownBy(() -> new TierRuntime(request -> Mono.just(TierPlan.UNTIERED),
+            TierSessionBindings.disabled(), null))
+            .isInstanceOf(NullPointerException.class)
+            .hasMessageContaining("learnedLimits");
     }
 
     private TierPlanRequest request(String model, TierRoute route) {

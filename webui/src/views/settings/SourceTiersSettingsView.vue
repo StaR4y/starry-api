@@ -4,8 +4,9 @@
    * 管理员在这里配置厂商开关、号池列表、手动指定账号，也可以先套用预设再改。
    *
    * 每个厂商有自己的草稿和版本。保存是整体替换：请求带上草稿所基于的版本，期间被别人改过
-   * 就返回 409，页面提示重新加载，不会覆盖别人的修改。本页不编辑的部分（跨协议成员行、门控）
-   * 放在草稿里原样带回。后端报告当前版本能运行什么（能力位），不能运行的开关在这里禁用并说明。
+   * 就返回 409，页面提示重新加载，不会覆盖别人的修改。门控在草稿里，随「保存」一起写入；跨协议成员（中转）
+   * 不经草稿，各自单独保存（只增改那一个成员行，带读取时的版本），所以页面有未保存的修改时不能改它们。
+   * 后端报告当前版本能运行什么（能力位），不能运行的开关在这里禁用并说明。
    *
    * 页面下方的「运行状态」每 15 秒读一次（页面不可见时暂停）：它不属于草稿，读取失败只影响那一块。
    */
@@ -17,21 +18,26 @@
   import { t } from '@/i18n';
   import { ApiError } from '@/utils/http';
   import { accountsApi } from '@/api/accounts';
+  import { apiKeysApi } from '@/api/apiKeys';
   import {
     SOURCE_TIER_RUNTIME_UNSUPPORTED,
     SOURCE_TIER_VERSION_CONFLICT,
     sourceTiersApi,
+    type SourceTierGate,
     type SourceTierRuntime,
     type SourceTierStatus,
     type SourceTierVendor,
     type SourceTierWarning,
   } from '@/api/sourceTiers';
-  import type { Account } from '@/types/api';
+  import type { Account, ApiKey } from '@/types/api';
   import NativePinsPanel from './components/source-tiers/NativePinsPanel.vue';
+  import PairGatePanel from './components/source-tiers/PairGatePanel.vue';
   import TierSectionHead from './components/source-tiers/TierSectionHead.vue';
   import TierSettingRow from './components/source-tiers/TierSettingRow.vue';
   import TierStatusPanel from './components/source-tiers/TierStatusPanel.vue';
   import TierTable from './components/source-tiers/TierTable.vue';
+  import XpMemberDialog from './components/source-tiers/XpMemberDialog.vue';
+  import XpMembersPanel from './components/source-tiers/XpMembersPanel.vue';
   import {
     DEFAULT_REFUSAL_CAP,
     MAX_REFUSAL_CAP,
@@ -53,6 +59,11 @@
     type TierPreset,
     type VendorDraft,
   } from './components/source-tiers/sourceTiersMeta';
+  import {
+    blockingGateProblem,
+    relayErrorMessage,
+    supportsRelays,
+  } from './components/source-tiers/xpMeta';
 
   /** 一个厂商：后端最近一次给的配置、正在编辑的草稿、以及草稿开始时的签名（用来判断有没有改动） */
   interface VendorState {
@@ -68,6 +79,8 @@
   const order = ref<string[]>([]);
   const vendors = reactive<Record<string, VendorState>>({});
   const accounts = ref<Account[]>([]);
+  /** 门控名单里可选的 API Key；读不到时名单里已有的 Key ID 仍然显示 */
+  const apiKeys = ref<ApiKey[]>([]);
   const active = ref('');
 
   const saving = ref(false);
@@ -158,13 +171,15 @@
     else refreshing.value = true;
     loadError.value = '';
     try {
-      const [overview, list] = await Promise.all([
+      const [overview, list, keys] = await Promise.all([
         sourceTiersApi.overview(),
-        // 账号只用来给指定账号显示名称，取不到时显示账号 ID
+        // 账号只用来给指定账号和中转显示名称、挑选中转，取不到时显示账号 ID
         accountsApi.list().catch(() => [] as Account[]),
+        apiKeysApi.list().catch(() => [] as ApiKey[]),
       ]);
       runtime.value = overview.runtime;
       accounts.value = list;
+      apiKeys.value = keys;
       for (const key of Object.keys(vendors)) delete vendors[key];
       overview.vendors.forEach(adopt);
       order.value = overview.vendors.map((vendor) => vendor.vendor);
@@ -241,13 +256,16 @@
     if (err.code === SOURCE_TIER_RUNTIME_UNSUPPORTED) {
       return unsupportedMessage(err.data) ?? err.message;
     }
-    return err.message;
+    // 门控、缓存口径等后端的业务错误换成控制台的说法，不认识的仍是后端的原文
+    return relayErrorMessage(err);
   }
 
   async function save() {
     const entry = current.value;
     if (!entry || saving.value) return;
-    const problem = validateDraft(entry.draft);
+    const problem =
+      validateDraft(entry.draft) ??
+      blockingGateProblem(entry.draft.gates, runtime.value, entry.loaded.vendor);
     if (problem) {
       saveError.value = problem;
       conflict.value = false;
@@ -340,6 +358,42 @@
 
   function setPins(pins: PinDraft[]) {
     setDraft('pins', pins);
+  }
+
+  function setGates(gates: SourceTierGate[]) {
+    setDraft('gates', gates);
+  }
+
+  /* ---------- 跨协议成员（中转） ---------- */
+
+  const xpDialog = reactive({ visible: false, editing: null as string | null });
+  const xpSupported = computed(() => !!runtime.value?.xpMembers);
+  /** 这个厂商的状态里的中转部分（指标、层、被跳过的原因） */
+  const currentXp = computed(() => currentStatus.value?.xp ?? null);
+  /** 中转单独保存，保存的结果是整个厂商的最新配置，会替换草稿：有未保存的修改时先让管理员处理它们 */
+  const xpBlocked = computed(() =>
+    currentDirty.value
+      ? t(
+          '页面上有未保存的修改。中转单独保存，保存后会重新读取这个厂商的配置，所以请先保存或放弃这些修改。',
+        )
+      : '',
+  );
+
+  function openXpDialog(accountId: string | null) {
+    xpDialog.editing = accountId;
+    xpDialog.visible = true;
+  }
+
+  /** 中转已保存或移除：返回的是这个厂商最新的配置（草稿是干净的，直接替换） */
+  function onXpSaved(vendor: SourceTierVendor) {
+    adopt(vendor);
+    void loadStatus();
+  }
+
+  /** 验证写在服务器上，不改厂商的版本：重新读取，让映射的「已验证」状态更新 */
+  async function onXpVerified() {
+    await reloadVendor();
+    void loadStatus();
   }
 
   const pinCounts = computed(() => {
@@ -742,8 +796,45 @@
           @update:pins="setPins"
         />
 
+        <template v-if="supportsRelays(active)">
+          <XpMembersPanel
+            :vendor="current.loaded"
+            :accounts="accounts"
+            :xp="currentXp"
+            :window-minutes="status?.windowMinutes ?? 15"
+            :blocked="xpBlocked"
+            :supported="xpSupported"
+            @add="openXpDialog(null)"
+            @edit="openXpDialog"
+            @saved="onXpSaved"
+            @conflict="reloadVendor"
+          />
+
+          <PairGatePanel
+            :vendor="active"
+            :gates="current.draft.gates"
+            :runtime="runtime"
+            :keys="apiKeys"
+            :xp="currentXp"
+            :window-minutes="status?.windowMinutes ?? 15"
+            :disabled="saving || !xpSupported"
+            @update:gates="setGates"
+          />
+
+          <XpMemberDialog
+            v-model:visible="xpDialog.visible"
+            :vendor="current.loaded"
+            :editing="xpDialog.editing"
+            :accounts="accounts"
+            :runtime="runtime"
+            @saved="onXpSaved"
+            @verified="onXpVerified"
+            @conflict="reloadVendor"
+          />
+        </template>
+
         <el-alert
-          v-if="hiddenMembers.relays || hiddenMembers.gates"
+          v-else-if="hiddenMembers.relays || hiddenMembers.gates"
           class="tiers-alert"
           type="info"
           show-icon

@@ -42,6 +42,12 @@ public class SourceTierAdminController implements SourceTierAdminApi {
     }
 
     @Override
+    public Mono<ApiResponse<SourceTierDtos.Evidence>> evidence(ServerWebExchange exchange, int days) {
+        adminAuth.verifyAdmin(exchange);
+        return statusService.evidence(days).map(ApiResponse::ok);
+    }
+
+    @Override
     public Mono<ApiResponse<SourceTierDtos.Placements>> placements(ServerWebExchange exchange) {
         adminAuth.verifyAdmin(exchange);
         return statusService.placements().map(ApiResponse::ok);

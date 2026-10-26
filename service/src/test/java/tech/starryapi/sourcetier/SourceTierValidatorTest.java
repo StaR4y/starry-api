@@ -711,6 +711,18 @@ class SourceTierValidatorTest {
     }
 
     @Test
+    void aGateCannotListTheCallersThatHaveNoKey() {
+        // They reach the planner as "anonymous", which is no API key: a trial pair is for the keys the administrator names.
+        assertRejected(() -> validator.normalize("anthropic", replace(false, List.of(), List.of(),
+                List.of(gate("CHAT", "KEYS", "key-1", "anonymous")))), HttpStatus.BAD_REQUEST, "SOURCE_TIER_GATE_INVALID",
+            "not an API key");
+        assertRejected(() -> validator.normalize("anthropic", replace(false, List.of(), List.of(),
+                List.of(gate("CHAT", "KEYS", " anonymous ")))), HttpStatus.BAD_REQUEST, "SOURCE_TIER_GATE_INVALID", "not an API key");
+        assertThat(validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("CHAT", "KEYS", "anonymous-2"))))
+            .gates().getFirst().allowKeyIds()).containsExactly("anonymous-2");
+    }
+
+    @Test
     void gatesOnlyExistForTheVendorsARelayCanServe() {
         assertRejected(() -> validator.normalize("deepseek", replace(false, List.of(), List.of(), List.of(gate("CHAT", "OFF")))),
             HttpStatus.BAD_REQUEST, "SOURCE_PROFILE_NOT_APPLICABLE", "already uses compatible API keys");
@@ -757,18 +769,26 @@ class SourceTierValidatorTest {
     }
 
     @Test
-    void thisReleaseTakesRelayRowsButOpensNoPairBecauseNoneIsOffered() {
+    void thisReleaseTakesRelayRowsAndOpensTheChatAndMessagesPairsToListedKeysOnly() {
         Config relay = validator.normalize("anthropic", replace(false, RELAY_TIERS,
             List.of(relay("relay-1", "relay", mapping("claude-sonnet-4.5", "x"))), List.of()));
         Config keysGate = validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("MESSAGES", "KEYS", "k"))));
         Config onGate = validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("CHAT", "ON"))));
         Config offGate = validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("CHAT", "OFF"))));
+        Config responsesGate = validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("RESPONSES", "KEYS", "k"))));
+        Config openaiKeys = validator.normalize("openai", replace(false, List.of(), List.of(), List.of(gate("CHAT", "KEYS", "k"))));
+        Config googleKeys = validator.normalize("google", replace(false, List.of(), List.of(), List.of(gate("CHAT", "KEYS", "k"))));
 
-        // The relay is registered (and kept out of the untiered pools, P4-10); the pairs come with the cross-protocol phases.
+        // The relay is registered (and kept out of the untiered pools, P4-10), and the pairs of the Chat and Messages
+        // entries are on trial (P5-05): open to the keys a gate lists and to no more.
         assertThatCode(() -> validator.requireSupported(relay)).doesNotThrowAnyException();
         assertThatCode(() -> validator.requireSupported(offGate)).doesNotThrowAnyException();
-        assertRejected(() -> validator.requireSupported(keysGate), HttpStatus.BAD_REQUEST, "SOURCE_PAIR_NOT_OFFERED", "is not offered");
-        assertRejected(() -> validator.requireSupported(onGate), HttpStatus.BAD_REQUEST, "SOURCE_PAIR_NOT_OFFERED", "is not offered");
+        assertThatCode(() -> validator.requireSupported(keysGate)).doesNotThrowAnyException();
+        assertThatCode(() -> validator.requireSupported(openaiKeys)).doesNotThrowAnyException();
+        assertRejected(() -> validator.requireSupported(onGate), HttpStatus.CONFLICT, "SOURCE_PAIR_GATE_FORBIDDEN", "experimental");
+        // The Responses entry comes with the sixth phase and the google vendor with the seventh.
+        assertRejected(() -> validator.requireSupported(responsesGate), HttpStatus.BAD_REQUEST, "SOURCE_PAIR_NOT_OFFERED", "is not offered");
+        assertRejected(() -> validator.requireSupported(googleKeys), HttpStatus.BAD_REQUEST, "SOURCE_PAIR_NOT_OFFERED", "is not offered");
     }
 
     @Test

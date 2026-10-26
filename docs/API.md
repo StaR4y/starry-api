@@ -88,15 +88,15 @@ Authorization: Bearer change-me
 
 | 状态码 | 含义 |
 | --- | --- |
-| `400` | 请求体无效，或缺少模型 / 消息 |
+| `400` | 请求体无效，或缺少模型 / 消息；模型后缀引用的号池不存在或用不上（`SOURCE_TIER_UNKNOWN`、`SOURCE_TIER_NOT_OFFERED`），或用了固定的号池里没有任何号源支持的功能（`SOURCE_TIER_FEATURE_UNSUPPORTED`），见 [号源分级的错误码](#号源分级) |
 | `401` | 缺少或无效的 API Key / 管理员令牌 |
 | `402` | 余额或订阅额度不足（在转发到上游之前就拒绝） |
-| `403` | 需要先改首次登录密码；管理员权限不足；API Key 的模型厂商限制 |
-| `409` | 并发冲突（版本号过期）、幂等键冲突、计费待复核 |
+| `403` | 需要先改首次登录密码；管理员权限不足；API Key 的模型厂商限制；模型后缀固定了不允许客户端选择的号池（`SOURCE_TIER_NOT_SELECTABLE`） |
+| `409` | 并发冲突（版本号过期）、幂等键冲突、计费待复核；续写的 Responses 链不在固定的号池里（`RESPONSE_OWNER_TIER_MISMATCH`） |
 | `413` | 请求体超过配置的上限 |
 | `429` | API Key 限流、额度上限，或上游容量 / 限流。上游的 `429` 是**暂时**的，本身不会让账号被标记为额度耗尽 |
 | `502` | 上游返回了不可恢复的错误 |
-| `503` | 没有可用的上游账号；或数据管理安全锁定后整站的 `SYSTEM_MAINTENANCE` |
+| `503` | 没有可用的上游账号；固定的号池暂时没有可用账号（`SOURCE_TIER_UNAVAILABLE`，带 `Retry-After`）；或数据管理安全锁定后整站的 `SYSTEM_MAINTENANCE` |
 
 ---
 
@@ -548,11 +548,12 @@ POST /admin/source-tiers/{vendor}/members
 POST /admin/source-tiers/{vendor}/members/{accountId}/verify
 GET /admin/source-tiers/{vendor}/members/{accountId}/upstream-models
 GET /admin/source-tiers/status
+GET /admin/source-tiers/evidence?days={days}
 GET /admin/source-tiers/placements
 GET /admin/source-tiers/me?provider={provider}
 ```
 
-- `GET /admin/source-tiers` 返回 `configVersion`（所有厂商共用，各节点据此刷新）、`runtime`（这个版本能运行什么）和每个厂商的已保存配置。`runtime.nativeTiers` 为真表示这个版本能按号池选号：厂商的路由本来就能用的账号（官方 Key、Kiro、Claude OAuth、Codex 等）可以分级，`enabled` 能打开；为假时 `enabled` 打不开（保存返回 `409 SOURCE_TIER_RUNTIME_UNSUPPORTED`，`data` 列出被拒的设置）。`unifyEndpoints` 为真表示这个版本能运行 Anthropic 的「全端点统一」开关（见下文「全端点统一」）；`xpMembers` 为真表示这个版本接受跨协议成员行（把一把 OpenAI 兼容 Key 登记为 OpenAI 格式中转，成员行的 `protocol` 为 `OPENAI_CHAT`）：登记后这把 Key 默认是专用的（`exclusive: true`），不再服务 GLM 等未分级的兼容模型请求，也不再作为 Responses 链的 owner；把 `exclusive` 设为 `false` 它才继续服务这些请求。`pairs` 列出每个（入口，厂商）对的状态，现在全部是 `NOT_OFFERED`，所以还没有入口会把请求派给中转，把门控设为 `KEYS` 或 `ON` 返回 `400 SOURCE_PAIR_NOT_OFFERED`。`selectors` 表示客户端能自己指定号池（`模型@标识` 写法、`X-Starry-Tier` 请求头、API Key 的号源偏好，见下文「指定号池」）。它不拒绝任何设置，只决定控制台是否提供复制「模型@标识」的按钮，以及 API Key 表单里的「号源偏好」。厂商里的 `tierAccounts` 是每个号池已收下的启用账号数。
+- `GET /admin/source-tiers` 返回 `configVersion`（所有厂商共用，各节点据此刷新）、`runtime`（这个版本能运行什么）和每个厂商的已保存配置。`runtime.nativeTiers` 为真表示这个版本能按号池选号：厂商的路由本来就能用的账号（官方 Key、Kiro、Claude OAuth、Codex 等）可以分级，`enabled` 能打开；为假时 `enabled` 打不开（保存返回 `409 SOURCE_TIER_RUNTIME_UNSUPPORTED`，`data` 列出被拒的设置）。`unifyEndpoints` 为真表示这个版本能运行 Anthropic 的「全端点统一」开关（见下文「全端点统一」）；`xpMembers` 为真表示这个版本接受跨协议成员行（把一把 OpenAI 兼容 Key 登记为 OpenAI 格式中转，成员行的 `protocol` 为 `OPENAI_CHAT`）：登记后这把 Key 默认是专用的（`exclusive: true`），不再服务 GLM 等未分级的兼容模型请求，也不再作为 Responses 链的 owner；把 `exclusive` 设为 `false` 它才继续服务这些请求。`pairs` 列出每个（入口，厂商）对的状态：Chat 和 Messages 入口对 anthropic、openai 厂商的四个对现在是 `EXPERIMENTAL`（试用中：门控只能设为 `KEYS`，只对名单里的 Key 把请求派给中转，设为 `ON` 返回 `409 SOURCE_PAIR_GATE_FORBIDDEN`），其余是 `NOT_OFFERED`，把门控设为 `KEYS` 或 `ON` 返回 `400 SOURCE_PAIR_NOT_OFFERED`。`selectors` 表示客户端能自己指定号池（`模型@标识` 写法、`X-Starry-Tier` 请求头、API Key 的号源偏好，见下文「指定号池」）。它不拒绝任何设置，只决定控制台是否提供复制「模型@标识」的按钮，以及 API Key 表单里的「号源偏好」。厂商里的 `tierAccounts` 是每个号池已收下的启用账号数。
 - `PUT /admin/source-tiers/{vendor}` **整体替换**一个厂商的开关、号池、成员行和门控，请求带 `expectedVersion`（从未配置过的厂商为 `0`）；期间被别人改过返回 `409 SOURCE_TIER_VERSION_CONFLICT`（`data.currentVersion` 是现在的版本）。号池的 `tierId` 是小写字母、数字和连字符（至多 32 位），不能是 `auto`、`L2` 或纯数字；`priceFactor` 大于 0、至多 1000、至多 6 位小数，默认 1；`memberCategories` 取 `OFFICIAL_API_KEY`、`COMPATIBLE_API_KEY`、`CODEX`、`CLAUDE_OAUTH`、`KIRO`，一个类别只能属于一个号池。账号归级的规则：有成员行取其号池；否则取列出该账号类别的号池（类别只匹配本厂商的账号）；都没有则落入**最低一级**。
 - `POST /admin/source-tiers/{vendor}/members` 只增改、移除成员行（账号列表批量设置号池用它），带同样的 `expectedVersion`，结果必须是合法的整体配置。
 - `POST /admin/source-tiers/{vendor}/members/{accountId}/verify` **验证**一个跨协议成员（中转）的映射：用请求真正使用的客户端和解析器向中转发探针，全部通过的映射才算「已验证」，未验证的映射不会进入任何请求的计划。请求体可省略，也可以带 `{"modelIds":["claude-sonnet-4.5"],"cacheProbe":true}`：`modelIds` 指定要验证的映射（至多 8 个；省略时验证已启用的映射，它们多于 8 个就必须指定），`cacheProbe` 额外跑缓存探针（默认 `false`）。每个映射依次发这些探针，结果在 `models[].probes[]`（`status` 是 `PASSED`、`FAILED` 或 `SKIPPED`，`message` 只有网关自己的话，失败时是中转的状态和类型，如 `Source error 404 (model_not_found)`，从不含中转的原文）：`basic` 是 `max_tokens` 16 的短问题（不流式，要求有 `finish_reason` 和用量；GPT-5 一类用 `max_completion_tokens` 的模型留 512 个令牌给推理）、`tool_call` 是 `tool_choice: auto` 加明确指令的一次函数调用（不用 `required`，Claude 开启思考时会拒绝它）、`tool_loop` 是函数调用、结果、再回答的两轮循环、`stream`（成员用上游流式时）是带 `include_usage` 的事件流、`vision`（成员支持图片时）是一像素 PNG；`basic` 不通过时其余探针不发（`SKIPPED`），以免白花钱。探针请求和真实请求走同一条白名单、规范化和严格检查，工具探针按成员的流式设置读答案。全部必需的探针通过后，写入 `verified_at` 和 `verified_hash`（成员的设置、目录模型、中转给它的名字、账号的 provider 和 base URL 的指纹），映射在这些没变之前都算已验证，账号改了 base URL 或映射改了名字，验证就自动失效；有任何一个探针失败，就把原来的验证收回，因为中转已经不是验证时的样子。探针要几秒钟，期间配置若被改动（指纹变了），那个映射不写入，结果里标 `stale: true`。缓存探针不影响是否通过，只给建议：把约 1,200 个令牌的同一个提示问两次，从两次的 `prompt_tokens` 和缓存字段判断中转的 prompt 是否已经含缓存读 / 写，`cache.readInPrompt` / `writeInPrompt` 是 `true`、`false` 或 `null`（数字不足以判断，`cache.message` 说明原因），`readEvidence` / `writeEvidence` 是依据的数字。一次验证整体最长 4 分钟：回答不超过 128 个令牌的探针（缓存探针的每一次调用也算）各给 30 秒，其余（如给推理留 512 个令牌的 `basic`）60 秒，剩余时间少于该探针的限时就以剩余时间为限，不足 1 秒的探针不再发出，标为 `SKIPPED`（`Not asked: the verification ran out of time`，不算通过），所以一个每次都拖到限时才回答的中转不会让一次请求占着账号的验证名额近一小时。探针由运营者付费，所以同一个账号 30 秒只能验证一次，不能同时验证两次（`429 SOURCE_VERIFY_RATE_LIMITED`，`data.retryAfterSeconds`；限流是每个节点各自的）；账号不是这个厂商的中转返回 `404 SOURCE_TIER_MEMBER_NOT_FOUND`。
@@ -581,9 +582,13 @@ GET /admin/source-tiers/me?provider={provider}
 ```
 
   - `accounts` 把号池收下的每个账号只计入第一个让它不能服务的层：`disabled`（已停用）、`unavailable`（被挂起或额度耗尽）、`resting`（分配生命周期里冷却或隔离中）、`busy`（并发或在途 token 已到上限；每分钟请求数、突发和会话数的限制，以及按模型的冷却，只在请求到来时才知道，不在这里计）、`ready`。数字是**这个节点**的（账号缓存最多晚 30 秒）。
+  - 号池里登记的中转（跨协议成员）和别的账号一样按层计入。中转多一层 `unopened`：没有任何入口的门控对它开放（对这个版本提供的对、状态不是 `OFF`），或没有已验证的映射，所以请求不会派给它；检查在账号自己的各层之前，因为它只有管理员动手才会变。只有号池里有中转时 `accounts` 才有 `unopened`。
   - `serves`：这个节点现在会从该号池服务（厂商已启用、版本能运行、号池已启用、至少一个 `ready` 账号）；`serving` 是厂商一级的前两个条件。
   - `served`、`servedPinned`、`failed` 取自请求日志，覆盖**所有节点**：最近 15 分钟里该号池服务成功的尝试数（其中客户端指定号池的）和失败的尝试数。一个请求在 1 级失败又由 2 级服务，算 1 级一次失败、2 级一次服务。`autoServed` 是由网关自己选号池服务的请求数，`degraded` 是其中由低于「已启用的最好一级」服务的数；降级率 = `degraded / autoServed`。
+  - 厂商登记了中转时，厂商项多一个 `xp`：`relays` 是每个中转所在的号池（`tierId`）、`layer`（`disabled`、`unopened`、`unavailable`、`resting`、`busy` 或 `ready`）、已启用的映射数 `mappings` 和其中已验证的 `verified`，以及它最近 15 分钟的 `figures`；`pairs` 是这个版本提供的、或已有门控、或有过尝试的（入口，厂商）对，带 `status`、门控状态 `gate` 和名单里的 Key 数 `allowedKeys`、该入口的 `figures`，以及被服务的尝试丢掉的请求特性 `degradedFeatures`（从多到少，最多 5 个）；`skips` 是**应答节点**自 `skipsSince` 起，因为哪个原因（`GATE`、`NOT_A_RELAY`、`NO_MAPPING`、`UNVERIFIED`、`FEATURE`、`INTERRUPTED`、`CONVERSION`、`CONTEXT`）没有把请求交给某个号池的中转，数的是被跳过的中转次数而不是请求数（被跳过的中转在日志里没有痕迹，所以只有这个节点自己知道）。没有登记中转的厂商没有 `xp`。
+  - `figures` 取自请求日志，覆盖**所有节点**，数的是发给中转的尝试（`source_dispatch` 为 `OPENAI_CHAT` 的行）：`attempts` 全部、`served` 已服务、`failed` 失败；失败里网关知道种类的单独数，种类写在日志的 `stop_reason` 里——`interrupted`（`INTERRUPTED`：中转可能已经生成、没人为它付费，由运营者承担，设计里的 UNBILLED）、`conversionRejected`（`CONVERSION_REJECTED`：中转拒绝了转换后的请求）、`contextExceeded`（`CONTEXT_EXCEEDED`）、`modelNotServed`（`MODEL_NOT_SERVED`），其余失败只在 `failed` 里；`estimated`、`clamped` 是用量不是中转报的那样的已服务尝试（日志的 `usage_source`，同时估算又钳制的只算 `estimated`），`degraded` 是丢掉了请求特性的已服务尝试，`p95Ms` 是已服务尝试延迟的第 95 百分位（没有已服务的尝试时缺省）。入口取自日志里的客户端路径（`/v1/chat/completions` 为 `CHAT`，`/v1/messages` 为 `MESSAGES`，`/v1/responses` 为 `RESPONSES`，`/v1beta/models/…` 为 `GEMINI`）。连接失败、429 等网关不知道种类的失败没有种类；客户端在中转还在生成时断开的请求不写日志行，所以不在这些数字里。「带内错误」（200 里带错误）和「疑似少报」（`suspectedUnderReport`）目前没有计数，只在服务端日志里。
   - 配置从未加载成功时返回 `503 TIER_CONFIG_UNAVAILABLE`。
+- `GET /admin/source-tiers/evidence?days=30` 是升级一个对（EXPERIMENTAL → VERIFIED，门控才能对所有 Key 打开）要看的证据：最近 `days` 天（1 到 90，默认 30；其他返回 `400 SOURCE_EVIDENCE_WINDOW_INVALID`，请求日志只保留三个多月）里，这个版本提供的每个对（`status` 不是 `NOT_OFFERED`）的 `figures`（同上）、`members`（按号池和中转分开的同样的数字）、`lintSkips`（该厂商的中转因转换后的请求没通过严格检查而被跳过的次数，**应答节点**自 `skipsSince` 起的计数，多节点时请每个节点各看一次），和 `criteria`：设计 7.3 的统一标准，每条有 `name`、`rule`、`value`（个数或百分比，没有可除的数时缺省）和 `met`——`requests` 至少 200 次尝试、`lintFailures` 为 0、`conversionRejected` 不到 1%（占尝试）、`estimated` 不到 5%（占已服务的尝试）、`unbilled` 不到 2%（`interrupted` 占尝试）；没有可除的数的条件判不了，算未达标。`meetsStandard` 是全部达标。试用中的对的门控只能对名单里的 Key 打开，所以这些尝试都来自名单里的 Key；负责人可以在升级时书面放宽尝试数。控制台的「升级证据」对话框显示这些数字并可下载成 JSON。
 - 厂商的 `warnings` 是已保存配置里允许、但多半不是本意的情况：`LOWEST_TIER_COLLECTS_OFFICIAL_KEYS`（没有号池列出的官方 API Key 落入最低级，按它的系数计费）、`MEMBER_NOT_SERVING_VENDOR`（被指定的账号不是这个厂商的路由会用到的账号，指定无效）和 `PIN_ON_EXCLUSIVE_RELAY`（被指定的账号在某个厂商登记为专用中转，它不是任何厂商的原生成员，指定无效；`exclusive: false` 的中转不在此列）。
 - `GET /admin/source-tiers/placements` 返回每个账号所在的号池，供账号列表显示「号源级别」列：`{"configVersion":7,"accounts":[{"accountId":"…","tiers":[{"vendor":"anthropic","tierId":"kiro","level":2,"name":"kiro","rule":"CATEGORY","relay":false,"active":true}]}]}`。`rule` 是 `MEMBER_ROW`（手动指定）、`CATEGORY` 或 `LOWEST_TIER`（没有号池列出它的类别，落入最低级）；`active` 是现在是否按这个号池服务；中转（`relay: true`）还要有一个这个版本提供的（入口，厂商）对的门控不是 `OFF`，并且至少一个启用的映射已验证，否则它放在号池里但什么请求都不收。不在任何号池的账号不出现。
 - `GET /admin/source-tiers/me?provider=Anthropic` 返回这个模型分类（API Key 的 `modelProvider`）所属厂商里**客户端可以指定**的号池——已启用、「用户可选」打开的，从好到差：`{"provider":"Anthropic","referenceModel":"claude-sonnet-4.5","tiers":[{"id":"kiro","level":2,"name":"kiro","priceFactor":0.6,"pricing":{…}}]}`。每个号池只有 `id`（Key 偏好、请求头和模型后缀都用它）、`level`、`name`、`priceFactor` 和 `pricing`，不含账号、类别或协议。`pricing` 是 `referenceModel`（这个厂商的模型列表里第一个有价格的模型）乘上号池系数后的价格，写法同 `/v1/models` 的 `sourceTiers[].pricing`，两者都可能缺省。`tiers` 为空表示这个厂商没有启用分级、当前版本不能运行分级，或厂商没有打开「公开号池名称」——普通用户只能看到打开了它的厂商的号池，管理员总能看到。缺少 `provider` 返回 `400`。
@@ -594,7 +599,7 @@ GET /admin/source-tiers/me?provider={provider}
 
 **与「实验性的分级熔断」的关系**：两者互相独立。按号源分级服务的厂商不进入旧的熔断（它的请求不带熔断纪元，不产生 `ACCOUNT_POOL_CIRCUIT_OPEN`，`pool_tier` 与熔断指标不变）；旧熔断只作用于没有配置号源分级的厂商。
 
-**指定号池**：客户端可以自己指定要用的号池，写在模型名后面（`claude-sonnet-4.5@kiro`、`gpt-5.5@L2`、`claude-opus-4.5@1+`；Chat、Responses、Messages 的 `model` 和 Gemini 路径里的模型都行）或写在请求头 `X-Starry-Tier` 里，或设成 API Key 的**号源偏好**（见下）。同时有几处时，模型后缀优先于请求头，请求头优先于 Key 的偏好；`@auto`（或请求头 `auto`）回到自动，并盖过优先级更低的那几处。写法是 `auto`、号池标识、`L<N>`（按级别）或纯数字，后面可以加 `+`：不加，请求只由这一个号池服务，也只按它预留和计价；加了，由它和它以下的号池服务，预留按其中最贵的一个，结算按实际服务的那个。可以固定到比 1 级更贵的号池，价格仍是标准价乘它的系数；固定不绕过 Key 的厂商限制和 Codex 隔离。固定的请求不读也不改会话停留的号池，但算作会话在使用：一个一直在发固定请求的会话不算空闲，它停留的号池不会因此过期，各个入口都一样（它产生的响应成了 Responses 链最近的一环、它的账号成了链的 owner，也不会让之后的自动请求留在那个号池：续写一条可以在别的账号上重放的链时，自动请求只有在 owner 正好在它本来要开始的号池——会话停留的号池，没有停留就是 1 级——里才先用 owner，否则忽略它，从那个号池开始，按它预留和计价；会话空闲满 10 分钟回到 1 级之后同样如此。带 `+` 的固定请求也一样：它从自己写的号池开始（那里没有可用账号时，从它以下第一个有账号的号池开始），owner 只有在这个号池里才先用。所以某一轮因为忙而改由更低的号池服务、或某一轮固定到了更低的号池之后，之后的轮次只要写的号池能服务，就回到写的号池，不会一直留在更低的号池、一直按它的系数计价），并且不会换到别的号池：号池里的账号都不可用时返回 `503 SOURCE_TIER_UNAVAILABLE`（带 `Retry-After`，冻结的额度整笔退回）。请求头和 Key 的偏好固定的号池，账号都被停用或挂起时也是这样（不会改由别的号池按另一个价格服务）；模型后缀固定的号池，账号都被停用或挂起时是 `400 SOURCE_TIER_NOT_OFFERED`（见下表）。续写一个不能离开 owner 账号的 Responses 链时，owner 在号池里但暂时用不了（额度耗尽、冷却中）返回的是 owner 的说明（`503 NO_AVAILABLE_ACCOUNT`，owner 的并发满了是 `503 RESPONSE_OWNER_UNAVAILABLE`），不是号池的，也不带 `Retry-After`。
+**指定号池**：客户端可以自己指定要用的号池，写在模型名后面（`claude-sonnet-4.5@kiro`、`gpt-5.5@L2`、`claude-opus-4.5@1+`；Chat、Responses、Messages 的 `model` 和 Gemini 路径里的模型都行）或写在请求头 `X-Starry-Tier` 里，或设成 API Key 的**号源偏好**（见下）。同时有几处时，模型后缀优先于请求头，请求头优先于 Key 的偏好；`@auto`（或请求头 `auto`）回到自动，并盖过优先级更低的那几处。写法是 `auto`、号池标识、`L<N>`（按级别）或纯数字，后面可以加 `+`：不加，请求只由这一个号池服务，也只按它预留和计价；加了，由它和它以下的号池服务，预留按其中最贵的一个，结算按实际服务的那个。可以固定到比 1 级更贵的号池，价格仍是标准价乘它的系数；固定不绕过 Key 的厂商限制和 Codex 隔离。固定的请求不读也不改会话停留的号池，但算作会话在使用：一个一直在发固定请求的会话不算空闲，它停留的号池不会因此过期，各个入口都一样（它产生的响应成了 Responses 链最近的一环、它的账号成了链的 owner，也不会让之后的自动请求留在那个号池：续写一条可以在别的账号上重放的链时，自动请求只有在 owner 正好在它本来要开始的号池——会话停留的号池，没有停留就是 1 级——里才先用 owner，否则忽略它，从那个号池开始，按它预留和计价；会话空闲满 10 分钟回到 1 级之后同样如此。带 `+` 的固定请求也一样：它从自己写的号池开始（那里没有可用账号时，从它以下第一个有账号的号池开始），owner 只有在这个号池里才先用。所以某一轮因为忙而改由更低的号池服务、或某一轮固定到了更低的号池之后，之后的轮次只要写的号池能服务，就回到写的号池，不会一直留在更低的号池、一直按它的系数计价），并且不会换到别的号池：号池里的账号都不可用时返回 `503 SOURCE_TIER_UNAVAILABLE`（带 `Retry-After`，冻结的额度整笔退回）；号池里的中转刚中断了这个会话的应答、2 分钟内不再给它时也是这样（只是暂时用不了，不算「没有可用的账号类型」，所以不是 `400 SOURCE_TIER_NOT_OFFERED`）。请求头和 Key 的偏好固定的号池，账号都被停用或挂起时也是这样（不会改由别的号池按另一个价格服务）；模型后缀固定的号池，账号都被停用或挂起时是 `400 SOURCE_TIER_NOT_OFFERED`（见下表）。续写一个不能离开 owner 账号的 Responses 链时，owner 在号池里但暂时用不了（额度耗尽、冷却中）返回的是 owner 的说明（`503 NO_AVAILABLE_ACCOUNT`，owner 的并发满了是 `503 RESPONSE_OWNER_UNAVAILABLE`），不是号池的，也不带 `Retry-After`。
 
 模型后缀只有在它确实是选择器时才会被取走，由**服务这个模型的厂商**判断（Key 的模型映射把模型映到哪个厂商就看哪个厂商）：`@` 前面是目录里的模型，而且那个厂商配置过号源分级；或者 `@` 前面不是目录里的模型（比目录新的带日期的 Claude ID、目录里没有的 Codex 模型），但 `@` 后面是那个厂商的一个号池（标识、`L<N>`、数字或 `auto`）。这里的厂商是**服务这个请求的账号**的厂商，与入口无关：Chat 和 Responses 把它送上 Kiro 路由的以 `claude` 开头的模型，由 Kiro 账号服务，算 Anthropic 厂商；Responses 上只有 Codex 账号能服务的模型（`codex-mini-latest` 这样不以 `gpt` 开头的）算 OpenAI 厂商。因此这些模型的请求按它们所在号池的系数计价，也带 `X-Starry-Tier*` 响应头。其余的整个字符串仍是普通的模型 ID，和以前完全一样：从未配置过的厂商不认识选择器（后缀留在模型名里，请求头也被忽略，响应不加任何号源头；号池被删光、只剩厂商一行的厂商同样算没有配置），目录外的模型加 `@20250805` 这样的日期后缀也留在模型名里。目录里的模型加日期后缀（`claude-sonnet-4@20250514`）按不存在的号池拒绝，除非 Key 的模型映射有一条规则的源模型自己带 `@` 而且接得住这个完整字符串——整串（`claude-sonnet-4@20250514`），或围着 `@` 写的带通配符的写法（`claude-sonnet-4@*`、`*@cheap`）——那它就是一个映射源，不当选择器（单独的 `*` 和 `claude-*` 这样自己不带 `@` 的写法不算：它们照常映射 `@` 前面的模型，后缀仍然可以是选择器）。映射只问一次：`@` 前面的模型映到哪个厂商，就由那个厂商决定后缀是不是选择器，也由那个厂商服务；加权随机的映射（`loadbalance`）不会因此在判断后缀和选号时各抽一次而落到两个厂商。后缀的错误都在预留之前返回：
 
@@ -602,6 +607,7 @@ GET /admin/source-tiers/me?provider={provider}
 |---|---|
 | 引用的号池不存在，或写法不对 | `400 SOURCE_TIER_UNKNOWN` |
 | 号池已停用，或这个端点 / 模型上它没有可用的账号类型（账号被停用或挂起的也不算：挂起会同时停用账号，号池的账号全被停用或挂起时就是这一行，不是 `503`） | `400 SOURCE_TIER_NOT_OFFERED` |
+| 号池的中转都因为这个请求放不下被跳过（提示比映射的上下文上限长，或比这个中转拒绝过的长度大），而号池里没有别的号源 | `400 UPSTREAM_ERROR`，信息是 `prompt is too long: …`：与中转自己拒绝这个长度时的回答相同，第一次和以后每次一样，Claude Code 这样的客户端据此压缩对话 |
 | 号池不允许用户选择（`userSelectable` 关闭） | `403 SOURCE_TIER_NOT_SELECTABLE` |
 | 续写的 Responses 链不能离开它的 owner 账号，而 owner 不在固定的号池里 | `409 RESPONSE_OWNER_TIER_MISMATCH` |
 
@@ -639,6 +645,82 @@ GET /admin/source-tiers/me?provider={provider}
 3. 都没有（客户端不发会话标识，例如手写的 SDK 脚本、curl，或没有核对过的客户端版本）：对话开头的**内容指纹**：这把 Key、模型、system 文本前 2048 个字符和第一条 user 文本前 2048 个字符的哈希，图片和文件不计。开头相同的两个会话共用一个绑定，其中一个降级，另一个也停在低级；system 文本每轮都变的客户端每轮是一个新会话，哪里也不停留。
 
 按上面核对的结果，Claude Code、Codex 和 OpenCode 在这三个版本上都发会话标识，不依赖内容指纹；依赖它的是不发会话标识的客户端。绑定只记在各节点的内存里，会话的任何一个被服务的请求（包括客户端固定了号池的）都算在使用，空闲 10 分钟过期，多节点见[运维手册：号源分级](OPERATIONS.md#号源分级)。
+
+**跨协议中转**（OpenAI 格式的兼容 Key 当别的厂商某一级的号源）：运营步骤、门控、费用和排错见[运维手册：跨协议中转](OPERATIONS.md#跨协议中转)，这里写接口，以及客户端和管理员能观察到什么。
+
+登记一个中转、并对一把 Key 打开 Messages 入口，是对 `PUT /admin/source-tiers/anthropic` 带上成员行和门控（整体替换，下面只写相关字段）：
+
+```json
+{
+  "expectedVersion": 7,
+  "enabled": true,
+  "tiers": [
+    { "tierId": "relay", "level": 1, "name": "relay" },
+    { "tierId": "kiro", "level": 2, "name": "kiro", "priceFactor": 0.6, "memberCategories": ["KIRO", "CLAUDE_OAUTH"] }
+  ],
+  "members": [
+    {
+      "accountId": "acc-relay-1", "tierId": "relay", "protocol": "OPENAI_CHAT", "exclusive": true,
+      "vision": false, "upstreamStream": true, "reasoningMode": "NONE", "maxDurationSeconds": 540,
+      "usageCacheReadInPrompt": true, "usageCacheWriteInPrompt": true,
+      "models": [
+        { "modelId": "claude-sonnet-4.5", "upstreamModel": "relay/sonnet", "maxContextTokens": 200000, "imageTokenCap": 8192 }
+      ]
+    }
+  ],
+  "gates": [
+    { "sourceProtocol": "OPENAI_CHAT", "entryEndpoint": "MESSAGES", "state": "KEYS", "allowKeyIds": ["<你自己的 Key 的 keyId>"] }
+  ]
+}
+```
+
+- 带 `protocol: "OPENAI_CHAT"` 的成员行是中转，账号必须是 OpenAI 兼容 Key，厂商只能是 `anthropic`、`openai`、`google`（`deepseek` 和自定义厂商返回 `400 SOURCE_PROFILE_NOT_APPLICABLE`），这一版只有前两个厂商有对，登记在 `google` 的中转暂时收不到请求；`usageCacheReadInPrompt` 和 `usageCacheWriteInPrompt` 必填；至少一条映射，每条映射的 `maxContextTokens` 必填、`imageTokenCap` 默认 8192、`upstreamModel` 原样发给中转。不带 `protocol` 的成员行只是把原生账号钉在某个号池。
+- 保存**不发探针**：新的或改过的映射 `verified` 为 `false`，用 `POST …/verify` 验证后才进入请求的计划。成员行一保存，`exclusive` 就生效（`true` 时这把 Key 不再服务未分级的兼容模型请求）。
+- 门控 `entryEndpoint` 取 `CHAT`、`MESSAGES`、`RESPONSES`、`GEMINI`，`state` 取 `OFF`、`KEYS`、`ON`；`allowKeyIds` 是 API Key 的 `keyId`，至多 50 个，去重；不带 Key 的调用者（允许匿名代理时的无 Key 请求、控制台自己的助手）不能列入，试用中的对不会派给它们。同一个（来源协议，入口）只能有一行；没有行就是关闭。对没有提供的对设 `KEYS` / `ON` 返回 `400 SOURCE_PAIR_NOT_OFFERED`，对试用中的对设 `ON` 返回 `409 SOURCE_PAIR_GATE_FORBIDDEN`。门控与号池配置在同一个事务里保存，保存即经数据库通知刷新所有节点，所以设为 `OFF` 就是紧急开关：之后的请求不再派给中转，在飞的请求按冻结的计划完成。
+- **客户端看到的**：请求和响应的格式不变，工厂仍按入口的格式渲染，响应头 `X-Starry-Tier*` 说明由哪个号池服务；工具调用的 id 由网关重新生成（Messages 是 `toolu_…`，Chat 是 `call_…`），不是中转给的；中转因长度或内容过滤结束时，Messages 的 `stop_reason` 是 `max_tokens` / `refusal`，Chat 的 `finish_reason` 是 `length` / `content_filter`。请求带了这个中转承载不了的功能（`web_search` 等服务端工具、多于 4 个的停止序列、gpt 类请求的图片等）时，中转被跳过，由原生号池服务；没有原生号池能服务时返回 `400 SOURCE_TIER_FEATURE_UNSUPPORTED`（`data.feature` 是功能名）。中转可能已经生成就断了（读超时、单次时限、流中断）时返回 `502`，不再派给别的账号或级别，用户不付费；这个会话 2 分钟内的重试也不再给同一个中转。
+- **日志**（只给管理员，`/admin/logs`，每次尝试一行）：按中转服务的行另有 `sourceDispatch`（`OPENAI_CHAT`）、`wireModel`（发给中转的模型名）、`usageSource`（`REPORTED`、`ESTIMATED` 网关估算了缺的用量、`CLAMPED` 钳到了上限）、`stopReason`（成功时 `END_TURN`、`TOOL_USE`、`MAX_TOKENS`、`CONTENT_FILTER`；失败时 `INTERRUPTED`、`CONVERSION_REJECTED`、`CONTEXT_EXCEEDED`、`MODEL_NOT_SERVED`，其余失败为空）和 `degradedFeatures`（丢掉的请求特性，逗号分隔）。原生号源的行这些字段为空；用户自己的日志（`/admin/logs/me`）看不到它们。中转的原文错误不会出现在客户端的消息和这些日志里。
+- **所有节点都升级到支持跨协议的版本之后再保存非 `OFF` 的门控**：旧节点把不认识的对当作未提供，不会派给中转，同一个会话落在新旧节点上得到的服务不同。升级到带 V30 的版本后请立即重新备份（见 [运维手册：恢复流程](OPERATIONS.md#恢复流程)）。
+
+**号源分级的错误码**
+
+代理接口（`/v1/...`，都在预留之前返回，不扣费，除非另有说明）：
+
+| 状态码 | 错误码 | 何时 |
+|---|---|---|
+| `400` | `SOURCE_TIER_UNKNOWN` | 模型后缀引用的号池不存在，或写法不对 |
+| `400` | `SOURCE_TIER_NOT_OFFERED` | 号池已停用，或这个端点 / 模型上它没有可用的账号类型，或后缀固定的号池的账号全被停用或挂起 |
+| `400` | `SOURCE_TIER_FEATURE_UNSUPPORTED` | 请求用了一个功能，这次能用的号池里没有任何号源支持它（`data.feature` 是功能名）；固定到只有中转的号池时最常见 |
+| `400` | `UPSTREAM_ERROR`，信息 `prompt is too long: …` | 提示比这次能用的中转的上下文上限长（映射的上限，或这个中转拒绝过的长度），而没有原生号源可以服务；中转自己在派发时拒绝这个长度、又没有原生号源可跨时的回答也是它，第一次和以后每次一样 |
+| `403` | `SOURCE_TIER_NOT_SELECTABLE` | 后缀固定到「用户可选」关闭的号池 |
+| `409` | `RESPONSE_OWNER_TIER_MISMATCH` | 续写的 Responses 链不能离开它的 owner 账号，而 owner 不在固定的号池里（或不在能服务这个请求的号池里） |
+| `503` | `SOURCE_TIER_UNAVAILABLE` | 固定的号池暂时没有可用账号（包括只有中转、而它们刚中断了这个会话的应答、2 分钟内不再给）；带 `Retry-After`，冻结的额度整笔退回 |
+| `503` | `RESPONSE_OWNER_UNAVAILABLE` | 续写的 Responses 链的 owner 账号并发已满 |
+| `503` | `TIER_CONFIG_UNAVAILABLE` | 号源分级配置从未加载成功（失败关闭，不按系数 1 静默计费） |
+| `500` | `SOURCE_TIER_SELECTION_INVALID` | 选中的账号不属于为它选定的号池（内部一致性检查，不应出现；派发之前返回，预留全额退回） |
+| `400` | `API_KEY_TIER_PREFERENCE_INVALID` | 创建或编辑 API Key 时（`/admin/api-keys`）号源偏好写法不对，或给 `*` 的旧 Key 设偏好 |
+
+管理接口（`/admin/source-tiers/...`）：
+
+| 状态码 | 错误码 | 何时 |
+|---|---|---|
+| `400` | `SOURCE_TIER_VENDOR_UNKNOWN` | 厂商不是模型目录里的提供方（`anthropic`、`openai`、`google`、`deepseek` 或自定义厂商） |
+| `400` | `SOURCE_TIER_INVALID` | 号池配置不合法：号池标识、级别、名称、系数、类别重复，或启用了没有启用号池的厂商等 |
+| `400` | `SOURCE_TIER_MEMBER_INVALID` | 成员行不合法：账号重复、引用了不存在的号池、映射的字段不合法，或对该账号不适用 |
+| `400` | `SOURCE_TIER_MEMBER_PROTOCOL_INVALID` | 成员行的 `protocol` 不是这个版本支持的（目前只有 `OPENAI_CHAT`） |
+| `400` | `SOURCE_TIER_GATE_INVALID` | 门控行不合法：来源协议、入口或状态不在取值里，名单的 Key 过长、多于 50 个或列了 `anonymous`（不带 Key 的调用者用这个 ID，它不是 API Key），或同一个对出现两次 |
+| `400` | `SOURCE_PROFILE_NOT_APPLICABLE` | 给 `deepseek` 或自定义厂商登记中转 / 门控：它们本来就把兼容 Key 当作自己的账号 |
+| `400` | `SOURCE_PAIR_NOT_OFFERED` | 门控设为 `KEYS` / `ON`，而这个版本没有提供这个（入口，厂商）对 |
+| `409` | `SOURCE_PAIR_GATE_FORBIDDEN` | 门控对试用中的对设为 `ON`（只能 `KEYS`） |
+| `400` | `SOURCE_TIER_CACHE_EVIDENCE_REQUIRED` | 缓存口径设为「不含」而没有缓存探针的证据 |
+| `409` | `SOURCE_TIER_RUNTIME_UNSUPPORTED` | 保存了这个版本还不能运行的设置（`data` 列出） |
+| `409` | `SOURCE_TIER_VERSION_CONFLICT` | `expectedVersion` 过期（`data.currentVersion`） |
+| `404` | `SOURCE_TIER_MEMBER_NOT_FOUND` | 验证或拉取模型列表的账号不存在，或不是这个厂商的中转 |
+| `429` | `SOURCE_VERIFY_RATE_LIMITED` | 同一个账号 30 秒内验证过（`data.retryAfterSeconds`），或 5 秒内拉取过模型列表 |
+| `502` | `SOURCE_UPSTREAM_MODELS_FAILED` | 中转没有返回模型列表 |
+| `400` | `SOURCE_EVIDENCE_WINDOW_INVALID` | 升级证据的 `days` 不在 1 到 90 |
+| `503` | `TIER_CONFIG_UNAVAILABLE` | 配置从未加载成功（状态接口也一样） |
+
+另见控制台「使用文档」里的「错误码速查」，它给最终用户讲了上面代理接口那几条的处理办法。
 
 ### 实验性的分级熔断
 
@@ -926,7 +1008,7 @@ POST  /admin/billing/reviews/{requestHash}/resolve
 - 手动发放用 `{"userId":"user-1","planId":"plan-1"}` 加一个 `Idempotency-Key` 请求头。状态变更必须给出原因，例如 `{"status":"REVOKED","reason":"Entitlement correction"}`。恢复一个已过期的订阅，或与已经推进的续订重叠的期限，会返回 409。
 - 订阅响应包含 `planVersion`、`reservedCredits`、`availableCredits` 和有效状态（`ACTIVE`、`SCHEDULED`、`EXHAUSTED`、`EXPIRED`、`REVOKED`、`CANCELLED`）。`remainingCredits` 是额度减去已消耗的用量；`availableCredits` 还会额外扣除冻结额度。**在把一行当作可花费之前先检查状态。**汇总端点在服务端聚合所有匹配的订阅，包括已撤销 / 过期期限上未结清的冻结。分页响应含 `items,total,page,pageSize`（页大小最大 200）；账本分页最多 100 条，用最后一条的 ID 作 `before`。旧版的列表端点最多返回 200 行。
 
-**余额不足与计费复核**：余额或匹配的套餐额度不足，会在派发之前返回 `402`。请求在已经发出之后断开 / 读超时 / 响应不完整，其未知成本会保留冻结并需要复核；该用户（所有 Key）之后的调用会返回 `409 BILLING_REVIEW_REQUIRED`。上游明确返回的错误响应，以及请求根本没发出去的失败，会直接释放冻结，不进入复核。管理员用 `{"action":"SETTLE","credits":"0.15","reason":"Verified upstream usage"}` 或 `{"action":"WAIVE","reason":"Confirmed no charge"}` 处理。`GET /admin/billing/reviews` 里，按号源分级服务的请求的预留按它**可能**被服务的最贵号池定额，所以按预留金额结算会让用户为没有服务过他的号池付费；这类行因此另带 `tier_plan`（预留时冻结的号池计划）、`served`（实际服务的号池，含级别、系数、报价 `quote` 和该级的预留估算 `estimate`）和 `last_dispatched`（最后派发到的号池及时间，同样带报价）。核对时请按 `served`（没有则按 `last_dispatched`）的报价估算金额，而不是预留金额；没有分级的请求不含这些字段。每个操作都会被审计。在计费未完成时修改 Key 的厂商 / 计费来源或删除它，会返回 `409 API_KEY_BILLING_BUSY`。
+**余额不足与计费复核**：余额或匹配的套餐额度不足，会在派发之前返回 `402`。请求在已经发出之后断开 / 读超时 / 响应不完整，其未知成本会保留冻结并需要复核；该用户（所有 Key）之后的调用会返回 `409 BILLING_REVIEW_REQUIRED`。上游明确返回的错误响应，以及请求根本没发出去的失败，会直接释放冻结，不进入复核。请求在手于跨协议中转时是例外，反过来：中转只被问一次，从派发到结算返回，无论读超时、响应不完整，还是客户端断开，冻结都**确定释放**（运营者承担，不向用户收费），不进复核；原生账号在手时才按上面的规则保留冻结，此前已经问过原生账号、可能已计费的请求也仍然进复核。管理员用 `{"action":"SETTLE","credits":"0.15","reason":"Verified upstream usage"}` 或 `{"action":"WAIVE","reason":"Confirmed no charge"}` 处理。`GET /admin/billing/reviews` 里，按号源分级服务的请求的预留按它**可能**被服务的最贵号池定额，所以按预留金额结算会让用户为没有服务过他的号池付费；这类行因此另带 `tier_plan`（预留时冻结的号池计划）、`served`（实际服务的号池，含级别、系数、报价 `quote` 和该级的预留估算 `estimate`）和 `last_dispatched`（最后派发到的号池及时间，同样带报价）。核对时请按 `served`（没有则按 `last_dispatched`）的报价估算金额，而不是预留金额；没有分级的请求不含这些字段。每个操作都会被审计。在计费未完成时修改 Key 的厂商 / 计费来源或删除它，会返回 `409 API_KEY_BILLING_BUSY`。
 
 套餐兑换码用 `planId` 取代 `balance`（前缀 `PLN-`）；兑换时遵循固定的版本，即使该产品之后被更新或下架。目前的结账方式是钱包购买、管理员发放或兑换码；**套餐的网关直付尚未实现**。迁移和恢复的细节见 [Coding Plan 重建与验证](CODING_PLAN_REBUILD.md)。
 

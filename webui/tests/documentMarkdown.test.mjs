@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import { JSDOM } from 'jsdom';
 import { build } from 'esbuild';
@@ -58,4 +59,45 @@ test('heading anchors stay unique and image alt text cannot inject markup', () =
   const result = render('## Repeated\n\n## Repeated\n\n![" onerror="alert(1)](https://example.com/a.png)');
   assert.deepEqual(result.headings.map(h => h.id), ['doc-heading-1', 'doc-heading-2']);
   assert.equal(documentFor(result.html).querySelector('[onerror]'), null);
+});
+
+// The default tutorials that explain source tiers (V30) are Markdown inside a migration, so a mistake in a table or a link
+// would only show to a reader. Render every body the migration installs, in both languages.
+const tierTutorials = readFileSync(
+  new URL('../../service/src/main/resources/db/migration/V30__documentation_source_tiers.sql', import.meta.url),
+  'utf8',
+);
+const tierBodies = [...tierTutorials.matchAll(/\$doc\$([\s\S]*?)\$doc\$/g)].map(match => match[1]);
+const siteRoutes = new Set(['#/api-keys', '#/models', '#/payment', '#/coding-plans', '#/welcome', '#/tickets', '#/model-ranking', '#/news', '#/documentation']);
+
+test('the source-tier tutorials render as tables, code and site links without raw HTML', () => {
+  assert.equal(tierBodies.length, 12);
+  for (const [index, body] of tierBodies.entries()) {
+    const result = render(body);
+    const doc = documentFor(result.html);
+    const where = `body ${index} (${index % 2 === 0 ? 'Chinese' : 'English'})`;
+    assert.equal(doc.querySelector('script, iframe, [onerror], [onclick]'), null, where);
+    // A table that Markdown cannot parse (a missing separator row, rows of another width) stays a paragraph of pipes.
+    for (const paragraph of doc.querySelectorAll('p')) {
+      assert.ok(!paragraph.textContent.trimStart().startsWith('|'), `${where}: a table did not render: ${paragraph.textContent.slice(0, 60)}`);
+    }
+    for (const row of doc.querySelectorAll('table')) {
+      const widths = new Set([...row.querySelectorAll('tr')].map(tr => tr.children.length));
+      assert.equal(widths.size, 1, `${where}: table rows of different widths`);
+    }
+    assert.equal(new Set(result.headings.map(heading => heading.id)).size, result.headings.length, where);
+    for (const anchor of doc.querySelectorAll('a')) {
+      const href = anchor.getAttribute('href');
+      assert.ok(href.startsWith('#/documentation/') || siteRoutes.has(href) || href.startsWith('https://'), `${where}: ${href}`);
+    }
+  }
+});
+
+test('the client tutorials keep their code blocks and the tier examples copy as written', () => {
+  const copied = tierBodies.flatMap(body => render(body).codes);
+  assert.ok(copied.includes("export ANTHROPIC_CUSTOM_HEADERS='X-Starry-Tier: economy'\n"));
+  assert.ok(copied.some(code => code.includes('http_headers = { "X-Starry-Tier" = "economy" }')));
+  assert.ok(copied.some(code => code.includes('"headers": { "X-Starry-Tier": "economy" }')));
+  // A copy button never copies a site placeholder unresolved.
+  assert.ok(copied.every(code => !code.includes('{{')));
 });

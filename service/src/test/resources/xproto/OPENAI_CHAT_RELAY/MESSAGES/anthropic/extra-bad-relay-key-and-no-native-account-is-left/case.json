@@ -1,0 +1,1 @@
+{"origin": "Claude Code 2.1.168: the relay refuses its own key (401) and the tier below has no account in service, so what the client is told is the relay's 401. The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

@@ -157,6 +157,33 @@ class TierBillingTest {
     }
 
     @Test
+    void aRelaysCostIsThePriceOfItsTierAndNeverMoreThanTheEstimateThatWasReserved() {
+        TierPlan plan = plan("1", "0.6", true);
+        TierBilling billing = TierBilling.of(plan, "claude-sonnet-4.5");
+        Level served = plan.levels().get(1);
+
+        // Within the estimate it is the price of the tier, as for any other source.
+        assertThat(billing.relayCost(served, USAGE)).isEqualByComparingTo("0.0234");
+        assertThat(billing.relayCost(served, USAGE)).isEqualByComparingTo(billing.cost(served, USAGE));
+        // A usage the bounds did not hold would cost more than the tier reserved; the reservation is the ceiling.
+        PlatformUsage beyond = new PlatformUsage(900_000_000L, 900_000_000L, BigDecimal.ZERO, 0, 0, 0);
+        assertThat(billing.cost(served, beyond)).isGreaterThan(served.estimate());
+        assertThat(billing.relayCost(served, beyond)).isEqualByComparingTo(served.estimate());
+    }
+
+    @Test
+    void aRelaysCostOfATierThePlanDidNotPriceIsAnErrorToo() {
+        TierPlan plan = plan("1", "0.6", true);
+        TierPlan another = plan("1", "3", true);
+        Level foreign = new Level(another.levels().get(1).tier(), "anthropic:relay", List.of(PoolCell.XP_OPENAI_CHAT),
+            1_000L, QUOTE.scaled(new BigDecimal("3")), BigDecimal.ONE, java.util.Map.of());
+
+        assertThatThrownBy(() -> TierBilling.of(plan, "claude-sonnet-4.5").relayCost(foreign, USAGE))
+            .isInstanceOf(IllegalStateException.class)
+            .hasMessageContaining("anthropic:relay");
+    }
+
+    @Test
     void aTierThePlanDidNotPriceIsAnErrorNotTheLargestQuote() {
         TierPlan plan = plan("1", "0.6", true);
         TierPlan another = plan("1", "3", true);

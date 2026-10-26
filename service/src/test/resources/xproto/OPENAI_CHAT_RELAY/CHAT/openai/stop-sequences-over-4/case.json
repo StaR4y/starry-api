@@ -1,0 +1,1 @@
+{"origin": "OpenCode 1.18.16 request with 5 stop sequences: derived from the capture by adding the field. The capture asks for a Claude model; the model is changed to gpt-5.5 and reasoning_effort is the medium OpenCode sends for it (its verbosity field is left out, see extra-opencode-gpt-request-with-verbosity)"}

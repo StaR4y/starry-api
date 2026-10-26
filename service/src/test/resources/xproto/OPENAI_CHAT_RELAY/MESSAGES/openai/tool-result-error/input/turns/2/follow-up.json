@@ -1,0 +1,16 @@
+[
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "tool_result",
+        "content": "File does not exist. Note: your current working directory is /work/project",
+        "is_error": true,
+        "tool_use_id": "${tool.0}",
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      }
+    ]
+  }
+]

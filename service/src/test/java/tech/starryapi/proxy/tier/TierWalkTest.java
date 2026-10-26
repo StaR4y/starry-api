@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
 import tech.starryapi.account.AccountPoolService;
 import tech.starryapi.account.ModelPoolKeyResolver;
+import tech.starryapi.account.PoolCell;
 import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.account.allocation.AccountAllocationCategory;
 import tech.starryapi.model.BillingQuote;
@@ -315,6 +316,35 @@ class TierWalkTest {
         assertThat(walk.takeRetest()).isFalse();
         // Each request has its own: the one of another walk is not used up by it.
         assertThat(new TierWalk(plan()).takeRetest()).isTrue();
+    }
+
+    // ---- a relay that refused the request ----
+
+    @Test
+    void aWalkThatCrossedToTheNativeAccountsLeavesTheTierAndTheRelaysBehind() {
+        TierPlan plan = plan();
+        TierWalk walk = new TierWalk(plan);
+        Level first = plan.levels().get(0);
+        Level relayAndNative = new Level(first.tier(), first.tierRef(), List.of(PoolCell.KIRO_COMPATIBLE, PoolCell.XP_OPENAI_CHAT),
+            first.inputBound(), first.quote(), first.estimate(), first.responseHeaders());
+        assertThat(walk.nativeOnly()).isFalse();
+        assertThat(walk.cells(relayAndNative)).containsExactly(PoolCell.KIRO_COMPATIBLE, PoolCell.XP_OPENAI_CHAT);
+
+        walk.crossedToNative(first);
+
+        assertThat(walk.nativeOnly()).isTrue();
+        assertThat(tierIds(walk.levels())).containsExactly("oauth", "kiro");
+        // The cell of the relays is the one that goes; the rest of a tier is offered as it was.
+        assertThat(walk.cells(relayAndNative)).containsExactly(PoolCell.KIRO_COMPATIBLE);
+        assertThat(walk.cells(plan.levels().get(2))).isEqualTo(plan.levels().get(2).cells());
+    }
+
+    @Test
+    void aWalkCannotCrossBelowTheLastTier() {
+        TierPlan plan = plan();
+        TierWalk walk = new TierWalk(plan);
+
+        assertThatThrownBy(() -> walk.crossedToNative(plan.levels().get(2))).isInstanceOf(IllegalArgumentException.class);
     }
 
     // ---- fixtures ----

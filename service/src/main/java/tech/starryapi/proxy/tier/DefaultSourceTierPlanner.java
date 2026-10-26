@@ -3,9 +3,11 @@ package tech.starryapi.proxy.tier;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -25,6 +27,8 @@ import tech.starryapi.model.BillingQuote;
 import tech.starryapi.model.ModelCatalogProvider;
 import tech.starryapi.model.ModelPricingService;
 import tech.starryapi.payment.PaymentSettingsService;
+import tech.starryapi.platform.xproto.PairRegistry;
+import tech.starryapi.platform.xproto.RelayErrorException;
 import tech.starryapi.proxy.tier.TierPlan.Level;
 import tech.starryapi.proxy.tier.TierRuntime.Destination;
 import tech.starryapi.proxy.tier.TierSelectorParser.Selector;
@@ -57,6 +61,14 @@ import tools.jackson.databind.JsonNode;
  * choose it, the route of this request has nothing in it, the response chain would have to leave its owner's pool), the
  * request is served in the tiers' order and the response says that the selector was ignored.
  *
+ * <p>A tier may also hold relays, accounts of another protocol that a request is converted for (design 7). They join a
+ * tier's cells as the last of them, and only the relays that {@link XpEligibility} finds fit for this request: the pair is
+ * offered and its gate is open for the key, the model is mapped and verified, the request has nothing the relay cannot
+ * carry, it converts and fits, it has not broken off an answer for the session a moment ago, and no prompt as large was
+ * refused by it for its length. A tier whose relays are all left out is as it would be without them, and a request
+ * that nothing else can serve because of a feature a relay cannot carry is refused with that feature named (400
+ * SOURCE_TIER_FEATURE_UNSUPPORTED), before anything is reserved. A vendor without relays is planned exactly as it was.
+ *
  * <p>The one thing that changes where a request is sent is the all-endpoints switch of the anthropic vendor (design 4.9),
  * which the plan reports ({@link TierPlan#unified}): a Claude model asked through Chat Completions or Responses is planned
  * and served on the Anthropic route, as it is through the Messages endpoint, and not by Kiro alone.
@@ -77,6 +89,10 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
     private final TierSessionBindings bindings;
     private final boolean selectors;
     private final boolean unifyEndpoints;
+    private final XpEligibility relays;
+    private final XpSkipCounts skipCounts;
+    /** The entries for which the registry lists a pair: for any other, no request is read for relays. */
+    private final Set<TierEntry> relayEntries;
 
     /** A planner that lets clients name the tier they want, and honours the all-endpoints switch. */
     public DefaultSourceTierPlanner(
@@ -123,6 +139,48 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         boolean selectors,
         boolean unifyEndpoints
     ) {
+        this(registry, keyResolver, modelCatalog, accountPool, paymentSettings, modelPricing, bindings, selectors, unifyEndpoints,
+            PairRegistry.defaults(), new XpSkipCounts());
+    }
+
+    /** A planner that has learned nothing of the relays. */
+    public DefaultSourceTierPlanner(
+        SourceTierRegistry registry,
+        ModelPoolKeyResolver keyResolver,
+        ModelCatalogProvider modelCatalog,
+        AccountPoolService accountPool,
+        PaymentSettingsService paymentSettings,
+        ModelPricingService modelPricing,
+        TierSessionBindings bindings,
+        boolean selectors,
+        boolean unifyEndpoints,
+        PairRegistry pairs,
+        XpSkipCounts skipCounts
+    ) {
+        this(registry, keyResolver, modelCatalog, accountPool, paymentSettings, modelPricing, bindings, selectors, unifyEndpoints,
+            pairs, skipCounts, XpLearnedLimits.disabled());
+    }
+
+    /**
+     * @param pairs the cross-protocol pairs this release offers, which decide whether a relay can take part in a request
+     * @param skipCounts where the reasons relays were left out of plans are counted
+     * @param learnedLimits the context windows that the refusals of relays taught this node, which a relay is also left out
+     *     of the requests that are as large as one it refused for (design 7.8)
+     */
+    public DefaultSourceTierPlanner(
+        SourceTierRegistry registry,
+        ModelPoolKeyResolver keyResolver,
+        ModelCatalogProvider modelCatalog,
+        AccountPoolService accountPool,
+        PaymentSettingsService paymentSettings,
+        ModelPricingService modelPricing,
+        TierSessionBindings bindings,
+        boolean selectors,
+        boolean unifyEndpoints,
+        PairRegistry pairs,
+        XpSkipCounts skipCounts,
+        XpLearnedLimits learnedLimits
+    ) {
         this.registry = Objects.requireNonNull(registry, "registry");
         this.keyResolver = Objects.requireNonNull(keyResolver, "keyResolver");
         this.modelCatalog = Objects.requireNonNull(modelCatalog, "modelCatalog");
@@ -132,6 +190,24 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         this.bindings = Objects.requireNonNull(bindings, "bindings");
         this.selectors = selectors;
         this.unifyEndpoints = unifyEndpoints;
+        this.relays = new XpEligibility(Objects.requireNonNull(pairs, "pairs"), accountPool,
+            new XpModelResolver(modelCatalog, keyResolver), bindings, Objects.requireNonNull(learnedLimits, "learnedLimits"));
+        this.skipCounts = Objects.requireNonNull(skipCounts, "skipCounts");
+        Set<TierEntry> entries = EnumSet.noneOf(TierEntry.class);
+        pairs.offeredPairs().forEach(pair -> entries.add(TierEntry.valueOf(pair.entry().name())));
+        this.relayEntries = Set.copyOf(entries);
+    }
+
+    @Override
+    public boolean wantsEntryFacts(TierEntry entry) {
+        if (entry == null || !relayEntries.contains(entry)) {
+            return false;
+        }
+        try {
+            return registry.snapshot().hasOpenRelayFor(entry.name());
+        } catch (ApiException notLoaded) {
+            return false;
+        }
     }
 
     @Override
@@ -225,10 +301,12 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
             TierPlanRequest routed = unified ? request.withRoute(TierRoute.ANTHROPIC) : request;
             List<PoolCell> units = nativeUnits(routed);
             String modelKey = modelKey(vendor, routed.upstreamModel());
+            XpEligibility.Found xp = relays.evaluate(routed, snapshot, vendor, modelKey, units, tiers);
+            skipCounts.add(vendor, xp.skips());
             // A chain no tier can continue is refused here, before the price of the model is even looked up.
-            return resolve(routed, snapshot, config, vendor, modelKey, units, chosen, tiers)
+            return resolve(routed, snapshot, config, vendor, modelKey, units, xp, chosen, tiers)
                 .flatMap(resolved -> standardPrice(routed)
-                    .map(price -> build(routed, snapshot, config, vendor, modelKey, units, resolved, price.orElse(null), unified)));
+                    .map(price -> build(routed, snapshot, config, vendor, modelKey, units, xp, resolved, price.orElse(null), unified)));
         });
     }
 
@@ -270,6 +348,13 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
      * account is a pool whose accounts are all switched off ({@link #hasSwitchedOffMember}): the client asked for that
      * pool alone, and it is the pool that cannot serve for now, so the request is kept to it and answered with
      * SOURCE_TIER_UNAVAILABLE, as it is when the accounts are only busy, and not served by another pool at another price.
+     *
+     * <p>Where no tier has anything to serve with, and a relay was left out for a feature of the request that the native
+     * accounts of the route carry, or for the length of its prompt, the request is refused for that ({@link #servable}),
+     * whether it asked for the tier by the suffix or by a hint that was dropped, or for none. Where the only thing missing
+     * is a relay that broke off an answer a moment ago, nothing is refused: the tier can serve again shortly, so a request
+     * that named it by the suffix keeps it and is answered with SOURCE_TIER_UNAVAILABLE, which a client retries, and not with
+     * the SOURCE_TIER_NOT_OFFERED of a tier that has no account for it at all.
      */
     private Mono<Resolved> resolve(
         TierPlanRequest request,
@@ -278,31 +363,72 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         String vendor,
         String modelKey,
         List<PoolCell> units,
+        XpEligibility.Found xp,
         Choice choice,
         List<Tier> enabled
     ) {
         return Mono.defer(() -> {
             Resolved met;
             try {
-                met = meet(request, snapshot, config, vendor, modelKey, units, choice);
+                met = meet(request, snapshot, config, vendor, modelKey, units, xp, choice);
             } catch (ApiException refused) {
                 if (!choice.yields()) {
                     throw refused;
                 }
-                return Mono.just(meet(request, snapshot, config, vendor, modelKey, units, new Choice(enabled, null, true, false)));
+                return Mono.just(servable(
+                    meet(request, snapshot, config, vendor, modelKey, units, xp, new Choice(enabled, null, true, false)), xp));
             }
             List<Tier> memberless = met.availability().memberless();
-            if (!choice.pinned() || memberless.isEmpty()) {
+            if (memberless.isEmpty()) {
                 return Mono.just(met);
             }
+            if (!choice.pinned()) {
+                return Mono.just(servable(met, xp));
+            }
             if (!choice.yields()) {
+                servable(met, xp);
+                if (xp.temporarilyOut(memberless)) {
+                    return Mono.just(met);
+                }
                 throw notOffered(choice);
             }
-            return hasSwitchedOffMember(memberless, units, snapshot, vendor)
+            return hasSwitchedOffMember(request, memberless, units, xp, snapshot, vendor)
                 .map(switchedOff -> switchedOff
                     ? met
-                    : meet(request, snapshot, config, vendor, modelKey, units, new Choice(enabled, null, true, false)));
+                    : servable(meet(request, snapshot, config, vendor, modelKey, units, xp, new Choice(enabled, null, true, false)),
+                        xp));
         });
+    }
+
+    /**
+     * Refuses a request that has nowhere to go because of what it asks for (design 3, step 6): none of the tiers it may use
+     * has an account or a relay for it, and a relay of them was left out for a feature that is beyond it, or because the
+     * prompt is longer than it takes. The client is told the feature, which is its own to take out, or what a relay that
+     * refuses the prompt at dispatch is answered with (design 7.8: "prompt is too long", which clients such as Claude Code
+     * shorten the conversation for), the same on the first request and on every later one, whether the window is the one the
+     * administrator wrote or the one a refusal showed. It is not told about the relays.
+     *
+     * <p>Nothing is refused while a relay is only out for a moment ({@link XpSkip.Reason#temporary}): the request may be
+     * served by it shortly, and what is refused for good is not a request that would be.
+     */
+    private static Resolved servable(Resolved resolved, XpEligibility.Found xp) {
+        List<Tier> memberless = resolved.availability().memberless();
+        if (memberless.isEmpty() || xp.temporarilyOut(memberless)) {
+            return resolved;
+        }
+        String feature = xp.hardFeature(memberless);
+        if (feature != null) {
+            throw new ApiException(
+                HttpStatus.BAD_REQUEST,
+                "SOURCE_TIER_FEATURE_UNSUPPORTED",
+                "The request uses " + feature + ", which no source of the tiers it may be served from supports",
+                Map.of("feature", feature)
+            );
+        }
+        if (xp.contextRefused(memberless)) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "UPSTREAM_ERROR", RelayErrorException.PROMPT_TOO_LONG);
+        }
+        return resolved;
     }
 
     private Resolved meet(
@@ -312,6 +438,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         String vendor,
         String modelKey,
         List<PoolCell> units,
+        XpEligibility.Found xp,
         Choice choice
     ) {
         Tier ownerTier = ownerTier(request, snapshot, vendor, units, choice);
@@ -330,15 +457,15 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
             // been idle for too long to keep); keeping it would hold the chain in that tier, and pay its factor, for as
             // long as the chain lasts, whatever the named or the best tier could serve. A chain that cannot leave its
             // owner keeps it.
-            Availability walked = availability(choice.candidates(), null, false, units, snapshot, vendor);
+            Availability walked = availability(choice.candidates(), null, false, units, xp, snapshot, vendor);
             if (ownerTier.tierId().equals(startTier(walked.serving(), snapshot, vendor, bound).tierId())) {
-                availability = availability(choice.candidates(), ownerTier, false, units, snapshot, vendor);
+                availability = availability(choice.candidates(), ownerTier, false, units, xp, snapshot, vendor);
             } else {
                 ownerTier = null;
                 availability = walked;
             }
         } else {
-            availability = availability(choice.candidates(), ownerTier, !request.responseMovable(), units, snapshot, vendor);
+            availability = availability(choice.candidates(), ownerTier, !request.responseMovable(), units, xp, snapshot, vendor);
         }
         return new Resolved(choice, session, bound, ownerTier, availability);
     }
@@ -369,7 +496,14 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
      * of service. Only a request that pinned the tier by a hint needs to tell the two apart, and only when the cache has
      * nothing of the tier, so the table is read rarely (and the read is kept as long as the cache is).
      */
-    private Mono<Boolean> hasSwitchedOffMember(List<Tier> tiers, List<PoolCell> units, SourceTierSnapshot snapshot, String vendor) {
+    private Mono<Boolean> hasSwitchedOffMember(
+        TierPlanRequest request,
+        List<Tier> tiers,
+        List<PoolCell> units,
+        XpEligibility.Found xp,
+        SourceTierSnapshot snapshot,
+        String vendor
+    ) {
         Mono<List<ProxyAccountEntity>> read = accountPool.switchedOffAccounts();
         if (read == null) {
             return Mono.just(false);
@@ -380,7 +514,18 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
                 .filter(account -> units.stream().anyMatch(cell -> cell.predicate().test(account)))
                 .anyMatch(account -> TierMembership.nativeTierOf(snapshot, vendor, account)
                     .filter(tier -> ids.contains(tier.tierId()))
-                    .isPresent()))
+                    .isPresent())
+                // A relay of those tiers that is switched off is out of service in the same way, provided it is one this
+                // request would be given if it were back: the pair is open to the key, the model is mapped and verified for it,
+                // and the request carries nothing it cannot. One that could not serve it anyway (the small model of Claude
+                // Code that the relay has no mapping for, a web search) is no reason to keep the request to a tier that has
+                // nothing for it: that request is served in the order of the tiers, as it is when the relay is in service.
+                || (xp.open() && switchedOff.stream()
+                    .filter(account -> PoolCell.XP_OPENAI_CHAT.predicate().test(account))
+                    .anyMatch(account -> snapshot.member(vendor, account.getAccountId())
+                        .filter(member -> member.crossProtocol() && ids.contains(member.tierId()))
+                        .filter(member -> relays.couldServeWhenBack(request, snapshot, vendor, units, member, account))
+                        .isPresent())))
             .defaultIfEmpty(false);
     }
 
@@ -499,6 +644,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         String vendor,
         String modelKey,
         List<PoolCell> units,
+        XpEligibility.Found xp,
         Resolved resolved,
         BillingQuote standardPrice,
         boolean unified
@@ -508,7 +654,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         Tier ownerTier = resolved.ownerTier();
         TierPlan.Session session = resolved.session();
         TierSessionBindings.Binding bound = resolved.bound();
-        long inputBound = inputBound(request.upstreamRequest(), units);
+        long nativeInputBound = inputBound(request.upstreamRequest(), units);
         long outputBound = RequestBounds.outputTokens(request.upstreamRequest());
         TierPlan.Mode mode = choice.pinned() ? TierPlan.Mode.PINNED : TierPlan.Mode.AUTO;
 
@@ -516,14 +662,27 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         for (Tier tier : availability.serving()) {
             // One multiplication per tier, exact and rounded only when a cost or an estimate is taken from it.
             BillingQuote quote = standardPrice == null ? null : standardPrice.scaled(tier.priceFactor());
+            List<TierPlan.Relay> relays = xp.relays(tier.tierId());
+            // The reservation of a tier covers the dearest thing it can be sent: what the native cells are, and what each
+            // relay is, since a relay is sent its own body and counts an image as its mapping says. A tier that the
+            // configuration cannot put a native account in is sent the relays' body alone, so an inline image on a route that
+            // passes it through (which lifts the native bound to the floor for hidden input) does not size its reservation;
+            // that is the configuration of the plan, and no account the cache reloads can change it.
+            boolean natives = relays.isEmpty() || snapshot.canHoldNativeAccounts(vendor, tier.tierId())
+                || (ownerTier != null && ownerTier.tierId().equals(tier.tierId()));
+            long inputBound = natives ? nativeInputBound : 0L;
+            for (TierPlan.Relay relay : relays) {
+                inputBound = Math.max(inputBound, relay.inputBound());
+            }
             levels.add(new Level(
                 tier,
                 vendor + ":" + tier.tierId(),
-                units,
+                relays.isEmpty() ? units : withRelayCell(units),
                 inputBound,
                 quote,
                 quote == null ? null : quote.estimate(inputBound, outputBound),
-                TierResponseHeaders.served(tier, mode, choice.ignored())
+                TierResponseHeaders.served(tier, mode, choice.ignored()),
+                relays
             ));
         }
         TierPlan.Owner owner = ownerTier == null
@@ -538,6 +697,13 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         int origin = bound == null ? 0 : levelOf(snapshot, vendor, bound);
         int start = startIndex(availability.serving(), bound, origin);
         List<Level> hold = holdLevels(levels, start);
+        // The tiers where a relay sat this request out for its own sake: whatever the rest of the tier did, serving it from
+        // below is not a fall of the session (design 4.7). Those above the tier the session is bound to are not its concern.
+        List<Tier> requestBound = xp.requestBoundTiers().stream()
+            .map(tierId -> snapshot.tier(vendor, tierId))
+            .flatMap(Optional::stream)
+            .filter(tier -> tier.level() >= origin)
+            .toList();
         return new TierPlan(
             vendor,
             modelKey,
@@ -564,8 +730,19 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
             ),
             choice.pinned() ? choice.candidates().stream().map(Tier::tierId).collect(Collectors.toSet()) : Set.of(),
             choice.pinned() ? null : lowBalanceHint(config, request, levels, hold),
-            unified
+            unified,
+            xp.skips(),
+            xp.open(),
+            xp.session(),
+            requestBound
         );
+    }
+
+    /** The cells of a tier that has relays: the route's, and the relays' after them (design 4.3, "native first"). */
+    private static List<PoolCell> withRelayCell(List<PoolCell> units) {
+        List<PoolCell> cells = new ArrayList<>(units);
+        cells.add(PoolCell.XP_OPENAI_CHAT);
+        return cells;
     }
 
     /**
@@ -723,12 +900,16 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
      * <p>A response chain that cannot leave its owner ({@code ownerOnly}) is served by the owner's tier and by no other:
      * the owner is tried first, nothing else may serve the chain, and the retries stop, so no other tier is planned, held
      * for, or offered as a cheaper way. The tiers it does not use are not ones the session was pushed out of either.
+     *
+     * <p>The relays that may serve the request count with the native accounts: a tier with such a relay has an account of
+     * the route (cached and enabled), and is available when one of them is.
      */
     private Availability availability(
         List<Tier> tiers,
         Tier ownerTier,
         boolean ownerOnly,
         List<PoolCell> units,
+        XpEligibility.Found xp,
         SourceTierSnapshot snapshot,
         String vendor
     ) {
@@ -746,6 +927,14 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
                 }
             });
         }
+        // A relay that may serve the request places its tier like a native account does. One that was left out does not: a
+        // tier made of such relays has nothing to serve this request with, which is the structural kind of empty.
+        xp.byTier().forEach((tierId, relays) -> {
+            placed.add(tierId);
+            if (relays.stream().anyMatch(eligible -> accountPool.isUsable(eligible.account()))) {
+                available.add(tierId);
+            }
+        });
         List<Tier> serving = tiers.stream()
             .filter(tier -> (ownerTier != null && tier.tierId().equals(ownerTier.tierId())) || available.contains(tier.tierId()))
             .toList();
@@ -755,9 +944,14 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
                 ? new Availability(tiers, List.of(), tiers)
                 : new Availability(withAccounts, List.of(), List.of());
         }
+        // A tier that has a relay sat out for this request is not one the request found with nothing to offer, even when
+        // the members that did take part cannot serve now (design 4.2: only the layers 1 to 4 count; 4.7).
+        Set<String> requestBound = xp.requestBoundTiers();
         return new Availability(
             serving,
-            tiers.stream().filter(tier -> !serving.contains(tier) && placed.contains(tier.tierId())).toList(),
+            tiers.stream()
+                .filter(tier -> !serving.contains(tier) && placed.contains(tier.tierId()) && !requestBound.contains(tier.tierId()))
+                .toList(),
             List.of()
         );
     }
@@ -829,7 +1023,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
             .orElse(id);
     }
 
-    private static String normalize(String model) {
+    static String normalize(String model) {
         String id = model == null ? "" : model.trim().toLowerCase(Locale.ROOT);
         boolean stripped = true;
         while (stripped) {

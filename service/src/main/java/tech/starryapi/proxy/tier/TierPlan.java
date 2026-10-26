@@ -12,6 +12,7 @@ import tech.starryapi.account.PoolCell;
 import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.model.BillingQuote;
 import tech.starryapi.sourcetier.SourceTierSnapshot;
+import tech.starryapi.sourcetier.SourceTierSnapshot.MemberModel;
 import tech.starryapi.sourcetier.SourceTierSnapshot.Tier;
 import tech.starryapi.sourcetier.SourceTierSnapshot.VendorConfig;
 
@@ -59,13 +60,17 @@ public final class TierPlan {
 
     /**
      * One tier of the plan. {@code cells} are the kinds of account the route can send the request to, in the order the
-     * untiered route tries them; which of those accounts belong to this tier is {@link TierPlan#holds}.
+     * untiered route tries them; which of those accounts belong to this tier is {@link TierPlan#holds}. The cell of the
+     * relays comes last, and only in a tier that has relays for this request.
      *
      * @param tierRef the tier as it is recorded with the reservation and the usage: {@code vendor:tierId}
      * @param inputBound the most input tokens the cells can be sent, which the reservation of this tier assumes
      * @param quote the standard price of the model times the tier's factor; null when the request is not billed
      * @param estimate what this tier would reserve for the request; null when the request is not billed
      * @param responseHeaders the headers of a response served by this tier, already encoded
+     * @param relays the relays of this tier that may serve this request, each with the dispatch it is sent (design 3,
+     *     step 5b); empty for every request that no relay takes part in, which is every request of a vendor without
+     *     relays
      */
     public record Level(
         Tier tier,
@@ -74,10 +79,25 @@ public final class TierPlan {
         long inputBound,
         BillingQuote quote,
         BigDecimal estimate,
-        Map<String, String> responseHeaders
+        Map<String, String> responseHeaders,
+        List<Relay> relays
     ) {
         public Level {
             cells = List.copyOf(cells);
+            relays = List.copyOf(relays);
+        }
+
+        /** A tier that no relay serves. */
+        public Level(
+            Tier tier,
+            String tierRef,
+            List<PoolCell> cells,
+            long inputBound,
+            BillingQuote quote,
+            BigDecimal estimate,
+            Map<String, String> responseHeaders
+        ) {
+            this(tier, tierRef, cells, inputBound, quote, estimate, responseHeaders, List.of());
         }
 
         /** The place in the order of tiers, 1 being the best. */
@@ -95,6 +115,38 @@ public final class TierPlan {
 
         public BigDecimal factor() {
             return tier.priceFactor();
+        }
+
+        /** The relay of this tier that is the account, if it may serve the request. */
+        public Optional<Relay> relay(String accountId) {
+            return accountId == null
+                ? Optional.empty()
+                : relays.stream().filter(relay -> relay.accountId().equals(accountId)).findFirst();
+        }
+    }
+
+    /**
+     * A relay that may serve the request from its tier: it passed every condition of design 3, step 5b, and the
+     * dispatch is what it is sent when the account is selected. Nothing of the request is looked at again then.
+     *
+     * @param dispatch how the request is sent to the relay: the mapping's wire name, the body built for the member's
+     *     settings and shared with the other members of the same settings, and the soft features it leaves out
+     * @param mapping the row of the relay that serves the model, with the window and the image cap the bounds use
+     * @param estimatedInput what the body weighs, as it was measured against the window of the mapping; what a relay that
+     *     refuses the prompt for its length is taught about its window (design 7.8)
+     */
+    public record Relay(TierDispatch dispatch, MemberModel mapping, long estimatedInput) {
+
+        public String accountId() {
+            return dispatch.member().accountId();
+        }
+
+        /**
+         * The most input tokens this relay can be sent: what the reservation of its tier assumes for it, and what the usage
+         * it reports is bounded by when it serves (design 5.2, 5.8).
+         */
+        public long inputBound() {
+            return RequestBounds.xpInputTokens(dispatch.wireBody(), mapping.imageTokenCap());
         }
     }
 
@@ -131,6 +183,7 @@ public final class TierPlan {
     private final List<Level> levels;
     private final List<Level> holdLevels;
     private final List<Tier> unavailableTiers;
+    private final List<Tier> requestBoundTiers;
     private final Set<String> memberlessTiers;
     private final int startIndex;
     private final Session session;
@@ -144,6 +197,9 @@ public final class TierPlan {
     private final Set<String> pinnedScope;
     private final String lowBalanceHint;
     private final boolean unified;
+    private final List<XpSkip> xpSkips;
+    private final boolean xpOpen;
+    private final String relaySession;
 
     private TierPlan(boolean selectorIgnored) {
         this.selectorIgnored = selectorIgnored;
@@ -156,6 +212,7 @@ public final class TierPlan {
         this.levels = List.of();
         this.holdLevels = List.of();
         this.unavailableTiers = List.of();
+        this.requestBoundTiers = List.of();
         this.memberlessTiers = Set.of();
         this.startIndex = 0;
         this.session = null;
@@ -168,6 +225,9 @@ public final class TierPlan {
         this.pinnedScope = Set.of();
         this.lowBalanceHint = null;
         this.unified = false;
+        this.xpSkips = List.of();
+        this.xpOpen = false;
+        this.relaySession = null;
     }
 
     /**
@@ -229,6 +289,133 @@ public final class TierPlan {
         String lowBalanceHint,
         boolean unified
     ) {
+        this(vendor, modelKey, mode, snapshot, vendorConfig, levels, holdLevels, unavailableTiers, memberlessTiers,
+            startIndex, session, owner, outputBound, standardQuote, poolContext, pinnedScope, lowBalanceHint, unified,
+            List.of());
+    }
+
+    /**
+     * @param xpSkips the relays registered in the vendor's tiers that took no part in the request, each with the first
+     *     condition it failed (see {@link #xpSkips()})
+     */
+    TierPlan(
+        String vendor,
+        String modelKey,
+        Mode mode,
+        SourceTierSnapshot snapshot,
+        VendorConfig vendorConfig,
+        List<Level> levels,
+        List<Level> holdLevels,
+        List<Tier> unavailableTiers,
+        Set<String> memberlessTiers,
+        int startIndex,
+        Session session,
+        Owner owner,
+        long outputBound,
+        BillingQuote standardQuote,
+        AccountPoolRequestContext poolContext,
+        Set<String> pinnedScope,
+        String lowBalanceHint,
+        boolean unified,
+        List<XpSkip> xpSkips
+    ) {
+        this(vendor, modelKey, mode, snapshot, vendorConfig, levels, holdLevels, unavailableTiers, memberlessTiers,
+            startIndex, session, owner, outputBound, standardQuote, poolContext, pinnedScope, lowBalanceHint, unified,
+            xpSkips, false);
+    }
+
+    /**
+     * @param xpOpen whether a pair of a relay registered in the vendor's tiers is offered and open to this request's key
+     *     (see {@link #leftOutRelay})
+     */
+    TierPlan(
+        String vendor,
+        String modelKey,
+        Mode mode,
+        SourceTierSnapshot snapshot,
+        VendorConfig vendorConfig,
+        List<Level> levels,
+        List<Level> holdLevels,
+        List<Tier> unavailableTiers,
+        Set<String> memberlessTiers,
+        int startIndex,
+        Session session,
+        Owner owner,
+        long outputBound,
+        BillingQuote standardQuote,
+        AccountPoolRequestContext poolContext,
+        Set<String> pinnedScope,
+        String lowBalanceHint,
+        boolean unified,
+        List<XpSkip> xpSkips,
+        boolean xpOpen
+    ) {
+        this(vendor, modelKey, mode, snapshot, vendorConfig, levels, holdLevels, unavailableTiers, memberlessTiers,
+            startIndex, session, owner, outputBound, standardQuote, poolContext, pinnedScope, lowBalanceHint, unified,
+            xpSkips, xpOpen, null);
+    }
+
+    /**
+     * @param relaySession what the session of the request is called for the relays that broke off its answers (see {@link
+     *     #relaySession()}); null when nothing tells the session from others
+     */
+    TierPlan(
+        String vendor,
+        String modelKey,
+        Mode mode,
+        SourceTierSnapshot snapshot,
+        VendorConfig vendorConfig,
+        List<Level> levels,
+        List<Level> holdLevels,
+        List<Tier> unavailableTiers,
+        Set<String> memberlessTiers,
+        int startIndex,
+        Session session,
+        Owner owner,
+        long outputBound,
+        BillingQuote standardQuote,
+        AccountPoolRequestContext poolContext,
+        Set<String> pinnedScope,
+        String lowBalanceHint,
+        boolean unified,
+        List<XpSkip> xpSkips,
+        boolean xpOpen,
+        String relaySession
+    ) {
+        this(vendor, modelKey, mode, snapshot, vendorConfig, levels, holdLevels, unavailableTiers, memberlessTiers,
+            startIndex, session, owner, outputBound, standardQuote, poolContext, pinnedScope, lowBalanceHint, unified,
+            xpSkips, xpOpen, relaySession, List.of());
+    }
+
+    /**
+     * @param requestBoundTiers the tiers, from the one the session is bound to down, in which a relay was left out for
+     *     something about this request or this moment, whether or not the tier is among {@code levels} (see {@link
+     *     #requestBoundAbove})
+     */
+    TierPlan(
+        String vendor,
+        String modelKey,
+        Mode mode,
+        SourceTierSnapshot snapshot,
+        VendorConfig vendorConfig,
+        List<Level> levels,
+        List<Level> holdLevels,
+        List<Tier> unavailableTiers,
+        Set<String> memberlessTiers,
+        int startIndex,
+        Session session,
+        Owner owner,
+        long outputBound,
+        BillingQuote standardQuote,
+        AccountPoolRequestContext poolContext,
+        Set<String> pinnedScope,
+        String lowBalanceHint,
+        boolean unified,
+        List<XpSkip> xpSkips,
+        boolean xpOpen,
+        String relaySession,
+        List<Tier> requestBoundTiers
+    ) {
         if (levels.isEmpty()) {
             throw new IllegalArgumentException("A tiered plan needs at least one tier");
         }
@@ -245,6 +432,7 @@ public final class TierPlan {
         this.levels = List.copyOf(levels);
         this.holdLevels = List.copyOf(holdLevels);
         this.unavailableTiers = List.copyOf(unavailableTiers);
+        this.requestBoundTiers = List.copyOf(requestBoundTiers);
         this.memberlessTiers = Set.copyOf(memberlessTiers);
         this.startIndex = startIndex;
         this.session = session;
@@ -256,6 +444,9 @@ public final class TierPlan {
         this.pinnedScope = Set.copyOf(pinnedScope);
         this.lowBalanceHint = lowBalanceHint;
         this.unified = unified;
+        this.xpSkips = List.copyOf(xpSkips);
+        this.xpOpen = xpOpen;
+        this.relaySession = relaySession;
         // A reservation is only an upper bound: the most any tier the request may end up in would reserve.
         this.reservation = this.holdLevels.stream()
             .map(Level::estimate)
@@ -295,6 +486,27 @@ public final class TierPlan {
      */
     public boolean unified() {
         return unified;
+    }
+
+    /**
+     * The relays registered in the vendor's tiers that take no part in this request and why (design 3, step 5b), frozen
+     * with the plan. Only the relays of a tier that is enabled and whose account is in the account cache are listed: one
+     * that is switched off is no one's concern until it is switched on. Empty for a vendor without relays, and for a
+     * request no relay can be given (an entry whose pair this release does not offer).
+     */
+    public List<XpSkip> xpSkips() {
+        return xpSkips;
+    }
+
+    /**
+     * What the session of the request is called when a relay breaks off an answer for it (design 7.8): the name the
+     * client gave the session, or the fingerprint of its beginning ({@link TierSessionKeys#resolve}). The relay is then kept
+     * from the same session for a couple of minutes, and the plans of that session's next requests are made without it.
+     * Unlike {@link #session()}, which is the session of the tier bindings, it exists whether or not the vendor keeps
+     * sessions to their tier. Null for a plan that has no relay to ask, and when nothing tells the session from others.
+     */
+    public String relaySession() {
+        return relaySession;
     }
 
     /** The vendor whose tiers the request is served from, as the tier configuration names it. */
@@ -348,7 +560,8 @@ public final class TierPlan {
      * session down (design 4.1 counts the quota of an account as the account being unavailable). A
      * tier with no account of the route's kinds at all is something else, one this request cannot be served from, and
      * is in neither list; that includes a tier whose accounts are all disabled or suspended, since a suspended account
-     * is disabled and is not in the account cache.
+     * is disabled and is not in the account cache. Nor is a tier in which a relay sat this request out for its own sake
+     * ({@link #requestBoundAbove}): it was not found with nothing to serve with, however its other members are.
      */
     public List<Tier> unavailableTiers() {
         return unavailableTiers;
@@ -367,6 +580,19 @@ public final class TierPlan {
     /** Whether a tier left out of the plan for having nothing available sits above {@code level}. */
     public boolean unavailableAbove(Level level) {
         return unavailableTiers.stream().anyMatch(tier -> tier.level() < level.level());
+    }
+
+    /**
+     * Whether a tier above {@code level}, from the one the session is bound to down, has a relay that was left out for
+     * something about this request or this moment: it is too large for its window, it needs what the relay does not carry,
+     * the conversion for it was not taken, or it broke off an answer for the session a moment ago. Whatever the other
+     * members of that tier then did (they were busy, or out of quota), the session was not found with nothing to be
+     * served by in the tier: a smaller or an ordinary request would have been given the relay that is left out. The
+     * tier below serving the request is no fall of the session, and does not keep it there (design 0, 4.7, invariant I8),
+     * whether the tier is in {@link #levels()} or was left out of it.
+     */
+    public boolean requestBoundAbove(Level level) {
+        return requestBoundTiers.stream().anyMatch(tier -> tier.level() < level.level());
     }
 
     /**
@@ -440,15 +666,32 @@ public final class TierPlan {
     }
 
     /**
+     * Whether {@code level} holds {@code account} as a member of {@code cell}: for the cell of the relays one of the relays
+     * the plan found eligible in that tier, for any other cell an account the configuration puts into the tier.
+     */
+    public boolean holds(Level level, PoolCell cell, ProxyAccountEntity account) {
+        return cell == PoolCell.XP_OPENAI_CHAT ? level.relay(account.getAccountId()).isPresent() : holds(level, account);
+    }
+
+    /**
      * Whether the plan lets the request be served by {@code account} as one of the accounts of {@code cell} in
      * {@code level}: the tier is one the reservation covers, the cell is one of that tier's, the cell's rule takes the
-     * account and the tier holds it.
+     * account and the tier holds it (for the cell of the relays, the account is one of the relays the plan found eligible
+     * in that tier).
      */
     public boolean permits(Level level, PoolCell cell, ProxyAccountEntity account) {
-        return covers(level)
-            && levels.stream().anyMatch(own -> own.tierRef().equals(level.tierRef()) && own.cells().contains(cell))
-            && cell.predicate().test(account)
-            && holds(level, account);
+        if (!covers(level)) {
+            return false;
+        }
+        Level own = levels.stream()
+            .filter(candidate -> candidate.tierRef().equals(level.tierRef()) && candidate.cells().contains(cell))
+            .findFirst()
+            .orElse(null);
+        if (own == null || !cell.predicate().test(account)) {
+            return false;
+        }
+        // The relays of a tier are the ones the plan found to be eligible, not the accounts a rule puts into the tier.
+        return holds(own, cell, account);
     }
 
     /**
@@ -458,7 +701,10 @@ public final class TierPlan {
      * served by such an account; the retest tests it all the same, since the tier recovers through it or not at all.
      */
     public boolean leftOut(ProxyAccountEntity account) {
-        if (!tiered || levels.get(0).cells().stream().noneMatch(cell -> cell.predicate().test(account))) {
+        // Only the native cells: the cell of the relays takes any compatible key, and a key that is no relay of the vendor is
+        // not a member of one of its tiers for being compatible.
+        if (!tiered || levels.get(0).cells().stream()
+            .noneMatch(cell -> cell != PoolCell.XP_OPENAI_CHAT && cell.predicate().test(account))) {
             return false;
         }
         return TierMembership.nativeTierOf(snapshot, vendor, account)
@@ -466,6 +712,30 @@ public final class TierPlan {
             // A request that named its tier has no use for the tiers it left out on purpose.
             .filter(tier -> pinnedScope.isEmpty() || pinnedScope.contains(tier.tierId()))
             .filter(tier -> levels.stream().noneMatch(level -> level.tierId().equals(tier.tierId())))
+            .isPresent();
+    }
+
+    /**
+     * Whether {@code account} is a relay of a tier of the vendor that the plan did not look at because it is out of
+     * service (disabled, suspended: it is in no account cache), while the request is one that relays may be given at all.
+     * Like a native account of a tier that is left out, it cannot serve this request, and the retest tests it all the
+     * same: the tier it is a relay of would otherwise never come back through the one retest a request makes. A relay
+     * that the plan did look at is either one of its relays or was left out for what the request asks, which a test of
+     * the account does not change.
+     */
+    public boolean leftOutRelay(ProxyAccountEntity account) {
+        String accountId = account == null ? null : account.getAccountId();
+        if (!tiered || !xpOpen || accountId == null || !PoolCell.XP_OPENAI_CHAT.predicate().test(account)) {
+            return false;
+        }
+        return snapshot.member(vendor, accountId)
+            .filter(SourceTierSnapshot.Member::crossProtocol)
+            .flatMap(member -> snapshot.tier(vendor, member.tierId()))
+            .filter(Tier::enabled)
+            // A request that named its tier has no use for the tiers it left out on purpose.
+            .filter(tier -> pinnedScope.isEmpty() || pinnedScope.contains(tier.tierId()))
+            .filter(tier -> levels.stream().noneMatch(level -> level.relay(accountId).isPresent())
+                && xpSkips.stream().noneMatch(skip -> skip.accountId().equals(accountId)))
             .isPresent();
     }
 

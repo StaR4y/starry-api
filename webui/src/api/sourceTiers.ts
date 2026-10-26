@@ -176,6 +176,8 @@ export interface SourceTierVendorStatus {
   /** 其中由低于「已启用的最好一级」服务的请求数 */
   degraded: number;
   tiers: SourceTierTierStatus[];
+  /** 这个厂商登记了中转（跨协议成员）时才有：中转的层、对的门控与指标、本节点跳过中转的原因 */
+  xp?: SourceTierXpStatus | null;
 }
 
 export interface SourceTierTierStatus {
@@ -200,6 +202,123 @@ export interface SourceTierAccountLayers {
   resting: number;
   busy: number;
   ready: number;
+  /** 只有中转有这一层：没有任何入口的门控对它开放，或没有已验证的映射；号池里没有中转时缺省 */
+  unopened?: number | null;
+}
+
+/** 中转所在的层：同 SourceTierAccountLayers 的字段名 */
+export type SourceTierRelayLayer =
+  | 'disabled'
+  | 'unopened'
+  | 'unavailable'
+  | 'resting'
+  | 'busy'
+  | 'ready';
+
+/**
+ * 一个厂商的中转（跨协议成员）在状态里的部分。指标取自请求日志（覆盖所有节点）；skips 是应答节点自己的计数，
+ * 自 skipsSince 起，数的是被跳过的中转次数而不是请求数（被跳过的中转在日志里没有痕迹）。
+ */
+export interface SourceTierXpStatus {
+  skipsSince: string;
+  relays: SourceTierXpRelay[];
+  pairs: SourceTierXpPair[];
+  skips: SourceTierXpSkipCount[];
+}
+
+export interface SourceTierXpRelay {
+  tierId: string;
+  accountId: string;
+  layer: SourceTierRelayLayer;
+  /** 已启用的映射数，和其中已验证的 */
+  mappings: number;
+  verified: number;
+  figures: SourceTierXpFigures;
+}
+
+export interface SourceTierXpPair {
+  sourceProtocol: SourceTierProtocol;
+  entryEndpoint: SourceTierEntryEndpoint;
+  status: SourceTierPairStatusName;
+  gate: SourceTierGateState;
+  allowedKeys: number;
+  figures: SourceTierXpFigures;
+  /** 窗口里被服务的尝试丢掉的请求特性，从多到少 */
+  degradedFeatures: SourceTierFeatureCount[];
+}
+
+/**
+ * 发给中转的尝试，取自请求日志。interrupted 是中转可能已经生成、没人为它付费的中断（设计里的 UNBILLED，由运营者承担），
+ * conversionRejected 是中转拒绝了转换后的请求；failed 里其余的是别的失败。estimated、clamped 是用量不是中转报的那样的
+ * 已服务尝试，degraded 是丢掉了请求特性的已服务尝试。p95Ms 是已服务尝试延迟的第 95 百分位，没有已服务的尝试时缺省。
+ */
+export interface SourceTierXpFigures {
+  attempts: number;
+  served: number;
+  failed: number;
+  interrupted: number;
+  conversionRejected: number;
+  contextExceeded: number;
+  modelNotServed: number;
+  estimated: number;
+  clamped: number;
+  degraded: number;
+  p95Ms?: number | null;
+}
+
+export interface SourceTierFeatureCount {
+  feature: string;
+  count: number;
+}
+
+/** reason 取 GATE、NOT_A_RELAY、NO_MAPPING、UNVERIFIED、FEATURE、INTERRUPTED、CONVERSION、CONTEXT */
+export interface SourceTierXpSkipCount {
+  tierId: string;
+  reason: string;
+  count: number;
+}
+
+/**
+ * 升级一个对为 VERIFIED 的证据（GET /admin/source-tiers/evidence）：每个这个版本提供的对在最近 days 天请求日志里的
+ * 数字，和标准是否达到。lintSkips 只有应答的节点自己数（自 skipsSince 起）。
+ */
+export interface SourceTierEvidence {
+  at: string;
+  since: string;
+  days: number;
+  configVersion: number;
+  skipsSince: string;
+  pairs: SourceTierPairEvidence[];
+}
+
+export interface SourceTierPairEvidence {
+  vendor: string;
+  label: string;
+  sourceProtocol: SourceTierProtocol;
+  entryEndpoint: SourceTierEntryEndpoint;
+  status: SourceTierPairStatusName;
+  gate: SourceTierGateState;
+  allowedKeys: number;
+  figures: SourceTierXpFigures;
+  lintSkips: number;
+  criteria: SourceTierCriterion[];
+  meetsStandard: boolean;
+  degradedFeatures: SourceTierFeatureCount[];
+  members: SourceTierMemberEvidence[];
+}
+
+/** name 取 requests、lintFailures、conversionRejected、estimated、unbilled；value 是个数或百分比，没有可除的数时缺省 */
+export interface SourceTierCriterion {
+  name: string;
+  rule: string;
+  value?: number | null;
+  met: boolean;
+}
+
+export interface SourceTierMemberEvidence {
+  tierId: string;
+  accountId: string;
+  figures: SourceTierXpFigures;
 }
 
 /** 每个账号所在的号池（GET /admin/source-tiers/placements），供账号列表的「号源级别」列使用；不在任何号池的账号不出现 */
@@ -250,9 +369,83 @@ export interface SourceTierChoice {
   pricing?: ModelPublicPricing | null;
 }
 
+/** 验证一个中转的映射（POST …/members/{accountId}/verify）；整个请求体可省略 */
+export interface SourceTierVerifyRequest {
+  /** 要验证的目录模型，至多 8 个；缺省时验证已启用的映射（它们须不多于 8 个） */
+  modelIds?: string[];
+  /** 额外跑缓存探针：每个映射问两次约 1,200 令牌的提示，费用由运营者承担 */
+  cacheProbe?: boolean;
+}
+
+export interface SourceTierVerifyResult {
+  vendor: string;
+  accountId: string;
+  at: string;
+  /** 这次验证的每个映射现在都算已验证 */
+  verified: boolean;
+  models: SourceTierModelVerification[];
+}
+
+/** stale：验证期间映射被改过，探针说的不是现在保存的配置，什么都没写 */
+export interface SourceTierModelVerification {
+  modelId: string;
+  upstreamModel: string;
+  verified: boolean;
+  stale: boolean;
+  probes: SourceTierProbeResult[];
+  cache?: SourceTierCacheAdvice | null;
+}
+
+/** name 取 basic、tool_call、tool_loop、stream、vision、cache、cache_evidence；message 只有网关自己的话 */
+export interface SourceTierProbeResult {
+  name: string;
+  status: 'PASSED' | 'FAILED' | 'SKIPPED' | string;
+  message?: string | null;
+  latencyMs: number;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+}
+
+/**
+ * 缓存探针对中转缓存的判断：readInPrompt / writeInPrompt 说中转的 prompt_tokens 是否已含缓存读 / 写，
+ * 数字不足以判断时为 null（message 说明原因）。「不含」的设置只有这里是 false 才能保存。
+ */
+export interface SourceTierCacheAdvice {
+  readInPrompt?: boolean | null;
+  writeInPrompt?: boolean | null;
+  readEvidence?: string | null;
+  writeEvidence?: string | null;
+  message?: string | null;
+  calls: SourceTierCacheCall[];
+}
+
+export interface SourceTierCacheCall {
+  promptTokens?: number | null;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+}
+
+/** 中转自己列出的模型（GET …/upstream-models），contextLength 是它写的窗口，没写时缺省 */
+export interface SourceTierUpstreamModels {
+  models: SourceTierUpstreamModel[];
+  truncated: boolean;
+}
+
+export interface SourceTierUpstreamModel {
+  id: string;
+  contextLength?: number | null;
+}
+
 /** 后端的业务错误码：控制台对它们有专门的提示 */
 export const SOURCE_TIER_VERSION_CONFLICT = 'SOURCE_TIER_VERSION_CONFLICT';
 export const SOURCE_TIER_RUNTIME_UNSUPPORTED = 'SOURCE_TIER_RUNTIME_UNSUPPORTED';
+export const SOURCE_TIER_CACHE_EVIDENCE_REQUIRED = 'SOURCE_TIER_CACHE_EVIDENCE_REQUIRED';
+export const SOURCE_VERIFY_RATE_LIMITED = 'SOURCE_VERIFY_RATE_LIMITED';
+export const SOURCE_TIER_MEMBER_NOT_FOUND = 'SOURCE_TIER_MEMBER_NOT_FOUND';
+export const SOURCE_UPSTREAM_MODELS_FAILED = 'SOURCE_UPSTREAM_MODELS_FAILED';
+
+/** 一次验证最长 4 分钟，请求的等待要比它长 */
+const VERIFY_TIMEOUT_MS = 270_000;
 
 export const sourceTiersApi = {
   overview: () =>
@@ -281,5 +474,28 @@ export const sourceTiersApi = {
         `/admin/source-tiers/${encodeURIComponent(vendor)}/members`,
         payload,
       ),
+    ),
+  /** 验证一个中转的映射：探针由运营者付费，同一个账号 30 秒只能验证一次，整体最长 4 分钟 */
+  verify: (vendor: string, accountId: string, payload: SourceTierVerifyRequest = {}) =>
+    unwrap<SourceTierVerifyResult>(
+      http.post<ApiResponse<SourceTierVerifyResult>>(
+        `/admin/source-tiers/${encodeURIComponent(vendor)}/members/${encodeURIComponent(accountId)}/verify`,
+        payload,
+        { timeout: VERIFY_TIMEOUT_MS },
+      ),
+    ),
+  /** 经账号的出口向中转取它列出的模型，给映射表预填；账号不必已经是成员 */
+  upstreamModels: (vendor: string, accountId: string) =>
+    unwrap<SourceTierUpstreamModels>(
+      http.get<ApiResponse<SourceTierUpstreamModels>>(
+        `/admin/source-tiers/${encodeURIComponent(vendor)}/members/${encodeURIComponent(accountId)}/upstream-models`,
+      ),
+    ),
+  /** 升级对为 VERIFIED 的证据：最近 days 天（1 到 90） */
+  evidence: (days: number) =>
+    unwrap<SourceTierEvidence>(
+      http.get<ApiResponse<SourceTierEvidence>>('/admin/source-tiers/evidence', {
+        params: { days },
+      }),
     ),
 };

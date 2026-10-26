@@ -303,13 +303,15 @@ class XpDispatcherTest {
 
     @Test
     void aResponsesItemOfARelaysToolCallHasNeitherTheRelaysIdNorTheShapeOfItsCall() throws Exception {
-        when(client.complete(any(), any(), any())).thenReturn(Mono.just(withCalls(call("call_0", "Read"), call("call_0", "Bash"))));
+        // Not "call_0": one minted id in 62 begins with it. One with two underscores is in no id the gateway mints.
+        String relayId = "relay_call_0";
+        when(client.complete(any(), any(), any())).thenReturn(Mono.just(withCalls(call(relayId, "Read"), call(relayId, "Bash"))));
 
         PlatformCompletionResult result = dispatcher.dispatch(account, relay(Entry.RESPONSES, body()), LIMITS, LIMIT).block(WAIT);
         JsonNode rendered = new OpenAiResponseFactory(JSON).responses("claude-sonnet-4.5", result, null);
 
         JsonNode items = rendered.path("output");
-        assertThat(items.toString()).doesNotContain("call_0");
+        assertThat(items.toString()).doesNotContain(relayId);
         int calls = 0;
         for (JsonNode item : items) {
             if (!"function_call".equals(item.path("type").asString())) {

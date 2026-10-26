@@ -35,6 +35,8 @@ import tools.jackson.databind.JsonNode;
  *     for an id that a mapping rule of the key is written around, such as {@code claude-sonnet-4@*}. The advice to a user
  *     who cannot pay offers the suffix only for a spelling that works; null when the caller does not say, which offers
  *     it for every spelling
+ * @param entryFacts what the original request asks for and what the sanitizer reads of it, for the relays that may serve
+ *     it (design 3, step 5b); null when the caller took none, and then no relay does
  */
 public record TierPlanRequest(
     String requestId,
@@ -56,11 +58,40 @@ public record TierPlanRequest(
     TierSelectorParser.Selector selector,
     TierEntry entry,
     boolean keyHoldsPreference,
-    Predicate<String> suffixTakenOff
+    Predicate<String> suffixTakenOff,
+    TierEntryFacts entryFacts
 ) {
     public TierPlanRequest {
         Objects.requireNonNull(route, "route");
         Objects.requireNonNull(upstreamRequest, "upstreamRequest");
+    }
+
+    /** A request that no relay is given. */
+    public TierPlanRequest(
+        String requestId,
+        String requestedModel,
+        String upstreamModel,
+        String providerHint,
+        TierRoute route,
+        boolean preferDeepSeekAccounts,
+        boolean openAiCompatibleModel,
+        boolean preferCodexAccounts,
+        boolean isolateCodexPool,
+        boolean fastMode,
+        boolean billed,
+        JsonNode upstreamRequest,
+        String responseOwnerAccountId,
+        boolean responseMovable,
+        String keyId,
+        String sessionName,
+        TierSelectorParser.Selector selector,
+        TierEntry entry,
+        boolean keyHoldsPreference,
+        Predicate<String> suffixTakenOff
+    ) {
+        this(requestId, requestedModel, upstreamModel, providerHint, route, preferDeepSeekAccounts, openAiCompatibleModel,
+            preferCodexAccounts, isolateCodexPool, fastMode, billed, upstreamRequest, responseOwnerAccountId,
+            responseMovable, keyId, sessionName, selector, entry, keyHoldsPreference, suffixTakenOff, null);
     }
 
     /** A request whose key may or may not have a tier preference, and for which the suffix is advised as it always was. */
@@ -169,35 +200,43 @@ public record TierPlanRequest(
     public TierPlanRequest withSessionName(String sessionName) {
         return new TierPlanRequest(requestId, requestedModel, upstreamModel, providerHint, route, preferDeepSeekAccounts,
             openAiCompatibleModel, preferCodexAccounts, isolateCodexPool, fastMode, billed, upstreamRequest,
-            responseOwnerAccountId, responseMovable, keyId, sessionName, selector, entry, keyHoldsPreference, suffixTakenOff);
+            responseOwnerAccountId, responseMovable, keyId, sessionName, selector, entry, keyHoldsPreference, suffixTakenOff, entryFacts);
     }
 
     /** The same request with the tier the client named. */
     public TierPlanRequest withSelector(TierSelectorParser.Selector selector) {
         return new TierPlanRequest(requestId, requestedModel, upstreamModel, providerHint, route, preferDeepSeekAccounts,
             openAiCompatibleModel, preferCodexAccounts, isolateCodexPool, fastMode, billed, upstreamRequest,
-            responseOwnerAccountId, responseMovable, keyId, sessionName, selector, entry, keyHoldsPreference, suffixTakenOff);
+            responseOwnerAccountId, responseMovable, keyId, sessionName, selector, entry, keyHoldsPreference, suffixTakenOff, entryFacts);
     }
 
     /** The same request with the endpoint it came in through. */
     public TierPlanRequest withEntry(TierEntry entry) {
         return new TierPlanRequest(requestId, requestedModel, upstreamModel, providerHint, route, preferDeepSeekAccounts,
             openAiCompatibleModel, preferCodexAccounts, isolateCodexPool, fastMode, billed, upstreamRequest,
-            responseOwnerAccountId, responseMovable, keyId, sessionName, selector, entry, keyHoldsPreference, suffixTakenOff);
+            responseOwnerAccountId, responseMovable, keyId, sessionName, selector, entry, keyHoldsPreference, suffixTakenOff, entryFacts);
     }
 
     /** The same request, for a key that can have a tier preference or cannot. */
     public TierPlanRequest withKeyHoldsPreference(boolean keyHoldsPreference) {
         return new TierPlanRequest(requestId, requestedModel, upstreamModel, providerHint, route, preferDeepSeekAccounts,
             openAiCompatibleModel, preferCodexAccounts, isolateCodexPool, fastMode, billed, upstreamRequest,
-            responseOwnerAccountId, responseMovable, keyId, sessionName, selector, entry, keyHoldsPreference, suffixTakenOff);
+            responseOwnerAccountId, responseMovable, keyId, sessionName, selector, entry, keyHoldsPreference, suffixTakenOff, entryFacts);
     }
 
     /** The same request, for which the tier suffix is taken off the spellings that {@code suffixTakenOff} accepts. */
     public TierPlanRequest withSuffixTakenOff(Predicate<String> suffixTakenOff) {
         return new TierPlanRequest(requestId, requestedModel, upstreamModel, providerHint, route, preferDeepSeekAccounts,
             openAiCompatibleModel, preferCodexAccounts, isolateCodexPool, fastMode, billed, upstreamRequest,
-            responseOwnerAccountId, responseMovable, keyId, sessionName, selector, entry, keyHoldsPreference, suffixTakenOff);
+            responseOwnerAccountId, responseMovable, keyId, sessionName, selector, entry, keyHoldsPreference, suffixTakenOff, entryFacts);
+    }
+
+    /** The same request with what the original body asks for, which the relays that may serve it are judged by. */
+    public TierPlanRequest withEntryFacts(TierEntryFacts entryFacts) {
+        return new TierPlanRequest(requestId, requestedModel, upstreamModel, providerHint, route, preferDeepSeekAccounts,
+            openAiCompatibleModel, preferCodexAccounts, isolateCodexPool, fastMode, billed, upstreamRequest,
+            responseOwnerAccountId, responseMovable, keyId, sessionName, selector, entry, keyHoldsPreference, suffixTakenOff,
+            entryFacts);
     }
 
     /** Whether the entry takes the tier suffix off {@code spelling}, so that advising it to the user would work. */
@@ -212,6 +251,6 @@ public record TierPlanRequest(
     TierPlanRequest withRoute(TierRoute route) {
         return new TierPlanRequest(requestId, requestedModel, upstreamModel, providerHint, route, preferDeepSeekAccounts,
             openAiCompatibleModel, preferCodexAccounts, isolateCodexPool, fastMode, billed, upstreamRequest,
-            responseOwnerAccountId, responseMovable, keyId, sessionName, selector, entry, keyHoldsPreference, suffixTakenOff);
+            responseOwnerAccountId, responseMovable, keyId, sessionName, selector, entry, keyHoldsPreference, suffixTakenOff, entryFacts);
     }
 }

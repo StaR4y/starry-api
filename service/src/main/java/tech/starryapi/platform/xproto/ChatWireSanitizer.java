@@ -233,10 +233,73 @@ public final class ChatWireSanitizer {
     }
 
     /**
+     * What {@link #sanitize} reads of the client's own request ({@code entryBody}), kept in a body of its own: the
+     * reasoning request ({@code thinking}, {@code output_config.effort}, a Gemini {@code thinkingConfig}) and the tools of
+     * the tool search, by type and name. A request is planned long before it is sent, and the body of a Messages or Gemini
+     * request may hold large base64 images that nothing should keep alive for that long, so the facade takes this when the
+     * request comes in and plans, and later sanitizes, from it. {@code sanitize(chat, entryDigest(entry), ...)} gives
+     * exactly what {@code sanitize(chat, entry, ...)} does; {@code ChatWireSanitizerTest} pins that for the shapes the
+     * sanitizer reads.
+     */
+    public static ObjectNode entryDigest(JsonNode entryBody) {
+        ObjectNode digest = FACTORY.objectNode();
+        if (entryBody == null || !entryBody.isObject()) {
+            return digest;
+        }
+        JsonNode thinking = entryBody.path("thinking");
+        if (thinking.isObject()) {
+            ObjectNode kept = digest.putObject("thinking");
+            if (thinking.path("type").isString()) {
+                kept.set("type", thinking.path("type"));
+            }
+            if (thinking.path("budget_tokens").isNumber()) {
+                kept.set("budget_tokens", thinking.path("budget_tokens"));
+            }
+        }
+        JsonNode outputConfig = entryBody.path("output_config");
+        if (outputConfig.isObject()) {
+            ObjectNode kept = digest.putObject("output_config");
+            if (outputConfig.path("effort").isString()) {
+                kept.set("effort", outputConfig.path("effort"));
+            }
+        }
+        JsonNode config = entryBody.path("generationConfig").path("thinkingConfig");
+        if (!config.isObject()) {
+            config = entryBody.path("thinkingConfig");
+        }
+        if (config.isObject()) {
+            ObjectNode kept = digest.putObject("thinkingConfig");
+            if (config.path("thinkingBudget").isNumber()) {
+                kept.set("thinkingBudget", config.path("thinkingBudget"));
+            }
+            if (config.path("thinkingLevel").isString()) {
+                kept.set("thinkingLevel", config.path("thinkingLevel"));
+            }
+        }
+        JsonNode tools = entryBody.path("tools");
+        if (tools.isArray()) {
+            ArrayNode search = FACTORY.arrayNode();
+            for (JsonNode tool : tools) {
+                if (tool.isObject() && tool.path("type").stringValue("").toLowerCase(Locale.ROOT).startsWith("tool_search_tool")) {
+                    ObjectNode kept = search.addObject();
+                    kept.put("type", tool.path("type").stringValue(""));
+                    if (tool.path("name").isString()) {
+                        kept.set("name", tool.path("name"));
+                    }
+                }
+            }
+            if (!search.isEmpty()) {
+                digest.set("tools", search);
+            }
+        }
+        return digest;
+    }
+
+    /**
      * @param chatBody  the Chat Completions body the entry gives: the client's own for the Chat entry, the conversion's
      *                  output for the others
      * @param entryBody the client's request as it came in, which carries what the conversion drops ({@code
-     *                  output_config}); null when the chat body is the client's own
+     *                  output_config}), or its {@link #entryDigest}; null when the chat body is the client's own
      * @param wireModel the model name the relay is to be asked for, or null when the dispatcher writes it
      */
     public static Wire sanitize(JsonNode chatBody, JsonNode entryBody, Settings settings, String wireModel) {

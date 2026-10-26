@@ -16,8 +16,11 @@ import { nativeMember } from './sourceTiersMeta';
 
 /* ---------- 状态面板 ---------- */
 
-/** 账号层的顺序：从「能服务」到「最不能服务」；号池收下的每个账号只计入第一个让它不能服务的层 */
-export const LAYERS = ['ready', 'busy', 'resting', 'unavailable', 'disabled'] as const;
+/**
+ * 账号层的顺序：从「能服务」到「最不能服务」；号池收下的每个账号只计入第一个让它不能服务的层。
+ * unopened 只有中转有：还没有任何入口的门控对它开放，或没有已验证的映射，请求不会派给它。
+ */
+export const LAYERS = ['ready', 'busy', 'resting', 'unavailable', 'unopened', 'disabled'] as const;
 export type LayerKey = (typeof LAYERS)[number];
 
 export function layerLabel(key: LayerKey): string {
@@ -30,6 +33,9 @@ export function layerLabel(key: LayerKey): string {
       return t('冷却');
     case 'unavailable':
       return t('不可用');
+    case 'unopened':
+      // Not the text of "unavailable" or of a payment that is not offered, which the English of "未开放" already stands for.
+      return t('尚未开放');
     default:
       return t('已停用');
   }
@@ -48,13 +54,22 @@ export function layerHint(key: LayerKey): string {
       return t('分配生命周期里冷却或隔离中，到期后自动恢复');
     case 'unavailable':
       return t('被挂起，或额度已耗尽');
+    case 'unopened':
+      return t(
+        '中转还没有被请求用到：没有任何入口的门控对它开放（或门控是 OFF），或没有已验证的映射。在「跨协议成员」里验证映射，在「门控」里开放入口',
+      );
     default:
       return t('账号已停用');
   }
 }
 
+/** 一层的账号数；只有中转有的层在没有中转的号池里缺省，算 0 */
+export function layerCount(accounts: SourceTierAccountLayers, key: LayerKey): number {
+  return accounts[key] ?? 0;
+}
+
 export function layerTotal(accounts: SourceTierAccountLayers): number {
-  return LAYERS.reduce((sum, key) => sum + (accounts[key] ?? 0), 0);
+  return LAYERS.reduce((sum, key) => sum + layerCount(accounts, key), 0);
 }
 
 export interface LayerSegment {
@@ -68,10 +83,10 @@ export interface LayerSegment {
 export function layerSegments(accounts: SourceTierAccountLayers): LayerSegment[] {
   const total = layerTotal(accounts);
   if (total <= 0) return [];
-  return LAYERS.filter((key) => (accounts[key] ?? 0) > 0).map((key) => ({
+  return LAYERS.filter((key) => layerCount(accounts, key) > 0).map((key) => ({
     key,
-    count: accounts[key],
-    percent: (accounts[key] / total) * 100,
+    count: layerCount(accounts, key),
+    percent: (layerCount(accounts, key) / total) * 100,
   }));
 }
 

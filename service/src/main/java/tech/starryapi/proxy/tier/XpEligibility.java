@@ -1,0 +1,391 @@
+package tech.starryapi.proxy.tier;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.OptionalLong;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import tech.starryapi.account.AccountPoolService;
+import tech.starryapi.account.PoolCell;
+import tech.starryapi.account.ProxyAccountEntity;
+import tech.starryapi.platform.xproto.ChatCanonicalizer;
+import tech.starryapi.platform.xproto.ChatWireSanitizer;
+import tech.starryapi.platform.xproto.ChatWireSanitizer.Settings;
+import tech.starryapi.platform.xproto.ChatWireSanitizer.Wire;
+import tech.starryapi.platform.xproto.FeaturePolicy;
+import tech.starryapi.platform.xproto.FeaturePolicy.Verdict;
+import tech.starryapi.platform.xproto.PairRegistry;
+import tech.starryapi.platform.xproto.PairRegistry.PairKey;
+import tech.starryapi.platform.xproto.PairRegistry.SourceKind;
+import tech.starryapi.platform.xproto.PairRegistry.Status;
+import tech.starryapi.platform.xproto.RelayUsageNormalizer;
+import tech.starryapi.platform.xproto.RequestFeatureDetector.Detected;
+import tech.starryapi.platform.xproto.RequestFeatureDetector.Feature;
+import tech.starryapi.platform.xproto.StrictChatLint;
+import tech.starryapi.proxy.tier.TierPlan.Relay;
+import tech.starryapi.sourcetier.SourceTierSnapshot;
+import tech.starryapi.sourcetier.SourceTierSnapshot.Member;
+import tech.starryapi.sourcetier.SourceTierSnapshot.MemberModel;
+import tech.starryapi.sourcetier.SourceTierSnapshot.PairGate;
+import tech.starryapi.sourcetier.SourceTierSnapshot.Tier;
+import tech.starryapi.sourcetier.SourceTierValidator;
+
+/**
+ * Decides which of the relays registered in a vendor's tiers may serve one request, and builds what each is sent (design 3,
+ * step 5b). A relay is eligible when, for this request:
+ *
+ * <ol>
+ *   <li>the registry offers its pair (source, entry, vendor) and the pair gate lets this key through: OFF lets none, KEYS
+ *       the listed keys, ON everyone, but a pair that is only EXPERIMENTAL is never open to more than the listed keys;
+ *   <li>the account is still an OpenAI-compatible API key;
+ *   <li>the model asked for has an enabled mapping on the relay ({@link XpModelResolver}), and it is verified, with the
+ *       fingerprint of what it is now;
+ *   <li>the request has no feature the relay cannot carry and the native accounts of the route can ({@link FeaturePolicy},
+ *       the route's baseline being that of its native cells);
+ *   <li>the relay has not broken off an answer for this session a moment ago ({@link TierSessionBindings#relayExcluded});
+ *   <li>the request, made into the relay's Chat body, passes the sanitizer, the canonicalizer and the strict lint;
+ *   <li>and fits the window of the mapping, and is smaller than any prompt this node has seen the relay refuse for its
+ *       length ({@link XpLearnedLimits}).
+ * </ol>
+ *
+ * The conditions are met in this order and a relay is skipped for the first it fails (design 7.9, 7.6, 7.8; the window is
+ * last because it is measured on the body of the sixth, and the exclusion comes before the conversion because it needs no
+ * body). Every relay left out is recorded with its reason. A relay whose account is not in the account cache (disabled,
+ * suspended, deleted) is not looked at: it is not a member of the tier until it is back, as a native account that is not
+ * in the cache is not.
+ *
+ * <p>Members with the same settings are sent the same body, so it is built once per distinct {@link Settings}, and the
+ * features are judged once per distinct settings too. Nothing here selects an account, reserves or charges; the walk of
+ * the tiers picks among the eligible relays as it does among native accounts, and the dispatch each carries is what the
+ * facade then sends.
+ *
+ * <p>What this node has learned of a relay (the window its refusals showed, the answers it broke off for the session) is
+ * a reason to leave it out like the others, and a structural one: a tier whose relays are all left out for it is a tier
+ * the request has nothing in, and not one it found unavailable, so that the tier below serving the request is no
+ * downgrade of its session (design 4.7). The same holds for a tier of which only some relays are left out for what the
+ * request is or for a moment (its features, its conversion, its size, an interruption), whatever the others do: they may be
+ * busy or out of quota, but the relay that sat this request out would serve a smaller, plainer or later one of the same
+ * session ({@link Found#requestBoundTiers}).
+ */
+final class XpEligibility {
+
+    private static final Logger log = LoggerFactory.getLogger(XpEligibility.class);
+
+    /** A relay that may serve the request, with the account as the cache holds it now. */
+    record Eligible(Relay relay, ProxyAccountEntity account) {
+    }
+
+    /**
+     * What was found for one request.
+     *
+     * @param byTier the eligible relays, by the id of their tier
+     * @param skips the relays that were left out, with the reasons, in the order of the tiers
+     * @param open whether the pair of some relay is offered and its gate lets the request through, even when no relay is
+     *     in service for it: a tier of relays that are switched off is then a tier that cannot serve for now, and not a
+     *     tier the request has nothing in
+     * @param session what the request's session is called for the relays that broke off its answers, which the facade writes
+     *     them under; null when no relay is eligible, and when nothing tells the session from others
+     */
+    record Found(Map<String, List<Eligible>> byTier, List<XpSkip> skips, boolean open, String session) {
+
+        /** A request no relay takes part in. */
+        static final Found NONE = new Found(Map.of(), List.of(), false, null);
+
+        List<Relay> relays(String tierId) {
+            return byTier.getOrDefault(tierId, List.of()).stream().map(Eligible::relay).toList();
+        }
+
+        /**
+         * The feature a request that no tier can serve has to do without, if a relay of the tiers was left out for one
+         * (design 3, step 6): the request is then refused with a name for it, rather than with "no account".
+         */
+        String hardFeature(Collection<Tier> tiers) {
+            Set<String> ids = tiers.stream().map(Tier::tierId).collect(Collectors.toSet());
+            return skips.stream()
+                .filter(skip -> skip.reason() == XpSkip.Reason.FEATURE && ids.contains(skip.tierId()))
+                .map(XpSkip::firstFeature)
+                .findFirst()
+                .orElse(null);
+        }
+
+        /**
+         * Whether a request that no tier can serve has a relay in these tiers that is only left out for a moment (it broke
+         * off an answer for the session): the tier can serve it again shortly, so it is neither a tier that has nothing for
+         * this request nor one to refuse the request for.
+         */
+        boolean temporarilyOut(Collection<Tier> tiers) {
+            Set<String> ids = tiers.stream().map(Tier::tierId).collect(Collectors.toSet());
+            return skips.stream().anyMatch(skip -> skip.reason().temporary() && ids.contains(skip.tierId()));
+        }
+
+        /**
+         * Whether a request that no tier can serve has a relay in these tiers that was left out because the request is
+         * larger than its window, or than a prompt it refused (design 3, step 6 and 7.9: the estimated input over the limit is
+         * a feature no relay carries). It is told what a relay that refuses the prompt at dispatch would have told it.
+         */
+        boolean contextRefused(Collection<Tier> tiers) {
+            Set<String> ids = tiers.stream().map(Tier::tierId).collect(Collectors.toSet());
+            return skips.stream().anyMatch(skip -> skip.reason() == XpSkip.Reason.CONTEXT && ids.contains(skip.tierId()));
+        }
+
+        /**
+         * The ids of the tiers in which a relay was left out for something about this request or this moment
+         * ({@link XpSkip.Reason#ofTheRequest}): a session that the tier below serves is not one the tier pushed out when the
+         * request, and not the tier, is why a member did not take part (design 0, 4.7).
+         */
+        Set<String> requestBoundTiers() {
+            return skips.stream().filter(skip -> skip.reason().ofTheRequest()).map(XpSkip::tierId).collect(Collectors.toSet());
+        }
+    }
+
+    /** The body of one set of settings, and whether it can be sent. */
+    private record Built(Wire wire, List<String> problems, long estimatedInput) {
+    }
+
+    private final PairRegistry pairs;
+    private final AccountPoolService accountPool;
+    private final XpModelResolver models;
+    private final TierSessionBindings sessions;
+    private final XpLearnedLimits learnedLimits;
+
+    XpEligibility(
+        PairRegistry pairs,
+        AccountPoolService accountPool,
+        XpModelResolver models,
+        TierSessionBindings sessions,
+        XpLearnedLimits learnedLimits
+    ) {
+        this.pairs = Objects.requireNonNull(pairs, "pairs");
+        this.accountPool = Objects.requireNonNull(accountPool, "accountPool");
+        this.models = Objects.requireNonNull(models, "models");
+        this.sessions = Objects.requireNonNull(sessions, "sessions");
+        this.learnedLimits = Objects.requireNonNull(learnedLimits, "learnedLimits");
+    }
+
+    /**
+     * @param modelKey the model as tiers see it, which a session without a name of its own is told by
+     * @param units the cells of the route's native accounts, which give the baseline of the policy
+     * @param enabled the vendor's enabled tiers; the relays of a tier that is switched off are no one's
+     */
+    Found evaluate(
+        TierPlanRequest request,
+        SourceTierSnapshot snapshot,
+        String vendor,
+        String modelKey,
+        List<PoolCell> units,
+        List<Tier> enabled
+    ) {
+        TierEntryFacts facts = request.entryFacts();
+        if (facts == null || !snapshot.hasCrossProtocolMembers() || !PairRegistry.VENDORS.contains(vendor)) {
+            return Found.NONE;
+        }
+        Detected detected = facts.detected();
+        if (request.entry() != null && !request.entry().name().equals(detected.entry().name())) {
+            return Found.NONE;
+        }
+        Map<String, Tier> tiers = enabled.stream().collect(Collectors.toMap(Tier::tierId, Function.identity()));
+        List<Member> members = snapshot.members(vendor).stream()
+            .filter(member -> member.crossProtocol() && tiers.containsKey(member.tierId()))
+            .sorted(Comparator.comparingInt((Member member) -> tiers.get(member.tierId()).level()).thenComparing(Member::accountId))
+            .toList();
+        if (members.isEmpty()) {
+            return Found.NONE;
+        }
+        Set<String> ids = members.stream().map(Member::accountId).collect(Collectors.toSet());
+        Map<String, ProxyAccountEntity> cached = accountPool.cachedAccounts(account -> ids.contains(account.getAccountId())).stream()
+            .collect(Collectors.toMap(ProxyAccountEntity::getAccountId, Function.identity(), (first, second) -> first));
+        String model = DefaultSourceTierPlanner.normalize(request.upstreamModel());
+        FeaturePolicy.Baseline baseline = FeaturePolicy.Baseline.of(units);
+        Map<Settings, Verdict> verdicts = new HashMap<>();
+        Map<Settings, Built> built = new HashMap<>();
+        Map<String, List<Eligible>> eligible = new LinkedHashMap<>();
+        List<XpSkip> skips = new ArrayList<>();
+        // What the relays that broke off this session's answers are kept from it by; the same name the facade writes them under.
+        String session = TierSessionKeys.resolve(request.keyId(), modelKey, request.sessionName(), request.upstreamRequest())
+            .orElse(null);
+        boolean open = false;
+        for (Member member : members) {
+            Optional<SourceKind> kind = SourceKind.ofProtocol(member.protocol());
+            if (kind.isEmpty()) {
+                // A protocol that a newer release added: nothing of this release's to say about it.
+                continue;
+            }
+            PairKey pair = new PairKey(kind.get(), detected.entry(), vendor);
+            Status status = pairs.status(pair);
+            if (status == Status.NOT_OFFERED) {
+                continue;
+            }
+            boolean letsThrough = gateLetsThrough(snapshot, vendor, pair, status, request.keyId());
+            open |= letsThrough;
+            ProxyAccountEntity account = cached.get(member.accountId());
+            if (account == null) {
+                // Not in service: not a member of the tier until it is back, so there is nothing to say about it either.
+                continue;
+            }
+            String tierId = member.tierId();
+            if (!letsThrough) {
+                skips.add(new XpSkip(tierId, member.accountId(), XpSkip.Reason.GATE, ""));
+                continue;
+            }
+            if (!PoolCell.XP_OPENAI_CHAT.predicate().test(account)) {
+                skips.add(new XpSkip(tierId, member.accountId(), XpSkip.Reason.NOT_A_RELAY, ""));
+                continue;
+            }
+            MemberModel mapping = models.find(snapshot.models(vendor, member.accountId()), vendor, model)
+                .filter(MemberModel::enabled)
+                .orElse(null);
+            if (mapping == null) {
+                skips.add(new XpSkip(tierId, member.accountId(), XpSkip.Reason.NO_MAPPING, model));
+                continue;
+            }
+            if (!SourceTierValidator.isVerified(member, mapping, account)) {
+                skips.add(new XpSkip(tierId, member.accountId(), XpSkip.Reason.UNVERIFIED, mapping.modelId()));
+                continue;
+            }
+            Settings settings = settings(member, mapping, vendor, request.fastMode());
+            Verdict verdict = verdicts.computeIfAbsent(settings, ignored -> FeaturePolicy.judge(detected, baseline, settings));
+            if (!verdict.allowed()) {
+                skips.add(new XpSkip(tierId, member.accountId(), XpSkip.Reason.FEATURE,
+                    verdict.hard().stream().map(Feature::label).collect(Collectors.joining(","))));
+                continue;
+            }
+            if (sessions.relayExcluded(vendor, session, member.accountId())) {
+                skips.add(new XpSkip(tierId, member.accountId(), XpSkip.Reason.INTERRUPTED, ""));
+                continue;
+            }
+            Built body = built.computeIfAbsent(settings, ignored -> build(request, facts, settings));
+            if (!body.problems().isEmpty()) {
+                skips.add(new XpSkip(tierId, member.accountId(), XpSkip.Reason.CONVERSION, body.problems().getFirst()));
+                continue;
+            }
+            if (body.estimatedInput() > mapping.maxContextTokens()) {
+                skips.add(new XpSkip(tierId, member.accountId(), XpSkip.Reason.CONTEXT,
+                    "about " + body.estimatedInput() + " tokens, the window is " + mapping.maxContextTokens()));
+                continue;
+            }
+            // A relay that refused a prompt of this size for its length is not asked the same again (design 7.8).
+            OptionalLong refused = learnedLimits.refusedFrom(mapping);
+            if (refused.isPresent() && body.estimatedInput() >= refused.getAsLong()) {
+                skips.add(new XpSkip(tierId, member.accountId(), XpSkip.Reason.CONTEXT,
+                    "about " + body.estimatedInput() + " tokens, a prompt of " + refused.getAsLong() + " was refused for its length"));
+                continue;
+            }
+            Set<String> degraded = new LinkedHashSet<>(verdict.soft().stream().map(Feature::label).toList());
+            degraded.addAll(body.wire().degraded());
+            TierDispatch dispatch = TierDispatch.openAiChat(pair, mapping.modelId(), mapping.upstreamModel(), member,
+                body.wire().body(), List.copyOf(degraded));
+            eligible.computeIfAbsent(tierId, ignored -> new ArrayList<>())
+                .add(new Eligible(new Relay(dispatch, mapping, body.estimatedInput()), account));
+        }
+        return new Found(eligible, List.copyOf(skips), open, eligible.isEmpty() ? null : session);
+    }
+
+    /**
+     * Whether a relay that is out of service (disabled or suspended, so in no account cache and not looked at by {@link
+     * #evaluate}) would take part in the request if it were back: the conditions that need nothing but the account and the
+     * configuration. The pair is offered and its gate lets the key through, the account is still a relay, the model has an
+     * enabled mapping that is verified for the account as it is, and the request carries nothing the relay cannot
+     * (the first four of the class description). What the session met on the relay and the size of the request are not
+     * asked: they are not what keeps a request from a tier whose relays are all switched off.
+     */
+    boolean couldServeWhenBack(
+        TierPlanRequest request,
+        SourceTierSnapshot snapshot,
+        String vendor,
+        List<PoolCell> units,
+        Member member,
+        ProxyAccountEntity account
+    ) {
+        TierEntryFacts facts = request.entryFacts();
+        Optional<SourceKind> kind = SourceKind.ofProtocol(member.protocol());
+        if (facts == null || kind.isEmpty() || account == null || !PoolCell.XP_OPENAI_CHAT.predicate().test(account)) {
+            return false;
+        }
+        Detected detected = facts.detected();
+        PairKey pair = new PairKey(kind.get(), detected.entry(), vendor);
+        Status status = pairs.status(pair);
+        if (status == Status.NOT_OFFERED || !gateLetsThrough(snapshot, vendor, pair, status, request.keyId())) {
+            return false;
+        }
+        MemberModel mapping = models.find(snapshot.models(vendor, member.accountId()), vendor,
+                DefaultSourceTierPlanner.normalize(request.upstreamModel()))
+            .filter(MemberModel::enabled)
+            .orElse(null);
+        if (mapping == null || !SourceTierValidator.isVerified(member, mapping, account)) {
+            return false;
+        }
+        return FeaturePolicy.judge(detected, FeaturePolicy.Baseline.of(units), settings(member, mapping, vendor, request.fastMode()))
+            .allowed();
+    }
+
+    /**
+     * The registry is the code's lock and the gate the administrator's (design 7.3): a gate that is ON opens a pair that
+     * is VERIFIED to every key, and one that is only EXPERIMENTAL to the keys it lists, as KEYS does. No gate row is OFF.
+     */
+    private static boolean gateLetsThrough(SourceTierSnapshot snapshot, String vendor, PairKey pair, Status status, String keyId) {
+        PairGate gate = snapshot.gates(vendor).stream()
+            .filter(candidate -> candidate.sourceProtocol().equals(pair.kind().sourceProtocol())
+                && candidate.entryEndpoint().equals(pair.entry().name()))
+            .findFirst()
+            .orElse(null);
+        if (gate == null) {
+            return false;
+        }
+        boolean listed = gate.lists(keyId);
+        if ("ON".equals(gate.state())) {
+            return status == Status.VERIFIED || listed;
+        }
+        return "KEYS".equals(gate.state()) && listed;
+    }
+
+    /**
+     * The settings the body is built from and the features are judged by: what the member is set to, what the request is
+     * billed as, and what the model's vendor needs (design 7.6). The name of the token limit follows the catalog model of
+     * the mapping (the GPT-5 family and the o-series only take {@code max_completion_tokens}), not the relay's own name for
+     * it and not the Claude model the catalog sends a gpt id to on the Kiro route; the verification of the mapping asks the
+     * same way, so what it vouched for is the body that is sent.
+     */
+    private Settings settings(Member member, MemberModel mapping, String vendor, boolean billedFastMode) {
+        return new Settings(
+            member.vision(),
+            member.jsonSchema(),
+            member.priorityTier(),
+            member.cacheControlPassthrough(),
+            member.upstreamStream(),
+            "EFFORT".equals(member.reasoningMode()),
+            billedFastMode,
+            ChatWireSanitizer.usesMaxCompletionTokens(mapping.modelId()),
+            ChatWireSanitizer.dropsReasoningOnContinuation(vendor),
+            ChatWireSanitizer.needsToolsForToolHistory(vendor)
+        );
+    }
+
+    /**
+     * The body for one set of settings, made from the request as it is reserved (so the output limit the reservation
+     * assumes is the one the relay is given) and from what the original body says about reasoning and tool search. A
+     * body that cannot be made, or does not pass the lint, is a conversion this member cannot serve; a defect in the
+     * conversion costs the request its relays, not the request.
+     */
+    private static Built build(TierPlanRequest request, TierEntryFacts facts, Settings settings) {
+        try {
+            Wire wire = ChatCanonicalizer.canonicalize(
+                ChatWireSanitizer.sanitize(request.upstreamRequest(), facts.entryDigest(), settings, null), settings);
+            List<String> problems = StrictChatLint.problems(wire.body());
+            return new Built(wire, problems, problems.isEmpty() ? RelayUsageNormalizer.estimateInputTokens(wire.body()) : 0);
+        } catch (RuntimeException failure) {
+            log.warn("The conversion of a request for a relay failed: {}", failure.toString());
+            return new Built(null, List.of("the conversion failed: " + failure.getClass().getSimpleName()), 0);
+        }
+    }
+}

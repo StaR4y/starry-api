@@ -100,6 +100,25 @@ class TierBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSupp
     }
 
     @Test
+    void aDispatchToARelayIsLeasedForItsOwnTimeLimitAndAMinuteOver() throws Exception {
+        try (Connection db = owner()) {
+            Caller caller = caller(db, "10");
+            service.reserveUsage(caller.principal(), "req-1", new BigDecimal("2"), PRICING).block();
+
+            ApiKeyService.DispatchLease lease = service
+                .markUsageDispatchedTiered(caller.principal(), "req-1", "anthropic:relay", Duration.ofSeconds(1_800)).block();
+
+            // More than the 960 seconds of the upstream clients: the lease outlasts the relay's limit by a minute.
+            assertThat(lease.window()).isEqualTo(Duration.ofSeconds(1_860));
+            assertThat(reservation(db, caller.hash("req-1"))).containsEntry("status", "DISPATCHED")
+                .containsEntry("last_dispatched_tier_ref", "anthropic:relay");
+            assertThat(seconds(db, "SELECT extract(epoch FROM expires_at - last_dispatched_at) FROM billing_reservations WHERE request_hash = ?",
+                caller.hash("req-1"))).isBetween(1_859.9, 1_860.5);
+            assertThat(lease.untilCap().toSeconds()).isBetween(3_590L, 3_600L);
+        }
+    }
+
+    @Test
     void aLaterDispatchRenewsTheLeaseAndRecordsTheTierItWentTo() throws Exception {
         try (Connection db = owner()) {
             Caller caller = caller(db, "10");

@@ -11,9 +11,12 @@ import tech.starryapi.platform.xproto.PairRegistry.PairKey;
 import tech.starryapi.platform.xproto.PairRegistry.Registration;
 import tech.starryapi.platform.xproto.PairRegistry.SourceKind;
 import tech.starryapi.platform.xproto.PairRegistry.Status;
+import tech.starryapi.platform.xproto.RequestFeatureDetector.Feature;
 import tech.starryapi.proxy.tier.TierEntry;
 import tech.starryapi.sourcetier.SourceTierRuntimeInfo;
 import tech.starryapi.sourcetier.SourceTierRuntimeInfo.PairStatus;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
 
 class PairRegistryTest {
 
@@ -21,15 +24,33 @@ class PairRegistryTest {
     private static final PairKey MESSAGES_ANTHROPIC = new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.MESSAGES, "anthropic");
 
     @Test
-    void thisReleaseOffersNoPair() {
-        // P5-05 lists the first pairs and replaces this test with the completeness of their fixtures.
+    void thisReleaseOffersTheChatAndMessagesPairsOfTheAnthropicAndOpenAiVendorsOnTrial() {
         PairRegistry defaults = PairRegistry.defaults();
 
-        assertThat(defaults.offeredPairs()).isEmpty();
+        // The Responses entry comes with the sixth phase, the Gemini entry and the google vendor with the seventh; the
+        // fifth phase's four pairs stay EXPERIMENTAL until the upgrade task has the evidence (P5-09).
+        assertThat(defaults.offeredPairs()).containsExactly(
+            new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.CHAT, "anthropic"),
+            new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.CHAT, "openai"),
+            new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.MESSAGES, "anthropic"),
+            new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.MESSAGES, "openai"));
         assertThat(PairRegistry.allPairs()).isNotEmpty().allSatisfy(pair -> {
-            assertThat(defaults.status(pair)).isEqualTo(Status.NOT_OFFERED);
-            assertThat(defaults.offered(pair)).isFalse();
+            boolean offered = defaults.offeredPairs().contains(pair);
+            assertThat(defaults.status(pair)).isEqualTo(offered ? Status.EXPERIMENTAL : Status.NOT_OFFERED);
+            assertThat(defaults.offered(pair)).isEqualTo(offered);
         });
+    }
+
+    @Test
+    void everyPairTheReleaseOffersIsOfAnEntryWhoseFeaturesAreDetectedAndJudged() {
+        // A pair is listed only when its entry has the conversion to the relay's Chat body and the table of what is carried,
+        // left out or refused (design 7.3): a listed pair of an entry that has none would have every request refused.
+        ObjectNode body = new ObjectMapper().createObjectNode();
+        assertThat(PairRegistry.defaults().offeredPairs()).allSatisfy(pair ->
+            assertThat(RequestFeatureDetector.detect(pair.entry(), body).features())
+                .as(pair.toString()).doesNotContain(Feature.UNSUPPORTED_ENTRY));
+        assertThat(RequestFeatureDetector.detect(Entry.RESPONSES, body).features()).contains(Feature.UNSUPPORTED_ENTRY);
+        assertThat(RequestFeatureDetector.detect(Entry.GEMINI, body).features()).contains(Feature.UNSUPPORTED_ENTRY);
     }
 
     @Test

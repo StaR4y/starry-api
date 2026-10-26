@@ -490,6 +490,17 @@ export function tierPresets(vendor: string): TierPreset[] {
             presetTier('kiro', 'Kiro', ['KIRO', 'CLAUDE_OAUTH']),
           ],
         },
+        {
+          id: 'relay-kiro',
+          title: t('OpenAI 中转 + Kiro'),
+          description: t(
+            '1 级放 OpenAI 格式的中转（保存后在下面的「跨协议成员」里登记），2 级 Kiro 与 Claude OAuth。没有列出的账号，包括官方 API Key，落入 2 级。系数都是 1，Kiro 要便宜多少请自己定。',
+          ),
+          build: () => [
+            presetTier('relay', t('OpenAI 中转'), []),
+            presetTier('kiro', 'Kiro', ['KIRO', 'CLAUDE_OAUTH']),
+          ],
+        },
       ];
     case 'openai':
       return [

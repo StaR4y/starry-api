@@ -80,12 +80,27 @@ public final class TierBilling {
      * @throws IllegalStateException if the tier is not one the plan priced
      */
     public BigDecimal cost(Level served, PlatformUsage usage) {
-        Level priced = plan.levels().stream()
+        return priced(served).quote().cost(usage);
+    }
+
+    /**
+     * {@link #cost} for a request served by a relay, which is never charged more than the tier reserved for it (design
+     * 5.3, invariant I2). The usage of a relay has been bounded to the input and the output the reservation assumed, and
+     * the estimate prices every token at the dearest of the rates, so the cost cannot pass it. The ceiling is kept as the
+     * one place where the invariant holds whatever the bounds were: what a relay reports is not to be trusted with it.
+     */
+    public BigDecimal relayCost(Level served, PlatformUsage usage) {
+        Level priced = priced(served);
+        BigDecimal cost = priced.quote().cost(usage);
+        return priced.estimate() == null ? cost : cost.min(priced.estimate());
+    }
+
+    private Level priced(Level served) {
+        return plan.levels().stream()
             .filter(level -> level.tierRef().equals(served.tierRef()))
             .findFirst()
             .orElseThrow(() -> new IllegalStateException(
                 "Tier " + served.tierRef() + " served a request whose plan did not price it"));
-        return priced.quote().cost(usage);
     }
 
     private static Set<String> dispatchKinds(Level level) {

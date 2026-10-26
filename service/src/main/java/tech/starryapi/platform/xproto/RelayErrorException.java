@@ -15,6 +15,14 @@ import tech.starryapi.platform.upstream.UpstreamException;
  */
 public final class RelayErrorException extends UpstreamException {
 
+    /**
+     * What a client is told when a prompt does not fit the context window of a relay and no native source is left to try
+     * (design 7.8): the words that clients such as Claude Code look for to shorten what they send. The relay's own words
+     * are not passed on. It is the answer both of a relay that refused the prompt and of a plan that left the relay out for
+     * the prompt's length, so that the first request and every later one are told the same.
+     */
+    public static final String PROMPT_TOO_LONG = "prompt is too long: the request does not fit the context window of the source";
+
     private final boolean contextExceeded;
 
     RelayErrorException(int statusCode, String message, boolean recoverable, String retryAfter, boolean contextExceeded) {

@@ -29,6 +29,12 @@ import tech.starryapi.config.ProxyProperties;
  * <p>The store also counts, per session and tier, the dispatches in flight on this node. An account that refuses a
  * request because the same session still has requests running on it (a client that runs sub-agents in parallel) says
  * nothing about the tier being busy, and does not push the session down.
+ *
+ * <p>And it keeps the relays that broke off an answer for a session (design 7.8), for {@link #RELAY_EXCLUSION}. That is no
+ * tier binding and moves no session between tiers: it is about not paying twice for an answer that may still be running,
+ * so it holds whether or not the vendor keeps sessions to their tier, and the switch of the account affinity leaves it
+ * alone. It only shapes the plans of that session's next requests, which leave the relay out as they leave out a relay
+ * that cannot carry the request.
  */
 public class TierSessionBindings {
 
@@ -41,11 +47,21 @@ public class TierSessionBindings {
     public record Binding(String tierId, int level) {
     }
 
+    /**
+     * How long a relay that broke off an answer is kept from the same session: long enough for the client's own retry of
+     * the 502 it was answered with (an SDK retries a few times within seconds), short enough that the relay is back for
+     * the session when the interruption was a passing one.
+     */
+    public static final Duration RELAY_EXCLUSION = Duration.ofMinutes(2);
+
     private static final TierSessionBindings DISABLED =
         new TierSessionBindings(() -> false, Duration.ofMinutes(10), 0, Ticker.systemTicker());
 
     private final BooleanSupplier enabled;
     private final Cache<String, Binding> bindings;
+    private final Cache<String, Boolean> interrupted;
+    /** Off for the store that keeps nothing: a cache of no size still shows an entry until its eviction has run. */
+    private final boolean keepsExclusions;
     private final ConcurrentMap<String, Integer> inFlight = new ConcurrentHashMap<>();
 
     public TierSessionBindings(ProxyProperties properties) {
@@ -62,6 +78,12 @@ public class TierSessionBindings {
         this.bindings = Caffeine.newBuilder()
             .maximumSize(maximumSize)
             .expireAfterAccess(ttl == null || ttl.isZero() || ttl.isNegative() ? Duration.ofMinutes(10) : ttl)
+            .ticker(ticker)
+            .build();
+        this.keepsExclusions = maximumSize > 0;
+        this.interrupted = Caffeine.newBuilder()
+            .maximumSize(maximumSize)
+            .expireAfterWrite(RELAY_EXCLUSION)
             .ticker(ticker)
             .build();
     }
@@ -125,6 +147,26 @@ public class TierSessionBindings {
         }
     }
 
+    /**
+     * A relay broke off an answer for the session: the request was written, and the relay may be generating the answer
+     * still. The session's retry of that request is not sent to the relay again for {@link #RELAY_EXCLUSION}, whatever
+     * the relay's tier, so that it goes to another relay or tier and the operator does not pay for the same answer twice.
+     *
+     * @param sessionKey what the session is called ({@link TierPlan#relaySession}); nothing is kept for a request that
+     *     has no session to tell it by
+     */
+    public void excludeRelay(String vendor, String sessionKey, String accountId) {
+        if (keepsExclusions && vendor != null && sessionKey != null && accountId != null) {
+            interrupted.put(exclusionKey(vendor, sessionKey, accountId), Boolean.TRUE);
+        }
+    }
+
+    /** Whether the relay broke off an answer for the session less than {@link #RELAY_EXCLUSION} ago. */
+    public boolean relayExcluded(String vendor, String sessionKey, String accountId) {
+        return keepsExclusions && vendor != null && sessionKey != null && accountId != null
+            && interrupted.getIfPresent(exclusionKey(vendor, sessionKey, accountId)) != null;
+    }
+
     /** A request of the session was dispatched in the tier. */
     public void dispatchStarted(String sessionKey, String tierRef) {
         if (sessionKey != null) {
@@ -146,6 +188,11 @@ public class TierSessionBindings {
 
     private static String inFlightKey(String sessionKey, String tierRef) {
         return tierRef + '|' + sessionKey;
+    }
+
+    /** A relay is a member of a vendor's tier, and the same account may be one in two vendors. */
+    private static String exclusionKey(String vendor, String sessionKey, String accountId) {
+        return vendor + '|' + accountId + '|' + sessionKey;
     }
 
     long size() {

@@ -2,6 +2,7 @@ package tech.starryapi.sourcetier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -105,6 +106,59 @@ class SourceTierAdminControllerTest {
             .jsonPath("$.data.vendors[0].tiers[1].serves").isEqualTo(false)
             .jsonPath("$.data.vendors[0].tiers[1].servedPinned").isEqualTo(5)
             .jsonPath("$.data.vendors[0].tiers[1].accounts.disabled").isEqualTo(2);
+    }
+
+    @Test
+    void theStatusOfAVendorWithRelaysCarriesTheirLayersPairsFiguresAndSkips() {
+        SourceTierDtos.XpFigures figures = new SourceTierDtos.XpFigures(40, 36, 4, 2, 1, 0, 1, 3, 0, 5, 1800L);
+        when(status.status()).thenReturn(Mono.just(new SourceTierDtos.Status(Instant.parse("2026-10-25T08:00:00Z"), 7L, 15, List.of(
+            new SourceTierDtos.VendorStatus("anthropic", "Anthropic", true, true, 100, 30, List.of(
+                new SourceTierDtos.TierStatus("relay", 1, "Relay", true, true,
+                    new SourceTierDtos.TierAccounts(0, 0, 0, 0, 1, 0), 36, 0, 4)),
+                new SourceTierDtos.XpStatus(Instant.parse("2026-10-25T05:00:00Z"),
+                    List.of(new SourceTierDtos.XpRelay("relay", "relay-1", "ready", 2, 1, figures)),
+                    List.of(new SourceTierDtos.XpPair("OPENAI_CHAT", "MESSAGES", "EXPERIMENTAL", "KEYS", 2, figures,
+                        List.of(new SourceTierDtos.FeatureCount("image", 5)))),
+                    List.of(new SourceTierDtos.XpSkipCount("relay", "GATE", 12))))))));
+
+        client.get().uri("/admin/source-tiers/status").exchange().expectStatus().isOk().expectBody()
+            .jsonPath("$.data.vendors[0].tiers[0].accounts.unopened").isEqualTo(0)
+            .jsonPath("$.data.vendors[0].xp.skipsSince").isEqualTo("2026-10-25T05:00:00Z")
+            .jsonPath("$.data.vendors[0].xp.relays[0].layer").isEqualTo("ready")
+            .jsonPath("$.data.vendors[0].xp.relays[0].verified").isEqualTo(1)
+            .jsonPath("$.data.vendors[0].xp.relays[0].figures.interrupted").isEqualTo(2)
+            .jsonPath("$.data.vendors[0].xp.relays[0].figures.p95Ms").isEqualTo(1800)
+            .jsonPath("$.data.vendors[0].xp.pairs[0].gate").isEqualTo("KEYS")
+            .jsonPath("$.data.vendors[0].xp.pairs[0].allowedKeys").isEqualTo(2)
+            .jsonPath("$.data.vendors[0].xp.pairs[0].degradedFeatures[0].feature").isEqualTo("image")
+            .jsonPath("$.data.vendors[0].xp.skips[0].reason").isEqualTo("GATE");
+    }
+
+    @Test
+    void theEvidenceIsAskedForAWindowOfDaysAndDefaultsToThirty() {
+        SourceTierDtos.XpFigures figures = new SourceTierDtos.XpFigures(250, 240, 4, 2, 0, 0, 0, 10, 0, 0, null);
+        List<SourceTierDtos.Criterion> criteria = XpPairStandard.evaluate(figures, 0);
+        when(status.evidence(anyInt())).thenReturn(Mono.just(new SourceTierDtos.Evidence(Instant.parse("2026-10-26T08:00:00Z"),
+            Instant.parse("2026-09-26T08:00:00Z"), 30, 7L, Instant.parse("2026-10-25T05:00:00Z"), List.of(
+                new SourceTierDtos.PairEvidence("anthropic", "Anthropic", "OPENAI_CHAT", "MESSAGES", "EXPERIMENTAL", "KEYS", 1, figures, 0,
+                    criteria, true, List.of(new SourceTierDtos.FeatureCount("image", 12)),
+                    List.of(new SourceTierDtos.MemberEvidence("relay", "relay-1", figures)))))));
+
+        client.get().uri("/admin/source-tiers/evidence").exchange().expectStatus().isOk().expectBody()
+            .jsonPath("$.data.days").isEqualTo(30)
+            .jsonPath("$.data.pairs[0].vendor").isEqualTo("anthropic")
+            .jsonPath("$.data.pairs[0].meetsStandard").isEqualTo(true)
+            .jsonPath("$.data.pairs[0].criteria[0].name").isEqualTo("requests")
+            .jsonPath("$.data.pairs[0].criteria[0].rule").isEqualTo(">= 200")
+            .jsonPath("$.data.pairs[0].criteria[4].name").isEqualTo("unbilled")
+            .jsonPath("$.data.pairs[0].criteria[4].rule").isEqualTo("< 2%")
+            .jsonPath("$.data.pairs[0].criteria[4].value").isEqualTo(0.8)
+            .jsonPath("$.data.pairs[0].members[0].accountId").isEqualTo("relay-1");
+        client.get().uri("/admin/source-tiers/evidence?days=7").exchange().expectStatus().isOk();
+
+        verify(status).evidence(30);
+        verify(status).evidence(7);
+        client.get().uri("/admin/source-tiers/evidence?days=many").exchange().expectStatus().isBadRequest();
     }
 
     @Test
@@ -262,6 +316,7 @@ class SourceTierAdminControllerTest {
         client.get().uri("/admin/source-tiers").exchange().expectStatus().isForbidden();
         client.get().uri("/admin/source-tiers/status").exchange().expectStatus().isForbidden();
         client.get().uri("/admin/source-tiers/placements").exchange().expectStatus().isForbidden();
+        client.get().uri("/admin/source-tiers/evidence").exchange().expectStatus().isForbidden();
         client.put().uri("/admin/source-tiers/anthropic").contentType(MediaType.APPLICATION_JSON).bodyValue(PUT_BODY)
             .exchange().expectStatus().isForbidden();
         client.post().uri("/admin/source-tiers/anthropic/members").contentType(MediaType.APPLICATION_JSON)

@@ -1,0 +1,1 @@
+{"origin": "OpenCode 1.18.16 with the model gpt-5.5, as the client sends it: it asks for verbosity low and reasoning_effort medium in every request, and a gpt request is sent whole to its native accounts. The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

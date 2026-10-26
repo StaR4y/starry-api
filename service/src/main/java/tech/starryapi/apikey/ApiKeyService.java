@@ -267,8 +267,24 @@ public class ApiKeyService {
      * @return the lease; empty for the anonymous caller, who has no reservation
      */
     public Mono<DispatchLease> markUsageDispatchedTiered(ApiKeyPrincipal principal, String requestId, String tierRef) {
+        return markUsageDispatchedTiered(principal, requestId, tierRef, null);
+    }
+
+    /**
+     * {@link #markUsageDispatchedTiered(ApiKeyPrincipal, String, String)} for a dispatch to an OpenAI-format relay, which
+     * is bounded by a time limit of its own (design 4.6): the window also covers that limit and a minute over, so that a
+     * relay allowed more time than the upstream clients are is never dispatched under a lease that ends first.
+     *
+     * @param crossProtocolLimit how long the dispatch may take, or null for a dispatch of a native upstream client
+     */
+    public Mono<DispatchLease> markUsageDispatchedTiered(
+        ApiKeyPrincipal principal,
+        String requestId,
+        String tierRef,
+        Duration crossProtocolLimit
+    ) {
         if (principal == null || "anonymous".equals(principal.keyId())) return Mono.empty();
-        Duration window = leaseWindow();
+        Duration window = leaseWindow(crossProtocolLimit);
         return template.getDatabaseClient().sql("""
             UPDATE billing_reservations
             SET status = 'DISPATCHED',
@@ -289,13 +305,23 @@ public class ApiKeyService {
     /**
      * How long a lease on a dispatch of a tiered request lasts from the time it is made or renewed: the upstream client's
      * request timeout for each of its tries, and a minute over, but at least what a reservation is leased for to begin
-     * with. A cross-protocol dispatch adds its own time limit to this when it exists.
+     * with. A cross-protocol dispatch adds its own time limit to this ({@link #leaseWindow(Duration)}).
      */
     Duration leaseWindow() {
         Duration longestDispatch = properties.getRequestTimeout()
             .multipliedBy(Math.max(0, properties.getMaxRetries()) + 1L)
             .plus(LEASE_SLACK);
         return longestDispatch.compareTo(BASE_LEASE) > 0 ? longestDispatch : BASE_LEASE;
+    }
+
+    /** {@link #leaseWindow()}, or what a cross-protocol dispatch bounded by {@code crossProtocolLimit} needs when that is longer. */
+    Duration leaseWindow(Duration crossProtocolLimit) {
+        Duration window = leaseWindow();
+        if (crossProtocolLimit == null) {
+            return window;
+        }
+        Duration crossProtocol = crossProtocolLimit.plus(LEASE_SLACK);
+        return crossProtocol.compareTo(window) > 0 ? crossProtocol : window;
     }
 
     /**

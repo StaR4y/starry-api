@@ -220,7 +220,7 @@ class DataTransferServiceTest {
     }
 
     @Test
-    void requiresExactFlywayV29HistoryAndMatchingChecksumsForRestore() {
+    void requiresExactFlywayV30HistoryAndMatchingChecksumsForRestore() {
         List<DataTransferService.FlywayMigration> current = currentMigrationHistory();
 
         assertThatCode(() -> DataTransferService.validateMigrationHistory(current)).doesNotThrowAnyException();
@@ -229,29 +229,39 @@ class DataTransferServiceTest {
 
         assertThatThrownBy(() -> DataTransferService.validateMigrationHistory(current.subList(0, 9)))
             .isInstanceOf(SQLException.class)
-            .hasMessageContaining("V1-V29");
+            .hasMessageContaining("V1-V30");
 
         // A backup taken before the tiered source pools migration cannot be restored from the console.
         List<DataTransferService.FlywayMigration> beforeSourceTiers = current.subList(0, 28);
         assertThat(beforeSourceTiers.get(27).version()).isEqualTo("28");
         assertThatThrownBy(() -> DataTransferService.validateMigrationHistory(beforeSourceTiers))
             .isInstanceOf(SQLException.class)
-            .hasMessageContaining("V1-V29");
+            .hasMessageContaining("V1-V30");
         assertThatThrownBy(() -> DataTransferService.verifyRestoreMigrationHistory(current, beforeSourceTiers))
             .isInstanceOf(SQLException.class)
-            .hasMessageContaining("V1-V29");
+            .hasMessageContaining("V1-V30");
+
+        // Nor can one taken after V29 and before the tutorials about tiers.
+        List<DataTransferService.FlywayMigration> beforeTierTutorials = current.subList(0, 29);
+        assertThat(beforeTierTutorials.get(28).version()).isEqualTo("29");
+        assertThatThrownBy(() -> DataTransferService.validateMigrationHistory(beforeTierTutorials))
+            .isInstanceOf(SQLException.class)
+            .hasMessageContaining("V1-V30");
+        assertThatThrownBy(() -> DataTransferService.verifyRestoreMigrationHistory(current, beforeTierTutorials))
+            .isInstanceOf(SQLException.class)
+            .hasMessageContaining("V1-V30");
 
         List<DataTransferService.FlywayMigration> future = new ArrayList<>(current);
         future.add(new DataTransferService.FlywayMigration(
-            "30",
-            "V30__unknown_future.sql",
+            "31",
+            "V31__unknown_future.sql",
             "SQL",
             8008,
             true
         ));
         assertThatThrownBy(() -> DataTransferService.validateMigrationHistory(future))
             .isInstanceOf(SQLException.class)
-            .hasMessageContaining("V1-V29");
+            .hasMessageContaining("V1-V30");
 
         List<DataTransferService.FlywayMigration> changedChecksum = new ArrayList<>(current);
         DataTransferService.FlywayMigration v5 = changedChecksum.get(4);
@@ -479,7 +489,8 @@ class DataTransferServiceTest {
             new DataTransferService.FlywayMigration("26", "V26__account_egress_policy.sql", "SQL", 1026, true),
             new DataTransferService.FlywayMigration("27", "V27__egress_listener_ports_and_probe_results.sql", "SQL", 1027, true),
             new DataTransferService.FlywayMigration("28", "V28__account_allocation_defaults.sql", "SQL", 1028, true),
-            new DataTransferService.FlywayMigration("29", "V29__source_tiers.sql", "SQL", 1029, true)
+            new DataTransferService.FlywayMigration("29", "V29__source_tiers.sql", "SQL", 1029, true),
+            new DataTransferService.FlywayMigration("30", "V30__documentation_source_tiers.sql", "SQL", 1030, true)
         );
     }
 }

@@ -1,0 +1,34 @@
+{
+  "relaysLeftOut": [],
+  "attempts": [
+    {
+      "account": "relay-1",
+      "tier": "openai:relay",
+      "dispatch": "OPENAI_CHAT",
+      "wireModel": "relay-gpt",
+      "success": false,
+      "status": 400,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "usageSource": null,
+      "stopReason": "CONTEXT_EXCEEDED",
+      "degraded": "cache_control,thinking,context_management,metadata",
+      "error": "Source error 400 (context_length_exceeded)"
+    },
+    {
+      "account": "anthropic-1",
+      "tier": "openai:native",
+      "dispatch": "NATIVE",
+      "wireModel": null,
+      "success": true,
+      "status": 200,
+      "inputTokens": 500,
+      "outputTokens": 20,
+      "usageSource": null,
+      "stopReason": null,
+      "degraded": null,
+      "error": null,
+      "nativeToolIds": []
+    }
+  ]
+}

@@ -1,0 +1,1 @@
+{"origin": "Claude Code 2.1.168: the member is set not to stream and the relay answers with a JSON body. The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

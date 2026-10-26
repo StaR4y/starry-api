@@ -25,7 +25,9 @@ import tech.starryapi.platform.xproto.XprotoFixtures.Case;
  *
  * <p>What a harness does is the pair's own: for a pair that is served it takes the client request and the relay's
  * scripted answers from {@code input/} and returns what the gateway sent the relay, what it answered the client and what
- * it billed. The harnesses of the real pairs are listed in {@link #HARNESSES} by the tasks that write the pairs.
+ * it billed. The harness of every pair the release offers is {@link XpPairHarnesses}'s: the gateway's own entry, planner,
+ * dispatcher and relay client against a relay that answers as the case says. The expected directories are rewritten, on
+ * purpose, by {@link XprotoFixtureRecorder}.
  */
 class CrossProtocolContractTest {
 
@@ -35,8 +37,8 @@ class CrossProtocolContractTest {
         Map<String, byte[]> run(Case fixture) throws Exception;
     }
 
-    /** The harnesses of the pairs this release offers. There is none: it offers no pair. */
-    private static final Map<PairKey, PairHarness> HARNESSES = Map.of();
+    /** The harnesses of the pairs this release offers: the gateway's own code, played against a relay that answers as the case says. */
+    private static final Map<PairKey, PairHarness> HARNESSES = XpPairHarnesses.forTheOfferedPairs();
 
     private static final PairKey MESSAGES_ANTHROPIC = new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.MESSAGES, "anthropic");
     private static final PairKey CHAT_OPENAI = new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.CHAT, "openai");

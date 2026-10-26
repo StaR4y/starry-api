@@ -295,6 +295,86 @@ class SourceTierSnapshotTest {
     }
 
     @Test
+    void theSnapshotSaysWhetherAnyVendorHasARelay() {
+        List<Tier> tiers = List.of(tier("anthropic", "relay", 1, true));
+
+        assertThat(SourceTierSnapshot.EMPTY.hasCrossProtocolMembers()).isFalse();
+        assertThat(snapshot(List.of(vendor("anthropic")), tiers, List.of()).hasCrossProtocolMembers()).isFalse();
+        // A native pin is no relay.
+        assertThat(snapshot(List.of(vendor("anthropic")), tiers, List.of(nativeMember("anthropic", "pinned", "relay")))
+            .hasCrossProtocolMembers()).isFalse();
+        assertThat(snapshot(List.of(vendor("anthropic")), tiers, List.of(relayMember("anthropic", "relay", "relay", false)))
+            .hasCrossProtocolMembers()).isTrue();
+        // A row that points at no tier is not a member.
+        assertThat(snapshot(List.of(vendor("anthropic")), tiers, List.of(relayMember("anthropic", "relay", "no-such-tier", false)))
+            .hasCrossProtocolMembers()).isFalse();
+    }
+
+    @Test
+    void aRelayIsOpenForAnEntryOnlyWhenItsTierAndVendorAreOnAndAGateOfItsProtocolIsNotOff() {
+        List<Tier> tiers = List.of(tier("anthropic", "relay", 1, true));
+        List<Member> members = List.of(relayMember("anthropic", "relay-1", "relay", true));
+        PairGate messagesKeys = new PairGate("anthropic", "OPENAI_CHAT", "MESSAGES", "KEYS", List.of("key-1"));
+
+        // Registered and not opened: the state of a relay between the day it is added and the day a gate is set.
+        assertThat(SourceTierSnapshot.of(1L, List.of(vendor("anthropic")), tiers, members, List.of(), List.of())
+            .hasOpenRelayFor("MESSAGES")).isFalse();
+        SourceTierSnapshot opened = SourceTierSnapshot.of(1L, List.of(vendor("anthropic")), tiers, members, List.of(),
+            List.of(messagesKeys, new PairGate("anthropic", "OPENAI_CHAT", "CHAT", "OFF", List.of())));
+        assertThat(opened.hasOpenRelayFor("MESSAGES")).isTrue();
+        assertThat(opened.hasOpenRelayFor("CHAT")).isFalse();
+        assertThat(opened.hasOpenRelayFor("RESPONSES")).isFalse();
+        assertThat(opened.hasOpenRelayFor(null)).isFalse();
+        assertThat(opened.hasCrossProtocolMembers()).isTrue();
+        // A vendor that is switched off, or a tier that is, plans nothing over its relays.
+        assertThat(SourceTierSnapshot.of(1L, List.of(new VendorConfig("anthropic", false, false, false, true, 16, true, 1L)), tiers,
+            members, List.of(), List.of(messagesKeys)).hasOpenRelayFor("MESSAGES")).isFalse();
+        assertThat(SourceTierSnapshot.of(1L, List.of(vendor("anthropic")), List.of(tier("anthropic", "relay", 1, false)), members,
+            List.of(), List.of(messagesKeys)).hasOpenRelayFor("MESSAGES")).isFalse();
+        // The gate of another vendor opens nothing for this vendor's relay, nor a native pin's tier any relay.
+        assertThat(SourceTierSnapshot.of(1L, List.of(vendor("anthropic"), vendor("openai")), tiers, members, List.of(),
+            List.of(new PairGate("openai", "OPENAI_CHAT", "MESSAGES", "ON", List.of()))).hasOpenRelayFor("MESSAGES")).isFalse();
+        assertThat(SourceTierSnapshot.of(1L, List.of(vendor("anthropic")), tiers, List.of(nativeMember("anthropic", "pinned", "relay")),
+            List.of(), List.of(messagesKeys)).hasOpenRelayFor("MESSAGES")).isFalse();
+        assertThat(SourceTierSnapshot.EMPTY.hasOpenRelayFor("MESSAGES")).isFalse();
+    }
+
+    @Test
+    void aTierCanHoldNativeAccountsWhenARowNamesItItListsACategoryOrItIsTheLowestOneSwitchedOn() {
+        List<Tier> tiers = List.of(
+            tier("anthropic", "relay", 1, true),
+            tier("anthropic", "listed", 2, true, AccountAllocationCategory.KIRO),
+            tier("anthropic", "pinned", 3, true),
+            tier("anthropic", "lowest", 4, true),
+            tier("anthropic", "off", 5, false)
+        );
+        SourceTierSnapshot snapshot = snapshot(List.of(vendor("anthropic")), tiers,
+            List.of(relayMember("anthropic", "relay-1", "relay", true), nativeMember("anthropic", "spare", "pinned")));
+
+        // A tier of relays alone: no category, no native row, and a tier below it takes the accounts nothing places.
+        assertThat(snapshot.canHoldNativeAccounts("anthropic", "relay")).isFalse();
+        assertThat(snapshot.canHoldNativeAccounts("anthropic", "listed")).isTrue();
+        assertThat(snapshot.canHoldNativeAccounts("anthropic", "pinned")).isTrue();
+        assertThat(snapshot.canHoldNativeAccounts("anthropic", "lowest")).isTrue();
+        assertThat(snapshot.canHoldNativeAccounts("anthropic", "off")).isFalse();
+        assertThat(snapshot.canHoldNativeAccounts("anthropic", "no-such-tier")).isFalse();
+        assertThat(snapshot.canHoldNativeAccounts("openai", "relay")).isFalse();
+        // Alone, the tier of relays is the lowest and takes the rest.
+        assertThat(snapshot(List.of(vendor("anthropic")), List.of(tier("anthropic", "relay", 1, true)),
+            List.of(relayMember("anthropic", "relay-1", "relay", true))).canHoldNativeAccounts("anthropic", "relay")).isTrue();
+    }
+
+    @Test
+    void aCallerWithoutAKeyIsOnNoList() {
+        PairGate gate = new PairGate("anthropic", "OPENAI_CHAT", "CHAT", "KEYS", List.of("key-1", PairGate.ANONYMOUS_KEY_ID));
+
+        assertThat(gate.lists("key-1")).isTrue();
+        assertThat(gate.lists("key-2")).isFalse();
+        assertThat(gate.lists(null)).isFalse();
+        assertThat(gate.lists(PairGate.ANONYMOUS_KEY_ID)).isFalse();
+    }
+
+    @Test
     void anUnconfiguredVendorHasTheDefaultsOfTheTable() {
         VendorConfig defaults = VendorConfig.defaults("anthropic");
 

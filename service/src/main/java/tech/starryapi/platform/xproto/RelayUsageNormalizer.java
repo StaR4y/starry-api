@@ -157,7 +157,7 @@ public final class RelayUsageNormalizer {
         boolean estimated = false;
         boolean clamped = false;
         boolean suspectedUnderReport = false;
-        long weight = weigh(wireBody);
+        long weight = estimateInputTokens(wireBody);
         if (input <= 0) {
             input = weight;
             estimated = true;
@@ -211,8 +211,11 @@ public final class RelayUsageNormalizer {
             count(usage, OUTPUT));
     }
 
-    /** What the request weighs when the relay did not say: see the class description. At least 1. */
-    private static long weigh(JsonNode wireBody) {
+    /**
+     * What the request weighs when the relay did not say: see the class description. At least 1. The planner asks it too,
+     * whether the request fits the window of the mapping that would serve it (design 3, step 5b, condition 5).
+     */
+    public static long estimateInputTokens(JsonNode wireBody) {
         JsonNodes.MediaStats stats = JsonNodes.mediaStats(wireBody);
         long text = Math.max(1, (stats.charsWithoutBase64() + 3) / 4);
         return text + TOKENS_PER_MEDIA_ITEM * (stats.inlineImages() + stats.remoteMedia());

@@ -105,11 +105,18 @@ public final class PairRegistry {
     }
 
     /**
-     * What this release offers. Empty until the first pairs are written: the converters of the Chat and Messages
-     * entries and their fixtures arrive with the fifth phase of the plan, the Responses ones with the sixth, the Gemini
-     * ones with the seventh.
+     * What this release offers: the Chat Completions and Messages entries, for the models of the anthropic and the openai
+     * vendors, on trial. They are the entries of the clients the fifth phase of the plan is for (OpenCode, Claude Code),
+     * and they stay EXPERIMENTAL, open to the API keys an administrator lists, until the upgrade task of the phase
+     * (P5-09) has the evidence of the status page for each. The Responses entry comes with the sixth phase, the Gemini
+     * one and the google vendor with the seventh.
      */
-    private static final List<Registration> OFFERED = List.of();
+    private static final List<Registration> OFFERED = List.of(
+        new Registration(SourceKind.OPENAI_CHAT_RELAY, Entry.CHAT, "anthropic", Status.EXPERIMENTAL),
+        new Registration(SourceKind.OPENAI_CHAT_RELAY, Entry.CHAT, "openai", Status.EXPERIMENTAL),
+        new Registration(SourceKind.OPENAI_CHAT_RELAY, Entry.MESSAGES, "anthropic", Status.EXPERIMENTAL),
+        new Registration(SourceKind.OPENAI_CHAT_RELAY, Entry.MESSAGES, "openai", Status.EXPERIMENTAL)
+    );
 
     private static final PairRegistry DEFAULTS = new PairRegistry(OFFERED);
 

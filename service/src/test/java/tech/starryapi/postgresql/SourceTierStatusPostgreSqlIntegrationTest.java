@@ -45,6 +45,7 @@ class SourceTierStatusPostgreSqlIntegrationTest extends PostgreSqlIntegrationTes
     @Autowired AccountCandidateRanker ranker;
     @Autowired ModelPoolKeyResolver resolver;
     @Autowired ModelCatalogProvider catalog;
+    @Autowired SourceTierStatusService wired;
 
     private final List<String> accounts = new ArrayList<>();
     private final List<String> requests = new ArrayList<>();
@@ -86,6 +87,13 @@ class SourceTierStatusPostgreSqlIntegrationTest extends PostgreSqlIntegrationTes
                 new SourceTierDtos.Tier("kiro", 2, "kiro反向代理", new BigDecimal("0.6"), List.of("KIRO", "CLAUDE_OAUTH"),
                     null, null, null)), List.of(), List.of()))
             .block();
+    }
+
+    @Test
+    void theServiceTheApplicationWiresAnswersWithTheCountsOfThisNodesPlans() {
+        // Built by Spring, with the counts of skipped relays the planner keeps: nothing was planned here, so nothing is counted.
+        assertThat(wired.evidence(30).block().skipsSince()).isNotNull();
+        assertThat(wired.status().block().vendors()).isEmpty();
     }
 
     @Test
@@ -180,6 +188,122 @@ class SourceTierStatusPostgreSqlIntegrationTest extends PostgreSqlIntegrationTes
         assertThat(kiro.failed()).isZero();
     }
 
+    /** A relay in a tier of its own beside Kiro, opened to one key for the Messages entry and not yet verified. */
+    private String configureAnthropicWithRelay() {
+        String relay = account("OpenAI-compatible", "api-key", true);
+        new SourceTierAdminService(db, transactionManager, settings, registry,
+            new SourceTierValidator(catalog, resolver, everything), everything)
+            .replace("anthropic", new SourceTierDtos.ReplaceVendor(0L, true, null, null, null, null, null, List.of(
+                new SourceTierDtos.Tier("relay", 1, "openai源头", null, List.of(), null, null, null),
+                new SourceTierDtos.Tier("kiro", 2, "kiro反向代理", new BigDecimal("0.6"), List.of("KIRO", "CLAUDE_OAUTH"),
+                    null, null, null)),
+                List.of(new SourceTierDtos.Member(relay, "relay", "OPENAI_CHAT", null, null, null, null, null, null, null, null, true, true,
+                    List.of(new SourceTierDtos.MemberModel("claude-sonnet-4.5", "relay/sonnet", 200_000, null, null, null, null)))),
+                List.of(new SourceTierDtos.Gate("OPENAI_CHAT", "MESSAGES", "KEYS", List.of("key-1")))))
+            .block();
+        accountPool.refreshCache().block();
+        return relay;
+    }
+
+    @Test
+    void theAttemptsSentToRelaysAreCountedFromTheLogByRelayPairAndKindOfFailure() {
+        String relay = configureAnthropicWithRelay();
+        Instant now = Instant.now();
+        // Messages: 6 attempts, 4 answered (one estimated, one clamped, two reported; one left an image out), one broken off
+        // after the relay may have generated, one refused as converted.
+        relayLog(relay, "/v1/messages", true, 1000, "REPORTED", "END_TURN", null, now.minus(1, ChronoUnit.MINUTES));
+        relayLog(relay, "/v1/messages", true, 2000, "ESTIMATED", "TOOL_USE", "image,cache_control", now.minus(2, ChronoUnit.MINUTES));
+        relayLog(relay, "/v1/messages", true, 3000, "CLAMPED", "END_TURN", null, now.minus(3, ChronoUnit.MINUTES));
+        relayLog(relay, "/v1/messages", true, 9000, "REPORTED", "MAX_TOKENS", "image", now.minus(4, ChronoUnit.MINUTES));
+        relayLog(relay, "/v1/messages", false, 30000, null, "INTERRUPTED", null, now.minus(5, ChronoUnit.MINUTES));
+        relayLog(relay, "/v1/messages", false, 400, null, "CONVERSION_REJECTED", null, now.minus(5, ChronoUnit.MINUTES));
+        // Chat: one answered, one that the relay did not serve the model for, one that failed with no kind.
+        relayLog(relay, "/v1/chat/completions", true, 500, "REPORTED", "END_TURN", null, now.minus(1, ChronoUnit.MINUTES));
+        relayLog(relay, "/v1/chat/completions", false, 300, null, "MODEL_NOT_SERVED", null, now.minus(1, ChronoUnit.MINUTES));
+        relayLog(relay, "/v1/chat/completions", false, 100, null, null, null, now.minus(1, ChronoUnit.MINUTES));
+        // Not relay attempts: a native attempt of the same tier, and one of Kiro.
+        log("anthropic:relay", "AUTO", true, now.minus(1, ChronoUnit.MINUTES));
+        log("anthropic:kiro", "AUTO", true, now.minus(1, ChronoUnit.MINUTES));
+        // Older than the window of the status, inside the window of the evidence.
+        relayLog(relay, "/v1/messages", true, 100, "REPORTED", "END_TURN", null, now.minus(2, ChronoUnit.DAYS));
+
+        SourceTierDtos.VendorStatus anthropic = status().status().block().vendors().stream()
+            .filter(vendor -> vendor.vendor().equals("anthropic")).findFirst().orElseThrow();
+
+        SourceTierDtos.TierStatus relayTier = anthropic.tiers().get(0);
+        assertThat(relayTier.accounts()).as("registered, not opened for want of a verified mapping")
+            .isEqualTo(new SourceTierDtos.TierAccounts(0, 0, 0, 0, 0, 1));
+        assertThat(relayTier.serves()).isFalse();
+        SourceTierDtos.XpStatus xp = anthropic.xp();
+        assertThat(xp.relays()).singleElement().satisfies(view -> {
+            assertThat(view.accountId()).isEqualTo(relay);
+            assertThat(view.layer()).isEqualTo("unopened");
+            assertThat(view.mappings()).isEqualTo(1);
+            assertThat(view.verified()).isZero();
+            SourceTierDtos.XpFigures figures = view.figures();
+            assertThat(figures.attempts()).isEqualTo(9);
+            assertThat(figures.served()).isEqualTo(5);
+            assertThat(figures.failed()).isEqualTo(4);
+            assertThat(figures.interrupted()).isEqualTo(1);
+            assertThat(figures.conversionRejected()).isEqualTo(1);
+            assertThat(figures.modelNotServed()).isEqualTo(1);
+            assertThat(figures.contextExceeded()).isZero();
+            assertThat(figures.estimated()).isEqualTo(1);
+            assertThat(figures.clamped()).isEqualTo(1);
+            assertThat(figures.degraded()).isEqualTo(2);
+        });
+        SourceTierDtos.XpPair messages = xp.pairs().stream().filter(pair -> pair.entryEndpoint().equals("MESSAGES")).findFirst().orElseThrow();
+        assertThat(messages.gate()).isEqualTo("KEYS");
+        assertThat(messages.allowedKeys()).isEqualTo(1);
+        assertThat(messages.figures().attempts()).isEqualTo(6);
+        assertThat(messages.figures().served()).isEqualTo(4);
+        assertThat(messages.figures().p95Ms()).as("of the answered attempts, 1, 2, 3 and 9 seconds: 3 s and 0.85 of the 6 s to 9 s").isEqualTo(8100L);
+        assertThat(messages.degradedFeatures()).containsExactly(new SourceTierDtos.FeatureCount("image", 2),
+            new SourceTierDtos.FeatureCount("cache_control", 1));
+        SourceTierDtos.XpPair chat = xp.pairs().stream().filter(pair -> pair.entryEndpoint().equals("CHAT")).findFirst().orElseThrow();
+        assertThat(chat.figures().attempts()).isEqualTo(3);
+        assertThat(chat.figures().p95Ms()).isEqualTo(500L);
+        // Native attempts do not count among the relay's, the tier's own served and failed counts do include them all.
+        assertThat(relayTier.served()).isEqualTo(5 + 1);
+        assertThat(relayTier.failed()).isEqualTo(4);
+    }
+
+    @Test
+    void theEvidenceIsReadOverTheDaysAskedAndHoldsEachPairToTheStandard() {
+        String relay = configureAnthropicWithRelay();
+        Instant now = Instant.now();
+        for (int i = 0; i < 4; i++) {
+            relayLog(relay, "/v1/messages", true, 100, "REPORTED", "END_TURN", null, now.minus(2, ChronoUnit.DAYS));
+        }
+        relayLog(relay, "/v1/messages", false, 100, null, "INTERRUPTED", null, now.minus(10, ChronoUnit.DAYS));
+        relayLog(relay, "/v1/messages", true, 100, "REPORTED", "END_TURN", null, now.minus(40, ChronoUnit.DAYS));
+        relayLog(relay, "/v1/responses", true, 100, "REPORTED", "END_TURN", null, now.minus(1, ChronoUnit.DAYS));
+
+        SourceTierDtos.Evidence week = status().evidence(7).block();
+        SourceTierDtos.Evidence month = status().evidence(30).block();
+
+        SourceTierDtos.PairEvidence weekMessages = pair(week, "anthropic", "MESSAGES");
+        assertThat(weekMessages.figures().attempts()).isEqualTo(4);
+        assertThat(weekMessages.members()).singleElement().satisfies(member -> {
+            assertThat(member.tierId()).isEqualTo("relay");
+            assertThat(member.accountId()).isEqualTo(relay);
+            assertThat(member.figures().attempts()).isEqualTo(4);
+        });
+        SourceTierDtos.PairEvidence monthMessages = pair(month, "anthropic", "MESSAGES");
+        assertThat(monthMessages.figures().attempts()).isEqualTo(5);
+        assertThat(monthMessages.figures().interrupted()).isEqualTo(1);
+        assertThat(monthMessages.meetsStandard()).isFalse();
+        assertThat(monthMessages.criteria()).filteredOn(criterion -> !criterion.met()).extracting(SourceTierDtos.Criterion::name)
+            .containsExactly("requests", "unbilled");
+        assertThat(pair(month, "anthropic", "CHAT").figures().attempts()).as("each entry has the attempts of its own path").isZero();
+        assertThat(pair(month, "anthropic", "RESPONSES").figures().attempts()).isEqualTo(1);
+    }
+
+    private static SourceTierDtos.PairEvidence pair(SourceTierDtos.Evidence evidence, String vendor, String entry) {
+        return evidence.pairs().stream().filter(pair -> pair.vendor().equals(vendor) && pair.entryEndpoint().equals(entry))
+            .findFirst().orElseThrow();
+    }
+
     @Test
     void thePlacementsAreReadFromTheAccountTable() {
         String official = account("Anthropic", "api-key", true);
@@ -208,6 +332,25 @@ class SourceTierStatusPostgreSqlIntegrationTest extends PostgreSqlIntegrationTes
                 """)
             .bind("id", id).bind("status", success ? 200 : 502).bind("success", success).bind("at", at)
             .bind("ref", tierRef).bind("selection", selection).fetch().rowsUpdated().block();
+    }
+
+    private void relayLog(String accountId, String path, boolean success, long latencyMs, String usageSource, String stopReason,
+        String degraded, Instant at) {
+        String id = "st-" + UUID.randomUUID().toString().substring(0, 8);
+        requests.add(id);
+        DatabaseClient.GenericExecuteSpec spec = db.sql("""
+                INSERT INTO request_logs (request_id, account_id, path, status_code, success, latency_ms, created_at, source_tier_ref,
+                    source_tier_level, source_tier_name, price_factor, tier_selection, source_dispatch, wire_model, usage_source,
+                    stop_reason, degraded_features)
+                VALUES (:id, :account, :path, :status, :success, :latency, :at, 'anthropic:relay', 1, 'n', 1, 'AUTO', 'OPENAI_CHAT',
+                    'relay/sonnet', :usageSource, :stopReason, :degraded)
+                """)
+            .bind("id", id).bind("account", accountId).bind("path", path).bind("status", success ? 200 : 502).bind("success", success)
+            .bind("latency", latencyMs).bind("at", at);
+        spec = usageSource == null ? spec.bindNull("usageSource", String.class) : spec.bind("usageSource", usageSource);
+        spec = stopReason == null ? spec.bindNull("stopReason", String.class) : spec.bind("stopReason", stopReason);
+        spec = degraded == null ? spec.bindNull("degraded", String.class) : spec.bind("degraded", degraded);
+        spec.fetch().rowsUpdated().block();
     }
 
     private void logWithoutTier(Instant at) {
