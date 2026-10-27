@@ -2088,4 +2088,426 @@ class AssistantDocsIndexTest {
         ask(index, "发票");
         assertThat(loads).as("a change reported by the event is read at once").hasValue(2);
     }
+
+    // ---- safety: time, memory and a load that cannot finish ---------------------------------------------------------
+
+    private static void within(Duration limit, String what, Runnable work) {
+        org.junit.jupiter.api.Assertions.assertTimeoutPreemptively(limit, work::run, what);
+    }
+
+    @Test
+    void aRunOfHyphenatedWordsIsScannedOnceAndNotOncePerWord() {
+        // Every part is a stop word or a one-word duplicate, so nothing ends the scan early: the cost is the length of
+        // the run, not the length times the number of words in it. 180000 characters took half a minute when each word
+        // measured the run to its end again.
+        for (String unit : List.of("is-", "ab-", "\u33cc-", "\ufdf2-", "ab-cd-")) {
+            String run = unit.repeat(180_000 / unit.length());
+            within(Duration.ofSeconds(3), "scan of " + (int) unit.charAt(0), () -> {
+                AssistantDocsIndex.termWeights(run);
+                AssistantDocsIndex.phrases(run);
+            });
+        }
+    }
+
+    @Test
+    void hyphenatedWordsAreStillCutIntoWordsUnlessTheNameHasADigit() {
+        assertThat(AssistantDocsIndex.termWeights("alpha-beta-gamma")).containsOnlyKeys("alpha", "beta", "gamma");
+        assertThat(AssistantDocsIndex.termWeights("built-in ab-cd.ef-gh")).containsKeys("built", "ab", "gh")
+            .doesNotContainKey("built-in").doesNotContainKey("ab-cd.ef-gh");
+        assertThat(AssistantDocsIndex.termWeights("alpha-beta-gpt-5.5-turbo")).as("a digit anywhere makes one name")
+            .containsEntry("alpha-beta-gpt-5.5-turbo", 4.0);
+        assertThat(AssistantDocsIndex.termWeights("x-1 alpha-beta")).containsEntry("alpha", 1.0).containsEntry("beta", 1.0);
+        assertThat(AssistantDocsIndex.phrases("alpha-beta gamma")).as("a hyphen is no space between two words of a phrase")
+            .containsExactly("beta gamma");
+    }
+
+    @Test
+    void aQuestionOfHyphenatedStopWordsAfterSixLikeItIsAnsweredAtOnce() {
+        AssistantDocsIndex index = help();
+        ask(index, "怎么创建 API Key");
+        // The chat service stops at 4000 characters a message, the index does not rely on it: seven messages of 40000
+        // characters took half a minute when every word measured its run to the end again.
+        String message = "\u33cc-".repeat(20_000);
+        List<String> earlier = List.of(message, message, message, message, message, message);
+
+        within(Duration.ofSeconds(5), "a question of hyphenated stop words", () ->
+            assertThat(index.retrieveFor(message, earlier).block(TIMEOUT).chunks()).isEmpty());
+    }
+
+    @Test
+    void pagesOfHyphenatedParagraphsAreIndexedInTimeThatGrowsWithTheirLength() {
+        // 2000 chunks of 1500 characters, nothing in them but hyphenated words (U+FDF2 is four letters after folding).
+        List<Document> pages = new ArrayList<>();
+        for (int number = 0; number < 200; number++) {
+            StringBuilder body = new StringBuilder("## 连字符\n");
+            for (int paragraph = 0; paragraph < 10; paragraph++) {
+                body.append("\ufdf2-".repeat(750)).append("\n\n");
+            }
+            pages.add(page("hyphen-" + number, "连字符" + number, "帮助", "", body.toString()));
+        }
+        AssistantDocsIndex index = indexOf(pages);
+
+        within(Duration.ofSeconds(5), "indexing hyphenated paragraphs", () -> ask(index, "连字符"));
+        assertThat(index.searchCharacters()).isGreaterThan(1_000_000);
+    }
+
+    /** The Arabic ligature U+FDFA, which normalization turns into 18 characters. */
+    private static final String LIGATURE = "\ufdfa";
+
+    @Test
+    void whatIsKeptToSearchInIsBoundedByTheRawTextAndNotByWhatNormalizationMakesOfIt() {
+        List<Document> pages = new ArrayList<>();
+        int rawCharacters = 0;
+        for (int number = 0; number < 6; number++) {
+            String title = LIGATURE.repeat(100);
+            String category = LIGATURE.repeat(60);
+            String summary = LIGATURE.repeat(240);
+            String paragraph = LIGATURE.repeat(1500);
+            String heading = LIGATURE.repeat(100);
+            String body = "## " + heading + "\n" + paragraph;
+            Translation english = new Translation(title, category, summary, "## " + heading + "\n" + paragraph);
+            pages.add(page("ligature-" + number, new Content(title, category, summary, body, 10, english)));
+            // Two language versions, one chunk each: the raw text that is kept to search in.
+            rawCharacters += 2 * (title.length() + category.length() + summary.length() + paragraph.length() + heading.length());
+        }
+        AssistantDocsIndex index = indexOf(pages);
+
+        ask(index, "ligature");
+
+        // 18 times the raw text, 2.4 million characters, before the folded text was bounded; ordinary text folds to about
+        // its own length.
+        assertThat(index.searchCharacters()).isLessThan(rawCharacters * 3L);
+        assertThat(index.searchCharacters()).isGreaterThan(rawCharacters / 2L);
+    }
+
+    @Test
+    void textThatNormalizationDoesNotLengthenIsKeptWhole() {
+        String paragraph = "创建 API Key 的步骤。".repeat(100);
+        AssistantDocsIndex index = indexOf(page("p", "创建密钥", "开始使用", "在控制台创建密钥", "## 创建\n" + paragraph));
+
+        Retrieval hits = ask(index, "创建密钥");
+
+        assertThat(hits.chunks()).hasSize(1);
+        assertThat(index.searchCharacters()).isGreaterThanOrEqualTo(AssistantDocsIndex.fold(paragraph).replaceAll("\\s+", " ").length());
+    }
+
+    @Test
+    void thePagesSayingsAboutThemselvesAreFoldedOnceAndSharedByTheirChunks() {
+        StringBuilder body = new StringBuilder();
+        for (int section = 0; section < 40; section++) {
+            body.append("## 小节").append(section).append('\n').append("说明文字".repeat(60)).append("\n\n");
+        }
+        // Capital letters, so that folding makes a new string of each: text that folding leaves alone is shared anyway.
+        String category = "Getting Started ".repeat(3);
+        String summary = "Page Summary 页面摘要 ".repeat(15);
+        AssistantDocsIndex shared = indexOf(page("p", "共享页面", category, summary, body.toString()));
+        AssistantDocsIndex single = indexOf(page("p", "共享页面", category, summary, "## 小节0\n" + "说明文字".repeat(60)));
+        ask(shared, "说明文字");
+        ask(single, "说明文字");
+
+        long perChunkOfTheSharedPage = (shared.searchCharacters() - single.searchCharacters()) / 39;
+        assertThat(perChunkOfTheSharedPage).as("a further chunk costs its own text, not the page's summary again")
+            .isLessThan(240 + 20 + 12);
+        assertThat(summary.length() + category.length()).isGreaterThan(300);
+    }
+
+    @Test
+    void aBuildThatMeetsAnErrorTheJvmCannotRecoverFromStillAnswersAndRecoversWhenThePagesChange() {
+        for (Throwable fatal : List.of(new OutOfMemoryError("test"), new StackOverflowError("test"), new LinkageError("test"))) {
+            TestClock clock = new TestClock();
+            AtomicInteger loads = new AtomicInteger();
+            List<Document> exploding = new java.util.AbstractList<>() {
+                @Override
+                public Document get(int index) {
+                    if (fatal instanceof OutOfMemoryError oom) {
+                        throw oom;
+                    }
+                    if (fatal instanceof StackOverflowError overflow) {
+                        throw overflow;
+                    }
+                    throw (LinkageError) fatal;
+                }
+
+                @Override
+                public int size() {
+                    return 1;
+                }
+            };
+            AssistantDocsIndex index = new AssistantDocsIndex(NO_FILES, () -> {
+                int number = loads.incrementAndGet();
+                return Mono.just(number == 1 ? exploding : List.of(page("p", "发票", "帮助", "", "## 开票\n在发票页面申请开票。")));
+            }, clock);
+
+            Retrieval during = index.retrieve("发票", "").block(Duration.ofSeconds(5));
+            assertThat(during.chunks()).as(fatal.getClass().getSimpleName() + " while indexing: answered without the pages").isEmpty();
+            assertThat(index.retrieve("发票", "").block(Duration.ofSeconds(5)).chunks()).isEmpty();
+            assertThat(loads).as("not retried at once, it would fail again").hasValue(1);
+
+            index.invalidate();
+            assertThat(index.retrieve("发票", "").block(Duration.ofSeconds(5)).chunks())
+                .as("a change in the pages starts a new load").hasSize(1);
+            assertThat(loads).hasValue(2);
+        }
+    }
+
+    @Test
+    void anOutOfMemoryErrorOfTheBuildIsNotKeptAsIfThePagesWereToBlameSoTheyAreReadAgainWithoutAChange() {
+        TestClock clock = new TestClock();
+        AtomicInteger pageReads = new AtomicInteger();
+        List<Document> exploding = new java.util.AbstractList<>() {
+            @Override
+            public Document get(int index) {
+                throw new OutOfMemoryError("test");
+            }
+
+            @Override
+            public int size() {
+                return 1;
+            }
+        };
+        // The fingerprint never changes: the pages are not what failed, the heap was.
+        AssistantDocsIndex index = new AssistantDocsIndex(NO_FILES, () -> {
+            int number = pageReads.incrementAndGet();
+            return Mono.just(number == 1 ? exploding : List.of(page("p", "发票", "帮助", "", "## 开票\n在发票页面申请开票。")));
+        }, () -> Mono.just("unchanged"), clock);
+
+        assertThat(ask(index, "发票").chunks()).as("answered without the pages").isEmpty();
+        assertThat(pageReads).hasValue(1);
+
+        clock.advance(Duration.ofMillis(AssistantDocsIndex.RETRY_AFTER + 1));
+        assertThat(ask(index, "发票").chunks()).as("the pages are read again soon, as after any failure to load").hasSize(1);
+        assertThat(pageReads).hasValue(2);
+
+        clock.advance(Duration.ofMillis(AssistantDocsIndex.CACHE_TTL + 1));
+        assertThat(ask(index, "发票").chunks()).as("and, once indexed, kept while their fingerprint is the same").hasSize(1);
+        assertThat(pageReads).hasValue(2);
+    }
+
+    @Test
+    void aBuildThatFailsBecauseOfWhatThePagesSayIsStillNotRetriedWhileTheirFingerprintIsTheSame() {
+        for (Throwable fault : List.of(new IllegalStateException("test"), new StackOverflowError("test"), new LinkageError("test"))) {
+            TestClock clock = new TestClock();
+            AtomicInteger pageReads = new AtomicInteger();
+            List<Document> exploding = new java.util.AbstractList<>() {
+                @Override
+                public Document get(int index) {
+                    if (fault instanceof StackOverflowError overflow) {
+                        throw overflow;
+                    }
+                    if (fault instanceof LinkageError linkage) {
+                        throw linkage;
+                    }
+                    throw (RuntimeException) fault;
+                }
+
+                @Override
+                public int size() {
+                    return 1;
+                }
+            };
+            AssistantDocsIndex index = new AssistantDocsIndex(NO_FILES, () -> {
+                pageReads.incrementAndGet();
+                return Mono.just(exploding);
+            }, () -> Mono.just("unchanged"), clock);
+
+            assertThat(ask(index, "发票").chunks()).isEmpty();
+            clock.advance(Duration.ofMillis(AssistantDocsIndex.CACHE_TTL * 5));
+            assertThat(ask(index, "发票").chunks()).isEmpty();
+            assertThat(pageReads).as(fault.getClass().getSimpleName()).hasValue(1);
+        }
+    }
+
+    @Test
+    void anErrorTheJvmCannotRecoverFromWhileParsingTheRowsIsAnOrdinaryFailureToLoad() {
+        for (Throwable fatal : List.of(new OutOfMemoryError("test"), new StackOverflowError("test"), new LinkageError("test"))) {
+            Throwable failure = org.assertj.core.api.Assertions.catchThrowable(() ->
+                AssistantDocsIndex.pagesFrom(Flux.just("一行"), Duration.ofSeconds(1), rows -> {
+                    if (fatal instanceof OutOfMemoryError oom) {
+                        throw oom;
+                    }
+                    if (fatal instanceof StackOverflowError overflow) {
+                        throw overflow;
+                    }
+                    throw (LinkageError) fatal;
+                }).block(Duration.ofSeconds(3)));
+
+            assertThat(failure).as(fatal.getClass().getSimpleName()).hasRootCause(fatal);
+        }
+    }
+
+    @Test
+    void aLoadThatNeverReportsBackIsAbandonedAtItsDeadlineAndTheNextOneBegins() throws Exception {
+        TestClock clock = new TestClock();
+        AtomicInteger loads = new AtomicInteger();
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        // A build that is stuck: whatever the reason, it will not say that it is done.
+        List<Document> stuck = new java.util.AbstractList<>() {
+            @Override
+            public Document get(int index) {
+                while (release.getCount() > 0) {
+                    try {
+                        release.await();
+                    } catch (InterruptedException ignored) {
+                        // Cancelling the load interrupts the thread; it carries on being stuck.
+                    }
+                }
+                return page("late", "迟到", "帮助", "", "## 迟到\n迟到的发票。");
+            }
+
+            @Override
+            public int size() {
+                return 1;
+            }
+        };
+        AssistantDocsIndex index = new AssistantDocsIndex(NO_FILES, () -> {
+            int number = loads.incrementAndGet();
+            return Mono.just(number == 1 ? stuck : List.of(page("p", "发票", "帮助", "", "## 开票\n在发票页面申请开票。")));
+        }, clock);
+        index.readTimeout = Duration.ofMillis(200);
+        index.readBudget = Duration.ofMillis(200);
+        index.buildBudget = Duration.ofMillis(300);
+        try {
+            assertThat(index.retrieve("发票", "").block(Duration.ofSeconds(5)).chunks())
+                .as("answered without the pages once the deadline has passed").isEmpty();
+            assertThat(index.retrieve("发票", "").block(Duration.ofSeconds(5)).chunks()).isEmpty();
+            assertThat(loads).as("and not retried at once").hasValue(1);
+
+            clock.advance(Duration.ofSeconds(11));
+            assertThat(index.retrieve("发票", "").block(Duration.ofSeconds(5)).chunks())
+                .as("a new load begins instead of every question waiting for the stuck one").hasSize(1);
+            assertThat(loads).hasValue(2);
+        } finally {
+            release.countDown();
+        }
+    }
+
+    // ---- what a hostile page can cost -------------------------------------------------------------------------------
+
+    @Test
+    void aCodeBlockWithAnEnormousFenceLeavesNoMoreInTheSnapshotThanThePagesHad() {
+        StringBuilder code = new StringBuilder("`".repeat(50_000)).append('\n');
+        while (code.length() < 99_990) {
+            code.append("x\n");
+        }
+        String body = code.toString();
+        List<Document> pages = new ArrayList<>();
+        for (int number = 0; number < 3; number++) {
+            pages.add(page("fence-" + number, new Content("围栏" + number, "帮助", "", body, number + 1,
+                new Translation("Fence " + number, "Help", "", body))));
+        }
+        AssistantDocsIndex index = indexOf(pages);
+
+        assertThat(ask(index, "围栏").pageTitles()).as("the pages were indexed").hasSize(3);
+        assertThat(index.retainedCharacters()).isGreaterThan(100_000).isLessThanOrEqualTo(2L * pages.size() * 2 * body.length());
+        assertThat(ask(index, "围栏").chunks()).isNotEmpty().allSatisfy(chunk ->
+            assertThat(chunk.body().length()).isLessThanOrEqualTo(AssistantDocsChunker.MAX_CHUNK_CHARS));
+    }
+
+    @Test
+    void anAttachmentReferenceInAPageTitleReachesNeitherTheLabelNorTheSourcesNorTheListOfTitles() {
+        String id = "0f0e0d0c-0b0a-4908-8706-050403020100";
+        AssistantDocsIndex index = indexOf(page("invoice", new Content("发票样例 attachment:" + id, "帮助", "",
+            "## 开票\n在发票页面申请开票，开票后可以下载发票。", 1,
+            new Translation("Invoice sample attachment:" + id + " /documentation/media/" + id + "?signature=1", "Help", "",
+                "## Invoicing\nApply for an invoice on the invoice page and download the invoice afterwards."))));
+
+        for (String question : List.of("怎么申请开票", "How do I apply for an invoice", "与文档毫无关系的量子计算")) {
+            Retrieval found = ask(index, question);
+            List<String> shown = new ArrayList<>(found.sources());
+            shown.addAll(found.pageTitles());
+            found.chunks().forEach(chunk -> shown.add(chunk.pageTitle()));
+
+            assertThat(shown).as(question).isNotEmpty().allSatisfy(text ->
+                assertThat(text).doesNotContain(id, "attachment:", "documentation/media", "signature"));
+        }
+        assertThat(ask(index, "怎么申请开票").chunks()).as("a title cleaned of its attachment is still the page's title")
+            .extracting(Chunk::pageTitle).containsOnly("发票样例");
+        assertThat(ask(index, "How do I apply for an invoice").chunks()).extracting(Chunk::pageTitle)
+            .containsOnly("Invoice sample");
+    }
+
+    @Test
+    void aPageWhoseTitleIsNothingButAnAttachmentIsLeftOutLikeAPageWithoutATitle() {
+        String id = "0f0e0d0c-0b0a-4908-8706-050403020100";
+        AssistantDocsIndex index = indexOf(
+            page("hidden", "attachment:" + id, "帮助", "", "## 开票\n在发票页面申请开票。"),
+            page("shown", "发票", "帮助", "", "## 开票\n在发票页面申请开票。"));
+
+        Retrieval found = ask(index, "发票开票");
+
+        assertThat(found.pageTitles()).containsExactly("发票");
+        assertThat(pageIds(found)).containsExactly("shown");
+    }
+
+    @Test
+    void aQuestionOfShortWordsIsAnsweredQuicklyWhereverThePagesHaveLongRunsOfLetters() {
+        // Every word of the question is a word of the index (one page lists them) and a part of the runs everywhere, but
+        // never the whole of one: each hit in a run failed the test for a word and the next try was made one character
+        // on, 1590 times in each chunk for each of the 59 words, on 2000 chunks.
+        StringBuilder words = new StringBuilder();
+        for (int length = 2; length <= 60; length++) {
+            words.append("a".repeat(length)).append(' ');
+        }
+        String run = ("a".repeat(1590) + "\n\n").repeat(62);
+        List<Document> pages = new ArrayList<>();
+        pages.add(page("words", "词表", "分类", "摘要", words.toString()));
+        for (int number = 0; number < 20; number++) {
+            pages.add(page("run-" + number, new Content("页面" + number, "分类", "摘要", run, number + 1,
+                new Translation("Page " + number, "Category", "Summary", run))));
+        }
+        AssistantDocsIndex index = indexOf(pages);
+        String question = words.toString().strip();
+        ask(index, question);
+        assertThat(index.searchCharacters()).as("the index is full").isGreaterThan(3_000_000);
+
+        long asked = Long.MAX_VALUE;
+        long followed = Long.MAX_VALUE;
+        for (int round = 0; round < 3; round++) {
+            long start = System.nanoTime();
+            ask(index, question);
+            asked = Math.min(asked, System.nanoTime() - start);
+            start = System.nanoTime();
+            askAfter(index, "再讲讲", question);
+            followed = Math.min(followed, System.nanoTime() - start);
+        }
+
+        assertThat(Duration.ofNanos(asked)).as("the question").isLessThan(Duration.ofMillis(SCORING_LIMIT_MILLIS));
+        assertThat(Duration.ofNanos(followed)).as("a follow-up to it").isLessThan(Duration.ofMillis(SCORING_LIMIT_MILLIS));
+    }
+
+    /** A question takes some tens of milliseconds here, and took seconds (2.5 s and 4 s, a hundred times as long) before. */
+    private static final long SCORING_LIMIT_MILLIS = 500;
+
+    @Test
+    void aWordIsFoundWhereARunOfLettersIsTheWordOrTheWordWithAnEndingWhetherTheRunsAreCrossedByMaskOrByCharacter() {
+        Random random = new Random(7);
+        String alphabet = "aabbsedaing  _-.1é汉";
+        List<String> endings = List.of("s", "es", "d", "ed", "ing");
+        for (int round = 0; round < 30_000; round++) {
+            StringBuilder builder = new StringBuilder();
+            for (int length = random.nextInt(70); length > 0; length--) {
+                builder.append(alphabet.charAt(random.nextInt(alphabet.length())));
+            }
+            String text = builder.toString();
+            StringBuilder word = new StringBuilder();
+            for (int length = 2 + random.nextInt(3); length > 0; length--) {
+                word.append("abse".charAt(random.nextInt(4)));
+            }
+            String term = word.toString();
+            // What the rule says, without the scanning: split the text into its runs of letters and digits and count the
+            // runs that are the word or the word and one of the endings.
+            int expected = 0;
+            for (String run : text.split("[^\\p{L}\\p{N}]|[\u6c49]")) {
+                if (run.equals(term) || (run.startsWith(term) && endings.contains(run.substring(term.length())))) {
+                    expected++;
+                }
+            }
+            for (int limit : new int[] {1, 3}) {
+                assertThat(AssistantDocsIndex.occurrences(text, null, term, limit)).as("'%s' in '%s' by character, up to %d", term, text, limit)
+                    .isEqualTo(Math.min(limit, expected));
+                assertThat(AssistantDocsIndex.occurrences(text, AssistantDocsIndex.wordMask(text), term, limit))
+                    .as("'%s' in '%s' by mask, up to %d", term, text, limit).isEqualTo(Math.min(limit, expected));
+            }
+        }
+    }
 }

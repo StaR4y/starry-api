@@ -12,9 +12,12 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.BitSet;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -55,7 +58,8 @@ import tech.starryapi.documentation.DocumentationService;
  * and, for changes made on other nodes, when it is older than {@link #CACHE_TTL} <em>and</em> the cheap fingerprint of
  * the published pages has changed. Only one load runs at a time: changes that come while it does cost one more load
  * after it, not one each. If loading fails, or a read gets nothing for {@link #READ_TIMEOUT} (or takes longer than
- * {@link #READ_BUDGET} in all), the assistant carries on with the file chunks only and tries again shortly.
+ * {@link #READ_BUDGET} in all, or the load as a whole outlasts its deadline, which {@link #BUILD_BUDGET} for turning the
+ * pages into a snapshot makes a limit too), the assistant carries on with the file chunks only and tries again shortly.
  *
  * <p>Both language versions of a page are matched as one document and the one in the reader's language is quoted.
  * Questions are scored on the parallel scheduler, never on the thread that delivered the snapshot, which is a database
@@ -78,6 +82,12 @@ public class AssistantDocsIndex {
     static final Duration READ_TIMEOUT = Duration.ofSeconds(15);
     /** The most that reading the pages may take in all, however steadily the rows keep coming. */
     static final Duration READ_BUDGET = Duration.ofMinutes(5);
+    /**
+     * The most that turning the pages into a snapshot may take once they are read. It is CPU work on a worker thread and
+     * covered by no timeout of its own; this is what keeps a build that never reports back (see {@link Load}) from holding
+     * every question for good.
+     */
+    static final Duration BUILD_BUDGET = Duration.ofMinutes(2);
     private static final long WARN_INTERVAL = 60_000;
 
     static final int MAX_RESULTS = 6;
@@ -91,6 +101,22 @@ public class AssistantDocsIndex {
     static final int MAX_PAGE_CHUNKS = 2000;
     private static final int MAX_FILE_CHUNKS = 80;
     private static final int MAX_TITLE_CHARS = 100;
+    /**
+     * Normalization can make a text far longer than it was (U+FDFA becomes 18 characters), so limiting the raw text of a
+     * chunk does not limit what is kept to search in. The folded text of each field is cut to this many times what the
+     * raw text of that field may have; ordinary text, which folds to about its own length, never reaches it.
+     */
+    private static final int FOLDED_FACTOR = 2;
+    private static final int FOLDED_BODY_MAX = FOLDED_FACTOR * AssistantDocsChunker.MAX_CHUNK_CHARS;
+    /** A title is cut to {@link #MAX_TITLE_CHARS} and an ellipsis. */
+    private static final int FOLDED_TITLE_MAX = FOLDED_FACTOR * (MAX_TITLE_CHARS + 1);
+    private static final int FOLDED_LEAF_MAX = FOLDED_FACTOR * (AssistantDocsChunker.MAX_HEADING_CHARS + 1);
+    /** Three headings at most, each cut like a title, and what joins them. */
+    private static final int FOLDED_SECTION_MAX = FOLDED_FACTOR
+        * (3 * (AssistantDocsChunker.MAX_HEADING_CHARS + 1) + 2 * AssistantDocsChunker.PATH_SEPARATOR.length());
+    /** The limits of the documentation's own content: a category of 60 characters, a summary of 240. */
+    private static final int FOLDED_CATEGORY_MAX = FOLDED_FACTOR * 60;
+    private static final int FOLDED_SUMMARY_MAX = FOLDED_FACTOR * 240;
     /** The words of one question that are searched for; a pasted log is cut down to the ones the documents know. */
     static final int MAX_QUERY_TERMS = 32;
     private static final int MAX_PREVIOUS_TERMS = 16;
@@ -291,6 +317,8 @@ public class AssistantDocsIndex {
     volatile Duration readTimeout = READ_TIMEOUT;
     /** How long reading the pages may take in all; a test shortens it. */
     volatile Duration readBudget = READ_BUDGET;
+    /** How long building the snapshot may take once the pages are read; a test shortens it. */
+    volatile Duration buildBudget = BUILD_BUDGET;
     private final AtomicLong lastWarning = new AtomicLong(Long.MIN_VALUE / 2);
     /** The thread the last snapshot was built on; the build is CPU work and must not run on a database event loop. */
     volatile Thread lastBuildThread;
@@ -340,7 +368,13 @@ public class AssistantDocsIndex {
      * does. The rows are parsed on a worker thread, not on the database connection's event loop that delivers them.
      */
     static <T> Mono<List<Document>> pagesFrom(Flux<T> rows, Duration silence, Function<List<T>, List<Document>> parse) {
-        return rows.timeout(silence).collectList().publishOn(Schedulers.boundedElastic()).map(parse);
+        return rows.timeout(silence).collectList().publishOn(Schedulers.boundedElastic()).map(list -> {
+            try {
+                return parse.apply(list);
+            } catch (StackOverflowError | OutOfMemoryError | LinkageError fatal) {
+                throw new IllegalStateException("The documentation pages could not be read: " + fatal, fatal);
+            }
+        });
     }
 
     /** Files only; there are no 使用文档 pages. */
@@ -450,6 +484,23 @@ public class AssistantDocsIndex {
             });
     }
 
+    /** How many characters of folded text the current snapshot keeps to search in, shared strings counted once; for the tests. */
+    long searchCharacters() {
+        Snapshot current = snapshot.get();
+        if (current == null) {
+            return 0;
+        }
+        Set<String> distinct = Collections.newSetFromMap(new IdentityHashMap<>());
+        current.entries().forEach(entry -> entry.collect(distinct));
+        return distinct.stream().mapToLong(String::length).sum();
+    }
+
+    /** How many characters of the chunks' own (unfolded) text the current snapshot keeps for quoting; for the tests. */
+    long retainedCharacters() {
+        Snapshot current = snapshot.get();
+        return current == null ? 0 : current.entries().stream().mapToLong(entry -> entry.chunk().body().length()).sum();
+    }
+
     /** How many words are kept as strings and how many pairs of Chinese characters as ints; for the tests. */
     int[] vocabularySizes() {
         Snapshot current = snapshot.get();
@@ -490,6 +541,11 @@ public class AssistantDocsIndex {
      * <p>A load waits for the one before it on that load's {@link #done} signal, which carries nothing, and not on its
      * result: the result caches the snapshot, so a chain of results would keep every earlier snapshot alive for as long as
      * loads keep queueing behind each other.
+     *
+     * <p>Every load has a deadline that does not depend on it reporting back. Reactor rethrows an error that is fatal to
+     * the JVM (an {@code OutOfMemoryError}, a {@code StackOverflowError}, a {@code LinkageError}) where it was thrown
+     * instead of passing it on, so a load that meets one would never finish, {@code finished} would never run, no later
+     * load would ever begin and every question would wait for it for good. The timer fires whatever the load does.
      */
     private final class Load {
 
@@ -510,10 +566,27 @@ public class AssistantDocsIndex {
                         queued = null;
                     }
                 }
-                return load(wanted, snapshot.get());
+                return load(wanted, snapshot.get()).timeout(loadDeadline(), Mono.fromSupplier(() -> abandoned(wanted)));
             }).doFinally(signal -> finished(this));
             result = (after == null ? begin : after.done.asMono().then(begin)).cache();
         }
+    }
+
+    /** The most a load may take in all: the fingerprint, the pages and the build, each at its own limit. */
+    private Duration loadDeadline() {
+        return readTimeout.plus(readBudget).plus(buildBudget);
+    }
+
+    /** What a load that did not finish within its deadline leaves behind: the files only, until it is tried again. */
+    private Snapshot abandoned(long wanted) {
+        warn("Loading the published documentation pages for the assistant did not finish in time; answering without them", null);
+        Snapshot loaded = withoutPages(wanted, clock.millis() + RETRY_AFTER, null);
+        remember(loaded);
+        return loaded;
+    }
+
+    private void remember(Snapshot loaded) {
+        snapshot.accumulateAndGet(loaded, (old, next) -> old == null || next.generation() >= old.generation() ? next : old);
     }
 
     private void finished(Load load) {
@@ -579,8 +652,7 @@ public class AssistantDocsIndex {
                 warn("Could not load the published documentation pages for the assistant; answering without them", error);
                 return Mono.just(withoutPages(wanted, clock.millis() + RETRY_AFTER, null));
             })
-            .doOnNext(loaded -> snapshot.accumulateAndGet(loaded, (old, next) ->
-                old == null || next.generation() >= old.generation() ? next : old));
+            .doOnNext(this::remember);
     }
 
     private Snapshot withoutPages(long wanted, long until, String fingerprint) {
@@ -590,12 +662,22 @@ public class AssistantDocsIndex {
         return new Snapshot(entries, twins, List.of(), fingerprint, wanted, until, Vocabulary.of(entries));
     }
 
-    /** A failure of the build itself would repeat on every attempt, so it is not retried until something changes. */
+    /**
+     * A failure of the build that the text of the pages decides would repeat on every attempt, so it is not retried until
+     * something changes. Running out of memory is not decided by the pages alone: it is the heap of the moment, which other
+     * work may have been filling, so it is retried like any failure to load. The snapshot then has no fingerprint, and the
+     * pages are read again instead of being taken for unchanged.
+     */
     private Snapshot buildSafely(List<Document> documents, long wanted, String fingerprint) {
         lastBuildThread = Thread.currentThread();
         try {
             return build(documents, wanted, fingerprint);
-        } catch (RuntimeException error) {
+        } catch (OutOfMemoryError error) {
+            // Reactor would rethrow it where it is thrown and the load would never finish.
+            warn("Ran out of memory indexing the published documentation pages for the assistant; answering without them", error);
+            return withoutPages(wanted, clock.millis() + RETRY_AFTER, null);
+        } catch (RuntimeException | StackOverflowError | LinkageError error) {
+            // Reactor would rethrow an error like the last two where it is thrown and the load would never finish.
             warn("Could not index the published documentation pages for the assistant; answering without them", error);
             return withoutPages(wanted, clock.millis() + CACHE_TTL, fingerprint);
         }
@@ -603,7 +685,8 @@ public class AssistantDocsIndex {
 
     /** One published page, chunked in the languages it has. */
     private record PageText(String id, String title, String category, String summary,
-        AssistantDocsChunker.Parsed chinese, Translation english, AssistantDocsChunker.Parsed englishParsed) {
+        AssistantDocsChunker.Parsed chinese, Translation english, String englishTitle,
+        AssistantDocsChunker.Parsed englishParsed) {
     }
 
     private Snapshot build(List<Document> documents, long wanted, String fingerprint) {
@@ -618,9 +701,9 @@ public class AssistantDocsIndex {
                     continue;
                 }
                 texts.add(page);
-                titles.add(page.english() == null || page.english().title().equals(page.title())
-                    ? page.title() : page.title() + " / " + abbreviate(page.english().title()));
-            } catch (RuntimeException error) {
+                titles.add(page.english() == null || page.englishTitle().equals(page.title())
+                    ? page.title() : page.title() + " / " + page.englishTitle());
+            } catch (RuntimeException | StackOverflowError error) {
                 warn("Could not read a published documentation page for the assistant; leaving it out"
                     + (document == null ? "" : " (page " + document.id() + ")"), error);
             }
@@ -635,7 +718,7 @@ public class AssistantDocsIndex {
                 "zh", languages, limit);
             if (page.englishParsed() != null) {
                 Translation english = page.english();
-                Map<Integer, List<Integer>> translated = addChunks(entries, page, abbreviate(english.title()),
+                Map<Integer, List<Integer>> translated = addChunks(entries, page, page.englishTitle(),
                     english.category(), page.englishParsed(), "en", languages, limit);
                 if (page.chinese().headings() == page.englishParsed().headings()) {
                     pairTwins(chinese, translated, twinPairs);
@@ -656,16 +739,30 @@ public class AssistantDocsIndex {
 
     private PageText pageText(Document document) {
         Content page = document == null ? null : document.content();
-        if (page == null || document.id() == null || page.title() == null || page.title().isBlank()) {
+        if (page == null || document.id() == null || page.title() == null) {
+            return null;
+        }
+        String title = pageTitle(page.title());
+        if (title.isBlank()) {
             return null;
         }
         Translation english = page.english();
-        boolean translated = english != null && english.title() != null && !english.title().isBlank()
+        String englishTitle = english == null || english.title() == null ? "" : pageTitle(english.title());
+        boolean translated = english != null && !englishTitle.isBlank()
             && english.body() != null && !english.body().isBlank();
-        return new PageText(document.id(), abbreviate(page.title()), nullToEmpty(page.category()),
+        return new PageText(document.id(), title, nullToEmpty(page.category()),
             AssistantDocsChunker.clean(nullToEmpty(page.summary())), AssistantDocsChunker.parse(page.body(), 1),
-            translated ? english : null,
+            translated ? english : null, englishTitle,
             translated ? AssistantDocsChunker.parse(english.body(), 1) : null);
+    }
+
+    /**
+     * A page title as the prompt and the sources show it: without an attachment reference or a signed media address, which
+     * must never reach either wherever the administrator put them, and cut to {@link #MAX_TITLE_CHARS}. The reference is
+     * removed first, so that a cut cannot leave half of an id behind.
+     */
+    private static String pageTitle(String title) {
+        return abbreviate(AssistantDocsChunker.withoutMedia(title).strip());
     }
 
     /** Adds a page's chunks in one language and returns, for each heading, where its chunks went. */
@@ -680,10 +777,12 @@ public class AssistantDocsIndex {
                 + " passages of '" + title + "' are searched by the assistant", null);
             sections = sections.subList(0, limit);
         }
+        // What the page says about itself is folded once and shared by all its chunks, not copied into each of them.
+        PageFold fold = PageFold.of(title, nullToEmpty(category), summary);
         for (AssistantDocsChunker.Section section : sections) {
             byOrdinal.computeIfAbsent(section.ordinal(), key -> new ArrayList<>()).add(entries.size());
             entries.add(Entry.of(new Chunk(page.id(), title, nullToEmpty(category), summary, section.heading(),
-                language, section.body()), languages));
+                language, section.body()), languages, fold));
         }
         return byOrdinal;
     }
@@ -895,7 +994,7 @@ public class AssistantDocsIndex {
             }
             try {
                 String text = Files.readString(file, StandardCharsets.UTF_8);
-                loaded.addAll(split(relative, text).stream().map(chunk -> Entry.of(chunk, 0)).toList());
+                loaded.addAll(split(relative, text).stream().map(chunk -> Entry.of(chunk, 0, PageFold.NONE)).toList());
             } catch (IOException ignored) {
                 // Skip unreadable files; chat still works from the system prompt.
             }
@@ -917,21 +1016,44 @@ public class AssistantDocsIndex {
     // Search
     // ---------------------------------------------------------------------------------------------------------
 
+    /** The title, category and summary of a page, folded and bounded once for all its chunks in one language. */
+    private record PageFold(String title, String category, String summary) {
+
+        static final PageFold NONE = new PageFold("", "", "");
+
+        static PageFold of(String title, String category, String summary) {
+            return new PageFold(foldedWithin(title, FOLDED_TITLE_MAX), foldedWithin(category, FOLDED_CATEGORY_MAX),
+                foldedWithin(summary, FOLDED_SUMMARY_MAX));
+        }
+    }
+
     /**
      * A chunk with its searchable text folded once, so that a question costs no more than substring scans.
      *
      * @param languages which language versions its page has (a bit each for Chinese and English); 0 for a file
      */
     private record Entry(Chunk chunk, String title, String section, String leaf, String category, String summary,
-        String body, int languages) {
+        String body, BitSet bodyWords, int languages) {
 
-        static Entry of(Chunk chunk, int languages) {
+        /** @param page what the page says about itself, folded; {@link PageFold#NONE} for a file chunk */
+        static Entry of(Chunk chunk, int languages, PageFold page) {
             String path = chunk.section();
             int at = path.lastIndexOf(AssistantDocsChunker.PATH_SEPARATOR);
-            return new Entry(chunk,
-                chunk.isPage() ? foldForSearch(chunk.pageTitle()) : "",
-                foldForSearch(path), foldForSearch(at < 0 ? path : path.substring(at + AssistantDocsChunker.PATH_SEPARATOR.length())),
-                foldForSearch(chunk.category()), foldForSearch(chunk.summary()), foldForSearch(chunk.body()), languages);
+            String body = foldedWithin(chunk.body(), FOLDED_BODY_MAX);
+            return new Entry(chunk, page.title(),
+                foldedWithin(path, FOLDED_SECTION_MAX),
+                foldedWithin(at < 0 ? path : path.substring(at + AssistantDocsChunker.PATH_SEPARATOR.length()), FOLDED_LEAF_MAX),
+                page.category(), page.summary(), body, wordMask(body), languages);
+        }
+
+        /** The characters that are kept to search in, each distinct string counted once. */
+        void collect(Set<String> distinct) {
+            distinct.add(title);
+            distinct.add(section);
+            distinct.add(leaf);
+            distinct.add(category);
+            distinct.add(summary);
+            distinct.add(body);
         }
 
         /** Whether the reader is shown this chunk: the version in their language, or the only one there is. */
@@ -1007,7 +1129,7 @@ public class AssistantDocsIndex {
                     // At most 5 in the heading, 3 in the body and 6 + 3 + 2 in the page: a byte holds each.
                     boolean own = contains(entry.leaf(), word);
                     int heading = own || contains(entry.section(), word) ? SECTION_POINTS : 0;
-                    int body = BODY_POINTS * occurrences(entry.body(), word, MAX_BODY_HITS);
+                    int body = BODY_POINTS * occurrences(entry.body(), entry.bodyWords(), word, MAX_BODY_HITS);
                     int page = TITLE_POINTS * (contains(entry.title(), word) ? 1 : 0)
                         + CATEGORY_POINTS * (contains(entry.category(), word) ? 1 : 0)
                         + SUMMARY_POINTS * (contains(entry.summary(), word) ? 1 : 0);
@@ -1693,6 +1815,10 @@ public class AssistantDocsIndex {
         // Whether the last word was an HTTP status code or the reason phrase that follows one.
         boolean afterStatus = false;
         boolean latin = false;
+        // The run of word characters, underscores, dots and hyphens that the current word is cut from, found once: a run
+        // of many hyphenated words is walked word by word within it, not measured again from each word to its end.
+        int runEnd = -1;
+        boolean runHasDigit = false;
         while (index < length && terms.size() < limit) {
             char first = folded.charAt(index);
             if (isCjk(first)) {
@@ -1717,23 +1843,30 @@ public class AssistantDocsIndex {
                 index = end;
             } else if (isWordChar(first)) {
                 latin = true;
-                int end = index;
-                while (end < length) {
-                    char value = folded.charAt(end);
-                    if (isWordChar(value) || value == '_'
-                        || ((value == '.' || value == '-') && end + 1 < length && isWordChar(folded.charAt(end + 1)))) {
-                        end++;
-                    } else {
-                        break;
+                if (index >= runEnd) {
+                    int stop = index;
+                    while (stop < length) {
+                        char value = folded.charAt(stop);
+                        if (isWordChar(value) || value == '_'
+                            || ((value == '.' || value == '-') && stop + 1 < length && isWordChar(folded.charAt(stop + 1)))) {
+                            stop++;
+                        } else {
+                            break;
+                        }
+                    }
+                    runEnd = stop;
+                    runHasDigit = hasDigit(folded, index, stop);
+                }
+                int end = runEnd;
+                if (!runHasDigit) {
+                    // Only a name with a digit in it is one identifier ("gpt-5.5"); "built-in" is two words. A run
+                    // without a digit has none anywhere, so the words after the first hyphen are cut the same way.
+                    int hyphen = folded.indexOf('-', index, end);
+                    if (hyphen >= 0) {
+                        end = hyphen;
                     }
                 }
                 String token = folded.substring(index, end);
-                int hyphen = token.indexOf('-');
-                if (hyphen >= 0 && !hasDigit(token)) {
-                    // Only a name with a digit in it is one identifier ("gpt-5.5"); "built-in" is two words.
-                    end = index + hyphen;
-                    token = folded.substring(index, end);
-                }
                 while (token.endsWith("_")) {
                     token = token.substring(0, token.length() - 1);
                 }
@@ -1901,7 +2034,11 @@ public class AssistantDocsIndex {
     }
 
     private static boolean hasDigit(String text) {
-        for (int index = 0; index < text.length(); index++) {
+        return hasDigit(text, 0, text.length());
+    }
+
+    private static boolean hasDigit(String text, int from, int to) {
+        for (int index = from; index < to; index++) {
             if (Character.isDigit(text.charAt(index))) {
                 return true;
             }
@@ -1970,15 +2107,49 @@ public class AssistantDocsIndex {
     }
 
     private static boolean contains(String text, String term) {
-        return occurrences(text, term, 1) > 0;
+        return occurrences(text, null, term, 1) > 0;
+    }
+
+    /** Marks the word characters (see {@link #isWordChar}) of a text, one bit each, so that a run of them is crossed 64 at a time. */
+    static BitSet wordMask(String text) {
+        BitSet mask = new BitSet(text.length());
+        for (int index = 0; index < text.length(); index++) {
+            if (isWordChar(text.charAt(index))) {
+                mask.set(index);
+            }
+        }
+        return mask;
+    }
+
+    /**
+     * Where the run of word characters that contains {@code from} ends: the index of the first character at or after
+     * it that is not one, or the length of the text.
+     *
+     * @param words the {@link #wordMask} of the text, or null to look at the characters
+     */
+    private static int endOfWordRun(String text, BitSet words, int from) {
+        if (words != null) {
+            return Math.min(words.nextClearBit(from), text.length());
+        }
+        int end = from;
+        while (end < text.length() && isWordChar(text.charAt(end))) {
+            end++;
+        }
+        return end;
     }
 
     /**
      * How often the term occurs, counting up to {@code limit}. A Latin word has to be a word of the text, possibly
      * with an ending such as "s" or "ed": "key" matches "keys", but "ai" does not match "email" and "code" does not
      * match "codex". A whole identifier has to stand alone: "api_key" is not found inside "api_key_id".
+     *
+     * <p>A hit that is not a match could be one at any of the next characters of a run of letters ("aa" in a hundred
+     * "a"), and trying each of them would cost the length of the run for every term of the question in every chunk. No
+     * word starts inside a run, so the search goes on after it.
+     *
+     * @param words the {@link #wordMask} of the text, which makes crossing a long run cheap; null for a short text
      */
-    private static int occurrences(String text, String term, int limit) {
+    static int occurrences(String text, BitSet words, String term, int limit) {
         if (text.isEmpty()) {
             return 0;
         }
@@ -2000,6 +2171,7 @@ public class AssistantDocsIndex {
                         || !(isWordChar(text.charAt(end)) || text.charAt(end) == '_' || continuesName(text, end, term))
                     : wordEndsAt(text, end);
                 if (startsWord || !endsWord) {
+                    from = endOfWordRun(text, words, at) + 1;
                     continue;
                 }
             }
@@ -2039,7 +2211,23 @@ public class AssistantDocsIndex {
         return WHITESPACE.matcher(fold(text)).replaceAll(" ");
     }
 
+    /** {@link #foldForSearch} cut to at most {@code max} characters, never inside a surrogate pair. */
+    private static String foldedWithin(String text, int max) {
+        String folded = foldForSearch(text);
+        if (folded.length() <= max) {
+            return folded;
+        }
+        int end = max;
+        if (Character.isHighSurrogate(folded.charAt(end - 1))) {
+            end--;
+        }
+        return folded.substring(0, end);
+    }
+
     private static boolean isWordChar(char value) {
+        if (value < 0x80) {
+            return (value >= 'a' && value <= 'z') || (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9');
+        }
         return Character.isLetterOrDigit(value) && !isCjk(value);
     }
 

@@ -26,12 +26,25 @@ final class AssistantDocsChunker {
     static final int LEAD_IN_CHARS = 80;
     /** Joins the headings a section sits under: the parent first. */
     static final String PATH_SEPARATOR = " › ";
+    /**
+     * The longest fence that opens and closes a piece of a cut block of code. A block may be opened by a fence of any
+     * length (up to the whole text of the page); repeating that at both ends of every piece would make the pieces many
+     * times longer than the block, so the pieces get a fence of their own, however long the block's was.
+     */
+    static final int MAX_FENCE_CHARS = 16;
 
-    private static final Pattern FENCE = Pattern.compile("^ {0,3}(`{3,}|~{3,})(.*)$");
+    // Possessive on purpose: "." does not match U+0085, U+2028 or U+2029, which String.lines() leaves inside a line, so
+    // with backtracking a long run of fence characters that ends in one of them is retried once per character and the
+    // rest of the line rescanned each time (quadratic). Nothing a backtrack could give back would let the match succeed.
+    private static final Pattern FENCE = Pattern.compile("^ {0,3}+(`{3,}+|~{3,}+)(.*+)$");
     private static final Pattern IMAGE = Pattern.compile("!\\[[^\\]]{0,300}+\\](?:\\([^)]{0,2000}+\\)|\\[[^\\]]{0,300}+\\])");
     // Links to attachments or to other console pages keep their text and lose their target.
     private static final Pattern INTERNAL_LINK = Pattern.compile("\\[([^\\]]{0,300}+)\\]\\((?:attachment:|#)[^)]{0,2000}+\\)");
-    private static final Pattern ATTACHMENT_REFERENCE = Pattern.compile("attachment:[0-9A-Za-z][0-9A-Za-z-]{7,}");
+    // An id ends where the next reference begins: "attachment:<id>attachment:<id>" and "attachment:<id>-attachment:<id>" are
+    // two references, and the letters of the second word are in the alphabet of an id. The look-ahead is a fixed literal and
+    // the repetition possessive, so the match is still linear and never recursive.
+    private static final Pattern ATTACHMENT_REFERENCE = Pattern.compile(
+        "attachment:(?!attachment:)[0-9A-Za-z](?:(?!attachment:)[0-9A-Za-z-]){7,}+");
     // What may stay in code is anything but a reference to an attachment, so the whole embed goes, not just its id.
     private static final Pattern ATTACHMENT_EMBED = Pattern.compile("!?\\[[^\\]]{0,300}+\\]\\(attachment:[^)]{0,200}+\\)");
     private static final String MEDIA_PATH = "/documentation/media/";
@@ -88,7 +101,7 @@ final class AssistantDocsChunker {
         boolean inComment = false;
         for (String raw : (Iterable<String>) markdown.lines()::iterator) {
             if (fenceMarker != null) {
-                blocks.codeLine(codeSafe(raw));
+                blocks.codeLine(withoutMedia(raw));
                 if (closesFence(raw, fenceMarker)) {
                     fenceMarker = null;
                     blocks.endBlock();
@@ -99,7 +112,7 @@ final class AssistantDocsChunker {
             if (fence.matches() && !(fence.group(1).charAt(0) == '`' && fence.group(2).contains("`"))) {
                 blocks.endBlock();
                 fenceMarker = fence.group(1);
-                blocks.codeLine(codeSafe(raw));
+                blocks.codeLine(withoutMedia(raw));
                 continue;
             }
             String line = raw;
@@ -166,10 +179,11 @@ final class AssistantDocsChunker {
     }
 
     /**
-     * Removes only what must never reach the prompt from a line of fenced code: attachment embeds and references and
-     * signed media addresses. Everything else, HTML included, is something the reader is meant to type.
+     * Removes only what must never reach the prompt from a text that is shown as it is (a line of fenced code, a page
+     * title): attachment embeds and references and signed media addresses. Everything else, HTML included, is something
+     * the reader is meant to type or to read.
      */
-    static String codeSafe(String line) {
+    static String withoutMedia(String line) {
         String text = line;
         if (text.contains("attachment:")) {
             text = ATTACHMENT_EMBED.matcher(text).replaceAll("");
@@ -407,8 +421,24 @@ final class AssistantDocsChunker {
         piece.clear();
     }
 
+    /**
+     * The text of a section cut to {@link #MAX_CHUNK_CHARS}, never inside a surrogate pair. The cutting of long blocks
+     * keeps every piece within the limit; this makes it a promise that does not depend on how odd the Markdown is,
+     * for the snapshot keeps the text of up to thousands of sections in memory.
+     */
+    static String limited(String body) {
+        if (body.length() <= MAX_CHUNK_CHARS) {
+            return body;
+        }
+        int end = MAX_CHUNK_CHARS;
+        if (Character.isHighSurrogate(body.charAt(end - 1))) {
+            end--;
+        }
+        return body.substring(0, end).stripTrailing();
+    }
+
     private static void add(int ordinal, String heading, String text, int minChars, List<Section> out) {
-        String body = text.strip();
+        String body = limited(text.strip());
         // The heading counts towards the minimum: "## 版本\n1.2" is a perfectly good answer to a version question.
         int length = body.length() + (heading.isEmpty() ? 0 : heading.length() + 1);
         if (!body.isEmpty() && length >= minChars) {
@@ -427,13 +457,14 @@ final class AssistantDocsChunker {
             Matcher opener = FENCE.matcher(lines.getFirst());
             if (opener.matches()) {
                 String marker = opener.group(1);
+                String fence = marker.length() > MAX_FENCE_CHARS ? marker.substring(0, MAX_FENCE_CHARS) : marker;
                 String[] info = opener.group(2).strip().split("\\s+", 2);
                 String language = info[0].length() > 30 ? info[0].substring(0, 30) : info[0];
                 lines.removeFirst();
                 if (!lines.isEmpty() && closesFence(lines.getLast(), marker)) {
                     lines.removeLast();
                 }
-                return cutLines(lines, marker + language, marker, lead);
+                return cutLines(lines, fence + language, fence, lead);
             }
         }
         if (lines.size() > 2 && isTableHeader(lines.get(0)) && isTableSeparator(lines.get(1))) {

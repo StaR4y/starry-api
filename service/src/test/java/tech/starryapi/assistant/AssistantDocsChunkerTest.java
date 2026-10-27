@@ -314,6 +314,52 @@ class AssistantDocsChunkerTest {
             assertThat(section.body()).doesNotContain(id, "signature", "documentation/media"));
     }
 
+    private static final String FIRST_ID = "0f0e0d0c-0b0a-4908-8706-050403020100";
+    private static final String SECOND_ID = "9a9b9c9d-8e8f-4a4b-9c9d-0e0f10111213";
+
+    /** Ways to write two references so that nothing stands between them, or only a hyphen or what an image leaves behind. */
+    private static List<String> gluedReferences() {
+        return List.of(
+            "attachment:" + FIRST_ID + "attachment:" + SECOND_ID,
+            "attachment:" + FIRST_ID + "-attachment:" + SECOND_ID,
+            "attachment:" + FIRST_ID + "-![图](attachment:" + SECOND_ID + ")attachment:" + SECOND_ID,
+            "attachment:" + FIRST_ID + "![图](attachment:" + FIRST_ID + ")attachment:" + SECOND_ID,
+            "attachment:attachment:" + SECOND_ID,
+            "attachment:" + FIRST_ID + "attachment:attachment:" + SECOND_ID,
+            "attachment:" + FIRST_ID + "attachment:" + SECOND_ID + "attachment:" + FIRST_ID);
+    }
+
+    @Test
+    void anAttachmentReferenceThatFollowsAnotherOneDirectlyIsRemovedToo() {
+        for (String glued : gluedReferences()) {
+            List<Section> sections = AssistantDocsChunker.split(
+                "## 附件 " + glued + "\n在发票页面申请开票，附件 " + glued + " 是发票样例。\n\n```text\n" + glued + "\n```\n", 1);
+
+            assertThat(sections).as(glued).isNotEmpty().allSatisfy(section -> {
+                assertThat(section.body()).doesNotContain(FIRST_ID, SECOND_ID);
+                assertThat(section.heading()).doesNotContain(FIRST_ID, SECOND_ID);
+            });
+            assertThat(sections.getFirst().body()).contains("在发票页面申请开票");
+        }
+    }
+
+    @Test
+    void anAttachmentReferenceEndsWhereTheNextOneBeginsAndNothingElseIsLost() {
+        assertThat(AssistantDocsChunker.clean("A attachment:" + FIRST_ID + "attachment:" + SECOND_ID + " B")).isEqualTo("A  B");
+        assertThat(AssistantDocsChunker.clean("attachment:" + FIRST_ID + "-attachment:" + SECOND_ID)).isEmpty();
+        assertThat(AssistantDocsChunker.clean("文件 attachment:12345678 之后")).as("an id as the page's own writes it").isEqualTo("文件  之后");
+        assertThat(AssistantDocsChunker.clean("attachment:short 不是引用")).isEqualTo("attachment:short 不是引用");
+    }
+
+    @Test
+    void aTextShownAsItIsLosesAttachmentsAndSignedAddressesAndNothingElse() {
+        assertThat(AssistantDocsChunker.withoutMedia("发票样例 attachment:" + FIRST_ID)).isEqualTo("发票样例 ");
+        assertThat(AssistantDocsChunker.withoutMedia("a![图](attachment:" + FIRST_ID + ")b")).isEqualTo("ab");
+        assertThat(AssistantDocsChunker.withoutMedia("x /documentation/media/" + FIRST_ID + "?signature=1 y")).isEqualTo("x  y");
+        assertThat(AssistantDocsChunker.withoutMedia("List<String> <b>x</b> `y`")).isEqualTo("List<String> <b>x</b> `y`");
+        assertThat(AssistantDocsChunker.withoutMedia("attachment:" + FIRST_ID + "attachment:" + SECOND_ID)).isEmpty();
+    }
+
     // ---- long blocks keep their shape --------------------------------------------------------------------------
 
     @Test
@@ -543,6 +589,74 @@ class AssistantDocsChunkerTest {
         withinASecond("one long token before a media path", "x".repeat(60000) + "/documentation/media/");
         withinASecond("many media paths", "/documentation/media/".repeat(3000));
         withinASecond("backticks", "`".repeat(30000));
+        // String.lines() leaves U+0085, U+2028 and U+2029 inside a line and "." does not match them: a fence opener
+        // pattern that backtracks retries the whole line for every fence character it gives back.
+        for (String separator : List.of("\n", "\r", "\u0085", "\u2028", "\u2029")) {
+            withinASecond("backticks before a line separator " + (int) separator.charAt(0), "`".repeat(99999) + separator);
+            withinASecond("tildes before a line separator " + (int) separator.charAt(0), "~".repeat(99999) + separator);
+        }
+        withinASecond("indented backticks before a separator", "   " + "`".repeat(99997) + "\u2028");
+        withinASecond("backticks, a separator and more", "`".repeat(50000) + "\u0085" + "`".repeat(49999));
+        withinASecond("an opened fence closed by a hostile line", "```\n" + "`".repeat(99990) + "\u2029");
         withinASecond("a hundred thousand characters in one line", "字".repeat(100000));
+    }
+
+    // ---- a section is never longer than the limit, however odd the fence that opens its code ------------------------
+
+    private static void assertNoLongerThanTheTextItCameFrom(String what, String markdown) {
+        Parsed parsed = AssistantDocsChunker.parse(markdown, 1);
+        long total = parsed.sections().stream().mapToLong(section -> section.body().length()).sum();
+        int largest = parsed.sections().stream().mapToInt(section -> section.body().length()).max().orElse(0);
+
+        assertThat(parsed.sections()).as(what).isNotEmpty();
+        assertThat(largest).as(what + ": the largest section").isLessThanOrEqualTo(AssistantDocsChunker.MAX_CHUNK_CHARS);
+        assertThat(total).as(what + ": all sections together").isLessThanOrEqualTo(2L * markdown.length());
+    }
+
+    @Test
+    void aFenceMarkerOfTensOfThousandsOfCharactersIsNotRepeatedAroundEveryPieceOfTheCodeItOpens() {
+        for (char fence : new char[] {'`', '~'}) {
+            String marker = String.valueOf(fence).repeat(50_000);
+            assertNoLongerThanTheTextItCameFrom("unclosed " + fence, marker + "\n" + "x\n".repeat(25_000));
+            assertNoLongerThanTheTextItCameFrom("one long line " + fence, marker + "\n" + "y".repeat(49_999));
+            String closing = String.valueOf(fence).repeat(33_000);
+            assertNoLongerThanTheTextItCameFrom("closed " + fence, closing + "\n" + "x\n".repeat(16_000) + closing + "\n");
+            assertNoLongerThanTheTextItCameFrom("with a language " + fence, marker + "java" + "j".repeat(500) + "\n" + "x\n".repeat(20_000));
+            assertNoLongerThanTheTextItCameFrom("indented " + fence, "   " + marker + "\n" + "x\n".repeat(25_000));
+            assertNoLongerThanTheTextItCameFrom("after a label " + fence, "说明：\n\n" + marker + "\n" + "x\n".repeat(25_000));
+        }
+    }
+
+    @Test
+    void theCodeOfABlockWithAnEnormousFenceKeepsItsFenceAndItsLanguageInEveryPiece() {
+        String marker = "`".repeat(5000);
+        StringBuilder code = new StringBuilder("## 脚本\n\n").append(marker).append("bash\n");
+        for (int line = 0; line < 300; line++) {
+            code.append("echo line-").append(line).append(" && sleep 1\n");
+        }
+        code.append(marker).append("\n");
+
+        List<Section> pieces = AssistantDocsChunker.split(code.toString(), 1);
+
+        String fence = "`".repeat(AssistantDocsChunker.MAX_FENCE_CHARS);
+        assertThat(pieces).hasSizeGreaterThan(1).allSatisfy(section -> {
+            assertThat(section.body().length()).isLessThanOrEqualTo(AssistantDocsChunker.MAX_CHUNK_CHARS);
+            assertThat(section.body()).startsWith(fence + "bash\n").endsWith("\n" + fence);
+            assertThat(section.body().indexOf(fence, fence.length())).as("one opening and one closing fence")
+                .isEqualTo(section.body().length() - fence.length());
+        });
+        String all = String.join("\n", pieces.stream().map(Section::body).toList());
+        assertThat(all).contains("echo line-0 &&", "echo line-299 &&");
+    }
+
+    @Test
+    void aSectionIsCutToTheLimitWhateverMadeItLongerAndNeverInsideASurrogatePair() {
+        assertThat(AssistantDocsChunker.limited("x".repeat(AssistantDocsChunker.MAX_CHUNK_CHARS))).hasSize(AssistantDocsChunker.MAX_CHUNK_CHARS);
+        assertThat(AssistantDocsChunker.limited("x".repeat(100_000))).hasSize(AssistantDocsChunker.MAX_CHUNK_CHARS);
+        String pair = "x".repeat(AssistantDocsChunker.MAX_CHUNK_CHARS - 1) + "\uD83D\uDE00" + "tail";
+        String cut = AssistantDocsChunker.limited(pair);
+        assertThat(cut).hasSize(AssistantDocsChunker.MAX_CHUNK_CHARS - 1);
+        assertThat(Character.isHighSurrogate(cut.charAt(cut.length() - 1))).isFalse();
+        assertThat(AssistantDocsChunker.limited("短")).isEqualTo("短");
     }
 }
