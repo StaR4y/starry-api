@@ -343,26 +343,46 @@ final class AssistantDocsChunker {
     private static void emit(int ordinal, String heading, List<Block> blocks, int minChars, List<Section> out) {
         List<Block> piece = new ArrayList<>();
         for (Block block : blocks) {
-            if (block.text().length() > MAX_CHUNK_CHARS) {
+            int chars = block.text().length();
+            if (chars > MAX_CHUNK_CHARS) {
                 // The short paragraph that introduces a block too big for a piece goes with the block's first piece.
                 Block lead = takeLeadIn(piece, 0);
                 flush(ordinal, heading, piece, minChars, out);
-                for (String part : cut(block, lead == null ? null : lead.text())) {
-                    add(ordinal, heading, part, minChars, out);
-                }
+                cutInto(ordinal, heading, block, lead, minChars, out);
                 continue;
             }
-            if (!piece.isEmpty() && textLength(piece) + 2 + block.text().length() > MAX_CHUNK_CHARS) {
-                // So does a label that ends a piece when the block it labels starts the next one.
-                Block lead = takeLeadIn(piece, block.text().length());
+            if (!piece.isEmpty() && textLength(piece) + 2 + chars > MAX_CHUNK_CHARS) {
+                // So does a label that ends a piece when the block it labels starts the next one. A table or a block of
+                // code that fits a piece alone but not with its label is cut with the label, as a bigger one is, rather
+                // than left without it; a paragraph is not cut for that.
+                Block lead = takeLeadIn(piece, isCuttable(block) ? 0 : chars);
                 flush(ordinal, heading, piece, minChars, out);
                 if (lead != null) {
+                    if (lead.text().length() + 2 + chars > MAX_CHUNK_CHARS) {
+                        cutInto(ordinal, heading, block, lead, minChars, out);
+                        continue;
+                    }
                     piece.add(lead);
                 }
             }
             piece.add(block);
         }
         flush(ordinal, heading, piece, minChars, out);
+    }
+
+    private static void cutInto(int ordinal, String heading, Block block, Block lead, int minChars, List<Section> out) {
+        for (String part : cut(block, lead == null ? null : lead.text())) {
+            add(ordinal, heading, part, minChars, out);
+        }
+    }
+
+    /** Whether the block can be cut into pieces that each stand on their own: code keeps its fence, a table its header. */
+    private static boolean isCuttable(Block block) {
+        if (block.code()) {
+            return true;
+        }
+        List<String> lines = block.text().lines().limit(2).toList();
+        return lines.size() == 2 && isTableHeader(lines.get(0)) && isTableSeparator(lines.get(1));
     }
 
     /**
@@ -416,7 +436,7 @@ final class AssistantDocsChunker {
                 return cutLines(lines, marker + language, marker, lead);
             }
         }
-        if (lines.size() > 2 && isTableRow(lines.get(0)) && isTableSeparator(lines.get(1))) {
+        if (lines.size() > 2 && isTableHeader(lines.get(0)) && isTableSeparator(lines.get(1))) {
             String header = lines.get(0) + "\n" + lines.get(1);
             if (header.length() <= 400) {
                 return cutLines(lines.subList(2, lines.size()), header, "", lead);
@@ -465,8 +485,9 @@ final class AssistantDocsChunker {
             + (tail.isEmpty() ? "" : "\n" + tail);
     }
 
-    private static boolean isTableRow(String line) {
-        return line.stripLeading().startsWith("|");
+    /** A table's header row: it has cells, with or without the pipes at its ends, and a delimiter row follows it. */
+    private static boolean isTableHeader(String line) {
+        return line.indexOf('|') >= 0;
     }
 
     private static boolean isTableSeparator(String line) {
@@ -492,8 +513,25 @@ final class AssistantDocsChunker {
         private final List<Block> done = new ArrayList<>();
         private final StringBuilder current = new StringBuilder();
         private boolean code;
+        /** Whether the current block is a table whose delimiter row has been read: a row of dashes after it is a row. */
+        private boolean table;
 
         void textLine(String line) {
+            // A table needs no blank line in front of it: the line above a delimiter row is its header, and the table is
+            // a block of its own, so that its pieces repeat the header and its introduction goes with it. Only the first
+            // such row counts: "| - | - |" further down is an empty row, which the reader page shows as one.
+            if (!table && !current.isEmpty() && isTableSeparator(line)) {
+                int lineStart = current.lastIndexOf("\n") + 1;
+                String header = current.substring(lineStart);
+                if (isTableHeader(header)) {
+                    if (lineStart > 0) {
+                        current.setLength(lineStart - 1);
+                        endBlock();
+                        append(header, false);
+                    }
+                    table = true;
+                }
+            }
             append(line, false);
         }
 
@@ -515,6 +553,7 @@ final class AssistantDocsChunker {
                 done.add(new Block(current.toString(), code));
                 current.setLength(0);
             }
+            table = false;
         }
 
         List<Block> take() {

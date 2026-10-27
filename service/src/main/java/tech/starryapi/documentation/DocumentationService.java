@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.NoTransactionException;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.reactive.TransactionContextManager;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import tech.starryapi.admin.SystemSettingRepository;
 import tech.starryapi.common.ApiException;
@@ -100,13 +101,38 @@ public class DocumentationService {
      * last, instead of failing the whole list, so that one damaged page cannot hide all the others from the assistant.
      */
     public Mono<List<Document>> publishedPages() {
+        return publishedRows().map(this::documents);
+    }
+
+    /** A published page as it is stored: the text of its JSON is not read yet. */
+    public record PublishedRow(String id, String json, Instant publishedAt) { }
+
+    /**
+     * The same pages as {@link #publishedPages()} in the same order, but not parsed. Reading the JSON of every page is
+     * CPU work that does not belong on the database's event loop, which delivers the rows; {@link #documents} does it on
+     * whichever thread the caller moves to.
+     */
+    public Mono<List<PublishedRow>> publishedRows() {
+        return publishedRowStream().collectList();
+    }
+
+    /**
+     * The rows of {@link #publishedRows()} as they arrive, so that a caller can tell a read that is slow but going on from
+     * one that has stopped.
+     */
+    public Flux<PublishedRow> publishedRowStream() {
         return db.sql("""
             SELECT id, published::text AS content, published_at FROM documentation_pages
             WHERE deleted = FALSE AND published IS NOT NULL
             ORDER BY CASE WHEN published->>'sortOrder' ~ '^-?[0-9]{1,9}$' THEN (published->>'sortOrder')::integer END NULLS LAST,
                 published->>'title', id LIMIT 200
-            """).map((r, m) -> new Document(r.get("id", String.class), readableContent(r.get("content", String.class)),
-                r.get("published_at", Instant.class), List.of())).all().collectList();
+            """).map((r, m) -> new PublishedRow(r.get("id", String.class), r.get("content", String.class),
+                r.get("published_at", Instant.class))).all();
+    }
+
+    /** Parses the rows of {@link #publishedRows()}; a row whose JSON cannot be read comes back with no content. */
+    public List<Document> documents(List<PublishedRow> rows) {
+        return rows.stream().map(row -> new Document(row.id(), readableContent(row.json()), row.publishedAt(), List.<Attachment>of())).toList();
     }
 
     /**

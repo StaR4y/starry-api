@@ -7,7 +7,9 @@ import io.r2dbc.spi.ConnectionFactory;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
@@ -32,6 +34,7 @@ import tech.starryapi.admin.SystemSettingRepository;
 import tech.starryapi.assistant.AssistantDocsIndex.Chunk;
 import tech.starryapi.assistant.AssistantDocsIndex.Retrieval;
 import tech.starryapi.documentation.DocumentationDtos.Content;
+import tech.starryapi.documentation.DocumentationDtos.Document;
 import tech.starryapi.documentation.DocumentationDtos.Save;
 import tech.starryapi.documentation.DocumentationDtos.Translation;
 import tech.starryapi.documentation.DocumentationService;
@@ -255,29 +258,67 @@ class AssistantDocsPostgreSqlTest {
         assertThat(loads).as("the event waits for a commit that never came").hasValue(1);
     }
 
-    @Test
-    void theApplicationWiringHearsTheEventsOfTheDocumentationService(@TempDir Path elsewhere) {
-        // No wrapped loader here: the constructor Spring uses in production, injected with the real service.
+    /** No wrapped loader here: the constructor Spring uses in production, injected with the real service. */
+    private void useTheApplicationWiring(Path attachmentDirectory, ObjectMapper mapper) {
         context.close();
         context = new AnnotationConfigApplicationContext();
         ConnectionFactory factory = ConnectionFactories.get(r2dbcUrl);
         context.register(Transactions.class);
         context.registerBean(DatabaseClient.class, () -> DatabaseClient.create(factory));
         context.registerBean(ReactiveTransactionManager.class, () -> new R2dbcTransactionManager(factory));
-        context.registerBean(ObjectMapper.class, () -> new ObjectMapper());
+        context.registerBean(ObjectMapper.class, () -> mapper);
         context.registerBean(SystemSettingRepository.class, () ->
             new R2dbcRepositoryFactory(new R2dbcEntityTemplate(factory)).getRepository(SystemSettingRepository.class));
-        context.registerBean(DocumentationStorage.class, () -> new DocumentationStorage(elsewhere.toString()));
+        context.registerBean(DocumentationStorage.class, () -> new DocumentationStorage(attachmentDirectory.toString()));
         context.registerBean(DocumentationService.class);
         context.registerBean(AssistantDocsIndex.class);
         context.refresh();
         documentation = context.getBean(DocumentationService.class);
         index = context.getBean(AssistantDocsIndex.class);
+    }
+
+    @Test
+    void theApplicationWiringHearsTheEventsOfTheDocumentationService(@TempDir Path elsewhere) {
+        useTheApplicationWiring(elsewhere, new ObjectMapper());
 
         assertThat(ask("wiredwordqq").chunks()).isEmpty();
         String id = createPage("接线", "## 内容\n wiredwordqq 出现在这里。", null, true);
 
         assertThat(pageIds(ask("wiredwordqq"))).containsExactly(id);
+    }
+
+    @Test
+    void theJsonOfThePublishedPagesIsParsedOnAWorkerThreadNotOnTheDatabaseConnection(@TempDir Path elsewhere) {
+        Set<String> parsedOn = ConcurrentHashMap.newKeySet();
+        useTheApplicationWiring(elsewhere, new ObjectMapper() {
+            @Override
+            public <T> T readValue(String content, Class<T> valueType) {
+                parsedOn.add(Thread.currentThread().getName());
+                return super.readValue(content, valueType);
+            }
+        });
+
+        assertThat(ask("怎么创建 API Key").chunks()).isNotEmpty();
+
+        assertThat(parsedOn).as("the pages were parsed, 14 of them at least").isNotEmpty();
+        assertThat(parsedOn).allSatisfy(thread -> assertThat(thread).as("not reactor-tcp-nio, which delivers the rows").startsWith("boundedElastic"));
+    }
+
+    @Test
+    void theTutorialsTheBenchmarkReadsAreWhatTheMigrationsPublish() {
+        List<Document> published = documentation.publishedPages().block(TIMEOUT);
+
+        assertThat(SeededTutorials.pages()).hasSize(14);
+        // Every page this class creates is in the category AssistantTest and is hidden again after each test, so what is
+        // left is what a fresh installation publishes. It has to be exactly the pages the benchmark reads, in the order
+        // the catalog lists them (the order breaks ties between chunks): a migration that adds, removes or reorders a
+        // tutorial fails here, not only one that rewrites a page the benchmark already reads.
+        assertThat(published.stream().filter(page -> !"AssistantTest".equals(page.content().category())).map(Document::id).toList())
+            .containsExactlyElementsOf(SeededTutorials.pages().stream().map(Document::id).toList());
+        for (var expected : SeededTutorials.pages()) {
+            assertThat(published).filteredOn(page -> page.id().equals(expected.id())).singleElement()
+                .satisfies(page -> assertThat(page.content()).as(expected.id()).isEqualTo(expected.content()));
+        }
     }
 
     // ---- the seeded tutorials (V21 to V24) ---------------------------------------------------------------------
@@ -497,7 +538,7 @@ class AssistantDocsPostgreSqlTest {
 
     @Test
     void whatIsNotInTheTutorialsRetrievesNothingAndLeavesTheTitleList() {
-        for (String question : List.of("今天天气怎么样", "怎么看监控大屏", "管理员怎么添加 Kiro 账号", "你是谁", "What is the capital of France?")) {
+        for (String question : List.of("今天天气怎么样", "怎么看监控大屏", "管理员怎么添加 Kiro 账号", "What is the capital of France?")) {
             Retrieval result = ask(question);
             assertThat(result.chunks()).as(question).isEmpty();
             assertThat(result.sources()).as(question).isEmpty();

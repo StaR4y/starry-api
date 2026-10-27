@@ -7,6 +7,7 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import java.nio.file.Files;
+import java.lang.ref.WeakReference;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
@@ -15,7 +16,11 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -296,7 +301,8 @@ class AssistantDocsIndexTest {
         assertThat(ask(index, "key").chunks()).extracting(Chunk::pageId).containsExactly("keys");
         assertThat(ask(index, "keys").chunks()).as("a plural question word also finds 'Key'").extracting(Chunk::pageId)
             .containsExactly("keys");
-        assertThat(ask(index, "created").chunks()).isEmpty();
+        assertThat(ask(index, "created").chunks()).as("an ending the question has and the document has not")
+            .extracting(Chunk::pageId).containsExactly("keys");
         assertThat(ask(index, "create").chunks()).extracting(Chunk::pageId).containsExactly("keys");
         assertThat(ask(index, "code").chunks()).as("'Claude Code' is not 'Codex'").extracting(Chunk::pageId)
             .containsExactly("claude");
@@ -313,12 +319,15 @@ class AssistantDocsIndexTest {
     }
 
     @Test
-    void aLoneChineseCharacterIsATermOnlyWhenTheQuestionHasNothingElse() {
+    void aLoneChineseCharacterIsAWeakTermOfAnyQuestion() {
         assertThat(AssistantDocsIndex.terms("那怎么改？")).containsExactly("改");
         assertThat(AssistantDocsIndex.terms("那怎么删？")).containsExactly("删");
         assertThat(AssistantDocsIndex.terms("怎么办呢")).as("only grammar is left").isEmpty();
-        assertThat(AssistantDocsIndex.terms("OpenCode 怎么用")).as("a word is there, so the lone 用 is no term")
+        assertThat(AssistantDocsIndex.terms("OpenCode 怎么用")).as("'用' asks for nothing in particular, next to a topic")
             .containsExactly("opencode");
+        assertThat(AssistantDocsIndex.terms("用")).as("but on its own it is what the message has").containsExactly("用");
+        assertThat(AssistantDocsIndex.terms("OpenCode 怎么停")).as("a verb that names an action is a weak term")
+            .containsExactly("opencode", "停");
         assertThat(AssistantDocsIndex.termWeights("改")).containsEntry("改", 0.6);
     }
 
@@ -456,7 +465,7 @@ class AssistantDocsIndexTest {
     void aQuestionTheDocumentsDoNotCoverRetrievesNothingAndOffersTheTitlesInstead() {
         AssistantDocsIndex index = indexOf(userGuide());
 
-        for (String question : List.of("今天天气怎么样", "怎么看监控大屏", "你是谁", "What is the capital of France?")) {
+        for (String question : List.of("今天天气怎么样", "怎么看监控大屏", "What is the capital of France?")) {
             Retrieval hits = ask(index, question);
             assertThat(hits.chunks()).as(question).isEmpty();
             assertThat(hits.sources()).as(question).isEmpty();
@@ -548,6 +557,59 @@ class AssistantDocsIndexTest {
         assertThat(AssistantDocsIndex.terms("充值到账之后")).as("'值到' and '账之' are pairs of the message").contains("值到", "账之");
         assertThat(pageIds(ask(index, "充值到账之后"))).as("but the documents have the words").containsExactly("pay");
         assertThat(ask(index, "充值到账之后天气预报").chunks()).as("a word they lack is another matter").isEmpty();
+    }
+
+    @Test
+    void aVerbBeforeTheTopicIsAJoinButTheEndOfAWordTheDocumentsLackIsNot() {
+        AssistantDocsIndex index = indexOf(
+            page("pay", "充值", "帮助", "", "## 在线充值\n支持微信和支付宝在线支付，到账后余额增加。"),
+            page("tips", "好习惯", "帮助", "", "## 命名\n把日常开发和临时测试分开，各用一把密钥。"));
+
+        assertThat(pageIds(ask(index, "可以用微信吗"))).as("'用微' joins the verb to the word the documents have").containsExactly("pay");
+        assertThat(pageIds(ask(index, "怎么开发"))).containsExactly("tips");
+        // After wording that asks how the verb comes first, so "发票" is a word the documents lack, not the join of "开发"
+        // and "票": it cannot be answered by the page that has "开发". Without such wording the order cannot be told
+        // ("开发票" looks like "协议选"), which the benchmark lists among its known gaps.
+        for (String question : List.of("怎么开发票", "怎样开发票", "如何开发票", "咋开发票", "请问怎么开发票", "那如何开发票")) {
+            assertThat(ask(index, question).chunks()).as(question).isEmpty();
+        }
+    }
+
+    @Test
+    void whenTheTopicComesFirstTheLastPairIsTheJoinOfTheTopicAndItsVerb() {
+        // The topic is in the text of a few chunks and in no heading, so a chunk that has it is a modest match: it is quoted
+        // only if the question asks for nothing else than the topic.
+        AssistantDocsIndex index = indexOf(
+            page("proto", "接口说明", "帮助", "", "## 各接口的地址\n不同的接口有不同的协议和路径，请求头也不一样。"),
+            page("errors", "错误排查", "帮助", "", "## 状态码\n400 表示请求内容无效，检查协议是否选对，检查请求头是否写对。"),
+            page("faq", "常见问题", "帮助", "", "## 连接\n换了协议还是连不上，先看状态码；请求头里不要多写空格。"),
+            page("tips", "好习惯", "帮助", "", "## 命名\n把日常开发和临时测试分开，各用一把密钥。"),
+            page("pay", "充值", "帮助", "", "## 在线充值\n支持微信和支付宝在线支付，到账后余额增加。"),
+            page("misc", "杂项", "帮助", "", "## 其他\n没有别的了。"));
+
+        // "议选", "头填" and "头加" are not words, they are where "协议" and "请求头" meet "选", "填" and "加": the documents lack
+        // the pair, not the topic. Counted against the question, they would leave no chunk good enough to be quoted.
+        for (String question : List.of("协议选哪个", "协议选什么", "请求头填什么", "请求头加什么", "怎么选协议")) {
+            assertThat(pageIds(ask(index, question))).as(question).contains("proto");
+        }
+    }
+
+    @Test
+    void aTopicTheDocumentsLackIsNotAnsweredBecauseTheirHeadingsHaveTheVerbOrTheWordingBesideIt() {
+        AssistantDocsIndex index = seeded();
+
+        // Nothing of 发票, 邮箱, 团队 ... is in the tutorials; "开", "改", "建", "操作", "解决" only order what a topic has.
+        for (String question : List.of("发票怎么开", "邮箱怎么改", "昵称怎么改", "会员怎么买", "团队怎么建", "积分怎么换", "手机号怎么绑",
+            "发票怎么操作", "发票怎么解决", "怎么开发票", "怎么改邮箱", "怎么建团队", "How do I get an invoice?", "How do I fix an invoice?")) {
+            Retrieval hits = ask(index, question);
+            assertThat(hits.chunks()).as(question).isEmpty();
+            assertThat(hits.sources()).as(question).isEmpty();
+            assertThat(hits.pageTitles()).as("the model is handed the titles instead: " + question).isNotEmpty();
+        }
+        assertThat(ask(index, "密钥怎么删").chunks().getFirst().section()).isEqualTo("列表里的操作");
+        assertThat(ask(index, "工单怎么关").chunks().stream().limit(3).map(Chunk::section).toList()).contains("状态的含义");
+        assertThat(ask(index, "余额怎么扣").chunks().getFirst().section()).isEqualTo("余额是怎么扣的");
+        assertThat(ask(index, "充值怎么操作").chunks().getFirst().pageId()).isEqualTo("billing");
     }
 
     @Test
@@ -869,6 +931,358 @@ class AssistantDocsIndexTest {
         assertThat(change.chunks().getFirst().section()).isEqualTo("列表里的操作");
         assertThat(sections(change)).as("'改' is also in the password sections").noneMatch(section -> section.contains("修改密码"));
         assertThat(steps.chunks().getFirst().pageId()).isEqualTo("billing");
+    }
+
+    // ---- the tutorials of a fresh installation: wordings that were answered with the wrong page ----------------
+
+    /** The tutorials a fresh installation publishes (V23 and V24), as they are. */
+    private static AssistantDocsIndex seeded() {
+        return indexOf(SeededTutorials.pages());
+    }
+
+    private static String where(Chunk chunk) {
+        return chunk.pageId() + " § " + chunk.section();
+    }
+
+    @Test
+    void askingHowToSolveOrWhatAStatusCodeMeansIsAnsweredByThePagesThatNameTheCode() {
+        AssistantDocsIndex index = seeded();
+
+        assertThat(AssistantDocsIndex.termWeights("403 怎么解决")).containsEntry("403", 1.0).containsEntry("解决", 0.2);
+        assertThat(AssistantDocsIndex.termWeights("401 如何处理")).containsEntry("401", 1.0).containsEntry("处理", 0.2);
+        assertThat(AssistantDocsIndex.termWeights("What does 401 mean?")).containsEntry("mean", 0.2);
+        assertThat(AssistantDocsIndex.termWeights("How to solve 401")).containsEntry("solve", 0.2);
+        assertThat(AssistantDocsIndex.termWeights("solving 401")).as("the -ing form of the word").containsEntry("solving", 0.2);
+        assertThat(AssistantDocsIndex.termWeights("ticket resolved")).as("a participle is a status the documents may name")
+            .containsEntry("ticket", 1.0).containsEntry("resolved", 1.0);
+        for (String code : List.of("401", "402", "403", "503")) {
+            for (String question : List.of(code + " 怎么解决", code + " 怎么处理", code + " 如何处理", code + " 怎么修复",
+                "How to solve " + code, "What does " + code + " mean?", "How do I fix " + code + "?")) {
+                Retrieval hits = ask(index, question);
+                assertThat(hits.chunks()).as(question).isNotEmpty();
+                assertThat(hits.chunks()).as(question).allSatisfy(chunk ->
+                    assertThat(chunk.section() + "\n" + chunk.body()).as(question + " → " + where(chunk)).contains(code));
+            }
+            assertThat(ask(index, code + " 怎么解决").sources()).as(code).doesNotContain("使用文档《如何提交工单》");
+        }
+        assertThat(ask(index, "403 怎么解决").chunks().stream().limit(3).map(AssistantDocsIndexTest::where).toList())
+            .contains("faq § 模型 › 提示 403");
+    }
+
+    @Test
+    void aParticipleThatTheDocumentsUseAsAStatusIsATopicWordAndNotWording() {
+        AssistantDocsIndex index = seeded();
+
+        // "Resolved" is a status of a ticket; "resolve" and "resolving" are only a way to ask how to solve something.
+        for (String question : List.of("ticket resolved", "resolved ticket", "What does the Resolved status mean?", "Resolved status")) {
+            assertThat(ask(index, question).chunks().stream().limit(3).map(AssistantDocsIndexTest::where).toList()).as(question)
+                .contains("tickets § What the statuses mean");
+        }
+    }
+
+    @Test
+    void theOneCharacterVerbOfAQuestionOrdersTheChunksOfItsTopic() {
+        AssistantDocsIndex index = seeded();
+
+        assertThat(AssistantDocsIndex.termWeights("密钥怎么删")).containsEntry("密钥", 1.0).containsEntry("删", 2.0);
+        assertThat(AssistantDocsIndex.terms("OpenCode 怎么用")).as("'用' asks for nothing in particular").containsExactly("opencode");
+        assertThat(AssistantDocsIndex.terms("OpenCode 怎么停")).as("a verb that names an action is a weak term").containsExactly("opencode", "停");
+        assertThat(ask(index, "密钥怎么删").chunks().getFirst().section()).isEqualTo("列表里的操作");
+        assertThat(ask(index, "怎么删除密钥").chunks().getFirst().section()).isEqualTo("列表里的操作");
+        assertThat(ask(index, "工单怎么关").chunks().stream().limit(3).map(Chunk::section).toList()).contains("状态的含义");
+        assertThat(ask(index, "余额怎么扣").chunks().getFirst().section()).isEqualTo("余额是怎么扣的");
+    }
+
+    @Test
+    void theVerbBesideAPastedIdentifierTheDocumentsHaveOnlyInPartsDoesNotChooseTheChunks() {
+        AssistantDocsIndex index = seeded();
+
+        // None of these names is in the tutorials, but their parts are (API, KEY, INVALID; CODEX; BASE, URL ...). The parts are
+        // the topic. "改", "填", "换" and "钱" only order the chunks that have a part: they are in the heading of the password
+        // sections, the form tables, the redeem-code section and the wallet, which have nothing to do with the name.
+        assertThat(AssistantDocsIndex.termWeights("API_KEY_INVALID 怎么改")).containsEntry("api_key_invalid", 4.0)
+            .containsEntry("invalid", 0.3).containsEntry("改", 2.0);
+        assertThat(where(ask(index, "API_KEY_INVALID 怎么改").chunks().getFirst())).isEqualTo("faq § 密钥与登录 › 提示 401，或者密钥无效");
+        assertThat(where(ask(index, "OPENAI_BASE_URL 怎么填").chunks().getFirst()))
+            .isEqualTo("faq § 地址与连接 › Base URL 到底要不要带 /v1");
+        for (String question : List.of("CLAUDE_CODE_MAX_OUTPUT_TOKENS 怎么改", "怎么改 CLAUDE_CODE_MAX_OUTPUT_TOKENS")) {
+            assertThat(where(ask(index, question).chunks().getFirst())).as(question).isEqualTo("claude-code § 手动设置环境变量");
+        }
+        assertThat(where(ask(index, "claude-sonnet-4.5 怎么换").chunks().getFirst())).isEqualTo("claude-code § 手动设置环境变量");
+        assertThat(where(ask(index, "CODEX_HOME 怎么改").chunks().getFirst())).isEqualTo("codex-cli § 手动配置");
+        assertThat(pageIds(ask(index, "config.yaml 怎么改"))).containsExactly("codex-cli");
+        assertThat(pageIds(ask(index, "CODEX_HOME 怎么设"))).containsExactly("codex-cli");
+        for (String question : List.of("API_KEY_INVALID 怎么改", "config.yaml 怎么改", "settings.local.json 怎么改",
+            "CLAUDE_CODE_MAX_OUTPUT_TOKENS 怎么改", "OPENAI_BASE_URL 怎么填")) {
+            assertThat(sections(ask(index, question))).as(question + " is not about the password")
+                .noneMatch(section -> section.contains("修改密码"));
+        }
+        for (String question : List.of("gpt-5.5-mini 多少钱", "claude-opus-4.9 多少钱", "claude-opus-4.5 多少钱",
+            "claude-opus-4.5-20251101 多少钱")) {
+            assertThat(pageIds(ask(index, question))).as(question + " is not about the wallet")
+                .doesNotContain("coding-plan", "billing", "console-tour");
+        }
+        // A verb still decides among the chunks of a topic that has a word of its own.
+        assertThat(ask(index, "密钥怎么删").chunks().getFirst().section()).isEqualTo("列表里的操作");
+    }
+
+    @Test
+    void aParticipleOfAWordOfWordingTheDocumentsLackIsWordingAndNotAStopWordOrATopicWord() {
+        AssistantDocsIndex index = seeded();
+
+        // "viewed", "caused", "detailed" are not in the tutorials; they must not become "view", "cause" or "detail" as topic
+        // words, nor "noted" the stop word "not" (which every chunk has). "Resolved" is a status the tutorials do have, and
+        // stays a topic word (see aParticipleThatTheDocumentsUseAsAStatusIsATopicWordAndNotWording).
+        assertThat(where(ask(index, "What caused my 401?").chunks().getFirst()))
+            .isEqualTo("faq § Keys and sign-in › I get 401, or the key is invalid");
+        for (String question : List.of("Where is my balance viewed?", "Where can my subscription be viewed?",
+            "Where can the statistics be viewed?", "Where can the model list be viewed?")) {
+            assertThat(pageIds(ask(index, question))).as(question + " is not about tickets").doesNotContain("tickets");
+        }
+        assertThat(where(ask(index, "Where is my balance viewed?").chunks().getFirst())).startsWith("billing § ");
+        for (String message : List.of("Noted.", "noted", "Noted, thanks")) {
+            Retrieval hits = askAfter(index, message, "How do I top up?");
+            assertThat(hits.chunks()).as(message).isEmpty();
+            assertThat(hits.pageTitles()).as("an acknowledgement, not a question the documents lack: " + message).isEmpty();
+        }
+        assertThat(ask(index, "Noted.").pageTitles()).isEmpty();
+        assertThat(askAfter(index, "more detailed", "How do I top up?").chunks()).as("a request for more about the earlier topic")
+            .isNotEmpty().allSatisfy(chunk -> assertThat(chunk.pageId()).isEqualTo("billing"));
+
+        // The word the ending is taken off to may be a stop word of the documents' own text: "wanted" is not "want".
+        AssistantDocsIndex small = indexOf(page("keys", "Keys", "Help", "", "## Create\nYou will want a key, and you will need one."));
+        assertThat(ask(small, "wanted").chunks()).isEmpty();
+        assertThat(ask(small, "needed").chunks()).isEmpty();
+    }
+
+    @Test
+    void aLoneCharacterOnlyOrdersTheChunksOfTheTopicAndNeverMakesAChunkAnAnswer() {
+        AssistantDocsIndex index = indexOf(
+            page("keys", "管理密钥", "帮助", "", "## 密钥列表\n这里列出所有密钥，可以查看用量。"),
+            page("other", "杂项", "帮助", "", "## 其他\n点这里可以删除记录，删除之后无法恢复。"));
+
+        // 删 is only in the other page, which has nothing about keys.
+        assertThat(ask(index, "密钥怎么删").chunks()).extracting(Chunk::pageId).containsExactly("keys");
+    }
+
+    @Test
+    void aComplaintThatItStillFailsIsAboutTheEarlierQuestionAndNotAboutOneOfItsCharacters() {
+        AssistantDocsIndex index = seeded();
+
+        for (String complaint : List.of("还是不行", "不行", "不行啊", "没用", "不管用", "还是没反应")) {
+            Retrieval hits = askAfter(index, complaint, "Claude Code 报错 401");
+            assertThat(hits.chunks().stream().limit(3).map(AssistantDocsIndexTest::where).toList()).as(complaint)
+                .contains("claude-code § 常见问题");
+        }
+        assertThat(askAfter(index, "不行", "怎么创建 API Key").chunks().getFirst().pageId()).isEqualTo("api-keys");
+        assertThat(askAfter(index, "不对", "Codex 怎么配置").chunks().getFirst().pageId()).isEqualTo("codex-cli");
+        assertThat(AssistantDocsIndex.terms("还是不行")).as("nothing but grammar and wording").doesNotContain("行");
+    }
+
+    @Test
+    void thanksAndGreetingsRetrieveNothingWhateverWasAskedBefore() {
+        AssistantDocsIndex index = seeded();
+
+        for (String message : List.of("谢谢", "谢谢！", "好的，明白了", "收到", "你是谁", "Thanks!", "thank you", "非常感谢啊", "再见", "Hello", "bye")) {
+            Retrieval hits = askAfter(index, message, "怎么配置 Claude Code");
+            assertThat(hits.chunks()).as(message).isEmpty();
+            assertThat(hits.sources()).as(message).isEmpty();
+            assertThat(hits.pageTitles()).as("the model is not told that nothing was found: " + message).isEmpty();
+        }
+        assertThat(ask(index, "谢谢，怎么创建 API Key").chunks()).as("a thanks is not the whole message").isNotEmpty();
+        assertThat(askAfter(index, "好的，具体步骤呢", "怎么充值").chunks().getFirst().pageId()).isEqualTo("billing");
+        assertThat(askAfter(index, "可以吗", "怎么充值").chunks()).as("a question, not an acknowledgement").isNotEmpty();
+    }
+
+    @Test
+    void aBareYesToAnOfferOfMoreIsAFollowUpOfTheEarlierTopic() {
+        AssistantDocsIndex index = seeded();
+
+        // "需要我详细说说吗？" - "可以": the user wants the excerpts, not to be told that the documents have none.
+        for (String message : List.of("可以", "嗯", "行", "好的", "好吧", "嗯嗯，好的", "要", "是的", "ok", "Sure!", "yes")) {
+            Retrieval hits = askAfter(index, message, "怎么充值");
+            assertThat(hits.chunks()).as(message).isNotEmpty().allSatisfy(chunk -> assertThat(chunk.pageId()).isEqualTo("billing"));
+            assertThat(hits.sources()).as(message).containsExactly("使用文档《充值与计费》");
+        }
+        assertThat(askAfter(index, "可以", "怎么配置 Claude Code").chunks().getFirst().pageId()).isEqualTo("claude-code");
+        assertThat(askAfter(index, "sure", "How do I set up Claude Code?").sources()).startsWith("Docs: Set up Claude Code");
+        assertThat(askAfter(index, "可以", "好的", "怎么充值").chunks().getFirst().pageId()).as("past an earlier bare yes").isEqualTo("billing");
+        assertThat(ask(index, "好的").chunks()).as("nothing to follow up").isEmpty();
+    }
+
+    @Test
+    void aBareYesAtTheHeadOfAQuestionIsNotAWordOfTheQuestion() {
+        AssistantDocsIndex index = seeded();
+
+        // "好" must not become the verb of the question: 好习惯 and 写出好懂的工单 would then be quoted and cited.
+        for (String question : List.of("好的，那怎么删除密钥", "好，那怎么删除密钥", "那好，怎么删除密钥", "谢谢，怎么删除密钥")) {
+            Retrieval hits = ask(index, question);
+            assertThat(hits.chunks().getFirst().section()).as(question).isEqualTo("列表里的操作");
+            assertThat(hits.sources()).as(question).doesNotContain("使用文档《如何提交工单》");
+            assertThat(hits.chunks()).as(question).isEqualTo(ask(index, "怎么删除密钥").chunks());
+        }
+        assertThat(ask(index, "OK, how do I delete an API key").chunks()).isEqualTo(ask(index, "How do I delete an API key").chunks());
+        assertThat(AssistantDocsIndex.terms("好的，怎么充值")).containsExactly("充值");
+        assertThat(AssistantDocsIndex.terms("怎么好好充值")).as("only at the head, and only before a break").contains("好好");
+    }
+
+    @Test
+    void ofSiblingsThatShareAHeadingAboveThemTheOneWhoseOwnHeadingHasTheWordComesFirst() {
+        AssistantDocsIndex index = indexOf(page("faq", "常见问题", "帮助", "", """
+            ## 地址与连接
+            ### 地址怎么写
+            地址要写完整，不要多写斜杠。
+
+            ### 连接失败
+            先确认网络正常，再重试。
+            """));
+
+        assertThat(ask(index, "连接").chunks().getFirst().section()).isEqualTo("地址与连接 › 连接失败");
+        assertThat(ask(index, "地址与连接").chunks()).as("the parent heading still finds its children").hasSize(2);
+
+        AssistantDocsIndex tutorials = seeded();
+        assertThat(where(ask(tutorials, "Connection problems").chunks().getFirst())).isEqualTo("faq § Addresses and connections › Connection failure, or 5xx");
+        assertThat(where(ask(tutorials, "连接有问题").chunks().getFirst())).isEqualTo("faq § 地址与连接 › 连接失败，或 5xx");
+        assertThat(ask(tutorials, "地址怎么填").chunks().stream().map(Chunk::section).toList()).as("the sections about the address come first")
+            .startsWith("准备地址与密钥", "各接口的地址");
+    }
+
+    @Test
+    void anEnglishWordIsFoundInTheFormTheDocumentsHaveItInWhateverEndingItIsAsked() {
+        AssistantDocsIndex index = seeded();
+
+        assertThat(where(ask(index, "redeeming a code").chunks().getFirst())).isEqualTo("billing § Top up your balance › Redeem a code");
+        assertThat(ask(index, "verifying Claude Code").chunks().stream().limit(3).map(AssistantDocsIndexTest::where).toList())
+            .contains("claude-code § Verify");
+        assertThat(pageIds(ask(index, "how am I billed"))).contains("billing");
+        assertThat(ask(index, "changing my password").chunks().stream().limit(3).map(Chunk::pageId).toList()).contains("faq");
+
+        AssistantDocsIndex endings = indexOf(
+            page("settings", "Preferences", "Help", "", "## Preferences\nOpen the settings page and change the language."),
+            page("setup", "Installation", "Help", "", "## Installation\nSet up the tool and run it."));
+        assertThat(ask(endings, "settings").chunks()).as("a word of the documents keeps its form").extracting(Chunk::pageId)
+            .containsExactly("settings");
+        assertThat(ask(endings, "running").chunks()).as("a doubled letter before the ending").extracting(Chunk::pageId)
+            .containsExactly("setup");
+        assertThat(ask(endings, "setting").chunks()).extracting(Chunk::pageId).containsExactly("settings");
+
+        AssistantDocsIndex small = indexOf(page("keys", "Keys", "Help", "", "## Create\nCreate keys in the console."));
+        assertThat(ask(small, "created").chunks()).as("'create' with an ending").extracting(Chunk::pageId).containsExactly("keys");
+        assertThat(ask(small, "creating").chunks()).extracting(Chunk::pageId).containsExactly("keys");
+        assertThat(ask(small, "creatin").chunks()).as("not a form of anything").isEmpty();
+    }
+
+    @Test
+    void wordsOfNoMeaningInAnEnglishQuestionDoNotPullInPages() {
+        AssistantDocsIndex index = seeded();
+
+        Retrieval hits = askAfter(index, "How do I buy one?", "What is a Coding Plan?");
+
+        assertThat(pageIds(hits)).as("'one' is in 'one provider per key' and 'Import with one click'").doesNotContain("api-keys", "cc-switch");
+        assertThat(pageIds(hits)).contains("coding-plan");
+    }
+
+    @Test
+    void aWordThatTheTutorialsNeedIsNotDroppedAsAWordOfNoMeaning() {
+        AssistantDocsIndex index = seeded();
+
+        // "out" is how the tutorials say how to leave the console and what happens when the credits are gone; "one" is what
+        // a heading about a single provider per key is about.
+        for (String question : List.of("How do I sign out?", "sign out", "Where do I sign out?")) {
+            assertThat(ask(index, question).chunks().stream().limit(3).map(AssistantDocsIndexTest::where).toList())
+                .as(question).contains("console-tour § Top bar");
+        }
+        for (String question : List.of("my plan ran out", "I ran out of credits", "credits ran out")) {
+            assertThat(ask(index, question).chunks().stream().limit(2).map(Chunk::section).toList())
+                .as(question).anyMatch(section -> section.contains("What if the credits run out?"));
+        }
+        assertThat(ask(index, "Is one key enough?").chunks().stream().limit(3).map(Chunk::section).toList())
+            .contains("Model category: one provider per key");
+    }
+
+    @Test
+    void aMessageWithoutAnyEnglishWordFollowsTheConversationAndWithoutOneIsReadInChinese() {
+        AssistantDocsIndex index = seeded();
+
+        for (String message : List.of("401", "API_KEY_MODEL_PROVIDER_FORBIDDEN", "config.toml", "gpt-5.5", "502, 503")) {
+            Retrieval hits = ask(index, message);
+            assertThat(hits.chunks()).as(message).isNotEmpty();
+            assertThat(hits.sources()).as(message).allSatisfy(source -> assertThat(source).startsWith("使用文档《"));
+            assertThat(hits.chunks()).extracting(Chunk::language).as(message).containsOnly("zh");
+        }
+        assertThat(askAfter(index, "401", "How do I set up Claude Code?").sources()).as("unless the conversation is in English")
+            .allSatisfy(source -> assertThat(source).startsWith("Docs: "));
+        assertThat(ask(index, "Error 401").sources()).as("an ordinary English word").allSatisfy(source -> assertThat(source).startsWith("Docs: "));
+        assertThat(ask(index, "billing").sources()).allSatisfy(source -> assertThat(source).startsWith("Docs: "));
+
+        // Three status codes in a row after an English question: the question is more than two messages back.
+        for (List<String> earlier : List.of(List.of("401"), List.of("403", "401"), List.of("403", "401", "How do I set up Claude Code?"),
+            List.of("403", "401", "502", "How do I set up Claude Code?"), List.of("502, 503", "403", "401", "billing"))) {
+            Retrieval hits = askAfter(index, "502", earlier.toArray(String[]::new));
+            boolean english = earlier.stream().anyMatch(message -> message.matches(".*[A-Za-z]{3,}.*"));
+            assertThat(hits.sources()).as(earlier.toString()).isNotEmpty().allSatisfy(source ->
+                assertThat(source.startsWith("Docs: ")).isEqualTo(english));
+        }
+        assertThat(askAfter(index, "502", "403", "401", "怎么配置 Claude Code").sources()).as("and in Chinese when that is the conversation")
+            .allSatisfy(source -> assertThat(source).startsWith("使用文档《"));
+        assertThat(askAfter(index, "502", "403", "401", "怎么配置 Claude Code", "How do I set up Claude Code?").sources())
+            .as("the latest earlier message that says").allSatisfy(source -> assertThat(source).startsWith("使用文档《"));
+    }
+
+    @Test
+    void aLongMessageOfDottedOrHyphenatedPartsDoesNotOverflowASmallThreadStack() throws Exception {
+        // java.util.regex calls itself once for each repetition of a greedy group. A message may have 4000 characters, and a
+        // thread of the Linux default (1 MB) overflowed with about 3700 of "x.x.x…"; a StackOverflowError is fatal to Reactor,
+        // so the question was never answered. 512 KB stands for that default here, whatever the stack of the machine is.
+        String dotted = "a.".repeat(1999) + "a";
+        String hyphenated = "ab" + "-a".repeat(1998);
+        String version = "v1.2.3 " + "x.".repeat(1900) + "x";
+        AssistantDocsIndex index = seeded();
+
+        assertThat(onSmallStack(() -> AssistantDocsIndex.hasEnglishWord(hyphenated))).as("a hyphenated run of letters is an English word").isTrue();
+        assertThat(onSmallStack(() -> AssistantDocsIndex.hasEnglishWord(dotted))).as("a dotted one is a name, not a word").isFalse();
+        assertThat(onSmallStack(() -> AssistantDocsIndex.hasEnglishWord(version))).isFalse();
+        // And the question is answered, also when the long message is an earlier one and the question has no language of its own.
+        assertThat(ask(index, dotted).chunks()).isNotNull();
+        for (String earlier : List.of(dotted, hyphenated, version)) {
+            assertThat(askAfter(index, "401", earlier).chunks()).as("401 after " + earlier.substring(0, 12)).isNotEmpty();
+        }
+    }
+
+    private static <T> T onSmallStack(Supplier<T> work) throws Exception {
+        ExecutorService executor = Executors.newSingleThreadExecutor(task -> new Thread(null, task, "small-stack", 512 * 1024));
+        try {
+            return executor.submit(work::get).get(10, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void theVocabularyOfVariedChineseTextHasNoStringForEveryPairOfCharacters() {
+        // The 2000 chunks that are indexed at most, 1500 characters each, drawn evenly from 3500 common characters: almost
+        // every pair is a new one, some 1.4 million of them. As strings with a count each they were 165 MB.
+        Random random = new Random(7);
+        List<Document> pages = new ArrayList<>();
+        for (int page = 0; page < 40; page++) {
+            StringBuilder body = new StringBuilder();
+            for (int section = 0; section < 50; section++) {
+                body.append("## 小节").append(section).append('\n');
+                for (int character = 0; character < 1400; character++) {
+                    body.append((char) (0x4E00 + random.nextInt(3500)));
+                }
+                body.append("\n\n");
+            }
+            pages.add(page("page-" + page, "页面" + page, "帮助", "", body.toString()));
+        }
+        AssistantDocsIndex index = indexOf(pages);
+
+        Retrieval hits = ask(index, "页面7");
+        int[] sizes = index.vocabularySizes();
+
+        assertThat(hits.chunks()).as("and it still finds what is asked for").isNotEmpty();
+        assertThat(sizes[1]).as("pairs of characters, kept as ints").isGreaterThan(1_000_000);
+        assertThat(sizes[0]).as("words kept as strings: the headings only").isLessThan(1_000);
     }
 
     // ---- very long messages ------------------------------------------------------------------------------------
@@ -1396,32 +1810,200 @@ class AssistantDocsIndexTest {
         assertThat(loads).hasValue(1);
     }
 
-    @Test
-    void aLoadThatStartedBeforeAChangeIsNotSharedWithQuestionsAskedAfterIt() throws Exception {
-        List<Sinks.One<List<Document>>> loads = new ArrayList<>();
-        Supplier<Mono<List<Document>>> supplier = () -> Mono.defer(() -> {
-            Sinks.One<List<Document>> sink = Sinks.one();
-            synchronized (loads) {
-                loads.add(sink);
+    /** The supplier of pages whose every read is a sink that the test completes by hand. */
+    private static final class ManualReads {
+        final List<Sinks.One<List<Document>>> reads = new ArrayList<>();
+
+        Supplier<Mono<List<Document>>> supplier() {
+            return () -> Mono.defer(() -> {
+                Sinks.One<List<Document>> sink = Sinks.one();
+                synchronized (reads) {
+                    reads.add(sink);
+                }
+                return sink.asMono();
+            });
+        }
+
+        int count() {
+            synchronized (reads) {
+                return reads.size();
             }
-            return sink.asMono();
-        });
-        AssistantDocsIndex index = new AssistantDocsIndex(NO_FILES, supplier, new TestClock());
+        }
+
+        /** The load that follows another begins on the thread that finished the other, so the test waits for it. */
+        void awaitCount(int expected) throws InterruptedException {
+            long until = System.nanoTime() + TIMEOUT.toNanos();
+            while (count() < expected && System.nanoTime() < until) {
+                Thread.sleep(5);
+            }
+            assertThat(count()).isEqualTo(expected);
+        }
+    }
+
+    @Test
+    void aLoadThatStartedBeforeAChangeIsNotSharedWithQuestionsAskedAfterItButWaitsForItsTurn() throws Exception {
+        ManualReads source = new ManualReads();
+        AssistantDocsIndex index = new AssistantDocsIndex(NO_FILES, source.supplier(), new TestClock());
 
         CompletableFuture<Retrieval> before = index.retrieve("发票", "").toFuture();
-        assertThat(loads).hasSize(1);
+        assertThat(source.count()).isEqualTo(1);
         index.invalidate();
         CompletableFuture<Retrieval> after = index.retrieve("发票", "").toFuture();
-        assertThat(loads).hasSize(2);
+        assertThat(source.count()).as("one load at a time: the next begins when this one is done").isEqualTo(1);
 
-        loads.get(1).tryEmitValue(List.of(page("new", "发票", "帮助", "", "## 内容\n新的发票说明。")));
-        assertThat(after.get().chunks().getFirst().body()).contains("新的");
-        loads.get(0).tryEmitValue(List.of(page("old", "发票", "帮助", "", "## 内容\n旧的发票说明。")));
+        source.reads.get(0).tryEmitValue(List.of(page("old", "发票", "帮助", "", "## 内容\n旧的发票说明。")));
         assertThat(before.get().chunks().getFirst().body()).contains("旧的");
+        source.awaitCount(2);
+        assertThat(after.isDone()).as("it is waiting for the pages that were published after the first load began").isFalse();
+        source.reads.get(1).tryEmitValue(List.of(page("new", "发票", "帮助", "", "## 内容\n新的发票说明。")));
+        assertThat(after.get().chunks().getFirst().body()).contains("新的");
 
-        // The late, older load must not replace the newer snapshot.
         assertThat(ask(index, "发票").chunks().getFirst().body()).contains("新的");
-        assertThat(loads).hasSize(2);
+        assertThat(source.count()).isEqualTo(2);
+    }
+
+    @Test
+    void aBurstOfChangesWhileALoadRunsCostsOneMoreLoadAndNotOnePerChange() throws Exception {
+        ManualReads source = new ManualReads();
+        AssistantDocsIndex index = new AssistantDocsIndex(NO_FILES, source.supplier(), new TestClock());
+
+        List<CompletableFuture<Retrieval>> questions = new ArrayList<>();
+        questions.add(index.retrieve("发票", "").toFuture());
+        for (int change = 0; change < 12; change++) {
+            index.onPublicationChanged(new tech.starryapi.documentation.DocumentationPublicationChanged("p" + change));
+            questions.add(index.retrieve("发票", "").toFuture());
+        }
+        assertThat(source.count()).as("the pages are not read again while they are being read").isEqualTo(1);
+
+        source.reads.get(0).tryEmitValue(List.of(page("p", "发票", "帮助", "", "## 内容\n第一次读到的发票说明。")));
+        source.awaitCount(2);
+        index.invalidate();
+        questions.add(index.retrieve("发票", "").toFuture());
+        assertThat(source.count()).as("a change during the second load is not read in parallel either").isEqualTo(2);
+        source.reads.get(1).tryEmitValue(List.of(page("p", "发票", "帮助", "", "## 内容\n第二次读到的发票说明。")));
+        source.awaitCount(3);
+        source.reads.get(2).tryEmitValue(List.of(page("p", "发票", "帮助", "", "## 内容\n第三次读到的发票说明。")));
+
+        for (CompletableFuture<Retrieval> question : questions) {
+            assertThat(question.get().chunks()).hasSize(1);
+        }
+        assertThat(questions.get(1).get().chunks().getFirst().body()).as("asked after a change, answered after the next load")
+            .contains("第二次");
+        assertThat(source.count()).isEqualTo(3);
+    }
+
+    /** The title list of the snapshot that answered the question; nothing but the weak reference is kept. */
+    private static WeakReference<List<String>> snapshotOf(CompletableFuture<Retrieval> question) throws Exception {
+        return new WeakReference<>(question.get().pageTitles());
+    }
+
+    @Test
+    void loadsQueuedBehindEachOtherDoNotKeepEveryEarlierSnapshotInMemory() throws Exception {
+        ManualReads source = new ManualReads();
+        AssistantDocsIndex index = new AssistantDocsIndex(NO_FILES, source.supplier(), new TestClock());
+        int loads = 8;
+
+        // A script that updates many pages: every load is still running when the next change and the next question come,
+        // so there is always one more load waiting for it. Each one answers with a snapshot of its own.
+        List<WeakReference<List<String>>> snapshots = new ArrayList<>();
+        CompletableFuture<Retrieval> question = index.retrieve("发票", "").toFuture();
+        for (int load = 0; load < loads; load++) {
+            index.invalidate();
+            CompletableFuture<Retrieval> next = index.retrieve("发票", "").toFuture();
+            source.reads.get(load).tryEmitValue(List.of(page("p", "发票", "帮助", "", "## 内容\n第" + load + "次读到的发票说明。")));
+            snapshots.add(snapshotOf(question));
+            question = next;
+            source.awaitCount(load + 2);
+        }
+
+        // The last load is still being read, and one question waits for it. Only the newest finished snapshot is kept,
+        // as the one to answer with until that load is done; the ones before it are garbage.
+        awaitCollected(snapshots.subList(0, loads - 1));
+        assertThat(snapshots.get(loads - 1).get()).as("the newest finished snapshot is still the one in use").isNotNull();
+        assertThat(question.isDone()).isFalse();
+        source.reads.get(loads).tryEmitValue(List.of(page("p", "发票", "帮助", "", "## 内容\n最后一次读到的发票说明。")));
+        assertThat(question.get().chunks().getFirst().body()).contains("最后一次");
+    }
+
+    private static void awaitCollected(List<WeakReference<List<String>>> references) throws InterruptedException {
+        long until = System.nanoTime() + TIMEOUT.toNanos();
+        while (System.nanoTime() < until && references.stream().anyMatch(reference -> reference.get() != null)) {
+            System.gc();
+            Thread.sleep(20);
+        }
+        assertThat(references).as("snapshots that are still held by the queue of loads")
+            .allSatisfy(reference -> assertThat(reference.get()).isNull());
+    }
+
+    @Test
+    void aReadThatNeverReturnsIsAFailureLikeAnyOtherAndIsRetried() {
+        TestClock clock = new TestClock();
+        AtomicInteger pageReads = new AtomicInteger();
+        AssistantDocsIndex index = new AssistantDocsIndex(NO_FILES, () -> {
+            pageReads.incrementAndGet();
+            return Mono.never();
+        }, clock);
+        index.readBudget = Duration.ofMillis(200);
+
+        assertThat(ask(index, "发票").chunks()).as("answered without the pages once the read has taken too long").isEmpty();
+        assertThat(ask(index, "发票").pageTitles()).isEmpty();
+        assertThat(pageReads).as("and not retried on every question").hasValue(1);
+
+        clock.advance(Duration.ofSeconds(11));
+        assertThat(ask(index, "发票").chunks()).isEmpty();
+        assertThat(pageReads).as("but retried soon, so a node does not stay without the pages").hasValue(2);
+
+        AtomicInteger fingerprintReads = new AtomicInteger();
+        AssistantDocsIndex hanging = new AssistantDocsIndex(NO_FILES,
+            () -> Mono.just(List.of(page("p", "发票", "帮助", "", "## 内容\n发票说明。"))), () -> {
+                fingerprintReads.incrementAndGet();
+                return Mono.never();
+            }, clock);
+        hanging.readTimeout = Duration.ofMillis(200);
+        assertThat(ask(hanging, "发票").chunks()).as("a fingerprint that never comes is the same failure").isEmpty();
+        clock.advance(Duration.ofSeconds(11));
+        ask(hanging, "发票");
+        assertThat(fingerprintReads).hasValue(2);
+    }
+
+    @Test
+    void aReadOfThePagesIsNotCutOffForTakingLongAsLongAsItDeliversRows() {
+        AtomicInteger reads = new AtomicInteger();
+        // 8 rows, one every 60 ms: about half a second in all, but never 250 ms without a row.
+        AssistantDocsIndex index = new AssistantDocsIndex(NO_FILES, () -> {
+            reads.incrementAndGet();
+            return AssistantDocsIndex.pagesFrom(Flux.interval(Duration.ofMillis(60)).take(8).map(row -> "第" + row + "行的发票说明。"),
+                Duration.ofMillis(250), rows -> List.of(page("p", "发票", "帮助", "", "## 内容\n" + String.join("\n\n", rows))));
+        }, new TestClock());
+        index.readTimeout = Duration.ofMillis(250);
+
+        Retrieval slow = ask(index, "发票");
+
+        assertThat(slow.chunks()).as("the whole read took longer than the limit on silence").hasSize(1);
+        assertThat(slow.chunks().getFirst().body()).contains("第0行", "第7行");
+        assertThat(reads).hasValue(1);
+    }
+
+    @Test
+    void aReadOfThePagesThatStopsDeliveringRowsFailsAfterTheSilenceLimit() {
+        Flux<String> stalled = Flux.concat(Flux.just("第一行"), Flux.never());
+
+        assertThat(org.assertj.core.api.Assertions.catchThrowable(() ->
+            AssistantDocsIndex.pagesFrom(stalled, Duration.ofMillis(200), rows -> List.of()).block(TIMEOUT)))
+            .hasRootCauseInstanceOf(java.util.concurrent.TimeoutException.class);
+        assertThat(AssistantDocsIndex.pagesFrom(Flux.<String>empty(), Duration.ofMillis(200), rows -> List.of()).block(TIMEOUT))
+            .as("no rows at all is an empty list, not a failure").isEmpty();
+    }
+
+    @Test
+    void thePagesAreNotHeldToTheLimitThatTheFingerprintIsHeldTo() {
+        // Reading the pages, as a supplier that does not limit itself, is bounded only by the (much larger) budget.
+        AssistantDocsIndex index = new AssistantDocsIndex(NO_FILES, () ->
+            Mono.delay(Duration.ofMillis(500)).thenReturn(List.of(page("p", "发票", "帮助", "", "## 内容\n发票说明。"))), new TestClock());
+        index.readTimeout = Duration.ofMillis(200);
+
+        assertThat(ask(index, "发票").chunks()).hasSize(1);
+        assertThat(AssistantDocsIndex.READ_BUDGET).isGreaterThan(AssistantDocsIndex.READ_TIMEOUT.multipliedBy(10));
     }
 
     @Test

@@ -34,6 +34,8 @@ class DocumentationServicePostgreSqlTest {
     private static PostgreSQLContainer container;
     private static String r2dbcUrl;
     private DocumentationService service;
+    /** The service itself, for the methods that are not reactive and so cannot go through the transaction interceptor. */
+    private DocumentationService unproxied;
     private DocumentationStorage storage;
     private final List<Object> events = new CopyOnWriteArrayList<>();
     private static final Duration TIMEOUT = Duration.ofSeconds(15);
@@ -70,6 +72,7 @@ class DocumentationServicePostgreSqlTest {
         var repository = new R2dbcRepositoryFactory(template).getRepository(SystemSettingRepository.class);
         storage = new DocumentationStorage(files.toString());
         var target = new DocumentationService(DatabaseClient.create(factory), new ObjectMapper(), repository, storage, events::add);
+        unproxied = target;
         var transactions = new TransactionInterceptor();
         transactions.setTransactionManager(new R2dbcTransactionManager(factory));
         transactions.setTransactionAttributeSource(new AnnotationTransactionAttributeSource());
@@ -191,9 +194,28 @@ class DocumentationServicePostgreSqlTest {
         assertThat(service.publishedFingerprint().block(TIMEOUT)).hasSize(32);
     }
 
+    @Test void publishedRowsAreTheSamePagesBeforeTheirJsonIsParsed() {
+        var rows = service.publishedRows().block(TIMEOUT);
+
+        assertThat(rows).extracting(DocumentationService.PublishedRow::id).contains("getting-started", "api-keys");
+        assertThat(rows).allSatisfy(row -> assertThat(row.json()).startsWith("{"));
+        assertThat(unproxied.documents(rows)).isEqualTo(service.publishedPages().block(TIMEOUT));
+    }
+
+    @Test void thePublishedRowStreamDeliversTheSameRowsInTheSameOrderOneByOne() {
+        var streamed = service.publishedRowStream().collectList().block(TIMEOUT);
+
+        assertThat(streamed).isNotEmpty().isEqualTo(service.publishedRows().block(TIMEOUT));
+    }
+
     @Test void aPublishedRowWhoseSortOrderIsNotAWholeNumberDoesNotFailTheListAndSortsLast() {
         var db = DatabaseClient.create(ConnectionFactories.get(r2dbcUrl));
-        for (String[] row : new String[][] {{"sort-bad-a", "1.5"}, {"sort-bad-b", "\"abc\""}, {"sort-bad-c", "99999999999"}}) {
+        // The rows stay in the table (only hidden) when the test is over, so a database that is used again needs new ids.
+        String run = "-" + UUID.randomUUID().toString().substring(0, 8);
+        String fraction = "sort-bad-a" + run;
+        String text = "sort-bad-b" + run;
+        String huge = "sort-bad-c" + run;
+        for (String[] row : new String[][] {{fraction, "1.5"}, {text, "\"abc\""}, {huge, "99999999999"}}) {
             String content = "{\"title\":\"排序异常\",\"category\":\"Test\",\"summary\":\"\",\"body\":\"x\",\"sortOrder\":" + row[1] + "}";
             db.sql("INSERT INTO documentation_pages (id, draft, published, published_at) VALUES (:id, CAST(:content AS jsonb), CAST(:content AS jsonb), clock_timestamp())")
                 .bind("id", row[0]).bind("content", content).fetch().rowsUpdated().block(TIMEOUT);
@@ -203,11 +225,11 @@ class DocumentationServicePostgreSqlTest {
 
         var pages = service.publishedPages().block(TIMEOUT);
 
-        assertThat(pages).extracting(Document::id).contains(good.id(), "getting-started", "faq", "sort-bad-a", "sort-bad-b", "sort-bad-c");
+        assertThat(pages).extracting(Document::id).contains(good.id(), "getting-started", "faq", fraction, text, huge);
         assertThat(pages.subList(pages.size() - 3, pages.size())).extracting(Document::id)
-            .as("the damaged rows come after every page that has a sort order").containsExactly("sort-bad-a", "sort-bad-b", "sort-bad-c");
+            .as("the damaged rows come after every page that has a sort order").containsExactly(fraction, text, huge);
         assertThat(pages).filteredOn(d -> d.id().equals(good.id())).singleElement().satisfies(d -> assertThat(d.content()).isNotNull());
-        assertThat(pages).filteredOn(d -> d.id().equals("sort-bad-b")).singleElement()
+        assertThat(pages).filteredOn(d -> d.id().equals(text)).singleElement()
             .satisfies(d -> assertThat(d.content()).as("it does not parse, and is passed on as such").isNull());
     }
 

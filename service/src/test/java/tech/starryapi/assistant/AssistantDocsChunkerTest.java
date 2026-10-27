@@ -353,7 +353,92 @@ class AssistantDocsChunkerTest {
         assertThat(String.join("\n", sections.stream().map(Section::body).toList())).contains("| E0 |", "| E59 |");
     }
 
+    @Test
+    void aTableThatFollowsAParagraphLineDirectlyIsStillATableWhoseEveryPieceHasItsHeader() {
+        // Without a blank line in front it is a table all the same, as the console's reader page shows it.
+        for (String header : List.of("| 错误码 | 含义 | 处理 |\n| --- | --- | --- |", "错误码 | 含义 | 处理\n--- | --- | ---")) {
+            StringBuilder table = new StringBuilder("## 错误码\n\n以下是全部错误码：\n" + header + "\n");
+            for (int row = 0; row < 60; row++) {
+                table.append("| E").append(row).append(" | 第").append(row).append("号错误的含义说明文字 | 按文档处理这一类错误，必要时联系管理员 |\n");
+            }
+
+            List<Section> sections = AssistantDocsChunker.split(table.toString(), 1);
+
+            assertThat(sections).as(header).hasSizeGreaterThan(1).allSatisfy(section -> {
+                assertThat(section.body()).contains(header);
+                assertThat(section.body().length()).isLessThanOrEqualTo(AssistantDocsChunker.MAX_CHUNK_CHARS);
+            });
+            assertThat(sections.getFirst().body()).as("the sentence stays with its table")
+                .startsWith("以下是全部错误码：\n\n" + header + "\n| E0 |");
+            assertThat(sections.stream().skip(1)).allSatisfy(section -> assertThat(section.body()).startsWith(header + "\n"));
+            assertThat(String.join("\n", sections.stream().map(Section::body).toList())).contains("| E0 |", "| E59 |");
+        }
+    }
+
+    @Test
+    void aRowOfDashesAndPipesInsideATableIsARowAndNotAnotherDelimiterRow() {
+        // An empty or "not applicable" row looks like a delimiter row; the reader page shows the table whole all the same.
+        for (String empty : List.of("| - | - | - |", "|  | - | - |", "- | - | -")) {
+            for (String lead : List.of("", "以下是各模型的价格：\n")) {
+                String table = "| 模型 | 输入 | 输出 |\n|---|---|---|\n| model-a | 1.0 | 2.0 |\n" + empty + "\n| model-b | 3.0 | 4.0 |";
+
+                List<Section> sections = AssistantDocsChunker.split("## 价格\n\n" + lead + table + "\n", 1);
+
+                assertThat(sections).as(lead + empty).singleElement().satisfies(section ->
+                    assertThat(section.body()).as("one table, no blank line inside it").isEqualTo(lead.isEmpty() ? table : lead + "\n" + table));
+            }
+        }
+    }
+
+    @Test
+    void aLongTableWithARowOfDashesRepeatsItsRealHeaderInEveryPiece() {
+        String header = "| 错误码 | 含义 | 处理 |\n| --- | --- | --- |";
+        StringBuilder table = new StringBuilder("## 错误码\n\n" + header + "\n");
+        for (int row = 0; row < 60; row++) {
+            table.append(row == 29 ? "|  | - | - |" : "| E" + row + " | 第" + row + "号错误的含义说明文字 | 按文档处理这一类错误，必要时联系管理员 |").append('\n');
+        }
+
+        List<Section> sections = AssistantDocsChunker.split(table.toString(), 1);
+
+        assertThat(sections).hasSizeGreaterThan(1).allSatisfy(section -> {
+            assertThat(section.body()).startsWith(header + "\n");
+            assertThat(section.body().length()).isLessThanOrEqualTo(AssistantDocsChunker.MAX_CHUNK_CHARS);
+        });
+        assertThat(String.join("\n", sections.stream().map(Section::body).toList())).contains("| E28 |", "|  | - | - |", "| E30 |", "| E59 |");
+    }
+
+    @Test
+    void aParagraphLineAboveARowThatIsNotATableStaysAParagraph() {
+        List<Section> sections = AssistantDocsChunker.split("## 说明\n\n用 | 隔开两个值\n| 不是表格 | 因为没有分隔行 |\n", 1);
+
+        assertThat(sections).singleElement().satisfies(section ->
+            assertThat(section.body()).isEqualTo("用 | 隔开两个值\n| 不是表格 | 因为没有分隔行 |"));
+    }
+
     // ---- a lead-in stays with what it introduces ---------------------------------------------------------------
+
+    @Test
+    void aLabelStaysInFrontOfItsCodeWhenTheCodeFitsAPieceAloneButNotWithTheLabel() {
+        String intro = "先在终端里设置环境变量，然后重新打开终端。".repeat(48);
+        StringBuilder code = new StringBuilder("```text\n");
+        for (int line = 0; line < 45; line++) {
+            code.append(String.format("set \"VAR_%02d=%s\"%n", line, "x".repeat(21)));
+        }
+        code.append("```");
+        assertThat(code.length()).as("fits a piece alone (1600), but not with the 16 characters of the label and a blank line")
+            .isEqualTo(1586);
+
+        List<Section> sections = AssistantDocsChunker.split("## Set environment variables manually\n\n" + intro
+            + "\n\n**Windows CMD**:\n\n" + code + "\n", 1);
+
+        assertThat(sections).as("no piece ends on the label").noneMatch(section -> section.body().endsWith("**Windows CMD**:"));
+        assertThat(sections).as("the code is introduced by it").anyMatch(section -> section.body().startsWith("**Windows CMD**:\n\n```text\nset "));
+        assertThat(sections).allSatisfy(section -> {
+            assertThat(section.body().length()).isLessThanOrEqualTo(AssistantDocsChunker.MAX_CHUNK_CHARS);
+            assertThat(section.body().lines().filter(line -> line.startsWith("```")).count() % 2).as("no fence is left open").isZero();
+        });
+        assertThat(String.join("\n", sections.stream().map(Section::body).toList())).contains("VAR_00=", "VAR_44=");
+    }
 
     @Test
     void aLabelThatWouldEndAPieceMovesToTheNextPieceWithTheBlockItLabels() {

@@ -6,6 +6,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.text.Normalizer;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
@@ -24,6 +25,7 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -33,7 +35,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.event.TransactionPhase;
 import org.springframework.transaction.event.TransactionalEventListener;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
 import reactor.core.scheduler.Schedulers;
 import tech.starryapi.documentation.DocumentationDtos.Content;
 import tech.starryapi.documentation.DocumentationDtos.Document;
@@ -49,8 +53,9 @@ import tech.starryapi.documentation.DocumentationService;
  * lazily, by a single load however many questions arrive meanwhile, when {@link DocumentationService} reports a
  * publish, unpublish or delete that has committed (this node) or a restore clears the caches ({@link #invalidate()}),
  * and, for changes made on other nodes, when it is older than {@link #CACHE_TTL} <em>and</em> the cheap fingerprint of
- * the published pages has changed. If loading fails the assistant carries on with the file chunks only and tries
- * again shortly.
+ * the published pages has changed. Only one load runs at a time: changes that come while it does cost one more load
+ * after it, not one each. If loading fails, or a read gets nothing for {@link #READ_TIMEOUT} (or takes longer than
+ * {@link #READ_BUDGET} in all), the assistant carries on with the file chunks only and tries again shortly.
  *
  * <p>Both language versions of a page are matched as one document and the one in the reader's language is quoted.
  * Questions are scored on the parallel scheduler, never on the thread that delivered the snapshot, which is a database
@@ -65,6 +70,14 @@ public class AssistantDocsIndex {
     static final long CACHE_TTL = 60_000;
     /** After a failed load the assistant answers without the pages for this long, then tries again. */
     static final long RETRY_AFTER = 10_000;
+    /**
+     * How long a read may go without an answer: the whole fingerprint check, and the pages between two rows. Well under
+     * the database's own statement timeout, which a connection that is gone never enforces. A limit on the whole read of
+     * the pages would also cut off one that is slow but healthy (tens of megabytes over a remote database).
+     */
+    static final Duration READ_TIMEOUT = Duration.ofSeconds(15);
+    /** The most that reading the pages may take in all, however steadily the rows keep coming. */
+    static final Duration READ_BUDGET = Duration.ofMinutes(5);
     private static final long WARN_INTERVAL = 60_000;
 
     static final int MAX_RESULTS = 6;
@@ -72,7 +85,7 @@ public class AssistantDocsIndex {
     /** Per page (or file) at most this many chunks in a first pass, then up to {@link #MAX_PER_SOURCE} to fill up. */
     private static final int PREFERRED_PER_SOURCE = 2;
     private static final int MAX_PER_SOURCE = 3;
-    /** Total characters of excerpts, labels included, that may be put into one prompt. */
+    /** Total characters of excerpts, markers and labels included, that may be put into one prompt; the fixed rules come on top. */
     static final int EXCERPT_BUDGET = 8000;
     /** Bounds the memory and the per-question scan however many large pages there are; shared out fairly. */
     static final int MAX_PAGE_CHUNKS = 2000;
@@ -102,8 +115,22 @@ public class AssistantDocsIndex {
 
     // How much each kind of term of a question counts.
     private static final double WORD_WEIGHT = 1.0;
-    /** A lone Chinese character left over after the question wording is removed ("改" in "那怎么改"). */
+    /**
+     * A lone Chinese character left over after the question wording is removed: the whole question when it is a follow-up
+     * ("改" in "那怎么改"), otherwise the verb that says what is wanted of the topic ("删" in "文件怎么删").
+     */
     private static final double UNIGRAM_WEIGHT = 0.6;
+    /**
+     * The same character next to a topic: an answer to "文件怎么删" has the verb, so it counts for more than a stand-in. It is a
+     * soft term, which orders the chunks of a topic the documents have and can neither make a chunk an answer nor make the
+     * documents cover a topic they lack: "保险怎么买" is not answered by whatever has a "买" in its heading.
+     *
+     * <p>The same holds when the topic is a pasted identifier that the documents have only in parts ("CODEX_HOME 怎么改":
+     * "codex" and "home" at {@link #IDENTIFIER_PART_WEIGHT}, no term heavy enough to be an anchor). A chunk then has to
+     * contain one of the parts, what it covers is measured by the parts alone, and the verb is worth no more than the
+     * strongest part; otherwise it would outweigh them all and the chunks that merely have a "改" would lead.
+     */
+    private static final double VERB_WEIGHT = 2.0;
     /** A whole identifier such as API_KEY_MODEL_PROVIDER_FORBIDDEN or config.toml counts far more than its parts. */
     private static final double IDENTIFIER_WEIGHT = 4.0;
     private static final double IDENTIFIER_PART_WEIGHT = 0.3;
@@ -165,16 +192,33 @@ public class AssistantDocsIndex {
             + "在哪里看|在哪儿看|在哪看|去哪里看|去哪看|能看到|看看|哪里能|在哪里|在哪儿|去哪里|去哪儿|去哪|在哪|哪看|哪里|哪儿|这个|那个|"
             + "这么多|那么多|这么|那么|一下|你好|您好|谢谢|还有呢|还有吗|然后呢|然后|的话|一直|这边|我的|那|咋|啥|谁|吗|呢|吧|啊|嘛|呀"
     );
-    // Words of the structure of a document or of a request for more ("steps", "details", "an example"). They are in many
-    // headings, so they would get a high weight by rarity; they count GENERIC_WEIGHT and a message made of nothing else
-    // is a follow-up. Longer words first; the text is folded.
+    // Wording that asks how and is followed by the verb and then the topic ("怎么买保险", "如何设置"). Where it is removed
+    // from a question a VERB_FIRST_MARK is left instead of a space, so that the run of characters after it can be told from
+    // one that has its topic first ("接口选哪个", "地址填什么"): see addPair. The fold of a message (NFKC) turns an em space into
+    // a plain one, so the mark is never in a message itself.
+    private static final Set<String> VERB_FIRST_WORDING = Set.of("怎么", "怎样", "如何", "咋");
+    private static final char VERB_FIRST_MARK = '\u2003';
+    // Words of the structure of a document, of a request for more ("steps", "details", "an example"), of what is asked
+    // about a problem ("solve", "fix", "what does it mean", "why") and of a complaint that it still does not work
+    // ("没用了"). They are rare in the running text but sit in headings and in the header rows of tables (a section on
+    // what to do when nothing helps, a column of causes and remedies, a list of what the statuses mean), so by rarity they
+    // would outweigh the topic of the question: "<status code> 怎么解决" would be answered by the section on what to do
+    // when nothing helps rather than by the ones that name the code. They count GENERIC_WEIGHT, and a message made of
+    // nothing else is a follow-up. The rule is the kind of word, not the page: add a word here when it says how the user
+    // wants the topic treated and is not itself a topic. Longer words first; the text is folded.
     private static final Pattern GENERIC_CJK = Pattern.compile(
         "举个例子|举个例|举例子|举例|例子|示例|样例|实例|具体|详细|详情|细节|步骤|操作|验证|常见问题|问题|下一步|注意|规则|方法|办法|流程|"
-            + "说明|介绍|展开|继续|更多|其他|别的|完整|仔细|讲一讲|说一说|讲讲|说说|解释|补充|报错|出错"
+            + "说明|介绍|展开|继续|更多|其他|别的|完整|仔细|讲一讲|说一说|讲讲|说说|解释|补充|报错|出错|"
+            + "解决|处理|修复|排查|搞定|含义|意思|原因|"
+            + "不管用|没反应|没效果|不好使|不行|不对|没用"
     );
     // A verb of looking for something in front of the topic ("看用量", "查余额"): the pair it forms with the first
     // character of the topic is a seam, not a word.
     private static final String LIGHT_VERBS = "看查找搜问";
+    // Verbs so general that, left alone beside a topic ("怎么用", "怎么做", "怎么办"), they ask for nothing in particular and
+    // are in nearly every chunk; next to a topic they are not terms. A verb that names an action ("删", "关", "改", "扣")
+    // is one, and says which chunks of the topic answer.
+    private static final String GENERAL_VERBS = "用做弄搞整办干看查找搜问";
     // Single characters that are grammar, not topic; any other lone character left in a question is a (weak) term.
     private static final String CJK_FUNCTION_CHARACTERS = "的了是在我你他她它们和与或及把被就也都还又才吗呢吧啊哦嗯呀哈那这个些么有无没不";
     private static final Set<String> STOP_WORDS = Set.of(
@@ -182,11 +226,16 @@ public class AssistantDocsIndex {
         "you", "your", "are", "was", "were", "for", "this", "that", "these", "those", "with", "and", "from", "have",
         "has", "not", "but", "please", "hello", "thanks", "thank", "is", "it", "in", "on", "to", "of", "do", "be", "an",
         "as", "at", "by", "or", "if", "my", "me", "we", "us", "so", "no", "am",
-        "want", "know", "get", "about", "tell", "way", "there", "any", "see", "give", "more", "show", "also", "just"
+        "want", "know", "get", "about", "tell", "way", "there", "any", "see", "give", "more", "show", "also", "just",
+        "need", "much", "than", "put", "some", "then", "its", "into"
     );
-    // The same kind of words in English, as they are after "singular".
+    // The same kind of words in English, in the form the endings are taken off to ("solving" is "solve"; a participle such
+    // as "resolved" is not, because the documents use it as the name of a status). "one" ("how do I buy one") belongs here
+    // and not among the stop words, which are dropped altogether, because a heading may be about it ("one provider per
+    // key"). No word that the sentences about a topic need ("out" in "credits run out") may be a stop word.
     private static final Set<String> GENERIC_WORDS = Set.of(
-        "step", "detail", "example", "verify", "verification", "rule", "note", "operation", "problem", "issue", "common"
+        "step", "detail", "example", "verify", "verification", "rule", "note", "operation", "problem", "issue", "common",
+        "mean", "meaning", "solve", "resolve", "fix", "troubleshoot", "cause", "reason", "view", "one"
     );
     // The words of the reason phrases of HTTP status codes, as they are after "singular": "502 Bad Gateway" says
     // 502; whether the documents happen to spell the phrase the same way is not what the question asks about.
@@ -199,6 +248,28 @@ public class AssistantDocsIndex {
         "version", "supported", "insufficient", "storage", "loop", "detected", "network", "ok", "created", "accepted"
     );
     private static final Pattern WHITESPACE = Pattern.compile("\\s+");
+    // The repetitions of a group are possessive: java.util.regex calls itself once for each repetition of a greedy group,
+    // and a message of "a.a.a.…" a few thousand characters long overflows a small thread stack with it. Reactor takes a
+    // StackOverflowError for fatal, so the question would not be answered at all. The separators and the parts are
+    // different characters, so nothing is lost by not backing off.
+    private static final Pattern TOKEN = Pattern.compile("[\\p{L}\\p{N}_]+(?:[.-][\\p{L}\\p{N}_]+)*+");
+    private static final Pattern ENGLISH_WORD = Pattern.compile("\\p{IsLatin}{2,}(?:-\\p{IsLatin}+)*+");
+    // Thanks, a greeting, a farewell, a sign that the answer was understood and the question "who are you": a message made
+    // of nothing else closes the conversation and is no follow-up. Folded. Possessive below, so that a long message that
+    // is not one is rejected in linear time; a longer word is listed before a shorter one that starts it.
+    private static final String CLOSING_WORDS = "(?:(?:非常|十分|特别|真的|太|多)?(?:谢谢|多谢|谢了|感谢|辛苦了|明白了|明白|知道了|知道|收到|了解了|了解|"
+        + "懂了|清楚了|没问题|没事了|不用了|哦哦|哦|再见|拜拜|你好|您好|哈喽|你是谁|您是谁|"
+        + "thanks|thank you|thx|got it|noted|great|nice|cool|hello|hi|hey|goodbye|bye|good|understood|i see|who are you))";
+    // The answer yes. It is usually the reply to the assistant's own "要我详细说说吗？", so it is about the topic before it:
+    // taking it for a close would tell the model that nothing was found at the very moment the user said "go on".
+    private static final String CONSENT_WORDS = "(?:好的|好吧|好嘞|好|行|可以|嗯嗯|嗯|要的|要|需要|是的|对的|对|okay|ok|sure|yes|yeah|yep)";
+    private static final String PARTICLES = "[啊吧哦呀啦哈嘛哒你您~]*+";
+    private static final Pattern CLOSING_OR_CONSENT = Pattern.compile(
+        "(?:(?:" + CLOSING_WORDS + "|" + CONSENT_WORDS + ")" + PARTICLES + "[\\s\\p{P}\\p{S}]*+)++");
+    private static final Pattern CONSENT = Pattern.compile("(?:" + CONSENT_WORDS + PARTICLES + "[\\s\\p{P}\\p{S}]*+)++");
+    // The same words, or "那好", at the head of a message that goes on ("好的，那怎么停用密钥"): they are not what it asks about.
+    private static final Pattern OPENING = Pattern.compile(
+        "^(?:(?:" + CLOSING_WORDS + "|" + CONSENT_WORDS + "|那好)" + PARTICLES + "[\\s\\p{P}\\p{S}]++)++(?=\\S)");
 
     // Endings a Latin word may carry and still count as the same word: key / keys, create / created.
     private static final Set<String> WORD_ENDINGS = Set.of("s", "es", "d", "ed", "ing");
@@ -210,7 +281,16 @@ public class AssistantDocsIndex {
     private final Clock clock;
     private final AtomicLong generation = new AtomicLong();
     private final AtomicReference<Snapshot> snapshot = new AtomicReference<>();
-    private final AtomicReference<Load> loading = new AtomicReference<>();
+    /** Guards {@link #running} and {@link #queued}; held only to look at them or to change them. */
+    private final Object loadLock = new Object();
+    /** The load that is reading the pages, or has been handed to the first question and will begin on subscription. */
+    private Load running;
+    /** The one load waiting for {@link #running} to finish because a change came after that one began. */
+    private Load queued;
+    /** How long the fingerprint may take to read; a test shortens it. The pages are held to it where they are read. */
+    volatile Duration readTimeout = READ_TIMEOUT;
+    /** How long reading the pages may take in all; a test shortens it. */
+    volatile Duration readBudget = READ_BUDGET;
     private final AtomicLong lastWarning = new AtomicLong(Long.MIN_VALUE / 2);
     /** The thread the last snapshot was built on; the build is CPU work and must not run on a database event loop. */
     volatile Thread lastBuildThread;
@@ -249,8 +329,18 @@ public class AssistantDocsIndex {
 
     @Autowired
     public AssistantDocsIndex(DocumentationService documentation) {
-        this(Path.of(System.getProperty("user.dir", ".")), documentation::publishedPages,
+        this(Path.of(System.getProperty("user.dir", ".")),
+            () -> pagesFrom(documentation.publishedRowStream(), READ_TIMEOUT, documentation::documents),
             documentation::publishedFingerprint, MONOTONIC);
+    }
+
+    /**
+     * The pages from the rows as they arrive. The read fails when no row comes for {@code silence}, which a connection
+     * that is gone without a reset does; it does not fail because it takes long, as a large documentation over a slow link
+     * does. The rows are parsed on a worker thread, not on the database connection's event loop that delivers them.
+     */
+    static <T> Mono<List<Document>> pagesFrom(Flux<T> rows, Duration silence, Function<List<T>, List<Document>> parse) {
+        return rows.timeout(silence).collectList().publishOn(Schedulers.boundedElastic()).map(parse);
     }
 
     /** Files only; there are no 使用文档 pages. */
@@ -300,8 +390,12 @@ public class AssistantDocsIndex {
         String body
     ) {
 
-        /** What an excerpt's label adds to its text in the prompt. */
-        private static final int LABEL_OVERHEAD = 16;
+        /**
+         * What an excerpt's markers and label add to its text in the prompt (see {@code AssistantChatService.systemPrompt}):
+         * the opening marker with its number and the 12-character code, the closing one, the quotation marks round the
+         * title and the separator before the section, and the line breaks. Six excerpts at most, so one digit.
+         */
+        private static final int LABEL_OVERHEAD = 56;
 
         public boolean isPage() {
             return pageId != null;
@@ -315,7 +409,7 @@ public class AssistantDocsIndex {
             return "en".equals(language) ? "Docs: " + pageTitle : "使用文档《" + pageTitle + "》";
         }
 
-        /** How many characters of the prompt this excerpt takes, its label included. */
+        /** How many characters of the prompt this excerpt takes, its markers and label included. */
         public int cost() {
             return body.length() + pageTitle.length() + section.length() + LABEL_OVERHEAD;
         }
@@ -356,6 +450,12 @@ public class AssistantDocsIndex {
             });
     }
 
+    /** How many words are kept as strings and how many pairs of Chinese characters as ints; for the tests. */
+    int[] vocabularySizes() {
+        Snapshot current = snapshot.get();
+        return current == null ? new int[2] : current.vocabulary().sizes();
+    }
+
     /** Called once a publish, re-publish, unpublish or delete has committed on this node. */
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT, fallbackExecution = true)
     public void onPublicationChanged(DocumentationPublicationChanged event) {
@@ -376,39 +476,93 @@ public class AssistantDocsIndex {
      * @param fingerprint what the published pages looked like when they were read; null when unknown or not read
      */
     private record Snapshot(List<Entry> entries, int[] twins, List<String> pageTitles, String fingerprint,
-        long generation, long expiresAt, Map<String, Integer> vocabulary) {
+        long generation, long expiresAt, Vocabulary vocabulary) {
 
         Snapshot renewed(long until) {
             return new Snapshot(entries, twins, pageTitles, fingerprint, generation, until, vocabulary);
         }
     }
 
-    private record Load(long generation, Mono<Snapshot> result) {
+    /**
+     * One reading of the pages. It reads the generation it serves when it begins, not when it is created, so that a load
+     * queued behind another one is for whatever is wanted by the time it runs.
+     *
+     * <p>A load waits for the one before it on that load's {@link #done} signal, which carries nothing, and not on its
+     * result: the result caches the snapshot, so a chain of results would keep every earlier snapshot alive for as long as
+     * loads keep queueing behind each other.
+     */
+    private final class Load {
+
+        /** The generation it reads; {@link Long#MAX_VALUE} until it begins, which any question may therefore join. */
+        volatile long serving = Long.MAX_VALUE;
+        /** Completes, empty, when the load is over, however it ended. */
+        final Sinks.Empty<Void> done = Sinks.empty();
+        final Mono<Snapshot> result;
+
+        /** @param after the load to wait for first; null to begin as soon as the first question subscribes */
+        Load(Load after) {
+            Mono<Snapshot> begin = Mono.defer(() -> {
+                long wanted = generation.get();
+                serving = wanted;
+                synchronized (loadLock) {
+                    running = this;
+                    if (queued == this) {
+                        queued = null;
+                    }
+                }
+                return load(wanted, snapshot.get());
+            }).doFinally(signal -> finished(this));
+            result = (after == null ? begin : after.done.asMono().then(begin)).cache();
+        }
     }
 
+    private void finished(Load load) {
+        synchronized (loadLock) {
+            if (running == load) {
+                running = queued;
+                queued = null;
+            }
+        }
+        load.done.tryEmitEmpty();
+    }
+
+    /**
+     * The snapshot to answer with. Only one load runs at a time, however many publishes there are: a question that
+     * wants a generation newer than the running load's waits for one more load, queued behind it and shared by all such
+     * questions, which begins when the running one is done and reads whatever is current then. A burst of changes costs
+     * at most two loads, not one per change in parallel, each holding all the pages in memory at once.
+     */
     private Mono<Snapshot> snapshot() {
-        while (true) {
-            long wanted = generation.get();
-            Snapshot ready = snapshot.get();
-            if (ready != null && ready.generation() >= wanted && clock.millis() < ready.expiresAt()) {
-                return Mono.just(ready);
+        long wanted = generation.get();
+        Snapshot ready = snapshot.get();
+        if (ready != null && ready.generation() >= wanted && clock.millis() < ready.expiresAt()) {
+            return Mono.just(ready);
+        }
+        synchronized (loadLock) {
+            if (running == null) {
+                running = new Load(null);
+                return running.result;
             }
             // A load that began before the latest change may have read the old pages, so it is not shared.
-            Load running = loading.get();
-            if (running != null && running.generation() >= wanted) {
-                return running.result();
+            if (running.serving >= wanted) {
+                return running.result;
             }
-            Load next = new Load(wanted, load(wanted, ready));
-            if (loading.compareAndSet(running, next)) {
-                return next.result();
+            if (queued == null) {
+                queued = new Load(running);
             }
+            return queued.result;
         }
     }
 
     private Mono<Snapshot> load(long wanted, Snapshot previous) {
         // Only the time to live ran out, nothing was reported: the pages are read again only if they changed.
         boolean expiredOnly = previous != null && previous.generation() >= wanted && previous.fingerprint() != null;
+        // A read that never returns (a connection that died without a reset) is a failure like any other: without
+        // a limit it would hold every question of this node for as long as the operating system keeps the socket. The
+        // fingerprint is a few bytes and is limited in all; the pages are limited where their rows arrive (see
+        // pagesFrom), so that a large documentation over a slow link is still read, and here only by a generous budget.
         return Mono.defer(fingerprint)
+            .timeout(readTimeout)
             .map(Optional::of)
             .defaultIfEmpty(Optional.empty())
             .flatMap(current -> {
@@ -417,6 +571,7 @@ public class AssistantDocsIndex {
                 }
                 // The fingerprint is read first: a publish in between makes the next check reload once more.
                 return Mono.defer(pages)
+                    .timeout(readBudget)
                     .publishOn(Schedulers.boundedElastic())
                     .map(loaded -> buildSafely(loaded, wanted, current.orElse(null)));
             })
@@ -425,17 +580,14 @@ public class AssistantDocsIndex {
                 return Mono.just(withoutPages(wanted, clock.millis() + RETRY_AFTER, null));
             })
             .doOnNext(loaded -> snapshot.accumulateAndGet(loaded, (old, next) ->
-                old == null || next.generation() >= old.generation() ? next : old))
-            .doFinally(signal -> loading.updateAndGet(running ->
-                running != null && running.generation() == wanted ? null : running))
-            .cache();
+                old == null || next.generation() >= old.generation() ? next : old));
     }
 
     private Snapshot withoutPages(long wanted, long until, String fingerprint) {
         List<Entry> entries = List.copyOf(fileEntries);
         int[] twins = new int[entries.size()];
         Arrays.fill(twins, -1);
-        return new Snapshot(entries, twins, List.of(), fingerprint, wanted, until, vocabularyOf(entries));
+        return new Snapshot(entries, twins, List.of(), fingerprint, wanted, until, Vocabulary.of(entries));
     }
 
     /** A failure of the build itself would repeat on every attempt, so it is not retried until something changes. */
@@ -499,7 +651,7 @@ public class AssistantDocsIndex {
         }
         List<Entry> all = List.copyOf(entries);
         return new Snapshot(all, twins, List.copyOf(titles), fingerprint, wanted, clock.millis() + CACHE_TTL,
-            vocabularyOf(all));
+            Vocabulary.of(all));
     }
 
     private PageText pageText(Document document) {
@@ -604,18 +756,97 @@ public class AssistantDocsIndex {
      * The words of the index, each with the number of chunks it occurs in. A question's term that is not in it cannot
      * match anything, so it is neither looked for nor, in a very long question, kept. A Latin word is there in the
      * forms a question may use to find it: with its ending taken off ("created" is found by "create").
+     *
+     * <p>The pairs of Chinese characters are most of it: a page of varied text has some hundred thousand different ones,
+     * and as strings with a boxed count each they would take several times the memory of the text they describe, twice
+     * over while a new snapshot is built beside the old one. They are kept as the two characters in one {@code int}, in a
+     * sorted array with a count array beside it. Only Latin words and identifiers are strings.
      */
-    private static Map<String, Integer> vocabularyOf(List<Entry> entries) {
-        Map<String, Integer> vocabulary = new HashMap<>();
-        for (Entry entry : entries) {
-            Set<String> words = new HashSet<>();
-            for (String text : List.of(entry.title(), entry.section(), entry.category(), entry.summary(), entry.body())) {
-                words.addAll(scan(text, Integer.MAX_VALUE, false).terms().keySet());
-                addStems(words, text);
-            }
-            words.forEach(word -> vocabulary.merge(word, 1, Integer::sum));
+    private static final class Vocabulary {
+
+        private final Map<String, Integer> words;
+        private final int[] pairs;
+        private final int[] pairCounts;
+
+        private Vocabulary(Map<String, Integer> words, int[] pairs, int[] pairCounts) {
+            this.words = words;
+            this.pairs = pairs;
+            this.pairCounts = pairCounts;
         }
-        return vocabulary;
+
+        static Vocabulary of(List<Entry> entries) {
+            Map<String, Integer> words = new HashMap<>();
+            int[] all = new int[1024];
+            int size = 0;
+            for (Entry entry : entries) {
+                Set<String> inEntry = new HashSet<>();
+                int[] pairsInEntry = new int[64];
+                int pairCount = 0;
+                for (String text : List.of(entry.title(), entry.section(), entry.category(), entry.summary(), entry.body())) {
+                    for (String term : scan(text, Integer.MAX_VALUE, false).terms().keySet()) {
+                        if (isPair(term)) {
+                            if (pairCount == pairsInEntry.length) {
+                                pairsInEntry = Arrays.copyOf(pairsInEntry, pairCount * 2);
+                            }
+                            pairsInEntry[pairCount++] = key(term);
+                        } else {
+                            inEntry.add(term);
+                        }
+                    }
+                    addStems(inEntry, text);
+                }
+                inEntry.forEach(word -> words.merge(word, 1, Integer::sum));
+                // Each pair counts once per chunk, however often it occurs in it.
+                Arrays.sort(pairsInEntry, 0, pairCount);
+                for (int at = 0; at < pairCount; at++) {
+                    if (at == 0 || pairsInEntry[at] != pairsInEntry[at - 1]) {
+                        if (size == all.length) {
+                            all = Arrays.copyOf(all, size * 2);
+                        }
+                        all[size++] = pairsInEntry[at];
+                    }
+                }
+            }
+            Arrays.sort(all, 0, size);
+            int[] pairs = new int[size];
+            int[] counts = new int[size];
+            int distinct = 0;
+            for (int at = 0; at < size; at++) {
+                if (distinct > 0 && pairs[distinct - 1] == all[at]) {
+                    counts[distinct - 1]++;
+                } else {
+                    pairs[distinct] = all[at];
+                    counts[distinct++] = 1;
+                }
+            }
+            return new Vocabulary(words, Arrays.copyOf(pairs, distinct), Arrays.copyOf(counts, distinct));
+        }
+
+        /** In how many chunks the word or pair occurs; 0 when in none. */
+        int count(String term) {
+            if (isPair(term)) {
+                int at = Arrays.binarySearch(pairs, key(term));
+                return at < 0 ? 0 : pairCounts[at];
+            }
+            return words.getOrDefault(term, 0);
+        }
+
+        boolean contains(String term) {
+            return count(term) > 0;
+        }
+
+        /** How many words are kept as strings, and how many pairs of Chinese characters as ints. */
+        int[] sizes() {
+            return new int[] {words.size(), pairs.length};
+        }
+
+        private static boolean isPair(String term) {
+            return term.length() == 2 && isCjk(term.charAt(0)) && isCjk(term.charAt(1));
+        }
+
+        private static int key(String pair) {
+            return (pair.charAt(0) << 16) | pair.charAt(1);
+        }
     }
 
     private static void addStems(Set<String> words, String text) {
@@ -647,8 +878,8 @@ public class AssistantDocsIndex {
      * Whether a term can occur in any chunk: a letter pair or a word has to be a word of the index. A single character
      * and a phrase are not words of it, and an identifier may stand in front of a longer one ("config.toml.bak").
      */
-    private static boolean mayOccur(String term, Map<String, Integer> vocabulary) {
-        return term.length() < 2 || term.indexOf(' ') >= 0 || isCompound(term) || vocabulary.containsKey(term);
+    private static boolean mayOccur(String term, Vocabulary vocabulary) {
+        return term.length() < 2 || term.indexOf(' ') >= 0 || isCompound(term) || vocabulary.contains(term);
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -691,14 +922,16 @@ public class AssistantDocsIndex {
      *
      * @param languages which language versions its page has (a bit each for Chinese and English); 0 for a file
      */
-    private record Entry(Chunk chunk, String title, String section, String category, String summary, String body,
-        int languages) {
+    private record Entry(Chunk chunk, String title, String section, String leaf, String category, String summary,
+        String body, int languages) {
 
         static Entry of(Chunk chunk, int languages) {
+            String path = chunk.section();
+            int at = path.lastIndexOf(AssistantDocsChunker.PATH_SEPARATOR);
             return new Entry(chunk,
                 chunk.isPage() ? foldForSearch(chunk.pageTitle()) : "",
-                foldForSearch(chunk.section()), foldForSearch(chunk.category()), foldForSearch(chunk.summary()),
-                foldForSearch(chunk.body()), languages);
+                foldForSearch(path), foldForSearch(at < 0 ? path : path.substring(at + AssistantDocsChunker.PATH_SEPARATOR.length())),
+                foldForSearch(chunk.category()), foldForSearch(chunk.summary()), foldForSearch(chunk.body()), languages);
         }
 
         /** Whether the reader is shown this chunk: the version in their language, or the only one there is. */
@@ -707,7 +940,16 @@ public class AssistantDocsIndex {
         }
     }
 
-    private record Scored(Entry entry, int row, long score) {
+    /**
+     * The best score first. Chunks with the same score are told apart by what their own heading has of the question,
+     * so that the section that answers comes before its siblings that only share the heading above them, and after
+     * that by their place, which keeps pages in catalog order and puts pages before files.
+     */
+    private static final Comparator<Scored> BEST_FIRST = Comparator.comparingLong(Scored::score).reversed()
+        .thenComparing(Comparator.comparingLong(Scored::own).reversed()).thenComparingInt(Scored::row);
+
+    /** @param own what the chunk's own heading has of the question, to tell it from siblings that have the same words from a heading above */
+    private record Scored(Entry entry, int row, long score, long own) {
     }
 
     /**
@@ -736,12 +978,18 @@ public class AssistantDocsIndex {
         }
     }
 
-    /** What every term finds in every chunk (points, before the rarity of the term), and in how many chunks it occurs. */
-    private record Matches(int columns, byte[] inText, byte[] inPage, int[] frequency) {
+    /**
+     * What every term finds in every chunk (points, before the rarity of the term), and in how many chunks it occurs. The
+     * heading and the body of a chunk are counted apart, because the one word of a follow-up counts only the body.
+     */
+    private record Matches(int columns, byte[] inHeading, boolean[] inOwnHeading, byte[] inBody, byte[] inPage,
+        int[] frequency) {
 
-        static Matches of(List<Entry> entries, List<Term> terms, Map<String, Integer> vocabulary) {
+        static Matches of(List<Entry> entries, List<Term> terms, Vocabulary vocabulary) {
             int columns = terms.size();
-            byte[] inText = new byte[entries.size() * columns];
+            byte[] inHeading = new byte[entries.size() * columns];
+            boolean[] inOwnHeading = new boolean[entries.size() * columns];
+            byte[] inBody = new byte[entries.size() * columns];
             byte[] inPage = new byte[entries.size() * columns];
             int[] frequency = new int[columns];
             // A term that is not a word of the documents is found nowhere; looking for it would only cost time.
@@ -756,26 +1004,47 @@ public class AssistantDocsIndex {
                         continue;
                     }
                     String word = terms.get(column).text();
-                    // At most 5 + 3 points in the text and 6 + 3 + 2 in the page: a byte holds them.
-                    int text = SECTION_POINTS * (contains(entry.section(), word) ? 1 : 0)
-                        + BODY_POINTS * occurrences(entry.body(), word, MAX_BODY_HITS);
+                    // At most 5 in the heading, 3 in the body and 6 + 3 + 2 in the page: a byte holds each.
+                    boolean own = contains(entry.leaf(), word);
+                    int heading = own || contains(entry.section(), word) ? SECTION_POINTS : 0;
+                    int body = BODY_POINTS * occurrences(entry.body(), word, MAX_BODY_HITS);
                     int page = TITLE_POINTS * (contains(entry.title(), word) ? 1 : 0)
                         + CATEGORY_POINTS * (contains(entry.category(), word) ? 1 : 0)
                         + SUMMARY_POINTS * (contains(entry.summary(), word) ? 1 : 0);
-                    inText[row * columns + column] = (byte) text;
+                    inHeading[row * columns + column] = (byte) heading;
+                    inOwnHeading[row * columns + column] = own;
+                    inBody[row * columns + column] = (byte) body;
                     inPage[row * columns + column] = (byte) page;
-                    if (text + page > 0) {
+                    if (heading + body + page > 0) {
                         frequency[column]++;
                     }
                 }
             }
-            return new Matches(columns, inText, inPage, frequency);
+            return new Matches(columns, inHeading, inOwnHeading, inBody, inPage, frequency);
         }
 
-        /** Points of a term in the text of a chunk (heading 5, body 1 per mention, at most 3); when the chunk has a twin, the better of the two. */
-        int text(int row, int twin, int column) {
-            int own = inText[row * columns + column];
-            return twin >= 0 ? Math.max(own, inText[twin * columns + column]) : own;
+        /**
+         * The chunk whose text says more about the term: the chunk itself or, when it has one, its twin in the other
+         * language. Heading and body points are read from that one.
+         */
+        int better(int row, int twin, int column) {
+            return twin >= 0 && heading(twin, column) + body(twin, column) > heading(row, column) + body(row, column)
+                ? twin : row;
+        }
+
+        /** Points of a term in the headings a chunk sits under, its own included: 5. */
+        int heading(int row, int column) {
+            return inHeading[row * columns + column];
+        }
+
+        /** Whether the term is in the chunk's own heading and not only in one above it. */
+        boolean ownHeading(int row, int column) {
+            return inOwnHeading[row * columns + column];
+        }
+
+        /** Points of a term in the body of a chunk: 1 per mention, at most 3. */
+        int body(int row, int column) {
+            return inBody[row * columns + column];
         }
 
         /** Points of a term in the page of a chunk (title 6, category 3, summary 2). */
@@ -792,23 +1061,43 @@ public class AssistantDocsIndex {
      * @param ideal    what the documents know of the question, plus what they lack of it up to as much again
      * @param anchored whether the documents know a term that says what the question is about; a chunk then has to
      *                 contain one, however many of the generic words ("操作", "steps") it has
+     * @param topical  whether the documents know a term of the topic that is not soft; without an anchor, a chunk has to
+     *                 contain one of those, and what it covers is counted by them alone
      */
-    private record Worth(double[] value, double ideal, boolean anchored) {
+    private record Worth(double[] value, double ideal, boolean anchored, boolean topical) {
 
         static Worth of(List<Term> terms, Matches matches, int rows) {
             double[] value = new double[terms.size()];
             Map<String, Integer> frequencies = new HashMap<>();
+            double strongest = 0;
+            boolean anchorKnown = false;
             for (int column = 0; column < value.length; column++) {
                 Term term = terms.get(column);
                 int frequency = matches.frequency()[column];
                 value[column] = term.weight() * Math.log(1.0 + (double) rows / (1 + frequency));
                 if (!term.previous() && !term.phrase()) {
                     frequencies.put(term.text(), frequency);
+                    if (!term.soft() && frequency > 0) {
+                        strongest = Math.max(strongest, value[column]);
+                        anchorKnown |= term.anchor();
+                    }
+                }
+            }
+            // Where the documents know the topic only in weak parts (the pieces of a pasted identifier), a soft term such as
+            // the verb of "CODEX_HOME 怎么改" is worth no more than the strongest of them. At its own weight it would
+            // outweigh them all and decide which chunks come first.
+            if (!anchorKnown && strongest > 0) {
+                for (int column = 0; column < value.length; column++) {
+                    Term term = terms.get(column);
+                    if (!term.previous() && !term.phrase() && term.soft()) {
+                        value[column] = Math.min(value[column], strongest);
+                    }
                 }
             }
             double known = 0;
             double knownTopic = 0;
             double lacked = 0;
+            boolean lackedTopic = false;
             boolean anchored = false;
             for (int column = 0; column < value.length; column++) {
                 Term term = terms.get(column);
@@ -823,18 +1112,26 @@ public class AssistantDocsIndex {
                     // What the question asks for that the documents lack counts too: a word for all of its weight, a
                     // pair of Chinese characters for half, as it may be just the seam between two words. A whole
                     // identifier they never mention says nothing about what they do cover.
+                    lackedTopic = true;
                     lacked += isCjk(term.text().charAt(0)) ? value[column] * LACKED_PAIR : value[column];
                 }
             }
+            // A soft term (the verb of "保险怎么买", a word of wording) only orders the chunks of a topic the documents have.
+            // When the topic is one they lack and all they know of the question is such terms, they do not cover it.
+            if (knownTopic <= 0 && lackedTopic) {
+                return new Worth(value, 0, anchored, false);
+            }
             // However much of a pasted log the documents lack, it cannot outweigh what they know of the question.
             double expected = knownTopic > 0 ? knownTopic : known;
-            return new Worth(value, Math.min(expected + Math.min(lacked, expected), MAX_IDEAL), anchored);
+            return new Worth(value, Math.min(expected + Math.min(lacked, expected), MAX_IDEAL), anchored, knownTopic > 0);
         }
 
         /**
          * A pair of Chinese characters that the documents lack and that shares a character with a pair they have is the
          * join between a word and the wording around it ("看用" in "怎么看用量", "额在" in "余额在"), or between two
-         * words ("款之" in "付款之后"), not something the question asks for.
+         * words ("款之" in "付款之后"), not something the question asks for. The last pair of a run that follows wording
+         * which asks how is never one (see {@code addPair}): "保险" next to "买保" in "怎么买保险" is the end of a word the
+         * documents lack. When the topic comes first, the last pair may be a join, as at any other place.
          */
         private static boolean isSeam(Term term, Map<String, Integer> frequencies) {
             if (!isCjk(term.text().charAt(0))) {
@@ -871,18 +1168,75 @@ public class AssistantDocsIndex {
 
     private Retrieval search(Snapshot current, String question, List<String> earlier) {
         List<Entry> entries = current.entries();
+        // "谢谢" after a question is not a follow-up: the excerpts of the question before would only be sent again. Nothing
+        // is looked for, and the model is not told that nothing was found either: there was nothing to find.
+        if (isClosing(question)) {
+            return Retrieval.EMPTY;
+        }
         Plan plan = plan(question, earlier, current);
         if (entries.isEmpty() || plan.main() == null || plan.main().terms().isEmpty()) {
             return new Retrieval(List.of(), current.pageTitles());
         }
-        // A reader who writes Chinese gets the Chinese version, even when this message is a pasted English error.
-        int reader = containsCjk(question) || earlier.stream().limit(2).anyMatch(AssistantDocsIndex::containsCjk) ? ZH : EN;
+        int reader = readerOf(question, earlier);
         Ranking ranking = rank(current, plan.main(), reader);
         // A short message none of whose words any page has ("再讲讲") is about the question before it.
         if (!ranking.known() && plan.fallback() != null) {
             ranking = rank(current, plan.fallback(), reader);
         }
         return new Retrieval(select(ranking.chunks()), current.pageTitles());
+    }
+
+    /**
+     * The language of the version of a page that is quoted. A reader who writes Chinese gets the Chinese version, even
+     * when this message is a pasted English error. Otherwise the reader gets English only if the message, or the ones
+     * before it, have an ordinary English word. A status code, a file name or an error identifier says nothing about the
+     * language: such a message follows the conversation, the latest earlier question that does say, and with nothing
+     * to follow it is read in Chinese, the language the pages were written in (the request does not tell the console's).
+     */
+    private static int readerOf(String question, List<String> earlier) {
+        List<String> recent = new ArrayList<>(3);
+        recent.add(question);
+        earlier.stream().limit(2).forEach(recent::add);
+        if (recent.stream().anyMatch(AssistantDocsIndex::containsCjk)) {
+            return ZH;
+        }
+        if (recent.stream().anyMatch(AssistantDocsIndex::hasEnglishWord)) {
+            return EN;
+        }
+        for (String message : earlier.stream().skip(2).toList()) {
+            if (containsCjk(message)) {
+                return ZH;
+            }
+            if (hasEnglishWord(message)) {
+                return EN;
+            }
+        }
+        return ZH;
+    }
+
+    /**
+     * Whether the text has a run of letters that is not a number, a status code or an identifier (underscore, dot, or
+     * hyphen with a digit). Package-private for the test of the stack it needs.
+     */
+    static boolean hasEnglishWord(String text) {
+        Matcher tokens = TOKEN.matcher(text);
+        while (tokens.find()) {
+            if (ENGLISH_WORD.matcher(tokens.group()).matches()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Whether the message is nothing but thanks, a greeting or the like; a bare "yes" is not, see {@link #isConsent}. */
+    private static boolean isClosing(String message) {
+        String folded = fold(message).strip();
+        return CLOSING_OR_CONSENT.matcher(folded).matches() && !CONSENT.matcher(folded).matches();
+    }
+
+    /** Whether the message is nothing but "好的" or "ok": the answer yes, to the offer of more about the earlier topic. */
+    private static boolean isConsent(String folded) {
+        return CONSENT.matcher(folded.strip()).matches();
     }
 
     /** @param known whether the documents have any word of the question at all */
@@ -918,37 +1272,52 @@ public class AssistantDocsIndex {
             double beforeText = 0;
             double beforePage = 0;
             double matched = 0;
+            double matchedTopic = 0;
             boolean anchorMatched = false;
+            boolean anchorInText = false;
+            double ownHeading = 0;
             for (int column = 0; column < terms.size(); column++) {
-                int text = matches.text(row, twin, column);
+                int source = matches.better(row, twin, column);
+                int heading = matches.heading(source, column);
+                int body = matches.body(source, column);
                 int page = matches.page(row, twin, column);
                 Term term = terms.get(column);
                 if (term.previous()) {
                     // In an ordinary search this is the earlier question: what it found in a heading says what that
                     // answer was, not what this is about. In a follow-up it is the message's own word, and counts.
-                    int counted = followUp || text < SECTION_POINTS ? text : text - SECTION_POINTS;
+                    int counted = followUp ? heading + body : body;
                     beforeText += value[column] * counted;
                     beforePage += value[column] * page;
                 } else {
                     // The same the other way round: when the one word of a follow-up is what the chunk has to contain,
                     // a heading that merely repeats the earlier question is not an answer to it.
-                    int counted = query.mode() == Mode.FOLLOW_UP_WORD && text >= SECTION_POINTS ? text - SECTION_POINTS : text;
+                    int counted = query.mode() == Mode.FOLLOW_UP_WORD ? body : heading + body;
                     nowText += value[column] * counted;
                     nowPage += value[column] * page;
+                    if (!term.phrase() && query.mode() != Mode.FOLLOW_UP_WORD && matches.ownHeading(source, column)) {
+                        ownHeading += value[column];
+                    }
                     if (!term.phrase() && counted + page > 0) {
                         matched += value[column];
+                        matchedTopic += term.soft() ? 0 : value[column];
                         anchorMatched |= term.anchor();
+                        anchorInText |= counted > 0 && term.anchor();
                     }
                 }
             }
-            double now = nowText + (nowText > 0 ? nowPage : nowPage * PAGE_ONLY_MATCH);
+            // A chunk whose own text has only wording words ("下一步" in a heading) is on a page that is about the topic,
+            // not an answer about it: it counts as a match of the page only.
+            double now = nowText + (anchorInText ? nowPage : nowPage * PAGE_ONLY_MATCH);
             double before = beforeText + (beforeText > 0 ? beforePage : beforePage * PAGE_ONLY_MATCH);
             // The question has to match on its own words, and on one that says what it is about, not only on words like
-            // "操作" or "steps" that sit in a heading of every page.
-            if (matched <= 0 || (worth.anchored() && !anchorMatched)) {
+            // "操作" or "steps" that sit in a heading of every page. Where the documents know the topic but nothing heavy
+            // enough to be an anchor (the parts of a pasted identifier), the verb or the wording must not stand in for it:
+            // a chunk has to have a word of the topic, and is measured by those words alone.
+            double basis = worth.topical() && !worth.anchored() ? matchedTopic : matched;
+            if (basis <= 0 || (worth.anchored() && !anchorMatched)) {
                 continue;
             }
-            double covered = Math.min(1.0, matched / worth.ideal());
+            double covered = Math.min(1.0, basis / worth.ideal());
             if (followUp) {
                 // The chunk has to answer the earlier question as well as that question itself would have been
                 // answered; the message's own words only order the chunks that do.
@@ -960,7 +1329,7 @@ public class AssistantDocsIndex {
                 if (query.mode() == Mode.FOLLOW_UP_WORD && before <= 0) {
                     continue;
                 }
-                pool.add(new Scored(entry, row, Math.round((topic + before) * 1_000_000)));
+                pool.add(new Scored(entry, row, Math.round((topic + before) * 1_000_000), Math.round(ownHeading * 1_000_000)));
                 topics.add(topic);
                 continue;
             }
@@ -969,15 +1338,16 @@ public class AssistantDocsIndex {
             if (score / worth.ideal() < MIN_FIT) {
                 continue;
             }
-            // Scores that differ by rounding noise are ties; ties go to the earlier chunk (pages before files).
-            ranked.add(new Scored(entry, row, Math.round(score * 1_000_000)));
+            // Scores that differ by rounding noise are ties; ties go to the chunk whose own heading has the words, then to
+            // the earlier chunk (pages before files).
+            ranked.add(new Scored(entry, row, Math.round(score * 1_000_000), Math.round(ownHeading * 1_000_000)));
         }
         for (int index = 0; index < pool.size(); index++) {
             if (topics.get(index) >= bestTopic * TOPIC_SHARE) {
                 ranked.add(pool.get(index));
             }
         }
-        ranked.sort(Comparator.comparingLong(Scored::score).reversed().thenComparingInt(Scored::row));
+        ranked.sort(BEST_FIRST);
         return new Ranking(ranked, true);
     }
 
@@ -1023,7 +1393,7 @@ public class AssistantDocsIndex {
                 budget -= chunk.cost();
             }
         }
-        picked.sort(Comparator.comparingLong(Scored::score).reversed().thenComparingInt(Scored::row));
+        picked.sort(BEST_FIRST);
         return inReadingOrder(picked).stream().map(item -> item.entry().chunk()).toList();
     }
 
@@ -1060,10 +1430,10 @@ public class AssistantDocsIndex {
      * that has one. So is a very short message none of whose words any page has, such as "再讲讲".
      */
     private static Plan plan(String question, List<String> earlier, Snapshot current) {
-        Scanned now = scanMessage(question);
+        Scanned now = scanMessage(question, current.vocabulary());
         Scanned topic = null;
         for (String message : earlier) {
-            Scanned candidate = scanMessage(message);
+            Scanned candidate = scanMessage(message, current.vocabulary());
             if (candidate.content()) {
                 topic = candidate;
                 break;
@@ -1113,7 +1483,149 @@ public class AssistantDocsIndex {
     }
 
     private static Scanned scanMessage(String message) {
-        return scan(CJK_FILLER.matcher(fold(message)).replaceAll(" "), MAX_CANDIDATE_TERMS, true);
+        String folded = fold(message);
+        // A bare "好的" has no words of its own, and is about the topic before it; "好的，" at the head of a question is no
+        // more than a way to begin, and "好" must not become the verb that the question asks of its topic.
+        String text = isConsent(folded) ? "" : OPENING.matcher(folded).replaceFirst("");
+        return scan(CJK_FILLER.matcher(text).replaceAll(wording ->
+            VERB_FIRST_WORDING.contains(wording.group()) ? String.valueOf(VERB_FIRST_MARK) : " "), MAX_CANDIDATE_TERMS, true);
+    }
+
+    /**
+     * The message with each English word that the documents do not have as such put in the form they do have. A participle
+     * of a word of wording that they lack ("viewed", "caused", "detailed") is that word of wording, as "viewing" is: the
+     * rule that a participle is no wording protects the labels the documents really use ("Resolved"), and says nothing
+     * about one they do not have. Left to the base-form lookup it would become the topic word "view" at full weight.
+     */
+    private static Scanned scanMessage(String message, Vocabulary vocabulary) {
+        Scanned scanned = scanMessage(message);
+        Map<String, Candidate> terms = new LinkedHashMap<>();
+        boolean demoted = false;
+        for (Map.Entry<String, Candidate> entry : scanned.terms().entrySet()) {
+            Candidate candidate = entry.getValue();
+            String wording = candidate.soft() ? null : wordingFormOf(entry.getKey(), vocabulary);
+            if (wording == null) {
+                terms.merge(baseFormIn(entry.getKey(), vocabulary), candidate, AssistantDocsIndex::merged);
+            } else {
+                demoted = true;
+                terms.merge(wording, new Candidate(GENERIC_WEIGHT, candidate.position(), true, candidate.adjacent()),
+                    AssistantDocsIndex::merged);
+            }
+        }
+        boolean content = scanned.content();
+        if (demoted) {
+            // The word that made the message a question about a topic may have been the one that is wording after all.
+            content = false;
+            for (Candidate candidate : terms.values()) {
+                content |= candidate.weight() >= ANCHOR_WEIGHT && !candidate.soft();
+            }
+        }
+        return new Scanned(terms, scanned.phrases(), content, scanned.lone(), scanned.latin(), scanned.size());
+    }
+
+    /** The word of wording that an English word with an ending comes from, when the documents lack the word itself. */
+    private static String wordingFormOf(String word, Vocabulary vocabulary) {
+        if (vocabulary.count(word) > 0) {
+            return null;
+        }
+        for (String form : baseForms(word)) {
+            if (GENERIC_WORDS.contains(form)) {
+                return form;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * A question word with an ending is looked for in the form the documents use. The document side already lets a word
+     * carry s, es, d, ed or ing, so the stem finds the word that was asked and its other forms too: "opened" is looked for
+     * as "open" and finds "opening". A word that the documents have stays as it is, unless its stem is in more of their
+     * chunks ("settings" stays, because "sett" is no word of theirs). A word they do not have is looked for as the first
+     * of its possible base forms that they do have: "publishing" as "publish", "creating" as "create".
+     */
+    private static String baseFormIn(String word, Vocabulary vocabulary) {
+        List<String> forms = baseForms(word);
+        if (forms.isEmpty()) {
+            return word;
+        }
+        int known = vocabulary.count(word);
+        // Never a stop word: "noted" is not "not", although the documents have that word everywhere.
+        if (known > 0) {
+            String stem = forms.getFirst();
+            return !STOP_WORDS.contains(stem) && vocabulary.count(stem) > known ? stem : word;
+        }
+        for (String form : forms) {
+            if (vocabulary.contains(form) && !STOP_WORDS.contains(form)) {
+                return form;
+            }
+        }
+        return word;
+    }
+
+    private static boolean isPlainWord(String word) {
+        if (word.length() < 4) {
+            return false;
+        }
+        for (int index = 0; index < word.length(); index++) {
+            if (word.charAt(index) < 'a' || word.charAt(index) > 'z') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * The words an English word with an ending may come from, the likeliest first: the stem ("opened" from "open",
+     * "applied" from "apply"), the stem without a doubled last letter ("running" from "run"), and the stem with the "e"
+     * that the ending replaced ("using" from "use"). A word without an ending has none.
+     */
+    static List<String> baseForms(String word) {
+        List<String> forms = new ArrayList<>(3);
+        if (!isPlainWord(word)) {
+            return forms;
+        }
+        String stem = null;
+        String restored = null;
+        if (word.endsWith("ing") && word.length() >= 6) {
+            stem = word.substring(0, word.length() - 3);
+            restored = stem + "e";
+        } else if (word.endsWith("ied") && word.length() >= 5) {
+            forms.add(word.substring(0, word.length() - 3) + "y");
+            stem = word.substring(0, word.length() - 2);
+        } else if (word.endsWith("ed") && word.length() >= 5) {
+            stem = word.substring(0, word.length() - 2);
+            restored = word.substring(0, word.length() - 1);
+        }
+        if (stem != null) {
+            forms.add(stem);
+            if (stem.length() >= 3 && stem.charAt(stem.length() - 1) == stem.charAt(stem.length() - 2)) {
+                forms.add(stem.substring(0, stem.length() - 1));
+            }
+        }
+        if (restored != null) {
+            forms.add(restored);
+        }
+        return forms;
+    }
+
+    /**
+     * Whether the word is one of the words of wording, or the -ing form of one ("fixing 401"). A participle is not, as
+     * far as this can tell: the documents use it as a label or a status ("Resolved"), which a question may be about. It
+     * is told from the vocabulary, see {@link #scanMessage(String, Vocabulary)}.
+     */
+    private static boolean isWording(String word) {
+        if (GENERIC_WORDS.contains(word)) {
+            return true;
+        }
+        if (!word.endsWith("ing")) {
+            return false;
+        }
+        for (String form : baseForms(word)) {
+            if (GENERIC_WORDS.contains(form)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** At most {@code limit} of the terms, in their order of appearance. */
@@ -1123,17 +1635,17 @@ public class AssistantDocsIndex {
         }
         // A word no document contains cannot match anything, so it goes first; the others count by weight and
         // rarity, and by being later in the message when those are equal.
-        Map<String, Integer> vocabulary = current.vocabulary();
+        Vocabulary vocabulary = current.vocabulary();
         int total = Math.max(1, current.entries().size());
         List<Map.Entry<String, Candidate>> ranked = new ArrayList<>();
         for (Map.Entry<String, Candidate> entry : terms.entrySet()) {
-            if (vocabulary.getOrDefault(entry.getKey(), 0) > 0) {
+            if (vocabulary.contains(entry.getKey())) {
                 ranked.add(entry);
             }
         }
         ranked.sort(Comparator
             .comparingDouble((Map.Entry<String, Candidate> entry) ->
-                entry.getValue().weight() * Math.log(1.0 + (double) total / (1 + vocabulary.get(entry.getKey())))).reversed()
+                entry.getValue().weight() * Math.log(1.0 + (double) total / (1 + vocabulary.count(entry.getKey())))).reversed()
             .thenComparing(Comparator.comparingInt((Map.Entry<String, Candidate> entry) -> entry.getValue().position()).reversed()));
         Set<String> chosen = new HashSet<>();
         ranked.stream().limit(limit).forEach(entry -> chosen.add(entry.getKey()));
@@ -1235,7 +1747,7 @@ public class AssistantDocsIndex {
                 } else if (token.length() >= 2 && !STOP_WORDS.contains(token)) {
                     String word = singular(token);
                     boolean reason = afterStatus && REASON_WORDS.contains(word);
-                    boolean wording = question && GENERIC_WORDS.contains(word);
+                    boolean wording = question && isWording(word);
                     boolean tag = question && isTagName(folded, index);
                     add(terms, word, wording || reason || tag ? GENERIC_WEIGHT : WORD_WEIGHT, index, wording || reason || tag, Set.of());
                     if (lastWord != null && isOnlyWhitespace(folded, lastEnd, index)) {
@@ -1257,15 +1769,24 @@ public class AssistantDocsIndex {
         for (Candidate candidate : terms.values()) {
             content |= candidate.weight() >= ANCHOR_WEIGHT && !candidate.soft();
         }
-        // A lone character is a weak term and only stands in when the question has nothing else ("那怎么改？"). One
-        // such character is a follow-up's word; several ("扣了这么多钱": 扣, 钱) are what the question is about.
+        // A lone character is a weak term. With nothing else in the question it stands in for the topic ("那怎么改？"):
+        // one such character is a follow-up's word, several ("扣了这么多钱": 扣, 钱) are what the question is about. Next
+        // to a topic it is the verb of "文件怎么删", which leaves one character once 怎么 is gone, and says which chunks of
+        // the topic answer; as a soft term it only orders them, no chunk needs it and the documents may lack it.
         boolean loneOnly = false;
+        Map<String, Candidate> weak = new LinkedHashMap<>(lone);
+        weak.putAll(loose);
         if (!content) {
-            Map<String, Candidate> weak = new LinkedHashMap<>(lone);
-            weak.putAll(loose);
             terms.putAll(weak);
             content = weak.size() >= 2;
             loneOnly = !content && !weak.isEmpty();
+        } else if (question) {
+            for (Map.Entry<String, Candidate> verb : weak.entrySet()) {
+                if (terms.size() < limit && GENERAL_VERBS.indexOf(verb.getKey().charAt(0)) < 0) {
+                    terms.merge(verb.getKey(), new Candidate(VERB_WEIGHT, verb.getValue().position(), true, Set.of()),
+                        AssistantDocsIndex::merged);
+                }
+            }
         }
         return new Scanned(terms, phrases, content, loneOnly, latin, question ? nonBlankLength(folded) : 0);
     }
@@ -1281,8 +1802,15 @@ public class AssistantDocsIndex {
         char right = folded.charAt(at + 1);
         boolean wording = (generic[at] && generic[at + 1]) || (at == runStart && LIGHT_VERBS.indexOf(left) >= 0);
         boolean grammar = CJK_FUNCTION_CHARACTERS.indexOf(left) >= 0 || CJK_FUNCTION_CHARACTERS.indexOf(right) >= 0;
+        // Which pairs a pair may be the join of: the pair before it and the pair after it, each of which the documents may
+        // have as a word of their own. After wording that asks how ("怎么买保险") the verb stands in front of its topic, so
+        // the first pair of the run joins the verb to the topic and the last one is certainly the end of the topic: it is a
+        // word the documents may lack, not the join of the word before it ("保险" after "买保"), and a pair that joins nothing
+        // is not forgiven. Anywhere else the topic may come first ("接口选哪个", "超时填多少"), and then the last pair is the
+        // join of the topic and a verb of one character ("口选", "时填"), forgiven like any other.
+        boolean afterVerbFirst = runStart > 0 && folded.charAt(runStart - 1) == VERB_FIRST_MARK;
         Set<String> adjacent = new HashSet<>(2);
-        if (at > runStart) {
+        if (at > runStart && (at + 2 < runEnd || !afterVerbFirst)) {
             adjacent.add(folded.substring(at - 1, at + 1));
         }
         if (at + 2 < runEnd) {
@@ -1351,9 +1879,13 @@ public class AssistantDocsIndex {
 
     private static void add(Map<String, Candidate> terms, String text, double weight, int position, boolean soft,
         Set<String> adjacent) {
-        terms.merge(text, new Candidate(weight, position, soft, adjacent), (old, added) -> new Candidate(
-            Math.max(old.weight(), added.weight()), Math.min(old.position(), added.position()),
-            old.soft() && added.soft(), union(old.adjacent(), added.adjacent())));
+        terms.merge(text, new Candidate(weight, position, soft, adjacent), AssistantDocsIndex::merged);
+    }
+
+    /** The same term found twice counts once, for the better of its weights and as soft only if both were. */
+    private static Candidate merged(Candidate old, Candidate added) {
+        return new Candidate(Math.max(old.weight(), added.weight()), Math.min(old.position(), added.position()),
+            old.soft() && added.soft(), union(old.adjacent(), added.adjacent()));
     }
 
     private static Set<String> union(Set<String> first, Set<String> second) {
