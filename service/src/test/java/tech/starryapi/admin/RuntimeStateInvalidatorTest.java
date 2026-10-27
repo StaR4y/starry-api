@@ -9,6 +9,7 @@ import reactor.core.publisher.Mono;
 import tech.starryapi.account.AccountPoolPolicyService;
 import tech.starryapi.account.AccountPoolService;
 import tech.starryapi.account.AccountSettingsService;
+import tech.starryapi.assistant.AssistantDocsIndex;
 import tech.starryapi.model.ModelMappingService;
 import tech.starryapi.model.ModelCatalogManagementService;
 import tech.starryapi.model.ModelPricingService;
@@ -31,6 +32,7 @@ class RuntimeStateInvalidatorTest {
         KiroUpstreamClient kiro = mock(KiroUpstreamClient.class);
         RateLimiterService rateLimiter = mock(RateLimiterService.class);
         AppearanceSettingsService appearance = mock(AppearanceSettingsService.class);
+        AssistantDocsIndex assistantDocs = mock(AssistantDocsIndex.class);
         when(accountPool.refreshCache()).thenReturn(Mono.empty());
         when(poolPolicy.refreshSettings()).thenReturn(Mono.empty());
         when(modelMappings.refresh()).thenReturn(Mono.empty());
@@ -49,7 +51,8 @@ class RuntimeStateInvalidatorTest {
             modelPricing,
             kiro,
             rateLimiter,
-            appearance
+            appearance,
+            assistantDocs
         );
 
         invalidator.invalidateAll();
@@ -64,6 +67,7 @@ class RuntimeStateInvalidatorTest {
         verify(kiro).invalidateAllCaches();
         verify(rateLimiter).invalidateAllBuckets();
         verify(appearance).invalidateCache();
+        verify(assistantDocs).invalidate();
         verify(accountPool).refreshCache();
         verify(poolPolicy).refreshSettings();
         verify(modelMappings).refresh();
@@ -111,7 +115,8 @@ class RuntimeStateInvalidatorTest {
             modelPricing,
             mock(KiroUpstreamClient.class),
             mock(RateLimiterService.class),
-            mock(AppearanceSettingsService.class)
+            mock(AppearanceSettingsService.class),
+            mock(AssistantDocsIndex.class)
         );
 
         invalidator.invalidateSetting("account_pool_policy_enabled");
@@ -136,7 +141,8 @@ class RuntimeStateInvalidatorTest {
             modelPricing,
             mock(KiroUpstreamClient.class),
             mock(RateLimiterService.class),
-            mock(AppearanceSettingsService.class)
+            mock(AppearanceSettingsService.class),
+            mock(AssistantDocsIndex.class)
         );
     }
 }

@@ -20,7 +20,7 @@ Starry API 的运行时配置主要来自**环境变量**，由 `service/src/mai
 | `STARRY_ALLOW_ANONYMOUS_PROXY` | `false` | 是否允许**不带 API Key** 调用代理。公网服务请保持 `false` |
 | `STARRY_ADMIN_SESSION_TTL` | `12h` | 管理员会话有效期 |
 | `STARRY_RATE_LIMIT_PER_MINUTE` | `120` | 每个 API Key 每分钟请求上限，`0` 表示不限制 |
-| `STARRY_WEBUI_URL` | 空 | 控制台的**公开地址**，如 `https://你的域名/#/login`。启动日志会显示它，**注册验证邮件和 SMTP 验证邮件里的链接也用它生成**。不设置时会退回到请求里的 `Host` 头，而这个头可以被伪造（见下方说明） |
+| `STARRY_WEBUI_URL` | 空 | 控制台的**公开地址**，如 `https://你的域名/#/login`。启动日志会显示它，**注册验证邮件和 SMTP 验证邮件里的链接也用它生成**；鲸鱼助手引用使用文档时，也用它的协议、主机和端口替换文档里的 `{{site_url}}` 和 `{{api_base_url}}`。不设置时会退回到请求里的 `Host` 头，而这个头可以被伪造（见下方说明） |
 | `JAVA_OPTS` | `-Xms64m -Xmx768m -XX:MaxDirectMemorySize=256m -XX:+ExitOnOutOfMemoryError -XX:G1PeriodicGCInterval=300000 -XX:-G1PeriodicGCInvokesConcurrent -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=30`（Compose / 安装脚本） | JVM 参数，见下 |
 | `SERVICE_MEM_LIMIT` | `2g` | Compose 里服务容器的内存上限 |
 

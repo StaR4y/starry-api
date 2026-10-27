@@ -7,10 +7,15 @@ import java.util.List;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.ApplicationEvent;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.PayloadApplicationEvent;
 import org.springframework.http.HttpStatus;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.NoTransactionException;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.reactive.TransactionContextManager;
 import reactor.core.publisher.Mono;
 import tech.starryapi.admin.SystemSettingRepository;
 import tech.starryapi.common.ApiException;
@@ -25,10 +30,11 @@ public class DocumentationService {
     private final ObjectMapper json;
     private final SystemSettingRepository settings;
     private final DocumentationStorage storage;
+    private final ApplicationEventPublisher events;
 
     public DocumentationService(DatabaseClient db, ObjectMapper json, SystemSettingRepository settings,
-        DocumentationStorage storage) {
-        this.db = db; this.json = json; this.settings = settings; this.storage = storage;
+        DocumentationStorage storage, ApplicationEventPublisher events) {
+        this.db = db; this.json = json; this.settings = settings; this.storage = storage; this.events = events;
     }
 
     public Mono<Settings> settings() {
@@ -88,6 +94,32 @@ public class DocumentationService {
             .flatMap(doc -> attachments(id, false).map(files -> new Document(doc.id(), doc.content(), doc.updatedAt(), files)));
     }
 
+    /**
+     * Every published, non-deleted page as readers see it: the published copy only, never a draft, in catalog order.
+     * A row whose JSON cannot be read comes back with no content, and one whose sortOrder is not a whole number sorts
+     * last, instead of failing the whole list, so that one damaged page cannot hide all the others from the assistant.
+     */
+    public Mono<List<Document>> publishedPages() {
+        return db.sql("""
+            SELECT id, published::text AS content, published_at FROM documentation_pages
+            WHERE deleted = FALSE AND published IS NOT NULL
+            ORDER BY CASE WHEN published->>'sortOrder' ~ '^-?[0-9]{1,9}$' THEN (published->>'sortOrder')::integer END NULLS LAST,
+                published->>'title', id LIMIT 200
+            """).map((r, m) -> new Document(r.get("id", String.class), readableContent(r.get("content", String.class)),
+                r.get("published_at", Instant.class), List.of())).all().collectList();
+    }
+
+    /**
+     * A short value that changes whenever a page is published, re-published, unpublished or deleted (a draft save
+     * does not change it), so that a cache of {@link #publishedPages()} can tell cheaply whether it is out of date.
+     */
+    public Mono<String> publishedFingerprint() {
+        return db.sql("""
+            SELECT coalesce(md5(string_agg(id || '@' || coalesce(published_at::text, '') || '#' || pg_column_size(published), ',' ORDER BY id)), '') AS fingerprint
+            FROM documentation_pages WHERE deleted = FALSE AND published IS NOT NULL
+            """).map(r -> r.get("fingerprint", String.class)).one();
+    }
+
     public Mono<List<AdminEntry>> listAdmin() {
         return db.sql("""
             SELECT id, draft->>'title' AS title, draft->>'category' AS category,
@@ -131,12 +163,14 @@ public class DocumentationService {
             """).bind("id", id).bind("version", request.version()).bind("content", serialize(request.content()))
             .bind("publish", request.publish()).fetch().rowsUpdated().flatMap(this::changed)
             .then(Mono.defer(() -> readAdmin(id)))
+            .flatMap(d -> request.publish() ? publicationChanged(id).thenReturn(d) : Mono.just(d))
             .doOnSuccess(d -> log.info("documentation action={} actor={} id={} version={}", request.publish() ? "publish" : "save-draft", actor, id, d.version()));
     }
 
     public Mono<Void> withdraw(String id, long version, boolean delete, String actor) {
         return db.sql("UPDATE documentation_pages SET published = NULL, published_at = NULL, deleted = :deleted, version = version + 1, updated_at = clock_timestamp() WHERE id = :id AND version = :version AND deleted = FALSE")
             .bind("id", id).bind("version", version).bind("deleted", delete).fetch().rowsUpdated().flatMap(this::changed)
+            .then(Mono.defer(() -> publicationChanged(id)))
             .doOnSuccess(v -> log.info("documentation action={} actor={} id={}", delete ? "delete" : "unpublish", actor, id));
     }
 
@@ -199,9 +233,25 @@ public class DocumentationService {
         try { return json.readValue(value, Content.class); }
         catch (Exception e) { throw new IllegalStateException("Invalid documentation content", e); }
     }
+    private Content readableContent(String value) {
+        try { return content(value); }
+        catch (IllegalStateException e) { return null; }
+    }
     private String serialize(Content value) {
         try { return json.writeValueAsString(value); }
         catch (Exception e) { throw new IllegalStateException(e); }
+    }
+    /**
+     * Announces that what readers can see has changed. Inside a transaction the event carries the transaction as its
+     * source, so @TransactionalEventListener methods receive it only after the commit; outside one (withdraw is a single
+     * auto-committed statement) it is delivered right away.
+     */
+    private Mono<Void> publicationChanged(String id) {
+        DocumentationPublicationChanged change = new DocumentationPublicationChanged(id);
+        return TransactionContextManager.currentContext()
+            .<ApplicationEvent>map(transaction -> new PayloadApplicationEvent<>(transaction, change))
+            .onErrorResume(NoTransactionException.class, e -> Mono.just(new PayloadApplicationEvent<>(this, change)))
+            .doOnNext(events::publishEvent).then();
     }
     private Mono<Void> changed(long n) {
         return n == 1 ? Mono.empty() : Mono.error(new ApiException(HttpStatus.CONFLICT, "DOCUMENTATION_CONFLICT", "文档已被修改或删除，请重新加载后再编辑"));

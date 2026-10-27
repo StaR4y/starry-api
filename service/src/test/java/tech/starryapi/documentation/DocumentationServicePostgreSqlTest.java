@@ -8,16 +8,19 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.aop.framework.ProxyFactory;
+import org.springframework.context.PayloadApplicationEvent;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
 import org.springframework.data.r2dbc.repository.support.R2dbcRepositoryFactory;
 import org.springframework.r2dbc.connection.R2dbcTransactionManager;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
 import org.springframework.transaction.interceptor.TransactionInterceptor;
+import org.springframework.transaction.reactive.TransactionContext;
 import org.testcontainers.DockerClientFactory;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import reactor.core.publisher.Flux;
@@ -32,6 +35,7 @@ class DocumentationServicePostgreSqlTest {
     private static String r2dbcUrl;
     private DocumentationService service;
     private DocumentationStorage storage;
+    private final List<Object> events = new CopyOnWriteArrayList<>();
     private static final Duration TIMEOUT = Duration.ofSeconds(15);
     private static final List<String> DEFAULT_TUTORIALS = List.of("getting-started", "console-tour", "billing", "coding-plan",
         "api-keys", "models-and-pricing", "cc-switch", "claude-code", "codex-cli", "opencode", "manual-api", "errors", "faq", "tickets");
@@ -60,11 +64,12 @@ class DocumentationServicePostgreSqlTest {
             .fetch().rowsUpdated().block(TIMEOUT);
     }
     @BeforeEach void setup() {
+        events.clear();
         var factory = ConnectionFactories.get(r2dbcUrl);
         var template = new R2dbcEntityTemplate(factory);
         var repository = new R2dbcRepositoryFactory(template).getRepository(SystemSettingRepository.class);
         storage = new DocumentationStorage(files.toString());
-        var target = new DocumentationService(DatabaseClient.create(factory), new ObjectMapper(), repository, storage);
+        var target = new DocumentationService(DatabaseClient.create(factory), new ObjectMapper(), repository, storage, events::add);
         var transactions = new TransactionInterceptor();
         transactions.setTransactionManager(new R2dbcTransactionManager(factory));
         transactions.setTransactionAttributeSource(new AnnotationTransactionAttributeSource());
@@ -89,6 +94,121 @@ class DocumentationServicePostgreSqlTest {
         });
         service.withdraw(page.id(), edited.version(), true, "test").block(TIMEOUT);
         assertThatThrownBy(() -> service.read(page.id()).block(TIMEOUT)).isInstanceOf(ApiException.class);
+    }
+
+    @Test void publishingAndWithdrawingAnnounceTheChangeButDraftsDoNot() {
+        var page = service.create(content("Announce", "body"), "test").block(TIMEOUT);
+        var draft = service.save(page.id(), new Save(content("Announce", "edited"), page.version(), false), "test").block(TIMEOUT);
+        assertThat(events).as("creating and saving a draft change nothing readers see").isEmpty();
+
+        var published = service.save(page.id(), new Save(draft.draft(), draft.version(), true), "test").block(TIMEOUT);
+        assertThat(events).singleElement().isInstanceOfSatisfying(PayloadApplicationEvent.class, event -> {
+            assertThat(event.getPayload()).isEqualTo(new DocumentationPublicationChanged(page.id()));
+            assertThat(event.getSource()).as("inside the save transaction, so listeners wait for the commit")
+                .isInstanceOf(TransactionContext.class);
+        });
+
+        service.withdraw(page.id(), published.version(), false, "test").block(TIMEOUT);
+        assertThat(events).hasSize(2);
+        assertThat(((PayloadApplicationEvent<?>) events.getLast()).getPayload())
+            .isEqualTo(new DocumentationPublicationChanged(page.id()));
+
+        var again = service.readAdmin(page.id()).block(TIMEOUT);
+        service.withdraw(page.id(), again.version(), true, "test").block(TIMEOUT);
+        assertThat(events).hasSize(3);
+        assertThatThrownBy(() -> service.withdraw(page.id(), again.version(), true, "test").block(TIMEOUT))
+            .isInstanceOf(ApiException.class);
+        assertThat(events).as("a rejected change announces nothing").hasSize(3);
+    }
+
+    @Test void publishedPagesAreTheReaderCopyOnly() {
+        var page = service.create(new Content("Visible 页面", "Test", "", "published body", 5), "test").block(TIMEOUT);
+        var draftOnly = service.create(content("Never published", "draft only"), "test").block(TIMEOUT);
+        var published = service.save(page.id(), new Save(page.draft(), page.version(), true), "test").block(TIMEOUT);
+        service.save(page.id(), new Save(content("Edited draft", "unpublished edit"), published.version(), false), "test").block(TIMEOUT);
+
+        var pages = service.publishedPages().block(TIMEOUT);
+
+        assertThat(pages).extracting(Document::id).contains(page.id(), "getting-started", "api-keys")
+            .doesNotContain(draftOnly.id());
+        assertThat(pages).filteredOn(d -> d.id().equals(page.id())).singleElement().satisfies(d -> {
+            assertThat(d.content().title()).isEqualTo("Visible 页面");
+            assertThat(d.content().body()).isEqualTo("published body");
+            assertThat(d.attachments()).isEmpty();
+        });
+        assertThat(pages).filteredOn(d -> d.id().equals("api-keys")).singleElement()
+            .satisfies(d -> assertThat(d.content().english()).isNotNull());
+        assertThat(pages).hasSizeLessThanOrEqualTo(200);
+    }
+
+    @Test void thePublishedFingerprintChangesWithPublicationsAndWithNothingElse() {
+        String start = service.publishedFingerprint().block(TIMEOUT);
+        assertThat(start).as("a digest of the published pages").hasSize(32);
+
+        var page = service.create(content("Fingerprint", "body"), "test").block(TIMEOUT);
+        var draft = service.save(page.id(), new Save(content("Fingerprint", "edited"), page.version(), false), "test").block(TIMEOUT);
+        assertThat(service.publishedFingerprint().block(TIMEOUT)).as("drafts are not what readers see").isEqualTo(start);
+
+        var published = service.save(page.id(), new Save(draft.draft(), draft.version(), true), "test").block(TIMEOUT);
+        String first = service.publishedFingerprint().block(TIMEOUT);
+        assertThat(first).as("publish").isNotEqualTo(start);
+        assertThat(service.publishedFingerprint().block(TIMEOUT)).as("stable while nothing happens").isEqualTo(first);
+
+        var republished = service.save(page.id(), new Save(content("Fingerprint", "second edition"), published.version(), true), "test").block(TIMEOUT);
+        String second = service.publishedFingerprint().block(TIMEOUT);
+        assertThat(second).as("re-publish").isNotIn(start, first);
+
+        var edited = service.save(page.id(), new Save(content("Fingerprint", "only a draft"), republished.version(), false), "test").block(TIMEOUT);
+        assertThat(service.publishedFingerprint().block(TIMEOUT)).as("an unpublished edit").isEqualTo(second);
+
+        service.withdraw(page.id(), edited.version(), false, "test").block(TIMEOUT);
+        assertThat(service.publishedFingerprint().block(TIMEOUT)).as("unpublish").isEqualTo(start);
+
+        var again = service.readAdmin(page.id()).block(TIMEOUT);
+        service.save(page.id(), new Save(again.draft(), again.version(), true), "test").block(TIMEOUT);
+        String third = service.publishedFingerprint().block(TIMEOUT);
+        assertThat(third).isNotEqualTo(start);
+        service.withdraw(page.id(), service.readAdmin(page.id()).block(TIMEOUT).version(), true, "test").block(TIMEOUT);
+        assertThat(service.publishedFingerprint().block(TIMEOUT)).as("delete").isEqualTo(start);
+    }
+
+    @Test void withNothingPublishedThePageListIsEmptyAndTheFingerprintIsAnEmptyString() {
+        var db = DatabaseClient.create(ConnectionFactories.get(r2dbcUrl));
+        List<String> published = db.sql("SELECT id FROM documentation_pages WHERE deleted = FALSE AND published IS NOT NULL")
+            .map(row -> row.get("id", String.class)).all().collectList().block(TIMEOUT);
+        assertThat(published).as("the seeded tutorials at least").isNotEmpty();
+        try {
+            db.sql("UPDATE documentation_pages SET deleted = TRUE WHERE id = ANY(CAST(:ids AS text[]))")
+                .bind("ids", published.toArray(new String[0])).fetch().rowsUpdated().block(TIMEOUT);
+
+            assertThat(service.publishedPages().block(TIMEOUT)).isEmpty();
+            assertThat(service.publishedFingerprint().block(TIMEOUT))
+                .as("no rows to aggregate: not a digest, but a value all the same").isEqualTo("");
+        } finally {
+            db.sql("UPDATE documentation_pages SET deleted = FALSE WHERE id = ANY(CAST(:ids AS text[]))")
+                .bind("ids", published.toArray(new String[0])).fetch().rowsUpdated().block(TIMEOUT);
+        }
+        assertThat(service.publishedFingerprint().block(TIMEOUT)).hasSize(32);
+    }
+
+    @Test void aPublishedRowWhoseSortOrderIsNotAWholeNumberDoesNotFailTheListAndSortsLast() {
+        var db = DatabaseClient.create(ConnectionFactories.get(r2dbcUrl));
+        for (String[] row : new String[][] {{"sort-bad-a", "1.5"}, {"sort-bad-b", "\"abc\""}, {"sort-bad-c", "99999999999"}}) {
+            String content = "{\"title\":\"排序异常\",\"category\":\"Test\",\"summary\":\"\",\"body\":\"x\",\"sortOrder\":" + row[1] + "}";
+            db.sql("INSERT INTO documentation_pages (id, draft, published, published_at) VALUES (:id, CAST(:content AS jsonb), CAST(:content AS jsonb), clock_timestamp())")
+                .bind("id", row[0]).bind("content", content).fetch().rowsUpdated().block(TIMEOUT);
+        }
+        var good = service.create(new Content("排序正常", "Test", "", "body", 7), "test").block(TIMEOUT);
+        service.save(good.id(), new Save(good.draft(), good.version(), true), "test").block(TIMEOUT);
+
+        var pages = service.publishedPages().block(TIMEOUT);
+
+        assertThat(pages).extracting(Document::id).contains(good.id(), "getting-started", "faq", "sort-bad-a", "sort-bad-b", "sort-bad-c");
+        assertThat(pages.subList(pages.size() - 3, pages.size())).extracting(Document::id)
+            .as("the damaged rows come after every page that has a sort order").containsExactly("sort-bad-a", "sort-bad-b", "sort-bad-c");
+        assertThat(pages).filteredOn(d -> d.id().equals(good.id())).singleElement().satisfies(d -> assertThat(d.content()).isNotNull());
+        assertThat(pages).filteredOn(d -> d.id().equals("sort-bad-b")).singleElement()
+            .satisfies(d -> assertThat(d.content()).as("it does not parse, and is passed on as such").isNull());
     }
 
     @Test void defaultTutorialsAreCompleteAndTranslated() {

@@ -7,6 +7,7 @@ import reactor.core.publisher.Mono;
 import tech.starryapi.account.AccountPoolPolicyService;
 import tech.starryapi.account.AccountPoolService;
 import tech.starryapi.account.AccountSettingsService;
+import tech.starryapi.assistant.AssistantDocsIndex;
 import tech.starryapi.model.ModelMappingService;
 import tech.starryapi.model.ModelCatalogManagementService;
 import tech.starryapi.model.ModelPricingService;
@@ -30,6 +31,7 @@ public class RuntimeStateInvalidator {
     private final KiroUpstreamClient kiroUpstreamClient;
     private final RateLimiterService rateLimiterService;
     private final AppearanceSettingsService appearanceSettingsService;
+    private final AssistantDocsIndex assistantDocsIndex;
 
     public RuntimeStateInvalidator(
         AdminSessionService adminSessionService,
@@ -42,7 +44,8 @@ public class RuntimeStateInvalidator {
         ModelPricingService modelPricingService,
         KiroUpstreamClient kiroUpstreamClient,
         RateLimiterService rateLimiterService,
-        AppearanceSettingsService appearanceSettingsService
+        AppearanceSettingsService appearanceSettingsService,
+        AssistantDocsIndex assistantDocsIndex
     ) {
         this.adminSessionService = adminSessionService;
         this.accountPoolService = accountPoolService;
@@ -55,6 +58,7 @@ public class RuntimeStateInvalidator {
         this.kiroUpstreamClient = kiroUpstreamClient;
         this.rateLimiterService = rateLimiterService;
         this.appearanceSettingsService = appearanceSettingsService;
+        this.assistantDocsIndex = assistantDocsIndex;
     }
 
     public void invalidateAll() {
@@ -68,6 +72,8 @@ public class RuntimeStateInvalidator {
         kiroUpstreamClient.invalidateAllCaches();
         rateLimiterService.invalidateAllBuckets();
         appearanceSettingsService.invalidateCache();
+        // The 使用文档 pages the whale assistant quotes are read again by the next question, not warmed here.
+        assistantDocsIndex.invalidate();
 
         Mono.whenDelayError(
             accountPoolService.refreshCache(),
