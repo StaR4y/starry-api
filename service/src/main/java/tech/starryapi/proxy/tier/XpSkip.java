@@ -36,9 +36,9 @@ public record XpSkip(String tierId, String accountId, Reason reason, String deta
          */
         CONTEXT,
         /**
-         * The relay broke off an answer for this session a moment ago and may be generating it still (design 7.8): the
-         * client's retry of that request is not given to the same relay. Judged last, so that it is only said of a relay
-         * that would otherwise have been given the request.
+         * The relay broke off an answer for this session a moment ago and may be generating it still (design 7.8), or its
+         * answer was held back by the gateway: the client's retry of that request is not given to the same relay. Judged
+         * last, so that it is only said of a relay that would otherwise have been given the request.
          */
         INTERRUPTED;
 

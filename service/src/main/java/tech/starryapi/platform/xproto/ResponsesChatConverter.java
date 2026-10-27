@@ -2,7 +2,6 @@ package tech.starryapi.platform.xproto;
 
 import java.util.Set;
 import org.springframework.stereotype.Component;
-import tech.starryapi.platform.core.ToolSchemaSanitizer;
 import tech.starryapi.platform.openai.ApplyPatchEmulation;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
@@ -47,16 +46,22 @@ import tools.jackson.databind.node.ObjectNode;
  * file}). The refusal of an earlier assistant turn is text. A tool's output is the text of its parts (an output that is an image is empty, which
  * the canonicalizer makes {@code [no output]}).
  *
- * <p>The tools are the functions, with the parameters in the schema vocabulary the other conversions use ({@link
- * ToolSchemaSanitizer}), and {@code apply_patch}: Codex declares it as a custom tool, which a relay cannot be asked for,
- * and {@link ApplyPatchEmulation} gives it the function with one {@code patch} argument that the native Codex path sends
+ * <p>The tools are the functions, and {@code apply_patch}: Codex declares it as a custom tool, which a relay cannot be asked
+ * for, and {@link ApplyPatchEmulation} gives it the function with one {@code patch} argument that the native Codex path sends
  * as well. Its calls in the history ({@code custom_tool_call} and the answer, {@code custom_tool_call_output}) are calls of
  * that function with the patch as the argument; a custom tool of another name is a call of a function of that name with
  * its text as an {@code input} argument, though a request that declares one is not sent to a relay (design 7.9, HARD).
  * Every other tool (the hosted ones, {@code tool_search}, an MCP server) is left out, and a {@code tool_choice} and
- * {@code parallel_tool_calls} go only with tools. The {@code strict} of a client's own function is carried as the client
- * wrote it, as the Chat entry carries it and the native Codex path does after the same reduction of the schema: a relay
- * that is asked for arguments that fit the schema should be held to it where the client asked.
+ * {@code parallel_tool_calls} go only with tools. A client's own function is carried as the client wrote it, its {@code
+ * parameters} (a copy, not reduced to the vocabulary the Kiro and the Anthropic conversions use) and its {@code
+ * strict}, as the Chat entry carries it and official keys are given it: a relay that is asked for arguments that fit the
+ * schema should be held to the schema the client wrote, and the schema of a client that sends {@code strict} is one an
+ * OpenAI model is held to ({@code $defs} and {@code $ref} of a pydantic model, an optional field as an {@code anyOf} with
+ * {@code null}), which a reduction would turn into one that cannot be met. A function with no schema is given an empty
+ * object schema, and one whose schema has no root {@code type} or no {@code properties} (an MCP tool without arguments is
+ * {@code {}}) is given them, as OpenAI's Chat API refuses parameters that are not of type object. {@code strict} goes only
+ * with a schema that is the client's own: the gateway's function for {@code apply_patch} is sent without it, whatever the
+ * client declared.
  *
  * <p>Besides, {@code temperature}, {@code top_p}, {@code max_output_tokens} (as {@code max_tokens}) and {@code stream}; the
  * {@code reasoning.effort} as {@code reasoning_effort}, which is what the sanitizer reads to decide whether to send it; and
@@ -416,11 +421,40 @@ public final class ResponsesChatConverter {
         if (!source.path("description").stringValue("").isBlank()) {
             function.set("description", source.path("description"));
         }
-        function.set("parameters", ToolSchemaSanitizer.sanitizeParameters(objectMapper, source.path("parameters")));
+        // As the client wrote it, as the Chat entry carries it: a reduction of the schema (the vocabulary Kiro takes) would take
+        // the $ref of a strict schema and fold its anyOf, and the strict that goes with it would then ask for the impossible.
+        function.set("parameters", parametersOf(source.path("parameters")));
         if (source.path("strict").isBoolean()) {
             function.set("strict", source.path("strict"));
         }
         return tool;
+    }
+
+    /**
+     * The schema of a function's arguments, a copy of the client's. A function over a schema with no root {@code type} or no
+     * {@code properties} ({@code {}} is what MCP servers declare for a tool without arguments) is an object over none, as the
+     * reduction the other conversions make of it would say: OpenAI's Chat API refuses a function whose parameters are not of
+     * type object, and the schema means the same with them. A schema that has a type is otherwise left as it is.
+     */
+    private ObjectNode parametersOf(JsonNode declared) {
+        ObjectNode parameters = objectMapper.createObjectNode();
+        if (!declared.isObject()) {
+            parameters.put("type", "object");
+            parameters.putObject("properties");
+            return parameters;
+        }
+        if (declared.path("type").isMissingNode() || declared.path("type").isNull()) {
+            parameters.put("type", "object");
+        }
+        declared.properties().forEach(entry -> {
+            if (!parameters.has(entry.getKey())) {
+                parameters.set(entry.getKey(), entry.getValue().deepCopy());
+            }
+        });
+        if ("object".equals(parameters.path("type").stringValue("")) && !parameters.path("properties").isObject()) {
+            parameters.putObject("properties");
+        }
+        return parameters;
     }
 
     /**

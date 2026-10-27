@@ -11,7 +11,7 @@ import tech.starryapi.sourcetier.SourceTierDtos.XpFigures;
 class XpPairStandardTest {
 
     private static XpFigures figures(long attempts, long served, long interrupted, long rejected, long estimated) {
-        return new XpFigures(attempts, served, attempts - served, interrupted, rejected, 0, 0, 0, estimated, 0, 0, null);
+        return new XpFigures(attempts, served, attempts - served, interrupted, rejected, 0, 0, 0, 0, estimated, 0, 0, null);
     }
 
     private static Criterion criterion(List<Criterion> criteria, String name) {

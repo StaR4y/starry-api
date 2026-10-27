@@ -11,7 +11,7 @@
       "inputTokens": 0,
       "outputTokens": 0,
       "usageSource": null,
-      "stopReason": "INTERRUPTED",
+      "stopReason": "WITHHELD",
       "degraded": "builtin_tool,prompt_cache_key",
       "error": "The source stopped its answer with its content filter"
     }

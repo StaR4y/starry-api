@@ -464,7 +464,7 @@ class TierPlannerXpTest {
         configure(configured.apply(gateOf("openai", "CHAT", "KEYS", "key-9")));
         TierPlan unlisted = plan(offering(Status.VERIFIED), openAiChat(chatBody("gpt-5.5")));
         assertThat(unlisted.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.GATE);
-        assertThat(counts.snapshot()).containsExactly(Map.entry(new XpSkipCounts.Key("openai", "relay", XpSkip.Reason.GATE), 1L));
+        assertThat(counts.snapshot()).containsExactly(Map.entry(new XpSkipCounts.Key("openai", "CHAT", "relay", XpSkip.Reason.GATE), 1L));
     }
 
     @Test
@@ -474,7 +474,7 @@ class TierPlannerXpTest {
         plan(offering(Status.VERIFIED), messages(CLAUDE_CODE));
         plan(offering(Status.VERIFIED), messages(CLAUDE_CODE));
 
-        assertThat(counts.snapshot()).containsExactly(Map.entry(new XpSkipCounts.Key("anthropic", "relay", XpSkip.Reason.GATE), 2L));
+        assertThat(counts.snapshot()).containsExactly(Map.entry(new XpSkipCounts.Key("anthropic", "MESSAGES", "relay", XpSkip.Reason.GATE), 2L));
     }
 
     // ---- the account and the mapping ----
@@ -1313,7 +1313,7 @@ class TierPlannerXpTest {
 
         planRemembering(messages(CLAUDE_CODE).withSessionName("key-1:session-1"));
 
-        assertThat(counts.snapshot()).containsExactly(Map.entry(new XpSkipCounts.Key("anthropic", "relay", XpSkip.Reason.INTERRUPTED), 1L));
+        assertThat(counts.snapshot()).containsExactly(Map.entry(new XpSkipCounts.Key("anthropic", "MESSAGES", "relay", XpSkip.Reason.INTERRUPTED), 1L));
     }
 
     // ---- a relay that sat the request out is no tier the session was pushed out of (design 0, 4.2, 4.7) ----
@@ -1594,9 +1594,9 @@ class TierPlannerXpTest {
         assertThat(unconvertible.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.CONVERSION);
         assertThat(small.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.INTERRUPTED);
         assertThat(counts.snapshot()).containsOnly(
-            Map.entry(new XpSkipCounts.Key("anthropic", "relay", XpSkip.Reason.CONTEXT), 1L),
-            Map.entry(new XpSkipCounts.Key("anthropic", "relay", XpSkip.Reason.CONVERSION), 1L),
-            Map.entry(new XpSkipCounts.Key("anthropic", "relay", XpSkip.Reason.INTERRUPTED), 1L));
+            Map.entry(new XpSkipCounts.Key("anthropic", "MESSAGES", "relay", XpSkip.Reason.CONTEXT), 1L),
+            Map.entry(new XpSkipCounts.Key("anthropic", "MESSAGES", "relay", XpSkip.Reason.CONVERSION), 1L),
+            Map.entry(new XpSkipCounts.Key("anthropic", "MESSAGES", "relay", XpSkip.Reason.INTERRUPTED), 1L));
     }
 
     @Test
@@ -2036,6 +2036,8 @@ class TierPlannerXpTest {
 
         assertThat(plan.levels()).extracting(Level::tierId).containsExactly("kiro");
         assertThat(plan.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.CONVERSION);
+        // Counted for the entry it happened on: the Chat and Messages pairs of the vendor are not judged on a Responses conversion.
+        assertThat(counts.snapshot()).containsExactly(Map.entry(new XpSkipCounts.Key("anthropic", "RESPONSES", "relay", XpSkip.Reason.CONVERSION), 1L));
     }
 
     @Test

@@ -3,6 +3,7 @@ package tech.starryapi.platform.openai;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Component;
@@ -19,6 +20,9 @@ import tools.jackson.databind.node.ObjectNode;
 
 @Component
 public class OpenAiResponseFactory {
+
+    /** The argument a replayed call of a custom tool is written with when no function of the client says another. */
+    private static final String CUSTOM_CALL_ARGUMENT = "input";
 
     private final ObjectMapper objectMapper;
 
@@ -646,6 +650,110 @@ public class OpenAiResponseFactory {
         ObjectNode copy = JsonNodes.shallowCopy((ObjectNode) request);
         copy.set("input", kept);
         return copy;
+    }
+
+    /**
+     * The request with the calls of custom tools in its input written as the calls of functions, or the request itself when it
+     * holds none: {@code custom_tool_call} is a {@code function_call} and {@code custom_tool_call_output} a {@code
+     * function_call_output}, which is all the conversion of the Kiro and Anthropic routes ({@code
+     * OpenAiRequestAdapter#responsesToChat}) knows how to replay. The text of a call is its one string argument, in the
+     * shape those routes declare the tool: they are given the client's own declaration of it (not the one-argument
+     * {@code patch} function of {@link ApplyPatchEmulation}, which only the relays and the OpenAI route are given), so the
+     * argument is the string property that the client's function declares ({@code input} for the JSON tool Codex has), and
+     * {@code input} for a tool the client declared as a custom tool, which those routes are given with no properties. The
+     * input is rebuilt; everything else is shared with the request, which is not changed.
+     *
+     * <p>A relay serves the editing tool as a custom tool call whatever the client declared it as (it is what Codex expects),
+     * and the chain keeps that call. Replayed to a source of those routes it was a blank user message, and the patch with
+     * its result were gone from what the model was asked (the model then answered without knowing the patch was applied).
+     */
+    public static JsonNode withCustomCallsAsFunctionCalls(JsonNode request) {
+        JsonNode input = request.path("input");
+        if (!request.isObject() || !input.isArray()) {
+            return request;
+        }
+        ArrayNode converted = null;
+        for (int i = 0; i < input.size(); i++) {
+            JsonNode item = input.get(i);
+            String type = item.path("type").asString("");
+            boolean call = "custom_tool_call".equals(type);
+            boolean output = "custom_tool_call_output".equals(type);
+            if ((call || output) && item.isObject()) {
+                if (converted == null) {
+                    converted = JsonNodeFactory.instance.arrayNode();
+                    for (int before = 0; before < i; before++) {
+                        converted.add(input.get(before));
+                    }
+                }
+                converted.add(call ? customCallAsFunctionCall(item, request.path("tools")) : customOutputAsFunctionOutput(item));
+            } else if (converted != null) {
+                converted.add(item);
+            }
+        }
+        if (converted == null) {
+            return request;
+        }
+        ObjectNode copy = JsonNodes.shallowCopy((ObjectNode) request);
+        copy.set("input", converted);
+        return copy;
+    }
+
+    private static ObjectNode customCallAsFunctionCall(JsonNode item, JsonNode tools) {
+        ObjectNode call = JsonNodes.shallowCopy((ObjectNode) item);
+        call.put("type", "function_call");
+        call.remove("input");
+        JsonNode input = item.path("input");
+        String text = input.isString() ? input.asString("") : input.isMissingNode() || input.isNull() ? "" : input.toString();
+        String argument = ApplyPatchEmulation.TOOL_NAME.equals(item.path("name").asString(""))
+            ? editingToolArgument(tools)
+            : CUSTOM_CALL_ARGUMENT;
+        call.put("arguments", JsonNodeFactory.instance.objectNode().put(argument, text).toString());
+        return call;
+    }
+
+    /**
+     * The argument of the editing tool as the Kiro and Anthropic routes declare it: the string property of the function the
+     * client declared (the one that is required, else the first), or {@code input} when the client declared the tool as a custom
+     * tool, which those routes give an empty schema, or did not declare it at all.
+     */
+    private static String editingToolArgument(JsonNode tools) {
+        if (!tools.isArray()) {
+            return CUSTOM_CALL_ARGUMENT;
+        }
+        for (JsonNode tool : tools) {
+            JsonNode source = tool.path("function").isObject() ? tool.path("function") : tool;
+            if (!ApplyPatchEmulation.TOOL_NAME.equals(source.path("name").asString("")) || "custom".equals(tool.path("type").asString(""))) {
+                continue;
+            }
+            JsonNode parameters = source.path("parameters");
+            String first = null;
+            for (Map.Entry<String, JsonNode> property : parameters.path("properties").properties()) {
+                if (!"string".equals(property.getValue().path("type").asString(""))) {
+                    continue;
+                }
+                if (containsText(parameters.path("required"), property.getKey())) {
+                    return property.getKey();
+                }
+                first = first != null ? first : property.getKey();
+            }
+            return first != null ? first : CUSTOM_CALL_ARGUMENT;
+        }
+        return CUSTOM_CALL_ARGUMENT;
+    }
+
+    private static boolean containsText(JsonNode array, String text) {
+        for (JsonNode element : array) {
+            if (text.equals(element.asString(""))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static ObjectNode customOutputAsFunctionOutput(JsonNode item) {
+        ObjectNode output = JsonNodes.shallowCopy((ObjectNode) item);
+        output.put("type", "function_call_output");
+        return output;
     }
 
     private String responseReasoningItemText(JsonNode item) {

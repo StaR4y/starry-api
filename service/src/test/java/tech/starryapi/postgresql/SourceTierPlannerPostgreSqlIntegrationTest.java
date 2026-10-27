@@ -240,8 +240,8 @@ class SourceTierPlannerPostgreSqlIntegrationTest extends PostgreSqlIntegrationTe
         TierPlan stranger = planner.plan(messagesRequest("key-2")).block();
         assertThat(stranger.levels()).extracting(TierPlan.Level::tierId).containsExactly("kiro");
         assertThat(stranger.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.GATE);
-        assertThat(counts.snapshot()).containsEntry(new XpSkipCounts.Key("anthropic", "relay", XpSkip.Reason.GATE), 1L)
-            .containsEntry(new XpSkipCounts.Key("anthropic", "relay", XpSkip.Reason.UNVERIFIED), 1L);
+        assertThat(counts.snapshot()).containsEntry(new XpSkipCounts.Key("anthropic", "MESSAGES", "relay", XpSkip.Reason.GATE), 1L)
+            .containsEntry(new XpSkipCounts.Key("anthropic", "MESSAGES", "relay", XpSkip.Reason.UNVERIFIED), 1L);
         // The application's own runtime offers the Messages pair on trial (P5-05): it reads a request of that entry for the
         // relays and plans it as the planner above does, for the key the gate lists and for no other.
         assertThat(tierRuntime.planner().wantsEntryFacts(TierEntry.MESSAGES)).isTrue();

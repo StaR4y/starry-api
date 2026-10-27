@@ -211,6 +211,15 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
     }
 
     @Override
+    public boolean tiersInUse() {
+        try {
+            return registry.snapshot().hasTiersInUse();
+        } catch (ApiException notLoaded) {
+            return false;
+        }
+    }
+
+    @Override
     public TierSelectorParser.Stripped stripSelector(String model, Function<String, Destination> destination) {
         Optional<TierSelectorParser.Suffix> suffix = selectors ? TierSelectorParser.splitSuffix(model) : Optional.empty();
         // A bare "@kiro" names no model for a tier to serve.
@@ -302,7 +311,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
             List<PoolCell> units = nativeUnits(routed);
             String modelKey = modelKey(vendor, routed.upstreamModel());
             XpEligibility.Found xp = relays.evaluate(routed, snapshot, vendor, modelKey, units, tiers);
-            skipCounts.add(vendor, xp.skips());
+            skipCounts.add(vendor, xp.entry(), xp.skips());
             // A chain no tier can continue is refused here, before the price of the model is even looked up.
             return resolve(routed, snapshot, config, vendor, modelKey, units, xp, chosen, tiers)
                 .flatMap(resolved -> standardPrice(routed)

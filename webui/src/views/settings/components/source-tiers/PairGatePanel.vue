@@ -42,6 +42,7 @@
     setGate,
     successPercent,
     unbilledPercent,
+    withheldPercent,
   } from './xpMeta';
 
   const props = defineProps<{
@@ -110,6 +111,7 @@
       success: successPercent(figures),
       estimated: estimatedPercent(figures),
       unbilled: unbilledPercent(figures),
+      withheld: withheldPercent(figures),
       rejected: conversionRejectedPercent(figures),
       p95: formatLatency(figures.p95Ms),
     };
@@ -263,6 +265,23 @@
                 tabindex="0"
               >
                 {{ t('中断 {p0}', { p0: formatPercent(row.figures.unbilled) }) }}
+              </el-tag>
+            </el-tooltip>
+            <el-tooltip
+              :content="
+                t(
+                  '网关把中转的应答扣下（内容过滤，或在网关自己的输出上限处丢了调用）：没人为它付费，由你承担；不是中转的故障',
+                )
+              "
+              placement="top"
+            >
+              <el-tag
+                :type="figureTone('withheld', row.figures.withheld)"
+                size="small"
+                effect="plain"
+                tabindex="0"
+              >
+                {{ t('扣下 {p0}', { p0: formatPercent(row.figures.withheld) }) }}
               </el-tag>
             </el-tooltip>
             <el-tooltip :content="t('中转拒绝了转换后的请求的比例')" placement="top">

@@ -488,10 +488,10 @@ class SourceTierStatusServiceTest {
         return new SourceTierSnapshot.PairGate("anthropic", "OPENAI_CHAT", entry, state, List.of(keys));
     }
 
-    private static final XpSkipCounts.Key SKIP_LINT = new XpSkipCounts.Key("anthropic", "official", XpSkip.Reason.CONVERSION);
+    private static final XpSkipCounts.Key SKIP_LINT = new XpSkipCounts.Key("anthropic", "MESSAGES", "official", XpSkip.Reason.CONVERSION);
 
     private static SourceTierDtos.XpFigures figures(long attempts, long served, long interrupted, long conversionRejected, long estimated) {
-        return new SourceTierDtos.XpFigures(attempts, served, attempts - served, interrupted, conversionRejected, 0, 0, 0, estimated,
+        return new SourceTierDtos.XpFigures(attempts, served, attempts - served, interrupted, conversionRejected, 0, 0, 0, 0, estimated,
             0, 0, 1200L);
     }
 
@@ -552,9 +552,9 @@ class SourceTierStatusServiceTest {
         when(skipCounts.since()).thenReturn(NOW.minus(Duration.ofHours(3)));
         when(skipCounts.snapshot()).thenReturn(Map.of(
             SKIP_LINT, 2L,
-            new XpSkipCounts.Key("anthropic", "official", XpSkip.Reason.FEATURE), 7L,
-            new XpSkipCounts.Key("anthropic", "official", XpSkip.Reason.GATE), 100L,
-            new XpSkipCounts.Key("openai", "official", XpSkip.Reason.GATE), 4L));
+            new XpSkipCounts.Key("anthropic", "MESSAGES", "official", XpSkip.Reason.FEATURE), 7L,
+            new XpSkipCounts.Key("anthropic", "MESSAGES", "official", XpSkip.Reason.GATE), 100L,
+            new XpSkipCounts.Key("openai", "MESSAGES", "official", XpSkip.Reason.GATE), 4L));
 
         SourceTierDtos.XpStatus xp = service(true, offered).status().block().vendors().getFirst().xp();
 
@@ -642,18 +642,18 @@ class SourceTierStatusServiceTest {
         assertThat(chat.criteria()).filteredOn(criterion -> !criterion.met()).extracting(SourceTierDtos.Criterion::name)
             .containsExactly("requests", "conversionRejected");
         SourceTierDtos.PairEvidence openai = evidence.pairs().get(2);
-        assertThat(openai.figures()).isEqualTo(new SourceTierDtos.XpFigures(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null));
+        assertThat(openai.figures()).isEqualTo(new SourceTierDtos.XpFigures(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null));
         assertThat(openai.meetsStandard()).as("no attempts at all").isFalse();
         assertThat(openai.gate()).isEqualTo("OFF");
     }
 
     @Test
-    void theLintFailuresOfAPairAreThoseOfItsVendorAndAnyOneMakesItFail() {
+    void theLintFailuresOfAPairAreThoseOfItsEntryAndVendorAndAnyOneMakesItFail() {
         loaded(withRelay(relay, mapping("claude-sonnet-4.5", true, true), gate("MESSAGES", "KEYS", "key-1")));
         pairFigures.add(new FigureRow(null, "anthropic", null, "MESSAGES", figures(300, 300, 0, 0, 0)));
         when(skipCounts.since()).thenReturn(NOW.minus(Duration.ofDays(10)));
-        when(skipCounts.snapshot()).thenReturn(Map.of(SKIP_LINT, 1L, new XpSkipCounts.Key("openai", "official", XpSkip.Reason.CONVERSION), 9L,
-            new XpSkipCounts.Key("anthropic", "official", XpSkip.Reason.GATE), 50L));
+        when(skipCounts.snapshot()).thenReturn(Map.of(SKIP_LINT, 1L, new XpSkipCounts.Key("openai", "MESSAGES", "official", XpSkip.Reason.CONVERSION), 9L,
+            new XpSkipCounts.Key("anthropic", "MESSAGES", "official", XpSkip.Reason.GATE), 50L));
 
         SourceTierDtos.PairEvidence messages = service(true, offered).evidence(7).block().pairs().get(1);
 
@@ -662,6 +662,48 @@ class SourceTierStatusServiceTest {
             .containsExactly("lintFailures");
         assertThat(messages.criteria().get(1).value()).isEqualTo(1.0);
         assertThat(messages.meetsStandard()).isFalse();
+    }
+
+    /**
+     * The pairs of a vendor are promoted one by one: a conversion that failed for the Responses entry (a skip that is the
+     * newest converter's) is not a reason to keep the Chat and Messages pairs of the vendor from the upgrade, and the other
+     * way round.
+     */
+    @Test
+    void aConversionThatFailedForAnotherEntryIsNoLintFailureOfThePair() {
+        loaded(withRelay(relay, mapping("claude-sonnet-4.5", true, true), gate("MESSAGES", "KEYS", "key-1")));
+        pairFigures.add(new FigureRow(null, "anthropic", null, "MESSAGES", figures(300, 300, 0, 0, 0)));
+        pairFigures.add(new FigureRow(null, "anthropic", null, "CHAT", figures(300, 300, 0, 0, 0)));
+        when(skipCounts.since()).thenReturn(NOW.minus(Duration.ofDays(10)));
+        when(skipCounts.snapshot()).thenReturn(Map.of(
+            new XpSkipCounts.Key("anthropic", "RESPONSES", "official", XpSkip.Reason.CONVERSION), 4L,
+            new XpSkipCounts.Key("anthropic", "CHAT", "official", XpSkip.Reason.CONVERSION), 1L));
+
+        List<SourceTierDtos.PairEvidence> pairs = service(true, offered).evidence(7).block().pairs();
+
+        SourceTierDtos.PairEvidence chat = pairs.stream().filter(pair -> pair.vendor().equals("anthropic") && pair.entryEndpoint().equals("CHAT")).findFirst().orElseThrow();
+        SourceTierDtos.PairEvidence messages = pairs.stream().filter(pair -> pair.vendor().equals("anthropic") && pair.entryEndpoint().equals("MESSAGES")).findFirst().orElseThrow();
+        assertThat(messages.lintSkips()).as("neither the Chat entry's nor the Responses entry's").isZero();
+        assertThat(messages.criteria().get(1).met()).isTrue();
+        assertThat(chat.lintSkips()).as("its own").isEqualTo(1);
+        assertThat(chat.criteria().get(1).met()).isFalse();
+    }
+
+    @Test
+    void theSkipsOfTheStatusAreListedOverTheEntriesOfTheVendorTogether() {
+        loaded(withRelay(relay, mapping("claude-sonnet-4.5", true, true), gate("MESSAGES", "KEYS", "key-1")));
+        enabled.add(relayAccount);
+        when(skipCounts.since()).thenReturn(NOW.minus(Duration.ofHours(3)));
+        when(skipCounts.snapshot()).thenReturn(Map.of(
+            new XpSkipCounts.Key("anthropic", "MESSAGES", "official", XpSkip.Reason.GATE), 5L,
+            new XpSkipCounts.Key("anthropic", "RESPONSES", "official", XpSkip.Reason.GATE), 7L,
+            new XpSkipCounts.Key("anthropic", "RESPONSES", "official", XpSkip.Reason.CONVERSION), 1L,
+            new XpSkipCounts.Key("anthropic", "CHAT", "official", XpSkip.Reason.CONVERSION), 2L));
+
+        SourceTierDtos.XpStatus xp = service(true, offered).status().block().vendors().getFirst().xp();
+
+        assertThat(xp.skips()).containsExactly(
+            new SourceTierDtos.XpSkipCount("official", "GATE", 12), new SourceTierDtos.XpSkipCount("official", "CONVERSION", 3));
     }
 
     @Test

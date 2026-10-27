@@ -203,6 +203,8 @@ class ResponsesChatConverterTest {
         ((ObjectNode) chat.path("messages").get(0)).put("role", "changed");
         ((ObjectNode) chat.path("tools").get(0).path("function")).put("name", "changed");
         ((ObjectNode) chat.path("tool_choice")).put("type", "changed");
+        ((ObjectNode) chat.path("tools").get(0).path("function").path("parameters")).put("type", "changed");
+        ((ObjectNode) chat.path("tools").get(0).path("function").path("parameters").path("properties").path("cmd")).put("type", "changed");
         ((ObjectNode) chat.path("response_format").path("json_schema").path("schema")).put("type", "changed");
 
         assertThat(request.toString()).isEqualTo(before);
@@ -300,7 +302,7 @@ class ResponsesChatConverterTest {
     // ---------------------------------------------------------------------------------------- tools and tool_choice
 
     @Test
-    void aFunctionIsTheFunctionOfTheChatShapeWithTheSchemaOfTheOtherConversions() {
+    void aFunctionIsTheFunctionOfTheChatShapeWithTheSchemaTheClientWrote() {
         ObjectNode chat = convert(request(USER_HI, "\"tools\":[" + EXEC_TOOL + ","
             + "{\"type\":\"function\",\"name\":\"no_schema\"},"
             + "{\"type\":\"function\",\"function\":{\"name\":\"nested\",\"description\":\"Chat shape\",\"parameters\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":[\"string\",\"null\"],\"format\":\"uri\"}}}}},"
@@ -314,7 +316,8 @@ class ResponsesChatConverterTest {
             + "\"strict\":false}}"));
         assertThat(tools.get(1)).isEqualTo(tree("{\"type\":\"function\",\"function\":{\"name\":\"no_schema\",\"parameters\":{\"type\":\"object\",\"properties\":{}}}}"));
         assertThat(tools.get(2).path("function").path("description").stringValue()).isEqualTo("Chat shape");
-        assertThat(tools.get(2).path("function").path("parameters").path("properties").path("a").has("format")).isFalse();
+        // The schema is the client's, not reduced to the vocabulary Kiro takes: the type list and the format stay.
+        assertThat(tools.get(2).path("function").path("parameters")).isEqualTo(tree("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":[\"string\",\"null\"],\"format\":\"uri\"}}}"));
         assertThat(tools.get(3).path("function").propertyNames()).containsExactly("name", "parameters");
         assertThat(chat.path("parallel_tool_calls").booleanValue()).isFalse();
     }
@@ -404,6 +407,95 @@ class ResponsesChatConverterTest {
 
     private static final String APPLY_PATCH_CUSTOM = "{\"type\":\"custom\",\"name\":\"apply_patch\",\"description\":\"Use the `apply_patch` tool to edit files.\","
         + "\"format\":{\"type\":\"grammar\",\"syntax\":\"lark\",\"definition\":\"start: begin_patch hunk+ end_patch\"}}";
+
+    /**
+     * The tool of an Agents SDK app: pydantic models make a strict schema out of {@code $defs} and {@code $ref}, and an optional
+     * field is an {@code anyOf} with {@code null}. The Chat entry gives a relay this schema as written, and so does a native
+     * official key; a reduction of it to the vocabulary Kiro takes would make {@code $ref} an empty schema and fold the {@code
+     * anyOf} into {@code null}, and the strict that goes with it would ask a model for arguments that cannot be valid.
+     */
+    private static final String PYDANTIC_TOOL = "{\"type\":\"function\",\"name\":\"add_items\",\"description\":\"Adds items\",\"strict\":true,"
+        + "\"parameters\":{\"$defs\":{\"Item\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"},\"qty\":{\"type\":\"integer\",\"minimum\":1}},"
+        + "\"required\":[\"name\",\"qty\"],\"additionalProperties\":false}},"
+        + "\"type\":\"object\",\"properties\":{\"items\":{\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/Item\"}},"
+        + "\"shipping\":{\"anyOf\":[{\"$ref\":\"#/$defs/Item\"},{\"type\":\"null\"}]}},"
+        + "\"required\":[\"items\",\"shipping\"],\"additionalProperties\":false}}";
+
+    @Test
+    void theStrictSchemaOfAFunctionIsCarriedWithItsDefsRefsAndAnyOfAsTheClientWroteIt() {
+        JsonNode declared = tree(PYDANTIC_TOOL);
+        ObjectNode chat = convert(request(USER_HI, "\"tools\":[" + PYDANTIC_TOOL + "]"));
+
+        JsonNode function = chat.path("tools").get(0).path("function");
+        assertThat(function.path("parameters")).isEqualTo(declared.path("parameters"));
+        assertThat(function.path("strict").booleanValue()).isTrue();
+        // The same through the sanitizer for a gpt model behind the relay, which is where the relay is held to the schema.
+        Wire wire = sendable(tree(request(USER_HI, "\"tools\":[" + PYDANTIC_TOOL + "]")), GPT);
+        assertSendable(wire);
+        assertThat(wire.body().path("tools").get(0).path("function").path("parameters")).isEqualTo(declared.path("parameters"));
+        assertThat(wire.body().path("tools").get(0).path("function").path("strict").booleanValue()).isTrue();
+        assertThat(wire.degraded()).isEmpty();
+    }
+
+    /**
+     * An OpenAI-backed relay holds a strict function to its schema and refuses one that is not a strict schema. The gateway's own
+     * schema for the editing tool is not one (it has no {@code additionalProperties:false}), so the client's strict does not go
+     * with it, whichever way the client declared the tool; its other functions keep theirs.
+     */
+    @Test
+    void theStrictOfAClientIsNotSentWithTheGatewaysOwnSchemaForApplyPatch() {
+        ObjectNode chat = convert(request(USER_HI, "\"tools\":[{\"type\":\"function\",\"name\":\"apply_patch\",\"strict\":true,\"parameters\":{\"type\":\"object\","
+            + "\"properties\":{\"input\":{\"type\":\"string\"}},\"required\":[\"input\"],\"additionalProperties\":false}},"
+            + "{\"type\":\"function\",\"function\":{\"name\":\"apply_patch\",\"strict\":true}},"
+            + "{\"type\":\"function\",\"name\":\"read_file\",\"strict\":true,\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},"
+            + "\"required\":[\"path\"],\"additionalProperties\":false}}]"));
+
+        JsonNode tools = chat.path("tools");
+        for (int i = 0; i < 2; i++) {
+            JsonNode function = tools.get(i).path("function");
+            assertThat(function.path("name").stringValue()).isEqualTo("apply_patch");
+            assertThat(function.has("strict")).as("the gateway's schema is not the client's").isFalse();
+            assertThat(function.path("parameters").path("properties").propertyNames()).containsExactly("patch");
+        }
+        assertThat(tools.get(2).path("function").path("strict").booleanValue()).isTrue();
+        // Nor is it there after the sanitizer, for a gpt model behind the relay, where a strict function would be held to its schema.
+        Wire wire = sendable(tree(request(USER_HI, "\"tools\":[{\"type\":\"function\",\"name\":\"apply_patch\",\"strict\":true,\"parameters\":{\"type\":\"object\","
+            + "\"properties\":{\"input\":{\"type\":\"string\"}},\"required\":[\"input\"],\"additionalProperties\":false}}]")), GPT);
+        assertSendable(wire);
+        assertThat(wire.body().path("tools").get(0).path("function").has("strict")).isFalse();
+    }
+
+    /**
+     * A function with a schema that is an object with no root type is an object schema, as the reduction the other conversions
+     * make would say, and OpenAI's Chat API needs: {@code parameters: {}} is what an MCP server declares for a tool without
+     * arguments, and a relay that is OpenAI behind its own gateway refuses it (invalid_function_parameters).
+     */
+    @Test
+    void theSchemaOfAFunctionIsAnObjectSchemaWhateverTheClientLeftOutOfItsRoot() {
+        ObjectNode chat = convert(request(USER_HI, "\"tools\":["
+            + "{\"type\":\"function\",\"name\":\"now\",\"parameters\":{}},"
+            + "{\"type\":\"function\",\"name\":\"none\"},"
+            + "{\"type\":\"function\",\"name\":\"described\",\"parameters\":{\"description\":\"nothing to say\",\"type\":null}},"
+            + "{\"type\":\"function\",\"name\":\"fields\",\"parameters\":{\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\"]}},"
+            + "{\"type\":\"function\",\"name\":\"typed\",\"parameters\":{\"type\":\"object\"}},"
+            + "{\"type\":\"function\",\"name\":\"nulled\",\"parameters\":{\"type\":\"object\",\"properties\":null}},"
+            + "{\"type\":\"function\",\"name\":\"whole\",\"strict\":true,\"parameters\":{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},"
+            + "\"required\":[\"a\"],\"additionalProperties\":false}}]"));
+
+        JsonNode tools = chat.path("tools");
+        assertThat(tools.get(0).path("function").path("parameters")).isEqualTo(tree("{\"type\":\"object\",\"properties\":{}}"));
+        assertThat(tools.get(1).path("function").path("parameters")).isEqualTo(tree("{\"type\":\"object\",\"properties\":{}}"));
+        assertThat(tools.get(2).path("function").path("parameters"))
+            .isEqualTo(tree("{\"type\":\"object\",\"description\":\"nothing to say\",\"properties\":{}}"));
+        assertThat(tools.get(3).path("function").path("parameters"))
+            .isEqualTo(tree("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\"]}"));
+        assertThat(tools.get(4).path("function").path("parameters")).isEqualTo(tree("{\"type\":\"object\",\"properties\":{}}"));
+        assertThat(tools.get(5).path("function").path("parameters")).isEqualTo(tree("{\"type\":\"object\",\"properties\":{}}"));
+        // A schema that has both is the client's, as it wrote it.
+        assertThat(tools.get(6).path("function").path("parameters"))
+            .isEqualTo(tree("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\"}},\"required\":[\"a\"],\"additionalProperties\":false}"));
+        assertThat(tools.get(6).path("function").path("strict").booleanValue()).isTrue();
+    }
 
     @Test
     void theCustomToolApplyPatchIsTheFunctionTheCodexPathSendsAsWell() {

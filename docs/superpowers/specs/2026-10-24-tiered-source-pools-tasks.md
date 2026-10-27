@@ -365,8 +365,8 @@
 
 - 依赖：P6-02
 - 文件：`service/src/main/java/tech/starryapi/proxy/ProxyFacade.java`, `service/src/main/java/tech/starryapi/proxy/XpDispatcher.java`, `service/src/main/java/tech/starryapi/proxy/tier/TierSessionBindings.java`, `service/src/test/java/tech/starryapi/proxy/ProxyFacadeTieredXpResponsesTest.java`
-- 内容：OPENAI_CHAT 时 XpDispatcher，否则 callResponsesWithAccount；跨协议成功时 owner 记 null（不调 rememberResponseOwner，状态存储 accountId 为 null）；本轮产生的 response id 记为本轮会话的一部分（链的下一轮是同一个会话）。
-- 测试：Codex 多轮；截断（网关默认上限处：只有文字按 completed；丢了被截断的调用、只有推理、被内容过滤停下是中断，502 不收费、重试去原生级别；客户端自己的上限给 incomplete 且不带调用，设计 7.10）；链的各轮是同一个会话（3 轮链降级后保持 L2，换了别的模型的一轮之后仍保持）；跨协议服务后未分级 OPENAI 链不选中中转；中转的推理项不记进链历史、不发给 OpenAI 账号；中转被中断后的 2 分钟排除经过中转因特性、缺映射被跳过或别的模型的一轮，仍然对链的下一轮有效。
+- 内容：OPENAI_CHAT 时 XpDispatcher，否则 callResponsesWithAccount；跨协议成功时 owner 记 null（不调 rememberResponseOwner，状态存储 accountId 为 null）；本轮产生的 response id 记为本轮会话的一部分（链的下一轮是同一个会话），不论本轮由谁服务、有没有分级的计划（未分级厂商的一轮、不保留会话的厂商的一轮也登记）。
+- 测试：Codex 多轮；截断（网关默认上限处：只有文字按 completed；丢了被截断的调用、只有推理、被内容过滤停下是被扣下的应答，502 不收费、不是中转的故障（不冷却、不计账号错误），`stop_reason` 记 `WITHHELD`，重试去下一个号源，它也被同一个 4,096 约束，除非是 Codex 账号，设计 7.10、O12；客户端自己的上限给 incomplete 且不带调用）；链的各轮是同一个会话（3 轮链降级后保持 L2，换了别的模型或别的厂商的模型的一轮之后仍保持）；中转答的 `apply_patch` 调用及其结果在下一轮落到 Kiro 时作为函数调用重放；函数工具的 schema 和 strict 原样发给中转；跨协议服务后未分级 OPENAI 链不选中中转；中转的推理项不记进链历史、不发给 OpenAI 账号；中转被中断后的 2 分钟排除经过中转因特性、缺映射被跳过或别的模型的一轮，仍然对链的下一轮有效。
 - 验收：原生 Responses 不变。
 
 ### P6-04 Responses 夹具与 EXPERIMENTAL

@@ -99,11 +99,13 @@ final class XpEligibility {
      * @param session what the request's session is called for the relays that broke off its answers, which the facade writes
      *     them under; null when no relay of the vendor is open to the request's key (a pair that is not offered or whose gate
      *     is shut), and when nothing tells the session from others
+     * @param entry the entry of the request as the registry names it, which the skips are counted under; null when no relay
+     *     was looked at
      */
-    record Found(Map<String, List<Eligible>> byTier, List<XpSkip> skips, boolean open, String session) {
+    record Found(Map<String, List<Eligible>> byTier, List<XpSkip> skips, boolean open, String session, String entry) {
 
         /** A request no relay takes part in. */
-        static final Found NONE = new Found(Map.of(), List.of(), false, null);
+        static final Found NONE = new Found(Map.of(), List.of(), false, null, null);
 
         List<Relay> relays(String tierId) {
             return byTier.getOrDefault(tierId, List.of()).stream().map(Eligible::relay).toList();
@@ -336,7 +338,7 @@ final class XpEligibility {
         }
         // Whatever the relays did this turn, or were left out for: the session is the one a relay is kept from, and what the
         // next turn of a response chain is the session of. A relay that is not open to the key is nothing of the session's.
-        return new Found(eligible, List.copyOf(skips), open, open ? session : null);
+        return new Found(eligible, List.copyOf(skips), open, open ? session : null, detected.entry().name());
     }
 
     /**

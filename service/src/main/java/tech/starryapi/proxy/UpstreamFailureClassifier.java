@@ -15,6 +15,7 @@ import tech.starryapi.account.allocation.AccountFailureScope;
 import tech.starryapi.egress.EgressException;
 import tech.starryapi.platform.upstream.UpstreamException;
 import tech.starryapi.platform.xproto.RelayAbortedAfterDispatchException;
+import tech.starryapi.platform.xproto.RelayAnswerWithheldException;
 import tech.starryapi.platform.xproto.RelayErrorException;
 import tech.starryapi.proxy.tier.TierDispatch;
 
@@ -56,6 +57,10 @@ final class UpstreamFailureClassifier {
      *       request was written, or the relay stopped after its first output) is a transport failure with its
      *       one-minute cooldown that is not retried anywhere, whatever else its cause says: the relay may be generating
      *       the answer, and a second attempt would pay for it twice.
+     *   <li>An answer the gateway holds back ({@link RelayAnswerWithheldException}: the relay's filter stopped it, or the
+     *       gateway's own output bound cut it, which the Responses entry cannot tell its client) ends the request as an
+     *       interruption does, and is nothing of the relay's: the request scope, no cooldown, nothing counted against the
+     *       account, and the admission store is told of a relay that answered ({@link Classification#withheld()}).
      *   <li>A model the relay does not serve (a 404, or a 400, 403, 422 or 503 that says so) is the model's problem on
      *       that account: ten minutes of cooldown, keyed by the mapping's model id ({@link TierDispatch#modelScope}),
      *       and the request goes on to another account or tier.
@@ -85,6 +90,13 @@ final class UpstreamFailureClassifier {
             return classify(error, account);
         }
         RelayAbortedAfterDispatchException aborted = findCause(error, RelayAbortedAfterDispatchException.class);
+        if (aborted instanceof RelayAnswerWithheldException) {
+            // The relay answered and the gateway held the answer back: the request ends here like an interruption, and nothing
+            // of it is the relay's failure (no scope that counts against the account, no cooldown).
+            return relayClassification(
+                aborted, aborted.getStatusCode(), AccountFailureScope.REQUEST, false, false, Duration.ZERO, RelayFailure.WITHHELD
+            );
+        }
         if (aborted != null) {
             // The exception's own words, not the transport error under it: that one can name the relay.
             return relayClassification(
@@ -543,7 +555,12 @@ final class UpstreamFailureClassifier {
         /** The relay refused the converted request. */
         CONVERSION_REJECTED,
         /** The relay rejected the key of its account (401, 403): a failure of that account, which the request does not end with. */
-        KEY_REFUSED
+        KEY_REFUSED,
+        /**
+         * The relay answered and the gateway held the answer back (design 7.10): it is the request's end like an interruption,
+         * and no failure of the relay, so the status page counts it apart from the interruptions the evidence is measured on.
+         */
+        WITHHELD
     }
 
     /**
@@ -577,9 +594,20 @@ final class UpstreamFailureClassifier {
                 permanentCredentialFailure, null);
         }
 
-        /** The relay may be generating the answer: not retried, not rechecked, and the tier is not climbed back from it. */
+        /**
+         * The relay may be generating the answer: not retried, not rechecked, and the tier is not climbed back from it, and
+         * the relay is kept from the session for a while. An answer the gateway holds back is the same to the request.
+         */
         boolean interrupted() {
-            return relayFailure == RelayFailure.INTERRUPTED;
+            return relayFailure == RelayFailure.INTERRUPTED || withheld();
+        }
+
+        /**
+         * The relay answered and the gateway did not pass the answer on: the relay is healthy, which the admission store is
+         * told (an answer, not a failure), though the request is not served.
+         */
+        boolean withheld() {
+            return relayFailure == RelayFailure.WITHHELD;
         }
 
         /** The relay refused the prompt for its length, which this node keeps (design 7.8) so as not to ask for the same again. */

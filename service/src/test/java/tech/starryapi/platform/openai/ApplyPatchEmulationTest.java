@@ -51,16 +51,31 @@ class ApplyPatchEmulationTest {
 
     @Test
     void theFunctionOfTheChatShapeIsTheSameFunctionOneLevelDownWithADescriptionThatSaysWhereThePatchGoes() {
-        JsonNode source = tree("{\"type\":\"custom\",\"name\":\"apply_patch\",\"description\":\"Edit files.\",\"strict\":false}");
+        JsonNode source = tree("{\"type\":\"custom\",\"name\":\"apply_patch\",\"description\":\"Edit files.\"}");
 
         JsonNode chat = EMULATION.chatFunctionTool(source);
 
         assertThat(chat).isEqualTo(tree("{\"type\":\"function\",\"function\":{\"name\":\"apply_patch\",\"description\":"
-            + JSON.valueToTree(ApplyPatchEmulation.CHAT_DESCRIPTION) + ",\"parameters\":" + PARAMETERS + ",\"strict\":false}}"));
+            + JSON.valueToTree(ApplyPatchEmulation.CHAT_DESCRIPTION) + ",\"parameters\":" + PARAMETERS + "}}"));
         assertThat(chat.propertyNames()).containsExactly("type", "function");
-        assertThat(chat.path("function").propertyNames()).containsExactly("name", "description", "parameters", "strict");
+        assertThat(chat.path("function").propertyNames()).containsExactly("name", "description", "parameters");
         // The accounts that speak Responses keep the client's own words, as they always did.
         assertThat(EMULATION.functionTool(source).path("description").stringValue()).isEqualTo("Edit files.");
+    }
+
+    /**
+     * The client's {@code strict} is a promise about the client's own schema. The schema of this function is the gateway's, and a
+     * strict one needs {@code additionalProperties:false}, which it has not: a relay is not told it is strict, whatever the client
+     * wrote, while the accounts that speak Responses are given it as they always were.
+     */
+    @Test
+    void theStrictOfTheClientGoesWithTheGatewaysSchemaToTheAccountsOfResponsesAndNotToARelay() {
+        for (String strict : new String[] {"true", "false"}) {
+            JsonNode source = tree("{\"type\":\"function\",\"name\":\"apply_patch\",\"strict\":" + strict + "}");
+
+            assertThat(EMULATION.functionTool(source).path("strict").booleanValue()).isEqualTo(Boolean.parseBoolean(strict));
+            assertThat(EMULATION.chatFunctionTool(source).path("function").has("strict")).isFalse();
+        }
     }
 
     /**

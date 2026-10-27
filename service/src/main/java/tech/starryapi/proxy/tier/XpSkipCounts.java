@@ -9,22 +9,25 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * How often relays were left out of a plan and why, per vendor, tier and reason (design 3, step 5b), since this node
+ * How often relays were left out of a plan and why, per vendor, entry, tier and reason (design 3, step 5b), since this node
  * started. A relay skipped for a request is not logged anywhere else, so this is the status page's only source for why a
- * tier that has relays was not served by them; the count of a (vendor, tier, reason) is the number of relays skipped,
- * not of requests. The keys are bounded by the configuration: vendors, tiers and the reasons.
+ * tier that has relays was not served by them; the count of a (vendor, entry, tier, reason) is the number of relays
+ * skipped, not of requests. The entry is the one the request came in through: a relay is skipped for a pair, and the
+ * pairs of a vendor are promoted one by one (design 7.3), so a skip of the Responses entry is nothing of the Chat entry's.
+ * The keys are bounded by the configuration: vendors, entries, tiers and the reasons.
  */
 public class XpSkipCounts {
 
-    public record Key(String vendor, String tierId, XpSkip.Reason reason) {
+    /** @param entry the entry of the request, as {@code PairRegistry.Entry} names it */
+    public record Key(String vendor, String entry, String tierId, XpSkip.Reason reason) {
     }
 
     private final ConcurrentMap<Key, LongAdder> counts = new ConcurrentHashMap<>();
     private final Instant since = Instant.now();
 
-    void add(String vendor, Collection<XpSkip> skips) {
+    void add(String vendor, String entry, Collection<XpSkip> skips) {
         for (XpSkip skip : skips) {
-            counts.computeIfAbsent(new Key(vendor, skip.tierId(), skip.reason()), ignored -> new LongAdder()).increment();
+            counts.computeIfAbsent(new Key(vendor, entry, skip.tierId(), skip.reason()), ignored -> new LongAdder()).increment();
         }
     }
 

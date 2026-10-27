@@ -281,6 +281,8 @@ class SourceTierStatusPostgreSqlIntegrationTest extends PostgreSqlIntegrationTes
         relayLog(relay, "/v1/messages", false, 100, null, "INTERRUPTED", null, now.minus(10, ChronoUnit.DAYS));
         relayLog(relay, "/v1/messages", true, 100, "REPORTED", "END_TURN", null, now.minus(40, ChronoUnit.DAYS));
         relayLog(relay, "/v1/responses", true, 100, "REPORTED", "END_TURN", null, now.minus(1, ChronoUnit.DAYS));
+        // An answer the gateway held back is no breakdown of the relay: it is counted apart and is not among the unbilled.
+        relayLog(relay, "/v1/responses", false, 100, null, "WITHHELD", null, now.minus(1, ChronoUnit.DAYS));
 
         SourceTierDtos.Evidence week = status().evidence(7).block();
         SourceTierDtos.Evidence month = status().evidence(30).block();
@@ -301,7 +303,13 @@ class SourceTierStatusPostgreSqlIntegrationTest extends PostgreSqlIntegrationTes
             .containsExactly("requests", "lintFailures", "unbilled");
         assertThat(monthMessages.criteria().get(1).value()).isNull();
         assertThat(pair(month, "anthropic", "CHAT").figures().attempts()).as("each entry has the attempts of its own path").isZero();
-        assertThat(pair(month, "anthropic", "RESPONSES").figures().attempts()).isEqualTo(1);
+        SourceTierDtos.XpFigures responses = pair(month, "anthropic", "RESPONSES").figures();
+        assertThat(responses.attempts()).isEqualTo(2);
+        assertThat(responses.failed()).isEqualTo(1);
+        assertThat(responses.withheld()).isEqualTo(1);
+        assertThat(responses.interrupted()).isZero();
+        assertThat(pair(month, "anthropic", "RESPONSES").criteria()).filteredOn(criterion -> criterion.name().equals("unbilled"))
+            .singleElement().satisfies(criterion -> assertThat(criterion.value()).isZero());
     }
 
     private static SourceTierDtos.PairEvidence pair(SourceTierDtos.Evidence evidence, String vendor, String entry) {

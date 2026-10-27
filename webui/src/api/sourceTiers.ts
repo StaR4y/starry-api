@@ -249,8 +249,9 @@ export interface SourceTierXpPair {
 
 /**
  * 发给中转的尝试，取自请求日志。interrupted 是中转可能已经生成、没人为它付费的中断（设计里的 UNBILLED，由运营者承担），
- * conversionRejected 是中转拒绝了转换后的请求，keyRefused 是中转拒绝了账号自己的 Key（请求去了别处，账号歇一会儿）；
- * failed 里其余的是别的失败。estimated、clamped 是用量不是中转报的那样的
+ * conversionRejected 是中转拒绝了转换后的请求，keyRefused 是中转拒绝了账号自己的 Key（请求去了别处，账号歇一会儿），
+ * withheld 是中转答了、网关把应答扣下的（Responses 入口上被过滤或在网关自己的输出上限处被截断的应答：没人为它付费，
+ * 不是中转的故障，所以不算在 interrupted 里）；failed 里其余的是别的失败。estimated、clamped 是用量不是中转报的那样的
  * 已服务尝试，degraded 是丢掉了请求特性的已服务尝试。p95Ms 是已服务尝试延迟的第 95 百分位，没有已服务的尝试时缺省。
  */
 export interface SourceTierXpFigures {
@@ -262,6 +263,7 @@ export interface SourceTierXpFigures {
   contextExceeded: number;
   modelNotServed: number;
   keyRefused: number;
+  withheld: number;
   estimated: number;
   clamped: number;
   degraded: number;

@@ -171,6 +171,7 @@ public final class SourceTierSnapshot {
     private final Set<String> exclusiveXpAccountIds;
     private final boolean crossProtocolMembers;
     private final Map<String, Set<String>> openRelayEntries;
+    private final boolean tiersInUse;
 
     private SourceTierSnapshot(
         long configVersion,
@@ -186,6 +187,7 @@ public final class SourceTierSnapshot {
         this.exclusiveXpAccountIds = exclusiveXpAccountIds;
         this.crossProtocolMembers = crossProtocolMembers;
         this.openRelayEntries = openRelayEntries;
+        this.tiersInUse = vendors.values().stream().anyMatch(index -> index.config.enabled() && index.tiers.stream().anyMatch(Tier::enabled));
     }
 
     /**
@@ -299,6 +301,14 @@ public final class SourceTierSnapshot {
      */
     public boolean isEmpty() {
         return vendors.isEmpty();
+    }
+
+    /**
+     * Whether any vendor is switched on with a tier switched on, which is when a request can be planned in tiers at all.
+     * Without one, a deployment runs the code it ran before tiers existed and keeps nothing for the sake of tiers.
+     */
+    public boolean hasTiersInUse() {
+        return tiersInUse;
     }
 
     /** The vendors that have a configuration row, enabled or not. */

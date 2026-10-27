@@ -24,6 +24,7 @@ import tech.starryapi.platform.upstream.UpstreamException;
 import tech.starryapi.platform.xproto.ChatCompletionAccumulator.Completion;
 import tech.starryapi.platform.xproto.PairRegistry.Entry;
 import tech.starryapi.platform.xproto.RelayAbortedAfterDispatchException;
+import tech.starryapi.platform.xproto.RelayAnswerWithheldException;
 import tech.starryapi.platform.xproto.RelayErrorMapper;
 import tech.starryapi.platform.xproto.RelayNotSentException;
 import tech.starryapi.platform.xproto.RelayUsageNormalizer;
@@ -55,13 +56,16 @@ import tools.jackson.databind.node.ObjectNode;
  *       calls of the editing tool, {@code apply_patch}, are turned into the custom tool calls Codex declared it as, with
  *       the patch for their input, as the native path does for the accounts that speak Responses ({@link
  *       ApplyPatchEmulation}; the relay was offered a function of that name with one {@code patch} argument).
- *   <li><b>An answer the Responses entry cannot be told</b> is an interruption too (see {@link #cannotBeTold}): the clients
- *       of that entry that matter take {@code response.incomplete} for a failure of the stream and send the request again,
- *       and a relay that is asked again answers again and is paid for it. So an answer that the relay's filter stopped, and
- *       one that the gateway's own bound cut off (the client named no limit, so the relay was held to the default the
+ *   <li><b>An answer the Responses entry cannot be told</b> is held back (see {@link #cannotBeTold}): the clients of that
+ *       entry that matter take {@code response.incomplete} for a failure of the stream and send the request again, and a
+ *       relay that is asked again answers again and is paid for it. So an answer that the relay's filter stopped, and one
+ *       that the gateway's own bound cut off (the client named no limit, so the relay was held to the default the
  *       reservation assumes) when it lost a call or has nothing to show, are not told as {@code incomplete}: nothing is
  *       charged for them, the relay is kept from the session for a couple of minutes, and the client's retry reaches
- *       another source, which is not held to that bound.
+ *       another source. That source is held to the same bound unless it is a Codex account (the other native sources are
+ *       sent the default as well, see {@link #cannotBeTold}), so the retry is no promise that the answer fits. It is a
+ *       {@link RelayAnswerWithheldException}, which is an interruption to the request and none to the relay's health: the
+ *       relay did what it was asked.
  *   <li><b>Every failure is the gateway's own</b>, and never one that leaves a reservation for review: a cross-protocol
  *       attempt is generated once, and whatever goes wrong with it is absorbed by the operator (invariant I7). The
  *       relay client already says what it can prove, and an {@link UpstreamException} it raises is kept (its status is
@@ -203,7 +207,7 @@ class XpDispatcher {
         if (dispatch.pair().entry() == Entry.RESPONSES) {
             String reason = cannotBeTold(completion, defaultOutputLimit);
             if (reason != null) {
-                throw new RelayAbortedAfterDispatchException(reason);
+                throw new RelayAnswerWithheldException(reason);
             }
         }
         RelayUsageNormalizer.Result usage = RelayUsageNormalizer.normalize(completion, sent, caliber, limits);
@@ -232,11 +236,13 @@ class XpDispatcher {
      *   <li>One that the relay's filter stopped. Another source may answer the request, and the same relay is likely to
      *       stop the retry in the same place.
      *   <li>One that the gateway's own bound cut off ({@code defaultOutputLimit}: the client wrote none, so the relay was
-     *       held to the default the reservation assumes, which the native accounts, that strip it, are not) and that lost a
-     *       call to it, or that has nothing the client can show: no text and no whole call, only reasoning. An answer
-     *       that is text alone, or has the calls it came to, is a finished turn to every native account's client and is
-     *       told as {@code completed} by the facade ({@code ProxyFacade#responsesAnswerOfRelay}); one that lost a call
-     *       would end the turn without the step the model was taking, or run the calls it kept without the one it cut.
+     *       held to the default the reservation assumes) and that lost a call to it, or that has nothing the client can
+     *       show: no text and no whole call, only reasoning. The bound is the gateway's for every source: Codex accounts
+     *       drop the field, but Kiro, official OpenAI keys and Anthropic keys are sent the same 4,096 when the client names
+     *       none, and Kiro's answer has no stop reason, so a native source renders what it was cut at as a finished
+     *       answer. An answer that is text alone, or has the calls it came to, is told as {@code completed} by the facade
+     *       ({@code ProxyFacade#responsesAnswerOfRelay}) as a native source's is; one that lost a call would end the turn
+     *       without the step the model was taking, or run the calls it kept without the one it cut.
      * </ul>
      *
      * A limit the client named is its own, and an answer that reached it is {@code incomplete} to the client that asked

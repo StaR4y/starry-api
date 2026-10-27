@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -69,6 +70,7 @@ public class SourceTierStatusService {
     public static final String CONTEXT_EXCEEDED = "CONTEXT_EXCEEDED";
     public static final String MODEL_NOT_SERVED = "MODEL_NOT_SERVED";
     public static final String KEY_REFUSED = "KEY_REFUSED";
+    public static final String WITHHELD = "WITHHELD";
 
     /** The first layer that keeps a relay from serving, as the status names it. */
     static final String LAYER_DISABLED = "disabled";
@@ -78,7 +80,7 @@ public class SourceTierStatusService {
     static final String LAYER_BUSY = "busy";
     static final String LAYER_READY = "ready";
 
-    private static final SourceTierDtos.XpFigures NO_FIGURES = new SourceTierDtos.XpFigures(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null);
+    private static final SourceTierDtos.XpFigures NO_FIGURES = new SourceTierDtos.XpFigures(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null);
 
     private final SourceTierRegistry registry;
     private final SourceTierRuntimeInfo runtime;
@@ -422,14 +424,23 @@ public class SourceTierStatusService {
             .findFirst().orElse(null);
     }
 
-    /** How often this node has left a relay of the vendor out of a plan, by tier and reason, in the order the reasons are met. */
+    /**
+     * How often this node has left a relay of the vendor out of a plan, by tier and reason, in the order the reasons are met,
+     * over every entry the vendor is asked through (the evidence of a pair is the one that counts one entry's lint skips).
+     */
     private List<SourceTierDtos.XpSkipCount> skips(String vendor) {
-        return skipCounts.snapshot().entrySet().stream()
-            .filter(entry -> entry.getKey().vendor().equals(vendor) && entry.getValue() > 0)
-            .sorted(Comparator.comparing((Map.Entry<XpSkipCounts.Key, Long> entry) -> entry.getKey().tierId())
-                .thenComparing(entry -> entry.getKey().reason()))
+        Map<TierReason, Long> merged = new TreeMap<>(Comparator.comparing(TierReason::tierId).thenComparing(TierReason::reason));
+        skipCounts.snapshot().forEach((key, count) -> {
+            if (key.vendor().equals(vendor) && count > 0) {
+                merged.merge(new TierReason(key.tierId(), key.reason()), count, Long::sum);
+            }
+        });
+        return merged.entrySet().stream()
             .map(entry -> new SourceTierDtos.XpSkipCount(entry.getKey().tierId(), entry.getKey().reason().name(), entry.getValue()))
             .toList();
+    }
+
+    private record TierReason(String tierId, XpSkip.Reason reason) {
     }
 
     /** What the log says of the relays in a window. */
@@ -503,7 +514,7 @@ public class SourceTierStatusService {
                         }
                         PairGate gate = gate(snapshot, pair.vendor(), pair.sourceProtocol(), pair.entryEndpoint());
                         SourceTierDtos.XpFigures figures = relayReads.pair(pair.vendor(), pair.entryEndpoint());
-                        long lint = lintFailures(pair.vendor());
+                        long lint = lintFailures(pair.vendor(), pair.entryEndpoint());
                         // This node counted the failures from the day it started, which may be later than the window begins.
                         List<SourceTierDtos.Criterion> criteria = XpPairStandard.evaluate(figures, lint, !skipCounts.since().isAfter(since));
                         pairs.add(new SourceTierDtos.PairEvidence(
@@ -531,10 +542,15 @@ public class SourceTierStatusService {
         });
     }
 
-    /** The relays of the vendor that this node left out of plans for a body that failed the strict lint. */
-    private long lintFailures(String vendor) {
+    /**
+     * The relays of the vendor that this node left out of plans of the entry for a body that failed the strict lint (or a
+     * conversion that failed): a pair's own, since the pairs of a vendor are promoted one by one and the converter of one
+     * entry is not the converter of another.
+     */
+    private long lintFailures(String vendor, String entryEndpoint) {
         return skipCounts.snapshot().entrySet().stream()
-            .filter(entry -> entry.getKey().vendor().equals(vendor) && entry.getKey().reason() == XpSkip.Reason.CONVERSION)
+            .filter(entry -> entry.getKey().vendor().equals(vendor) && entry.getKey().entry().equals(entryEndpoint)
+                && entry.getKey().reason() == XpSkip.Reason.CONVERSION)
             .mapToLong(Map.Entry::getValue)
             .sum();
     }
@@ -609,11 +625,12 @@ public class SourceTierStatusService {
             count(*) FILTER (WHERE NOT success AND stop_reason = '%s') AS context_exceeded,
             count(*) FILTER (WHERE NOT success AND stop_reason = '%s') AS model_not_served,
             count(*) FILTER (WHERE NOT success AND stop_reason = '%s') AS key_refused,
+            count(*) FILTER (WHERE NOT success AND stop_reason = '%s') AS withheld,
             count(*) FILTER (WHERE success AND usage_source = 'ESTIMATED') AS estimated,
             count(*) FILTER (WHERE success AND usage_source = 'CLAMPED') AS clamped,
             count(*) FILTER (WHERE success AND degraded_features IS NOT NULL AND degraded_features <> '') AS degraded,
             percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE success) AS p95""".formatted(
-            INTERRUPTED, CONVERSION_REJECTED, CONTEXT_EXCEEDED, MODEL_NOT_SERVED, KEY_REFUSED);
+            INTERRUPTED, CONVERSION_REJECTED, CONTEXT_EXCEEDED, MODEL_NOT_SERVED, KEY_REFUSED, WITHHELD);
 
         private static final String RELAY_ATTEMPTS = """
             FROM request_logs
@@ -713,6 +730,7 @@ public class SourceTierStatusService {
                 count(row.get("context_exceeded", Number.class)),
                 count(row.get("model_not_served", Number.class)),
                 count(row.get("key_refused", Number.class)),
+                count(row.get("withheld", Number.class)),
                 count(row.get("estimated", Number.class)),
                 count(row.get("clamped", Number.class)),
                 count(row.get("degraded", Number.class)),

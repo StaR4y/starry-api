@@ -39,7 +39,7 @@ const {
   cacheCostWarning, exclusiveWarning, limitsNote, durationNote, isOpenAiCompatibleKey, relayCandidates, catalogModelsOf,
   coveredAliases, catalogWindow, prefillContext, prefillContexts, suggestWireName, pairStatusOf, allowedGateStates, gateOf,
   gateState, gateKeys, setGate, gateProblem, blockingGateProblem, percentOf, successPercent, estimatedPercent, unbilledPercent,
-  conversionRejectedPercent, figureTone, formatLatency, skipReasonLabel, skipReasonHint, criterionValue, criterionNote, lintCountPartial, unmetCriteria, evidenceFileName,
+  withheldPercent, conversionRejectedPercent, figureTone, formatLatency, skipReasonLabel, skipReasonHint, criterionValue, criterionNote, lintCountPartial, unmetCriteria, evidenceFileName,
   relayErrorMessage, verificationOf, probeLabel, verifyTargets, ENTRY_ENDPOINTS,
 } = meta;
 meta.setLocale('zh-CN');
@@ -1237,7 +1237,7 @@ test('a gate that cannot be saved is told before the server refuses it, and an e
   assert.match(gateProblem([gate('CHAT', 'ON')], 'CHAT', 'EXPERIMENTAL'), /不能设为/);
 });
 
-const figures = (extra = {}) => ({ attempts: 200, served: 190, failed: 10, interrupted: 2, conversionRejected: 1, contextExceeded: 0, modelNotServed: 0, keyRefused: 0, estimated: 19, clamped: 0, degraded: 0, ...extra });
+const figures = (extra = {}) => ({ attempts: 200, served: 190, failed: 10, interrupted: 2, conversionRejected: 1, contextExceeded: 0, modelNotServed: 0, keyRefused: 0, withheld: 0, estimated: 19, clamped: 0, degraded: 0, ...extra });
 
 test('the figures of the window are shares of the attempts or of the answered attempts, and absent without a base', () => {
   assert.equal(percentOf(1, 0), null);
@@ -1246,6 +1246,11 @@ test('the figures of the window are shares of the attempts or of the answered at
   assert.equal(estimatedPercent(figures()), 10);
   assert.equal(unbilledPercent(figures()), 1);
   assert.equal(conversionRejectedPercent(figures()), 0.5);
+  // The answers the gateway held back are shares of the attempts of their own, not of the interrupted ones.
+  assert.equal(withheldPercent(figures()), 0);
+  assert.equal(withheldPercent(figures({ withheld: 5 })), 2.5);
+  assert.equal(unbilledPercent(figures({ withheld: 5 })), 1);
+  assert.equal(withheldPercent(figures({ attempts: 0, withheld: 0 })), null);
   assert.equal(successPercent(figures({ attempts: 0, served: 0 })), null);
   assert.equal(estimatedPercent(figures({ served: 0 })), null);
 });
@@ -1258,6 +1263,9 @@ test('a figure turns red at the line the upgrade standard draws', () => {
   assert.equal(figureTone('unbilled', 0), 'success');
   assert.equal(figureTone('conversionRejected', 1), 'danger');
   assert.equal(figureTone('conversionRejected', 0.4), 'warning');
+  assert.equal(figureTone('withheld', 0), 'success');
+  assert.equal(figureTone('withheld', 0.5), 'warning');
+  assert.equal(figureTone('withheld', null), 'info');
   assert.equal(figureTone('success', 89.9), 'warning');
   assert.equal(figureTone('success', 90), 'success');
   assert.equal(figureTone('estimated', null), 'info');

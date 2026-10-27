@@ -845,9 +845,14 @@ export function conversionRejectedPercent(figures: SourceTierXpFigures): number 
   return percentOf(figures.conversionRejected, figures.attempts);
 }
 
-export type FigureKind = 'success' | 'estimated' | 'unbilled' | 'conversionRejected';
+/** 网关把中转的应答扣下（内容过滤，或在网关自己的输出上限处丢了调用）的尝试占全部尝试的比例；不在中断里，也不是中转的故障 */
+export function withheldPercent(figures: SourceTierXpFigures): number | null {
+  return percentOf(figures.withheld, figures.attempts);
+}
 
-/** 指标的提示色：估算超过 5%、中断达到 2%、转换被拒达到 1% 标红（升级标准的界限），成功率低于 90% 标黄 */
+export type FigureKind = 'success' | 'estimated' | 'unbilled' | 'conversionRejected' | 'withheld';
+
+/** 指标的提示色：估算超过 5%、中断达到 2%、转换被拒达到 1% 标红（升级标准的界限），成功率低于 90% 标黄，有被扣下的应答标黄（没有升级标准） */
 export function figureTone(
   kind: FigureKind,
   value: number | null,
@@ -860,6 +865,8 @@ export function figureTone(
       return value >= 2 ? 'danger' : value > 0 ? 'warning' : 'success';
     case 'conversionRejected':
       return value >= 1 ? 'danger' : value > 0 ? 'warning' : 'success';
+    case 'withheld':
+      return value > 0 ? 'warning' : 'success';
     default:
       return value < 90 ? 'warning' : 'success';
   }
@@ -911,12 +918,14 @@ export function skipReasonHint(reason: string): string {
         '请求带了图片、json_schema、服务端工具等中转承载不了、而原生账号能承载的特性，这个请求只能由原生账号服务',
       );
     case 'CONVERSION':
-      return t('请求转换成中转的格式后没通过严格检查。升级一个对之前，这一项必须为 0');
+      return t(
+        '请求转换成中转的格式后没通过严格检查。这里是厂商各个入口的合计；升级证据按入口数，这一对的入口必须为 0',
+      );
     case 'CONTEXT':
       return t('请求比映射的上下文上限，或中转拒绝过的长度更大，由窗口更大的原生级别服务');
     case 'INTERRUPTED':
       return t(
-        '中转刚中断了这个会话的应答（它可能还在生成），客户端的重试 2 分钟内不会再给它，免得为多次部分生成付费',
+        '中转刚中断了这个会话的应答（它可能还在生成），或它的应答被网关扣下（内容过滤、在网关的上限处丢了调用），客户端的重试 2 分钟内不会再给它，免得为多次部分生成或被扣下的应答付费',
       );
     default:
       return reason;

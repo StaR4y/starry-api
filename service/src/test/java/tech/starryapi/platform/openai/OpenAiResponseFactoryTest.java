@@ -467,6 +467,84 @@ class OpenAiResponseFactoryTest {
         assertThat(OpenAiResponseFactory.withoutRenderedReasoning(text)).isSameAs(text);
     }
 
+    /**
+     * What a relay called the editing tool with, and what the client answered, are a custom tool call and its output in the
+     * chain; the sources whose conversion knows only functions are given them as the call of a function and its result.
+     */
+    @Test
+    void theCustomToolCallsOfAnInputAreFunctionCallsForTheRoutesThatKnowOnlyThose() {
+        JsonNode request = objectMapper.readTree("""
+            {"model":"claude-sonnet-4.5","store":false,"input":[
+              {"type":"message","role":"user","content":"add a file"},
+              {"type":"custom_tool_call","id":"ctc_1","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch\\n*** End Patch\\n","status":"completed"},
+              {"type":"custom_tool_call_output","call_id":"call_1","output":"Done!"},
+              {"type":"custom_tool_call","call_id":"call_2","name":"shell","input":"ls -la"},
+              {"type":"custom_tool_call_output","call_id":"call_2","output":[{"type":"output_text","text":"a.txt"}]},
+              {"type":"function_call","call_id":"call_3","name":"exec_command","arguments":"{}"}]}""");
+        JsonNode before = request.deepCopy();
+
+        JsonNode converted = OpenAiResponseFactory.withCustomCallsAsFunctionCalls(request);
+
+        JsonNode input = converted.path("input");
+        assertThat(input).extracting(item -> item.path("type").asString("")).containsExactly(
+            "message", "function_call", "function_call_output", "function_call", "function_call_output", "function_call");
+        assertThat(input.get(1).path("call_id").asString()).isEqualTo("call_1");
+        assertThat(input.get(1).path("name").asString()).isEqualTo("apply_patch");
+        // No tool of the request is the editing tool, so there is nothing to follow: the argument of any custom tool.
+        assertThat(objectMapper.readTree(input.get(1).path("arguments").asString()).path("input").asString())
+            .isEqualTo("*** Begin Patch\n*** End Patch\n");
+        assertThat(input.get(1).has("input")).isFalse();
+        assertThat(input.get(2).path("call_id").asString()).isEqualTo("call_1");
+        assertThat(input.get(2).path("output").asString()).isEqualTo("Done!");
+        assertThat(objectMapper.readTree(input.get(3).path("arguments").asString()).path("input").asString()).isEqualTo("ls -la");
+        assertThat(input.get(4).path("output").get(0).path("text").asString()).isEqualTo("a.txt");
+        assertThat(input.get(5)).isSameAs(request.path("input").get(5));
+        assertThat(converted.path("model").asString()).isEqualTo("claude-sonnet-4.5");
+        assertThat(converted.path("store").booleanValue()).isFalse();
+        // The request is not changed; one that holds no custom call is the very same request, and so is one whose input is a text.
+        assertThat(request).isEqualTo(before);
+        JsonNode plain = objectMapper.readTree("{\"model\":\"m\",\"input\":[{\"type\":\"function_call\",\"call_id\":\"c\",\"name\":\"f\",\"arguments\":\"{}\"}]}");
+        assertThat(OpenAiResponseFactory.withCustomCallsAsFunctionCalls(plain)).isSameAs(plain);
+        JsonNode text = objectMapper.readTree("{\"model\":\"m\",\"input\":\"q\"}");
+        assertThat(OpenAiResponseFactory.withCustomCallsAsFunctionCalls(text)).isSameAs(text);
+    }
+
+    /**
+     * The Kiro and Anthropic routes are given the client's own declaration of the editing tool, not the gateway's function with
+     * its {@code patch}, so the history shows the call with the argument that declaration has: the string property of the
+     * function (Codex's JSON tool takes {@code input}), and {@code input} for a custom tool, which those routes declare with no
+     * properties.
+     */
+    @Test
+    void theArgumentOfAReplayedPatchIsTheOneTheRouteDeclaresTheEditingToolWith() {
+        assertThat(replayedPatchArgument("[{\"type\":\"function\",\"name\":\"apply_patch\",\"parameters\":{\"type\":\"object\","
+            + "\"properties\":{\"input\":{\"type\":\"string\"}},\"required\":[\"input\"]}}]")).isEqualTo("input");
+        assertThat(replayedPatchArgument("[{\"type\":\"function\",\"name\":\"apply_patch\",\"parameters\":{\"type\":\"object\","
+            + "\"properties\":{\"diff\":{\"type\":\"string\"}},\"required\":[\"diff\"]}}]")).isEqualTo("diff");
+        // The required one when there are several, else the first string one; the nested shape of the Chat API is the same function.
+        assertThat(replayedPatchArgument("[{\"type\":\"function\",\"function\":{\"name\":\"apply_patch\",\"parameters\":{\"type\":\"object\","
+            + "\"properties\":{\"dry_run\":{\"type\":\"boolean\"},\"note\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"}},"
+            + "\"required\":[\"text\"]}}}]")).isEqualTo("text");
+        assertThat(replayedPatchArgument("[{\"type\":\"function\",\"name\":\"apply_patch\",\"parameters\":{\"type\":\"object\","
+            + "\"properties\":{\"dry_run\":{\"type\":\"boolean\"},\"note\":{\"type\":\"string\"}}}}]")).isEqualTo("note");
+        // A custom tool is declared to those routes with an empty schema, a function with none to name is too, and so is no declaration.
+        assertThat(replayedPatchArgument("[{\"type\":\"custom\",\"name\":\"apply_patch\",\"format\":{\"type\":\"grammar\"}}]")).isEqualTo("input");
+        assertThat(replayedPatchArgument("[{\"type\":\"function\",\"name\":\"apply_patch\"}]")).isEqualTo("input");
+        assertThat(replayedPatchArgument("[{\"type\":\"function\",\"name\":\"shell\",\"parameters\":{\"type\":\"object\","
+            + "\"properties\":{\"command\":{\"type\":\"string\"}}}}]")).isEqualTo("input");
+        assertThat(replayedPatchArgument(null)).isEqualTo("input");
+    }
+
+    private String replayedPatchArgument(String tools) {
+        JsonNode request = objectMapper.readTree("{\"model\":\"claude-sonnet-4.5\"," + (tools == null ? "" : "\"tools\":" + tools + ",") + "\"input\":["
+            + "{\"type\":\"custom_tool_call\",\"call_id\":\"call_1\",\"name\":\"apply_patch\",\"input\":\"*** Begin Patch\\n*** End Patch\\n\"}]}");
+        JsonNode arguments = objectMapper.readTree(OpenAiResponseFactory.withCustomCallsAsFunctionCalls(request)
+            .path("input").get(0).path("arguments").asString());
+        assertThat(arguments.propertyNames()).hasSize(1);
+        assertThat(arguments.properties().iterator().next().getValue().asString()).isEqualTo("*** Begin Patch\n*** End Patch\n");
+        return arguments.propertyNames().iterator().next();
+    }
+
     private PlatformCompletionResult textResult() {
         return new PlatformCompletionResult("Hello", new PlatformUsage(10, 2, java.math.BigDecimal.ZERO, 0, 0, 0));
     }

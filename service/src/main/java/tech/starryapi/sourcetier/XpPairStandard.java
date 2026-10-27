@@ -14,8 +14,9 @@ import tech.starryapi.sourcetier.SourceTierDtos.XpFigures;
  *
  * <ul>
  *   <li>{@code requests}: at least 200 attempts were sent to relays for the pair, under the keys the gate listed.
- *   <li>{@code lintFailures}: no relay was left out of a plan for a body that failed the strict lint (a count of relays,
- *       kept by the node that planned them; the vendor's, since a plan skips a relay before it is known which pair it was for).
+ *   <li>{@code lintFailures}: no relay was left out of a plan for a body that failed the strict lint, or for a conversion
+ *       that failed (a count of relays, kept by the node that planned them, for the entry of the pair: a plan knows which pair
+ *       it is for before it skips a relay, and the converter of the Responses entry is not that of the Chat entry).
  *       The node counts from the moment it started, so the condition can be judged only for a window that begins after that:
  *       for a longer one the node cannot say that nothing failed in the part it did not see, and the condition is not met.
  *   <li>{@code conversionRejected}: fewer than 1% of the attempts were refused by the relay as converted.
@@ -40,7 +41,7 @@ public final class XpPairStandard {
     }
 
     /**
-     * The conditions in the order above, for the figures of a pair and the lint failures of its vendor.
+     * The conditions in the order above, for the figures of a pair and the lint failures of its vendor on the entry of the pair.
      *
      * @param lintCounted whether the lint failures were counted over the whole window of the figures; if not, the node has
      *     not been up for all of it, and that condition cannot be judged (no value, not met)

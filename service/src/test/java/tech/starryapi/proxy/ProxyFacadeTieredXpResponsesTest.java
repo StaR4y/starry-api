@@ -33,6 +33,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
+import java.util.stream.StreamSupport;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -56,6 +57,7 @@ import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.account.allocation.AccountAdmissionStore;
 import tech.starryapi.account.allocation.AccountAdmissionStore.AdmissionDecision;
 import tech.starryapi.account.allocation.AccountAdmissionStore.AdmissionRequest;
+import tech.starryapi.account.allocation.AccountFailureScope;
 import tech.starryapi.account.allocation.AccountAllocationCategory;
 import tech.starryapi.apikey.ApiKeyPrincipal;
 import tech.starryapi.apikey.ApiKeyService;
@@ -91,6 +93,7 @@ import tech.starryapi.platform.xproto.PairRegistry.Registration;
 import tech.starryapi.platform.xproto.PairRegistry.SourceKind;
 import tech.starryapi.platform.xproto.PairRegistry.Status;
 import tech.starryapi.platform.xproto.RelayAbortedAfterDispatchException;
+import tech.starryapi.platform.xproto.RelayAnswerWithheldException;
 import tech.starryapi.platform.xproto.RelayErrorMapper;
 import tech.starryapi.platform.xproto.RelayUsageNormalizer.Limits;
 import tech.starryapi.platform.xproto.ResponsesChatConverter;
@@ -547,20 +550,22 @@ class ProxyFacadeTieredXpResponsesTest {
     }
 
     /**
-     * An answer the dispatcher found unusable (cut inside a call, or only reasoning, at the gateway's bound; stopped by the
-     * relay's filter) is an interruption: Codex is told 502 and not that the response is incomplete, nothing is charged, and
-     * its retry of the same request is not given to the relay again but to Kiro, which is not held to 4,096 tokens.
+     * An answer the dispatcher held back (cut inside a call, or only reasoning, at the gateway's bound; stopped by the relay's
+     * filter) ends the request like an interruption: Codex is told 502 and not that the response is incomplete, nothing is
+     * charged, and its retry of the same request is not given to the relay again but to Kiro. It is no failure of the relay: its
+     * account is not counted against and the admission store is told of an answer.
      */
     @Test
-    void anAnswerTheRelayCouldNotFinishIsAnInterruptionAndTheClientsRetryIsKirosWithNothingChargedForIt() {
+    void anAnswerTheGatewayHeldBackEndsTheRequestAndTheClientsRetryIsKirosWithNothingChargedForIt() {
         configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
         add(relay, kiro("kiro-1"));
-        fails(relayAnswers, "relay-1", new RelayAbortedAfterDispatchException("The source's answer was cut off before it could be used"));
+        fails(relayAnswers, "relay-1", new RelayAnswerWithheldException("The source's answer was cut off before it could be used"));
 
         assertThatThrownBy(() -> responses(codexTurn(), "codex-session-1"))
             .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_GATEWAY));
         verify(apiKeyService, never()).accountUsageServed(any(), anyString(), any(), anyLong(), anyLong(), anyString(), anyInt(), any());
         verify(apiKeyService).releaseUsage(any(), anyString(), eq(true), anyString());
+        assertThat(logs().getFirst().stopReason()).as("counted apart from the interruptions").isEqualTo("WITHHELD");
 
         // Codex sends the request again, up to five times; every one is Kiro's, and the relay is asked once.
         for (int retry = 0; retry < 5; retry++) {
@@ -569,6 +574,84 @@ class ProxyFacadeTieredXpResponsesTest {
         }
         assertThat(dispatched).containsExactly("relay-1", "kiro-1", "kiro-1", "kiro-1", "kiro-1", "kiro-1");
         verify(apiKeyService, times(5)).accountUsageServed(any(), anyString(), any(), anyLong(), anyLong(), eq("anthropic:kiro"), eq(2), any());
+    }
+
+    /**
+     * The 4,096 tokens a request that names no limit is held to are the gateway's for every source, not the relay's alone: Kiro
+     * is sent them as its {@code maxTokens} (it is the bound the reservation is sized from, and what the facade has always sent
+     * the accounts of this route). So the client whose retry is Kiro's is not given a source that lets a long write complete;
+     * only Codex accounts, which drop the field, are. The documentation says so (design 7.10, O12).
+     */
+    @Test
+    void kiroIsHeldToTheSameDefaultOutputLimitAsTheRelayWhenTheClientNamesNone() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+
+        responses(codexTurn().put("stream", false));
+        busy.add("relay-1");
+        responses(codexTurn().put("stream", false));
+        responses(codexTurn().put("stream", false).put("max_output_tokens", 20_000));
+
+        assertThat(lastLimits.maxOutputTokens()).isEqualTo(4096);
+        assertThat(relayDispatches.getFirst().wireBody().path("max_tokens").asInt()).isEqualTo(4096);
+        assertThat(kiroPayloads).hasSize(2);
+        assertThat(kiroPayloads.get(0).path("inferenceConfig").path("maxTokens").asInt()).isEqualTo(4096);
+        assertThat(kiroPayloads.get(1).path("inferenceConfig").path("maxTokens").asInt()).as("the client's own limit is kept").isEqualTo(20_000);
+    }
+
+    /**
+     * The relay did what it was asked, so its account is not counted against (the error count and the automatic test that two
+     * failures in a row start), and admission is told it answered: nothing that could cool it down for the other sessions.
+     */
+    @Test
+    void anAnswerTheGatewayHeldBackIsNoFailureOfTheRelaysAccountAndAdmissionIsToldOfAnAnswer() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        fails(relayAnswers, "relay-1", new RelayAnswerWithheldException("The source stopped its answer with its content filter"));
+
+        for (int session = 0; session < 4; session++) {
+            int number = session;
+            assertThatThrownBy(() -> responses(codexTurn(), "codex-session-" + number))
+                .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_GATEWAY));
+        }
+
+        verify(accountPool, never()).recordRequestFailure(eq("relay-1"), any(AccountPoolService.UpstreamErrorType.class), any(), anyString(),
+            any(AccountPoolRequestContext.class));
+        ArgumentCaptor<AccountAdmissionStore.AdmissionResult> reconciled = ArgumentCaptor.forClass(AccountAdmissionStore.AdmissionResult.class);
+        verify(admissionStore, times(4)).reconcile(reconciled.capture());
+        assertThat(reconciled.getAllValues()).allSatisfy(result -> {
+            assertThat(result.success()).isTrue();
+            assertThat(result.failureScope()).isNotEqualTo(AccountFailureScope.TRANSPORT);
+            assertThat(result.cooldown()).isEqualTo(Duration.ZERO);
+        });
+        // The relay is asked again by a session that it did not answer for: nothing of its state was touched.
+        assertThat(logs()).hasSize(4).allSatisfy(log -> {
+            assertThat(log.success()).isFalse();
+            assertThat(log.statusCode()).isEqualTo(502);
+            assertThat(log.stopReason()).isEqualTo("WITHHELD");
+        });
+        relayAnswers.clear();
+        dispatched.clear();
+        assertThat(finalResponse(responses(codexTurn().put("stream", false), "codex-session-9")).path("status").asString()).isEqualTo("completed");
+        assertThat(dispatched).containsExactly("relay-1");
+    }
+
+    /** A breakdown is a failure of the relay all the same, and the answer the gateway held back has not changed that. */
+    @Test
+    void aBreakdownOfTheRelayStillCountsAgainstItsAccount() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        fails(relayAnswers, "relay-1", new RelayAbortedAfterDispatchException("The exchange with the source failed after the request was sent"));
+
+        assertThatThrownBy(() -> responses(codexTurn(), "codex-session-1")).isInstanceOf(ApiException.class);
+
+        verify(accountPool).recordRequestFailure(eq("relay-1"), any(AccountPoolService.UpstreamErrorType.class), any(), anyString(),
+            any(AccountPoolRequestContext.class));
+        ArgumentCaptor<AccountAdmissionStore.AdmissionResult> reconciled = ArgumentCaptor.forClass(AccountAdmissionStore.AdmissionResult.class);
+        verify(admissionStore).reconcile(reconciled.capture());
+        assertThat(reconciled.getValue().success()).isFalse();
+        assertThat(reconciled.getValue().failureScope()).isEqualTo(AccountFailureScope.TRANSPORT);
+        assertThat(logs().getFirst().stopReason()).isEqualTo("INTERRUPTED");
     }
 
     /** What the answer is rendered as is the answer's; a call that ended its turn normally is rendered as it always was. */
@@ -712,6 +795,144 @@ class ProxyFacadeTieredXpResponsesTest {
         assertThat(startedFrom()).isEqualTo("anthropic:kiro");
         assertThat(fourth).isNotEqualTo(third);
         assertThat(dispatched).containsExactly("kiro-1", "kiro-1", "kiro-1", "kiro-1");
+    }
+
+    /**
+     * A turn of a model whose vendor has no tiers is no tier's, but it is a turn of the chain: the response it produces is
+     * recorded as the chain's session all the same, or the turn after it would be a session of its own, and a session that fell
+     * to Kiro would go back to the relay without having been idle.
+     */
+    @Test
+    void aChainThatFellToKiroStaysThereThroughATurnForAModelOfAVendorWithoutTiers() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        untieredOfficial();
+        busy.add("relay-1");
+        String first = idOf(responses(plain("start the task", null)));
+        assertThat(startedFrom()).isEqualTo("anthropic:relay");
+        busy.clear();
+        String second = idOf(responses(plain("claude-sonnet-4.5", "second", first)));
+        assertThat(startedFrom()).isEqualTo("anthropic:kiro");
+
+        String third = idOf(responses(plain("gpt-5.4", "a question for a gpt model", second)));
+        assertThat(dispatched).endsWith("openai-1");
+        String fourth = idOf(responses(plain("claude-sonnet-4.5", "back to claude", third)));
+
+        assertThat(startedFrom()).isEqualTo("anthropic:kiro");
+        assertThat(dispatched).containsExactly("kiro-1", "kiro-1", "openai-1", "kiro-1");
+        responses(plain("claude-sonnet-4.5", "and on", fourth));
+        assertThat(dispatched).endsWith("kiro-1");
+        assertThat(dispatched).doesNotContain("relay-1");
+    }
+
+    /** The same through a vendor that is tiered but keeps no session in a tier and has no relay open to the key: no plan names the session. */
+    @Test
+    void aChainThatFellToKiroStaysThereThroughATurnForAModelOfATieredVendorThatKeepsNoSessions() {
+        configure(ownerPlusTieredOpenAi(false));
+        add(relay, kiro("kiro-1"), account("openai-1", "OpenAI", "api-key", null));
+        busy.add("relay-1");
+        String first = idOf(responses(plain("start the task", null)));
+        busy.clear();
+        String second = idOf(responses(plain("claude-sonnet-4.5", "second", first)));
+        assertThat(startedFrom()).isEqualTo("anthropic:kiro");
+
+        ResponseEntity<?> gpt = responses(plain("gpt-5.4", "a question for a gpt model", second));
+        assertThat(gpt.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("official");
+        String fourth = idOf(responses(plain("claude-sonnet-4.5", "back to claude", idOf(gpt))));
+
+        assertThat(startedFrom()).isEqualTo("anthropic:kiro");
+        assertThat(fourth).isNotNull();
+        assertThat(dispatched).containsExactly("kiro-1", "kiro-1", "openai-1", "kiro-1");
+    }
+
+    /** The interruption of a relay holds for the whole chain, and a turn on a vendor without tiers in between does not end it. */
+    @Test
+    void theExclusionOfARelayHoldsThroughATurnForAModelOfAVendorWithoutTiers() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        untieredOfficial();
+        String first = idOf(responses(plain("start the task", null)));
+        fails(relayAnswers, "relay-1", new RelayAbortedAfterDispatchException("The exchange with the source failed after the request was sent"));
+        assertThatThrownBy(() -> responses(plain("second turn", first))).isInstanceOf(ApiException.class);
+        relayAnswers.clear();
+        String second = idOf(responses(plain("second turn", first)));
+        dispatched.clear();
+
+        clock.addAndGet(Duration.ofSeconds(20).toNanos());
+        String third = idOf(responses(plain("gpt-5.4", "a question for a gpt model", second)));
+        assertThat(dispatched).containsExactly("openai-1");
+        dispatched.clear();
+
+        // Forty seconds after the interruption the relay may be generating the answer it broke off still.
+        clock.addAndGet(Duration.ofSeconds(20).toNanos());
+        String fourth = idOf(responses(plain("claude-sonnet-4.5", "back to claude, 40 s after the interruption", third)));
+        assertThat(dispatched).containsExactly("kiro-1");
+
+        dispatched.clear();
+        clock.addAndGet(Duration.ofSeconds(81).toNanos());
+        responses(plain("claude-sonnet-4.5", "much later", fourth));
+        assertThat(dispatched).containsExactly("relay-1");
+    }
+
+    @Test
+    void theExclusionOfARelayHoldsThroughATurnForAModelOfATieredVendorThatKeepsNoSessions() {
+        configure(ownerPlusTieredOpenAi(false));
+        add(relay, kiro("kiro-1"), account("openai-1", "OpenAI", "api-key", null));
+        String first = idOf(responses(plain("start the task", null)));
+        fails(relayAnswers, "relay-1", new RelayAbortedAfterDispatchException("The exchange with the source failed after the request was sent"));
+        assertThatThrownBy(() -> responses(plain("second turn", first))).isInstanceOf(ApiException.class);
+        relayAnswers.clear();
+        String second = idOf(responses(plain("second turn", first)));
+        dispatched.clear();
+
+        clock.addAndGet(Duration.ofSeconds(20).toNanos());
+        ResponseEntity<?> gpt = responses(plain("gpt-5.4", "a question for a gpt model", second));
+        assertThat(gpt.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("official");
+        dispatched.clear();
+
+        clock.addAndGet(Duration.ofSeconds(20).toNanos());
+        responses(plain("claude-sonnet-4.5", "back to claude, 40 s after the interruption", idOf(gpt)));
+        assertThat(dispatched).containsExactly("kiro-1");
+    }
+
+    /** What the chain is called is the same node's memory whatever served the turn, and it is only the chain's: nothing is written for a request that names none. */
+    @Test
+    void aTurnWithNoChainAndNoNameOnAVendorWithoutTiersLeavesNothingToFollow() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        untieredOfficial();
+
+        String gpt = idOf(responses(plain("gpt-5.4", "a first question", null)));
+
+        verify(bindings, never()).follow(anyString(), anyString());
+        assertThat(bindings.sessionOf(TierSessionKeys.ofResponse("key-1", gpt))).isEqualTo(TierSessionKeys.ofResponse("key-1", gpt));
+    }
+
+    /**
+     * The chain map is for the turns of a session that tiers keep whole. A deployment where no vendor has tiers in use, none
+     * configured or every vendor switched off, runs the untiered path as it always did and writes nothing: not for a Codex session,
+     * which finds itself again by its header, and not for a chain, which no tier will ever continue.
+     */
+    @Test
+    void aDeploymentWithNoTierInUseKeepsNothingOfTheChainsItAnswers() {
+        untieredOfficial();
+        for (SourceTierSnapshot none : List.of(
+            SourceTierSnapshot.EMPTY,
+            SourceTierSnapshot.of(7L, List.of(new VendorConfig("anthropic", false, false, false, true, 16, true, 7L)),
+                List.of(tier("kiro", 1, "1", AccountAllocationCategory.KIRO)), List.of(), List.of(), List.of()))) {
+            configure(none);
+
+            String first = idOf(responses(plain("gpt-5.4", "a first question", null), "codex-session-1"));
+            String second = idOf(responses(plain("gpt-5.4", "and a second", first), "codex-session-1"));
+            String third = idOf(responses(plain("gpt-5.4", "a chain without a header", second)));
+
+            assertThat(third).isNotNull();
+            verify(bindings, never()).follow(anyString(), anyString());
+        }
+        // Where some vendor has tiers, the same turns are recorded (aChainThatFellToKiroStaysThereThroughATurnForAModelOfAVendorWithoutTiers).
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        String first = idOf(responses(plain("gpt-5.4", "a first question", null), "codex-session-1"));
+        verify(bindings).follow(TierSessionKeys.ofResponse("key-1", first), TierSessionKeys.ofCodexSession("key-1", "codex-session-1"));
     }
 
     @Test
@@ -1062,6 +1283,102 @@ class ProxyFacadeTieredXpResponsesTest {
         assertThat(sent.getValue().path("input").toString()).doesNotContain("thinking it over").contains("gAAAAB", "Looked at it");
         // The request of the client is not changed.
         assertThat(request.path("input")).hasSize(5);
+    }
+
+    private static final String PATCH = "*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch";
+
+    /** What {@code XpDispatcher} makes of a relay's call of the editing tool on this entry: the custom tool call Codex expects, the patch for its input. */
+    private PlatformCompletionResult patchCall() {
+        return new PlatformCompletionResult("", "", List.of(new PlatformToolUse(CALL_ID, "apply_patch",
+            objectMapper.createObjectNode().put("patch", PATCH), "custom_tool_call", PATCH, null)), USAGE, StopReason.TOOL_USE,
+            UsageSource.REPORTED, List.of());
+    }
+
+    private ObjectNode patchRequest(String declaredAs) {
+        ObjectNode request = plain("add a file a.txt", null);
+        ObjectNode tool = request.putArray("tools").addObject();
+        tool.put("type", declaredAs).put("name", "apply_patch").put("description", "apply a patch");
+        if ("function".equals(declaredAs)) {
+            tool.putObject("parameters").put("type", "object").putObject("properties").putObject("input").put("type", "string");
+        }
+        return request;
+    }
+
+    /**
+     * The relay's call of the editing tool is a custom tool call in the chain, and the client answers it with a custom tool call
+     * output. When the relay is busy for the next turn, Kiro is asked, whose conversion knew only function calls: the patch and
+     * its result were two blank messages, and Kiro answered without knowing the patch was applied while the user paid for the
+     * turn. Kiro is given them as the call of the function and its result.
+     */
+    @Test
+    void aPatchTheRelayCalledForACustomToolAndItsResultAreInWhatKiroIsAskedWhenTheNextTurnFallsToKiro() {
+        assertThePatchSurvivesTheFallToKiro("custom");
+    }
+
+    @Test
+    void aPatchTheRelayCalledForAFunctionAndItsResultAreInWhatKiroIsAskedWhenTheNextTurnFallsToKiro() {
+        assertThePatchSurvivesTheFallToKiro("function");
+    }
+
+    private void assertThePatchSurvivesTheFallToKiro(String declaredAs) {
+        relayAnswers.put("relay-1", () -> Mono.just(patchCall()));
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        ObjectNode first = patchRequest(declaredAs);
+        JsonNode answer = finalResponse(responses(first));
+        assertThat(answer.path("output").path(0).path("type").asString()).isEqualTo("custom_tool_call");
+        String callId = answer.path("output").path(0).path("call_id").asString();
+
+        busy.add("relay-1");
+        ObjectNode second = plain("ignored", answer.path("id").asString());
+        second.set("tools", first.path("tools").deepCopy());
+        second.putArray("input").addObject().put("type", "custom_tool_call_output").put("call_id", callId).put("output", "Done!");
+        responses(second);
+
+        assertThat(dispatched).containsExactly("relay-1", "kiro-1");
+        JsonNode payload = kiroPayloads.getFirst();
+        assertThat(payload.toString()).doesNotContain("\"Continue\"").contains("add a file a.txt").contains("Done!");
+        // The patch is in the assistant turn as the call it was, and its result is the result of that call.
+        JsonNode history = payload.path("conversationState").path("history");
+        JsonNode call = StreamSupport.stream(history.spliterator(), false)
+            .map(turn -> turn.path("assistantResponseMessage").path("toolUses"))
+            .filter(JsonNode::isArray).flatMap(uses -> StreamSupport.stream(uses.spliterator(), false)).findFirst().orElseThrow();
+        assertThat(call.path("name").asString()).isEqualTo("apply_patch");
+        assertThat(call.path("toolUseId").asString()).isEqualTo(callId);
+        // The argument is the one Kiro was declared the tool with (the string property of the client's function, or `input` for
+        // a custom tool, whose schema is empty), not the `patch` of the function the relays are given.
+        JsonNode declared = payload.path("conversationState").path("currentMessage").path("userInputMessage").path("userInputMessageContext")
+            .path("tools").get(0).path("toolSpecification");
+        assertThat(declared.path("name").asString()).isEqualTo("apply_patch");
+        assertThat(declared.path("inputSchema").path("json").path("properties").propertyNames())
+            .containsExactlyElementsOf("function".equals(declaredAs) ? List.of("input") : List.of());
+        assertThat(call.path("input").propertyNames()).containsExactly("input");
+        assertThat(call.path("input").path("input").asString()).as("the patch the client was given, which ends its line").isEqualTo(PATCH + "\n");
+        JsonNode results = payload.path("conversationState").path("currentMessage").path("userInputMessage")
+            .path("userInputMessageContext").path("toolResults");
+        assertThat(results).hasSize(1);
+        assertThat(results.get(0).path("toolUseId").asString()).isEqualTo(callId);
+        assertThat(results.get(0).toString()).contains("Done!");
+    }
+
+    /** The chain and the client's request are not changed by it, and a vendor without relays is sent what its client sent. */
+    @Test
+    void aVendorWithoutRelaysIsSentTheCustomToolCallsItsClientReplaysAsItAlwaysWas() {
+        configure(SourceTierSnapshot.of(7L, List.of(new VendorConfig("anthropic", true, false, false, true, 16, true, 7L)),
+            List.of(tier("kiro", 1, "1", AccountAllocationCategory.KIRO, AccountAllocationCategory.CLAUDE_OAUTH)),
+            List.of(), List.of(), List.of()));
+        add(kiro("kiro-1"));
+        ObjectNode request = plain("ignored", null);
+        request.putArray("input").addObject().put("type", "message").put("role", "user").put("content", "add a file a.txt");
+        ((ArrayNode) request.path("input")).addObject().put("type", "custom_tool_call").put("call_id", "call_1")
+            .put("name", "apply_patch").put("input", PATCH);
+        ((ArrayNode) request.path("input")).addObject().put("type", "custom_tool_call_output").put("call_id", "call_1").put("output", "Done!");
+
+        responses(request);
+
+        // The conversion of this route knows no custom tool calls; nothing is done about them for a vendor that has no relay.
+        assertThat(kiroPayloads.getFirst().toString()).doesNotContain("toolUses", "toolResults", PATCH.substring(0, 10));
+        assertThat(request.path("input").get(1).path("type").asString()).isEqualTo("custom_tool_call");
     }
 
     /** A vendor whose tiers hold no relay is sent what its client sent, as it always was. */
@@ -1433,6 +1750,11 @@ class ProxyFacadeTieredXpResponsesTest {
             public boolean wantsEntryFacts(TierEntry entry) {
                 return planner.wantsEntryFacts(entry);
             }
+
+            @Override
+            public boolean tiersInUse() {
+                return planner.tiersInUse();
+            }
         };
     }
 
@@ -1491,6 +1813,28 @@ class ProxyFacadeTieredXpResponsesTest {
                     EnumSet.of(AccountAllocationCategory.OFFICIAL_API_KEY), true, true, null)),
             List.of(member), List.of(verified),
             List.of(new PairGate("openai", "OPENAI_CHAT", "RESPONSES", "KEYS", List.of("key-1"))));
+    }
+
+    /** An official key of a vendor that has no tiers: the accounts of the untiered path are this one. */
+    private ProxyAccountEntity untieredOfficial() {
+        ProxyAccountEntity official = account("openai-1", "OpenAI", "api-key", null);
+        cached.add(official);
+        when(accountPool.selectOpenAiApiKeyAccountForPool(any(), any(AccountPoolRequestContext.class))).thenReturn(Mono.just(official));
+        when(accountPool.selectOpenAiAccountForPool(any(), any(AccountPoolRequestContext.class))).thenReturn(Mono.just(official));
+        when(accountPool.selectOpenAiApiKeyAccountForPool(any(), any(), any(AccountPoolRequestContext.class))).thenReturn(Mono.just(official));
+        when(accountPool.selectOpenAiAccountForPool(any(), any(), any(AccountPoolRequestContext.class))).thenReturn(Mono.just(official));
+        when(accountPool.selectOpenAiAccountByIdForPool(anyString(), any(AccountPoolRequestContext.class))).thenReturn(Mono.just(official));
+        return official;
+    }
+
+    /** The anthropic vendor as in {@link #owner}, and a tiered openai vendor of official keys alone, which keeps sessions in a tier or does not. */
+    private SourceTierSnapshot ownerPlusTieredOpenAi(boolean openAiSticky) {
+        Member member = relayMember("relay-1");
+        return SourceTierSnapshot.of(7L, List.of(vendor(), new VendorConfig("openai", true, false, false, openAiSticky, 16, true, 7L)), List.of(
+            tier("relay", 1, "1"),
+            tier("kiro", 2, "0.6", AccountAllocationCategory.KIRO, AccountAllocationCategory.CLAUDE_OAUTH),
+            new Tier("openai", "official", 1, "official", BigDecimal.ONE, EnumSet.of(AccountAllocationCategory.OFFICIAL_API_KEY), true, true, null)),
+            List.of(member), List.of(mapping(member, relay)), List.of(gate("RESPONSES", "KEYS", "key-1")));
     }
 
     private static ProxyAccountEntity kiro(String accountId) {

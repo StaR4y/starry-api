@@ -8,7 +8,9 @@ import reactor.core.publisher.Mono;
  * What the proxy facade needs from the tiered-source feature, handed over as one value so its constructor does not
  * grow with every phase. A release that cannot run tiers has {@link #disabled()}, whose planner says
  * {@link TierPlan#UNTIERED} for every request. One that can has the real planner, which says the same for a vendor
- * without tiers in use. Either way the facade runs exactly the code it ran before for that request.
+ * without tiers in use. Either way the facade runs exactly the code it ran before for that request. The one thing it adds
+ * for a request no tier plans is the node's memory of the chain it continues, which it writes only where some vendor has
+ * tiers in use ({@link Planner#tiersInUse}); a deployment with none writes nothing.
  *
  * @param bindings where the tier each session was pushed down to is kept (design 4.7), and the relays that broke off an
  *     answer for a session (design 7.8); the planner reads it, and the facade writes it when a request is served or a
@@ -86,6 +88,15 @@ public record TierRuntime(Planner planner, TierSessionBindings bindings, XpLearn
          */
         default boolean wantsEntryFacts(TierEntry entry) {
             return false;
+        }
+
+        /**
+         * Whether any request can be planned in tiers at all: some vendor is switched on with a tier switched on. The facade
+         * keeps a thing or two for the sake of tiers even for the requests no tier plans (the chain of a Responses session,
+         * design 4.7), and a deployment with no tier in use keeps none of them. A planner that cannot say plans.
+         */
+        default boolean tiersInUse() {
+            return true;
         }
     }
 }

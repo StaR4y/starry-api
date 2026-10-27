@@ -33,6 +33,7 @@
     skipReasonLabel,
     successPercent,
     unbilledPercent,
+    withheldPercent,
   } from './xpMeta';
 
   const props = defineProps<{
@@ -252,6 +253,23 @@
             >
               {{ t('中断 {p0}', { p0: formatNumber(row.figures.interrupted) }) }}
             </el-tag>
+            <el-tooltip
+              :content="
+                t(
+                  '网关把中转的应答扣下（内容过滤，或在网关自己的输出上限处丢了调用）：没人为它付费，由你承担；不是中转的故障',
+                )
+              "
+              placement="top"
+            >
+              <el-tag
+                :type="figureTone('withheld', withheldPercent(row.figures))"
+                size="small"
+                effect="plain"
+                tabindex="0"
+              >
+                {{ t('扣下 {p0}', { p0: formatNumber(row.figures.withheld) }) }}
+              </el-tag>
+            </el-tooltip>
             <span>p95 {{ formatLatency(row.figures.p95Ms) }}</span>
           </template>
           <span v-else class="relay__none">

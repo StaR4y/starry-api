@@ -77,6 +77,12 @@ class FeaturePolicySanitizerTest {
     private static final String RESPONSES_CALL = "{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"f\",\"arguments\":\"{}\"}";
     private static final String RESPONSES_ANSWER = "{\"type\":\"function_call_output\",\"call_id\":\"c1\",\"output\":\"r\"}";
 
+    /** The function of an Agents SDK app: a strict schema of a pydantic model, with {@code $defs}, a {@code $ref} and an {@code anyOf} with null. */
+    private static final String PYDANTIC_TOOL = "{\"type\":\"function\",\"name\":\"add_items\",\"strict\":true,\"parameters\":{"
+        + "\"$defs\":{\"Item\":{\"type\":\"object\",\"properties\":{\"name\":{\"type\":\"string\"}},\"required\":[\"name\"],\"additionalProperties\":false}},"
+        + "\"type\":\"object\",\"properties\":{\"items\":{\"type\":\"array\",\"items\":{\"$ref\":\"#/$defs/Item\"}},"
+        + "\"shipping\":{\"anyOf\":[{\"$ref\":\"#/$defs/Item\"},{\"type\":\"null\"}]}},\"required\":[\"items\",\"shipping\"],\"additionalProperties\":false}}";
+
     private static String responses(String extra, String... items) {
         return "{\"model\":\"claude-sonnet-4.5\"" + (extra.isEmpty() ? "" : "," + extra) + ",\"input\":[" + String.join(",", items) + "]}";
     }
@@ -179,6 +185,8 @@ class FeaturePolicySanitizerTest {
             "\"tools\":[{\"type\":\"function\",\"name\":\"f\"}],\"tool_choice\":{\"type\":\"function\",\"name\":\"g\"}", RESPONSES_USER)));
         samples.add(new Sample("responses, a tool choice without a function to choose from", Entry.RESPONSES, responses(
             "\"tools\":[{\"type\":\"web_search\"}],\"tool_choice\":\"required\"", RESPONSES_USER)));
+        samples.add(new Sample("responses, a strict function over a pydantic schema", Entry.RESPONSES, responses(
+            "\"tools\":[" + PYDANTIC_TOOL + "]", RESPONSES_USER)));
         samples.add(new Sample("responses, everything at once", Entry.RESPONSES, responses(
             "\"reasoning\":{\"effort\":\"low\"},\"include\":[\"reasoning.encrypted_content\"],\"store\":true,\"prompt_cache_key\":\"k\","
                 + "\"text\":{\"verbosity\":\"high\",\"format\":{\"type\":\"json_schema\",\"name\":\"s\",\"schema\":{\"type\":\"object\"}}},"
@@ -238,6 +246,25 @@ class FeaturePolicySanitizerTest {
         Set<String> labels = new LinkedHashSet<>();
         features.forEach(feature -> labels.add(feature.label()));
         return labels;
+    }
+
+    /**
+     * A relay is held to the schema of a strict function as the client wrote it, whatever the member behind it and whichever
+     * entry the client came in through: the Chat entry passes the parameters on as they are, and so does a native official
+     * key, and the Responses entry used to hand a relay the schema reduced to Kiro's vocabulary (a {@code $ref} became an
+     * empty schema, the {@code anyOf} with null became null) with the client's strict on it.
+     */
+    @Test
+    void aStrictFunctionReachesTheRelayWithTheSchemaTheClientWroteOnEveryRoute() {
+        Sample sample = samples().stream().filter(candidate -> candidate.name().contains("pydantic")).findFirst().orElseThrow();
+        JsonNode body = JSON.readTree(sample.body());
+        JsonNode declared = body.path("tools").get(0).path("parameters");
+        for (int bits = 0; bits < COMBINATIONS; bits++) {
+            Wire wire = wire(sample, body, settings(bits));
+            JsonNode function = wire.body().path("tools").get(0).path("function");
+            assertThat(function.path("parameters")).as("%s", settings(bits)).isEqualTo(declared);
+            assertThat(function.path("strict").booleanValue()).isTrue();
+        }
     }
 
     @Test

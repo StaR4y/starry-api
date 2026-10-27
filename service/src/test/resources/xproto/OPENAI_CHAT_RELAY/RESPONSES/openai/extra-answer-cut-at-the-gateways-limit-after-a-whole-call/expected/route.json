@@ -11,7 +11,7 @@
       "inputTokens": 0,
       "outputTokens": 0,
       "usageSource": null,
-      "stopReason": "INTERRUPTED",
+      "stopReason": "WITHHELD",
       "degraded": "reasoning_effort,verbosity,include,prompt_cache_key",
       "error": "The source's answer was cut off before it could be used"
     }

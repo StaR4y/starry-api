@@ -353,7 +353,10 @@ public final class SourceTierDtos {
      * counted apart: {@code interrupted} (the relay may have generated and nobody was charged: the operator's loss, the
      * UNBILLED of the design), {@code conversionRejected} (the relay refused the converted request), {@code
      * contextExceeded}, {@code modelNotServed} and {@code keyRefused} (the relay turned the key of its account down: the
-     * request went on elsewhere and the account rests); the rest of {@code failed} is anything else. {@code estimated} and
+     * request went on elsewhere and the account rests) and {@code withheld} (the relay answered and the gateway held the
+     * answer back, as the Responses entry must for an answer its client would take for a failure: nobody was charged, and it
+     * is nothing of the relay's reliability, so it is no part of {@code interrupted}); the rest of {@code failed} is anything
+     * else. {@code estimated} and
      * {@code clamped} are answered attempts whose usage was not what the relay reported, {@code degraded} those that
      * left a feature of the request out. {@code p95Ms} is the 95th percentile of the latency of the answered ones, absent
      * when none was.
@@ -367,6 +370,7 @@ public final class SourceTierDtos {
         long contextExceeded,
         long modelNotServed,
         long keyRefused,
+        long withheld,
         long estimated,
         long clamped,
         long degraded,
@@ -381,8 +385,8 @@ public final class SourceTierDtos {
     /**
      * The evidence an upgrade of a pair to VERIFIED is decided on (design 7.3): the figures of every offered pair over the
      * last {@code days} days of the request log, with the standard they are held to and whether each is met. The figures
-     * of attempts are those of every node; {@code lintSkips} of a pair is its vendor's count of relays that failed the
-     * strict lint, which only this node keeps (since {@code skipsSince}), so on several nodes it is the answering node's.
+     * of attempts are those of every node; {@code lintSkips} of a pair is the count of its vendor's relays that failed the
+     * strict lint on the entry of the pair, which only this node keeps (since {@code skipsSince}), so on several nodes it is the answering node's.
      * The state of a gate is the one now: a pair that is only EXPERIMENTAL has been open to listed keys only for as long as
      * it has been open at all.
      */

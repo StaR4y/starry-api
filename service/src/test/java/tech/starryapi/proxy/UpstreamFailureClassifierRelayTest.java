@@ -21,6 +21,7 @@ import tech.starryapi.platform.xproto.PairRegistry.Entry;
 import tech.starryapi.platform.xproto.PairRegistry.PairKey;
 import tech.starryapi.platform.xproto.PairRegistry.SourceKind;
 import tech.starryapi.platform.xproto.RelayAbortedAfterDispatchException;
+import tech.starryapi.platform.xproto.RelayAnswerWithheldException;
 import tech.starryapi.platform.xproto.RelayErrorMapper;
 import tech.starryapi.proxy.UpstreamFailureClassifier.Classification;
 import tech.starryapi.proxy.UpstreamFailureClassifier.RelayFailure;
@@ -89,6 +90,45 @@ class UpstreamFailureClassifierRelayTest {
         assertThat(untiered.retryable()).isTrue();
         assertThat(UpstreamFailureClassifier.classify(aborted, relay, TierDispatch.nativeDispatch())).isEqualTo(untiered);
         assertThat(UpstreamFailureClassifier.classify(aborted, relay, null)).isEqualTo(untiered);
+    }
+
+    // --- an answer the gateway holds back ---
+
+    /**
+     * The relay answered, and the Responses entry cannot tell the answer to its client (design 7.10): the request ends as it does
+     * for an interruption, but nothing is the relay's fault, so nothing counts against the account and it is not cooled down.
+     */
+    @Test
+    void anAnswerTheGatewayHoldsBackEndsTheRequestLikeAnInterruptionAndIsNothingOfTheRelaysFailure() {
+        RelayAnswerWithheldException withheld = new RelayAnswerWithheldException("The source stopped its answer with its content filter");
+
+        Classification classification = UpstreamFailureClassifier.classify(withheld, relay, dispatch);
+
+        assertThat(classification.relayFailure()).isEqualTo(RelayFailure.WITHHELD);
+        assertThat(classification.withheld()).isTrue();
+        assertThat(classification.interrupted()).as("the relay is kept from the session and nobody else is asked").isTrue();
+        assertThat(classification.scope()).as("not an account-wide failure").isEqualTo(AccountFailureScope.REQUEST);
+        assertThat(classification.cooldown()).isEqualTo(Duration.ZERO);
+        assertThat(classification.statusCode()).isEqualTo(502);
+        assertThat(classification.retryable()).isFalse();
+        assertThat(classification.crossAccountRetryAllowed()).isFalse();
+        assertThat(classification.crossTierOnly()).isFalse();
+        assertThat(classification.circuitFailure()).isFalse();
+        assertThat(classification.permanentCredentialFailure()).isFalse();
+        assertThat(classification.failure()).isSameAs(withheld);
+        // An interruption proper is none of this.
+        Classification interruption = UpstreamFailureClassifier.classify(new RelayAbortedAfterDispatchException("The exchange broke"), relay, dispatch);
+        assertThat(interruption.withheld()).isFalse();
+        assertThat(interruption.relayFailure()).isEqualTo(RelayFailure.INTERRUPTED);
+    }
+
+    @Test
+    void anAnswerTheGatewayHoldsBackIsOneWhereverItIsFoundAndAnAccountOfAnotherKindIsNotAffected() {
+        RelayAnswerWithheldException withheld = new RelayAnswerWithheldException("The source stopped its answer with its content filter");
+
+        assertThat(UpstreamFailureClassifier.classify(new RuntimeException("wrapped", withheld), relay, dispatch).withheld()).isTrue();
+        // A native dispatch is classified as it always was, whatever the exception is.
+        assertThat(UpstreamFailureClassifier.classify(withheld, relay, TierDispatch.nativeDispatch()).relayFailure()).isNull();
     }
 
     // --- a model the relay does not serve ---

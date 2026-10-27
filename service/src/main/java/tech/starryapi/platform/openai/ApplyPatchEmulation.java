@@ -93,12 +93,15 @@ public final class ApplyPatchEmulation {
      * which is true of the custom tool and the opposite of this function, whose one required argument is a JSON string. A
      * model that did as it was told would write the patch where a relay reads the arguments, which are then not JSON, and
      * the answer would be refused as an interruption instead of applied. (The accounts that speak Responses are given the
-     * function with the client's words, {@link #functionTool}, and a bare patch is read from what they answer.)
+     * function with the client's words, {@link #functionTool}, and a bare patch is read from what they answer.) Nor does it
+     * carry the client's {@code strict}: that promise is for the schema the client wrote, and this one is the gateway's (a
+     * strict schema needs {@code additionalProperties:false}, which it has not), so a relay that is held to it refuses the tool.
      */
     public ObjectNode chatFunctionTool(JsonNode source) {
         ObjectNode function = functionTool(source);
         function.remove("type");
         function.put("description", CHAT_DESCRIPTION);
+        function.remove("strict");
         ObjectNode tool = objectMapper.createObjectNode();
         tool.put("type", "function");
         tool.set("function", function);

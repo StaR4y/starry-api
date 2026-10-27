@@ -334,7 +334,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
         assertThat(events(client)).isEmpty();
         assertThat(logs(client)).singleElement().satisfies(row -> {
             assertThat(row.get("success")).isEqualTo(false);
-            assertThat(row.get("stop_reason")).isEqualTo("INTERRUPTED");
+            assertThat(row.get("stop_reason")).as("counted apart from the relay's breakdowns").isEqualTo("WITHHELD");
         });
 
         // The retry is Kiro's, once, at the price of Kiro's tier; the relay is not asked again.
@@ -345,6 +345,79 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
         assertThat(relayBodies).hasSize(1);
         assertThat(balance(client)).isEqualByComparingTo(
             new BigDecimal("10").subtract(standard.scaled(new BigDecimal("0.6")).cost(KIRO_USAGE).multiply(BigDecimal.valueOf(2))));
+    }
+
+    /**
+     * Answers the gateway holds back are not the relay's failures. A relay whose filter stops a few prompts, or whose answers
+     * to a few long writes reach the gateway's bound, answered every time: it must not be counted against, cooled down, or
+     * tested at the operator's expense, for every other session of every other user. Four from four sessions is enough to
+     * cool a relay down when they are breakdowns (the control below).
+     */
+    @Test
+    void fourAnswersTheRelaysFilterStoppedLeaveTheRelayInServiceForTheOtherSessions() {
+        assertTheRelayStaysInService(() -> new Completion("I can't help with th", "", List.of(),
+            PlatformCompletionResult.StopReason.CONTENT_FILTER, reported(500, 0), "content_filter"));
+    }
+
+    @Test
+    void fourAnswersThatLostTheirCallToTheGatewaysLimitLeaveTheRelayInServiceForTheOtherSessions() {
+        assertTheRelayStaysInService(() -> new Completion("", "", List.of(), PlatformCompletionResult.StopReason.MAX_TOKENS,
+            reported(500, 900_000), "length", true));
+    }
+
+    private void assertTheRelayStaysInService(Supplier<Completion> held) {
+        Client client = client("10");
+        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+        relayAnswers(() -> Mono.just(held.get()));
+        Map<String, Object> before = allocationState(relayId);
+
+        for (int session = 0; session < 4; session++) {
+            int number = session;
+            assertThatThrownBy(() -> responses(client, responsesBody("session number " + number)))
+                .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_GATEWAY));
+        }
+
+        // The relay was asked each time, and kept from the session it answered for; nothing else was done to it.
+        assertThat(relayBodies).hasSize(4);
+        Map<String, Object> after = allocationState(relayId);
+        assertThat(after.get("lifecycle_state")).as("%s", after).isEqualTo(before.get("lifecycle_state")).isNotIn("COOLDOWN", "DEGRADED");
+        assertThat(after.get("cooldown_until")).isNull();
+        assertThat(((Number) after.get("recent_error_ewma")).doubleValue()).isZero();
+        assertThat(db.sql("SELECT enabled, error_count FROM proxy_accounts WHERE account_id = :id").bind("id", relayId).fetch().one().block())
+            .containsEntry("enabled", true).containsEntry("error_count", 0);
+        assertThat(logs(client)).hasSize(4).allSatisfy(row -> {
+            assertThat(row.get("success")).isEqualTo(false);
+            assertThat(row.get("stop_reason")).isEqualTo("WITHHELD");
+        });
+        assertThat(reservations(client)).allSatisfy(reservation -> assertThat(reservation).containsEntry("status", "RELEASED"));
+        assertThat(balance(client)).isEqualByComparingTo("10");
+        assertThat(reviews(client)).isEmpty();
+
+        // Another session is served by the relay.
+        relayAnswers(() -> Mono.just(relayAnswer(RELAY_USAGE)));
+        ResponseEntity<?> other = responses(client, responsesBody("a healthy turn of another session"));
+        assertThat(other.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(relayBodies).hasSize(5);
+    }
+
+    /** The control: the same four requests, each broken off by the relay after it was written, do cool the relay down. */
+    @Test
+    void fourBreakdownsOfTheRelayFromFourSessionsStillCoolItDown() {
+        Client client = client("10");
+        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+        relayAnswers(() -> Mono.error(new RelayAbortedAfterDispatchException("The exchange with the source failed after the request was sent")));
+
+        for (int session = 0; session < 4; session++) {
+            int number = session;
+            assertThatThrownBy(() -> responses(client, responsesBody("session number " + number)))
+                .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_GATEWAY));
+        }
+
+        assertThat(allocationState(relayId).get("lifecycle_state")).isEqualTo("COOLDOWN");
+        assertThat(logs(client)).allSatisfy(row -> assertThat(row.get("stop_reason")).isEqualTo("INTERRUPTED"));
+        relayAnswers(() -> Mono.just(relayAnswer(RELAY_USAGE)));
+        ResponseEntity<?> other = responses(client, responsesBody("a healthy turn of another session"));
+        assertThat(other.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
     }
 
     @Test
@@ -740,6 +813,17 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
                 + " WHERE vendor = 'openai' AND account_id = :id")
             .bind("hash", fingerprint).bind("id", relayId).fetch().rowsUpdated().block();
         registry.refresh().block();
+    }
+
+    private ObjectNode reported(int promptTokens, int completionTokens) {
+        ObjectNode reported = objectMapper.createObjectNode();
+        reported.put("prompt_tokens", promptTokens).put("completion_tokens", completionTokens);
+        return reported;
+    }
+
+    private Map<String, Object> allocationState(String accountId) {
+        return db.sql("SELECT lifecycle_state, cooldown_until, recent_error_ewma FROM account_allocation_states WHERE account_id = :id")
+            .bind("id", accountId).fetch().one().block();
     }
 
     /** What the relay answers to each request, which is noted as it comes. Stubbed again with {@code doAnswer}, which asks nothing. */

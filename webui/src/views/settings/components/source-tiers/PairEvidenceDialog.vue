@@ -137,7 +137,7 @@
         <p class="evidence__note">
           {{
             t(
-              '严格检查失败是应答节点自 {p0} 起的计数（按厂商，不分入口）；多节点部署时请到每个节点各看一次。',
+              '严格检查失败是应答节点自 {p0} 起的计数（只数这一对的入口，不数同一厂商别的入口）；多节点部署时请到每个节点各看一次。',
               { p0: formatDateTime(evidence.skipsSince) },
             )
           }}
@@ -207,16 +207,17 @@
           <p class="pair__figures">
             {{
               t(
-                '尝试 {p0}，已服务 {p1}（{p2}），失败 {p3}，中断 {p4}，转换被拒 {p5}，估算 {p6}，p95 {p7}',
+                '尝试 {p0}，已服务 {p1}（{p2}），失败 {p3}，中断 {p4}，扣下 {p5}，转换被拒 {p6}，估算 {p7}，p95 {p8}',
                 {
                   p0: formatNumber(pair.figures.attempts),
                   p1: formatNumber(pair.figures.served),
                   p2: formatPercent(successPercent(pair.figures)),
                   p3: formatNumber(pair.figures.failed),
                   p4: formatNumber(pair.figures.interrupted),
-                  p5: formatNumber(pair.figures.conversionRejected),
-                  p6: formatNumber(pair.figures.estimated),
-                  p7: formatLatency(pair.figures.p95Ms),
+                  p5: formatNumber(pair.figures.withheld),
+                  p6: formatNumber(pair.figures.conversionRejected),
+                  p7: formatNumber(pair.figures.estimated),
+                  p8: formatLatency(pair.figures.p95Ms),
                 },
               )
             }}
@@ -242,12 +243,13 @@
                   <span>{{ member.tierId }}</span>
                   <span>
                     {{
-                      t('尝试 {p0}，已服务 {p1}，中断 {p2}，转换被拒 {p3}，估算 {p4}', {
+                      t('尝试 {p0}，已服务 {p1}，中断 {p2}，扣下 {p3}，转换被拒 {p4}，估算 {p5}', {
                         p0: formatNumber(member.figures.attempts),
                         p1: formatNumber(member.figures.served),
                         p2: formatNumber(member.figures.interrupted),
-                        p3: formatNumber(member.figures.conversionRejected),
-                        p4: formatNumber(member.figures.estimated),
+                        p3: formatNumber(member.figures.withheld),
+                        p4: formatNumber(member.figures.conversionRejected),
+                        p5: formatNumber(member.figures.estimated),
                       })
                     }}
                   </span>

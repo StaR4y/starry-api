@@ -74,6 +74,7 @@ import tech.starryapi.platform.xproto.PairRegistry.Entry;
 import tech.starryapi.platform.xproto.PairRegistry.PairKey;
 import tech.starryapi.platform.xproto.PairRegistry.SourceKind;
 import tech.starryapi.platform.xproto.RelayAbortedAfterDispatchException;
+import tech.starryapi.platform.xproto.RelayAnswerWithheldException;
 import tech.starryapi.platform.xproto.RelayErrorMapper;
 import tech.starryapi.platform.xproto.RelayNotSentException;
 import tech.starryapi.platform.xproto.RelayUsageNormalizer.Limits;
@@ -286,16 +287,25 @@ class XpDispatcherTest {
         return dispatcher.dispatch(account, relay(Entry.RESPONSES, body()), LIMITS, LIMIT, true);
     }
 
+    /**
+     * The answer is held back: the request ends there as an interruption does (nobody else is asked, the reservation is
+     * released without charge, the relay is kept from the session), and it is no failure of the relay.
+     */
     private void assertInterruptedAndNotBilled(Throwable thrown) {
-        assertThat(thrown).isInstanceOf(RelayAbortedAfterDispatchException.class);
+        assertThat(thrown).isInstanceOf(RelayAnswerWithheldException.class).isInstanceOf(RelayAbortedAfterDispatchException.class);
         assertThat(facade.tierDefinitive(thrown)).isTrue();
-        assertThat(UpstreamFailureClassifier.classify(thrown, account, relay(Entry.RESPONSES, body())).interrupted()).isTrue();
+        UpstreamFailureClassifier.Classification classification =
+            UpstreamFailureClassifier.classify(thrown, account, relay(Entry.RESPONSES, body()));
+        assertThat(classification.interrupted()).isTrue();
+        assertThat(classification.withheld()).isTrue();
+        assertThat(classification.retryable()).isFalse();
         assertThat(thrown).hasNoCause().message().doesNotContain(RELAY_WORDS);
     }
 
     /**
-     * The 4,096 tokens of the reservation are the gateway's own bound, which the native accounts are not held to. An answer that
-     * lost its call to it was not what the model meant, and told as incomplete it would be asked for five more times.
+     * The 4,096 tokens of the reservation are the gateway's own bound (Codex accounts drop it; Kiro, official keys and Anthropic
+     * keys are sent it too). An answer that lost its call to it was not what the model meant, and told as incomplete it would be
+     * asked for five more times.
      */
     @Test
     void anAnswerCutInsideItsOnlyCallAtTheGatewaysBoundIsAnInterruptionOfTheResponsesEntry() {

@@ -935,7 +935,8 @@ public class ProxyFacade {
                         request,
                         start,
                         !responseAffinity.responseChain() || responseAffinity.movable(),
-                        responseAffinity.movable()
+                        responseAffinity.movable(),
+                        tierSessionName
                     )));
                 }
                 return withSelectorStatus(plan, withBilling(principal, requestId, requestedModel, upstreamRequest, fastMode, Mono.defer(() -> attemptResponses(
@@ -957,7 +958,8 @@ public class ProxyFacade {
                     requestId,
                     start,
                     List.of(),
-                    new AtomicBoolean(false)
+                    new AtomicBoolean(false),
+                    tierSessionName
                 ))));
             }));
     }
@@ -1395,7 +1397,8 @@ public class ProxyFacade {
         String requestId,
         Instant start,
         List<String> attemptedAccountIds,
-        AtomicBoolean autoRetestAttempted
+        AtomicBoolean autoRetestAttempted,
+        String chainSession
     ) {
         String responseOwner = attemptedAccountIds.isEmpty() ? responseAffinity.accountId() : null;
         return selectAccountWithAdmission(
@@ -1438,6 +1441,12 @@ public class ProxyFacade {
                             PreparedResponse response = stream
                                 ? prepareResponsesStreamResponse(responseRequest, upstreamRequest, mappedModel, result, account)
                                 : prepareResponsesJsonResponse(responseRequest, upstreamRequest, mappedModel, result, account);
+                            // A turn of a chain that no tier planned is the chain's all the same: a model of a vendor without tiers
+                            // must not cut the chain's session (and what it holds) in two for the turns after it. Where no vendor has
+                            // tiers there is no session to keep whole, and nothing is written.
+                            if (tierRuntime.planner().tiersInUse()) {
+                                followChain(principal, response.responseId(), chainSession);
+                            }
                             return rememberResponseOwner(response, account).thenReturn(response.response());
                         }));
                     }
@@ -1489,7 +1498,8 @@ public class ProxyFacade {
                         requestId,
                         start,
                         nextAttempted,
-                        autoRetestAttempted
+                        autoRetestAttempted,
+                        chainSession
                     ).onErrorResume(retryError -> isNoAvailableAccount(retryError)
                         ? Mono.<ResponseEntity<?>>error(mapError(error))
                         : Mono.<ResponseEntity<?>>error(retryError)));
@@ -2176,12 +2186,16 @@ public class ProxyFacade {
     Mono<ResponseEntity<?>> serveTieredResponses(TieredRequest run) {
         TierWalk walk = new TierWalk(run.plan());
         TierRetryPolicy retry = new TierRetryPolicy(walk, run.start(), run.requestMovable());
-        // The history a client replays can hold the reasoning a relay answered a turn before. An OpenAI account is not sent
-        // that (it is the gateway's own rendering, which no OpenAI model can read back); a vendor without relays is sent
-        // its request as it always was.
-        JsonNode nativeRequest = run.route() == UpstreamRoute.OPENAI && run.plan().vendorHasRelays()
-            ? OpenAiResponseFactory.withoutRenderedReasoning(run.upstreamRequest())
-            : run.upstreamRequest();
+        // The history a client replays can hold what a relay answered a turn before. An OpenAI account is not sent the
+        // reasoning (it is the gateway's own rendering, which no OpenAI model can read back); the accounts of the other routes
+        // (Kiro, Anthropic keys) are sent the custom tool calls as the function calls their conversion can replay, with the
+        // argument their own declaration of the tool has (the editing tool is a custom tool call from a relay, and was lost
+        // from what they were asked). A vendor without relays is sent its request as it always was.
+        JsonNode nativeRequest = !run.plan().vendorHasRelays()
+            ? run.upstreamRequest()
+            : run.route() == UpstreamRoute.OPENAI
+                ? OpenAiResponseFactory.withoutRenderedReasoning(run.upstreamRequest())
+                : OpenAiResponseFactory.withCustomCallsAsFunctionCalls(run.upstreamRequest());
         TieredEndpoint endpoint = new TieredEndpoint(
             account -> callResponsesWithAccount(run.route(), account, nativeRequest, run.upstreamModel(), run.sessionHint()),
             (result, selection) -> Mono.defer(() -> {
@@ -2208,15 +2222,16 @@ public class ProxyFacade {
      * clients that matter: Codex takes {@code response.incomplete} for a failure of the stream and sends the same request
      * again, five more times, each of which a relay answers and is paid for, and it has run the calls of the answer by then,
      * as it runs a call when the call arrives. What reaches this method is an answer that can be told at all: one that the
-     * relay's filter stopped, or that the gateway's own bound cut off when it lost a call or has nothing to show, was an
-     * interruption already ({@code XpDispatcher}), and nothing was charged for it.
+     * relay's filter stopped, or that the gateway's own bound cut off when it lost a call or has nothing to show, was held
+     * back already ({@code XpDispatcher}), and nothing was charged for it.
      *
      * <ul>
      *   <li>An answer the relay broke off at the limit of a client that named none was broken off at the gateway's default
      *       (the bound the reservation is sized from, which the relay is told it may write). That is no limit of the
-     *       client's to report, and the native accounts' answers, which carry no stop reason, are finished ones: it is
-     *       rendered as one, with the text and the calls it came to. A relay holds the bound where a native account does not
-     *       (Codex accounts strip it), so an answer that was cut inside a call is no finished one and is not among these.
+     *       client's to report, and the native answers, which carry no stop reason (Kiro's), are finished ones: it is
+     *       rendered as one, with the text and the calls it came to. An answer that was cut inside a call is no finished
+     *       one and is not among these. (Kiro is held to the same bound, and a cut inside a call comes out of it as a finished
+     *       answer whose call has the arguments as they stood; the gateway does not make that of a relay's answer.)
      *   <li>An answer that is reported as {@code incomplete} (the limit the client wrote was reached) carries no tool call:
      *       the client may retry it, and a call that was run once must not be run again.
      * </ul>
@@ -2702,17 +2717,33 @@ public class ProxyFacade {
      * this turn produced belongs to the session of this turn. The next turn is then the same session, and so the same tier
      * (design 4.7) for every model the chain has asked for, and the relays that broke off an answer of it a moment ago
      * (design 7.8) stay out of the plans of its turns, whatever those turns were: it is the retry of this one, and the turns
-     * after it, that must not be given to a relay that may still be generating.
+     * after it, that must not be given to a relay that may still be generating. The untiered path hands the chain on as well
+     * ({@link #followChain}) where some vendor has tiers in use, and a turn that was planned in tiers without a session of its
+     * own is recorded under the name the request was given before planning.
      */
     private void followTierToNextTurn(TieredRequest run, String responseId) {
-        if (responseId == null || responseId.isBlank()) {
-            return;
-        }
         TierPlan plan = run.plan();
         TierPlan.Session session = plan.session().orElse(null);
-        String name = session != null ? session.key() : plan.relaySession();
-        if (name != null) {
-            tierRuntime.bindings().follow(TierSessionKeys.ofResponse(run.principal().keyId(), responseId), name);
+        // A plan that names no session (the vendor keeps none in a tier and no relay is open to the key) still has the name the
+        // chain gave the request: the turn is the chain's all the same.
+        String name = session != null ? session.key() : plan.relaySession() != null ? plan.relaySession() : run.chainSession();
+        followChain(run.principal(), responseId, name);
+    }
+
+    /**
+     * Records that the response a turn of a chain produced belongs to the session {@code name}, which is the chain's.
+     * Every turn does this, whichever source served it and whether or not any tier planned it: a turn of a vendor without
+     * tiers, or of one that keeps no sessions, would otherwise end the chain's name at its response id, and the turn after it
+     * would be a new session (a session that fell to a lower tier would go back to the better one without having been idle,
+     * and a relay that broke off an answer would be asked again while it may still be generating). Only the node's chain map
+     * is written; routing, prices, logs and the bytes sent are the request's own. A deployment where no vendor has tiers in
+     * use ({@link TierRuntime.Planner#tiersInUse}) has no session to keep whole, and the untiered path does not call this.
+     *
+     * @param name the session of this turn; null when it has none (no chain, no name, nothing to tell it by)
+     */
+    private void followChain(ApiKeyPrincipal principal, String responseId, String name) {
+        if (responseId != null && !responseId.isBlank() && name != null) {
+            tierRuntime.bindings().follow(TierSessionKeys.ofResponse(principal.keyId(), responseId), name);
         }
     }
 
@@ -3400,17 +3431,21 @@ public class ProxyFacade {
         // The cooldown of a model or an endpoint is kept under the keys the attempt was admitted by: a relay's are the
         // mapping's model and the relay's own endpoint, not the model of the pool context and the path of the client.
         TierDispatch dispatch = attempt.selection() == null ? TierDispatch.nativeDispatch() : attempt.selection().dispatch();
+        // A relay whose answer the gateway held back did what it was asked: the admission store is told of an answer, which
+        // lets its error rate decay, and not of a failure of the account, which would raise it and could cool the relay down
+        // for every session (the request itself is the failure, and is logged as one below).
+        boolean answered = classification.withheld();
         Mono<Void> admissionReconciliation = reconcileAttempt(
             "reconcile failed account admission",
             attempt,
             new AccountAdmissionStore.AdmissionResult(
                 attempt.leaseId(),
-                false,
+                answered,
                 0,
                 0,
                 Duration.between(attempt.startedAt(), Instant.now()).toMillis(),
-                statusCode,
-                classification.scope(),
+                answered ? Integer.valueOf(200) : statusCode,
+                answered ? AccountFailureScope.UNKNOWN : classification.scope(),
                 classification.cooldown(),
                 classification.permanentCredentialFailure(),
                 Map.of(
@@ -3869,6 +3904,10 @@ public class ProxyFacade {
      * @param responseRequest the client's request, which the response is shaped by
      * @param requestMovable whether the request may be sent to another account after a failure
      * @param ownerMayBeLeft whether the request may leave the account that owns its response chain
+     * @param chainSession the session a Responses request belongs to by the name its chain gives it, which the facade has
+     *     worked out before planning ({@code TierSessionBindings#sessionOf}); null on the other endpoints, and for a request
+     *     that continues no chain and names no session. The response that is produced is recorded under it when the plan names
+     *     no session of its own ({@link #followTierToNextTurn}).
      */
     record TieredRequest(
         TierPlan plan,
@@ -3888,8 +3927,35 @@ public class ProxyFacade {
         JsonNode responseRequest,
         Instant start,
         boolean requestMovable,
-        boolean ownerMayBeLeft
+        boolean ownerMayBeLeft,
+        String chainSession
     ) {
+
+        /** A request that belongs to no response chain: the endpoints without one, and a request that continues none. */
+        TieredRequest(
+            TierPlan plan,
+            ApiKeyPrincipal principal,
+            String requestId,
+            String path,
+            String requestedModel,
+            String upstreamModel,
+            String sessionHint,
+            boolean stream,
+            UpstreamRoute route,
+            boolean fastMode,
+            boolean preferCodexAccounts,
+            boolean preferDeepSeekAccounts,
+            AccountDtos.RoutingPolicySettings routingPolicy,
+            JsonNode upstreamRequest,
+            JsonNode responseRequest,
+            Instant start,
+            boolean requestMovable,
+            boolean ownerMayBeLeft
+        ) {
+            this(plan, principal, requestId, path, requestedModel, upstreamModel, sessionHint, stream, route, fastMode,
+                preferCodexAccounts, preferDeepSeekAccounts, routingPolicy, upstreamRequest, responseRequest, start,
+                requestMovable, ownerMayBeLeft, null);
+        }
     }
 
     /**

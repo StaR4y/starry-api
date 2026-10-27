@@ -12,9 +12,10 @@ import tech.starryapi.platform.upstream.UpstreamException;
  * <p>It is a recoverable 502 with {@code generationStarted} set, so the code that reads the flag never moves the
  * request on to another account or tier. Only the classification of the cross-protocol dispatcher (P4-08) gives it
  * its other consequences: a one-minute transport cooldown, a short-term exclusion of the member for the session, a
- * release of the reservation that is not a review.
+ * release of the reservation that is not a review. {@link RelayAnswerWithheldException} is the one kind that has the
+ * exclusion and the release and none of the rest.
  */
-public final class RelayAbortedAfterDispatchException extends UpstreamException {
+public class RelayAbortedAfterDispatchException extends UpstreamException {
 
     public RelayAbortedAfterDispatchException(String message) {
         this(message, null);
