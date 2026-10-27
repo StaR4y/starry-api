@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -416,7 +417,8 @@ class TierPlannerXpTest {
         configure(ownerConfiguration(relayMember(), gate("MESSAGES", "OFF", "key-1")));
         TierPlan off = plan(offering(Status.VERIFIED), messages(CLAUDE_CODE));
         assertThat(servedByRelay(off)).isFalse();
-        assertThat(off.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.GATE);
+        // A gate that is off is not a key left off a list: the relay is not looked at, and not counted as left out.
+        assertThat(off.xpSkips()).isEmpty();
 
         configure(ownerConfiguration(relayMember()));
         assertThat(servedByRelay(plan(offering(Status.VERIFIED), messages(CLAUDE_CODE)))).isFalse();
@@ -426,8 +428,44 @@ class TierPlannerXpTest {
     }
 
     @Test
+    void aGateThatIsOffForAVendorIsNoGateSkipOfItsRelaysWhateverAnotherVendorOpensForTheSameEntry() {
+        Member anthropicRelay = relayMember();
+        Member openAiRelay = new Member("openai", "relay-2", "relay", "OPENAI_CHAT", true, false, false, false, false, true, "NONE", 540, true, true);
+        cached.add(secondRelay);
+        usable.add(secondRelay);
+        cached.add(openAiOfficial);
+        usable.add(openAiOfficial);
+        List<Tier> tiers = new ArrayList<>(anthropicTiers());
+        tiers.addAll(List.of(tier("openai", "relay", 1, "relay", "1"),
+            tier("openai", "official", 2, "official", "0.5", AccountAllocationCategory.OFFICIAL_API_KEY)));
+        Function<PairGate, SourceTierSnapshot> configured = openAiGate -> SourceTierSnapshot.of(7L,
+            List.of(vendor("anthropic"), vendor("openai")), tiers, List.of(anthropicRelay, openAiRelay),
+            List.of(mapping(anthropicRelay, "claude-sonnet-4.5", "relay-sonnet", 200_000, true),
+                mapping(openAiRelay, "gpt-5.5", "relay-gpt", 400_000, true)),
+            openAiGate == null ? List.of(gateOf("anthropic", "CHAT", "KEYS", "key-1"))
+                : List.of(gateOf("anthropic", "CHAT", "KEYS", "key-1"), openAiGate));
+
+        // Anthropic opens the Chat entry to its key, so every Chat request is read for relays; the gpt request of any key then
+        // reaches the openai vendor, whose gate is off or was never made: its relay is not one this key was kept from.
+        for (PairGate closed : new PairGate[] {null, gateOf("openai", "CHAT", "OFF")}) {
+            configure(configured.apply(closed));
+            TierPlan gpt = plan(offering(Status.VERIFIED), openAiChat(chatBody("gpt-5.5")));
+
+            assertThat(gpt.levels()).allSatisfy(level -> assertThat(level.relays()).isEmpty());
+            assertThat(gpt.xpSkips()).isEmpty();
+            assertThat(counts.snapshot()).isEmpty();
+        }
+
+        // A gate that is open to some keys and not to this one is the case the count is for.
+        configure(configured.apply(gateOf("openai", "CHAT", "KEYS", "key-9")));
+        TierPlan unlisted = plan(offering(Status.VERIFIED), openAiChat(chatBody("gpt-5.5")));
+        assertThat(unlisted.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.GATE);
+        assertThat(counts.snapshot()).containsExactly(Map.entry(new XpSkipCounts.Key("openai", "relay", XpSkip.Reason.GATE), 1L));
+    }
+
+    @Test
     void theReasonsRelaysAreLeftOutAreCountedPerVendorTierAndReason() {
-        configure(ownerConfiguration(relayMember(), gate("MESSAGES", "OFF")));
+        configure(ownerConfiguration(relayMember(), gate("MESSAGES", "KEYS", "another-key")));
 
         plan(offering(Status.VERIFIED), messages(CLAUDE_CODE));
         plan(offering(Status.VERIFIED), messages(CLAUDE_CODE));
@@ -1147,28 +1185,76 @@ class TierPlannerXpTest {
     }
 
     @Test
-    void aSuffixThatPinsTheTierOfARelayThatBrokeOffAnAnswerKeepsThePinAndAHintIsDropped() {
+    void aPinToTheTierOfARelayThatBrokeOffAnAnswerIsKeptWhetherItIsASuffixOrAHint() {
         configure(ownerConfiguration(relayMember(), gate("MESSAGES", "ON")));
         sessions.excludeRelay("anthropic", "key-1:session-1", "relay-1");
 
         // The relay is out for two minutes, which is not a tier with no account for the model: the pin stays, and the
-        // request is answered with SOURCE_TIER_UNAVAILABLE (a retry) where there is nothing to select.
+        // request is answered with SOURCE_TIER_UNAVAILABLE (a retry) where there is nothing to select. A hint is no
+        // different: it is not dropped for a tier that can serve again shortly, whatever else is in the tier.
         TierPlan pinned = planRemembering(messages(CLAUDE_CODE).withSessionName("key-1:session-1")
             .withSelector(TierSelectorParser.parse(TierSelectorParser.Source.SUFFIX, "relay")));
         assertThat(pinned.pinned()).isTrue();
         assertThat(pinned.levels()).extracting(Level::tierId).containsExactly("relay");
         assertThat(pinned.levels().get(0).relays()).isEmpty();
         assertThat(pinned.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.INTERRUPTED);
-        TierPlan hinted = planRemembering(messages(CLAUDE_CODE).withSessionName("key-1:session-1")
-            .withSelector(TierSelectorParser.fromHeader("relay")));
-        assertThat(hinted.pinned()).isFalse();
-        assertThat(hinted.levels()).extracting(Level::tierId).containsExactly("kiro");
+        for (TierSelectorParser.Selector hint : List.of(TierSelectorParser.fromHeader("relay"), TierSelectorParser.fromPreference("relay"))) {
+            TierPlan hinted = planRemembering(messages(CLAUDE_CODE).withSessionName("key-1:session-1").withSelector(hint));
+            assertThat(hinted.pinned()).isTrue();
+            assertThat(hinted.levels()).extracting(Level::tierId).containsExactly("relay");
+            assertThat(hinted.levels().get(0).relays()).isEmpty();
+        }
 
         // Two minutes later it is the relay's again.
         nanos.addAndGet(java.time.Duration.ofSeconds(121).toNanos());
         TierPlan later = planRemembering(messages(CLAUDE_CODE).withSessionName("key-1:session-1")
             .withSelector(TierSelectorParser.parse(TierSelectorParser.Source.SUFFIX, "relay")));
         assertThat(later.levels().get(0).relay("relay-1")).isPresent();
+    }
+
+    @Test
+    void aPlanKnowsWhetherNativeAccountsAreInReachForARelayThatRefusesTheRequestItself() {
+        configure(ownerConfiguration(relayMember(), gate("MESSAGES", "ON")));
+        TierSelectorParser.Selector suffix = TierSelectorParser.parse(TierSelectorParser.Source.SUFFIX, "relay");
+        TierSelectorParser.Selector suffixAndBelow = TierSelectorParser.parse(TierSelectorParser.Source.SUFFIX, "relay+");
+        TierSelectorParser.Selector header = TierSelectorParser.fromHeader("relay");
+
+        // Kiro is in the cache: its accounts take the prompt the relay refused, whatever they are doing for now.
+        assertThat(planRemembering(messages(CLAUDE_CODE)).retriesAfterRelayRefusal(true)).isTrue();
+        assertThat(planRemembering(messages(CLAUDE_CODE)).retriesAfterRelayRefusal(false)).isTrue();
+        usable.remove(kiro);
+        assertThat(planRemembering(messages(CLAUDE_CODE)).retriesAfterRelayRefusal(true)).as("out of quota").isTrue();
+        // A request that named the tier by the suffix is served by the tiers it names alone.
+        assertThat(planRemembering(messages(CLAUDE_CODE).withSelector(suffix)).retriesAfterRelayRefusal(true)).isFalse();
+        usable.add(kiro);
+        assertThat(planRemembering(messages(CLAUDE_CODE).withSelector(suffix)).retriesAfterRelayRefusal(true)).isFalse();
+        assertThat(planRemembering(messages(CLAUDE_CODE).withSelector(suffixAndBelow)).retriesAfterRelayRefusal(true)).isTrue();
+        // A hint gives way to the other tiers, for the refusal of a length, which this node learns, and for that alone.
+        TierPlan hinted = planRemembering(messages(CLAUDE_CODE).withSelector(header));
+        assertThat(hinted.pinned()).isTrue();
+        assertThat(hinted.retriesAfterRelayRefusal(true)).isTrue();
+        assertThat(hinted.retriesAfterRelayRefusal(false)).isFalse();
+        // The hint to tiers that hold Kiro keeps them for the refusal that is not learned, and the retry crosses to Kiro.
+        for (TierSelectorParser.Selector range : List.of(TierSelectorParser.fromHeader("relay+"), TierSelectorParser.fromHeader("1+"),
+            TierSelectorParser.fromPreference("relay+"))) {
+            TierPlan ranged = planRemembering(messages(CLAUDE_CODE).withSelector(range));
+            assertThat(ranged.pinned()).isTrue();
+            assertThat(ranged.retriesAfterRelayRefusal(true)).isTrue();
+            assertThat(ranged.retriesAfterRelayRefusal(false)).isTrue();
+        }
+        // Without a native account anywhere there is nothing to try again for.
+        cached.remove(kiro);
+        assertThat(planRemembering(messages(CLAUDE_CODE)).retriesAfterRelayRefusal(true)).isFalse();
+        assertThat(planRemembering(messages(CLAUDE_CODE).withSelector(header)).retriesAfterRelayRefusal(true)).isFalse();
+        assertThat(planRemembering(messages(CLAUDE_CODE).withSelector(TierSelectorParser.fromHeader("relay+")))
+            .retriesAfterRelayRefusal(false)).isFalse();
+    }
+
+    @Test
+    void aPlanWithNoRelayInItHasNothingToRetryAfterARelayRefusal() {
+        configure(ownerConfiguration(relayMember(), gate("MESSAGES", "KEYS", "another-key")));
+
+        assertThat(planRemembering(messages(CLAUDE_CODE)).retriesAfterRelayRefusal(true)).isFalse();
     }
 
     @Test
@@ -1358,7 +1444,7 @@ class TierPlannerXpTest {
     @Test
     void theReasonsARelayIsLeftOutForAreSortedIntoThoseOfTheRequestAndThoseOfTheSession() {
         assertThat(java.util.Arrays.stream(XpSkip.Reason.values()).filter(XpSkip.Reason::ofTheRequest))
-            .containsExactly(XpSkip.Reason.FEATURE, XpSkip.Reason.INTERRUPTED, XpSkip.Reason.CONVERSION, XpSkip.Reason.CONTEXT);
+            .containsExactly(XpSkip.Reason.FEATURE, XpSkip.Reason.CONVERSION, XpSkip.Reason.CONTEXT, XpSkip.Reason.INTERRUPTED);
         assertThat(java.util.Arrays.stream(XpSkip.Reason.values()).filter(XpSkip.Reason::temporary))
             .containsExactly(XpSkip.Reason.INTERRUPTED);
     }
@@ -1441,6 +1527,53 @@ class TierPlannerXpTest {
             .containsExactlyInAnyOrder(XpSkip.Reason.CONTEXT, XpSkip.Reason.INTERRUPTED);
     }
 
+    @Test
+    void aRelayThatBrokeOffAnAnswerIsOnlySaidToBeOutForAMomentForARequestItWouldOtherwiseBeGiven() {
+        Member member = relayMember();
+        configure(ownerConfiguration(member, List.of(mapping(member, "claude-sonnet-4.5", "relay-sonnet", 1_000, true)),
+            gate("MESSAGES", "ON")));
+        sessions.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+        ObjectNode nameless = (ObjectNode) json(CLAUDE_CODE);
+        nameless.withArray("tools").addObject().put("name", "").put("description", "nameless");
+
+        TierPlan large = planRemembering(messages(conversationOf(4_000)).withSessionName("key-1:session-1"));
+        TierPlan unconvertible = planRemembering(messages(nameless.toString()).withSessionName("key-1:session-1"));
+        TierPlan small = planRemembering(messages(CLAUDE_CODE).withSessionName("key-1:session-1"));
+
+        // The window and the conversion are the request's, and hold whatever the session met on the relay.
+        assertThat(large.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.CONTEXT);
+        assertThat(unconvertible.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.CONVERSION);
+        assertThat(small.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.INTERRUPTED);
+        assertThat(counts.snapshot()).containsOnly(
+            Map.entry(new XpSkipCounts.Key("anthropic", "relay", XpSkip.Reason.CONTEXT), 1L),
+            Map.entry(new XpSkipCounts.Key("anthropic", "relay", XpSkip.Reason.CONVERSION), 1L),
+            Map.entry(new XpSkipCounts.Key("anthropic", "relay", XpSkip.Reason.INTERRUPTED), 1L));
+    }
+
+    @Test
+    void aPinToTheRelayTierIsKeptForTheInterruptionOfARequestTheRelayWouldHaveTakenAndNotForOneItWouldNot() {
+        Member member = relayMember();
+        configure(ownerConfiguration(member, List.of(mapping(member, "claude-sonnet-4.5", "relay-sonnet", 1_000, true)),
+            gate("MESSAGES", "ON")));
+        sessions.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+        TierSelectorParser.Selector suffix = TierSelectorParser.parse(TierSelectorParser.Source.SUFFIX, "relay");
+
+        for (TierSelectorParser.Selector hint : List.of(TierSelectorParser.fromHeader("relay"), TierSelectorParser.fromPreference("relay"))) {
+            // Beyond the window the relay would not have taken it: the hint gives way, and Kiro serves it as it would have.
+            TierPlan large = planRemembering(messages(conversationOf(4_000)).withSessionName("key-1:session-1").withSelector(hint));
+            assertThat(large.pinned()).isFalse();
+            assertThat(large.levels()).extracting(Level::tierId).containsExactly("kiro");
+            assertThat(large.levels().get(0).responseHeaders()).containsEntry(TierResponseHeaders.STATUS, TierResponseHeaders.IGNORED);
+            TierPlan small = planRemembering(messages(CLAUDE_CODE).withSessionName("key-1:session-1").withSelector(hint));
+            assertThat(small.pinned()).isTrue();
+            assertThat(small.levels()).extracting(Level::tierId).containsExactly("relay");
+        }
+        // The suffix is refused for the length of the prompt, as it is when the relay is not out for a moment.
+        assertThatThrownBy(() -> planRemembering(messages(conversationOf(4_000)).withSessionName("key-1:session-1").withSelector(suffix)))
+            .isInstanceOfSatisfying(ApiException.class, refused -> assertThat(refused.getMessage()).startsWith("prompt is too long"));
+        assertThat(planRemembering(messages(CLAUDE_CODE).withSessionName("key-1:session-1").withSelector(suffix)).pinned()).isTrue();
+    }
+
     // ---- a relay that is switched off keeps a request to its tier only when it could have served the request ----
 
     @Test
@@ -1486,6 +1619,37 @@ class TierPlannerXpTest {
         TierPlan closed = plan(offering(Status.EXPERIMENTAL), messages(CLAUDE_CODE).withSelector(TierSelectorParser.fromHeader("relay")));
         assertThat(closed.pinned()).isFalse();
         assertThat(closed.levels()).extracting(Level::tierId).containsExactly("kiro");
+    }
+
+    @Test
+    void aHintForTheRelayTierWhoseRelayIsSwitchedOffIsDroppedForARequestBeyondItsWindowOrWhatItRefusedAndForOneItCannotConvert() {
+        Member member = relayMember();
+        configure(ownerConfiguration(member, List.of(mapping(member, "claude-sonnet-4.5", "relay-sonnet", 1_000, true)),
+            gate("MESSAGES", "ON")));
+        cached.remove(relay);
+        switchedOff.add(relay);
+        ObjectNode nameless = (ObjectNode) json(CLAUDE_CODE);
+        nameless.withArray("tools").addObject().put("name", "").put("description", "nameless");
+        TierSelectorParser.Selector header = TierSelectorParser.fromHeader("relay");
+
+        // The relay would not take these if it were back, so they are not held for it: Kiro serves them in the order of the tiers.
+        for (String request : List.of(conversationOf(4_000), nameless.toString())) {
+            TierPlan plan = planRemembering(messages(request).withSelector(header));
+            assertThat(plan.pinned()).isFalse();
+            assertThat(plan.levels()).extracting(Level::tierId).containsExactly("kiro");
+            assertThat(plan.levels().get(0).responseHeaders()).containsEntry(TierResponseHeaders.STATUS, TierResponseHeaders.IGNORED);
+        }
+        assertThat(planRemembering(messages(CLAUDE_CODE).withSelector(header)).pinned()).isTrue();
+
+        // The same for a prompt the relay was seen to refuse for its length, though its window says it takes it.
+        Member roomy = relayMember();
+        MemberModel wide = mapping(roomy, "claude-sonnet-4.5", "relay-sonnet", 200_000, true);
+        configure(ownerConfiguration(roomy, List.of(wide), gate("MESSAGES", "ON")));
+        limits.learn(wide, 3_000);
+        TierPlan refused = planRemembering(messages(conversationOf(4_000)).withSelector(header));
+        assertThat(refused.pinned()).isFalse();
+        assertThat(refused.levels()).extracting(Level::tierId).containsExactly("kiro");
+        assertThat(planRemembering(messages(CLAUDE_CODE).withSelector(header)).pinned()).isTrue();
     }
 
     // ---- what a tier reserves for (design 5.2) ----
@@ -1537,6 +1701,35 @@ class TierPlannerXpTest {
         assertThat(pinned.levels()).extracting(Level::tierId).containsExactly("relay");
         assertThat(pinned.reservation()).isEqualByComparingTo(relays.estimate());
         assertThat(pinned.reservation()).isLessThan(official.estimate().max(relays.estimate()).add(BigDecimal.ONE));
+    }
+
+    @Test
+    void aTierOfRelaysAloneThatNoRelayCanServeForNowIsReservedForNoMoreThanItsRelaysWouldBeEitherWhenTheRequestIsPinnedToIt() {
+        configureOpenAiWithAnInlineImage();
+        // The only relay broke off an answer of the session a moment ago and is kept from it for two minutes.
+        sessions.excludeRelay("openai", "key-1:session-1", "relay-1");
+        BigDecimal floor = STANDARD.scaled(BigDecimal.ONE).estimate(1_000_000L, 4096);
+
+        for (TierSelectorParser.Selector selector : List.of(
+            TierSelectorParser.parse(TierSelectorParser.Source.SUFFIX, "relay"), TierSelectorParser.fromHeader("relay"))) {
+            TierPlan pinned = planRemembering(openAiChat(gptBodyWithAnInlineImage()).withSessionName("key-1:session-1")
+                .withSelector(selector));
+
+            // Nobody is asked, and the request is answered with a retry: it needs no more balance than the relay itself did.
+            assertThat(pinned.pinned()).isTrue();
+            assertThat(pinned.levels()).extracting(Level::tierId).containsExactly("relay");
+            assertThat(pinned.levels().get(0).relays()).isEmpty();
+            assertThat(pinned.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.INTERRUPTED);
+            assertThat(pinned.levels().get(0).inputBound()).isZero();
+            assertThat(pinned.reservation()).isEqualByComparingTo(STANDARD.scaled(BigDecimal.ONE).estimate(0, 4096));
+            assertThat(pinned.reservation()).isLessThan(floor);
+        }
+        // The same request when the relay is back: its own body is what the tier is reserved for.
+        nanos.addAndGet(java.time.Duration.ofSeconds(121).toNanos());
+        TierPlan back = planRemembering(openAiChat(gptBodyWithAnInlineImage()).withSessionName("key-1:session-1")
+            .withSelector(TierSelectorParser.fromHeader("relay")));
+        assertThat(back.levels().get(0).relay("relay-1").orElseThrow().inputBound()).isBetween(5_000L, 20_000L);
+        assertThat(back.levels().get(0).inputBound()).isBetween(5_000L, 20_000L);
     }
 
     @Test

@@ -15,11 +15,13 @@
   import { sourceTiersApi, type SourceTierEvidence } from '@/api/sourceTiers';
   import {
     criterionLabel,
+    criterionNote,
     criterionValue,
     entryInfo,
     evidenceFileName,
     formatLatency,
     gateStateLabel,
+    lintCountPartial,
     pairStatusLabel,
     successPercent,
     unmetCriteria,
@@ -140,6 +142,19 @@
             )
           }}
         </p>
+        <el-alert
+          v-if="lintCountPartial(evidence)"
+          type="warning"
+          show-icon
+          :closable="false"
+          :title="t('严格检查失败这一项判不了')"
+          :description="
+            t(
+              '应答节点自 {p0} 才开始计数，比所选窗口（自 {p1}）短，窗口前面那一段它没看到，所以这一项算未达标。请等它运行满窗口再看，或选更短的窗口。',
+              { p0: formatDateTime(evidence.skipsSince), p1: formatDateTime(evidence.since) },
+            )
+          "
+        />
         <p v-if="!evidence.pairs.length" class="evidence__empty">
           {{ t('这个版本没有提供任何对，没有可升级的。') }}
         </p>
@@ -183,6 +198,9 @@
               <span class="pair__criterion">{{ criterionLabel(criterion.name) }}</span>
               <span class="pair__rule">{{ criterion.rule }}</span>
               <strong>{{ criterionValue(criterion) }}</strong>
+              <span v-if="criterionNote(criterion.name)" class="pair__rule pair__note">
+                {{ criterionNote(criterion.name) }}
+              </span>
             </li>
           </ul>
 
@@ -322,8 +340,9 @@
 
       li {
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
-        gap: 8px;
+        gap: 4px 8px;
         font-size: 13px;
         color: var(--kp-text-secondary);
       }
@@ -341,6 +360,11 @@
       font-size: 12px;
       color: var(--kp-text-muted);
       font-variant-numeric: tabular-nums;
+    }
+
+    /* 说明单独占一行，不挤进一格只有 260px 的标准行里 */
+    &__note {
+      flex-basis: 100%;
     }
 
     &__figures {

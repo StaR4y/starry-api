@@ -8,8 +8,10 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -33,6 +35,8 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -102,6 +106,7 @@ import tech.starryapi.proxy.tier.TierEntry;
 import tech.starryapi.proxy.tier.TierPlan;
 import tech.starryapi.proxy.tier.TierPlanRequest;
 import tech.starryapi.proxy.tier.TierResponseHeaders;
+import tech.starryapi.proxy.tier.TierRetryPolicy;
 import tech.starryapi.proxy.tier.TierRuntime;
 import tech.starryapi.proxy.tier.TierSelectorParser;
 import tech.starryapi.proxy.tier.TierSessionBindings;
@@ -165,7 +170,7 @@ class ProxyFacadeTieredXpChatTest {
     private final ApiKeyPrincipal principal = new ApiKeyPrincipal("key-1", "test", null, BigDecimal.ZERO);
 
     private final AtomicLong clock = new AtomicLong();
-    private final TierSessionBindings bindings = new TierSessionBindings(new ProxyProperties(), clock::get);
+    private final TierSessionBindings bindings = spy(new TierSessionBindings(new ProxyProperties(), clock::get));
     private final XpLearnedLimits learnedLimits = new XpLearnedLimits(clock::get);
 
     /** The accounts of the pool's cache, in the order it offers them. */
@@ -220,7 +225,8 @@ class ProxyFacadeTieredXpChatTest {
         when(accountPool.isUsable(any())).thenReturn(true);
         when(accountPool.selectInScope(any(), any(), anyString(), any(), any(), anyBoolean())).thenAnswer(invocation -> {
             Predicate<ProxyAccountEntity> filter = invocation.getArgument(1);
-            Optional<ProxyAccountEntity> found = cached.stream().filter(filter).findFirst();
+            // As the real selection does, an account that is out of quota is not offered.
+            Optional<ProxyAccountEntity> found = cached.stream().filter(filter).filter(accountPool::isUsable).findFirst();
             return found.<Mono<ProxyAccountEntity>>map(Mono::just).orElseGet(() -> Mono.error(
                 new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", invocation.getArgument(2))));
         });
@@ -303,6 +309,27 @@ class ProxyFacadeTieredXpChatTest {
             RequestBounds.xpInputTokens(lastDispatch.wireBody(), 8192));
         // The member's own time limit, with the lease of the reservation far from its end.
         assertThat(lastTimeLimit).isEqualTo(Duration.ofSeconds(540));
+    }
+
+    @Test
+    void aRelayIsHeldToTheOutputLimitItWasSentAndNotToTheBoundTheTierReservedFor() {
+        configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1"), gate("MESSAGES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        ObjectNode small = chatBody();
+        small.put("max_tokens", 100);
+
+        chat(small);
+
+        // The reservation takes the default limit of 4096 for a request that asks for fewer, which is no reason to pay a
+        // relay for more than it was told it may write.
+        assertThat(lastDispatch.wireBody().path("max_tokens").asInt()).isEqualTo(100);
+        assertThat(lastLimits.maxOutputTokens()).isEqualTo(100);
+
+        ObjectNode asked = messagesBody();
+        asked.put("max_tokens", 100);
+        messages(asked);
+
+        assertThat(lastLimits.maxOutputTokens()).isEqualTo(100);
     }
 
     @Test
@@ -537,6 +564,149 @@ class ProxyFacadeTieredXpChatTest {
         assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
     }
 
+    // ---- the relay turns its own key down (D5) ----
+
+    /** Statuses and the words of the three ways a relay says it will not take the key of its account. */
+    private UpstreamException relayRejectsItsKey(String how) {
+        return switch (how) {
+            case "401" -> relayErrors.fromResponse(401, error("invalid_api_key", "Incorrect API key provided: sk-secret"), null, "relay-1", "sk-secret");
+            case "403" -> relayErrors.fromResponse(403, error("permission_error", "Your account may not use this endpoint"), null, "relay-1", "sk-secret");
+            default -> relayErrors.fromInBand(
+                objectMapper.createObjectNode().put("message", "invalid x-api-key").put("type", "authentication_error"), "relay-1", "sk-secret");
+        };
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"401", "403", "in-band"})
+    void aRelayThatRejectsItsOwnKeyIsLeftForKiroAndRestsForTenMinutes(String how) {
+        configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        fails(relayAnswers, "relay-1", relayRejectsItsKey(how));
+
+        ResponseEntity<?> response = chat(chatBody());
+
+        assertThat(dispatched).containsExactly("relay-1", "kiro-1");
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.LEVEL)).isEqualTo("2");
+        // Billed at the tier that served: 8,000 in and 1,000 out cost 0.039 at the standard price and 0.0234 at 0.6.
+        verify(apiKeyService).accountUsageServed(any(), anyString(), org.mockito.ArgumentMatchers.argThat(
+            credits -> credits.compareTo(new BigDecimal("0.0234")) == 0), eq(8_000L), eq(1_000L), eq("anthropic:kiro"), eq(2),
+            org.mockito.ArgumentMatchers.argThat(factor -> factor.compareTo(new BigDecimal("0.6")) == 0));
+        // A refusal given before anything was generated is no reason to review the reservation.
+        verify(apiKeyService, never()).releaseUsage(any(), anyString(), anyBoolean(), anyString());
+        // The account rests as a native account does for credentials that are bad, and is not disabled by a relay's word.
+        AdmissionResult failed = reconciled().stream().filter(result -> !result.success()).findFirst().orElseThrow();
+        assertThat(failed.failureScope()).isEqualTo(AccountFailureScope.CREDENTIAL);
+        assertThat(failed.cooldown()).isEqualTo(Duration.ofMinutes(10));
+        assertThat(failed.permanentCredentialFailure()).isFalse();
+        assertThat(failed.statusCode()).isEqualTo(how.equals("403") ? 403 : 401);
+        // The failed attempt is logged at its own tier with the kind of failure, and nothing the relay wrote.
+        StatsService.RequestLog first = logs().getFirst();
+        assertThat(first.success()).isFalse();
+        assertThat(first.sourceTierRef()).isEqualTo("anthropic:relay");
+        assertThat(first.stopReason()).isEqualTo("KEY_REFUSED");
+        assertThat(first.errorMessage()).doesNotContain("sk-secret", "Incorrect API key", "invalid x-api-key", "may not use");
+        // The cooldown is the account's, whatever the model: it is kept under the relay's own endpoint.
+        assertThat(failed.evidence()).containsEntry("endpoint", "xp:/chat/completions");
+    }
+
+    @Test
+    void aRelayThatRejectsItsOwnKeyLeavesTheTierToItsNextRelayBeforeTheNextTier() {
+        configure(owner(List.of(relayMember("relay-1"), relayMember("relay-2")), gate("CHAT", "KEYS", "key-1")));
+        add(relay, secondRelay, kiro("kiro-1"));
+        fails(relayAnswers, "relay-1", relayRejectsItsKey("401"));
+
+        ResponseEntity<?> response = chat(chatBody());
+
+        assertThat(dispatched).containsExactly("relay-1", "relay-2");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+    }
+
+    @Test
+    void aRelayThatRejectsItsOwnKeyFallsToKiroInOneRequestAndTheSessionIsPushedDownOnlyWhenTheTierHadNothingElse() {
+        configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        fails(relayAnswers, "relay-1", relayRejectsItsKey("401"));
+
+        chat(chatBody(), "session-1");
+
+        // The tier had no other account to give: as for an account that is busy, this is a fall of the session (design 4.7).
+        verify(bindings).downgrade(any(), any(), any());
+    }
+
+    @Test
+    void aRelayThatRejectsItsOwnKeyWithNothingNativeBelowIsNotToldToTheClientAs401() {
+        configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1")));
+        add(relay);
+        fails(relayAnswers, "relay-1", relayRejectsItsKey("401"));
+
+        assertThatThrownBy(() -> chat(chatBody()))
+            .isInstanceOfSatisfying(ApiException.class, error -> {
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                assertThat(error.getCode()).isEqualTo("NO_AVAILABLE_ACCOUNT");
+                assertThat(error.getMessage()).doesNotContain("Source error", "401", "invalid_api_key");
+            });
+
+        assertThat(dispatched).containsExactly("relay-1");
+        verify(apiKeyService).releaseUsage(any(), anyString(), eq(true), anyString());
+        verify(apiKeyService, never()).releaseUsage(any(), anyString(), eq(false), anyString());
+    }
+
+    @Test
+    void aRelayThatRejectsItsOwnKeyWhileKiroIsBusyIsNotToldToTheClientAs403() {
+        configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        busy.add("kiro-1");
+        fails(relayAnswers, "relay-1", relayRejectsItsKey("403"));
+
+        assertThatThrownBy(() -> chat(chatBody()))
+            .isInstanceOfSatisfying(ApiException.class, error -> {
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                assertThat(error.getMessage()).doesNotContain("Source error", "403", "permission_error");
+            });
+
+        assertThat(dispatched).containsExactly("relay-1");
+        verify(apiKeyService).releaseUsage(any(), anyString(), eq(true), anyString());
+    }
+
+    @Test
+    void aRequestPinnedToTheRelayIsToldToTryAgainWhenTheRelayRejectsItsKey() {
+        configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        fails(relayAnswers, "relay-1", relayRejectsItsKey("401"));
+        ObjectNode body = chatBody();
+        body.put("model", "claude-sonnet-4.5@relay");
+        MockServerWebExchange exchange = exchange(CHAT_PATH, null);
+
+        assertThatThrownBy(() -> facade().chat(body, exchange).block())
+            .isInstanceOfSatisfying(ApiException.class, error -> {
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                assertThat(error.getCode()).isEqualTo("SOURCE_TIER_UNAVAILABLE");
+            });
+
+        // No other tier may serve it, at another price, and what the relay said is not the answer.
+        assertThat(dispatched).containsExactly("relay-1");
+        assertThat(exchange.getResponse().getHeaders().getFirst("Retry-After")).isNotNull();
+        verify(apiKeyService).releaseUsage(any(), anyString(), eq(true), anyString());
+    }
+
+    @Test
+    void theRejectionOfANativeAccountIsAnsweredAsItAlwaysWas() {
+        configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        busy.add("relay-1");
+        fails(kiroAnswers, "kiro-1", new UpstreamException(401, "The bearer token is invalid", false));
+
+        assertThatThrownBy(() -> chat(chatBody()))
+            .isInstanceOfSatisfying(ApiException.class, error -> {
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.UNAUTHORIZED);
+                assertThat(error.getCode()).isEqualTo("UPSTREAM_ERROR");
+            });
+
+        assertThat(dispatched).containsExactly("kiro-1");
+    }
+
     // ---- the relay refuses the request itself ----
 
     @Test
@@ -616,6 +786,205 @@ class ProxyFacadeTieredXpChatTest {
 
         assertThat(dispatched).containsExactly("relay-1");
         verify(apiKeyService).releaseUsage(any(), anyString(), eq(true), anyString());
+    }
+
+    // ---- a relay that refused the request itself, with native accounts that cannot take it for now (design 7.8) ----
+
+    private void relayRefusesTheLengthOfEveryPrompt() {
+        fails(relayAnswers, "relay-1", relayErrors.fromResponse(400,
+            error("context_length_exceeded", "maximum context length"), null, "relay-1", "sk-secret"));
+    }
+
+    private ApiException refusedWith(ObjectNode body, MockServerWebExchange exchange) {
+        return refusedWith(facade(), body, exchange);
+    }
+
+    private ApiException refusedWith(ProxyFacade facade, ObjectNode body, MockServerWebExchange exchange) {
+        try {
+            facade.chat(body, exchange).block();
+        } catch (ApiException refused) {
+            return refused;
+        }
+        throw new AssertionError("The request was not refused");
+    }
+
+    @Test
+    void aPromptTheRelayRefusedIsNotAnsweredTooLongWhenKiroWouldTakeItAndIsOnlyBusy() {
+        configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        busy.add("kiro-1");
+        relayRefusesTheLengthOfEveryPrompt();
+
+        // Shortening the conversation would be lossy and needless: Kiro takes the prompt as it is, and is busy for now.
+        ApiException first = refusedWith(conversationOf(4_000), exchange(CHAT_PATH, null));
+        ApiException again = refusedWith(conversationOf(4_000), exchange(CHAT_PATH, null));
+
+        assertThat(first.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(first.getCode()).isEqualTo("NO_AVAILABLE_ACCOUNT");
+        // The identical request is answered the same, the relay now being left out of its plan.
+        assertThat(again.getStatus()).isEqualTo(first.getStatus());
+        assertThat(again.getCode()).isEqualTo(first.getCode());
+        assertThat(dispatched).containsExactly("relay-1");
+        // The relay had the request until the end: nothing is left for review.
+        verify(apiKeyService, times(1)).releaseUsage(any(), anyString(), eq(true), anyString());
+        verify(apiKeyService, never()).accountUsageServed(any(), anyString(), any(), anyLong(), anyLong(), anyString(), anyInt(), any());
+
+        busy.clear();
+        assertThat(chat(conversationOf(4_000)).getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
+    }
+
+    @Test
+    void aPromptTheRelayRefusedIsNotAnsweredTooLongWhenKiroWouldTakeItAndIsOutOfQuota() {
+        configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1")));
+        ProxyAccountEntity exhausted = kiro("kiro-1");
+        add(relay, exhausted);
+        // Out of quota, so that the plan holds the relay's tier alone and the relay has no tier below it to cross to.
+        when(accountPool.isUsable(exhausted)).thenReturn(false);
+        relayRefusesTheLengthOfEveryPrompt();
+
+        ApiException first = refusedWith(conversationOf(4_000), exchange(CHAT_PATH, null));
+        ApiException again = refusedWith(conversationOf(4_000), exchange(CHAT_PATH, null));
+
+        assertThat(first.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(first.getCode()).isEqualTo("NO_AVAILABLE_ACCOUNT");
+        assertThat(again.getCode()).isEqualTo(first.getCode());
+        assertThat(dispatched).containsExactly("relay-1");
+        verify(apiKeyService, times(1)).releaseUsage(any(), anyString(), eq(true), anyString());
+    }
+
+    @Test
+    void aConversionTheRelayRefusedIsNotAnsweredWithItsErrorWhenKiroIsOnlyBusyEither() {
+        configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        busy.add("kiro-1");
+        fails(relayAnswers, "relay-1", relayErrors.fromResponse(400, error("invalid_request_error", "Unsupported parameter: x"),
+            null, "relay-1", "sk-secret"));
+
+        ApiException refused = refusedWith(chatBody(), exchange(CHAT_PATH, null));
+
+        assertThat(refused.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(refused.getCode()).isEqualTo("NO_AVAILABLE_ACCOUNT");
+        verify(apiKeyService).releaseUsage(any(), anyString(), eq(true), anyString());
+    }
+
+    /** The tier holds Kiro and the relay, Kiro first, and the tier below holds a second Kiro account. */
+    private void kiroAndTheRelayShareTheFirstTier() {
+        configure(SourceTierSnapshot.of(7L, List.of(vendor()), List.of(
+                tier("mixed", 1, "1", AccountAllocationCategory.KIRO),
+                tier("oauth", 2, "0.6", AccountAllocationCategory.CLAUDE_OAUTH)),
+            List.of(relayMember("relay-1", "mixed")), List.of(mapping(relayMember("relay-1", "mixed"), relay)),
+            List.of(gate("CHAT", "KEYS", "key-1"))));
+        add(kiro("kiro-1"), relay);
+    }
+
+    @ParameterizedTest(name = "request {0} seconds old")
+    @ValueSource(longs = {0, 250})
+    void aPromptTheRelayRefusedAfterAKiroFailureThatMayHaveBeenBilledIsAnsweredAsItIsWhateverTheRequestsAge(long seconds) {
+        kiroAndTheRelayShareTheFirstTier();
+        // The timeout may have been billed: the request is narrowed to its tier, and the relay of the tier is asked next.
+        fails(kiroAnswers, "kiro-1", new UpstreamException(408, "Request timeout", true));
+        relayRefusesTheLengthOfEveryPrompt();
+
+        ApiException refused = refusedWith(facade(offering(), Duration.ofSeconds(seconds)), conversationOf(4_000), exchange(CHAT_PATH, null));
+
+        // Not told to try again: the request would be reserved and charged a second time for what Kiro may have generated.
+        assertThat(refused.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(refused.getMessage()).startsWith("prompt is too long");
+        assertThat(dispatched).containsExactly("kiro-1", "relay-1");
+        verify(apiKeyService, times(1)).releaseUsage(any(), anyString(), eq(false), anyString());
+        verify(apiKeyService, never()).releaseUsage(any(), anyString(), eq(true), anyString());
+    }
+
+    @Test
+    void aPromptTheRelayRefusedOfARequestOlderThanTheDeadlineIsToldToTryAgainWhileKiroIsOnlyBusy() {
+        configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        busy.add("kiro-1");
+        relayRefusesTheLengthOfEveryPrompt();
+
+        ApiException refused = refusedWith(facade(offering(), TierRetryPolicy.CROSS_TIER_DEADLINE.plusSeconds(1)),
+            conversationOf(4_000), exchange(CHAT_PATH, null));
+
+        // Nothing about the request is uncertain, and the identical request, made again, crosses to Kiro.
+        assertThat(refused.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(refused.getCode()).isEqualTo("NO_AVAILABLE_ACCOUNT");
+        assertThat(dispatched).containsExactly("relay-1");
+        verify(apiKeyService, times(1)).releaseUsage(any(), anyString(), eq(true), anyString());
+    }
+
+    @Test
+    void aPromptTheRelayRefusedIsStillAnsweredTooLongWhenNoNativeAccountIsThereAtAll() {
+        configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1")));
+        add(relay);
+        relayRefusesTheLengthOfEveryPrompt();
+
+        // Kiro has no account, busy or not: the prompt is too long for everything there is, and a client shortens it.
+        ApiException refused = refusedWith(conversationOf(4_000), exchange(CHAT_PATH, null));
+
+        assertThat(refused.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(refused.getMessage()).startsWith("prompt is too long");
+    }
+
+    @Test
+    void aPromptTheRelayRefusedIsAnsweredTooLongToARequestThatNamedTheTierBySuffixWhateverKiroIs() {
+        configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        relayRefusesTheLengthOfEveryPrompt();
+        ObjectNode body = conversationOf(4_000);
+        body.put("model", "claude-sonnet-4.5@relay");
+
+        // The suffix is the client's demand for this tier, and Kiro may not serve it: the same answer every time.
+        ApiException first = refusedWith(body.deepCopy(), exchange(CHAT_PATH, null));
+        ApiException again = refusedWith(body.deepCopy(), exchange(CHAT_PATH, null));
+
+        assertThat(first.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(first.getMessage()).startsWith("prompt is too long");
+        assertThat(again.getStatus()).isEqualTo(first.getStatus());
+        assertThat(again.getMessage()).isEqualTo(first.getMessage());
+        assertThat(dispatched).containsExactly("relay-1");
+    }
+
+    @Test
+    void aPromptTheRelayRefusedIsAnsweredWithATryAgainToARequestWhoseHeaderNamedTheTierAndTheRetryDropsTheHint() {
+        configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        relayRefusesTheLengthOfEveryPrompt();
+        MockServerWebExchange named = MockServerWebExchange.from(
+            MockServerHttpRequest.post(CHAT_PATH).header(TierSelectorParser.REQUEST_HEADER, "relay"));
+
+        // A hint gives way: this node now knows the relay does not take the prompt, and the retry is served by Kiro, which
+        // the client is not made to shorten the conversation for.
+        ApiException refused = refusedWith(conversationOf(4_000), named);
+
+        assertThat(refused.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(refused.getCode()).isEqualTo("SOURCE_TIER_UNAVAILABLE");
+        assertThat(named.getResponse().getHeaders().getFirst("Retry-After")).isNotNull();
+        verify(apiKeyService).releaseUsage(any(), anyString(), eq(true), anyString());
+
+        MockServerWebExchange retried = MockServerWebExchange.from(
+            MockServerHttpRequest.post(CHAT_PATH).header(TierSelectorParser.REQUEST_HEADER, "relay"));
+        ResponseEntity<?> retry = facade().chat(conversationOf(4_000), retried).block();
+        assertThat(retry.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
+        assertThat(retry.getHeaders().getFirst(TierResponseHeaders.STATUS)).isEqualTo(TierResponseHeaders.IGNORED);
+        assertThat(dispatched).containsExactly("relay-1", "kiro-1");
+    }
+
+    @Test
+    void aConversionTheRelayRefusedIsAnsweredWithItsErrorToARequestWhoseHeaderNamedTheTier() {
+        configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        fails(relayAnswers, "relay-1", relayErrors.fromResponse(400, error("invalid_request_error", "Unsupported parameter: x"),
+            null, "relay-1", "sk-secret"));
+        MockServerWebExchange named = MockServerWebExchange.from(
+            MockServerHttpRequest.post(CHAT_PATH).header(TierSelectorParser.REQUEST_HEADER, "relay"));
+
+        // Nothing is learned of a conversion the relay will not take: a retry would be refused the same, so none is invited.
+        ApiException refused = refusedWith(chatBody(), named);
+
+        assertThat(refused.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(refused.getCode()).isEqualTo("UPSTREAM_ERROR");
+        assertThat(named.getResponse().getHeaders().getFirst("Retry-After")).isNull();
+        assertThat(dispatched).containsExactly("relay-1");
     }
 
     @Test
@@ -1364,6 +1733,301 @@ class ProxyFacadeTieredXpChatTest {
         assertServedByANativeTier(response, "kiro-1", "openai:official", "official");
     }
 
+    // The entries that are never read for relays, the Responses entry of Codex and the Gemini one, stay what they were whatever
+    // relay the vendor of the model has and however open its gate is: they pass no facts to the planner (design 3, step 5b).
+
+    private static final String RESPONSES_PATH = "/v1/responses";
+    private static final String GEMINI_PATH = "/v1beta/models/claude-sonnet-4.5:generateContent";
+
+    /** The openai vendor with a relay as its first tier, open to key-1 on the Chat entry, and official keys as its second at half the price. */
+    private SourceTierSnapshot openAiRelayBesideOfficialKeys() {
+        return openAiRelayBesideOfficialKeys(false, true);
+    }
+
+    /**
+     * The same, with the tier of the relay kept and the relay left out when {@code withRelay} is false, and with the names of the tiers
+     * given to the users who cannot pay for the reservation when {@code publicListing} is true.
+     */
+    private SourceTierSnapshot openAiRelayBesideOfficialKeys(boolean publicListing, boolean withRelay) {
+        Member member = new Member("openai", "relay-1", "relay", "OPENAI_CHAT", true, false, false, false, false, true, "NONE", 540, true, true);
+        MemberModel unverified = new MemberModel("openai", "relay-1", "gpt-5.4", "relay-gpt", 400_000, 8192, true, null, null);
+        MemberModel verified = new MemberModel("openai", "relay-1", "gpt-5.4", "relay-gpt", 400_000, 8192, true,
+            Instant.parse("2026-10-26T00:00:00Z"), SourceTierValidator.mappingFingerprint(member, unverified, relay));
+        return SourceTierSnapshot.of(7L, List.of(new VendorConfig("openai", true, false, publicListing, true, 16, true, 7L)),
+            List.of(new Tier("openai", "relay", 1, "relay", BigDecimal.ONE, EnumSet.noneOf(AccountAllocationCategory.class), true, true, null),
+                new Tier("openai", "official", 2, "official", new BigDecimal("0.5"),
+                    EnumSet.of(AccountAllocationCategory.OFFICIAL_API_KEY), true, true, null)),
+            withRelay ? List.of(member) : List.of(), withRelay ? List.of(verified) : List.of(),
+            withRelay ? List.of(new PairGate("openai", "OPENAI_CHAT", "CHAT", "KEYS", List.of("key-1"))) : List.of());
+    }
+
+    private static PairRegistry offeringOpenAi() {
+        return new PairRegistry(List.of(
+            new Registration(SourceKind.OPENAI_CHAT_RELAY, Entry.CHAT, "openai", Status.EXPERIMENTAL),
+            new Registration(SourceKind.OPENAI_CHAT_RELAY, Entry.CHAT, "anthropic", Status.EXPERIMENTAL),
+            new Registration(SourceKind.OPENAI_CHAT_RELAY, Entry.MESSAGES, "anthropic", Status.EXPERIMENTAL)));
+    }
+
+    private ObjectNode codexResponsesBody() {
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("model", "gpt-5.4").put("input", "list the files");
+        return body;
+    }
+
+    private ObjectNode geminiBody() {
+        ObjectNode body = objectMapper.createObjectNode();
+        body.putArray("contents").addObject().put("role", "user").putArray("parts").addObject().put("text", "hi");
+        body.putObject("generationConfig").put("maxOutputTokens", 4096);
+        return body;
+    }
+
+    private static MockServerWebExchange namingTheRelayTier(String path) {
+        return MockServerWebExchange.from(MockServerHttpRequest.post(path).header(TierSelectorParser.REQUEST_HEADER, "relay"));
+    }
+
+    /**
+     * What a request of an entry that is not read for relays is, though the tiers of its vendor hold a relay with an open gate:
+     * it is planned without the facts a relay is judged by, never meets the dispatcher of relays, is marked, settled and
+     * logged as a request of native tiers, and moves no session.
+     */
+    private void assertServedByANativeTierAndNeverReadForRelays(
+        ResponseEntity<?> response,
+        String accountId,
+        String tierRef,
+        String tierId,
+        String level
+    ) {
+        assertThat(planned).hasSize(1);
+        assertThat(planned.getFirst().entryFacts()).isNull();
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        assertThat(dispatched).containsExactly(accountId);
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo(tierId);
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.LEVEL)).isEqualTo(level);
+        verifyNoInteractions(xpDispatcher);
+        verify(apiKeyService).markUsageDispatchedTiered(any(), anyString(), eq(tierRef));
+        verify(apiKeyService, never()).markUsageDispatchedTiered(any(), anyString(), anyString(), any(Duration.class));
+        verify(apiKeyService, never()).markUsageDispatched(any(), anyString());
+        verify(apiKeyService).accountUsageServed(any(), anyString(), any(), anyLong(), anyLong(), eq(tierRef), eq(Integer.parseInt(level)), any());
+        StatsService.RequestLog row = onlyLog();
+        assertThat(row.sourceTierRef()).isEqualTo(tierRef);
+        assertThat(row.sourceDispatch()).isNull();
+        assertThat(row.wireModel()).isNull();
+        assertThat(row.usageSource()).isNull();
+        assertThat(row.stopReason()).isNull();
+        assertThat(row.degradedFeatures()).isNull();
+        // The tier that serves is the only one there is for the entry: no session is pushed down, and none climbs.
+        verify(bindings, never()).downgrade(any(), any(), any());
+        verify(bindings, never()).climb(any(), any());
+    }
+
+    @Test
+    void aCodexResponsesRequestIsServedByTheNativeTiersAsBeforeWhateverRelayTheVendorHasAndHoweverOpenItsGateIs() {
+        configure(openAiRelayBesideOfficialKeys());
+        add(relay, account("openai-1", "OpenAI", "api-key", null));
+        when(openAiClient.completeResponses(any(), any(), anyString())).thenAnswer(invocation -> {
+            dispatched.add(invocation.<ProxyAccountEntity>getArgument(0).getAccountId());
+            return Mono.just(OPENAI_ANSWER);
+        });
+
+        ResponseEntity<?> response = facade(offeringOpenAi()).responses(codexResponsesBody(), exchange(RESPONSES_PATH, null)).block();
+
+        assertServedByANativeTierAndNeverReadForRelays(response, "openai-1", "openai:official", "official", "2");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.STATUS)).isEqualTo("served");
+        // The relay is the Chat entry's: the same configuration gives it the gpt request that OpenCode sends.
+        dispatched.clear();
+        ObjectNode opencode = gptChatBody();
+        opencode.put("model", "gpt-5.4");
+        ResponseEntity<?> chat = facade(offeringOpenAi()).chat(opencode, exchange(CHAT_PATH, null)).block();
+        assertThat(chat.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(dispatched).containsExactly("relay-1");
+    }
+
+    /** OpenCode sends a verbosity of low with every request of a gpt model (D6): the relay is given the request all the same. */
+    @Test
+    void aGptChatRequestThatAsksForALowVerbosityIsServedByTheRelayWhichIsNotSentItAndTheRequestLogsItAsLeftOut() {
+        configure(openAiRelayBesideOfficialKeys());
+        add(relay, account("openai-1", "OpenAI", "api-key", null));
+        ObjectNode opencode = gptChatBody();
+        opencode.put("model", "gpt-5.4").put("verbosity", "low");
+
+        ResponseEntity<?> response = facade(offeringOpenAi()).chat(opencode, exchange(CHAT_PATH, null)).block();
+
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(dispatched).containsExactly("relay-1");
+        assertThat(lastDispatch.wireBody().has("verbosity")).isFalse();
+        assertThat(lastDispatch.degraded()).contains("verbosity");
+        assertThat(planned.getFirst().entryFacts().detected().features().stream().map(feature -> feature.label()))
+            .contains("verbosity");
+    }
+
+    @Test
+    void aGptChatRequestThatAsksForLogitBiasIsStillServedByTheOfficialKeysAndNotByTheRelay() {
+        configure(openAiRelayBesideOfficialKeys());
+        add(relay, account("openai-1", "OpenAI", "api-key", null));
+        ObjectNode opencode = gptChatBody();
+        opencode.put("model", "gpt-5.4").put("verbosity", "low").putObject("logit_bias").put("50256", -100);
+
+        ResponseEntity<?> response = facade(offeringOpenAi()).chat(opencode, exchange(CHAT_PATH, null)).block();
+
+        // The odds of the words are changed by the account that is handed them, and a relay is not.
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("official");
+        assertThat(dispatched).containsExactly("openai-1");
+        verifyNoInteractions(xpDispatcher);
+    }
+
+    @Test
+    void aCodexResponsesRequestThatNamedTheRelayTierByHeaderIsServedAutomaticallyAsBefore() {
+        configure(openAiRelayBesideOfficialKeys());
+        add(relay, account("openai-1", "OpenAI", "api-key", null));
+        when(openAiClient.completeResponses(any(), any(), anyString())).thenAnswer(invocation -> {
+            dispatched.add(invocation.<ProxyAccountEntity>getArgument(0).getAccountId());
+            return Mono.just(OPENAI_ANSWER);
+        });
+
+        // No relay takes part in this entry, so the tier the header names has nothing for it: the hint is dropped.
+        ResponseEntity<?> response = facade(offeringOpenAi()).responses(codexResponsesBody(), namingTheRelayTier(RESPONSES_PATH)).block();
+
+        assertServedByANativeTierAndNeverReadForRelays(response, "openai-1", "openai:official", "official", "2");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.MODE)).isEqualTo("auto");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.STATUS)).isEqualTo(TierResponseHeaders.IGNORED);
+    }
+
+    /** The relay of the anthropic vendor with its gates on the Chat and Messages entries open to key-1, and Kiro beside it. */
+    private void configureTheRelayOpenToTheKeyBesideKiro() {
+        configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1"), gate("MESSAGES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+    }
+
+    /** The gates really are open to this key: the entries the relay is offered on give it a request of the key. */
+    private void assertTheGatesAreOpenToTheKey() {
+        dispatched.clear();
+        assertThat(chat(chatBody()).getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(messages(messagesBody()).getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(dispatched).containsExactly("relay-1", "relay-1");
+    }
+
+    @Test
+    void aGeminiRequestIsServedByTheNativeTiersAsBeforeWhateverRelayTheVendorHasAndHoweverOpenItsGateIs() {
+        configureTheRelayOpenToTheKeyBesideKiro();
+
+        ResponseEntity<?> response = facade().geminiGenerateContent("claude-sonnet-4.5", geminiBody(), exchange(GEMINI_PATH, null)).block();
+
+        assertServedByANativeTierAndNeverReadForRelays(response, "kiro-1", "anthropic:kiro", "kiro", "2");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.STATUS)).isEqualTo("served");
+        assertTheGatesAreOpenToTheKey();
+    }
+
+    @Test
+    void aGeminiRequestThatNamedTheRelayTierByHeaderIsServedAutomaticallyAsBefore() {
+        configureTheRelayOpenToTheKeyBesideKiro();
+
+        ResponseEntity<?> response = facade().geminiGenerateContent("claude-sonnet-4.5", geminiBody(), namingTheRelayTier(GEMINI_PATH)).block();
+
+        assertServedByANativeTierAndNeverReadForRelays(response, "kiro-1", "anthropic:kiro", "kiro", "2");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.MODE)).isEqualTo("auto");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.STATUS)).isEqualTo(TierResponseHeaders.IGNORED);
+        assertTheGatesAreOpenToTheKey();
+    }
+
+    // The entries no relay takes part in, and the requests a relay is not given, reserve what they always did: a tier of relays
+    // alone that nobody is asked of is not reserved for by what its relays would have been sent (design 5.2).
+
+    /** What a request reserves, whatever it ends in. */
+    private BigDecimal reservedBy(Supplier<Mono<ResponseEntity<?>>> request) {
+        try {
+            request.get().block();
+        } catch (ApiException failed) {
+            // Nothing is cached to serve it, or the balance does not cover it: the reservation is what is looked at.
+        }
+        ArgumentCaptor<BigDecimal> credits = ArgumentCaptor.forClass(BigDecimal.class);
+        verify(apiKeyService).reserveUsage(any(), anyString(), credits.capture(), anyString());
+        clearInvocations(apiKeyService);
+        return credits.getValue();
+    }
+
+    private ObjectNode longCodexResponsesBody() {
+        ObjectNode body = codexResponsesBody();
+        body.put("input", "word ".repeat(20_000));
+        return body;
+    }
+
+    private String lowBalanceAdvice(Supplier<Mono<ResponseEntity<?>>> request) {
+        when(apiKeyService.reserveUsage(any(), anyString(), any(), anyString())).thenReturn(Mono.error(
+            new ApiException(HttpStatus.PAYMENT_REQUIRED, "INSUFFICIENT_BALANCE", "balance too low")));
+        try {
+            request.get().block();
+        } catch (ApiException refused) {
+            assertThat(refused.getCode()).isEqualTo("INSUFFICIENT_BALANCE");
+            return refused.getMessage();
+        } finally {
+            when(apiKeyService.reserveUsage(any(), anyString(), any(), anyString())).thenReturn(Mono.empty());
+            clearInvocations(apiKeyService);
+        }
+        throw new AssertionError("The request was not refused");
+    }
+
+    @Test
+    void aCodexResponsesRequestReservesWhatItAlwaysDidWhateverRelayTierSitsAboveTheNativeOnesAndNothingNativeIsCached() {
+        ObjectNode request = longCodexResponsesBody();
+        Supplier<Mono<ResponseEntity<?>>> codex = () -> facade(offeringOpenAi()).responses(request.deepCopy(), exchange(RESPONSES_PATH, null));
+        configure(openAiRelayBesideOfficialKeys(false, false));
+        BigDecimal withoutRelay = reservedBy(codex);
+
+        configure(openAiRelayBesideOfficialKeys(false, true));
+        add(relay);
+        BigDecimal withRelay = reservedBy(codex);
+
+        // The entry is not read for relays, so the tier of relays alone is reserved for as any tier that nobody is asked of.
+        assertThat(withRelay).isEqualByComparingTo(withoutRelay);
+        assertThat(withRelay).isGreaterThan(QUOTE.estimate(0, RequestBounds.outputTokens(request)));
+    }
+
+    @Test
+    void aCodexResponsesRequestThatCannotPayIsNotAdvisedToNameTheRelayTierItsReservationDoesNotCount() {
+        Supplier<Mono<ResponseEntity<?>>> codex = () -> facade(offeringOpenAi())
+            .responses(longCodexResponsesBody(), exchange(RESPONSES_PATH, null));
+        configure(openAiRelayBesideOfficialKeys(true, false));
+        String without = lowBalanceAdvice(codex);
+
+        configure(openAiRelayBesideOfficialKeys(true, true));
+        add(relay);
+        String with = lowBalanceAdvice(codex);
+
+        // The relay is no tier this request can be pinned to: the advice would be answered with SOURCE_TIER_NOT_OFFERED.
+        assertThat(with).isEqualTo(without);
+        assertThat(with).contains("gpt-5.4@official").doesNotContain("@relay");
+    }
+
+    @Test
+    void aGeminiRequestReservesWhatItAlwaysDidWhateverRelayTierSitsAboveKiroAndNoKiroAccountIsCached() {
+        Supplier<Mono<ResponseEntity<?>>> gemini = () -> facade().geminiGenerateContent("claude-sonnet-4.5", geminiBody(),
+            exchange(GEMINI_PATH, null));
+        configure(anthropicTiersWithoutRelay());
+        BigDecimal withoutRelay = reservedBy(gemini);
+
+        configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1"), gate("MESSAGES", "KEYS", "key-1")));
+        add(relay);
+        BigDecimal withRelay = reservedBy(gemini);
+
+        assertThat(withRelay).isEqualByComparingTo(withoutRelay);
+        assertThat(withRelay).isGreaterThan(QUOTE.estimate(0, 4096));
+    }
+
+    @Test
+    void aRequestOfAnEntryWhoseGateIsNotOpenToTheKeyReservesWhatItAlwaysDidToo() {
+        Supplier<Mono<ResponseEntity<?>>> chat = () -> facade().chat(chatBody(), exchange(CHAT_PATH, null));
+        configure(anthropicTiersWithoutRelay());
+        BigDecimal withoutRelay = reservedBy(chat);
+
+        // A gate that is open to other keys alone, and an entry that has no gate: the key's request is not given to the relay.
+        for (PairGate[] gates : List.of(new PairGate[] {gate("CHAT", "KEYS", "another-key")}, new PairGate[0])) {
+            configure(owner(relayMember("relay-1"), gates));
+            cached.clear();
+            add(relay);
+            assertThat(reservedBy(chat)).isEqualByComparingTo(withoutRelay);
+        }
+    }
+
     @Test
     void aRelayOfAPairThatIsNotOpenForTheKeyIsNeverAsked() {
         configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "another-key")));
@@ -1390,6 +2054,11 @@ class ProxyFacadeTieredXpChatTest {
     }
 
     private ProxyFacade facade(PairRegistry pairs) {
+        return facade(pairs, Duration.ZERO);
+    }
+
+    /** A facade that serves every tiered request as one that began {@code age} ago, as the deadline for crossing counts it. */
+    private ProxyFacade facade(PairRegistry pairs, Duration age) {
         DefaultSourceTierPlanner planner = new DefaultSourceTierPlanner(registry, new ModelPoolKeyResolver(modelCatalog), modelCatalog,
             accountPool, payments, pricing, bindings, true, true, pairs, new XpSkipCounts(), learnedLimits);
         TierRuntime.Planner recording = new TierRuntime.Planner() {
@@ -1435,7 +2104,19 @@ class ProxyFacadeTieredXpChatTest {
             ownerStore,
             new TierRuntime(recording, bindings, learnedLimits),
             xpDispatcher
-        );
+        ) {
+            @Override
+            Mono<ResponseEntity<?>> serveTieredChat(TieredRequest run, ResponseMode responseMode) {
+                return super.serveTieredChat(began(run, age), responseMode);
+            }
+        };
+    }
+
+    private static ProxyFacade.TieredRequest began(ProxyFacade.TieredRequest run, Duration ago) {
+        return new ProxyFacade.TieredRequest(run.plan(), run.principal(), run.requestId(), run.path(), run.requestedModel(),
+            run.upstreamModel(), run.sessionHint(), run.stream(), run.route(), run.fastMode(), run.preferCodexAccounts(),
+            run.preferDeepSeekAccounts(), run.routingPolicy(), run.upstreamRequest(), run.responseRequest(),
+            run.start().minus(ago), run.requestMovable(), run.ownerMayBeLeft());
     }
 
     private static MockServerWebExchange exchange(String path, String session) {
@@ -1523,6 +2204,14 @@ class ProxyFacadeTieredXpChatTest {
             tier("relay", 1, "1"),
             tier("kiro", 2, "0.6", AccountAllocationCategory.KIRO, AccountAllocationCategory.CLAUDE_OAUTH)),
             members, models, List.of(gates));
+    }
+
+    /** The tiers of the owner's example with no relay registered in the first: an empty tier above Kiro's. */
+    private static SourceTierSnapshot anthropicTiersWithoutRelay() {
+        return SourceTierSnapshot.of(7L, List.of(vendor()), List.of(
+            tier("relay", 1, "1"),
+            tier("kiro", 2, "0.6", AccountAllocationCategory.KIRO, AccountAllocationCategory.CLAUDE_OAUTH)),
+            List.of(), List.of(), List.of());
     }
 
     private static Member relayMember(String accountId) {

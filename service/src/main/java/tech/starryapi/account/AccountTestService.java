@@ -269,6 +269,17 @@ public class AccountTestService {
                 // A broken outbound route is not evidence about the account: report it, but leave the account's health alone.
                 Mono<Void> failureUpdate = failure instanceof tech.starryapi.egress.EgressException
                     ? Mono.empty()
+                    // What a relay says of its own key is the relay's word, and no ground for disabling the account (D5).
+                    : isRelay(account)
+                    ? accountPoolService.recordTestFailure(
+                        account.getAccountId(),
+                        type,
+                        upstreamStatus,
+                        detail,
+                        updateStatus,
+                        false,
+                        false
+                    )
                     : AccountPlatforms.isDeepSeek(account)
                     ? accountPoolService.recordTestFailure(
                         account.getAccountId(),
@@ -298,6 +309,11 @@ public class AccountTestService {
                         model
                     ));
             });
+    }
+
+    /** Whether the account is registered as a relay for another vendor's models (design 7.4). */
+    private boolean isRelay(ProxyAccountEntity account) {
+        return tierRegistry != null && tierRegistry.loaded() && tierRegistry.snapshot().isRelay(account.getAccountId());
     }
 
     /**

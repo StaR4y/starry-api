@@ -63,9 +63,18 @@ final class UpstreamFailureClassifier {
      *       was refused), are the request's problem with this source, not the account's: no cooldown, no retry on
      *       another source of the same kind, but one crossing to a tier whose first source is a native one is allowed
      *       ({@link Classification#crossTierOnly()}). Such a refusal says the relay did not generate.
-     *   <li>Everything else (402, 401, 403, 408, 409, 429, a 5xx) is judged as it is for any other upstream, because the
-     *       relay's status is all there is to go by. A 402 in particular is the relay's account out of money: the same
-     *       capacity failure it is today, which a tiered request counts as unbilled.
+     *   <li>A relay that rejects the key of its account (a 401 or 403, or an authentication or permission error inside a
+     *       successful response; D5) has failed as that account and as nothing else: the key is the administrator's, and the
+     *       client's request has done nothing wrong. The account rests for ten minutes, as a native account does for
+     *       credentials that are bad, and the request goes on to the next account or tier like it does after one that is out
+     *       of money or busy, since a rejection is given before anything is generated. It is never a permanent failure (a
+     *       relay's word does not disable an account: not here, and not in the health test that two failures in a row start,
+     *       which does not take the words of a relay's raw answer for proof that its credential is gone), and what the client
+     *       is told when nothing is left is what it is told when nothing can serve, never the relay's 401 or 403 ({@link
+     *       Classification#keyRefused()}). A native account keeps the rules of the other overload, unchanged.
+     *   <li>Everything else (402, 408, 409, 429, a 5xx) is judged as it is for any other upstream, because the relay's
+     *       status is all there is to go by. A 402 in particular is the relay's account out of money: the same capacity
+     *       failure it is today, which a tiered request counts as unbilled.
      * </ul>
      *
      * <p>A failure that proves the request never left (the route could not be built, the connection was refused) is
@@ -101,6 +110,11 @@ final class UpstreamFailureClassifier {
         if (status == 400 || status == 413 || status == 422) {
             return relayClassification(
                 upstream, status, AccountFailureScope.REQUEST, false, false, Duration.ZERO, RelayFailure.CONVERSION_REJECTED
+            );
+        }
+        if (status == 401 || status == 403) {
+            return relayClassification(
+                upstream, status, AccountFailureScope.CREDENTIAL, true, true, Duration.ofMinutes(10), RelayFailure.KEY_REFUSED
             );
         }
         return classify(error, account);
@@ -527,7 +541,9 @@ final class UpstreamFailureClassifier {
         /** The prompt is longer than the relay's context window. */
         CONTEXT_EXCEEDED,
         /** The relay refused the converted request. */
-        CONVERSION_REJECTED
+        CONVERSION_REJECTED,
+        /** The relay rejected the key of its account (401, 403): a failure of that account, which the request does not end with. */
+        KEY_REFUSED
     }
 
     /**
@@ -579,6 +595,14 @@ final class UpstreamFailureClassifier {
          */
         boolean crossTierOnly() {
             return contextExceeded() || relayFailure == RelayFailure.CONVERSION_REJECTED;
+        }
+
+        /**
+         * The relay turned the key of its account down. The account rests and the request goes on to another account or tier,
+         * as it does for one that is busy; the relay's 401 or 403 is not an answer for the client, whatever is left to try.
+         */
+        boolean keyRefused() {
+            return relayFailure == RelayFailure.KEY_REFUSED;
         }
     }
 }

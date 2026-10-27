@@ -12,7 +12,7 @@
       "outputTokens": 0,
       "usageSource": null,
       "stopReason": null,
-      "degraded": "cache_control,thinking,context_management,metadata",
+      "degraded": "cache_control,thinking,context_management,metadata,billing_header_dropped",
       "error": "Source error 503 (server_error)"
     }
   ]

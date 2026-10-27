@@ -12,7 +12,7 @@
       "outputTokens": 0,
       "usageSource": null,
       "stopReason": "INTERRUPTED",
-      "degraded": "cache_control,thinking,context_management,metadata",
+      "degraded": "cache_control,thinking,context_management,metadata,billing_header_dropped",
       "error": "The source returned data that is not a completion"
     }
   ]

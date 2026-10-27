@@ -2105,7 +2105,8 @@ public class ProxyFacade {
      * {@link #attemptChat} and {@link #attemptResponses} do for the untiered route, over the tiers of the plan. The
      * account comes from the plan and through admission. A failure is recorded, and the retry policy (not the untiered
      * count of accounts) decides where the request goes next; when it has nowhere to go, the error of the failed
-     * attempt is returned. No circuit probe is taken or cancelled, since a tiered request has no circuit epoch.
+     * attempt is returned, except for a relay's refusal of its own key, which is never told to the client. No circuit
+     * probe is taken or cancelled, since a tiered request has no circuit epoch.
      */
     private Mono<ResponseEntity<?>> attemptTiered(TieredRequest run, TierWalk walk, TierRetryPolicy retry, TieredEndpoint endpoint) {
         TierPlan plan = run.plan();
@@ -2192,16 +2193,42 @@ public class ProxyFacade {
                             TierRetryPolicy.Outcome next = classification.crossTierOnly()
                                 ? retry.onRelayRefusal(failed)
                                 : retry.onFailure(failed);
+                            // A relay's refusal is told to the client as it is only when the request has nowhere native left to
+                            // go: where accounts exist for it that are busy or out of quota for now, the client is told to try
+                            // again, as its next request is, and is not made to shorten what an account would take as it is. That
+                            // holds whether the request has no tier to cross to or may not cross now (it is too old, its lease
+                            // is spent, its budget is): what the identical request is told does not depend on that. A stop for
+                            // a failure that may have started a generation or been billed is the failure's, and is returned.
+                            boolean tryAgain = classification.crossTierOnly()
+                                && plan.retriesAfterRelayRefusal(classification.contextExceeded());
+                            // A relay that turned its own key down is a failure of that account, which the operator mends (D5): it
+                            // goes on to the next account or tier like a busy one, and the client is never told the relay's 401 or
+                            // 403. Where it cannot go on (the budget is spent, the lease is) or nothing is left, it is told what
+                            // a request nothing can serve is told; an earlier failure of the request keeps its own answer.
+                            boolean keyRefused = classification.keyRefused();
                             if (next == TierRetryPolicy.Outcome.STOP) {
-                                return failureRecord.then(Mono.<ResponseEntity<?>>error(mapError(error)));
+                                return failureRecord.then(Mono.<ResponseEntity<?>>error(keyRefused ? noAvailableAccount() : mapError(error)));
+                            }
+                            if (next == TierRetryPolicy.Outcome.NOWHERE_TO_CROSS || next == TierRetryPolicy.Outcome.MAY_NOT_CROSS) {
+                                return failureRecord.then(Mono.<ResponseEntity<?>>error(tryAgain ? new TryAgainAfterRefusal() : mapError(error)));
                             }
                             // A retry that finds no account, or no admission capacity, returns the error that sent it there.
                             // The 503 of exhausted admission is not a definitive failure: it would send the reservation of a
-                            // request that was already dispatched to review.
+                            // request that was already dispatched to review. After the refusal of a relay the reservation is
+                            // released for good all the same (the relay has the request until a native account is asked, and
+                            // none was), so the retry's own error can be returned for a client that is to try again. That
+                            // answer is given on purpose, whether the refusal crossed to a native account that was busy or
+                            // stopped short of it, and is marked as such so that the attempts before this one keep it.
                             return failureRecord.then(attemptTiered(run, walk, retry, endpoint)
-                                .onErrorResume(retryError -> isNoAvailableAccount(retryError) || isAdmissionExhausted(retryError)
-                                    ? Mono.<ResponseEntity<?>>error(mapError(error))
-                                    : Mono.<ResponseEntity<?>>error(retryError)));
+                                .onErrorResume(retryError -> {
+                                    if (isTryAgainAfterRefusal(retryError) || !(isNoAvailableAccount(retryError) || isAdmissionExhausted(retryError))) {
+                                        return Mono.<ResponseEntity<?>>error(retryError);
+                                    }
+                                    if (tryAgain) {
+                                        return Mono.<ResponseEntity<?>>error(new TryAgainAfterRefusal((ApiException) rootFailure(retryError)));
+                                    }
+                                    return Mono.<ResponseEntity<?>>error(keyRefused ? retryError : mapError(error));
+                                }));
                         });
                     });
             }));
@@ -2381,10 +2408,14 @@ public class ProxyFacade {
             // The reservation cannot be leased for much longer: nothing was sent, and another source may answer.
             return Mono.error(new UpstreamException(502, "The source was not asked: too little time is left for the request", true));
         }
+        // The relay is charged for no more than it was told it may write, which can be less than the bound the tier reserved
+        // for (a request that names a small limit is still reserved for the default one).
+        long forwarded = dispatch.forwardedOutputLimit();
+        long outputLimit = forwarded > 0 ? Math.min(run.plan().outputBound(), forwarded) : run.plan().outputBound();
         return xpDispatcher.dispatch(
             selection.account(),
             dispatch,
-            new RelayUsageNormalizer.Limits(relay.inputBound(), run.plan().outputBound()),
+            new RelayUsageNormalizer.Limits(relay.inputBound(), outputLimit),
             timeLimit
         );
     }
@@ -2535,6 +2566,32 @@ public class ProxyFacade {
             session.bindingKey(),
             TierSessionKeys.bindingKey(run.plan().vendor(), run.plan().modelKey(), next)
         );
+    }
+
+    /**
+     * What a client is answered when a relay refused its request and the accounts that would take it are only unavailable for
+     * now (design 7.8): the answer of a selection that found no account, which is what clients retry and what a pinned request
+     * is told as SOURCE_TIER_UNAVAILABLE. It is a type of its own so that an earlier attempt, to whose error a retry that finds
+     * no account gives way, does not take the place of an answer that was given on purpose.
+     */
+    private static final class TryAgainAfterRefusal extends ApiException {
+        TryAgainAfterRefusal() {
+            super(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "No available upstream account");
+        }
+
+        /** The answer of a retry that found no account, which is told as that retry told it. */
+        TryAgainAfterRefusal(ApiException retry) {
+            super(retry.getStatus(), retry.getCode(), retry.getMessage(), retry.getDetails());
+        }
+    }
+
+    private boolean isTryAgainAfterRefusal(Throwable error) {
+        return rootFailure(error) instanceof TryAgainAfterRefusal;
+    }
+
+    /** What a request is answered when no account can be asked for it: the selection's own error, as a failure of a request puts it. */
+    private static ApiException noAvailableAccount() {
+        return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "No available upstream account");
     }
 
     private boolean isAdmissionExhausted(Throwable error) {

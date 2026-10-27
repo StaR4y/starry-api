@@ -78,6 +78,14 @@ class FeaturePolicySanitizerTest {
             RequestFeatureDetectorTest.CLAUDE_CODE_TURN.formatted(RequestFeatureDetectorTest.NEXT_PROMPT)));
         samples.add(new Sample("claude code, tool continuation", Entry.MESSAGES,
             RequestFeatureDetectorTest.CLAUDE_CODE_TURN.formatted(RequestFeatureDetectorTest.TOOL_RESULT_LAST)));
+        samples.add(new Sample("claude code, billing header", Entry.MESSAGES,
+            RequestFeatureDetectorTest.CLAUDE_CODE_TURN.replace("\"system\":[{\"type\":\"text\",\"text\":\"You are Claude Code.\"",
+                "\"system\":[{\"type\":\"text\",\"text\":\"x-anthropic-billing-header: cc_version=2.1.168.177; cch=278c4;\"},"
+                    + "{\"type\":\"text\",\"text\":\"You are Claude Code.\"").formatted(RequestFeatureDetectorTest.NEXT_PROMPT)));
+        samples.add(new Sample("claude code, billing header in the block of the prompt", Entry.MESSAGES,
+            RequestFeatureDetectorTest.CLAUDE_CODE_TURN.replace("\"system\":[{\"type\":\"text\",\"text\":\"You are Claude Code.\"",
+                "\"system\":[{\"type\":\"text\",\"text\":\"x-anthropic-billing-header: cc_version=2.1.168.177; cch=278c4;\\nYou are Claude Code.\"")
+                .formatted(RequestFeatureDetectorTest.NEXT_PROMPT)));
         samples.add(new Sample("messages, budget", Entry.MESSAGES,
             anthropic("\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":9000}", "{\"role\":\"user\",\"content\":\"q\"}")));
         samples.add(new Sample("messages, adaptive without a known effort", Entry.MESSAGES,
@@ -137,6 +145,29 @@ class FeaturePolicySanitizerTest {
             : ChatWireSanitizer.sanitize(body, null, settings, "relay-model");
     }
 
+    /**
+     * The names the sanitizer and the canonicalizer record that are repairs of the body and not features of the request. The
+     * policy has no word for them, so they are told apart from what it names (and no feature may be called like one).
+     */
+    private static final Set<String> REPAIRS = Set.of(
+        ChatCanonicalizer.EMPTY_TOOL_RESULT, ChatCanonicalizer.EMPTY_USER_MESSAGE, ChatCanonicalizer.TOOL_HISTORY_FLATTENED,
+        ChatWireSanitizer.BILLING_HEADER_DROPPED);
+
+    private static List<String> withoutRepairs(List<String> degraded) {
+        return degraded.stream().filter(name -> !REPAIRS.contains(name)).toList();
+    }
+
+    /** Whether a system block of the body is the billing header of Claude Code and no more than its line. */
+    private static boolean hasABlockOfTheHeaderAlone(JsonNode body) {
+        for (JsonNode block : body.path("system")) {
+            String text = block.path("text").stringValue("").strip();
+            if (text.startsWith("x-anthropic-billing-header:") && text.indexOf('\n') < 0 && text.indexOf('\r') < 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static Set<String> labels(List<Feature> features) {
         Set<String> labels = new LinkedHashSet<>();
         features.forEach(feature -> labels.add(feature.label()));
@@ -155,7 +186,7 @@ class FeaturePolicySanitizerTest {
                     Verdict verdict = FeaturePolicy.judge(detected, baseline, settings);
                     Set<String> named = labels(verdict.soft());
                     named.addAll(labels(verdict.hard()));
-                    assertThat(wire.degraded()).as("%s, %s, %s", sample.name(), baseline, settings).isSubsetOf(named);
+                    assertThat(withoutRepairs(wire.degraded())).as("%s, %s, %s", sample.name(), baseline, settings).isSubsetOf(named);
                 }
             }
         }
@@ -215,7 +246,7 @@ class FeaturePolicySanitizerTest {
             Detected detected = RequestFeatureDetector.detect(Entry.MESSAGES, body);
             for (int bits = 0; bits < COMBINATIONS; bits++) {
                 Settings settings = settings(bits);
-                Set<String> degraded = new LinkedHashSet<>(wire(sample, body, settings).degraded());
+                Set<String> degraded = new LinkedHashSet<>(withoutRepairs(wire(sample, body, settings).degraded()));
                 Set<String> expected = new LinkedHashSet<>();
                 if (detected.has(Feature.THINKING)
                     && FeaturePolicy.treatment(Feature.THINKING, detected, Baseline.TEXT_ONLY, settings) != Treatment.CARRY) {
@@ -254,7 +285,8 @@ class FeaturePolicySanitizerTest {
                 assertThat(body.has(key)).as(key).isTrue();
                 assertThat(wire.body().has(key)).as("%s is not sent, %s", key, settings).isFalse();
                 assertThat(detected.has(feature)).as("%s is named", key).isTrue();
-                boolean changesTheAnswer = feature == Feature.VERBOSITY || feature == Feature.LOGIT_BIAS;
+                // The odds of the words change the answer; the length is only advice, and soft everywhere (D6).
+                boolean changesTheAnswer = feature == Feature.LOGIT_BIAS;
                 assertThat(FeaturePolicy.treatment(feature, detected, Baseline.PASSTHROUGH, settings))
                     .as("%s on a passthrough route", key).isEqualTo(changesTheAnswer ? Treatment.HARD : Treatment.SOFT);
                 assertThat(FeaturePolicy.treatment(feature, detected, Baseline.TEXT_ONLY, settings))
@@ -271,8 +303,7 @@ class FeaturePolicySanitizerTest {
      */
     @Test
     void theRepairsTheCanonicalizerRecordsAreNeverFeaturesAndFollowTheSettingsOfTheMember() {
-        Set<String> repairs = Set.of(
-            ChatCanonicalizer.EMPTY_TOOL_RESULT, ChatCanonicalizer.EMPTY_USER_MESSAGE, ChatCanonicalizer.TOOL_HISTORY_FLATTENED);
+        Set<String> repairs = REPAIRS;
         for (Feature feature : Feature.values()) {
             assertThat(repairs).as("a repair named like %s", feature).doesNotContain(feature.label());
         }
@@ -301,6 +332,10 @@ class FeaturePolicySanitizerTest {
                     unexplained.removeAll(named);
                     assertThat(repairs).as(where + ", " + baseline).containsAll(unexplained);
                 }
+                // The header of Claude Code is dropped from a Messages request that has a system block of it alone, whatever the
+                // member, and from no other: not from one whose block carries the system prompt after the header line.
+                assertThat(sanitized.degraded().contains(ChatWireSanitizer.BILLING_HEADER_DROPPED))
+                    .as(where).isEqualTo(hasABlockOfTheHeaderAlone(body));
                 boolean flattened = wire.degraded().contains(ChatCanonicalizer.TOOL_HISTORY_FLATTENED);
                 if (flattened) {
                     assertThat(settings.needsToolsForToolHistory()).as(where).isTrue();

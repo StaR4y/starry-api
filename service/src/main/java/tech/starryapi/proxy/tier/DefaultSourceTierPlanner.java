@@ -344,10 +344,11 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
     /**
      * Works out what the choice leaves of the request, and refuses the request when the choice cannot be met. A hint
      * (the header or the preference of a key) is not refused: it is dropped, and the request is planned over all the
-     * tiers, with the response saying that the selector was ignored. The one hint that is not dropped for want of an
-     * account is a pool whose accounts are all switched off ({@link #hasSwitchedOffMember}): the client asked for that
-     * pool alone, and it is the pool that cannot serve for now, so the request is kept to it and answered with
-     * SOURCE_TIER_UNAVAILABLE, as it is when the accounts are only busy, and not served by another pool at another price.
+     * tiers, with the response saying that the selector was ignored. The hints that are not dropped for want of an
+     * account are those of a pool whose accounts are all switched off ({@link #hasSwitchedOffMember}) and of one whose
+     * relay broke off an answer a moment ago: the client asked for that pool alone, and it is the pool that cannot serve
+     * for now, so the request is kept to it and answered with SOURCE_TIER_UNAVAILABLE, as it is when the accounts are only
+     * busy, and not served by another pool at another price.
      *
      * <p>Where no tier has anything to serve with, and a relay was left out for a feature of the request that the native
      * accounts of the route carry, or for the length of its prompt, the request is refused for that ({@link #servable}),
@@ -391,6 +392,11 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
                     return Mono.just(met);
                 }
                 throw notOffered(choice);
+            }
+            if (xp.temporarilyOut(memberless)) {
+                // A relay that broke off an answer a moment ago is the tier being unable to serve for now, as one that is
+                // switched off is: the hint keeps the request to it, as the suffix does, and is not served at another price.
+                return Mono.just(met);
             }
             return hasSwitchedOffMember(request, memberless, units, xp, snapshot, vendor)
                 .map(switchedOff -> switchedOff
@@ -657,6 +663,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         long nativeInputBound = inputBound(request.upstreamRequest(), units);
         long outputBound = RequestBounds.outputTokens(request.upstreamRequest());
         TierPlan.Mode mode = choice.pinned() ? TierPlan.Mode.PINNED : TierPlan.Mode.AUTO;
+        NativeReach reach = nativesInReach(snapshot, vendor, units, xp, choice);
 
         List<Level> levels = new ArrayList<>();
         for (Tier tier : availability.serving()) {
@@ -667,8 +674,13 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
             // relay is, since a relay is sent its own body and counts an image as its mapping says. A tier that the
             // configuration cannot put a native account in is sent the relays' body alone, so an inline image on a route that
             // passes it through (which lifts the native bound to the floor for hidden input) does not size its reservation;
-            // that is the configuration of the plan, and no account the cache reloads can change it.
-            boolean natives = relays.isEmpty() || snapshot.canHoldNativeAccounts(vendor, tier.tierId())
+            // that is the configuration of the plan, and no account the cache reloads can change it. It is the tier's
+            // configuration, not this request's relays: a tier of relays that none can serve for now (one that broke off an
+            // answer a moment ago) is kept for a request pinned to it, which is answered with a retry, and is reserved for
+            // no more than the relays would have been. That is for a request the relays of the vendor take part in; where none
+            // does (an entry that is not read for them, a gate that is shut to the key) a tier is reserved for as it always was.
+            boolean natives = !xp.open() || !snapshot.hasRelayMembers(vendor, tier.tierId())
+                || snapshot.canHoldNativeAccounts(vendor, tier.tierId())
                 || (ownerTier != null && ownerTier.tierId().equals(tier.tierId()));
             long inputBound = natives ? nativeInputBound : 0L;
             for (TierPlan.Relay relay : relays) {
@@ -734,8 +746,45 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
             xp.skips(),
             xp.open(),
             xp.session(),
-            requestBound
+            requestBound,
+            reach.afterLengthRefusal(),
+            reach.afterOtherRefusal()
         );
+    }
+
+    /**
+     * Whether an account of the route's native cells sits in a tier this request could be served from if no relay took it,
+     * whatever state it is in (busy, out of quota): a relay that refuses the request itself, with such an account in
+     * reach, leaves the client with an error it can retry, and not with the refusal (see {@link TierPlan#retriesAfterRelayRefusal}).
+     * The tiers in reach are those the client's choice allows. A hint is dropped once a relay's refusal of the length is
+     * learned, and the retry is then served in the order of all the tiers, so for that refusal all of them count; any other
+     * refusal is not learned, the hint stays, and so do the tiers it names. Only a request a relay takes part in needs to know.
+     */
+    private NativeReach nativesInReach(
+        SourceTierSnapshot snapshot,
+        String vendor,
+        List<PoolCell> units,
+        XpEligibility.Found xp,
+        Choice choice
+    ) {
+        if (xp.byTier().isEmpty()) {
+            return new NativeReach(false, false);
+        }
+        Predicate<ProxyAccountEntity> onRoute = account -> units.stream().anyMatch(cell -> cell.predicate().test(account));
+        Set<String> nativeTiers = accountPool.cachedAccounts(onRoute).stream()
+            .map(account -> TierMembership.nativeTierOf(snapshot, vendor, account))
+            .flatMap(Optional::stream)
+            .map(Tier::tierId)
+            .collect(Collectors.toSet());
+        boolean inChoice = choice.candidates().stream().anyMatch(tier -> nativeTiers.contains(tier.tierId()));
+        boolean afterLength = choice.pinned() && choice.yields()
+            ? snapshot.tiers(vendor).stream().filter(Tier::enabled).anyMatch(tier -> nativeTiers.contains(tier.tierId()))
+            : inChoice;
+        return new NativeReach(afterLength, inChoice);
+    }
+
+    /** Whether natives are in reach of a request whose relay refused the length of its prompt, and of one whose relay refused it otherwise. */
+    private record NativeReach(boolean afterLengthRefusal, boolean afterOtherRefusal) {
     }
 
     /** The cells of a tier that has relays: the route's, and the relays' after them (design 4.3, "native first"). */

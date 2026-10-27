@@ -357,7 +357,7 @@
 
 - 依赖：P6-01
 - 文件：`service/src/main/java/tech/starryapi/platform/xproto/RequestFeatureDetector.java`, `service/src/main/java/tech/starryapi/proxy/tier/DefaultSourceTierPlanner.java`
-- 内容：7.9 RESPONSES 表（透传基线）；不可展开链 HARD 与 409；owner 为跨协议成员时忽略；开始前取得负责人对设计 O9（`text.verbosity` 的 low/high 在透传基线下 HARD 还是 SOFT）的决定。
+- 内容：7.9 RESPONSES 表（透传基线）；不可展开链 HARD 与 409；owner 为跨协议成员时忽略；设计 O9 已由负责人决定（D6，2026-10-26）：`text.verbosity` 的 low/high 对中转成员是 SOFT，与 CHAT 一致。
 - 测试：Codex 请求无 HARD；内置工具 HARD；只剩跨协议时 409。
 - 验收：与设计一致。
 

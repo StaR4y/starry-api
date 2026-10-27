@@ -1175,12 +1175,29 @@ public class AccountPoolService {
         boolean updateStatus,
         boolean rateLimitIsQuota
     ) {
+        return recordTestFailure(accountId, type, statusCode, message, updateStatus, rateLimitIsQuota, true);
+    }
+
+    /**
+     * @param credentialWordsDisable whether an authentication failure whose text says the credential was revoked disables the
+     *     account. False for a relay of another protocol (D5): the text is the relay's own, taken from its raw answer, and the
+     *     key it turns down is the administrator's to mend, so the account only rests, and serves again when the key is good.
+     */
+    public Mono<Void> recordTestFailure(
+        String accountId,
+        UpstreamErrorType type,
+        Integer statusCode,
+        String message,
+        boolean updateStatus,
+        boolean rateLimitIsQuota,
+        boolean credentialWordsDisable
+    ) {
         if (!updateStatus || (Integer.valueOf(429).equals(statusCode) && !rateLimitIsQuota)) {
             return recordError(accountId, type, statusCode, rateLimitIsQuota);
         }
         Instant now = Instant.now();
         boolean quotaFailure = isQuotaStatus(statusCode, rateLimitIsQuota);
-        boolean permanentCredentialFailure = isAuthStatus(statusCode)
+        boolean permanentCredentialFailure = credentialWordsDisable && isAuthStatus(statusCode)
             && hasPermanentCredentialEvidence(message);
         String sql = """
             UPDATE proxy_accounts

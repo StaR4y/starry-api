@@ -8,11 +8,11 @@
       "wireModel": "relay-sonnet",
       "success": true,
       "status": 200,
-      "inputTokens": 6881,
+      "inputTokens": 6794,
       "outputTokens": 32000,
       "usageSource": "CLAMPED",
       "stopReason": "END_TURN",
-      "degraded": "cache_control,thinking,context_management,metadata",
+      "degraded": "cache_control,thinking,context_management,metadata,billing_header_dropped",
       "error": null
     }
   ]

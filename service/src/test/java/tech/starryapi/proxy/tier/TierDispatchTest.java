@@ -62,6 +62,23 @@ class TierDispatchTest {
     }
 
     @Test
+    void theOutputLimitOfARelayIsTheOneItsBodyAsksFor() {
+        assertThat(relayWith(JSON.createObjectNode().put("max_tokens", 100)).forwardedOutputLimit()).isEqualTo(100);
+        assertThat(relayWith(JSON.createObjectNode().put("max_completion_tokens", 300)).forwardedOutputLimit()).isEqualTo(300);
+        assertThat(relayWith(JSON.createObjectNode().put("max_completion_tokens", 300).put("max_tokens", 100)).forwardedOutputLimit())
+            .isEqualTo(300);
+        // A body that names none, or none that makes sense, leaves the limit to the reservation.
+        assertThat(relayWith(JSON.createObjectNode().put("stream", true)).forwardedOutputLimit()).isZero();
+        assertThat(relayWith(JSON.createObjectNode().put("max_tokens", -5)).forwardedOutputLimit()).isZero();
+        assertThat(relayWith(JSON.createObjectNode().put("max_tokens", "many")).forwardedOutputLimit()).isZero();
+        assertThat(TierDispatch.nativeDispatch().forwardedOutputLimit()).isZero();
+    }
+
+    private static TierDispatch relayWith(ObjectNode body) {
+        return TierDispatch.openAiChat(PAIR, "claude-sonnet-4.5", "Wire-Name", member("OPENAI_CHAT"), body, List.of());
+    }
+
+    @Test
     void aRelayDispatchNeedsAMemberThatIsRegisteredAsOneAndEverythingItSends() {
         Member nativeMember = member(null);
         Member otherProtocol = member("OPENAI_RESPONSES");

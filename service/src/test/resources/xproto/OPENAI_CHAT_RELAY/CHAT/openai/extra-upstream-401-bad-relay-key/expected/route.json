@@ -11,9 +11,24 @@
       "inputTokens": 0,
       "outputTokens": 0,
       "usageSource": null,
-      "stopReason": null,
+      "stopReason": "KEY_REFUSED",
       "degraded": "cache_control,reasoning_effort",
       "error": "Source error 401 (invalid_api_key)"
+    },
+    {
+      "account": "openai-1",
+      "tier": "openai:native",
+      "dispatch": "NATIVE",
+      "wireModel": null,
+      "success": true,
+      "status": 200,
+      "inputTokens": 500,
+      "outputTokens": 20,
+      "usageSource": null,
+      "stopReason": null,
+      "degraded": null,
+      "error": null,
+      "nativeToolIds": []
     }
   ]
 }

@@ -466,17 +466,49 @@ class FeaturePolicyTest {
         }
     }
 
-    /** A native OpenAI account is handed both and the answer follows them: no relay is sent them, so they cannot be dropped quietly. */
+    /** A native OpenAI account is handed the odds and the answer follows them: no relay is sent them, so they cannot be dropped quietly. */
     @Test
-    void theLengthAndTheOddsOfTheAnswerAreHardOnAPassthroughRouteAndSoftOnATextRoute() {
-        String body = chatBody("\"verbosity\":\"low\",\"logit_bias\":{\"50256\":-100}", "\"q\"");
+    void theOddsOfTheAnswerAreHardOnAPassthroughRouteAndSoftOnATextRoute() {
+        String body = chatBody("\"logit_bias\":{\"50256\":-100}", "\"q\"");
 
         for (Settings member : allMembers()) {
-            assertThat(hard(chat(body, Baseline.PASSTHROUGH, member))).as("%s", member)
-                .containsExactly(Feature.VERBOSITY, Feature.LOGIT_BIAS);
+            assertThat(hard(chat(body, Baseline.PASSTHROUGH, member))).as("%s", member).containsExactly(Feature.LOGIT_BIAS);
             assertThat(chat(body, Baseline.PASSTHROUGH, member).soft()).isEmpty();
             assertThat(chat(body, Baseline.TEXT_ONLY, member).hard()).isEmpty();
-            assertThat(soft(chat(body, Baseline.TEXT_ONLY, member))).containsExactly(Feature.VERBOSITY, Feature.LOGIT_BIAS);
+            assertThat(soft(chat(body, Baseline.TEXT_ONLY, member))).containsExactly(Feature.LOGIT_BIAS);
+        }
+    }
+
+    /**
+     * The length of the answer is only advice, which OpenCode sends with every request of a gpt model: it is left out of
+     * the relay's body and recorded on every route, entry and member, so that a relay can serve those requests at all (D6).
+     * A request that asks for it and for the odds still has the odds as its hard feature.
+     */
+    @Test
+    void theLengthOfTheAnswerIsSoftOnEveryRouteAndEntryAndMember() {
+        String body = chatBody("\"verbosity\":\"low\"", "\"q\"");
+
+        for (Settings member : allMembers()) {
+            for (Baseline baseline : Baseline.values()) {
+                Verdict verdict = chat(body, baseline, member);
+
+                assertThat(verdict.hard()).as("%s %s", baseline, member).isEmpty();
+                assertThat(soft(verdict)).as("%s %s", baseline, member).containsExactly(Feature.VERBOSITY);
+                assertThat(verdict.allowed()).isTrue();
+            }
+            for (Entry entry : Entry.values()) {
+                for (Baseline baseline : Baseline.values()) {
+                    Detected detected = new Detected(entry, EnumSet.of(Feature.VERBOSITY), false, false);
+                    assertThat(FeaturePolicy.treatment(Feature.VERBOSITY, detected, baseline, member)).as("%s %s", entry, baseline)
+                        .isEqualTo(Treatment.SOFT);
+                }
+            }
+        }
+        String both = chatBody("\"verbosity\":\"high\",\"logit_bias\":{\"50256\":-100}", "\"q\"");
+        for (Settings member : allMembers()) {
+            Verdict verdict = chat(both, Baseline.PASSTHROUGH, member);
+            assertThat(hard(verdict)).containsExactly(Feature.LOGIT_BIAS);
+            assertThat(soft(verdict)).containsExactly(Feature.VERBOSITY);
         }
     }
 
@@ -668,7 +700,7 @@ class FeaturePolicyTest {
         Set<Feature> neverHard = EnumSet.complementOf(alwaysHard);
         neverHard.remove(Feature.FAST);
         neverHard.removeAll(EnumSet.of(
-            Feature.IMAGE, Feature.JSON_SCHEMA, Feature.AUDIO, Feature.FILE, Feature.TOOL_CHOICE, Feature.VERBOSITY, Feature.LOGIT_BIAS
+            Feature.IMAGE, Feature.JSON_SCHEMA, Feature.AUDIO, Feature.FILE, Feature.TOOL_CHOICE, Feature.LOGIT_BIAS
         ));
 
         for (Entry entry : Entry.values()) {

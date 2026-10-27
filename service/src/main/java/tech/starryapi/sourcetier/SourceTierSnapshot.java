@@ -170,7 +170,7 @@ public final class SourceTierSnapshot {
     private final Map<MemberKey, List<MemberModel>> memberModels;
     private final Set<String> exclusiveXpAccountIds;
     private final boolean crossProtocolMembers;
-    private final Set<String> openRelayEntries;
+    private final Map<String, Set<String>> openRelayEntries;
 
     private SourceTierSnapshot(
         long configVersion,
@@ -178,7 +178,7 @@ public final class SourceTierSnapshot {
         Map<MemberKey, List<MemberModel>> memberModels,
         Set<String> exclusiveXpAccountIds,
         boolean crossProtocolMembers,
-        Set<String> openRelayEntries
+        Map<String, Set<String>> openRelayEntries
     ) {
         this.configVersion = configVersion;
         this.vendors = vendors;
@@ -254,20 +254,22 @@ public final class SourceTierSnapshot {
         )));
         models.replaceAll((key, list) -> List.copyOf(list));
         return new SourceTierSnapshot(configVersion, Map.copyOf(indexes), Map.copyOf(models), Set.copyOf(exclusive), relays,
-            Set.copyOf(openRelayEntries(indexes)));
+            openRelayEntries(indexes));
     }
 
     /**
-     * The entry endpoints for which some relay could be given a request: a relay of a tier that is switched on, in a vendor
-     * that is switched on, and a gate of the vendor for the relay's protocol and the entry that is not off. The pair's state
-     * in the registry of the code is not looked at here; a pair it does not offer only makes the gate useless.
+     * By vendor, the entry endpoints for which some relay of the vendor could be given a request: a relay of a tier that is
+     * switched on, in a vendor that is switched on, and a gate of the vendor for the relay's protocol and the entry that is
+     * not off. The pair's state in the registry of the code is not looked at here; a pair it does not offer only makes the
+     * gate useless. A vendor with none is absent.
      */
-    private static Set<String> openRelayEntries(Map<String, VendorIndex> indexes) {
-        Set<String> entries = new HashSet<>();
+    private static Map<String, Set<String>> openRelayEntries(Map<String, VendorIndex> indexes) {
+        Map<String, Set<String>> byVendor = new HashMap<>();
         for (VendorIndex index : indexes.values()) {
             if (!index.config.enabled()) {
                 continue;
             }
+            Set<String> entries = new HashSet<>();
             for (Member member : index.members.values()) {
                 Tier tier = index.tiersById.get(member.tierId());
                 if (!member.crossProtocol() || tier == null || !tier.enabled()) {
@@ -279,8 +281,11 @@ public final class SourceTierSnapshot {
                     }
                 }
             }
+            if (!entries.isEmpty()) {
+                byVendor.put(index.config.vendor(), Set.copyOf(entries));
+            }
         }
-        return entries;
+        return Map.copyOf(byVendor);
     }
 
     /** The value of {@code source_tier_config_version} this snapshot was read at; 0 before anything was configured. */
@@ -358,12 +363,27 @@ public final class SourceTierSnapshot {
      * switched off) costs the traffic of no vendor anything.
      */
     public boolean hasOpenRelayFor(String entryEndpoint) {
-        return entryEndpoint != null && openRelayEntries.contains(entryEndpoint);
+        return entryEndpoint != null && openRelayEntries.values().stream().anyMatch(entries -> entries.contains(entryEndpoint));
+    }
+
+    /**
+     * {@link #hasOpenRelayFor(String)} for one vendor. A request of a vendor none of whose gates is open for the entry is not
+     * read for the relays of the vendor, whatever another vendor has open for the same entry.
+     */
+    public boolean hasOpenRelayFor(String vendor, String entryEndpoint) {
+        return vendor != null && entryEndpoint != null && openRelayEntries.getOrDefault(vendor, Set.of()).contains(entryEndpoint);
     }
 
     /** Whether the account is registered as the exclusive relay of another protocol in any vendor. */
     public boolean isExclusiveRelay(String accountId) {
         return accountId != null && exclusiveXpAccountIds.contains(accountId);
+    }
+
+    /** Whether the account is registered as a relay for another protocol (a cross-protocol member) in any vendor. */
+    public boolean isRelay(String accountId) {
+        return accountId != null && vendors.values().stream()
+            .map(index -> index.members.get(accountId))
+            .anyMatch(member -> member != null && member.crossProtocol());
     }
 
     /**
@@ -469,6 +489,13 @@ public final class SourceTierSnapshot {
             }
         }
         return counts;
+    }
+
+    /** Whether a relay (a member of another protocol) is registered in the tier, in service or not, eligible for a request or not. */
+    public boolean hasRelayMembers(String vendor, String tierId) {
+        VendorIndex index = vendors.get(vendor);
+        return index != null && index.members.values().stream()
+            .anyMatch(member -> member.crossProtocol() && member.tierId().equals(tierId));
     }
 
     /**

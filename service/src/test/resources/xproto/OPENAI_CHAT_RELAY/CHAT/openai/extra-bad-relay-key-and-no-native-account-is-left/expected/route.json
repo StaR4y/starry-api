@@ -11,7 +11,7 @@
       "inputTokens": 0,
       "outputTokens": 0,
       "usageSource": null,
-      "stopReason": null,
+      "stopReason": "KEY_REFUSED",
       "degraded": "cache_control,reasoning_effort",
       "error": "Source error 401 (invalid_api_key)"
     }

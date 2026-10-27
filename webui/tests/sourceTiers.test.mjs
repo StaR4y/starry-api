@@ -25,7 +25,7 @@ const compiled = await build({
 });
 const meta = await import(`data:text/javascript;base64,${Buffer.from(compiled.outputFiles[0].text).toString('base64')}`);
 const {
-  draftOf, replaceRequest, draftSignature, tierProblems, validateDraft, unsupportedMessage, enableNote, unifyNote, tierPresets, placedCounts,
+  draftOf, replaceRequest, draftSignature, relaysOfTier, carryRelays, relayTierId, tierProblems, validateDraft, unsupportedMessage, enableNote, unifyNote, tierPresets, placedCounts,
   pinChoices, exclusiveRelayIds, DEFAULT_REFUSAL_CAP,
   layerSegments, layerTotal, degradedPercent, degradedTone, notServingReason, placementsByAccount, tierFilterOptions,
   matchesTierFilter, placedLabel, placedHint, placementVendorCount, batchPlan, UNPIN, NO_TIER_FILTER, MAX_BATCH_MEMBERS,
@@ -39,7 +39,7 @@ const {
   cacheCostWarning, exclusiveWarning, limitsNote, durationNote, isOpenAiCompatibleKey, relayCandidates, catalogModelsOf,
   coveredAliases, catalogWindow, prefillContext, prefillContexts, suggestWireName, pairStatusOf, allowedGateStates, gateOf,
   gateState, gateKeys, setGate, gateProblem, blockingGateProblem, percentOf, successPercent, estimatedPercent, unbilledPercent,
-  conversionRejectedPercent, figureTone, formatLatency, skipReasonLabel, criterionValue, unmetCriteria, evidenceFileName,
+  conversionRejectedPercent, figureTone, formatLatency, skipReasonLabel, skipReasonHint, criterionValue, criterionNote, lintCountPartial, unmetCriteria, evidenceFileName,
   relayErrorMessage, verificationOf, probeLabel, verifyTargets, ENTRY_ENDPOINTS,
 } = meta;
 meta.setLocale('zh-CN');
@@ -144,6 +144,80 @@ test('a native pin follows its tier through a rename and a reorder, and goes wit
   );
 });
 
+test('a relay follows its tier through a rename and a reorder, as a native pin does', () => {
+  const draft = draftOf(vendor());
+  const [official, kiro] = draft.tiers;
+  const relayRow = () => replaceRequest(7, draft).members.find((member) => member.accountId === 'relay-1');
+  assert.deepEqual(relaysOfTier(draft, official.key).map((row) => row.member.accountId), ['relay-1']);
+  assert.deepEqual(relaysOfTier(draft, kiro.key), []);
+  const saved = draftSignature(draft);
+
+  draft.tiers = [{ ...official, tierId: 'official-2' }, kiro];
+  assert.equal(validateDraft(draft), null);
+  assert.deepEqual(relayRow(), { ...relay, tierId: 'official-2' });
+  assert.notEqual(draftSignature(draft), saved);
+
+  draft.tiers = [kiro, { ...official, tierId: 'official-2' }];
+  assert.equal(relayRow().tierId, 'official-2');
+  assert.equal(relayTierId(draft, draft.relayMembers[0]), 'official-2');
+});
+
+test('a relay stays with its own tier when another tier is given the identifier it had', () => {
+  const draft = draftOf(vendor());
+  const [official, kiro] = draft.tiers;
+  // The kiro row takes the identifier "official" while the relay's row is renamed after it: no relay is moved across.
+  draft.tiers = [official, { ...kiro, tierId: 'official' }];
+  assert.equal(relayTierId(draft, draft.relayMembers[0]), 'official');
+  draft.tiers = [{ ...official, tierId: 'official-2' }, { ...kiro, tierId: 'official' }];
+  assert.equal(relayTierId(draft, draft.relayMembers[0]), 'official-2');
+  assert.deepEqual(replaceRequest(7, draft).members.map((member) => `${member.accountId}@${member.tierId}`),
+    ['acc-1@official', 'acc-2@official-2', 'relay-1@official-2']);
+});
+
+test('a draft whose relay lost its tier is refused with the relay named, and the tier it was in can be found', () => {
+  const draft = draftOf(vendor());
+  const [official, kiro] = draft.tiers;
+  assert.equal(validateDraft(draft), null);
+
+  draft.tiers = [kiro];
+
+  assert.match(validateDraft(draft), /relay-1/);
+  assert.match(validateDraft(draft), /跨协议成员/);
+  // The relay is still in the request as it was saved, so that nothing else drops it; the page does not send this draft.
+  assert.equal(replaceRequest(7, draft).members.find((member) => member.accountId === 'relay-1').tierId, 'official');
+  assert.deepEqual(relaysOfTier(draft, official.key).map((row) => row.member.accountId), ['relay-1']);
+});
+
+test('applying a preset keeps the relays in the tier with the same identifier and refuses to drop one', () => {
+  const owner = vendor({
+    tiers: [tier('relay', 1), tier('kiro', 2, { memberCategories: ['KIRO', 'CLAUDE_OAUTH'] })],
+    members: [{ ...relay, tierId: 'relay' }],
+  });
+  const draft = draftOf(owner);
+  const relayKiro = tierPresets('anthropic').find((preset) => preset.id === 'relay-kiro');
+  const officialKiro = tierPresets('anthropic').find((preset) => preset.id === 'official-kiro');
+
+  const kept = relayKiro.build();
+  const carried = carryRelays(draft, kept);
+  assert.deepEqual(carried.lost, []);
+  draft.tiers = kept;
+  draft.pins = [];
+  draft.relayMembers = carried.relays;
+  assert.equal(validateDraft(draft), null);
+  assert.deepEqual(replaceRequest(7, draft).members.map((member) => `${member.accountId}@${member.tierId}`), ['relay-1@relay']);
+
+  // A preset that has no tier by that identifier cannot take the relay: the page asks for it to be moved first.
+  const lost = carryRelays(draftOf(owner), officialKiro.build());
+  assert.deepEqual(lost.lost.map((row) => row.member.accountId), ['relay-1']);
+  assert.deepEqual(lost.relays, []);
+
+  // The relay of a tier that was renamed in the draft is looked for under the name it has now.
+  const renamed = draftOf(owner);
+  renamed.tiers = [{ ...renamed.tiers[0], tierId: 'official' }, renamed.tiers[1]];
+  assert.deepEqual(carryRelays(renamed, officialKiro.build()).lost, []);
+  assert.deepEqual(carryRelays(renamed, relayKiro.build()).lost.map((row) => row.member.accountId), ['relay-1']);
+});
+
 test('the signature ignores row keys and changes with any edit', () => {
   const base = draftSignature(draftOf(vendor()));
   assert.equal(draftSignature(draftOf(vendor())), base);
@@ -226,7 +300,9 @@ test('validateDraft reports the first problem of the whole draft', () => {
   assert.equal(validateDraft(allOff), null);
   assert.ok(validateDraft({ ...allOff, enabled: true }));
   assert.equal(validateDraft({ ...base, enabled: true }), null);
-  assert.equal(validateDraft({ ...base, tiers: [], enabled: false }), null);
+  assert.equal(validateDraft({ ...base, tiers: [], relayMembers: [], enabled: false }), null);
+  // A relay needs its tier: removing every tier of a vendor that has one is refused, whatever the switch says
+  assert.match(validateDraft({ ...base, tiers: [], enabled: false }), /relay-1/);
 });
 
 test('a new tier takes the first free number and never repeats an identifier or a name', () => {
@@ -1009,7 +1085,10 @@ test('the advice of the cache probe changes only the switches it is sure about',
 });
 
 test('the warnings say what a relay costs or risks where it does', () => {
-  assert.match(cacheCostWarning('anthropic'), /没有提示缓存/);
+  // Not the absolute claim that a relay has no cache: it caches prefixes by itself when it can, and what it reports is billed.
+  assert.match(cacheCostWarning('anthropic'), /不给 Claude Code 发往中转的请求加提示缓存/);
+  assert.match(cacheCostWarning('anthropic'), /除非中转自己按前缀自动缓存/);
+  assert.doesNotMatch(cacheCostWarning('anthropic'), /没有提示缓存/);
   assert.equal(cacheCostWarning('openai'), null);
   assert.equal(exclusiveWarning(filled()), null);
   assert.match(exclusiveWarning(filled({ exclusive: false })), /GLM/);
@@ -1158,7 +1237,7 @@ test('a gate that cannot be saved is told before the server refuses it, and an e
   assert.match(gateProblem([gate('CHAT', 'ON')], 'CHAT', 'EXPERIMENTAL'), /不能设为/);
 });
 
-const figures = (extra = {}) => ({ attempts: 200, served: 190, failed: 10, interrupted: 2, conversionRejected: 1, contextExceeded: 0, modelNotServed: 0, estimated: 19, clamped: 0, degraded: 0, ...extra });
+const figures = (extra = {}) => ({ attempts: 200, served: 190, failed: 10, interrupted: 2, conversionRejected: 1, contextExceeded: 0, modelNotServed: 0, keyRefused: 0, estimated: 19, clamped: 0, degraded: 0, ...extra });
 
 test('the figures of the window are shares of the attempts or of the answered attempts, and absent without a base', () => {
   assert.equal(percentOf(1, 0), null);
@@ -1193,6 +1272,27 @@ test('every reason a relay is left out of a plan has a name, and one this build 
     assert.notEqual(skipReasonLabel(reason), reason, reason);
   }
   assert.equal(skipReasonLabel('SOMETHING_NEW'), 'SOMETHING_NEW');
+});
+
+test('the GATE skip is told as the key not being on the list of an open gate, not as a gate that is not open', () => {
+  // A vendor whose gate for the entry is off or missing does not look at its relays, so it counts no GATE skip; the one that
+  // is counted comes from a gate that is open to a list the key is not on, which the operator sees as open in the console.
+  for (const language of ['zh-CN', 'en-US']) {
+    meta.setLocale(language);
+    try {
+      const text = `${skipReasonLabel('GATE')} | ${skipReasonHint('GATE')}`;
+      assert.doesNotMatch(text, /未开放|不读请求|Gate not open|not read at all/i, text);
+    } finally {
+      meta.setLocale('zh-CN');
+    }
+  }
+  assert.match(skipReasonLabel('GATE'), /名单/);
+  meta.setLocale('en-US');
+  try {
+    assert.match(skipReasonLabel('GATE'), /list/);
+  } finally {
+    meta.setLocale('zh-CN');
+  }
 });
 
 test('a relay\'s layer extends the layers of an account by the one only it has', () => {
@@ -1251,6 +1351,18 @@ test('the evidence is read as the standard states it', () => {
   assert.deepEqual(criteria.map(criterionValue), ['250', '1', '0.8%', '—']);
   assert.deepEqual(unmetCriteria(criteria), ['lintFailures', 'estimated']);
   assert.equal(evidenceFileName({ at: '2026-10-26T08:00:00Z', days: 30 }), 'starry-pair-evidence-30d-2026-10-26.json');
+});
+
+test('the evidence says what its counts cannot vouch for', () => {
+  // Interruptions are a lower bound: a client that left first writes no row.
+  assert.match(criterionNote('unbilled'), /下限/);
+  assert.equal(criterionNote('requests'), '');
+  assert.equal(criterionNote('lintFailures'), '');
+  // The node that answers counts the strict-lint failures from the day it started, which may be after the window began.
+  assert.equal(lintCountPartial({ since: '2026-09-26T08:00:00Z', skipsSince: '2026-10-25T08:00:00Z' }), true);
+  assert.equal(lintCountPartial({ since: '2026-09-26T08:00:00Z', skipsSince: '2026-09-26T08:00:00Z' }), false);
+  assert.equal(lintCountPartial({ since: '2026-09-26T08:00:00Z', skipsSince: '2026-08-01T00:00:00Z' }), false);
+  assert.equal(lintCountPartial({ since: 'not a time', skipsSince: '2026-08-01T00:00:00Z' }), false);
 });
 
 test('the errors of a relay\'s save, verification and model list are told in the console\'s words', () => {

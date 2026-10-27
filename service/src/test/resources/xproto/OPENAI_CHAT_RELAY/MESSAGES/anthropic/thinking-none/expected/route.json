@@ -12,7 +12,7 @@
       "outputTokens": 24,
       "usageSource": "REPORTED",
       "stopReason": "END_TURN",
-      "degraded": "cache_control,metadata",
+      "degraded": "cache_control,metadata,billing_header_dropped",
       "error": null
     }
   ]

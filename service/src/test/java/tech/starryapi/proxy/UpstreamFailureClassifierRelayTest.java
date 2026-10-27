@@ -144,12 +144,12 @@ class UpstreamFailureClassifierRelayTest {
     @Test
     void aStatusThatDoesNotSayItIsTheModelStaysWithTheRulesOfThatStatus() {
         UpstreamException overloaded = new UpstreamException(503, "Source error 503 (overloaded_error)", true);
-        UpstreamException denied = new UpstreamException(403, "Source error 403 (permission_denied)", false);
+        UpstreamException limited = new UpstreamException(429, "Source error 429 (rate_limit_exceeded)", true);
 
         assertThat(UpstreamFailureClassifier.classify(overloaded, relay, dispatch))
             .isEqualTo(UpstreamFailureClassifier.classify(overloaded, relay));
-        assertThat(UpstreamFailureClassifier.classify(denied, relay, dispatch))
-            .isEqualTo(UpstreamFailureClassifier.classify(denied, relay));
+        assertThat(UpstreamFailureClassifier.classify(limited, relay, dispatch))
+            .isEqualTo(UpstreamFailureClassifier.classify(limited, relay));
     }
 
     // --- a request the relay refuses ---
@@ -206,10 +206,6 @@ class UpstreamFailureClassifierRelayTest {
     @Test
     void aFailureThatHasNoRuleOfItsOwnIsJudgedByItsStatusAsAlways() {
         List<UpstreamException> errors = List.of(
-            new UpstreamException(401, "Source error 401 (invalid_api_key)", false),
-            new UpstreamException(401, "Source error 401 (token_revoked)", false),
-            new UpstreamException(403, "Source error 403 (permission_denied)", false),
-            new UpstreamException(403, "Source error 403 (account_disabled)", false),
             new UpstreamException(408, "Source error 408", false),
             new UpstreamException(409, "Source error 409", false),
             new UpstreamException(429, "Source error 429 (rate_limit_exceeded)", true),
@@ -227,6 +223,77 @@ class UpstreamFailureClassifierRelayTest {
             assertThat(classification).as(error.getMessage()).isEqualTo(UpstreamFailureClassifier.classify(error, relay));
             assertThat(classification.relayFailure()).isNull();
         }
+    }
+
+    // --- the relay turns its own key down (D5) ---
+
+    @Test
+    void aRelayThatRejectsItsOwnKeyHasFailedAsThatAccountAndTheRequestGoesOnToAnotherAccountOrTier() {
+        List<UpstreamException> errors = List.of(
+            new UpstreamException(401, "Source error 401 (invalid_api_key)", false),
+            new UpstreamException(401, "Source error 401 (token_revoked)", false),
+            new UpstreamException(403, "Source error 403 (permission_denied)", false),
+            new UpstreamException(403, "Source error 403 (account_disabled)", false),
+            new UpstreamException(401, "Source error 401", false),
+            // What the mapper makes of the three ways a relay says it: a status, a name in the body, and an error inside a 200.
+            MAPPER.fromResponse(401, "{\"error\":{\"message\":\"Incorrect API key provided\",\"type\":\"invalid_request_error\",\"code\":\"invalid_api_key\"}}",
+                null, "relay-1", "sk-test"),
+            MAPPER.fromResponse(403, "<html>Forbidden</html>", null, "relay-1", "sk-test"),
+            MAPPER.fromInBand(JSON.readTree("{\"message\":\"invalid x-api-key\",\"type\":\"authentication_error\"}"), "relay-1", "sk-test"),
+            MAPPER.fromInBand(JSON.readTree("{\"message\":\"denied\",\"type\":\"permission_error\"}"), "relay-1", "sk-test"));
+
+        for (UpstreamException error : errors) {
+            Classification classification = UpstreamFailureClassifier.classify(error, relay, dispatch);
+
+            assertThat(error.getStatusCode()).as(error.getMessage()).isIn(401, 403);
+            assertThat(classification.relayFailure()).as(error.getMessage()).isEqualTo(RelayFailure.KEY_REFUSED);
+            assertThat(classification.keyRefused()).isTrue();
+            assertThat(classification.statusCode()).isEqualTo(error.getStatusCode());
+            // The credentials of the account are what failed: it rests as a native account does for bad ones.
+            assertThat(classification.scope()).isEqualTo(AccountFailureScope.CREDENTIAL);
+            assertThat(classification.cooldown()).isEqualTo(Duration.ofMinutes(10));
+            // A rejection is given before anything is generated, so the request goes on to another account and to another tier.
+            assertThat(classification.retryable()).isTrue();
+            assertThat(classification.crossAccountRetryAllowed()).isTrue();
+            assertThat(classification.crossTierOnly()).isFalse();
+            assertThat(classification.interrupted()).isFalse();
+            assertThat(classification.type()).isEqualTo(AccountPoolService.UpstreamErrorType.RECOVERABLE);
+            // A relay's word does not disable the administrator's account, and the old circuit breaker never counts a relay.
+            assertThat(classification.permanentCredentialFailure()).isFalse();
+            assertThat(classification.circuitFailure()).isFalse();
+            assertThat(classification.failure()).isSameAs(error);
+        }
+    }
+
+    @Test
+    void theSameRejectionOfANativeAttemptKeepsTheRulesItAlwaysHad() {
+        UpstreamException unauthorized = new UpstreamException(401, "Source error 401 (invalid_api_key)", false);
+        UpstreamException forbidden = new UpstreamException(403, "Source error 403 (permission_denied)", false);
+        UpstreamException revoked = new UpstreamException(401, "token_revoked", false);
+
+        for (UpstreamException error : List.of(unauthorized, forbidden, revoked)) {
+            Classification untiered = UpstreamFailureClassifier.classify(error, relay);
+
+            assertThat(untiered.relayFailure()).isNull();
+            assertThat(untiered.keyRefused()).isFalse();
+            assertThat(UpstreamFailureClassifier.classify(error, relay, TierDispatch.nativeDispatch())).isEqualTo(untiered);
+            assertThat(UpstreamFailureClassifier.classify(error, relay, null)).isEqualTo(untiered);
+        }
+        // A native 401 is retried on no other account, and one that says the token is gone disables the account.
+        assertThat(UpstreamFailureClassifier.classify(unauthorized, relay).crossAccountRetryAllowed()).isFalse();
+        assertThat(UpstreamFailureClassifier.classify(revoked, relay).permanentCredentialFailure()).isTrue();
+    }
+
+    @Test
+    void aRelayThatSaysTheModelIsNotServedWithA403IsStillTheModelsProblemAndNotTheKeys() {
+        UpstreamException error = MAPPER.fromResponse(403,
+            "{\"error\":{\"message\":\"You do not have access to the model `claude-x`\",\"type\":\"permission_error\"}}",
+            null, "relay-1", null);
+
+        Classification classification = UpstreamFailureClassifier.classify(error, relay, dispatch);
+
+        assertThat(classification.relayFailure()).isEqualTo(RelayFailure.MODEL_NOT_SERVED);
+        assertThat(classification.keyRefused()).isFalse();
     }
 
     @Test

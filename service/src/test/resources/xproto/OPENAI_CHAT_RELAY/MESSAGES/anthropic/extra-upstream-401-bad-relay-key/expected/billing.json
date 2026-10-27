@@ -1,8 +1,12 @@
 {
-  "reserved": "0.505804",
-  "settled": null,
-  "released": {
-    "definitive": true,
-    "reason": "Request failed"
-  }
+  "reserved": "0.505478",
+  "settled": {
+    "credits": "0.00108",
+    "inputTokens": 500,
+    "outputTokens": 20,
+    "tier": "anthropic:native",
+    "level": 2,
+    "priceFactor": "0.6"
+  },
+  "released": null
 }

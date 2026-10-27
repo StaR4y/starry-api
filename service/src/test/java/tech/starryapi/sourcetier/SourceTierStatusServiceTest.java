@@ -491,7 +491,7 @@ class SourceTierStatusServiceTest {
     private static final XpSkipCounts.Key SKIP_LINT = new XpSkipCounts.Key("anthropic", "official", XpSkip.Reason.CONVERSION);
 
     private static SourceTierDtos.XpFigures figures(long attempts, long served, long interrupted, long conversionRejected, long estimated) {
-        return new SourceTierDtos.XpFigures(attempts, served, attempts - served, interrupted, conversionRejected, 0, 0, estimated,
+        return new SourceTierDtos.XpFigures(attempts, served, attempts - served, interrupted, conversionRejected, 0, 0, 0, estimated,
             0, 0, 1200L);
     }
 
@@ -603,7 +603,8 @@ class SourceTierStatusServiceTest {
         memberFigures.add(new FigureRow("anthropic:official", "anthropic", "relay", "CHAT", figures(100, 90, 0, 5, 0)));
         memberFigures.add(new FigureRow("anthropic:kiro", "anthropic", "relay-2", "MESSAGES", figures(1, 1, 0, 0, 0)));
         features.add(new FeatureRow("anthropic", "MESSAGES", "image", 12));
-        when(skipCounts.since()).thenReturn(NOW.minus(Duration.ofDays(2)));
+        // The node has been counting for longer than the window, so what it counted is of all of it.
+        when(skipCounts.since()).thenReturn(NOW.minus(Duration.ofDays(40)));
         when(skipCounts.snapshot()).thenReturn(Map.of(SKIP_LINT, 0L));
 
         SourceTierDtos.Evidence evidence = service(true, offered).evidence(30).block();
@@ -612,7 +613,7 @@ class SourceTierStatusServiceTest {
         assertThat(evidence.days()).isEqualTo(30);
         assertThat(evidence.since()).isEqualTo(NOW.minus(Duration.ofDays(30)));
         assertThat(evidence.configVersion()).isEqualTo(7L);
-        assertThat(evidence.skipsSince()).isEqualTo(NOW.minus(Duration.ofDays(2)));
+        assertThat(evidence.skipsSince()).isEqualTo(NOW.minus(Duration.ofDays(40)));
         assertThat(relayReadSince).containsExactly(NOW.minus(Duration.ofDays(30)));
         assertThat(evidence.pairs()).as("pairs the release does not offer are not in the evidence").extracting(
                 SourceTierDtos.PairEvidence::vendor, SourceTierDtos.PairEvidence::entryEndpoint, SourceTierDtos.PairEvidence::status)
@@ -641,7 +642,7 @@ class SourceTierStatusServiceTest {
         assertThat(chat.criteria()).filteredOn(criterion -> !criterion.met()).extracting(SourceTierDtos.Criterion::name)
             .containsExactly("requests", "conversionRejected");
         SourceTierDtos.PairEvidence openai = evidence.pairs().get(2);
-        assertThat(openai.figures()).isEqualTo(new SourceTierDtos.XpFigures(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null));
+        assertThat(openai.figures()).isEqualTo(new SourceTierDtos.XpFigures(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null));
         assertThat(openai.meetsStandard()).as("no attempts at all").isFalse();
         assertThat(openai.gate()).isEqualTo("OFF");
     }
@@ -650,7 +651,7 @@ class SourceTierStatusServiceTest {
     void theLintFailuresOfAPairAreThoseOfItsVendorAndAnyOneMakesItFail() {
         loaded(withRelay(relay, mapping("claude-sonnet-4.5", true, true), gate("MESSAGES", "KEYS", "key-1")));
         pairFigures.add(new FigureRow(null, "anthropic", null, "MESSAGES", figures(300, 300, 0, 0, 0)));
-        when(skipCounts.since()).thenReturn(NOW);
+        when(skipCounts.since()).thenReturn(NOW.minus(Duration.ofDays(10)));
         when(skipCounts.snapshot()).thenReturn(Map.of(SKIP_LINT, 1L, new XpSkipCounts.Key("openai", "official", XpSkip.Reason.CONVERSION), 9L,
             new XpSkipCounts.Key("anthropic", "official", XpSkip.Reason.GATE), 50L));
 
@@ -659,12 +660,43 @@ class SourceTierStatusServiceTest {
         assertThat(messages.lintSkips()).isEqualTo(1);
         assertThat(messages.criteria()).filteredOn(criterion -> !criterion.met()).extracting(SourceTierDtos.Criterion::name)
             .containsExactly("lintFailures");
+        assertThat(messages.criteria().get(1).value()).isEqualTo(1.0);
         assertThat(messages.meetsStandard()).isFalse();
+    }
+
+    @Test
+    void theLintFailuresAreJudgedOnlyForAWindowThatTheAnsweringNodeHasBeenCountingThrough() {
+        loaded(withRelay(relay, mapping("claude-sonnet-4.5", true, true), gate("MESSAGES", "KEYS", "key-1")));
+        pairFigures.add(new FigureRow(null, "anthropic", null, "MESSAGES", figures(300, 300, 0, 0, 0)));
+        // The node started a day ago and has seen no failure: of the last day that is so, and of the last 30 days it is not known.
+        when(skipCounts.since()).thenReturn(NOW.minus(Duration.ofDays(1)));
+        when(skipCounts.snapshot()).thenReturn(Map.of(SKIP_LINT, 0L));
+
+        SourceTierDtos.PairEvidence month = service(true, offered).evidence(30).block().pairs().get(1);
+        SourceTierDtos.PairEvidence week = service(true, offered).evidence(7).block().pairs().get(1);
+        SourceTierDtos.PairEvidence day = service(true, offered).evidence(1).block().pairs().get(1);
+
+        for (SourceTierDtos.PairEvidence uncovered : List.of(month, week)) {
+            assertThat(uncovered.lintSkips()).isZero();
+            assertThat(uncovered.criteria().get(1).name()).isEqualTo("lintFailures");
+            assertThat(uncovered.criteria().get(1).value()).as("not counted over the window").isNull();
+            assertThat(uncovered.criteria().get(1).met()).isFalse();
+            assertThat(uncovered.criteria()).filteredOn(criterion -> !criterion.met()).extracting(SourceTierDtos.Criterion::name)
+                .containsExactly("lintFailures");
+            assertThat(uncovered.meetsStandard()).isFalse();
+        }
+        assertThat(day.criteria().get(1).met()).isTrue();
+        assertThat(day.meetsStandard()).isTrue();
+
+        // A node that started exactly when the window did has counted all of it.
+        when(skipCounts.since()).thenReturn(NOW.minus(Duration.ofDays(7)));
+        assertThat(service(true, offered).evidence(7).block().pairs().get(1).meetsStandard()).isTrue();
     }
 
     @Test
     void theEvidenceRefusesAWindowTheRequestLogCannotAnswerFor() {
         loaded(snapshot(true, anthropicTiers(), List.of()));
+        when(skipCounts.since()).thenReturn(NOW);
 
         for (int days : new int[] {0, -1, 91, 1000}) {
             assertThatThrownBy(() -> service(true, offered).evidence(days).block()).isInstanceOfSatisfying(ApiException.class, error -> {

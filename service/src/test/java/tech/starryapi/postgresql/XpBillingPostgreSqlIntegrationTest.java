@@ -288,6 +288,51 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     }
 
     @Test
+    void aRequestKeptToATierOfRelaysWhoseOnlyRelayBrokeOffTheSessionIsHeldForNoMoreThanTheRelayNeededAndToldToTryAgain() {
+        // Too little to pay for the floor for hidden input that the official keys of the other tier would be reserved for.
+        Client client = client("1");
+        BillingQuote gpt = pricing.billingQuote("gpt-5.5", false, payments.config().block().apiBillingMultiplier()).block();
+        openAiOwnersExample(client, 5_000);
+        relayAnswers(() -> Mono.error(new RelayAbortedAfterDispatchException("The exchange with the source failed after the request was sent")));
+        ObjectNode pinned = gptBodyWithImage("data:image/png;base64," + "A".repeat(200_000));
+        pinned.put("model", "gpt-5.5@relay");
+        assertThatThrownBy(() -> chat(client, pinned.deepCopy())).isInstanceOf(ApiException.class);
+        assertThat(relayBodies).hasSize(1);
+
+        // The client's own retry: the relay is kept from the session for two minutes, whether the tier is named by the suffix
+        // or by the header, and nobody is asked. The request waits for the relay; it is not told it is out of money.
+        ObjectNode retry = gptBodyWithImage("data:image/png;base64," + "A".repeat(200_000));
+        for (String named : List.of("suffix", "header")) {
+            MockServerHttpRequest.BodyBuilder request = MockServerHttpRequest.post("/v1/chat/completions")
+                .header("Authorization", "Bearer " + client.token());
+            ObjectNode body = retry.deepCopy();
+            if (named.equals("suffix")) {
+                body.put("model", "gpt-5.5@relay");
+            } else {
+                request.header("X-Starry-Tier", "relay");
+            }
+            MockServerWebExchange exchange = MockServerWebExchange.from(request);
+
+            assertThatThrownBy(() -> facade.chat(body, exchange).block()).as(named)
+                .isInstanceOfSatisfying(ApiException.class, error -> {
+                    assertThat(error.getCode()).isEqualTo("SOURCE_TIER_UNAVAILABLE");
+                    assertThat(error.getStatus().value()).isEqualTo(503);
+                });
+            assertThat(exchange.getResponse().getHeaders().getFirst("Retry-After")).as(named).isNotNull();
+        }
+
+        assertThat(relayBodies).hasSize(1);
+        List<Map<String, Object>> reservations = reservations(client);
+        assertThat(reservations).hasSize(3).allSatisfy(reservation -> assertThat(reservation).containsEntry("status", "RELEASED"));
+        BigDecimal floor = gpt.estimate(1_000_000L, 4096);
+        assertThat((BigDecimal) reservations.get(1).get("reserved_credits")).isLessThan(floor).isLessThan(new BigDecimal("1"));
+        assertThat((BigDecimal) reservations.get(2).get("reserved_credits")).isLessThan(floor).isLessThan(new BigDecimal("1"));
+        assertThat(balance(client)).isEqualByComparingTo("1");
+        assertThat(keyReserved(client)).isEqualByComparingTo("0");
+        assertThat(reviews(client)).isEmpty();
+    }
+
+    @Test
     void anImageTheRelayIsOnlyPointedAtHasNothingToCountAndRaisesTheReservationToTheFloor() {
         Client client = client("100");
         ownersExample(client, true, 5_000);

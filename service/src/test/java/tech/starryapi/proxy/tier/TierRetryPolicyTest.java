@@ -573,7 +573,9 @@ class TierRetryPolicyTest {
 
         Outcome outcome = policy.onRelayRefusal(failure(walk, 2, "kiro-1", refused(), true, THREE));
 
-        assertThat(outcome).isEqualTo(Outcome.STOP);
+        // Told apart from the other stops, so that the facade can tell a client to try again where native accounts are
+        // only busy for now (TierPlan#retriesAfterRelayRefusal).
+        assertThat(outcome).isEqualTo(Outcome.NOWHERE_TO_CROSS);
         assertThat(walk.nativeOnly()).isFalse();
     }
 
@@ -593,7 +595,8 @@ class TierRetryPolicyTest {
         TierWalk withoutSlot = new TierWalk(plan(false));
         TierRetryPolicy noSlot = policy(withoutSlot, true);
         noSlot.onFailure(failure(withoutSlot, 0, "official-1", rejected(), true, TWO));
-        assertThat(noSlot.onRelayRefusal(failure(withoutSlot, 0, "official-2", refused(), true, TWO))).isEqualTo(Outcome.STOP);
+        // Told apart from a stop for the failure's sake: the identical request, made again, may well cross.
+        assertThat(noSlot.onRelayRefusal(failure(withoutSlot, 0, "official-2", refused(), true, TWO))).isEqualTo(Outcome.MAY_NOT_CROSS);
         assertThat(withoutSlot.nativeOnly()).isFalse();
     }
 
@@ -633,7 +636,7 @@ class TierRetryPolicyTest {
 
         Outcome outcome = policy.onRelayRefusal(failure(walk, 0, "official-1", refused(), true, TWO));
 
-        assertThat(outcome).isEqualTo(Outcome.STOP);
+        assertThat(outcome).isEqualTo(Outcome.MAY_NOT_CROSS);
         assertThat(policy.narrowed()).isTrue();
         assertThat(walk.nativeOnly()).isFalse();
     }
@@ -662,6 +665,54 @@ class TierRetryPolicyTest {
     }
 
     @Test
+    void aRefusalOfARequestNarrowedForAFailureThatMayHaveGeneratedIsTheFailuresToTellWhateverTheRequestsAge() {
+        TierWalk walk = new TierWalk(plan(true));
+        TierRetryPolicy policy = policy(walk, true);
+        policy.onFailure(failure(walk, 0, "official-1", new IOException("reset"), false, THREE));
+        clock.advance(TierRetryPolicy.CROSS_TIER_DEADLINE.plusSeconds(1));
+
+        // The reset may have been billed: the client is told the refusal as it is and not to try again, young or old.
+        Outcome outcome = policy.onRelayRefusal(failure(walk, 0, "official-2", refused(), true, THREE));
+
+        assertThat(outcome).isEqualTo(Outcome.STOP);
+        assertThat(walk.nativeOnly()).isFalse();
+    }
+
+    @Test
+    void aRefusalOfARequestThatMustStayWhereItIsStopsWhateverTheRequestsAge() {
+        TierWalk walk = new TierWalk(plan(true));
+        TierRetryPolicy policy = policy(walk, false);
+        clock.advance(TierRetryPolicy.CROSS_TIER_DEADLINE.plusSeconds(1));
+
+        assertThat(policy.onRelayRefusal(failure(walk, 0, "official-1", refused(), true, TWO))).isEqualTo(Outcome.STOP);
+        assertThat(walk.nativeOnly()).isFalse();
+    }
+
+    @Test
+    void aSecondRefusalAfterACrossingStopsWhateverTheRequestsAge() {
+        TierWalk walk = new TierWalk(plan(true));
+        TierRetryPolicy policy = policy(walk, true);
+        assertThat(policy.onRelayRefusal(failure(walk, 0, "official-1", refused(), true, THREE))).isEqualTo(Outcome.RETRY);
+        clock.advance(TierRetryPolicy.CROSS_TIER_DEADLINE.plusSeconds(1));
+
+        assertThat(policy.onRelayRefusal(failure(walk, 1, "oauth-1", refused(), true, THREE))).isEqualTo(Outcome.STOP);
+    }
+
+    @Test
+    void aRequestNarrowedOnlyForItsAgeMayStillBeToldToTryAgainWhenARelayRefusesIt() {
+        TierWalk walk = new TierWalk(plan(true));
+        TierRetryPolicy policy = policy(walk, true);
+        clock.advance(TierRetryPolicy.CROSS_TIER_DEADLINE.plusSeconds(1));
+        // A native account turned it down for good, before it generated anything: the request is narrowed for its age alone.
+        assertThat(policy.onFailure(failure(walk, 0, "official-1", rejected(), true, THREE))).isEqualTo(Outcome.RETRY);
+        assertThat(policy.narrowed()).isTrue();
+
+        // Nothing about it is uncertain, so it is told what the identical request is told when no relay has had it first.
+        assertThat(policy.onRelayRefusal(failure(walk, 0, "official-2", refused(), true, THREE))).isEqualTo(Outcome.MAY_NOT_CROSS);
+        assertThat(walk.nativeOnly()).isFalse();
+    }
+
+    @Test
     void aLeaseThatCannotCoverAnotherDispatchAlsoStopsTheCrossing() {
         TierWalk walk = new TierWalk(plan(true));
         TierRetryPolicy policy = policy(walk, true);
@@ -669,7 +720,7 @@ class TierRetryPolicyTest {
 
         Outcome outcome = policy.onRelayRefusal(failure(walk, 0, "official-1", refused(), true, THREE));
 
-        assertThat(outcome).isEqualTo(Outcome.STOP);
+        assertThat(outcome).isEqualTo(Outcome.MAY_NOT_CROSS);
         assertThat(walk.nativeOnly()).isFalse();
     }
 

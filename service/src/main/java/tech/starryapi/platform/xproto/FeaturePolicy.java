@@ -40,11 +40,13 @@ import tech.starryapi.platform.xproto.RequestFeatureDetector.Feature;
  *       cannot carry is no loss, SOFT. A {@code gpt-*} request goes to OpenAI, Codex or a compatible key, which are
  *       handed the client's body whole: the same image or schema, audio or file part, that the member cannot carry, and
  *       a {@code tool_choice} that restricts the tools (the {@code allowed_tools} of the OpenAI API, which a relay is
- *       not given), a {@code verbosity} and a {@code logit_bias} (they change the answer, and no relay is sent them),
- *       are HARD, so that moving to the relay does not drop what the client sent and the native path would
- *       have kept. The
- *       Messages entry has no baseline: its conversion has flattened the request before any route (the native path
- *       already drops images and documents there), so these are SOFT for every route.
+ *       not given) and a {@code logit_bias} (it changes the odds of the words, and no relay is sent it), are HARD, so
+ *       that moving to the relay does not drop what the client sent and the native path would have kept. The Messages
+ *       entry has no baseline: its conversion has flattened the request before any route (the native path already
+ *       drops images and documents there), so these are SOFT for every route. A {@code verbosity} is SOFT on every
+ *       baseline and entry (D6): it only asks the model to be brief or full, OpenCode sends it with every request of a gpt
+ *       model, and a relay that refused the request for it would never be given one. The sanitizer does not send it and
+ *       the request log records it.
  *   <li><b>The member's settings</b>, the same record the sanitizer builds the body from ({@link Settings}): vision,
  *       response schemas, priority tier, cache-control pass-through and reasoning effort. Its {@code billedFastMode}
  *       is how a fast request gets here, because the body does not say whether the request is billed as fast: the
@@ -194,12 +196,13 @@ public final class FeaturePolicy {
             case TOOL_RESULT_ERROR -> carriedIf(entry, feature, true);
             case IMAGE -> carriedOr(entry, feature, member.vision(), baseline);
             case JSON_SCHEMA -> carriedOr(entry, feature, member.jsonSchema(), baseline);
-            // No setting of a member lets it carry these, only the baseline says what leaving them out is. The last two
-            // change the answer (its length, the odds of its words) and a passthrough route hands them to the account.
-            case AUDIO, FILE, TOOL_CHOICE, VERBOSITY, LOGIT_BIAS -> carriedOr(entry, feature, false, baseline);
+            // No setting of a member lets it carry these, only the baseline says what leaving them out is. The last one
+            // changes the odds of the words of the answer and a passthrough route hands it to the account.
+            case AUDIO, FILE, TOOL_CHOICE, LOGIT_BIAS -> carriedOr(entry, feature, false, baseline);
+            // A verbosity is advice about the length of the answer, left out on every baseline and entry (D6), recorded.
             case DOCUMENT, TOOL_SEARCH, CONTEXT_MANAGEMENT, HISTORY_THINKING, SERVER_TOOL_HISTORY, OUTPUT_CONFIG,
-                 TOP_K, METADATA, SERVICE_TIER, LOGPROBS, USER, STORE, PREDICTION, PROMPT_CACHE_KEY, PROMPT_CACHE_RETENTION,
-                 SAFETY_IDENTIFIER, MODALITIES -> Treatment.SOFT;
+                 TOP_K, METADATA, SERVICE_TIER, VERBOSITY, LOGPROBS, USER, STORE, PREDICTION, PROMPT_CACHE_KEY,
+                 PROMPT_CACHE_RETENTION, SAFETY_IDENTIFIER, MODALITIES -> Treatment.SOFT;
         };
     }
 

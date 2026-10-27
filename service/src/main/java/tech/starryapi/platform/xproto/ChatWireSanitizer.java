@@ -1,5 +1,6 @@
 package tech.starryapi.platform.xproto;
 
+import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -83,6 +84,21 @@ import tools.jackson.databind.node.ObjectNode;
  * a {@code tool_choice} that names it goes with it. The conversion to Chat turns it into a function of the same name,
  * so it is found by the name it has in the original body ({@code entryBody}).
  *
+ * <p>Claude Code writes the first block of its system prompt as {@code x-anthropic-billing-header: cc_version=…;
+ * cch=<hash>;}, and the hash changes with every request. The conversion to Chat makes that block the first line of the
+ * system message, which is the start of every request and so defeats the prefix caching of a relay that has it. The relay
+ * is not sent the block (D7): a system text block that is only the header line (its text, trimmed, starts with {@code
+ * x-anthropic-billing-header:} and runs no further than that line, as Claude Code writes it) is taken out of the system
+ * message, whole and only so (a block that carries more after the header line, a system prompt given as a plain string, a
+ * block that merely mentions the header, and a user's text are not touched), and a system message that had nothing else
+ * is not sent. The
+ * blocks are those of the original body, because the conversion has made one string of them; the system message of the
+ * Chat body is taken to be that string only when it is exactly the blocks, so a body that was not made from them is left
+ * as it is. The drop is a repair and not a feature, since the header is the client's bookkeeping with Anthropic and carries
+ * nothing for the model: it is recorded as {@link #BILLING_HEADER_DROPPED}. The conversion itself ({@code
+ * AnthropicRequestAdapter#messagesToChat}) keeps the block, so that Kiro and the official keys are given what they always
+ * were.
+ *
  * <p>The input is not changed. The result shares unchanged subtrees with it (tool schemas, scalar nodes), as {@code
  * JsonNodes.shallowCopy} does, so it must not be edited in place either; the canonicalizer copies what it changes.
  * Malformed pieces are skipped rather than failed on (a message that is not an object, a part with a type nothing
@@ -100,6 +116,15 @@ public final class ChatWireSanitizer {
     public static final String REASONING_EFFORT = "reasoning_effort";
     public static final String TOOL_SEARCH = "tool_search_tool";
     public static final String TOOL_CHOICE = "tool_choice";
+
+    /**
+     * The repair of the sanitizer, not a feature of the request: the billing header of Claude Code was left out of the system
+     * message (D7). The policy has no word for it, and no feature may be named like it.
+     */
+    public static final String BILLING_HEADER_DROPPED = "billing_header_dropped";
+
+    /** How the first block of Claude Code's system prompt starts, as it writes it; matched as it is, case and all. */
+    static final String BILLING_HEADER_PREFIX = "x-anthropic-billing-header:";
 
     static final String IMAGE_PLACEHOLDER = "[image omitted]";
     static final String AUDIO_PLACEHOLDER = "[audio omitted]";
@@ -234,10 +259,11 @@ public final class ChatWireSanitizer {
 
     /**
      * What {@link #sanitize} reads of the client's own request ({@code entryBody}), kept in a body of its own: the
-     * reasoning request ({@code thinking}, {@code output_config.effort}, a Gemini {@code thinkingConfig}) and the tools of
-     * the tool search, by type and name. A request is planned long before it is sent, and the body of a Messages or Gemini
-     * request may hold large base64 images that nothing should keep alive for that long, so the facade takes this when the
-     * request comes in and plans, and later sanitizes, from it. {@code sanitize(chat, entryDigest(entry), ...)} gives
+     * reasoning request ({@code thinking}, {@code output_config.effort}, a Gemini {@code thinkingConfig}), the tools of
+     * the tool search, by type and name, and the text blocks of the system prompt when one of them is the billing header of
+     * Claude Code (any other system prompt is not read). A request is planned long before it is sent, and the body of a
+     * Messages or Gemini request may hold large base64 images that nothing should keep alive for that long, so the facade
+     * takes this when the request comes in and plans, and later sanitizes, from it. {@code sanitize(chat, entryDigest(entry), ...)} gives
      * exactly what {@code sanitize(chat, entry, ...)} does; {@code ChatWireSanitizerTest} pins that for the shapes the
      * sanitizer reads.
      */
@@ -275,6 +301,10 @@ public final class ChatWireSanitizer {
             if (config.path("thinkingLevel").isString()) {
                 kept.set("thinkingLevel", config.path("thinkingLevel"));
             }
+        }
+        ArrayNode system = systemWithBillingHeader(entryBody);
+        if (system != null) {
+            digest.set("system", system);
         }
         JsonNode tools = entryBody.path("tools");
         if (tools.isArray()) {
@@ -314,7 +344,7 @@ public final class ChatWireSanitizer {
         if (wireModel != null && !wireModel.isBlank()) {
             body.put("model", wireModel);
         }
-        ArrayNode messages = messages(chatBody.path("messages"), settings, degraded);
+        ArrayNode messages = messages(withoutBillingHeader(chatBody.path("messages"), entry, degraded), settings, degraded);
         body.set("messages", messages);
         tokenLimit(chatBody, settings, body);
         number(chatBody, "temperature", body);
@@ -344,6 +374,86 @@ public final class ChatWireSanitizer {
             body.putObject("stream_options").put("include_usage", true);
         }
         return new Wire(body, List.copyOf(degraded));
+    }
+
+    // ---- the billing header of Claude Code ----
+
+    /**
+     * Whether a system text block is the billing header of Claude Code and nothing else: its text, trimmed, starts with the
+     * header's name and is the one line it is written as. A block that goes on after that line holds a system prompt too,
+     * which is not the client's bookkeeping and is not dropped for the header it starts with.
+     */
+    private static boolean isBillingHeader(String text) {
+        String line = text.strip();
+        return line.startsWith(BILLING_HEADER_PREFIX) && line.indexOf('\n') < 0 && line.indexOf('\r') < 0;
+    }
+
+    /**
+     * The text blocks of the system prompt of an entry body (the non-blank ones, which are the lines the conversion to Chat
+     * joins), as text blocks of their own, when the prompt is a list of blocks and one of them is the billing header; else
+     * null. The body of the digest keeps the same shape, so reading either gives the same.
+     */
+    private static ArrayNode systemWithBillingHeader(JsonNode entryBody) {
+        List<String> blocks = systemTexts(entryBody);
+        if (blocks == null || blocks.stream().noneMatch(ChatWireSanitizer::isBillingHeader)) {
+            return null;
+        }
+        ArrayNode kept = FACTORY.arrayNode();
+        for (String text : blocks) {
+            ObjectNode block = kept.addObject();
+            block.put("type", "text");
+            block.put("text", text);
+        }
+        return kept;
+    }
+
+    /** The texts of the non-blank text blocks of {@code system}, in order; null when it is not a list of blocks. */
+    private static List<String> systemTexts(JsonNode entry) {
+        JsonNode system = entry.path("system");
+        if (!system.isArray()) {
+            return null;
+        }
+        List<String> texts = new ArrayList<>();
+        for (JsonNode block : system) {
+            if (block.isObject() && "text".equals(block.path("type").stringValue(""))) {
+                String text = block.path("text").stringValue("");
+                if (!text.isBlank()) {
+                    texts.add(text);
+                }
+            }
+        }
+        return texts;
+    }
+
+    /**
+     * The messages of the Chat body without the billing header of Claude Code (D7), or {@code input} itself when there is
+     * nothing to take out. The system message the conversion made of the blocks of the original is its first one, and the
+     * string of the blocks it holds is rebuilt from them without the header; a system message that is not exactly what the
+     * blocks make is not touched. A system message that has nothing left is not sent.
+     */
+    private static JsonNode withoutBillingHeader(JsonNode input, JsonNode entry, Set<String> degraded) {
+        List<String> blocks = input.isArray() && !input.isEmpty() ? systemTexts(entry) : null;
+        if (blocks == null || blocks.stream().noneMatch(ChatWireSanitizer::isBillingHeader)) {
+            return input;
+        }
+        JsonNode first = input.get(0);
+        if (!first.isObject() || !"system".equals(first.path("role").stringValue(""))
+            || !first.path("content").isString() || !first.path("content").stringValue().equals(String.join("\n", blocks))) {
+            return input;
+        }
+        List<String> kept = blocks.stream().filter(text -> !isBillingHeader(text)).toList();
+        ArrayNode messages = FACTORY.arrayNode();
+        if (!kept.isEmpty()) {
+            ObjectNode system = FACTORY.objectNode();
+            first.properties().forEach(field -> system.set(field.getKey(), field.getValue()));
+            system.put("content", String.join("\n", kept));
+            messages.add(system);
+        }
+        for (int i = 1; i < input.size(); i++) {
+            messages.add(input.get(i));
+        }
+        degraded.add(BILLING_HEADER_DROPPED);
+        return messages;
     }
 
     // ---- messages ----

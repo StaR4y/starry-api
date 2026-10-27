@@ -2,14 +2,14 @@
   "status": 200,
   "headers": {
     "Content-Type": "text/event-stream",
-    "X-Starry-Tier": "native",
-    "X-Starry-Tier-Level": "2",
-    "X-Starry-Tier-Name": "native",
+    "X-Starry-Tier": "relay",
+    "X-Starry-Tier-Level": "1",
+    "X-Starry-Tier-Name": "relay",
     "X-Starry-Tier-Mode": "auto",
     "X-Starry-Tier-Status": "served"
   },
   "events": [
-    {"data":{"id":"chatcmpl-<id>","object":"chat.completion.chunk","created":0,"model":"gpt-5.5","choices":[{"index":0,"delta":{"role":"assistant","content":"from the native tier"},"finish_reason":null}]}},
+    {"data":{"id":"chatcmpl-<id>","object":"chat.completion.chunk","created":0,"model":"gpt-5.5","choices":[{"index":0,"delta":{"role":"assistant","content":"Hello from the relay (gpt)."},"finish_reason":null}]}},
     {"data":{"id":"chatcmpl-<id>","object":"chat.completion.chunk","created":0,"model":"gpt-5.5","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}},
     {"data":"[DONE]"}
   ]

@@ -53,17 +53,18 @@ import tech.starryapi.sourcetier.SourceTierValidator;
  *       fingerprint of what it is now;
  *   <li>the request has no feature the relay cannot carry and the native accounts of the route can ({@link FeaturePolicy},
  *       the route's baseline being that of its native cells);
- *   <li>the relay has not broken off an answer for this session a moment ago ({@link TierSessionBindings#relayExcluded});
  *   <li>the request, made into the relay's Chat body, passes the sanitizer, the canonicalizer and the strict lint;
- *   <li>and fits the window of the mapping, and is smaller than any prompt this node has seen the relay refuse for its
- *       length ({@link XpLearnedLimits}).
+ *   <li>it fits the window of the mapping, and is smaller than any prompt this node has seen the relay refuse for its
+ *       length ({@link XpLearnedLimits});
+ *   <li>and the relay has not broken off an answer for this session a moment ago ({@link TierSessionBindings#relayExcluded}).
  * </ol>
  *
  * The conditions are met in this order and a relay is skipped for the first it fails (design 7.9, 7.6, 7.8; the window is
- * last because it is measured on the body of the sixth, and the exclusion comes before the conversion because it needs no
- * body). Every relay left out is recorded with its reason. A relay whose account is not in the account cache (disabled,
- * suspended, deleted) is not looked at: it is not a member of the tier until it is back, as a native account that is not
- * in the cache is not.
+ * measured on the body of the fifth, and the exclusion is last so that a relay is reported as out for a moment only for a
+ * request it would otherwise have been given: one that is over its window, or that it cannot be sent, is not held back by
+ * what the session met on the relay, whatever it was). Every relay left out is recorded with its reason. A relay whose
+ * account is not in the account cache (disabled, suspended, deleted) is not looked at: it is not a member of the tier
+ * until it is back, as a native account that is not in the cache is not.
  *
  * <p>Members with the same settings are sent the same body, so it is built once per distinct {@link Settings}, and the
  * features are judged once per distinct settings too. Nothing here selects an account, reserves or charges; the walk of
@@ -194,6 +195,11 @@ final class XpEligibility {
         if (request.entry() != null && !request.entry().name().equals(detected.entry().name())) {
             return Found.NONE;
         }
+        // The request is read for the entry because some vendor has a gate open for it; this vendor's relays are looked at
+        // only if one of its own gates is, so that a gate that is off or missing is no reason to count a relay as left out.
+        if (!snapshot.hasOpenRelayFor(vendor, detected.entry().name())) {
+            return Found.NONE;
+        }
         Map<String, Tier> tiers = enabled.stream().collect(Collectors.toMap(Tier::tierId, Function.identity()));
         List<Member> members = snapshot.members(vendor).stream()
             .filter(member -> member.crossProtocol() && tiers.containsKey(member.tierId()))
@@ -260,25 +266,16 @@ final class XpEligibility {
                     verdict.hard().stream().map(Feature::label).collect(Collectors.joining(","))));
                 continue;
             }
+            Built body = built.computeIfAbsent(settings, ignored -> build(request, facts, settings));
+            XpSkip unfit = unfit(member, mapping, body);
+            if (unfit != null) {
+                skips.add(unfit);
+                continue;
+            }
+            // Last, so that the relay is out for a moment only for a request it would be given: the tier it sits in is then
+            // one that can serve this request again shortly, and not one the request has nothing in.
             if (sessions.relayExcluded(vendor, session, member.accountId())) {
                 skips.add(new XpSkip(tierId, member.accountId(), XpSkip.Reason.INTERRUPTED, ""));
-                continue;
-            }
-            Built body = built.computeIfAbsent(settings, ignored -> build(request, facts, settings));
-            if (!body.problems().isEmpty()) {
-                skips.add(new XpSkip(tierId, member.accountId(), XpSkip.Reason.CONVERSION, body.problems().getFirst()));
-                continue;
-            }
-            if (body.estimatedInput() > mapping.maxContextTokens()) {
-                skips.add(new XpSkip(tierId, member.accountId(), XpSkip.Reason.CONTEXT,
-                    "about " + body.estimatedInput() + " tokens, the window is " + mapping.maxContextTokens()));
-                continue;
-            }
-            // A relay that refused a prompt of this size for its length is not asked the same again (design 7.8).
-            OptionalLong refused = learnedLimits.refusedFrom(mapping);
-            if (refused.isPresent() && body.estimatedInput() >= refused.getAsLong()) {
-                skips.add(new XpSkip(tierId, member.accountId(), XpSkip.Reason.CONTEXT,
-                    "about " + body.estimatedInput() + " tokens, a prompt of " + refused.getAsLong() + " was refused for its length"));
                 continue;
             }
             Set<String> degraded = new LinkedHashSet<>(verdict.soft().stream().map(Feature::label).toList());
@@ -293,11 +290,12 @@ final class XpEligibility {
 
     /**
      * Whether a relay that is out of service (disabled or suspended, so in no account cache and not looked at by {@link
-     * #evaluate}) would take part in the request if it were back: the conditions that need nothing but the account and the
-     * configuration. The pair is offered and its gate lets the key through, the account is still a relay, the model has an
-     * enabled mapping that is verified for the account as it is, and the request carries nothing the relay cannot
-     * (the first four of the class description). What the session met on the relay and the size of the request are not
-     * asked: they are not what keeps a request from a tier whose relays are all switched off.
+     * #evaluate}) would take part in the request if it were back: every condition of the class description but the last.
+     * The pair is offered and its gate lets the key through, the account is still a relay, the model has an enabled mapping
+     * that is verified for the account as it is, the request carries nothing the relay cannot, and the request, made into
+     * its body, passes the lint and fits the window and what this node learned of it. What the session met on the relay is
+     * not asked: the relay is out of service for longer than that. A request the relay would not be given whatever its state
+     * is no reason to hold a pin to its tier, as it is none when the relay is in service.
      */
     boolean couldServeWhenBack(
         TierPlanRequest request,
@@ -325,8 +323,30 @@ final class XpEligibility {
         if (mapping == null || !SourceTierValidator.isVerified(member, mapping, account)) {
             return false;
         }
-        return FeaturePolicy.judge(detected, FeaturePolicy.Baseline.of(units), settings(member, mapping, vendor, request.fastMode()))
-            .allowed();
+        Settings settings = settings(member, mapping, vendor, request.fastMode());
+        return FeaturePolicy.judge(detected, FeaturePolicy.Baseline.of(units), settings).allowed()
+            && unfit(member, mapping, build(request, facts, settings)) == null;
+    }
+
+    /**
+     * Why the body made for the relay cannot be sent to it, if it cannot: the lint failed, the request is over the window of
+     * the mapping, or a relay that refused a prompt of this size for its length is not asked the same again (design 7.8).
+     * The one place these are decided, for a relay in service and for one that is out of it.
+     */
+    private XpSkip unfit(Member member, MemberModel mapping, Built body) {
+        if (!body.problems().isEmpty()) {
+            return new XpSkip(member.tierId(), member.accountId(), XpSkip.Reason.CONVERSION, body.problems().getFirst());
+        }
+        if (body.estimatedInput() > mapping.maxContextTokens()) {
+            return new XpSkip(member.tierId(), member.accountId(), XpSkip.Reason.CONTEXT,
+                "about " + body.estimatedInput() + " tokens, the window is " + mapping.maxContextTokens());
+        }
+        OptionalLong refused = learnedLimits.refusedFrom(mapping);
+        if (refused.isPresent() && body.estimatedInput() >= refused.getAsLong()) {
+            return new XpSkip(member.tierId(), member.accountId(), XpSkip.Reason.CONTEXT,
+                "about " + body.estimatedInput() + " tokens, a prompt of " + refused.getAsLong() + " was refused for its length");
+        }
+        return null;
     }
 
     /**

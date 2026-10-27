@@ -426,13 +426,14 @@ export function applyCacheSuggestion(draft: RelayDraft, suggestion: CacheSuggest
 /* ---------- 提示 ---------- */
 
 /**
- * Claude Code 的缓存成本警告（设计 7.15）：中转级别没有提示缓存（system 和内容被压平成字符串，cache_control 在原始体转换
- * 之前是软特性），每轮按全价付输入，而 Kiro 计缓存读；同系数下中转级可能每轮贵数倍。只对 Anthropic 厂商说。
+ * Claude Code 的缓存成本警告（设计 7.15）：网关不给中转加提示缓存（system 和内容被压平成字符串，cache_control 在原始体
+ * 转换之前是软特性），中转只有自己按前缀自动缓存的本事才用得上缓存，没有的话每轮按全价付输入，而 Kiro 计缓存读；同系数下
+ * 中转级可能每轮贵数倍。请求头不再挡住中转自己的前缀缓存（D7），中转报告的缓存命中按缓存读价计费。只对 Anthropic 厂商说。
  */
 export function cacheCostWarning(vendor: string): string | null {
   if (vendor !== 'anthropic') return null;
   return t(
-    'Claude Code 发给中转的请求没有提示缓存：system 和历史被压平成文本，cache_control 会被丢弃，每一轮都按全价计输入，而 Kiro 会计缓存读。号池系数相同时，中转所在的级别可能比 Kiro 每轮贵出数倍；请把中转所在号池的系数定得能覆盖这一点。',
+    '网关不给 Claude Code 发往中转的请求加提示缓存：system 和历史被压平成文本，cache_control 会被丢弃。除非中转自己按前缀自动缓存，否则每一轮都按全价计输入，而 Kiro 会计缓存读。号池系数相同时，中转所在的级别可能比 Kiro 每轮贵出数倍；请把中转所在号池的系数定得能覆盖这一点。',
   );
 }
 
@@ -873,7 +874,7 @@ export function formatLatency(ms: number | null | undefined): string {
 export function skipReasonLabel(reason: string): string {
   switch (reason) {
     case 'GATE':
-      return t('门控未开放');
+      return t('Key 不在门控名单里');
     case 'NOT_A_RELAY':
       return t('账号不再是兼容 Key');
     case 'NO_MAPPING':
@@ -882,12 +883,12 @@ export function skipReasonLabel(reason: string): string {
       return t('映射未验证');
     case 'FEATURE':
       return t('请求带了中转承载不了的特性');
-    case 'INTERRUPTED':
-      return t('刚中断过这个会话');
     case 'CONVERSION':
       return t('转换后的请求没通过严格检查');
     case 'CONTEXT':
       return t('请求超过上下文上限');
+    case 'INTERRUPTED':
+      return t('刚中断过这个会话');
     default:
       return reason;
   }
@@ -897,7 +898,7 @@ export function skipReasonHint(reason: string): string {
   switch (reason) {
     case 'GATE':
       return t(
-        '这个入口的门控只对名单里的 Key 开放，而这把 Key 不在名单里（门控不开放的入口不读请求，也就不计这一项）',
+        '这个入口的门控只对名单里的 Key 开放，而这把 Key 不在名单里（这个厂商的门控不开放的入口不看它的中转，也就不计这一项）',
       );
     case 'NOT_A_RELAY':
       return t('账号被改成了官方 OpenAI Key、Codex 或别的类型，它不能再当中转');
@@ -909,14 +910,14 @@ export function skipReasonHint(reason: string): string {
       return t(
         '请求带了图片、json_schema、服务端工具等中转承载不了、而原生账号能承载的特性，这个请求只能由原生账号服务',
       );
-    case 'INTERRUPTED':
-      return t(
-        '中转刚中断了这个会话的应答（它可能还在生成），客户端的重试 2 分钟内不会再给它，免得为多次部分生成付费',
-      );
     case 'CONVERSION':
       return t('请求转换成中转的格式后没通过严格检查。升级一个对之前，这一项必须为 0');
     case 'CONTEXT':
       return t('请求比映射的上下文上限，或中转拒绝过的长度更大，由窗口更大的原生级别服务');
+    case 'INTERRUPTED':
+      return t(
+        '中转刚中断了这个会话的应答（它可能还在生成），客户端的重试 2 分钟内不会再给它，免得为多次部分生成付费',
+      );
     default:
       return reason;
   }
@@ -939,6 +940,21 @@ export function criterionLabel(name: string): string {
     default:
       return name;
   }
+}
+
+/** 一条标准旁要说明的事：中断只是下限，客户端自己先断开的请求不进日志；其余没有 */
+export function criterionNote(name: string): string {
+  return name === 'unbilled' ? t('下限：客户端先断开的请求不进日志') : '';
+}
+
+/**
+ * 严格检查失败是应答节点自己数的（自 skipsSince 起）。节点起得比窗口的起点晚，窗口前面那一段它没看到，
+ * 这一项判不了，后端把它算作未达标
+ */
+export function lintCountPartial(evidence: Pick<SourceTierEvidence, 'since' | 'skipsSince'>): boolean {
+  const counted = Date.parse(evidence.skipsSince);
+  const window = Date.parse(evidence.since);
+  return Number.isFinite(counted) && Number.isFinite(window) && counted > window;
 }
 
 /** 一条标准的取值文字：个数或百分比；没有可除的数时为「—」 */

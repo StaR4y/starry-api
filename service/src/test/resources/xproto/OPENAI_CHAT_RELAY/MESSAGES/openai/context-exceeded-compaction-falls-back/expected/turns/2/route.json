@@ -4,7 +4,7 @@
       "tier": "relay",
       "account": "relay-1",
       "reason": "CONTEXT",
-      "detail": "about 3010 tokens, a prompt of 3010 was refused for its length"
+      "detail": "about 2989 tokens, a prompt of 2989 was refused for its length"
     }
   ],
   "attempts": [

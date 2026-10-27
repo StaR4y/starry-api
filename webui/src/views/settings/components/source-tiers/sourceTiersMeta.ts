@@ -48,6 +48,16 @@ export interface PinDraft {
   tierKey: string;
 }
 
+/**
+ * 本页不编辑、保存时原样带回的跨协议成员行（中转）。和固定的账号一样按号池行的 key 引用号池：改了号池的标识，
+ * 中转跟着走；成员行里的 tierId 只是加载时的样子。
+ */
+export interface RelayDraft {
+  member: SourceTierMember;
+  /** 加载时所在号池行的 key；空串表示已保存的配置里就找不到这个号池，成员行原样带回 */
+  tierKey: string;
+}
+
 export interface VendorDraft {
   enabled: boolean;
   unifyEndpoints: boolean;
@@ -58,7 +68,7 @@ export interface VendorDraft {
   tiers: TierDraft[];
   pins: PinDraft[];
   /** 本页不编辑、保存时原样带回的部分 */
-  relayMembers: SourceTierMember[];
+  relayMembers: RelayDraft[];
   gates: SourceTierGate[];
 }
 
@@ -104,9 +114,40 @@ export function draftOf(vendor: SourceTierVendor): VendorDraft {
         ? []
         : [{ accountId: member.accountId, tierKey }];
     }),
-    relayMembers: clone(vendor.members.filter((member) => member.protocol)),
+    relayMembers: vendor.members
+      .filter((member) => member.protocol)
+      .map((member) => ({ member: clone(member), tierKey: keyOf.get(member.tierId) ?? '' })),
     gates: clone(vendor.gates),
   };
+}
+
+/** 中转现在所在号池的标识：跟着号池行走；号池行已经不在草稿里（或从来没有）时是成员行里的 */
+export function relayTierId(draft: VendorDraft, relay: RelayDraft): string {
+  return draft.tiers.find((tier) => tier.key === relay.tierKey)?.tierId ?? relay.member.tierId;
+}
+
+/** 登记在这个号池行里的中转 */
+export function relaysOfTier(draft: VendorDraft, tierKey: string): RelayDraft[] {
+  return draft.relayMembers.filter((relay) => relay.tierKey === tierKey);
+}
+
+/**
+ * 换一批号池行（套用预设）时，中转跟着标识相同的号池走；标识在新的号池里找不到的中转留不住，
+ * 由调用方拒绝这次替换，不能让草稿带着没有号池的中转
+ */
+export function carryRelays(
+  draft: VendorDraft,
+  tiers: TierDraft[],
+): { relays: RelayDraft[]; lost: RelayDraft[] } {
+  const relays: RelayDraft[] = [];
+  const lost: RelayDraft[] = [];
+  for (const relay of draft.relayMembers) {
+    const tierId = relayTierId(draft, relay);
+    const target = tiers.find((tier) => tier.tierId === tierId);
+    if (target) relays.push({ member: relay.member, tierKey: target.key });
+    else lost.push(relay);
+  }
+  return { relays, lost };
 }
 
 /** 数据库里系数有 6 位小数 */
@@ -162,7 +203,7 @@ export function replaceRequest(
         const tier = draft.tiers.find((candidate) => candidate.key === pin.tierKey);
         return tier ? [nativeMember(pin.accountId, tier.tierId)] : [];
       }),
-      ...clone(draft.relayMembers),
+      ...draft.relayMembers.map((relay) => ({ ...clone(relay.member), tierId: relayTierId(draft, relay) })),
     ],
     gates: clone(draft.gates),
   };
@@ -355,6 +396,16 @@ export function validateDraft(draft: VendorDraft): string | null {
   }
   if (draft.enabled && !draft.tiers.some((tier) => tier.enabled)) {
     return t('启用分级至少需要一个已启用的号池');
+  }
+  // 中转登记在号池里：号池行没了，后端会整体拒绝这次保存
+  const stranded = draft.relayMembers.find(
+    (relay) => relay.tierKey && !draft.tiers.some((tier) => tier.key === relay.tierKey),
+  );
+  if (stranded) {
+    return t(
+      '中转 {p0} 登记的号池已不在草稿里。请放弃修改，先在「跨协议成员」里把它移到别的号池或移除它，再删除这个号池。',
+      { p0: stranded.member.accountId },
+    );
   }
   return null;
 }

@@ -221,6 +221,8 @@ class SourceTierStatusPostgreSqlIntegrationTest extends PostgreSqlIntegrationTes
         relayLog(relay, "/v1/chat/completions", true, 500, "REPORTED", "END_TURN", null, now.minus(1, ChronoUnit.MINUTES));
         relayLog(relay, "/v1/chat/completions", false, 300, null, "MODEL_NOT_SERVED", null, now.minus(1, ChronoUnit.MINUTES));
         relayLog(relay, "/v1/chat/completions", false, 100, null, null, null, now.minus(1, ChronoUnit.MINUTES));
+        // And one that the relay turned down for the key of its account (D5).
+        relayLog(relay, "/v1/chat/completions", false, 100, null, "KEY_REFUSED", null, now.minus(1, ChronoUnit.MINUTES));
         // Not relay attempts: a native attempt of the same tier, and one of Kiro.
         log("anthropic:relay", "AUTO", true, now.minus(1, ChronoUnit.MINUTES));
         log("anthropic:kiro", "AUTO", true, now.minus(1, ChronoUnit.MINUTES));
@@ -241,12 +243,13 @@ class SourceTierStatusPostgreSqlIntegrationTest extends PostgreSqlIntegrationTes
             assertThat(view.mappings()).isEqualTo(1);
             assertThat(view.verified()).isZero();
             SourceTierDtos.XpFigures figures = view.figures();
-            assertThat(figures.attempts()).isEqualTo(9);
+            assertThat(figures.attempts()).isEqualTo(10);
             assertThat(figures.served()).isEqualTo(5);
-            assertThat(figures.failed()).isEqualTo(4);
+            assertThat(figures.failed()).isEqualTo(5);
             assertThat(figures.interrupted()).isEqualTo(1);
             assertThat(figures.conversionRejected()).isEqualTo(1);
             assertThat(figures.modelNotServed()).isEqualTo(1);
+            assertThat(figures.keyRefused()).isEqualTo(1);
             assertThat(figures.contextExceeded()).isZero();
             assertThat(figures.estimated()).isEqualTo(1);
             assertThat(figures.clamped()).isEqualTo(1);
@@ -261,11 +264,11 @@ class SourceTierStatusPostgreSqlIntegrationTest extends PostgreSqlIntegrationTes
         assertThat(messages.degradedFeatures()).containsExactly(new SourceTierDtos.FeatureCount("image", 2),
             new SourceTierDtos.FeatureCount("cache_control", 1));
         SourceTierDtos.XpPair chat = xp.pairs().stream().filter(pair -> pair.entryEndpoint().equals("CHAT")).findFirst().orElseThrow();
-        assertThat(chat.figures().attempts()).isEqualTo(3);
+        assertThat(chat.figures().attempts()).isEqualTo(4);
         assertThat(chat.figures().p95Ms()).isEqualTo(500L);
         // Native attempts do not count among the relay's, the tier's own served and failed counts do include them all.
         assertThat(relayTier.served()).isEqualTo(5 + 1);
-        assertThat(relayTier.failed()).isEqualTo(4);
+        assertThat(relayTier.failed()).isEqualTo(5);
     }
 
     @Test
@@ -293,8 +296,10 @@ class SourceTierStatusPostgreSqlIntegrationTest extends PostgreSqlIntegrationTes
         assertThat(monthMessages.figures().attempts()).isEqualTo(5);
         assertThat(monthMessages.figures().interrupted()).isEqualTo(1);
         assertThat(monthMessages.meetsStandard()).isFalse();
+        // The node was started for this test, so what it counted of the lint is of none of the days asked for.
         assertThat(monthMessages.criteria()).filteredOn(criterion -> !criterion.met()).extracting(SourceTierDtos.Criterion::name)
-            .containsExactly("requests", "unbilled");
+            .containsExactly("requests", "lintFailures", "unbilled");
+        assertThat(monthMessages.criteria().get(1).value()).isNull();
         assertThat(pair(month, "anthropic", "CHAT").figures().attempts()).as("each entry has the attempts of its own path").isZero();
         assertThat(pair(month, "anthropic", "RESPONSES").figures().attempts()).isEqualTo(1);
     }

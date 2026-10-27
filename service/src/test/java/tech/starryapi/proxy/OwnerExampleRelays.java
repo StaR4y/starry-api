@@ -108,6 +108,23 @@ public final class OwnerExampleRelays implements AutoCloseable {
         }
 
         /**
+         * A stream that starts to answer, reports what it used, and ends without a finish reason or [DONE]: a relay that broke
+         * off an answer it has already counted. Nobody is charged for it (D8).
+         */
+        static Reply cutAfterUsage(String text, long promptTokens, long completionTokens) {
+            return (exchange, request) -> {
+                exchange.getResponseHeaders().add("Content-Type", "text/event-stream");
+                exchange.sendResponseHeaders(200, 0);
+                OutputStream out = exchange.getResponseBody();
+                event(out, chunk("{\"role\":\"assistant\",\"content\":\"\"}", "null"));
+                event(out, chunk("{\"content\":" + new ObjectMapper().writeValueAsString(text) + "}", "null"));
+                event(out, "{\"id\":\"chatcmpl-relay0001\",\"object\":\"chat.completion.chunk\",\"created\":1700000000,"
+                    + "\"model\":\"relay-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":" + promptTokens + ",\"completion_tokens\":"
+                    + completionTokens + ",\"total_tokens\":" + (promptTokens + completionTokens) + "}}");
+            };
+        }
+
+        /**
          * Says it has the request ({@code arrived}), waits until the scenario lets it go ({@code release}) and then answers
          * as {@code then} does: a relay that is busy with a long generation.
          */

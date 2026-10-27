@@ -295,6 +295,24 @@ class SourceTierSnapshotTest {
     }
 
     @Test
+    void anAccountIsARelayWhenItIsACrossProtocolMemberOfAnyVendorWhetherExclusiveOrNot() {
+        SourceTierSnapshot snapshot = snapshot(List.of(vendor("anthropic"), vendor("openai")),
+            List.of(tier("anthropic", "relay", 1, true), tier("openai", "direct", 1, true)),
+            List.of(relayMember("anthropic", "relay", "relay", true), relayMember("anthropic", "shared", "relay", false),
+                nativeMember("anthropic", "pinned", "relay"), relayMember("openai", "elsewhere", "direct", false),
+                relayMember("anthropic", "unplaced", "no-such-tier", false)));
+
+        assertThat(snapshot.isRelay("relay")).isTrue();
+        assertThat(snapshot.isRelay("shared")).isTrue();
+        assertThat(snapshot.isRelay("elsewhere")).isTrue();
+        assertThat(snapshot.isRelay("pinned")).as("a native pin").isFalse();
+        assertThat(snapshot.isRelay("unplaced")).as("a row that points at no tier").isFalse();
+        assertThat(snapshot.isRelay("somebody-else")).isFalse();
+        assertThat(snapshot.isRelay(null)).isFalse();
+        assertThat(SourceTierSnapshot.EMPTY.isRelay("relay")).isFalse();
+    }
+
+    @Test
     void theSnapshotSaysWhetherAnyVendorHasARelay() {
         List<Tier> tiers = List.of(tier("anthropic", "relay", 1, true));
 
@@ -325,6 +343,12 @@ class SourceTierSnapshotTest {
         assertThat(opened.hasOpenRelayFor("CHAT")).isFalse();
         assertThat(opened.hasOpenRelayFor("RESPONSES")).isFalse();
         assertThat(opened.hasOpenRelayFor(null)).isFalse();
+        assertThat(opened.hasOpenRelayFor("anthropic", "MESSAGES")).isTrue();
+        assertThat(opened.hasOpenRelayFor("anthropic", "CHAT")).isFalse();
+        assertThat(opened.hasOpenRelayFor("anthropic", null)).isFalse();
+        // The entry is open for the vendor whose gate says so and for no other, though the request is read for it.
+        assertThat(opened.hasOpenRelayFor("openai", "MESSAGES")).isFalse();
+        assertThat(opened.hasOpenRelayFor(null, "MESSAGES")).isFalse();
         assertThat(opened.hasCrossProtocolMembers()).isTrue();
         // A vendor that is switched off, or a tier that is, plans nothing over its relays.
         assertThat(SourceTierSnapshot.of(1L, List.of(new VendorConfig("anthropic", false, false, false, true, 16, true, 1L)), tiers,
@@ -337,6 +361,20 @@ class SourceTierSnapshotTest {
         assertThat(SourceTierSnapshot.of(1L, List.of(vendor("anthropic")), tiers, List.of(nativeMember("anthropic", "pinned", "relay")),
             List.of(), List.of(messagesKeys)).hasOpenRelayFor("MESSAGES")).isFalse();
         assertThat(SourceTierSnapshot.EMPTY.hasOpenRelayFor("MESSAGES")).isFalse();
+    }
+
+    @Test
+    void aTierHasRelayMembersWhenAMemberOfAnotherProtocolIsRegisteredInItWhateverItsState() {
+        List<Tier> tiers = List.of(tier("anthropic", "relay", 1, true), tier("anthropic", "kiro", 2, true));
+        SourceTierSnapshot snapshot = snapshot(List.of(vendor("anthropic")), tiers,
+            List.of(relayMember("anthropic", "relay-1", "relay", true), nativeMember("anthropic", "spare", "kiro")));
+
+        assertThat(snapshot.hasRelayMembers("anthropic", "relay")).isTrue();
+        // A native member row does not make a tier one of relays, and a tier without a row has none.
+        assertThat(snapshot.hasRelayMembers("anthropic", "kiro")).isFalse();
+        assertThat(snapshot.hasRelayMembers("anthropic", "no-such-tier")).isFalse();
+        assertThat(snapshot.hasRelayMembers("openai", "relay")).isFalse();
+        assertThat(SourceTierSnapshot.EMPTY.hasRelayMembers("anthropic", "relay")).isFalse();
     }
 
     @Test

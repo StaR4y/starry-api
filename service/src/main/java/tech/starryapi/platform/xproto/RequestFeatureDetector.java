@@ -92,11 +92,6 @@ public final class RequestFeatureDetector {
         /** The {@code reasoning_effort} of a Chat request. */
         REASONING_EFFORT(ChatWireSanitizer.REASONING_EFFORT),
         TOOL_RESULT_ERROR("tool_result_error"),
-        /**
-         * The {@code verbosity} of a Chat request (GPT-5's control of the length of the answer) when it is {@code low} or
-         * {@code high}: no relay is sent it. {@code medium} is the default and is not a feature.
-         */
-        VERBOSITY("verbosity"),
         /** The {@code logit_bias} of a Chat request: the answer is made from other probabilities if a relay leaves it out. */
         LOGIT_BIAS("logit_bias"),
 
@@ -113,6 +108,13 @@ public final class RequestFeatureDetector {
         TOP_K("top_k"),
         METADATA("metadata"),
         SERVICE_TIER("service_tier"),
+        /**
+         * The {@code verbosity} of a Chat request (GPT-5's control of the length of the answer) when it is {@code low} or
+         * {@code high}: no relay is sent it, and the answer is recorded as made without it (design 7.9, D6). OpenCode sends
+         * {@code low} with every request of a gpt model, so a relay that refused the request for it would never be given one.
+         * {@code medium} is the default and is not a feature.
+         */
+        VERBOSITY("verbosity"),
         LOGPROBS("logprobs"),
         USER("user"),
         STORE("store"),

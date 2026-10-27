@@ -12,7 +12,7 @@
       "outputTokens": 6,
       "usageSource": "REPORTED",
       "stopReason": "CONTENT_FILTER",
-      "degraded": "cache_control,thinking,context_management,metadata",
+      "degraded": "cache_control,thinking,context_management,metadata,billing_header_dropped",
       "error": null
     }
   ]

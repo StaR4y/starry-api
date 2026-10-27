@@ -28,18 +28,19 @@ public record XpSkip(String tierId, String accountId, Reason reason, String deta
         UNVERIFIED,
         /** The request asks for a feature the relay cannot carry and the native accounts of the route can (design 7.9). */
         FEATURE,
-        /**
-         * The relay broke off an answer for this session a moment ago and may be generating it still (design 7.8): the
-         * client's retry of that request is not given to the same relay.
-         */
-        INTERRUPTED,
         /** The request, converted for this relay, fails the strict lint. */
         CONVERSION,
         /**
          * The request is larger than the window of the mapping, or than a prompt that this relay refused for its length
          * (design 7.8). Both are about the request and the relay, not about how busy the relay is.
          */
-        CONTEXT;
+        CONTEXT,
+        /**
+         * The relay broke off an answer for this session a moment ago and may be generating it still (design 7.8): the
+         * client's retry of that request is not given to the same relay. Judged last, so that it is only said of a relay
+         * that would otherwise have been given the request.
+         */
+        INTERRUPTED;
 
         /**
          * Whether the relay is left out for something about this request or this moment, as opposed to something that holds

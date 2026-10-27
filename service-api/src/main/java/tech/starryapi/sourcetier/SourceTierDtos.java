@@ -352,7 +352,8 @@ public final class SourceTierDtos {
      * (answered or failed), {@code served} those that were answered. The failures that the gateway knows the kind of are
      * counted apart: {@code interrupted} (the relay may have generated and nobody was charged: the operator's loss, the
      * UNBILLED of the design), {@code conversionRejected} (the relay refused the converted request), {@code
-     * contextExceeded} and {@code modelNotServed}; the rest of {@code failed} is anything else. {@code estimated} and
+     * contextExceeded}, {@code modelNotServed} and {@code keyRefused} (the relay turned the key of its account down: the
+     * request went on elsewhere and the account rests); the rest of {@code failed} is anything else. {@code estimated} and
      * {@code clamped} are answered attempts whose usage was not what the relay reported, {@code degraded} those that
      * left a feature of the request out. {@code p95Ms} is the 95th percentile of the latency of the answered ones, absent
      * when none was.
@@ -365,6 +366,7 @@ public final class SourceTierDtos {
         long conversionRejected,
         long contextExceeded,
         long modelNotServed,
+        long keyRefused,
         long estimated,
         long clamped,
         long degraded,

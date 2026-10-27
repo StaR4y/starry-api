@@ -43,12 +43,14 @@
     MAX_REFUSAL_CAP,
     MAX_TIERS,
     MIN_REFUSAL_CAP,
+    carryRelays,
     draftOf,
     draftSignature,
     enableNote,
     exclusiveRelayIds,
     newTier,
     placedCounts,
+    relaysOfTier,
     replaceRequest,
     tierPresets,
     unifyNote,
@@ -313,6 +315,21 @@
   async function removeTier(tier: TierDraft) {
     const entry = current.value;
     if (!entry) return;
+    // 中转登记在号池里，不会随号池一起删掉：保存会被整体拒绝。要先在中转那边挪走或移除
+    const relays = relaysOfTier(entry.draft, tier.key);
+    if (relays.length > 0) {
+      ElMessage.warning(
+        t(
+          '号池「{p0}」里登记着 {p1} 个中转（{p2}）。请先在「跨协议成员」里把它们移到别的号池，或移除它们（页面上有未保存的修改时，要先保存或放弃它们），再删除这个号池。',
+          {
+            p0: tier.name.trim() || tier.tierId,
+            p1: relays.length,
+            p2: relays.map((relay) => relay.member.accountId).join('、'),
+          },
+        ),
+      );
+      return;
+    }
     const pinned = entry.draft.pins.filter((pin) => pin.tierKey === tier.key).length;
     if (pinned > 0) {
       const confirmed = await ElMessageBox.confirm(
@@ -338,9 +355,28 @@
     const entry = current.value;
     const preset: TierPreset | undefined = presets.value.find((candidate) => candidate.id === id);
     if (!entry || !preset) return;
+    const tiers = preset.build();
+    // 中转跟着标识相同的号池走；预设里没有它所在的号池时不能套用，否则保存会被整体拒绝
+    const { relays, lost } = carryRelays(entry.draft, tiers);
+    if (lost.length > 0) {
+      ElMessage.warning(
+        t(
+          '中转 {p0} 登记的号池不在这个预设里（预设的号池标识：{p1}）。请先在「跨协议成员」里把它们移到预设里有的号池，或移除它们（页面上有未保存的修改时，要先保存或放弃它们），再套用。',
+          {
+            p0: lost.map((relay) => relay.member.accountId).join('、'),
+            p1: tiers.map((tier) => tier.tierId).join('、'),
+          },
+        ),
+      );
+      return;
+    }
     if (entry.draft.tiers.length || entry.draft.pins.length) {
       const confirmed = await ElMessageBox.confirm(
-        t('套用预设会替换草稿里的所有号池，并移除固定在它们上面的账号。保存前不会生效。'),
+        relays.length
+          ? t(
+              '套用预设会替换草稿里的所有号池，并移除固定在它们上面的账号；中转留在标识相同的号池里。保存前不会生效。',
+            )
+          : t('套用预设会替换草稿里的所有号池，并移除固定在它们上面的账号。保存前不会生效。'),
         t('套用预设'),
         { type: 'warning', confirmButtonText: t('套用'), cancelButtonText: t('取消') },
       )
@@ -348,8 +384,9 @@
         .catch(() => false);
       if (!confirmed) return;
     }
-    entry.draft.tiers = preset.build();
+    entry.draft.tiers = tiers;
     entry.draft.pins = [];
+    entry.draft.relayMembers = relays;
   }
 
   function setTiers(tiers: TierDraft[]) {
@@ -412,7 +449,7 @@
    * （按已保存的配置；它们不是任何厂商的原生成员，固定了也不会生效）
    */
   const relayAccountIds = computed(() => [
-    ...(current.value?.draft.relayMembers.map((member) => member.accountId) ?? []),
+    ...(current.value?.draft.relayMembers.map((relay) => relay.member.accountId) ?? []),
     ...exclusiveRelayIds(
       Object.entries(vendors)
         .filter(([vendorId]) => vendorId !== active.value)

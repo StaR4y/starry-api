@@ -280,6 +280,107 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
         assertTheBooksBalance(client);
     }
 
+    // ---- the relay turns its own key down (D5) ----
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Entry.class)
+    void aRelayThatRejectsItsOwnKeyLeavesTheRequestToKiroKiroIsWhatIsChargedAndTheRelayRestsForTenMinutes(Entry entry) {
+        Client client = client();
+        ownersExample(client, 1, 200_000);
+        relays.always(id("relay-1"), Reply.failure(401, "invalid_api_key"));
+
+        ResponseEntity<?> response = ask(client, entry, body(entry, MODEL, "hello"), "session-a");
+
+        assertServed(response, "kiro", "2");
+        assertThat(dispatched).containsExactly(id("relay-1"), id("kiro-1"));
+        assertChargedAtKiro(client);
+        assertThat(logs(client)).extracting(row -> row.get("success"), row -> row.get("source_tier_ref"), row -> row.get("stop_reason"))
+            .containsExactlyInAnyOrder(tuple(false, "anthropic:relay", "KEY_REFUSED"), tuple(true, "anthropic:kiro", null));
+        assertThat(revenuePerPool(client)).containsOnlyKeys("anthropic:kiro");
+        // The relay's account is quarantined for ten minutes, as a native account is for credentials that are bad, and is not
+        // disabled: the administrator mends the key and the relay serves again once the time is over.
+        Map<String, Object> rest = db.sql("""
+                SELECT lifecycle_state, state_reason, cooldown_until > now() + interval '9 minutes' AS rests_for_long,
+                       cooldown_until < now() + interval '11 minutes' AS rests_no_longer
+                FROM account_allocation_states WHERE account_id = :id
+                """).bind("id", id("relay-1")).fetch().one().block();
+        assertThat(rest).containsEntry("lifecycle_state", "QUARANTINED").containsEntry("state_reason", "CREDENTIAL")
+            .containsEntry("rests_for_long", true).containsEntry("rests_no_longer", true);
+        assertThat(db.sql("SELECT enabled FROM proxy_accounts WHERE account_id = :id").bind("id", id("relay-1"))
+            .map((row, metadata) -> row.get("enabled", Boolean.class)).one().block()).isTrue();
+        assertTheBooksBalance(client);
+
+        // The resting relay is not asked for the next request of another session; Kiro serves it, at its price.
+        relays.forget();
+        dispatched.clear();
+        assertServed(ask(client, entry, body(entry, MODEL, "hello again"), "session-b"), "kiro", "2");
+        assertThat(dispatched).containsExactly(id("kiro-1"));
+        assertThat(relays.seen()).hasSize(1);
+        assertTheBooksBalance(client);
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Entry.class)
+    void aRelayThatRejectsItsKeyTwiceAndSaysItsTokenWasInvalidatedIsStillNotDisabledByTheHealthTestThatTheSecondRefusalStarts(Entry entry) {
+        Client client = client();
+        ownersExample(client, 1, 200_000);
+        // The words the health test of a native account takes for a credential that is gone for good, from the relay.
+        relays.always(id("relay-1"), Reply.failure(401, "token_invalidated"));
+
+        assertServed(ask(client, entry, body(entry, MODEL, "hello"), "session-a"), "kiro", "2");
+        assertThat(health(id("relay-1"))).containsEntry("enabled", true).containsEntry("error_count", 1);
+
+        // The relay is asked again once its ten minutes are over; the second refusal in a row starts the automatic test.
+        executeAsDatabaseOwner("UPDATE starry_api.account_allocation_states SET cooldown_until = now() - interval '1 minute'"
+            + " WHERE account_id = '" + id("relay-1") + "'");
+        await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(500)).until(() -> {
+            dispatched.clear();
+            assertServed(ask(client, entry, body(entry, MODEL, "hello again " + UUID.randomUUID()), "session-" + UUID.randomUUID()), "kiro", "2");
+            return dispatched.contains(id("relay-1"));
+        });
+
+        // The automatic test asks the relay as well, is turned down by the same words, and leaves the account enabled: it
+        // rests, and serves again once the key is mended (D5).
+        await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(250))
+            .untilAsserted(() -> assertThat(((Number) health(id("relay-1")).get("error_count")).intValue()).isGreaterThanOrEqualTo(3));
+        assertThat(health(id("relay-1"))).containsEntry("enabled", true).containsEntry("suspend_reason", null);
+        assertThat(relays.seen()).as("two requests and the test").hasSizeGreaterThanOrEqualTo(3);
+    }
+
+    private Map<String, Object> health(String accountId) {
+        return db.sql("SELECT enabled, error_count, suspend_reason FROM proxy_accounts WHERE account_id = :id")
+            .bind("id", accountId).fetch().one().block();
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Entry.class)
+    void aRelayThatRejectsItsOwnKeyWithKiroBusyIsNotToldToTheUserAndTheMoneyIsBack(Entry entry) {
+        Client client = client();
+        ownersExample(client, 1, 200_000);
+        makeBusy(id("kiro-1"));
+        relays.always(id("relay-1"), Reply.failure(403, "permission_error"));
+
+        assertThatThrownBy(() -> ask(client, entry, body(entry, MODEL, "hello"), "session-a"))
+            .isInstanceOfSatisfying(ApiException.class, error -> {
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                assertThat(error.getMessage()).doesNotContain("Source error", "403", "permission");
+            });
+
+        // The relay had the request and turned it down before generating anything: released for good, nothing for a review.
+        assertThat(dispatched).containsExactly(id("relay-1"));
+        assertThat(reservations(client).getLast()).containsEntry("status", "RELEASED").containsEntry("actual_credits", null)
+            .containsEntry("last_dispatched_tier_ref", "anthropic:relay");
+        assertThat(balance(client)).isEqualByComparingTo(START);
+        assertThat(keyReserved(client)).isEqualByComparingTo("0");
+        assertThat(reviews(client)).isEmpty();
+        assertThat(events(client)).isEmpty();
+
+        // The user is free to go on: once Kiro has room the next request is served and charged.
+        free(id("kiro-1"));
+        assertServed(ask(client, entry, body(entry, MODEL, "hello again"), "session-b"), "kiro", "2");
+        assertTheBooksBalance(client);
+    }
+
     // ---- two relays in the first tier, and a budget of two accounts ----
 
     @ParameterizedTest(name = "{0}")
@@ -354,6 +455,31 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
         assertTheBooksBalance(client);
     }
 
+    /** D8: the operator carries an interrupted attempt even when the relay had counted its tokens before it broke off. */
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Entry.class)
+    void aStreamThatBrokeOffAfterTheRelayReportedUsageCostsTheUserNothingAndLeavesNothingForAReview(Entry entry) {
+        Client client = client();
+        ownersExample(client, 1, 200_000);
+        relays.next(id("relay-1"), Reply.cutAfterUsage("I will run the", 5_000, 700));
+
+        assertThatThrownBy(() -> ask(client, entry, body(entry, MODEL, "hello"), "session-a"))
+            .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_GATEWAY));
+
+        assertThat(dispatched).containsExactly(id("relay-1"));
+        assertThat(reservations(client).getLast()).containsEntry("status", "RELEASED").containsEntry("actual_credits", null)
+            .containsEntry("served_tier_ref", null);
+        assertThat(balance(client)).isEqualByComparingTo(START);
+        assertThat(keyReserved(client)).isEqualByComparingTo("0");
+        assertThat(events(client)).isEmpty();
+        assertThat(reviews(client)).isEmpty();
+        assertThat(logs(client)).singleElement().satisfies(row -> {
+            assertThat(row.get("success")).isEqualTo(false);
+            assertThat(row.get("stop_reason")).isEqualTo("INTERRUPTED");
+        });
+        assertTheBooksBalance(client);
+    }
+
     @ParameterizedTest(name = "{0}")
     @EnumSource(Entry.class)
     void aClientThatGivesUpWhileTheRelayIsGeneratingGetsTheMoneyBackAndNothingWaitsForAReview(Entry entry)
@@ -423,6 +549,29 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     @EnumSource(Entry.class)
     void aRelayThatReportsFarMoreOutputThanTheRequestAllowedIsChargedNoMoreThanWasReserved(Entry entry) {
         assertChargedNoMoreThanReservedForAnswerClaiming(entry, OwnerExampleRelays.INPUT_TOKENS, 9_000_000L);
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Entry.class)
+    void aRelayThatReportsMoreOutputThanTheLimitItWasSentIsChargedForThatLimitAlone(Entry entry) {
+        Client client = client();
+        ownersExample(client, 1, 200_000);
+        relays.always(id("relay-1"), Reply.textReporting("from relay-1", OwnerExampleRelays.INPUT_TOKENS, 9_000_000L));
+        // A client of the SDKs asks for as many tokens as it needs: the tier is reserved for the default limit all the same.
+        ObjectNode request = body(entry, MODEL, "hello");
+        request.put("max_tokens", 100);
+
+        ResponseEntity<?> response = ask(client, entry, request, "session-a");
+
+        assertServed(response, "relay", "1");
+        assertThat(relays.seen()).singleElement().satisfies(seen -> assertThat(seen.body().path("max_tokens").asInt()).isEqualTo(100));
+        Map<String, Object> reservation = reservations(client).getLast();
+        // The relay was told it may write 100 tokens, and 100 tokens are what the user is charged for, not the 4096 reserved.
+        BigDecimal limited = standard.cost(new PlatformUsage(OwnerExampleRelays.INPUT_TOKENS, 100, BigDecimal.ZERO, 0, 0, 0));
+        assertThat((BigDecimal) reservation.get("actual_credits")).isEqualByComparingTo(limited);
+        assertThat((BigDecimal) reservation.get("reserved_credits")).isGreaterThan(limited);
+        assertThat(logs(client)).singleElement().satisfies(row -> assertThat(row.get("usage_source")).isEqualTo("CLAMPED"));
+        assertTheBooksBalance(client);
     }
 
     /**

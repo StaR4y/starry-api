@@ -8,11 +8,11 @@
       "wireModel": "relay-gpt",
       "success": true,
       "status": 200,
-      "inputTokens": 1472,
+      "inputTokens": 1450,
       "outputTokens": 8,
       "usageSource": "ESTIMATED",
       "stopReason": "END_TURN",
-      "degraded": "cache_control,thinking,context_management,metadata",
+      "degraded": "cache_control,thinking,context_management,metadata,billing_header_dropped",
       "error": null
     }
   ]

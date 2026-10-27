@@ -11,6 +11,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.io.IOException;
@@ -36,11 +37,15 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.mockito.ArgumentCaptor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.ServerSentEvent;
@@ -61,6 +66,7 @@ import tech.starryapi.account.ProxyAccountRepository;
 import tech.starryapi.account.allocation.AccountAdmissionStore;
 import tech.starryapi.account.allocation.AccountAdmissionStore.AdmissionDecision;
 import tech.starryapi.account.allocation.AccountAllocationCategory;
+import tech.starryapi.account.allocation.AccountFailureScope;
 import tech.starryapi.admin.SystemMaintenanceTaskGate;
 import tech.starryapi.apikey.ApiKeyPrincipal;
 import tech.starryapi.apikey.ApiKeyService;
@@ -153,6 +159,8 @@ class OwnerExampleTieredXpTest {
     /** The request headers a relay may be sent, and no others: the client's own are never forwarded (design 7.12). */
     private static final Set<String> RELAY_HEADERS = Set.of(
         "accept", "accept-encoding", "authorization", "connection", "content-length", "content-type", "host", "user-agent");
+    /** How the first block of the system prompt of Claude Code starts; the hash at its end is different in every request. */
+    private static final String BILLING_HEADER = "x-anthropic-billing-header: cc_version=2.1.168.177; cc_entrypoint=cli; cch=278c4;";
     private static final Pattern MINTED_MESSAGES_ID = Pattern.compile("toolu_[0-9A-Za-z]{24}");
     private static final Pattern MINTED_CALL_ID = Pattern.compile("call_[0-9A-Za-z]{24}");
 
@@ -330,6 +338,43 @@ class OwnerExampleTieredXpTest {
         assertThat(seen.headers().values().toString()).doesNotContain("session-1", KEY);
     }
 
+    /**
+     * The first system block of Claude Code changes with every request, which keeps a relay from caching the start of the
+     * prompt: the relay is not sent it (D7). Kiro, which the same request falls to, is sent what it always was.
+     */
+    @Test
+    void theBillingHeaderOfClaudeCodeIsLeftOutOfWhatTheRelayIsSentAndNotOfWhatKiroIsSent() {
+        serve(new Setup());
+        ObjectNode request = first(Client.CLAUDE_CODE, MODEL, "hello");
+        assertThat(request.path("system").get(0).path("text").asString()).isEqualTo(BILLING_HEADER);
+
+        ask(Client.CLAUDE_CODE, request, "session-1");
+
+        JsonNode sent = relays.seen().getFirst().body();
+        assertThat(sent.path("messages").get(0).path("role").asString()).isEqualTo("system");
+        assertThat(sent.path("messages").get(0).path("content").asString())
+            .isEqualTo("You are Claude Code, Anthropic's official CLI for Claude.");
+        assertThat(sent.toString()).doesNotContain("x-anthropic-billing-header", "cch=");
+        assertThat(logs).singleElement().satisfies(row -> assertThat(row.degradedFeatures()).contains("billing_header_dropped"));
+
+        // The same request, once the relay cannot serve it, is Kiro's: with the header in its system message, as before.
+        relays.always("relay-1", Reply.failure(404, "model_not_found"));
+        ask(Client.CLAUDE_CODE, first(Client.CLAUDE_CODE, MODEL, "hello again"), "session-2");
+        assertThat(nativeCalls).singleElement().satisfies(call -> {
+            assertThat(call.account()).isEqualTo("kiro-1");
+            assertThat(call.payload()).contains(BILLING_HEADER);
+        });
+    }
+
+    @Test
+    void theRequestOfOpenCodeHasNoHeaderToLeaveOutAndIsNotGivenTheRepair() {
+        serve(new Setup());
+
+        ask(Client.OPENCODE, first(Client.OPENCODE, MODEL, "hello"), "session-1");
+
+        assertThat(logs).singleElement().satisfies(row -> assertThat(row.degradedFeatures()).doesNotContain("billing_header_dropped"));
+    }
+
     @ParameterizedTest(name = "{0}")
     @EnumSource(Client.class)
     void aClientThatDoesNotStreamIsServedByTheRelayToo(Client client) {
@@ -402,6 +447,211 @@ class OwnerExampleTieredXpTest {
         // Nothing came of it, so nothing was generated: another source may answer, and the user is charged for one.
         assertThat(turn.answer().text()).isEqualTo("from kiro");
         assertKiroServedAfterRelays(turn, 1);
+    }
+
+    // ---- the relay turns its own key down (D5) ----
+
+    /** How a relay says it will not take the key of its account: a status of 401 or 403, and the same as an error inside a 200. */
+    private record Rejection(String name, Reply reply, int status) {
+
+        @Override
+        public String toString() {
+            return name;
+        }
+    }
+
+    static Stream<Arguments> clientsAndRejections() {
+        return Stream.of(Client.values()).flatMap(client -> Stream.of(
+                new Rejection("401", Reply.failure(401, "invalid_api_key"), 401),
+                new Rejection("403", Reply.failure(403, "permission_error"), 403),
+                new Rejection("an authentication error inside a 200",
+                    Reply.inBand("authentication_error", "Incorrect API key provided"), 401),
+                new Rejection("a permission error inside a 200",
+                    Reply.inBand("permission_error", "Your key may not use this endpoint"), 403))
+            .map(rejection -> Arguments.of(client, rejection)));
+    }
+
+    private AccountAdmissionStore.AdmissionResult theFailureAdmissionWasToldOf() {
+        ArgumentCaptor<AccountAdmissionStore.AdmissionResult> results = ArgumentCaptor.forClass(AccountAdmissionStore.AdmissionResult.class);
+        verify(admissionStore, org.mockito.Mockito.atLeastOnce()).reconcile(results.capture());
+        return results.getAllValues().stream().filter(result -> !result.success()).findFirst().orElseThrow();
+    }
+
+    @ParameterizedTest(name = "{0}, {1}")
+    @MethodSource("clientsAndRejections")
+    void aRelayThatRejectsItsOwnKeyLeavesTheRequestToKiroAndKiroIsWhatIsCharged(Client client, Rejection rejection) {
+        serve(new Setup());
+        relays.always("relay-1", rejection.reply());
+
+        Turn turn = ask(client, first(client, MODEL, "hello"), "session-1");
+
+        // The key is the operator's to mend and the user did nothing wrong: the tier below answers, at the price of that tier.
+        assertThat(turn.answer().text()).isEqualTo("from kiro");
+        assertKiroServedAfterRelays(turn, 1);
+        assertThat(logs).hasSize(2);
+        assertThat(logs.getFirst().success()).isFalse();
+        assertThat(logs.getFirst().sourceTierRef()).isEqualTo("anthropic:relay");
+        assertThat(logs.getFirst().sourceDispatch()).isEqualTo("OPENAI_CHAT");
+        assertThat(logs.getFirst().statusCode()).isEqualTo(rejection.status());
+        assertThat(logs.getFirst().stopReason()).isEqualTo("KEY_REFUSED");
+        assertThat(logs.getFirst().errorMessage()).doesNotContain("relay.internal.example.com", "Incorrect API key");
+        assertThat(logs.getLast().sourceTierRef()).isEqualTo("anthropic:kiro");
+        assertThat(logs.getLast().priceFactor()).isEqualByComparingTo("0.6");
+        // The relay account rests for ten minutes, as a native account does for credentials that are bad, and is not disabled.
+        AccountAdmissionStore.AdmissionResult failed = theFailureAdmissionWasToldOf();
+        assertThat(failed.failureScope()).isEqualTo(AccountFailureScope.CREDENTIAL);
+        assertThat(failed.cooldown()).isEqualTo(Duration.ofMinutes(10));
+        assertThat(failed.permanentCredentialFailure()).isFalse();
+        assertThat(failed.statusCode()).isEqualTo(rejection.status());
+
+        // The tier above had nothing left for the request, as it has none for a request whose account is busy: a real fall,
+        // so the session stays with Kiro until it has been idle, and does not meet the relay's rejection again at once.
+        relays.forget();
+        dispatched.clear();
+        Turn next = ask(client, first(client, MODEL, "hello again"), "session-1");
+        assertThat(dispatched).containsExactly("kiro-1");
+        assertServedBy(next.response(), "kiro", "2");
+        assertThat(ledger.holdLevels()).containsExactly("anthropic:kiro");
+        ledger.assertEveryRequestWasChargedTheTierThatServed(List.of("anthropic:kiro", "anthropic:kiro"));
+    }
+
+    @ParameterizedTest(name = "{0}, {1}")
+    @MethodSource("clientsAndRejections")
+    void aRelayThatRejectsItsOwnKeyLeavesTheTierToItsNextRelayBeforeTheNextTier(Client client, Rejection rejection) {
+        serve(new Setup().relays("relay-1", "relay-2"));
+        relays.always("relay-1", rejection.reply());
+
+        Turn turn = ask(client, first(client, MODEL, "hello"), "session-1");
+
+        assertThat(dispatched).containsExactly("relay-1", "relay-2");
+        assertThat(turn.answer().text()).isEqualTo("from relay-2");
+        assertServedBy(turn.response(), "relay", "1");
+        ledger.assertCharged("anthropic:relay", 1, "1");
+        assertThat(ledger.released).isEmpty();
+        // The first tier still had a relay, so nobody was pushed out of it: the session's next request starts there again.
+        relays.forget();
+        dispatched.clear();
+        assertServedBy(ask(client, first(client, MODEL, "hello again"), "session-1").response(), "relay", "1");
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Client.class)
+    void whenBothRelaysRejectTheirKeysTheReservedSlotTakesTheRequestToKiro(Client client) {
+        serve(new Setup().relays("relay-1", "relay-2"));
+        relays.always("relay-1", Reply.failure(401, "invalid_api_key"));
+        relays.always("relay-2", Reply.failure(403, "permission_error"));
+
+        Turn turn = ask(client, first(client, MODEL, "hello"), "session-1");
+
+        assertThat(dispatched).containsExactly("relay-1", "relay-2", "kiro-1");
+        assertServedBy(turn.response(), "kiro", "2");
+        ledger.assertCharged("anthropic:kiro", 2, "0.6");
+        assertThat(ledger.released).isEmpty();
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Client.class)
+    void aRelayThatRejectsItsKeyWithNothingNativeBelowIsNeverToldToTheClient(Client client) {
+        serve(new Setup().natives());
+        relays.always("relay-1", Reply.failure(401, "invalid_api_key"));
+
+        ApiException refused = refusedWith(client, first(client, MODEL, "hello"), "session-1");
+
+        // What a request nothing can serve is told, and not that the user's key is wrong, which Claude Code reads it as.
+        assertThat(refused.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(refused.getCode()).isEqualTo("NO_AVAILABLE_ACCOUNT");
+        assertThat(refused.getMessage()).doesNotContain("Source error", "401");
+        assertThat(dispatched).containsExactly("relay-1");
+        // The relay had the request and refused it: the reservation is released for good, nothing is left for review.
+        assertThat(ledger.settled).isEmpty();
+        assertThat(ledger.released).singleElement().satisfies(release -> assertThat(release.definitive()).isTrue());
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Client.class)
+    void aRelayThatRejectsItsKeyWhileKiroIsOnlyBusyIsNeverToldToTheClientEither(Client client) {
+        serve(new Setup());
+        busy.add("kiro-1");
+        relays.always("relay-1", Reply.failure(403, "permission_error"));
+
+        ApiException refused = refusedWith(client, first(client, MODEL, "hello"), "session-1");
+
+        assertThat(refused.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(refused.getMessage()).doesNotContain("Source error", "403");
+        assertThat(dispatched).containsExactly("relay-1");
+        assertThat(ledger.settled).isEmpty();
+        assertThat(ledger.released).singleElement().satisfies(release -> assertThat(release.definitive()).isTrue());
+
+        // The client's retry is served as soon as Kiro is free.
+        busy.clear();
+        assertServedBy(ask(client, first(client, MODEL, "hello"), "session-1").response(), "kiro", "2");
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Client.class)
+    void withoutTheReservedSlotTwoRelaysThatRejectTheirKeysEndTheRequestWithoutTheirWords(Client client) {
+        serve(new Setup().relays("relay-1", "relay-2").reservedSlot(false));
+        relays.always("relay-1", Reply.failure(401, "invalid_api_key"));
+        relays.always("relay-2", Reply.failure(401, "invalid_api_key"));
+
+        ApiException refused = refusedWith(client, first(client, MODEL, "hello"), "session-1");
+
+        // The budget of the route is spent on the two relays, and Kiro is not asked: that is the budget's doing, the key's
+        // is not what the client is told.
+        assertThat(dispatched).containsExactly("relay-1", "relay-2");
+        assertThat(refused.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(refused.getCode()).isEqualTo("NO_AVAILABLE_ACCOUNT");
+        assertThat(ledger.settled).isEmpty();
+        assertThat(ledger.released).singleElement().satisfies(release -> assertThat(release.definitive()).isTrue());
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Client.class)
+    void aRelayThatRejectsItsKeyForARequestPinnedToItsTierIsToldToTryAgainWithoutKiroBeingAsked(Client client) {
+        serve(new Setup());
+        relays.always("relay-1", Reply.failure(401, "invalid_api_key"));
+
+        ApiException refused = refusedWith(client, pinned(first(client, MODEL, "hello"), "relay"), "session-1");
+
+        assertUnavailableToTryAgain(refused);
+        assertThat(lastExchange.getResponse().getHeaders().getFirst("Retry-After")).isNotNull();
+        assertThat(refused.getMessage()).doesNotContain("Source error", "401");
+        assertThat(dispatched).as("the request is held to the tier it named").containsExactly("relay-1");
+        assertThat(ledger.settled).isEmpty();
+        assertThat(ledger.released).singleElement().satisfies(release -> assertThat(release.definitive()).isTrue());
+    }
+
+    @ParameterizedTest(name = "{0}, {1}")
+    @MethodSource("clientsAndHints")
+    void aRelayThatRejectsItsKeyForARequestThatAHintPinnedIsServedByTheTierBelowWhenTheRangeHasOne(Client client, Hint hint) {
+        serve(new Setup());
+        nameTheTiersBy(hint);
+        relays.always("relay-1", Reply.failure(401, "invalid_api_key"));
+
+        if (hint.holdsKiro) {
+            Turn turn = ask(client, first(client, MODEL, "hello"), "session-1");
+            assertServedBy(turn.response(), "kiro", "2", "pinned");
+            assertThat(dispatched).containsExactly("relay-1", "kiro-1");
+            ledger.assertCharged("anthropic:kiro", 2, "0.6");
+        } else {
+            ApiException refused = refusedWith(client, first(client, MODEL, "hello"), "session-1");
+            assertUnavailableToTryAgain(refused);
+            assertThat(dispatched).containsExactly("relay-1");
+        }
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Client.class)
+    void aNativeAccountThatRejectsTheRequestIsStillToldSoAsItAlwaysWas(Client client) {
+        serve(new Setup());
+        busy.add("relay-1");
+        nativeAnswers.put("kiro-1", () -> Mono.error(new UpstreamException(401, "The bearer token is invalid", false)));
+
+        ApiException refused = refusedWith(client, first(client, MODEL, "hello"), "session-1");
+
+        assertThat(refused.getStatus()).isEqualTo(HttpStatus.UNAUTHORIZED);
+        assertThat(refused.getCode()).isEqualTo("UPSTREAM_ERROR");
+        assertThat(dispatched).containsExactly("kiro-1");
     }
 
     // ---- two relays in the first tier, and a budget of two accounts (design 4.5, rule 2) ----
@@ -515,6 +765,32 @@ class OwnerExampleTieredXpTest {
             assertThat(row.success()).isFalse();
             assertThat(row.sourceDispatch()).isEqualTo("OPENAI_CHAT");
             assertThat(row.stopReason()).isEqualTo("INTERRUPTED");
+        });
+    }
+
+    /**
+     * D8: the operator carries the cost of an interrupted attempt even when the relay had counted the tokens before it broke
+     * off. What it reported is not a reason to charge the user for an answer that was never completed.
+     */
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Client.class)
+    void aStreamThatBrokeOffAfterTheRelayReportedUsageIsReleasedWithNoChargeToTheUser(Client client) {
+        serve(new Setup().relays("relay-1", "relay-2"));
+        relays.always("relay-1", Reply.cutAfterUsage("I will run the", 5_000, 700));
+
+        assertThatThrownBy(() -> ask(client, first(client, MODEL, "hello"), "session-1"))
+            .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_GATEWAY));
+
+        assertThat(dispatched).containsExactly("relay-1");
+        assertThat(ledger.settled).isEmpty();
+        assertThat(ledger.released).singleElement().satisfies(release -> assertThat(release.definitive()).isTrue());
+        assertThat(logs).singleElement().satisfies(row -> {
+            assertThat(row.success()).isFalse();
+            assertThat(row.stopReason()).isEqualTo("INTERRUPTED");
+            // Nothing the relay counted is written as the user's usage or credits.
+            assertThat(row.inputTokens()).isZero();
+            assertThat(row.outputTokens()).isZero();
+            assertThat(row.credits()).isEqualByComparingTo("0");
         });
     }
 
@@ -1035,6 +1311,230 @@ class OwnerExampleTieredXpTest {
 
     @ParameterizedTest(name = "{0}")
     @EnumSource(Client.class)
+    void aPromptTheRelayRefusedForItsLengthIsToldToTryAgainAndNotToShortenItWhileKiroIsOnlyBusy(Client client) {
+        serve(new Setup());
+        busy.add("kiro-1");
+        relays.next("relay-1", Reply.failure(400, "context_length_exceeded"));
+
+        // Claude Code shortens a conversation on "prompt is too long", at a loss, for a prompt Kiro takes as it is.
+        ApiException first = refusedWith(client, history(client, MODEL, 10, 6_000), "session-1");
+        ApiException again = refusedWith(client, history(client, MODEL, 10, 6_000), "session-1");
+
+        assertThat(first.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(first.getCode()).isEqualTo("NO_AVAILABLE_ACCOUNT");
+        assertThat(again.getStatus()).isEqualTo(first.getStatus());
+        assertThat(again.getCode()).isEqualTo(first.getCode());
+        assertThat(relays.seen()).as("the relay was asked once").hasSize(1);
+        // The relay had the request when it was refused: the reservation is released for good, not left for review.
+        assertThat(ledger.released).hasSize(2);
+        assertThat(ledger.released.getFirst().definitive()).isTrue();
+        assertThat(ledger.settled).isEmpty();
+
+        busy.clear();
+        Turn served = ask(client, history(client, MODEL, 10, 6_000), "session-1");
+        assertServedBy(served.response(), "kiro", "2");
+        ledger.assertEveryRequestWasChargedTheTierThatServed(List.of("anthropic:kiro"));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Client.class)
+    void aPromptTheRelayRefusedForItsLengthIsToldToTryAgainWhenAHeaderNamedItsTierAndTheRetryIsServedByKiro(Client client) {
+        serve(new Setup());
+        extraHeaders.put(TierSelectorParser.REQUEST_HEADER, "relay");
+        relays.next("relay-1", Reply.failure(400, "context_length_exceeded"));
+
+        // The header is a hint: it gives way once this node knows the relay does not take the prompt, so the client is
+        // told to try again and not to shorten the conversation Kiro takes as it is.
+        ApiException first = refusedWith(client, history(client, MODEL, 10, 6_000), "session-1");
+
+        assertThat(first.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(first.getCode()).isEqualTo("SOURCE_TIER_UNAVAILABLE");
+        assertThat(lastExchange.getResponse().getHeaders().getFirst("Retry-After")).isNotNull();
+        assertThat(ledger.released).hasSize(1);
+        assertThat(ledger.released.getFirst().definitive()).isTrue();
+
+        Turn retry = ask(client, history(client, MODEL, 10, 6_000), "session-1");
+
+        assertThat(servedTier(retry)).isEqualTo("kiro");
+        assertThat(retry.response().getHeaders().getFirst(TierResponseHeaders.MODE)).isEqualTo("auto");
+        assertThat(retry.response().getHeaders().getFirst(TierResponseHeaders.STATUS)).isEqualTo(TierResponseHeaders.IGNORED);
+        assertThat(relays.seen()).as("the relay was asked once").hasSize(1);
+        ledger.assertEveryRequestWasChargedTheTierThatServed(List.of("anthropic:kiro"));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Client.class)
+    void aPromptARelayRefusedAfterTheBudgetWasSpentIsToldToTryAgainWhileKiroIsFree(Client client) {
+        serve(new Setup().relays("relay-1", "relay-2").reservedSlot(false));
+        relays.next("relay-1", Reply.failure(503, "server_error"));
+        relays.next("relay-2", Reply.failure(400, "context_length_exceeded"));
+
+        // The two dispatches of the budget went to the relays and there is no slot to cross on, but Kiro is free and takes
+        // the prompt as it is: the client is not told to shorten it.
+        ApiException first = refusedWith(client, history(client, MODEL, 10, 6_000), "session-1");
+
+        assertThat(first.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(first.getCode()).isEqualTo("NO_AVAILABLE_ACCOUNT");
+        assertThat(dispatched).containsExactly("relay-1", "relay-2");
+        assertThat(ledger.settled).isEmpty();
+        assertThat(ledger.released).singleElement().satisfies(release -> assertThat(release.definitive()).isTrue());
+
+        // What the identical request is told next: this node has learned what the second relay refused.
+        Turn retry = ask(client, history(client, MODEL, 10, 6_000), "session-1");
+        assertThat(servedTier(retry)).isEqualTo("relay");
+        assertThat(plans.getLast().xpSkips()).singleElement().satisfies(skip -> {
+            assertThat(skip.accountId()).isEqualTo("relay-2");
+            assertThat(skip.reason()).isEqualTo(XpSkip.Reason.CONTEXT);
+        });
+    }
+
+    /** The ways a client names the relay tier and the tiers below it, and no tier at all (design 6.3). */
+    private enum Naming {
+        AUTOMATIC, SUFFIX, HEADER, PREFERENCE;
+
+        boolean pinned() {
+            return this != AUTOMATIC;
+        }
+    }
+
+    static Stream<Arguments> clientsNamingsAndRefusals() {
+        return Stream.of(Client.values()).flatMap(client -> Stream.of(Naming.values()).flatMap(naming ->
+            Stream.of("context_length_exceeded", "invalid_request_error").flatMap(refusal ->
+                Stream.of(true, false).map(slot -> Arguments.of(client, naming, refusal, slot)))));
+    }
+
+    @ParameterizedTest(name = "{0}, {1}, {2}, reserved slot {3}")
+    @MethodSource("clientsNamingsAndRefusals")
+    void aRelayRefusalAfterAnotherRelayFailedIsToldToTryAgainWhileKiroIsBusyWhateverTheReservedSlot(
+        Client client, Naming naming, String refusal, boolean reservedSlot
+    ) {
+        serve(new Setup().relays("relay-1", "relay-2").reservedSlot(reservedSlot));
+        busy.add("kiro-1");
+        relays.next("relay-1", Reply.failure(503, "server_error"));
+        relays.next("relay-2", Reply.failure(400, refusal));
+        ObjectNode body = history(client, MODEL, 10, 6_000);
+        switch (naming) {
+            case SUFFIX -> pinned(body, "relay+");
+            case HEADER -> extraHeaders.put(TierSelectorParser.REQUEST_HEADER, "relay+");
+            case PREFERENCE -> when(apiKeyService.authenticate(any())).thenReturn(Mono.just(new ApiKeyPrincipal(KEY, null, null,
+                "test", null, BigDecimal.ZERO, BigDecimal.ZERO, "anthropic", false, "BALANCE", "relay+")));
+            default -> { }
+        }
+
+        // The second relay's refusal crosses to Kiro on the slot that is kept for it, or cannot cross without one, and Kiro
+        // is busy for now: the answer is the same either way, and the first relay's 503 does not take its place.
+        ApiException refused = refusedWith(client, body, "session-1");
+
+        assertThat(refused.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        if (naming.pinned()) {
+            assertUnavailableToTryAgain(refused);
+            assertThat(lastExchange.getResponse().getHeaders().getFirst("Retry-After")).isNotNull();
+        } else {
+            assertThat(refused.getCode()).isEqualTo("NO_AVAILABLE_ACCOUNT");
+            assertThat(lastExchange.getResponse().getHeaders().getFirst("Retry-After")).isNull();
+        }
+        assertThat(dispatched).containsExactly("relay-1", "relay-2");
+        assertThat(ledger.settled).isEmpty();
+        assertThat(ledger.released).singleElement().satisfies(release -> assertThat(release.definitive()).isTrue());
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Client.class)
+    void aPromptARelayRefusedWhenTheLeaseCannotCoverAnotherDispatchIsToldToTryAgainWhileKiroIsFree(Client client) {
+        serve(new Setup());
+        // The reservation can be leased for ten minutes more, which is less than a second dispatch is given.
+        ApiKeyService.DispatchLease nearTheCap = new ApiKeyService.DispatchLease(Duration.ofSeconds(960), Duration.ofMinutes(10));
+        when(apiKeyService.markUsageDispatchedTiered(any(), anyString(), anyString())).thenReturn(Mono.just(nearTheCap));
+        when(apiKeyService.markUsageDispatchedTiered(any(), anyString(), anyString(), any(Duration.class))).thenReturn(Mono.just(nearTheCap));
+        relays.next("relay-1", Reply.failure(400, "context_length_exceeded"));
+
+        ApiException first = refusedWith(client, history(client, MODEL, 10, 6_000), "session-1");
+
+        assertThat(first.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(first.getCode()).isEqualTo("NO_AVAILABLE_ACCOUNT");
+        assertThat(dispatched).containsExactly("relay-1");
+        assertThat(ledger.settled).isEmpty();
+        assertThat(ledger.released).singleElement().satisfies(release -> assertThat(release.definitive()).isTrue());
+
+        // The identical request is served: the relay is left out of it by what it refused, and Kiro takes it as it is.
+        Turn retry = ask(client, history(client, MODEL, 10, 6_000), "session-1");
+        assertServedBy(retry.response(), "kiro", "2");
+        assertThat(dispatched).containsExactly("relay-1", "kiro-1");
+    }
+
+    /** How a hint names the tiers a request is pinned to, and whether those hold Kiro (design 6.3, 7.8). */
+    private enum Hint {
+        HEADER_TIER_AND_BELOW(true, "relay+", true),
+        HEADER_LEVEL_AND_BELOW(true, "1+", true),
+        PREFERENCE_TIER_AND_BELOW(false, "relay+", true),
+        HEADER_TIER(true, "relay", false),
+        PREFERENCE_TIER(false, "relay", false);
+
+        private final boolean header;
+        private final String reference;
+        private final boolean holdsKiro;
+
+        Hint(boolean header, String reference, boolean holdsKiro) {
+            this.header = header;
+            this.reference = reference;
+            this.holdsKiro = holdsKiro;
+        }
+
+        @Override
+        public String toString() {
+            return (header ? "header " : "preference ") + reference;
+        }
+    }
+
+    static Stream<Arguments> clientsAndHints() {
+        return Stream.of(Client.values()).flatMap(client -> Stream.of(Hint.values()).map(hint -> Arguments.of(client, hint)));
+    }
+
+    private void nameTheTiersBy(Hint hint) {
+        if (hint.header) {
+            extraHeaders.put(TierSelectorParser.REQUEST_HEADER, hint.reference);
+        } else {
+            when(apiKeyService.authenticate(any())).thenReturn(Mono.just(new ApiKeyPrincipal(KEY, null, null, "test", null,
+                BigDecimal.ZERO, BigDecimal.ZERO, "anthropic", false, "BALANCE", hint.reference)));
+        }
+    }
+
+    @ParameterizedTest(name = "{0}, {1}")
+    @MethodSource("clientsAndHints")
+    void aConversionTheRelayRefusedIsToldToTryAgainWhenTheTiersAHintNamesHoldKiroAndKiroIsOnlyBusy(Client client, Hint hint) {
+        serve(new Setup());
+        nameTheTiersBy(hint);
+        busy.add("kiro-1");
+        relays.next("relay-1", Reply.failure(400, "invalid_request_error"));
+
+        ApiException refused = refusedWith(client, first(client, MODEL, "hello"), "session-1");
+
+        assertThat(dispatched).as("Kiro is busy and was not asked").containsExactly("relay-1");
+        assertThat(ledger.settled).isEmpty();
+        assertThat(ledger.released).singleElement().satisfies(release -> assertThat(release.definitive()).isTrue());
+        busy.clear();
+        relays.next("relay-1", Reply.failure(400, "invalid_request_error"));
+        if (hint.holdsKiro) {
+            // The range has Kiro below the relay: the next request crosses to it, so the client is not told not to retry.
+            assertUnavailableToTryAgain(refused);
+            assertThat(lastExchange.getResponse().getHeaders().getFirst("Retry-After")).isNotNull();
+            Turn retry = ask(client, first(client, MODEL, "hello"), "session-1");
+            assertServedBy(retry.response(), "kiro", "2", "pinned");
+            assertThat(dispatched).containsExactly("relay-1", "relay-1", "kiro-1");
+            ledger.assertEveryRequestWasChargedTheTierThatServed(List.of("anthropic:kiro"));
+        } else {
+            // A tier of relays alone has nothing else to try, and the retry is refused the same way.
+            assertThat(refused.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+            assertThat(refused.getCode()).isEqualTo("UPSTREAM_ERROR");
+            assertThat(refused.getMessage()).startsWith("Source error 400");
+            ApiException again = refusedWith(client, first(client, MODEL, "hello"), "session-1");
+            assertThat(again.getMessage()).isEqualTo(refused.getMessage());
+            assertThat(dispatched).containsExactly("relay-1", "relay-1");
+        }
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Client.class)
     void aPinnedPromptBeyondTheWindowTheAdministratorWroteIsToldThatItIsTooLongToo(Client client) {
         serve(new Setup().window(20_000));
 
@@ -1090,6 +1590,35 @@ class OwnerExampleTieredXpTest {
         ledger.assertCharge(ledger.settled.getFirst(), "anthropic:relay", 1, "1");
     }
 
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Client.class)
+    void theRetryOfARequestWhoseHeaderNamesTheRelayTierAndWhoseOnlyRelayBrokeOffIsToldToTryAgainNotServedByKiro(Client client) {
+        serve(new Setup());
+        extraHeaders.put(TierSelectorParser.REQUEST_HEADER, "relay");
+        relays.next("relay-1", Reply.cutAfterStart("I will run the"));
+        assertThatThrownBy(() -> ask(client, first(client, MODEL, "hello"), "session-1"))
+            .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_GATEWAY));
+
+        // The header is a hint, and a hint to a tier that can serve again shortly is kept as the suffix is: the client is
+        // not given Kiro at Kiro's price for two minutes, it is told to try again.
+        ApiException retry = refusedWith(client, first(client, MODEL, "hello"), "session-1");
+
+        assertThat(retry.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(retry.getCode()).isEqualTo("SOURCE_TIER_UNAVAILABLE");
+        assertThat(lastExchange.getResponse().getHeaders().getFirst("Retry-After")).isNotNull();
+        assertThat(dispatched).containsExactly("relay-1");
+        assertThat(ledger.settled).isEmpty();
+        // The answer that was cut is released for good; the retry never reserved anything that stays.
+        assertThat(ledger.released).hasSize(2);
+        assertThat(ledger.released.getFirst().definitive()).isTrue();
+
+        advance(Duration.ofMinutes(2).plusSeconds(1));
+        Turn later = ask(client, first(client, MODEL, "hello"), "session-1");
+        assertThat(later.answer().text()).isEqualTo("from relay-1");
+        assertThat(later.response().getHeaders().getFirst(TierResponseHeaders.MODE)).isEqualTo("pinned");
+        ledger.assertCharge(ledger.settled.getFirst(), "anthropic:relay", 1, "1");
+    }
+
     // ---- a relay that is switched off, for a client that is set to send the tier with every request (design 6.3) ----
 
     @ParameterizedTest(name = "{0}")
@@ -1115,6 +1644,151 @@ class OwnerExampleTieredXpTest {
         assertThat(dispatched).containsExactly("kiro-1", "kiro-1");
         ledger.assertEveryRequestWasChargedTheTierThatServed(List.of("anthropic:kiro", "anthropic:kiro"));
         assertThat(ledger.released).hasSize(1);
+    }
+
+    // ---- a pin is kept for a relay that is out for a moment, and for no request the relay would not have taken (design 6.3) ----
+
+    private void assertServedByKiroDespiteTheHeader(Turn turn) {
+        assertThat(servedTier(turn)).isEqualTo("kiro");
+        assertThat(turn.response().getHeaders().getFirst(TierResponseHeaders.MODE)).isEqualTo("auto");
+        assertThat(turn.response().getHeaders().getFirst(TierResponseHeaders.STATUS)).isEqualTo(TierResponseHeaders.IGNORED);
+    }
+
+    private static void assertUnavailableToTryAgain(ApiException refused) {
+        assertThat(refused.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+        assertThat(refused.getCode()).isEqualTo("SOURCE_TIER_UNAVAILABLE");
+    }
+
+    private static void assertTooLong(ApiException refused) {
+        assertThat(refused.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(refused.getCode()).isEqualTo("UPSTREAM_ERROR");
+        assertThat(refused.getMessage()).startsWith("prompt is too long");
+    }
+
+    /** Another request of the session, for the Opus model, is cut mid-stream on the relay: the relay is kept from the session for two minutes. */
+    private void cutAnotherRequestOfTheSession(Client client, boolean pinnedToTheRelay) {
+        relays.next("relay-1", Reply.cutAfterStart("I will run the"));
+        ObjectNode cut = first(client, "claude-opus-4.5", "Run echo hello");
+        assertThat(refusedWith(client, pinnedToTheRelay ? pinned(cut, "relay") : cut, "session-1").getStatus())
+            .isEqualTo(HttpStatus.BAD_GATEWAY);
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Client.class)
+    void aHeaderForTheRelayTierIsNotHeldByAnInterruptionForARequestTheRelayWouldNotHaveTakenAnyway(Client client) {
+        serve(new Setup().window(20_000));
+        extraHeaders.put(TierSelectorParser.REQUEST_HEADER, "relay");
+        ObjectNode compaction = history(client, MODEL, 20, 6_000);
+
+        // The whole history is beyond the window of the relay: the header does not fit it, and Kiro serves it.
+        assertServedByKiroDespiteTheHeader(ask(client, compaction.deepCopy(), "session-1"));
+        cutAnotherRequestOfTheSession(client, false);
+
+        // The relay is kept from the session for two minutes, which changes nothing for a request it would not have taken:
+        // it is Kiro's all the same, and not held for a relay that has nothing to do with it.
+        Turn during = ask(client, compaction.deepCopy(), "session-1");
+        assertServedByKiroDespiteTheHeader(during);
+        assertThat(plans.getLast().xpSkips()).singleElement().satisfies(skip -> {
+            assertThat(skip.accountId()).isEqualTo("relay-1");
+            assertThat(skip.reason()).isEqualTo(XpSkip.Reason.CONTEXT);
+        });
+        // An ordinary request of the session is the relay's, and is held for it.
+        assertUnavailableToTryAgain(refusedWith(client, first(client, MODEL, "hello"), "session-1"));
+        assertThat(lastExchange.getResponse().getHeaders().getFirst("Retry-After")).isNotNull();
+
+        advance(Duration.ofMinutes(2).plusSeconds(1));
+        assertServedByKiroDespiteTheHeader(ask(client, compaction.deepCopy(), "session-1"));
+        Turn later = ask(client, first(client, MODEL, "hello"), "session-1");
+        assertServedBy(later.response(), "relay", "1", "pinned");
+        assertThat(dispatched).containsExactly("kiro-1", "relay-1", "kiro-1", "kiro-1", "relay-1");
+        ledger.assertEveryRequestWasChargedTheTierThatServed(List.of("anthropic:kiro", "anthropic:kiro", "anthropic:kiro", "anthropic:relay"));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Client.class)
+    void aHeaderForTheRelayTierIsNotHeldByAnInterruptionForAPromptTheRelayRefusedForItsLengthEither(Client client) {
+        serve(new Setup());
+        extraHeaders.put(TierSelectorParser.REQUEST_HEADER, "relay");
+        ObjectNode compaction = history(client, MODEL, 10, 6_000);
+        // This node learns that the relay does not take a prompt of this size; the client is told to try again.
+        relays.next("relay-1", Reply.failure(400, "context_length_exceeded"));
+        assertUnavailableToTryAgain(refusedWith(client, compaction.deepCopy(), "session-1"));
+        assertServedByKiroDespiteTheHeader(ask(client, compaction.deepCopy(), "session-1"));
+
+        cutAnotherRequestOfTheSession(client, false);
+
+        assertServedByKiroDespiteTheHeader(ask(client, compaction.deepCopy(), "session-1"));
+        assertThat(plans.getLast().xpSkips()).singleElement().satisfies(skip -> {
+            assertThat(skip.reason()).isEqualTo(XpSkip.Reason.CONTEXT);
+            assertThat(skip.detail()).contains("refused for its length");
+        });
+        advance(Duration.ofMinutes(2).plusSeconds(1));
+        assertServedByKiroDespiteTheHeader(ask(client, compaction.deepCopy(), "session-1"));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Client.class)
+    void aSuffixForTheRelayTierIsAnsweredThatThePromptIsTooLongWhateverTheRelayMetInTheSession(Client client) {
+        serve(new Setup().window(20_000));
+        ObjectNode compaction = pinned(history(client, MODEL, 20, 6_000), "relay");
+
+        assertTooLong(refusedWith(client, compaction.deepCopy(), "session-1"));
+        cutAnotherRequestOfTheSession(client, true);
+
+        // Not "try again": the relay is back in two minutes, and the prompt is still too long for it.
+        assertTooLong(refusedWith(client, compaction.deepCopy(), "session-1"));
+        assertUnavailableToTryAgain(refusedWith(client, pinned(first(client, MODEL, "hello"), "relay"), "session-1"));
+
+        advance(Duration.ofMinutes(2).plusSeconds(1));
+        assertTooLong(refusedWith(client, compaction.deepCopy(), "session-1"));
+        assertServedBy(ask(client, pinned(first(client, MODEL, "hello"), "relay"), "session-1").response(), "relay", "1", "pinned");
+        assertThat(dispatched).containsExactly("relay-1", "relay-1");
+        assertThat(ledger.settled).hasSize(1);
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Client.class)
+    void aHeaderForARelayTierWhoseRelayIsSwitchedOffIsNotHeldForARequestBeyondTheWindowOfTheRelay(Client client) {
+        serve(new Setup().window(20_000).relaysSwitchedOff(true));
+        extraHeaders.put(TierSelectorParser.REQUEST_HEADER, "relay");
+
+        // The relay would not have taken the whole history in any case, so it is no reason to hold it: Kiro serves it.
+        assertServedByKiroDespiteTheHeader(ask(client, history(client, MODEL, 20, 6_000), "session-1"));
+        assertThat(dispatched).containsExactly("kiro-1");
+        // A request it would have taken is held for the relay that is out of service.
+        assertUnavailableToTryAgain(refusedWith(client, first(client, MODEL, "hello"), "session-1"));
+        assertThat(dispatched).containsExactly("kiro-1");
+        ledger.assertEveryRequestWasChargedTheTierThatServed(List.of("anthropic:kiro"));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Client.class)
+    void aHeaderForARelayTierWhoseRelayIsSwitchedOffIsNotHeldForAPromptTheRelayRefusedForItsLengthEither(Client client) {
+        serve(new Setup());
+        relays.next("relay-1", Reply.failure(400, "context_length_exceeded"));
+        refusedWith(client, pinned(history(client, MODEL, 10, 6_000), "relay"), "session-1");
+        assertThat(relays.seen()).hasSize(1);
+        // The relay is switched off after it showed what it takes; the node remembers.
+        serve(new Setup().relaysSwitchedOff(true));
+        extraHeaders.put(TierSelectorParser.REQUEST_HEADER, "relay");
+
+        assertServedByKiroDespiteTheHeader(ask(client, history(client, MODEL, 10, 6_000), "session-1"));
+        assertUnavailableToTryAgain(refusedWith(client, first(client, MODEL, "hello"), "session-1"));
+        assertThat(relays.seen()).hasSize(1);
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @EnumSource(Client.class)
+    void aSuffixForARelayTierWhoseRelayIsSwitchedOffIsAnsweredThatTheTierHasNoAccountWhateverTheSizeOfTheRequest(Client client) {
+        serve(new Setup().window(20_000).relaysSwitchedOff(true));
+
+        // The tier holds nothing in service for the suffix, which is the client's explicit demand (design 6.2).
+        for (ObjectNode request : List.of(history(client, MODEL, 20, 6_000), first(client, MODEL, "hello"))) {
+            ApiException refused = refusedWith(client, pinned(request, "relay"), "session-1");
+            assertThat(refused.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+            assertThat(refused.getCode()).isEqualTo("SOURCE_TIER_NOT_OFFERED");
+        }
+        assertThat(dispatched).isEmpty();
     }
 
     // ---- nobody serves ----
@@ -1376,7 +2050,7 @@ class OwnerExampleTieredXpTest {
         dispatched.add(account.getAccountId());
         List<String> ids = new ArrayList<>();
         collectToolIds(payload, ids);
-        nativeCalls.add(new NativeCall(account.getAccountId(), ids));
+        nativeCalls.add(new NativeCall(account.getAccountId(), ids, payload.toString()));
         return nativeAnswers.getOrDefault(account.getAccountId(), () -> Mono.just(KIRO_ANSWER)).get();
     }
 
@@ -1476,7 +2150,10 @@ class OwnerExampleTieredXpTest {
         ObjectNode body = json.createObjectNode();
         body.put("model", model).put("max_tokens", 32000).put("stream", true);
         if (client.messages()) {
-            body.putArray("system").addObject().put("type", "text")
+            // The first block is Claude Code's billing header, whose hash is new with every request (D7).
+            ArrayNode system = body.putArray("system");
+            system.addObject().put("type", "text").put("text", BILLING_HEADER);
+            system.addObject().put("type", "text")
                 .put("text", "You are Claude Code, Anthropic's official CLI for Claude.")
                 .putObject("cache_control").put("type", "ephemeral");
             ObjectNode text = body.putArray("messages").addObject().put("role", "user").putArray("content").addObject();
@@ -1684,7 +2361,8 @@ class OwnerExampleTieredXpTest {
     // ---- the relays ----
 
     /** One call of a native account, with the tool ids its history carried. */
-    private record NativeCall(String account, List<String> toolIds) {
+    /** @param payload the request the account was sent, as the upstream client of its route is handed it */
+    private record NativeCall(String account, List<String> toolIds, String payload) {
     }
 
     // ---- the ledger ----

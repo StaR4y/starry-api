@@ -30,7 +30,9 @@ import tools.jackson.databind.ObjectMapper;
  *   <li>A response whose status is 408, 504 or 524: a timeout, of the relay or of the gateway in front of it, while the
  *       relay may have been generating. It keeps its status, whatever its body calls it, because the caller must not
  *       treat it as a refusal (the dispatcher turns it into an interruption).
- *   <li>The kind of error: rate limit 429; authentication 401; permission 403; invalid request 400; timeout 504;
+ *   <li>The kind of error: rate limit 429; authentication 401; permission 403 (both are the relay turning the key of its
+ *       account down, which the failure classification treats as a failure of that account and never tells the client:
+ *       the status here is only what the gateway reasons about); invalid request 400; timeout 504;
  *       overloaded or server error 503 (recoverable). The code is read before the type, because OpenAI answers a bad
  *       key with the type {@code invalid_request_error} and the code {@code invalid_api_key}. The generic invalid
  *       request gives way to a status of 402 or 429, which says more, whether it is the status of the response or the

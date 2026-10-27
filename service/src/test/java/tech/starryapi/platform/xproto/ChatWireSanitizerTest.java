@@ -13,6 +13,8 @@ import org.mockito.Mockito;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import tech.starryapi.model.DefaultModelCatalogProvider;
+import tech.starryapi.platform.anthropic.AnthropicRequestAdapter;
 import tech.starryapi.platform.openai.OpenAiUpstreamClient;
 import tech.starryapi.platform.xproto.ChatWireSanitizer.Settings;
 import tech.starryapi.platform.xproto.ChatWireSanitizer.Wire;
@@ -890,5 +892,187 @@ class ChatWireSanitizerTest {
         assertThat(digest.path("tools")).hasSize(1);
         assertThat(ChatWireSanitizer.entryDigest(null).isEmpty()).isTrue();
         assertThat(ChatWireSanitizer.entryDigest(tree("[1]")).isEmpty()).isTrue();
+    }
+
+    // ---------------------------------------------------------------------------------------- the billing header of Claude Code (D7)
+
+    private static final AnthropicRequestAdapter ADAPTER = new AnthropicRequestAdapter(JSON, new DefaultModelCatalogProvider());
+    private static final String HEADER = "x-anthropic-billing-header: cc_version=2.1.168.177; cc_entrypoint=cli; cch=278c4;";
+
+    private static JsonNode messagesRequest(String system) {
+        return tree("{\"model\":\"claude-sonnet-4.5\",\"max_tokens\":512" + (system == null ? "" : ",\"system\":" + system)
+            + ",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}");
+    }
+
+    /** What the relay is sent of a Messages request, through the conversion the gateway really uses. */
+    private static Wire relayBodyOf(JsonNode entry, String... on) {
+        return ChatWireSanitizer.sanitize(ADAPTER.messagesToChat(entry), entry, settings(on), "m");
+    }
+
+    @Test
+    void theBillingHeaderOfClaudeCodeIsLeftOutOfTheSystemMessageOfTheRelayAndTheOtherBlocksStay() {
+        JsonNode entry = messagesRequest("[{\"type\":\"text\",\"text\":\"" + HEADER + "\"},"
+            + "{\"type\":\"text\",\"text\":\"You are Claude Code.\",\"cache_control\":{\"type\":\"ephemeral\"}},"
+            + "{\"type\":\"text\",\"text\":\"cwd: /work\"}]");
+
+        for (String[] on : new String[][] {{}, {"cache"}, {"claude", "effort"}, {"vision", "stream"}}) {
+            Wire wire = relayBodyOf(entry, on);
+
+            assertThat(wire.body().path("messages").get(0).path("role").stringValue()).isEqualTo("system");
+            assertThat(wire.body().path("messages").get(0).path("content").stringValue()).isEqualTo("You are Claude Code.\ncwd: /work");
+            assertThat(wire.body().path("messages")).hasSize(2);
+            assertThat(wire.body().toString()).doesNotContain("x-anthropic-billing-header", "cch=");
+            // A repair of the sanitizer, with a name no feature has.
+            assertThat(wire.degraded()).contains(ChatWireSanitizer.BILLING_HEADER_DROPPED);
+        }
+    }
+
+    @Test
+    void theConversionItselfKeepsTheBillingHeaderSoThatKiroAndTheOfficialKeysAreGivenWhatTheyAlwaysWere() {
+        JsonNode entry = messagesRequest("[{\"type\":\"text\",\"text\":\"" + HEADER + "\"},{\"type\":\"text\",\"text\":\"You are Claude Code.\"}]");
+
+        JsonNode chat = ADAPTER.messagesToChat(entry);
+
+        assertThat(chat.path("messages").get(0).path("content").stringValue()).isEqualTo(HEADER + "\nYou are Claude Code.");
+        // And the sanitizer did not change what it was handed.
+        relayBodyOf(entry);
+        assertThat(chat.path("messages").get(0).path("content").stringValue()).isEqualTo(HEADER + "\nYou are Claude Code.");
+        assertThat(entry.path("system")).hasSize(2);
+    }
+
+    @Test
+    void aSystemPromptThatIsOnlyTheBillingHeaderIsNotSentAtAll() {
+        Wire wire = relayBodyOf(messagesRequest("[{\"type\":\"text\",\"text\":\"" + HEADER + "\"}]"));
+
+        assertThat(wire.body().path("messages")).hasSize(1);
+        assertThat(wire.body().path("messages").get(0).path("role").stringValue()).isEqualTo("user");
+        assertThat(wire.degraded()).containsExactly(ChatWireSanitizer.BILLING_HEADER_DROPPED);
+    }
+
+    @Test
+    void everyBlockThatIsTheHeaderLineIsTakenOutWhereverItIsAndWhateverTheSpaceAroundIt() {
+        JsonNode entry = messagesRequest("[{\"type\":\"text\",\"text\":\"  \\n" + HEADER + "\\n\"},{\"type\":\"text\",\"text\":\"a\"},"
+            + "{\"type\":\"text\",\"text\":\"" + HEADER + "\"},{\"type\":\"text\",\"text\":\"b\"}]");
+
+        Wire wire = relayBodyOf(entry);
+
+        assertThat(wire.body().path("messages").get(0).path("content").stringValue()).isEqualTo("a\nb");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        // The name is not at the start of the block, or is not written as Claude Code writes it.
+        "[{\"type\":\"text\",\"text\":\"Note the line x-anthropic-billing-header: cc_version=1\"},{\"type\":\"text\",\"text\":\"b\"}]",
+        "[{\"type\":\"text\",\"text\":\"a\\nx-anthropic-billing-header: cc_version=1; cch=1;\\nb\"}]",
+        "[{\"type\":\"text\",\"text\":\"X-Anthropic-Billing-Header: cc_version=1; cch=1;\"},{\"type\":\"text\",\"text\":\"b\"}]",
+        "[{\"type\":\"text\",\"text\":\"x-anthropic-billing-header cc_version=1\"},{\"type\":\"text\",\"text\":\"b\"}]",
+        // A prompt given as one string is not a block of a list, and nothing else is taken for one.
+        "\"x-anthropic-billing-header: cc_version=1; cch=1;\\nYou are Claude Code.\"",
+        "[{\"type\":\"image\",\"text\":\"x-anthropic-billing-header: cc_version=1; cch=1;\"},{\"type\":\"text\",\"text\":\"b\"}]",
+        // A block that starts with the header and carries the system prompt after it (a client or SDK that makes one block of
+        // the two) is a prompt as much as a header: dropping it would send the relay no instructions at all.
+        "[{\"type\":\"text\",\"text\":\"x-anthropic-billing-header: cc_version=1; cch=1;\\nYou are Claude Code.\"},{\"type\":\"text\",\"text\":\"b\"}]",
+        "[{\"type\":\"text\",\"text\":\"x-anthropic-billing-header: cc_version=1; cch=1;\\r\\nYou are Claude Code.\"}]",
+        "[{\"type\":\"text\",\"text\":\"\\n x-anthropic-billing-header: cc_version=1; cch=1;\\n\\nYou are Claude Code. Never delete files.\"}]"
+    })
+    void onlyABlockThatIsTheHeaderLineAloneIsTakenOutAndNothingElseOfAPromptIsTouched(String system) {
+        JsonNode entry = messagesRequest(system);
+        Wire wire = relayBodyOf(entry);
+
+        assertThat(wire.degraded()).doesNotContain(ChatWireSanitizer.BILLING_HEADER_DROPPED);
+        assertThat(wire.body().path("messages").get(0).path("content").stringValue())
+            .isEqualTo(ADAPTER.messagesToChat(entry).path("messages").get(0).path("content").stringValue());
+    }
+
+    @Test
+    void aPromptThatSharesItsBlockWithTheHeaderIsSentWhole() {
+        String prompt = HEADER + "\\nYou are a Claude agent. Never delete files.";
+        JsonNode entry = messagesRequest("[{\"type\":\"text\",\"text\":\"" + prompt + "\"},{\"type\":\"text\",\"text\":\"cwd: /w\"}]");
+
+        Wire wire = relayBodyOf(entry);
+
+        assertThat(wire.body().path("messages").get(0).path("role").stringValue()).isEqualTo("system");
+        assertThat(wire.body().path("messages").get(0).path("content").stringValue())
+            .isEqualTo(HEADER + "\nYou are a Claude agent. Never delete files.\ncwd: /w");
+        assertThat(wire.degraded()).doesNotContain(ChatWireSanitizer.BILLING_HEADER_DROPPED);
+        // The digest of the entry is the whole body's for it, and holds nothing for a prompt with no block of the header alone.
+        assertThat(ChatWireSanitizer.entryDigest(entry).has("system")).isFalse();
+        Wire digested = ChatWireSanitizer.sanitize(ADAPTER.messagesToChat(entry), ChatWireSanitizer.entryDigest(entry), settings(), "m");
+        assertThat(digested.body()).isEqualTo(ChatWireSanitizer.sanitize(ADAPTER.messagesToChat(entry), entry, settings(), "m").body());
+    }
+
+    @Test
+    void theHeaderLineAloneIsTakenOutOfAPromptThatAlsoHasABlockThatCarriesItAfterwards() {
+        String shared = HEADER + "\\nYou are a Claude agent.";
+        JsonNode entry = messagesRequest("[{\"type\":\"text\",\"text\":\"" + HEADER + "\"},{\"type\":\"text\",\"text\":\"" + shared + "\"}]");
+
+        Wire wire = relayBodyOf(entry);
+
+        assertThat(wire.body().path("messages").get(0).path("content").stringValue()).isEqualTo(HEADER + "\nYou are a Claude agent.");
+        assertThat(wire.degraded()).containsExactly(ChatWireSanitizer.BILLING_HEADER_DROPPED);
+    }
+
+    @Test
+    void aUserTextThatMerelyMentionsTheHeaderIsKept() {
+        JsonNode entry = tree("{\"model\":\"claude-sonnet-4.5\",\"max_tokens\":512,\"system\":[{\"type\":\"text\",\"text\":\"" + HEADER + "\"},"
+            + "{\"type\":\"text\",\"text\":\"s\"}],\"messages\":[{\"role\":\"user\",\"content\":\"" + HEADER + "\"},"
+            + "{\"role\":\"assistant\",\"content\":\"ok\"},{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"what is "
+            + "x-anthropic-billing-header: for?\"}]}]}");
+
+        Wire wire = relayBodyOf(entry);
+
+        assertThat(wire.body().path("messages").get(0).path("content").stringValue()).isEqualTo("s");
+        assertThat(wire.body().path("messages").get(1).path("content").stringValue()).isEqualTo(HEADER);
+        assertThat(wire.body().path("messages").get(3).path("content").toString()).contains("what is x-anthropic-billing-header: for?");
+    }
+
+    @Test
+    void aSystemMessageThatIsNotWhatTheBlocksMakeIsNotTouched() {
+        JsonNode entry = messagesRequest("[{\"type\":\"text\",\"text\":\"" + HEADER + "\"},{\"type\":\"text\",\"text\":\"s\"}]");
+        // A Chat body of another origin, whose first message is not the system message of these blocks.
+        JsonNode other = tree("{\"messages\":[{\"role\":\"system\",\"content\":\"something else\"},{\"role\":\"user\",\"content\":\"hi\"}]}");
+        JsonNode user = tree("{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
+
+        for (JsonNode chat : List.of(other, user)) {
+            Wire wire = ChatWireSanitizer.sanitize(chat, entry, settings(), "m");
+
+            assertThat(wire.body().path("messages")).isEqualTo(ChatWireSanitizer.sanitize(chat, null, settings(), "m").body().path("messages"));
+            assertThat(wire.degraded()).doesNotContain(ChatWireSanitizer.BILLING_HEADER_DROPPED);
+        }
+    }
+
+    @Test
+    void theDigestOfTheEntryHoldsTheSystemBlocksOnlyForAPromptWithTheHeaderAndGivesWhatTheWholeBodyGives() {
+        JsonNode entry = messagesRequest("[{\"type\":\"text\",\"text\":\"" + HEADER + "\"},"
+            + "{\"type\":\"text\",\"text\":\"You are Claude Code.\",\"cache_control\":{\"type\":\"ephemeral\"}},"
+            + "{\"type\":\"text\",\"text\":\"  \"}]");
+        JsonNode plain = messagesRequest("[{\"type\":\"text\",\"text\":\"You are Claude Code.\"}]");
+
+        JsonNode digest = ChatWireSanitizer.entryDigest(entry);
+
+        // The text blocks as the conversion reads them, and nothing else of them.
+        assertThat(digest.path("system")).hasSize(2);
+        assertThat(digest.toString()).doesNotContain("cache_control", "messages", "hello");
+        assertThat(ChatWireSanitizer.entryDigest(plain).has("system")).isFalse();
+        assertThat(ChatWireSanitizer.entryDigest(messagesRequest("\"" + HEADER + "\"")).has("system")).isFalse();
+        JsonNode chat = ADAPTER.messagesToChat(entry);
+        for (Settings settings : List.of(settings(), settings("effort", "claude"), settings("cache", "vision"))) {
+            Wire whole = ChatWireSanitizer.sanitize(chat, entry, settings, "m");
+            Wire digested = ChatWireSanitizer.sanitize(chat, digest, settings, "m");
+
+            assertThat(digested.body()).isEqualTo(whole.body());
+            assertThat(digested.degraded()).isEqualTo(whole.degraded());
+            assertThat(digested.degraded()).contains(ChatWireSanitizer.BILLING_HEADER_DROPPED);
+        }
+        // Taking the digest of a digest changes nothing.
+        assertThat(ChatWireSanitizer.entryDigest(digest)).isEqualTo(digest);
+    }
+
+    @Test
+    void aChatRequestIsNeverGivenARepairForTheHeader() {
+        Wire wire = sanitize("{\"messages\":[{\"role\":\"system\",\"content\":\"" + HEADER + "\"},{\"role\":\"user\",\"content\":\"hi\"}]}");
+
+        assertThat(wire.degraded()).isEmpty();
+        assertThat(wire.body().path("messages").get(0).path("content").stringValue()).isEqualTo(HEADER);
     }
 }

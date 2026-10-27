@@ -89,6 +89,19 @@ public record TierDispatch(
     }
 
     /**
+     * The output limit the body asks the relay for: {@code max_completion_tokens}, else {@code max_tokens}, which is the one
+     * the relay is told it may write and so the most it can be charged for (design 5.8). 0 for a native dispatch, which
+     * has no body of its own, and for a body that names none.
+     */
+    public long forwardedOutputLimit() {
+        if (wireBody == null) {
+            return 0;
+        }
+        long limit = wireBody.path("max_completion_tokens").asLong(0);
+        return limit > 0 ? limit : Math.max(0, wireBody.path("max_tokens").asLong(0));
+    }
+
+    /**
      * What the model cooldown and the admission of the attempt are keyed by, or null for a native dispatch, which uses
      * the model of the pool context as it always has.
      */

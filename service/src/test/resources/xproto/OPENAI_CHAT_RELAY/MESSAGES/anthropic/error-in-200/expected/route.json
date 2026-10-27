@@ -12,7 +12,7 @@
       "outputTokens": 0,
       "usageSource": null,
       "stopReason": "MODEL_NOT_SERVED",
-      "degraded": "cache_control,thinking,context_management,metadata",
+      "degraded": "cache_control,thinking,context_management,metadata,billing_header_dropped",
       "error": "Source error 404 (model_not_found)"
     },
     {

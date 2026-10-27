@@ -12,7 +12,7 @@
       "outputTokens": 0,
       "usageSource": null,
       "stopReason": "CONTEXT_EXCEEDED",
-      "degraded": "cache_control,thinking,context_management,metadata",
+      "degraded": "cache_control,thinking,context_management,metadata,billing_header_dropped",
       "error": "Source error 400 (context_length_exceeded)"
     },
     {

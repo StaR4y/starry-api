@@ -68,6 +68,7 @@ public class SourceTierStatusService {
     public static final String CONVERSION_REJECTED = "CONVERSION_REJECTED";
     public static final String CONTEXT_EXCEEDED = "CONTEXT_EXCEEDED";
     public static final String MODEL_NOT_SERVED = "MODEL_NOT_SERVED";
+    public static final String KEY_REFUSED = "KEY_REFUSED";
 
     /** The first layer that keeps a relay from serving, as the status names it. */
     static final String LAYER_DISABLED = "disabled";
@@ -77,7 +78,7 @@ public class SourceTierStatusService {
     static final String LAYER_BUSY = "busy";
     static final String LAYER_READY = "ready";
 
-    private static final SourceTierDtos.XpFigures NO_FIGURES = new SourceTierDtos.XpFigures(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null);
+    private static final SourceTierDtos.XpFigures NO_FIGURES = new SourceTierDtos.XpFigures(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null);
 
     private final SourceTierRegistry registry;
     private final SourceTierRuntimeInfo runtime;
@@ -503,7 +504,8 @@ public class SourceTierStatusService {
                         PairGate gate = gate(snapshot, pair.vendor(), pair.sourceProtocol(), pair.entryEndpoint());
                         SourceTierDtos.XpFigures figures = relayReads.pair(pair.vendor(), pair.entryEndpoint());
                         long lint = lintFailures(pair.vendor());
-                        List<SourceTierDtos.Criterion> criteria = XpPairStandard.evaluate(figures, lint);
+                        // This node counted the failures from the day it started, which may be later than the window begins.
+                        List<SourceTierDtos.Criterion> criteria = XpPairStandard.evaluate(figures, lint, !skipCounts.since().isAfter(since));
                         pairs.add(new SourceTierDtos.PairEvidence(
                             pair.vendor(),
                             labels.getOrDefault(pair.vendor(), pair.vendor()),
@@ -606,11 +608,12 @@ public class SourceTierStatusService {
             count(*) FILTER (WHERE NOT success AND stop_reason = '%s') AS conversion_rejected,
             count(*) FILTER (WHERE NOT success AND stop_reason = '%s') AS context_exceeded,
             count(*) FILTER (WHERE NOT success AND stop_reason = '%s') AS model_not_served,
+            count(*) FILTER (WHERE NOT success AND stop_reason = '%s') AS key_refused,
             count(*) FILTER (WHERE success AND usage_source = 'ESTIMATED') AS estimated,
             count(*) FILTER (WHERE success AND usage_source = 'CLAMPED') AS clamped,
             count(*) FILTER (WHERE success AND degraded_features IS NOT NULL AND degraded_features <> '') AS degraded,
             percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE success) AS p95""".formatted(
-            INTERRUPTED, CONVERSION_REJECTED, CONTEXT_EXCEEDED, MODEL_NOT_SERVED);
+            INTERRUPTED, CONVERSION_REJECTED, CONTEXT_EXCEEDED, MODEL_NOT_SERVED, KEY_REFUSED);
 
         private static final String RELAY_ATTEMPTS = """
             FROM request_logs
@@ -709,6 +712,7 @@ public class SourceTierStatusService {
                 count(row.get("conversion_rejected", Number.class)),
                 count(row.get("context_exceeded", Number.class)),
                 count(row.get("model_not_served", Number.class)),
+                count(row.get("key_refused", Number.class)),
                 count(row.get("estimated", Number.class)),
                 count(row.get("clamped", Number.class)),
                 count(row.get("degraded", Number.class)),

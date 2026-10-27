@@ -200,6 +200,8 @@ public final class TierPlan {
     private final List<XpSkip> xpSkips;
     private final boolean xpOpen;
     private final String relaySession;
+    private final boolean nativesAfterLengthRefusal;
+    private final boolean nativesAfterOtherRefusal;
 
     private TierPlan(boolean selectorIgnored) {
         this.selectorIgnored = selectorIgnored;
@@ -228,6 +230,8 @@ public final class TierPlan {
         this.xpSkips = List.of();
         this.xpOpen = false;
         this.relaySession = null;
+        this.nativesAfterLengthRefusal = false;
+        this.nativesAfterOtherRefusal = false;
     }
 
     /**
@@ -416,6 +420,44 @@ public final class TierPlan {
         String relaySession,
         List<Tier> requestBoundTiers
     ) {
+        this(vendor, modelKey, mode, snapshot, vendorConfig, levels, holdLevels, unavailableTiers, memberlessTiers,
+            startIndex, session, owner, outputBound, standardQuote, poolContext, pinnedScope, lowBalanceHint, unified,
+            xpSkips, xpOpen, relaySession, requestBoundTiers, false, false);
+    }
+
+    /**
+     * @param nativesAfterLengthRefusal whether an account of the route's native cells sits in a tier the request is served
+     *     from once a relay has refused the length of its prompt and this node has learned it, whatever state the account is
+     *     in (see {@link #retriesAfterRelayRefusal}); always false for a plan that no relay takes part in
+     * @param nativesAfterOtherRefusal the same for a refusal that is not learned, where the request keeps the tiers it was
+     *     given
+     */
+    TierPlan(
+        String vendor,
+        String modelKey,
+        Mode mode,
+        SourceTierSnapshot snapshot,
+        VendorConfig vendorConfig,
+        List<Level> levels,
+        List<Level> holdLevels,
+        List<Tier> unavailableTiers,
+        Set<String> memberlessTiers,
+        int startIndex,
+        Session session,
+        Owner owner,
+        long outputBound,
+        BillingQuote standardQuote,
+        AccountPoolRequestContext poolContext,
+        Set<String> pinnedScope,
+        String lowBalanceHint,
+        boolean unified,
+        List<XpSkip> xpSkips,
+        boolean xpOpen,
+        String relaySession,
+        List<Tier> requestBoundTiers,
+        boolean nativesAfterLengthRefusal,
+        boolean nativesAfterOtherRefusal
+    ) {
         if (levels.isEmpty()) {
             throw new IllegalArgumentException("A tiered plan needs at least one tier");
         }
@@ -447,6 +489,8 @@ public final class TierPlan {
         this.xpSkips = List.copyOf(xpSkips);
         this.xpOpen = xpOpen;
         this.relaySession = relaySession;
+        this.nativesAfterLengthRefusal = nativesAfterLengthRefusal;
+        this.nativesAfterOtherRefusal = nativesAfterOtherRefusal;
         // A reservation is only an upper bound: the most any tier the request may end up in would reserve.
         this.reservation = this.holdLevels.stream()
             .map(Level::estimate)
@@ -641,6 +685,28 @@ public final class TierPlan {
     /** Whether the client named the tier, so that the request is served by it or not at all. */
     public boolean pinned() {
         return mode == Mode.PINNED;
+    }
+
+    /**
+     * Whether a relay's refusal of the request itself is answered with a retryable error and not with the refusal
+     * (design 7.8). The refusal (a prompt longer than its window, a conversion it will not take) is what the client is told
+     * only when the request has nowhere native left to go; where native accounts exist for it that are only busy, or out of
+     * quota, for now, it is told to try again, which is what the identical request is told next, once this node knows the
+     * relay does not take it: the relay is then left out of the plan, and the accounts are what is left. A client that was
+     * told "prompt is too long" would shorten, lossily, a conversation that an account would have taken as it was.
+     *
+     * <p>Which accounts count depends on what the retry is served from. A refusal of the length is learned, and a request
+     * pinned by a hint (the header or the preference of the key) drops the hint once the tier it names has no relay left
+     * for it, so the retry is served in the order of all the tiers, and the accounts of any of them count. A conversion that
+     * a relay will not take is not learned, and the hint stays: the retry is refused again by the relay, crosses within the
+     * tiers the pin names, and is served by the accounts of those tiers if there are any. A hint to {@code relay+} has
+     * Kiro's accounts below the relays, and the client is told to try again; one to {@code relay}, a tier of relays alone, has none,
+     * and the client is told the refusal. A pin by the suffix counts the tiers it names in both cases.
+     *
+     * @param contextRefusal whether the relay said the prompt is longer than it takes, which this node learns
+     */
+    public boolean retriesAfterRelayRefusal(boolean contextRefusal) {
+        return contextRefusal ? nativesAfterLengthRefusal : nativesAfterOtherRefusal;
     }
 
     /**

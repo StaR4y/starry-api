@@ -35,6 +35,9 @@ import tech.starryapi.proxy.tier.TierPlan.Level;
  *   <li>A request more than {@link #CROSS_TIER_DEADLINE} old does not cross any more: a native attempt in the next tier
  *       can run for minutes, and a client that gives up meanwhile ends the request in a state that is billed for
  *       review. It is narrowed like a request that failed in a way that may have generated.
+ *   <li>A relay that rejects the key of its own account (a 401 or 403, D5) has failed as that account, before it generated
+ *       anything: it is a definitive failure that is retried like one of a busy account, in the tier and then in the tier
+ *       below, and is never what the request ends with. What the client is told when nothing is left is the facade's to say.
  *   <li>A relay that refuses the request itself (a prompt longer than its window, a conversion it will not take) is
  *       not asked again, in its tier or by another relay, since another relay would be given the same request. The request
  *       may cross once, and only to the native accounts of a tier below ({@link #onRelayRefusal}); it counts against the
@@ -62,7 +65,20 @@ public final class TierRetryPolicy {
         /** Select again; the walk is positioned at the tier that failed or below it. */
         RETRY,
         /** Select again in a tier below the one that failed, on the dispatch that only a crossing may use. */
-        RETRY_ON_RESERVED_SLOT
+        RETRY_ON_RESERVED_SLOT,
+        /**
+         * Only for the refusal of a relay ({@link #onRelayRefusal}): the plan has no tier below the relay's to cross to.
+         * It is {@link #STOP} as far as the request goes; what the client is told depends on whether native accounts of the
+         * plan are only unavailable for now ({@link TierPlan#retriesAfterRelayRefusal}), which the policy does not know.
+         */
+        NOWHERE_TO_CROSS,
+        /**
+         * Only for the refusal of a relay: there is a tier below to cross to, but this request may not go there now (it is
+         * older than {@link #CROSS_TIER_DEADLINE}, the lease on its reservation cannot cover another dispatch, or the budget
+         * is spent and the reserved slot is off or taken). Told apart from {@link #STOP} for the same reason as {@link
+         * #NOWHERE_TO_CROSS}: nothing about this request is uncertain, and the identical request, made again, may well cross.
+         */
+        MAY_NOT_CROSS
     }
 
     /**
@@ -102,6 +118,9 @@ public final class TierRetryPolicy {
     private final boolean requestMovable;
     private boolean reservedSlotUsed;
     private boolean nativeCrossingUsed;
+    // Whether an attempt of the request failed in a way that may have started a generation or been billed. The walk is
+    // narrowed for that and for the age of the request alike, and only the first is what a later answer must not forget.
+    private boolean mayHaveGenerated;
     private Duration leaseWindow;
     private Instant leaseCapAt;
 
@@ -145,7 +164,7 @@ public final class TierRetryPolicy {
         Level level = failed.level();
         walk.attempted(failed.accountId());
         if (!(failed.definitive() && !failed.generationStarted() && notStarted(failed.error()))) {
-            narrow(level, "the failure may have started a generation or been billed");
+            narrowAfterUncertainFailure(level);
         } else if (pastDeadline()) {
             narrow(level, "the request is older than " + CROSS_TIER_DEADLINE.toSeconds() + " seconds");
         }
@@ -181,33 +200,41 @@ public final class TierRetryPolicy {
      * classification: it said the prompt is longer than its window, or would not take the conversion) and says whether
      * the request goes on, once, to the native accounts of a tier below (design 7.8). Not idempotent either.
      *
-     * <p>The refusal is a definitive failure that cost nothing, so what stops a crossing is the request's own state: it
-     * has been narrowed, is a chain that must stay with its owner, is older than {@link #CROSS_TIER_DEADLINE}, has crossed
-     * this way already, has no tier below, or the lease on its reservation cannot cover another dispatch. A crossing is a
-     * dispatch like any other: it takes the budget, or the reserved slot when the budget is spent. The walk is moved below
-     * the tier and loses the relays, so that no relay is asked the same again and the session is not pushed down by it.
+     * <p>The refusal is a definitive failure that cost nothing, so what stops a crossing is the request's own state: an
+     * earlier attempt failed in a way that may have generated or been billed (the request was narrowed for it), it is a
+     * chain that must stay with its owner, or it has crossed this way already (all {@link Outcome#STOP}, whatever the
+     * request's age); it has no tier below ({@link Outcome#NOWHERE_TO_CROSS}); it is older than {@link #CROSS_TIER_DEADLINE},
+     * the lease on its reservation cannot cover another dispatch, or the budget is spent and the reserved slot cannot be
+     * taken (these three {@link Outcome#MAY_NOT_CROSS}). A crossing is a dispatch like any other: it takes the budget, or
+     * the reserved slot when the budget is spent. The walk is moved below the tier and loses the relays, so that no relay is
+     * asked the same again and the session is not pushed down by it.
      */
     public synchronized Outcome onRelayRefusal(FailedAttempt failed) {
         Level level = failed.level();
         walk.attempted(failed.accountId());
         if (!(failed.definitive() && !failed.generationStarted() && notStarted(failed.error()))) {
-            narrow(level, "the failure may have started a generation or been billed");
+            narrowAfterUncertainFailure(level);
+            return Outcome.STOP;
+        }
+        // What has become of the request decides first, and the same whatever its age: a failure that may have generated
+        // is the failure's to tell, so is a chain that must stay with its owner and a crossing that was made already.
+        if (!requestMovable || mayHaveGenerated || nativeCrossingUsed) {
             return Outcome.STOP;
         }
         if (pastDeadline()) {
             narrow(level, "the request is older than " + CROSS_TIER_DEADLINE.toSeconds() + " seconds");
-            return Outcome.STOP;
+            return Outcome.MAY_NOT_CROSS;
         }
-        if (!requestMovable || walk.narrowed() || nativeCrossingUsed || !walk.hasTierBelow(level)) {
-            return Outcome.STOP;
+        if (!walk.hasTierBelow(level)) {
+            return Outcome.NOWHERE_TO_CROSS;
         }
         if (!leaseHasRoomForAnotherDispatch()) {
             log.info("Tiered request is not dispatched again from tier {}: its billing lease cannot cover another dispatch", level.tierRef());
-            return Outcome.STOP;
+            return Outcome.MAY_NOT_CROSS;
         }
         boolean onReservedSlot = walk.dispatchedAccounts() >= failed.accountLimit();
         if (onReservedSlot && !reservedSlotAvailable(failed)) {
-            return Outcome.STOP;
+            return Outcome.MAY_NOT_CROSS;
         }
         reservedSlotUsed |= onReservedSlot;
         nativeCrossingUsed = true;
@@ -251,6 +278,11 @@ public final class TierRetryPolicy {
 
     private boolean pastDeadline() {
         return Duration.between(start, clock.instant()).compareTo(CROSS_TIER_DEADLINE) > 0;
+    }
+
+    private void narrowAfterUncertainFailure(Level level) {
+        mayHaveGenerated = true;
+        narrow(level, "the failure may have started a generation or been billed");
     }
 
     private void narrow(Level level, String reason) {
