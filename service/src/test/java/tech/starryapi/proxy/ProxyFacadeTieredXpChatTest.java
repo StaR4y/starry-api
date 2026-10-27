@@ -261,7 +261,7 @@ class ProxyFacadeTieredXpChatTest {
             dispatched.add(account.getAccountId());
             return Mono.just(OPENAI_ANSWER);
         });
-        when(xpDispatcher.dispatch(any(), any(), any(), any())).thenAnswer(invocation -> {
+        when(xpDispatcher.dispatch(any(), any(), any(), any(), anyBoolean())).thenAnswer(invocation -> {
             ProxyAccountEntity account = invocation.getArgument(0);
             lastDispatch = invocation.getArgument(1);
             lastLimits = invocation.getArgument(2);
@@ -545,7 +545,7 @@ class ProxyFacadeTieredXpChatTest {
 
         assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
         assertThat(dispatched).containsExactly("kiro-1");
-        verify(xpDispatcher, never()).dispatch(any(), any(), any(), any());
+        verify(xpDispatcher, never()).dispatch(any(), any(), any(), any(), anyBoolean());
         // The refusal was asked under the relay's keys all the same.
         assertThat(admissions.getFirst().accountId()).isEqualTo("relay-1");
         assertThat(admissions.getFirst().endpointScope()).isEqualTo("xp:/chat/completions");
@@ -1203,7 +1203,7 @@ class ProxyFacadeTieredXpChatTest {
         anotherSession.withArray("messages").get(0).asObject().put("content", "another conversation");
         assertThat(chat(anotherSession).getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
         assertThat(dispatched).containsExactly("kiro-1", "kiro-1", "kiro-1");
-        verify(xpDispatcher, times(1)).dispatch(any(), any(), any(), any());
+        verify(xpDispatcher, times(1)).dispatch(any(), any(), any(), any(), anyBoolean());
 
         // A short request of the session is the relay's again, and it is billed as the relay's tier.
         relayAnswers.clear();
@@ -1312,7 +1312,7 @@ class ProxyFacadeTieredXpChatTest {
         ResponseEntity<?> retry = chat(chatBody());
         assertThat(dispatched).containsExactly("kiro-1");
         assertThat(retry.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
-        verify(xpDispatcher, times(1)).dispatch(any(), any(), any(), any());
+        verify(xpDispatcher, times(1)).dispatch(any(), any(), any(), any(), anyBoolean());
         // Kiro served it for the relay's sake and not for the tier's being out of room: the session is not bound to it.
         assertThat(bindings.find(binding)).isEmpty();
         dispatched.clear();
@@ -1388,7 +1388,7 @@ class ProxyFacadeTieredXpChatTest {
         assertThat(filter.test(kiro("kiro-1"))).isTrue();
         // An OpenAI-compatible key that is no relay of the vendor is none of the request's concern.
         assertThat(filter.test(account("glm-1", "OpenAI-compatible", "api-key", "https://glm.example/v1"))).isFalse();
-        verify(xpDispatcher, never()).dispatch(any(), any(), any(), any());
+        verify(xpDispatcher, never()).dispatch(any(), any(), any(), any(), anyBoolean());
     }
 
     @Test
@@ -1478,7 +1478,7 @@ class ProxyFacadeTieredXpChatTest {
 
         ResponseEntity<?> response = chat(chatBody());
 
-        verify(xpDispatcher, never()).dispatch(any(), any(), any(), any());
+        verify(xpDispatcher, never()).dispatch(any(), any(), any(), any(), anyBoolean());
         assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
     }
 
@@ -1734,7 +1734,8 @@ class ProxyFacadeTieredXpChatTest {
     }
 
     // The entries that are never read for relays, the Responses entry of Codex and the Gemini one, stay what they were whatever
-    // relay the vendor of the model has and however open its gate is: they pass no facts to the planner (design 3, step 5b).
+    // relay the vendor of the model has and however open its gate is, as long as the registry offers no pair for them: they pass
+    // no facts to the planner (design 3, step 5b). The Responses entry with a pair is ProxyFacadeTieredXpResponsesTest's.
 
     private static final String RESPONSES_PATH = "/v1/responses";
     private static final String GEMINI_PATH = "/v1beta/models/claude-sonnet-4.5:generateContent";

@@ -2589,6 +2589,7 @@
   "Messages 入口": "Messages entry",
   "Claude Code 等 Anthropic 格式的客户端，/v1/messages": "Claude Code and other Anthropic-format clients, /v1/messages",
   "Responses 入口": "Responses entry",
+  "Codex，/v1/responses": "Codex, /v1/responses",
   "Gemini 入口": "Gemini entry",
   "Gemini 格式的客户端，:generateContent": "Gemini-format clients, :generateContent",
   "试用中": "On trial",

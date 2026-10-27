@@ -118,7 +118,7 @@
 
 - 依赖：P2-03, P2-04
 - 文件：`service/src/main/java/tech/starryapi/proxy/tier/TierSessionBindings.java`, `service/src/main/java/tech/starryapi/proxy/tier/TierSessionKeys.java`, `service/src/main/java/tech/starryapi/account/AccountPoolService.java`, `service/src/main/java/tech/starryapi/proxy/ProxyFacade.java`, `service/src/test/java/tech/starryapi/proxy/ProxyFacadeTieredStickyTest.java`
-- 内容：设计 4.7 与 5.2：键含 modelKey；tierSessionKey（可靠 hint、Responses response id 转写、内容指纹）；只在真实降级时写（排除结构剪枝、预算跨级、crossTierOnly、本会话自身并发）；单调；起点与 holdLevels；最后手段回升只进 holdLevels 且未收窄；遵守 session-affinity-enabled；账号移除时清理。
+- 内容：设计 4.7 与 5.2：键含 modelKey；tierSessionKey（可靠 hint、Responses 链按 response id 查到第一轮的会话名、内容指纹）；只在真实降级时写（排除结构剪枝、预算跨级、crossTierOnly、本会话自身并发）；单调；起点与 holdLevels；最后手段回升只进 holdLevels 且未收窄；遵守 session-affinity-enabled；账号移除时清理。
 - 测试：真实降级后停留、10 分钟后回 L1；HARD 特性请求与无映射模型在 L2 服务后下一个普通请求仍从 L1 开始；本会话并发拒绝不改绑定；晚完成的 L1 请求不改回；收窄后不回升；无会话头时内容指纹保持；3 轮 Responses 链降级后保持；sticky=false/PIN 不读写。
 - 验收：符合 I8。
 
@@ -358,15 +358,15 @@
 - 依赖：P6-01
 - 文件：`service/src/main/java/tech/starryapi/platform/xproto/RequestFeatureDetector.java`, `service/src/main/java/tech/starryapi/proxy/tier/DefaultSourceTierPlanner.java`
 - 内容：7.9 RESPONSES 表（透传基线）；不可展开链 HARD 与 409；owner 为跨协议成员时忽略；设计 O9 已由负责人决定（D6，2026-10-26）：`text.verbosity` 的 low/high 对中转成员是 SOFT，与 CHAT 一致。
-- 测试：Codex 请求无 HARD；内置工具 HARD；只剩跨协议时 409。
+- 测试：Codex 请求无 HARD；内置工具按基线（透传型 HARD，Kiro 类 SOFT，设计 O10）；上下文留在 OpenAI 那边的（`conversation`、`prompt`、`item_reference`、compaction）HARD；只有 file_id 的图片按无 vision 处理；只剩跨协议时 409。
 - 验收：与设计一致。
 
 ### P6-03 Responses 入口派发、不记 owner、incomplete
 
 - 依赖：P6-02
-- 文件：`service/src/main/java/tech/starryapi/proxy/ProxyFacade.java`, `service/src/test/java/tech/starryapi/proxy/ProxyFacadeTieredXpResponsesTest.java`
-- 内容：OPENAI_CHAT 时 XpDispatcher，否则 callResponsesWithAccount；跨协议成功时 owner 记 null（不调 rememberResponseOwner，状态存储 accountId 为 null）；绑定按 response id 转写。
-- 测试：Codex 多轮；截断 incomplete；3 轮链降级后保持 L2；跨协议服务后未分级 OPENAI 链不选中中转。
+- 文件：`service/src/main/java/tech/starryapi/proxy/ProxyFacade.java`, `service/src/main/java/tech/starryapi/proxy/XpDispatcher.java`, `service/src/main/java/tech/starryapi/proxy/tier/TierSessionBindings.java`, `service/src/test/java/tech/starryapi/proxy/ProxyFacadeTieredXpResponsesTest.java`
+- 内容：OPENAI_CHAT 时 XpDispatcher，否则 callResponsesWithAccount；跨协议成功时 owner 记 null（不调 rememberResponseOwner，状态存储 accountId 为 null）；本轮产生的 response id 记为本轮会话的一部分（链的下一轮是同一个会话）。
+- 测试：Codex 多轮；截断（网关默认上限处：只有文字按 completed；丢了被截断的调用、只有推理、被内容过滤停下是中断，502 不收费、重试去原生级别；客户端自己的上限给 incomplete 且不带调用，设计 7.10）；链的各轮是同一个会话（3 轮链降级后保持 L2，换了别的模型的一轮之后仍保持）；跨协议服务后未分级 OPENAI 链不选中中转；中转的推理项不记进链历史、不发给 OpenAI 账号；中转被中断后的 2 分钟排除经过中转因特性、缺映射被跳过或别的模型的一轮，仍然对链的下一轮有效。
 - 验收：原生 Responses 不变。
 
 ### P6-04 Responses 夹具与 EXPERIMENTAL

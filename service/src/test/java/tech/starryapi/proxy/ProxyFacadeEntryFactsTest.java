@@ -42,6 +42,7 @@ import tech.starryapi.platform.openai.OpenAiResponseStateStore;
 import tech.starryapi.platform.openai.OpenAiUpstreamClient;
 import tech.starryapi.platform.xproto.PairRegistry.Entry;
 import tech.starryapi.platform.xproto.RequestFeatureDetector.Feature;
+import tech.starryapi.platform.xproto.ResponsesChatConverter;
 import tech.starryapi.proxy.tier.TierEntry;
 import tech.starryapi.proxy.tier.TierEntryFacts;
 import tech.starryapi.proxy.tier.TierPlan;
@@ -60,6 +61,7 @@ import tools.jackson.databind.node.ObjectNode;
 class ProxyFacadeEntryFactsTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final OpenAiResponseStateStore stateStore = new OpenAiResponseStateStore(objectMapper);
     private final DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
     private final ApiKeyService apiKeyService = mock(ApiKeyService.class);
     private final AccountSettingsService accountSettings = mock(AccountSettingsService.class);
@@ -143,6 +145,61 @@ class ProxyFacadeEntryFactsTest {
     }
 
     @Test
+    void aResponsesRequestIsReadAsTheGatewayExpandedItAndCarriesTheConversionThatMakesTheChatBodyOfARelay() {
+        Capturing planner = new Capturing(true);
+        stateStore.remember(response("resp_known", "all done"), responsesBody("claude-sonnet-4.5", "first question"));
+        ObjectNode body = responsesBody("claude-sonnet-4.5", "next question");
+        body.put("previous_response_id", "resp_known");
+        body.put("store", true);
+
+        planner.runWithTheConverter(facade -> facade.responses(body, exchange("/v1/responses")));
+
+        TierPlanRequest seen = planner.seen();
+        assertThat(seen.entry()).isEqualTo(TierEntry.RESPONSES);
+        TierEntryFacts facts = seen.entryFacts();
+        assertThat(facts.detected().entry()).isEqualTo(Entry.RESPONSES);
+        // The chain was expanded here: the history is in the body that is planned over, and the relay is not kept from it.
+        assertThat(facts.detected().has(Feature.PREVIOUS_RESPONSE_ID)).isFalse();
+        assertThat(seen.upstreamRequest().has("previous_response_id")).isFalse();
+        assertThat(seen.upstreamRequest().path("input")).hasSize(3);
+        // The plan is made over the body the native accounts are sent, with the output limit forced ...
+        assertThat(seen.upstreamRequest().has("messages")).isFalse();
+        assertThat(seen.upstreamRequest().path("max_output_tokens").asInt()).isEqualTo(4096);
+        // ... and the relay is given the conversion of that body.
+        JsonNode chat = facts.chatConversion().apply(seen.upstreamRequest());
+        assertThat(chat.path("max_tokens").asInt()).isEqualTo(4096);
+        assertThat(chat.path("messages")).extracting(message -> message.path("role").asString())
+            .containsExactly("user", "assistant", "user");
+        assertThat(chat.path("messages").get(1).path("content").asString()).isEqualTo("all done");
+        assertThat(planner.asked).containsExactly(TierEntry.RESPONSES);
+    }
+
+    @Test
+    void aResponsesChainThisNodeCouldNotExpandIsReadWithTheChainStillNamedInIt() {
+        Capturing planner = new Capturing(true);
+        ObjectNode body = responsesBody("claude-sonnet-4.5", "next question");
+        body.put("previous_response_id", "resp_from_another_node");
+
+        planner.runWithTheConverter(facade -> facade.responses(body, exchange("/v1/responses")));
+
+        assertThat(planner.seen().entryFacts().detected().has(Feature.PREVIOUS_RESPONSE_ID)).isTrue();
+        assertThat(planner.seen().upstreamRequest().path("previous_response_id").asString()).isEqualTo("resp_from_another_node");
+    }
+
+    @Test
+    void aResponsesRequestIsNotReadWhenThePlannerHasNoUseForItOrTheFacadeCannotConvertIt() {
+        Capturing noUse = new Capturing(false);
+        noUse.runWithTheConverter(facade -> facade.responses(responsesBody("claude-sonnet-4.5", "hi"), exchange("/v1/responses")));
+        assertThat(noUse.seen().entryFacts()).isNull();
+
+        // A facade built the way the other tests build it has no converter, and the relays are not offered its requests.
+        Capturing unconverted = new Capturing(true);
+        unconverted.run(facade -> facade.responses(responsesBody("claude-sonnet-4.5", "hi"), exchange("/v1/responses")));
+        assertThat(unconverted.seen().entryFacts()).isNull();
+        assertThat(unconverted.asked).isEmpty();
+    }
+
+    @Test
     void aGeminiRequestIsNotReadSinceNoPairServesIt() {
         Capturing planner = new Capturing(true);
         ObjectNode body = objectMapper.createObjectNode();
@@ -197,6 +254,22 @@ class ProxyFacadeEntryFactsTest {
             Thread.sleep(100);
         }
         return reference.get() == null;
+    }
+
+    private ObjectNode responsesBody(String model, String text) {
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("model", model).put("input", text);
+        return body;
+    }
+
+    /** The response a client was given, as the store remembers it. */
+    private ObjectNode response(String id, String text) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("id", id);
+        ObjectNode message = response.putArray("output").addObject();
+        message.put("type", "message").put("role", "assistant");
+        message.putArray("content").addObject().put("type", "output_text").put("text", text);
+        return response;
     }
 
     private ObjectNode messagesBody() {
@@ -260,7 +333,7 @@ class ProxyFacadeEntryFactsTest {
                 mock(OpenAiUpstreamClient.class),
                 new OpenAiRequestAdapter(objectMapper, modelCatalog),
                 new OpenAiResponseFactory(objectMapper),
-                new OpenAiResponseStateStore(objectMapper),
+                stateStore,
                 new AnthropicRequestAdapter(objectMapper, modelCatalog),
                 new AnthropicResponseFactory(objectMapper),
                 mock(AnthropicUpstreamClient.class),
@@ -275,9 +348,50 @@ class ProxyFacadeEntryFactsTest {
             );
         }
 
+        /** The facade as Spring builds it, with the dispatcher of the relays and the converter of the Responses entry. */
+        ProxyFacade facadeWithTheConverter() {
+            return new ProxyFacade(
+                apiKeyService,
+                mock(AccountPoolService.class),
+                mock(AccountAutoSuspendService.class),
+                accountSettings,
+                mock(DisabledAccountScheduledTestService.class),
+                modelCatalog,
+                modelMappingService,
+                rateLimiter,
+                new KiroPayloadFactory(objectMapper, modelCatalog),
+                mock(KiroUpstreamClient.class),
+                mock(OpenAiUpstreamClient.class),
+                new OpenAiRequestAdapter(objectMapper, modelCatalog),
+                new OpenAiResponseFactory(objectMapper),
+                stateStore,
+                new AnthropicRequestAdapter(objectMapper, modelCatalog),
+                new AnthropicResponseFactory(objectMapper),
+                mock(AnthropicUpstreamClient.class),
+                new GeminiRequestAdapter(objectMapper),
+                new GeminiResponseFactory(objectMapper),
+                mock(PaymentSettingsService.class),
+                mock(ModelPricingService.class),
+                mock(StatsService.class),
+                AccountAdmissionStore.permissive(),
+                mock(OpenAiResponseOwnerStore.class),
+                new TierRuntime(this),
+                mock(XpDispatcher.class),
+                new ResponsesChatConverter(objectMapper)
+            );
+        }
+
+        void runWithTheConverter(java.util.function.Function<ProxyFacade, Mono<?>> call) {
+            run(facadeWithTheConverter(), call);
+        }
+
         /** Subscribes to the request and waits until the planner has seen it; the planner never answers. */
         void run(java.util.function.Function<ProxyFacade, Mono<?>> call) {
-            Disposable subscription = call.apply(facade()).subscribe(ignored -> { }, ignored -> { });
+            run(facade(), call);
+        }
+
+        private void run(ProxyFacade facade, java.util.function.Function<ProxyFacade, Mono<?>> call) {
+            Disposable subscription = call.apply(facade).subscribe(ignored -> { }, ignored -> { });
             try {
                 for (int attempt = 0; attempt < 100 && seen.get() == null; attempt++) {
                     Thread.sleep(10);

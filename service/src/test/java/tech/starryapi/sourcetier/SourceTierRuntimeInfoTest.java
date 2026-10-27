@@ -11,7 +11,7 @@ import tech.starryapi.sourcetier.SourceTierRuntimeInfo.PairStatus;
 class SourceTierRuntimeInfoTest {
 
     @Test
-    void thisReleaseRunsTheNativeTiersTheSelectorsTheAllEndpointsSwitchTheRelayRowsAndTheChatAndMessagesPairsOnTrial() {
+    void thisReleaseRunsTheNativeTiersTheSelectorsTheAllEndpointsSwitchTheRelayRowsAndTheChatMessagesAndResponsesPairsOnTrial() {
         SourceTierRuntimeInfo runtime = new SourceTierRuntimeInfo();
 
         // Native tiering (P2-09), the selectors (P3-01) and the all-endpoints switch (P3-03) are complete: requests are
@@ -22,10 +22,10 @@ class SourceTierRuntimeInfoTest {
         assertThat(runtime.unifyEndpoints()).isTrue();
         // A relay can be registered (P4-10): the pools of untiered traffic leave it out from then on.
         assertThat(runtime.xpMembers()).isTrue();
-        // The Chat and Messages pairs of the anthropic and openai vendors are offered on trial (P5-05): their gates open
-        // to listed keys only. Everything else the cross-protocol phases bring is still off.
+        // The Chat, Messages and Responses pairs of the anthropic and openai vendors are offered on trial (P5-05, P6-04):
+        // their gates open to listed keys only. Everything else the cross-protocol phases bring is still off.
         assertThat(runtime.pairs()).isNotEmpty().allSatisfy(pair -> {
-            boolean offered = List.of("CHAT", "MESSAGES").contains(pair.entryEndpoint())
+            boolean offered = List.of("CHAT", "MESSAGES", "RESPONSES").contains(pair.entryEndpoint())
                 && List.of("anthropic", "openai").contains(pair.vendor());
             assertThat(runtime.pairStatus(pair.vendor(), pair.sourceProtocol(), pair.entryEndpoint()))
                 .as(pair.toString()).isEqualTo(offered ? PairStatus.EXPERIMENTAL : PairStatus.NOT_OFFERED);

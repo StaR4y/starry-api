@@ -86,6 +86,7 @@ import tech.starryapi.platform.openai.OpenAiUpstreamClient;
 import tech.starryapi.platform.xproto.PairRegistry;
 import tech.starryapi.platform.xproto.PairRegistry.Entry;
 import tech.starryapi.platform.xproto.PairRegistry.PairKey;
+import tech.starryapi.platform.xproto.ResponsesChatConverter;
 import tech.starryapi.proxy.tier.DefaultSourceTierPlanner;
 import tech.starryapi.proxy.tier.TierEntry;
 import tech.starryapi.proxy.tier.TierPlan;
@@ -130,8 +131,10 @@ import tools.jackson.databind.node.ObjectNode;
  * gate.json               the pair's gate, {state, keys}, where it is not KEYS and the key of the requests
  * native.json             {accounts: false} where the tier below the relay has no account in service
  * turns/N/follow-up.json  the messages the client adds for turn N (N >= 2) after the answer of turn N-1, with "${tool.I}"
- *                         for the id of the I-th tool call the client was given
- * turns/N/request.json    or the whole request of turn N, where a conversation is not the one the answers made
+ *                         for the id of the I-th tool call the client was given (the items it adds, for the Responses entry)
+ * turns/N/request.json    or the whole request of turn N, where a conversation is not the one the answers made; with
+ *                         "${response.id}" for the id of the response that answered turn N-1 (a Responses client that
+ *                         continues a chain by {@code previous_response_id} and sends only what is new)
  * turns/N/relay.json      what the relay answers turn N
  * </pre>
  *
@@ -144,16 +147,23 @@ import tools.jackson.databind.node.ObjectNode;
  * route.json              the relays left out of the plan, and every attempt with what the request log says of it
  * </pre>
  *
- * Ids the gateway makes at random (the id of a message, the time it was created) are replaced by placeholders; the ids of
- * the tool calls it mints come from a generator with a fixed seed, so a case always sees the same ones. A case that
- * has a file nothing reads, or a turn the vendor's tiers do not plan, is refused rather than played.
+ * Ids the gateway makes at random (the id of a message, a response or an item, the time it was created) are replaced by
+ * placeholders; the ids of the tool calls it mints come from a generator with a fixed seed, so a case always sees the
+ * same ones. A case that has a file nothing reads, or a turn the vendor's tiers do not plan, is refused rather than
+ * played.
  *
- * <p><b>Where the inputs come from.</b> The requests are what Claude Code 2.1.168 and OpenCode 1.18.16 send, captured by
- * running the installed clients against a local server that answered what a scenario said (a tool call, then an answer),
- * each in a sandbox that allowed loopback only, with a throwaway home and configuration directory and dummy keys. Every
- * id, key and path in a capture is a placeholder, the system prompts and the long tool descriptions are shortened, and
- * the tool list is cut to the tools a case uses (one case keeps all of Claude Code's); a case that is not a capture says
- * in its {@code case.json} what it was derived from. The relay's answers are authored from the documented Chat
+ * <p>The Responses entry is played as Codex uses it: it sends its whole history every turn ({@code store: false}), each
+ * turn adding the items of the answer as it replays them (the message and the calls without their ids, the reasoning
+ * item without its id) and whatever the follow-up says. The requests carry the headers of Codex that the gateway reads
+ * ({@code session-id}, {@code originator}), and a gpt model asked for by Codex is served by Codex accounts, so the native
+ * tier of the openai vendor has one.
+ *
+ * <p><b>Where the inputs come from.</b> The requests are what Claude Code 2.1.168, OpenCode 1.18.16 and Codex 0.142.5
+ * send, captured by running the installed clients against a local server that answered what a scenario said (a tool call,
+ * then an answer), each in a sandbox that allowed loopback only, with a throwaway home and configuration directory and
+ * dummy keys. Every id, key and path in a capture is a placeholder, the system prompts and the long tool descriptions are
+ * shortened, and the tool list is cut to the tools a case uses (one case keeps all of Claude Code's); a case that is not
+ * a capture says in its {@code case.json} what it was derived from. The relay's answers are authored from the documented Chat
  * Completions shapes, never recorded from a service. The expected files are what this harness produced when the case was
  * added, read through and accepted; {@code XprotoFixtureRecorder} rewrites them when the behavior is changed on purpose.
  */
@@ -163,8 +173,11 @@ public final class XpPairHarness {
     private static final String KEY_ID = "key-1";
     private static final String RELAY_KEY = "sk-relay-0000";
     private static final Pattern RANDOM_ID = Pattern.compile("(msg_|chatcmpl-)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
+    /** The ids of the items and the responses of the Responses API, which the factory makes from a UUID with the dashes left out. */
+    private static final Pattern RANDOM_ITEM_ID = Pattern.compile("(resp_|msg_|fc_|ctc_|rs_)[0-9a-f]{32}");
     private static final Pattern CREATED = Pattern.compile("(\"created(?:_at)?\":\\s*)\\d+");
     private static final Pattern TOOL_PLACEHOLDER = Pattern.compile("\\$\\{tool\\.(\\d+)}");
+    private static final String RESPONSE_PLACEHOLDER = "${response.id}";
     /** The request headers a relay may be sent, and no others: the client's own are never forwarded (design 7.12). */
     private static final Set<String> RELAY_HEADERS = Set.of(
         "accept", "accept-encoding", "authorization", "connection", "content-length", "content-type", "host", "user-agent");
@@ -478,10 +491,17 @@ public final class XpPairHarness {
             kiro.setRegion("us-east-1");
             ProxyAccountEntity openai = account("openai-1", "OpenAI", "api-key", null);
             openai.setAccessToken("sk-openai-0000");
+            ProxyAccountEntity codex = account("codex-1", "OpenAI", "codex", null);
+            codex.setAccessToken("codex-token");
             cached.add(relayAccount);
             // The tier below the relay has the accounts of every native route unless the case says there are none in service.
             if (!input.has("native.json") || JSON.readTree(input.get("native.json")).path("accounts").asBoolean(true)) {
                 cached.addAll(List.of(anthropic, kiro, openai));
+                // Codex asks for a gpt model of the Codex accounts (its originator header says it is Codex), and only the
+                // Responses entry is Codex, so the accounts of the other entries are the ones they always were.
+                if (pair.entry() == Entry.RESPONSES) {
+                    cached.add(codex);
+                }
             }
 
             when(payments.config()).thenReturn(Mono.just(paymentConfig()));
@@ -517,6 +537,7 @@ public final class XpPairHarness {
                 return Mono.empty();
             });
             when(ownerStore.remember(anyString(), anyString())).thenReturn(Mono.empty());
+            when(ownerStore.findOwner(anyString())).thenReturn(Mono.empty());
             when(accountPool.recordSuccess(anyString(), anyLong(), any())).thenReturn(Mono.empty());
             when(accountPool.recordRequestFailure(anyString(), any(AccountPoolService.UpstreamErrorType.class), any(), anyString(),
                 any(AccountPoolRequestContext.class))).thenReturn(Mono.empty());
@@ -557,6 +578,11 @@ public final class XpPairHarness {
                 natives.add(new Native(account.getAccountId(), toolIds(invocation.getArgument(1))));
                 return Mono.just(NATIVE_ANSWER);
             });
+            when(openAiClient.completeResponses(any(), any(), anyString())).thenAnswer(invocation -> {
+                ProxyAccountEntity account = invocation.getArgument(0);
+                natives.add(new Native(account.getAccountId(), toolIds(invocation.getArgument(1))));
+                return Mono.just(NATIVE_ANSWER);
+            });
             when(registry.snapshot()).thenReturn(snapshot());
         }
 
@@ -570,7 +596,8 @@ public final class XpPairHarness {
         private static void collectToolIds(JsonNode node, List<String> ids) {
             if (node.isObject()) {
                 node.properties().forEach(field -> {
-                    boolean id = (field.getKey().equals("toolUseId") || field.getKey().equals("tool_call_id")) && field.getValue().isString();
+                    boolean id = (field.getKey().equals("toolUseId") || field.getKey().equals("tool_call_id") || field.getKey().equals("call_id"))
+                        && field.getValue().isString();
                     if (id) {
                         ids.add(field.getValue().asString());
                     } else if (field.getKey().equals("tool_calls") && field.getValue().isArray()) {
@@ -666,7 +693,7 @@ public final class XpPairHarness {
                 new OpenAiRequestAdapter(JSON, modelCatalog), new OpenAiResponseFactory(JSON), new OpenAiResponseStateStore(JSON),
                 new AnthropicRequestAdapter(JSON, modelCatalog), new AnthropicResponseFactory(JSON), anthropicClient,
                 new GeminiRequestAdapter(JSON), new GeminiResponseFactory(JSON), payments, pricing, statsService, admissionStore,
-                ownerStore, new TierRuntime(recording, bindings, learnedLimits), dispatcher);
+                ownerStore, new TierRuntime(recording, bindings, learnedLimits), dispatcher, new ResponsesChatConverter(JSON));
         }
 
         // ---- the conversation ----
@@ -744,15 +771,32 @@ public final class XpPairHarness {
 
         private ObjectNode nextRequest(ObjectNode previousRequest, Reply previous, String prefix, int turn) {
             if (input.has(prefix + "request.json")) {
-                return (ObjectNode) JSON.readTree(input.get(prefix + "request.json"));
+                String whole = new String(input.get(prefix + "request.json"), StandardCharsets.UTF_8);
+                if (whole.contains(RESPONSE_PLACEHOLDER)) {
+                    String id = previous == null || previous.status() != 200 ? null : responseId(previous);
+                    if (id == null) {
+                        throw new IllegalStateException(caseId + ": " + prefix + "request.json continues the response of turn "
+                            + (turn - 1) + ", which was not answered with one");
+                    }
+                    whole = whole.replace(RESPONSE_PLACEHOLDER, id);
+                }
+                return (ObjectNode) JSON.readTree(whole);
             }
             if (previous == null || previous.status() != 200) {
                 throw new IllegalStateException(caseId + ": turn " + (turn - 1) + " was not answered, so turn " + turn + " has no history");
             }
             ObjectNode request = previousRequest.deepCopy();
-            ArrayNode messages = request.withArray("messages");
+            // A Responses client sends its history as the items of the input; the others as messages.
+            ArrayNode messages = request.withArray(pair.entry() == Entry.RESPONSES ? "input" : "messages");
             List<String> toolIds = new ArrayList<>();
-            if (pair.entry() == Entry.MESSAGES) {
+            if (pair.entry() == Entry.RESPONSES) {
+                for (JsonNode item : replayedItems(previous)) {
+                    messages.add(item);
+                    if (item.path("type").asString("").endsWith("_call")) {
+                        toolIds.add(item.path("call_id").asString());
+                    }
+                }
+            } else if (pair.entry() == Entry.MESSAGES) {
                 ArrayNode content = assistantBlocks(previous);
                 content.forEach(block -> {
                     if ("tool_use".equals(block.path("type").asString())) {
@@ -790,6 +834,70 @@ public final class XpPairHarness {
             JsonNode added = JSON.readTree(substituted.toString());
             added.forEach(messages::add);
             return request;
+        }
+
+        /** The id of the response a Responses client was answered with: the body's, or the one the last event of the stream carries. */
+        private String responseId(Reply reply) {
+            JsonNode response = finalResponse(reply);
+            return response == null || !response.path("id").isString() ? null : response.path("id").asString();
+        }
+
+        /** The response the answer is, or the one the last event of the stream carries; null when there is none. */
+        private static JsonNode finalResponse(Reply reply) {
+            if (reply.body() != null) {
+                return reply.body();
+            }
+            JsonNode response = null;
+            if (reply.events() != null) {
+                for (ObjectNode event : reply.events()) {
+                    String type = event.path("data").path("type").asString("");
+                    if ((type.equals("response.completed") || type.equals("response.incomplete")) && event.path("data").path("response").isObject()) {
+                        response = event.path("data").path("response");
+                    }
+                }
+            }
+            return response;
+        }
+
+        /**
+         * The items of an answer as Codex puts them back into its history: what a client keeps of each item, which is not
+         * the id nor the status the API gave it (the status of a custom tool call it keeps), a message of the model as its
+         * text parts, a reasoning item with the fields it has.
+         */
+        private ArrayNode replayedItems(Reply reply) {
+            ArrayNode items = JSON.createArrayNode();
+            JsonNode response = finalResponse(reply);
+            if (response == null) {
+                return items;
+            }
+            for (JsonNode item : response.path("output")) {
+                ObjectNode replayed = JSON.createObjectNode();
+                switch (item.path("type").asString("")) {
+                    case "message" -> {
+                        replayed.put("type", "message").put("role", item.path("role").asString("assistant"));
+                        ArrayNode content = replayed.putArray("content");
+                        for (JsonNode part : item.path("content")) {
+                            content.addObject().put("type", part.path("type").asString("output_text")).put("text", part.path("text").asString(""));
+                        }
+                    }
+                    case "function_call" -> replayed.put("type", "function_call").put("name", item.path("name").asString(""))
+                        .put("arguments", item.path("arguments").asString("")).put("call_id", item.path("call_id").asString(""));
+                    case "custom_tool_call" -> replayed.put("type", "custom_tool_call").put("status", item.path("status").asString("completed"))
+                        .put("call_id", item.path("call_id").asString("")).put("name", item.path("name").asString(""))
+                        .put("input", item.path("input").asString(""));
+                    case "reasoning" -> {
+                        replayed.put("type", "reasoning");
+                        replayed.set("summary", item.has("summary") ? item.path("summary").deepCopy() : JSON.createArrayNode());
+                        replayed.set("content", item.path("content").isArray() ? item.path("content").deepCopy() : JSON.nullNode());
+                        replayed.set("encrypted_content", item.path("encrypted_content").isString() ? item.path("encrypted_content") : JSON.nullNode());
+                    }
+                    default -> {
+                        continue;
+                    }
+                }
+                items.add(replayed);
+            }
+            return items;
         }
 
         private static void stripCacheControl(JsonNode content) {
@@ -925,12 +1033,24 @@ public final class XpPairHarness {
         // ---- sending ----
 
         private Reply send(ObjectNode request) {
-            String path = pair.entry() == Entry.MESSAGES ? "/v1/messages" : "/v1/chat/completions";
+            String path = switch (pair.entry()) {
+                case MESSAGES -> "/v1/messages";
+                case RESPONSES -> "/v1/responses";
+                default -> "/v1/chat/completions";
+            };
             MockServerHttpRequest.BaseBuilder<?> builder = MockServerHttpRequest.post(path);
-            builder.header(pair.entry() == Entry.MESSAGES ? "x-claude-code-session-id" : "x-session-id",
-                pair.entry() == Entry.MESSAGES ? "11111111-1111-1111-1111-111111111111" : "ses_00000000000000000000000000");
+            switch (pair.entry()) {
+                case MESSAGES -> builder.header("x-claude-code-session-id", "11111111-1111-1111-1111-111111111111");
+                case RESPONSES -> builder.header("session-id", "11111111-1111-1111-1111-111111111111")
+                    .header("originator", "codex_exec").header("user-agent", "codex_exec/0.142.5 (Mac OS 27.0.0; arm64) dumb");
+                default -> builder.header("x-session-id", "ses_00000000000000000000000000");
+            }
             MockServerWebExchange exchange = MockServerWebExchange.from(builder);
-            Mono<ResponseEntity<?>> call = pair.entry() == Entry.MESSAGES ? facade.messages(request, exchange) : facade.chat(request, exchange);
+            Mono<ResponseEntity<?>> call = switch (pair.entry()) {
+                case MESSAGES -> facade.messages(request, exchange);
+                case RESPONSES -> facade.responses(request, exchange);
+                default -> facade.chat(request, exchange);
+            };
             try {
                 ResponseEntity<?> response = call.block(Duration.ofSeconds(60));
                 return reply(response);
@@ -1130,6 +1250,7 @@ public final class XpPairHarness {
             out.append('\n');
             String text = out.toString();
             text = RANDOM_ID.matcher(text).replaceAll("$1<id>");
+            text = RANDOM_ITEM_ID.matcher(text).replaceAll("$1<id>");
             return CREATED.matcher(text).replaceAll("$10");
         }
 

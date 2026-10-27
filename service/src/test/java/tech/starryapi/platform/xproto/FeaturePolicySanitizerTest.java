@@ -39,11 +39,21 @@ class FeaturePolicySanitizerTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final AnthropicRequestAdapter ADAPTER = new AnthropicRequestAdapter(JSON, new DefaultModelCatalogProvider());
+    private static final ResponsesChatConverter CONVERTER = new ResponsesChatConverter(JSON);
 
     /** The labels the sanitizer records, which the policy has to use for the same things. */
     private static final Set<Feature> SHARED = EnumSet.of(
         Feature.IMAGE, Feature.AUDIO, Feature.FILE, Feature.CACHE_CONTROL, Feature.JSON_SCHEMA, Feature.THINKING,
         Feature.REASONING_EFFORT, Feature.TOOL_SEARCH, Feature.TOOL_CHOICE
+    );
+
+    /**
+     * What the sanitizer can see of a Responses request after the conversion: the conversion gives it the images and files of
+     * the user's messages, the response schema, the effort and the choice of a tool, and drops the audio, the tools it has no
+     * function for and the reasoning items before the sanitizer is asked.
+     */
+    private static final Set<Feature> SHARED_RESPONSES = EnumSet.of(
+        Feature.IMAGE, Feature.FILE, Feature.JSON_SCHEMA, Feature.REASONING_EFFORT, Feature.TOOL_CHOICE
     );
 
     private record Sample(String name, Entry entry, String body) {
@@ -61,6 +71,14 @@ class FeaturePolicySanitizerTest {
 
     private static String user(String content) {
         return "{\"role\":\"user\",\"content\":" + content + "}";
+    }
+
+    private static final String RESPONSES_USER = "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"q\"}]}";
+    private static final String RESPONSES_CALL = "{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"f\",\"arguments\":\"{}\"}";
+    private static final String RESPONSES_ANSWER = "{\"type\":\"function_call_output\",\"call_id\":\"c1\",\"output\":\"r\"}";
+
+    private static String responses(String extra, String... items) {
+        return "{\"model\":\"claude-sonnet-4.5\"" + (extra.isEmpty() ? "" : "," + extra) + ",\"input\":[" + String.join(",", items) + "]}";
     }
 
     private static String anthropic(String extra, String... messages) {
@@ -122,6 +140,52 @@ class FeaturePolicySanitizerTest {
         samples.add(new Sample("chat, thinking budget", Entry.CHAT,
             chat("\"thinking\":{\"type\":\"enabled\",\"budget_tokens\":2000}", user("\"q\""))));
         samples.add(new Sample("chat, fields only a native account is handed", Entry.CHAT, chat(NATIVE_ONLY_FIELDS, user("\"q\""))));
+        samples.add(new Sample("responses, codex for a claude model", Entry.RESPONSES, CodexRequests.CLAUDE_TURN));
+        samples.add(new Sample("responses, codex for a gpt model", Entry.RESPONSES, CodexRequests.GPT_TURN));
+        samples.add(new Sample("responses, image, file and schema", Entry.RESPONSES, responses(
+            "\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"s\",\"schema\":{\"type\":\"object\"}}}",
+            "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"look\"},"
+                + "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0KGgo=\"},{\"type\":\"input_file\",\"file_id\":\"f1\"}]}")));
+        samples.add(new Sample("responses, an image that is only a file of OpenAI", Entry.RESPONSES, responses("",
+            "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"what is this?\"},"
+                + "{\"type\":\"input_image\",\"file_id\":\"file-abc123\",\"detail\":\"auto\"}]}")));
+        samples.add(new Sample("responses, an image by URL and another that is only a file", Entry.RESPONSES, responses("",
+            "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_image\",\"image_url\":\"https://x.example/a.png\"},"
+                + "{\"type\":\"input_image\",\"file_id\":\"file-abc123\"}]}")));
+        samples.add(new Sample("responses, audio", Entry.RESPONSES, responses("",
+            "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"hear\"},"
+                + "{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"AAAA\",\"format\":\"wav\"}}]}")));
+        samples.add(new Sample("responses, effort on a new turn", Entry.RESPONSES, responses("\"reasoning\":{\"effort\":\"high\"}", RESPONSES_USER)));
+        samples.add(new Sample("responses, effort on a tool continuation", Entry.RESPONSES, responses("\"reasoning\":{\"effort\":\"high\"}",
+            RESPONSES_USER, RESPONSES_CALL, RESPONSES_ANSWER)));
+        samples.add(new Sample("responses, effort on a tool continuation with the user's words after the answer", Entry.RESPONSES,
+            responses("\"reasoning\":{\"effort\":\"minimal\"}", RESPONSES_USER, RESPONSES_CALL, RESPONSES_ANSWER, RESPONSES_USER)));
+        samples.add(new Sample("responses, effort after a turn the assistant ended", Entry.RESPONSES, responses("\"reasoning\":{\"effort\":\"high\"}",
+            RESPONSES_USER, RESPONSES_CALL, RESPONSES_ANSWER, "{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"done\"}", RESPONSES_USER)));
+        samples.add(new Sample("responses, effort with the reasoning of the turns before it", Entry.RESPONSES, responses("\"reasoning\":{\"effort\":\"low\"}",
+            RESPONSES_USER, "{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[]}", RESPONSES_CALL, RESPONSES_ANSWER,
+            "{\"type\":\"reasoning\",\"id\":\"rs_2\",\"summary\":[]}")));
+        samples.add(new Sample("responses, tool choices a relay is given", Entry.RESPONSES, responses(
+            "\"tools\":[{\"type\":\"function\",\"name\":\"f\"},{\"type\":\"custom\",\"name\":\"apply_patch\"}],"
+                + "\"tool_choice\":{\"type\":\"custom\",\"name\":\"apply_patch\"}", RESPONSES_USER)));
+        samples.add(new Sample("responses, tool choice that restricts the tools", Entry.RESPONSES, responses(
+            "\"tools\":[{\"type\":\"function\",\"name\":\"f\"},{\"type\":\"function\",\"name\":\"g\"}],"
+                + "\"tool_choice\":{\"type\":\"allowed_tools\",\"mode\":\"required\",\"tools\":[{\"type\":\"function\",\"name\":\"g\"}]}",
+            RESPONSES_USER)));
+        samples.add(new Sample("responses, tool choice of a tool the conversion leaves out", Entry.RESPONSES, responses(
+            "\"tools\":[{\"type\":\"function\",\"name\":\"f\"},{\"type\":\"web_search\"}],\"tool_choice\":{\"type\":\"web_search\"}",
+            RESPONSES_USER)));
+        samples.add(new Sample("responses, tool choice of a function nobody declared", Entry.RESPONSES, responses(
+            "\"tools\":[{\"type\":\"function\",\"name\":\"f\"}],\"tool_choice\":{\"type\":\"function\",\"name\":\"g\"}", RESPONSES_USER)));
+        samples.add(new Sample("responses, a tool choice without a function to choose from", Entry.RESPONSES, responses(
+            "\"tools\":[{\"type\":\"web_search\"}],\"tool_choice\":\"required\"", RESPONSES_USER)));
+        samples.add(new Sample("responses, everything at once", Entry.RESPONSES, responses(
+            "\"reasoning\":{\"effort\":\"low\"},\"include\":[\"reasoning.encrypted_content\"],\"store\":true,\"prompt_cache_key\":\"k\","
+                + "\"text\":{\"verbosity\":\"high\",\"format\":{\"type\":\"json_schema\",\"name\":\"s\",\"schema\":{\"type\":\"object\"}}},"
+                + "\"tools\":[{\"type\":\"function\",\"name\":\"f\"},{\"type\":\"namespace\",\"name\":\"n\",\"tools\":[]}],\"tool_choice\":\"auto\"",
+            "{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"rules\"}]}",
+            "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"look\"},"
+                + "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0KGgo=\"},{\"type\":\"input_file\",\"file_id\":\"f1\"}]}")));
         samples.add(new Sample("chat, everything at once", Entry.CHAT, chat("\"reasoning_effort\":\"low\"," + SCHEMA,
             "{\"role\":\"developer\",\"content\":[" + CACHED_TEXT + "]}",
             user("[" + CACHED_TEXT + "," + IMAGE_PART + ",{\"type\":\"file\",\"file\":{\"file_id\":\"f1\"}}]"))));
@@ -140,9 +204,11 @@ class FeaturePolicySanitizerTest {
     }
 
     private static Wire wire(Sample sample, JsonNode body, Settings settings) {
-        return sample.entry() == Entry.MESSAGES
-            ? ChatWireSanitizer.sanitize(ADAPTER.messagesToChat(body), body, settings, "relay-model")
-            : ChatWireSanitizer.sanitize(body, null, settings, "relay-model");
+        return switch (sample.entry()) {
+            case MESSAGES -> ChatWireSanitizer.sanitize(ADAPTER.messagesToChat(body), body, settings, "relay-model");
+            case RESPONSES -> ChatWireSanitizer.sanitize(CONVERTER.toChat(body), null, settings, "relay-model");
+            default -> ChatWireSanitizer.sanitize(body, null, settings, "relay-model");
+        };
     }
 
     /**
@@ -232,6 +298,57 @@ class FeaturePolicySanitizerTest {
                     }
                     assertThat(degraded).as("%s, %s, %s", sample.name(), baseline, settings).isEqualTo(expected);
                 }
+            }
+        }
+    }
+
+    @Test
+    void onResponsesRequestsTheTwoAgreeBothWaysOnTheFeaturesTheyShare() {
+        boolean noneSeen = true;
+        for (Sample sample : samples()) {
+            if (sample.entry() != Entry.RESPONSES) {
+                continue;
+            }
+            noneSeen = false;
+            JsonNode body = JSON.readTree(sample.body());
+            Detected detected = RequestFeatureDetector.detect(Entry.RESPONSES, body);
+            for (int bits = 0; bits < COMBINATIONS; bits++) {
+                Settings settings = settings(bits);
+                Set<String> degraded = new LinkedHashSet<>(withoutRepairs(wire(sample, body, settings).degraded()));
+                for (Baseline baseline : Baseline.values()) {
+                    Set<String> expected = new LinkedHashSet<>();
+                    for (Feature feature : SHARED_RESPONSES) {
+                        if (detected.has(feature) && FeaturePolicy.treatment(feature, detected, baseline, settings) != Treatment.CARRY) {
+                            expected.add(feature.label());
+                        }
+                    }
+                    assertThat(degraded).as("%s, %s, %s", sample.name(), baseline, settings).isEqualTo(expected);
+                }
+            }
+        }
+        assertThat(noneSeen).isFalse();
+    }
+
+    /**
+     * The conversion keeps the text of a developer message and nothing else, so the sanitizer is never given the image of one
+     * and records nothing: the policy alone names the loss, and does so for a member with vision too.
+     */
+    @Test
+    void anImageInADeveloperMessageIsNamedByThePolicyAlthoughTheSanitizerNeverSeesIt() {
+        JsonNode body = JSON.readTree(responses("",
+            "{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"use this logo\"},"
+                + "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0KGgo=\"}]}",
+            RESPONSES_USER));
+        Detected detected = RequestFeatureDetector.detect(Entry.RESPONSES, body);
+
+        for (int bits = 0; bits < COMBINATIONS; bits++) {
+            Settings settings = settings(bits);
+            Wire wire = wire(new Sample("developer image", Entry.RESPONSES, ""), body, settings);
+            assertThat(wire.degraded()).as("%s", settings).doesNotContain(Feature.IMAGE.label());
+            assertThat(wire.body().toString()).doesNotContain("image_url");
+            for (Baseline baseline : Baseline.values()) {
+                assertThat(FeaturePolicy.treatment(Feature.IMAGE, detected, baseline, settings)).as("%s %s", baseline, settings)
+                    .isEqualTo(baseline == Baseline.PASSTHROUGH ? Treatment.HARD : Treatment.SOFT);
             }
         }
     }
@@ -362,6 +479,6 @@ class FeaturePolicySanitizerTest {
             seen.addAll(RequestFeatureDetector.detect(sample.entry(), JSON.readTree(sample.body())).features());
         }
 
-        assertThat(seen).containsAll(SHARED);
+        assertThat(seen).containsAll(SHARED).containsAll(SHARED_RESPONSES);
     }
 }

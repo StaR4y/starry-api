@@ -17,7 +17,7 @@ import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
 /**
- * Design 7.9: what is found in the requests of the Messages and Chat entries. A feature is found by where the wire
+ * Design 7.9: what is found in the requests of the Messages, Chat and Responses entries. A feature is found by where the wire
  * format puts it, so the negative cases matter as much as the positive ones: a tool input with a {@code cache_control}
  * key and a question about {@code web_search} are not features. The Claude Code request is the shape of the main loop
  * (adaptive thinking with an effort, cache control on the system prompt, a tool and a user text, a deferred tool and
@@ -37,6 +37,10 @@ class RequestFeatureDetectorTest {
 
     private static Detected chat(String json) {
         return RequestFeatureDetector.detect(Entry.CHAT, tree(json));
+    }
+
+    private static Detected responses(String json) {
+        return RequestFeatureDetector.detect(Entry.RESPONSES, tree(json));
     }
 
     private static String messagesBody(String extra, String messages) {
@@ -611,6 +615,343 @@ class RequestFeatureDetectorTest {
         return chat(chatBody("", "[" + String.join(",", messages) + "]")).toolContinuation();
     }
 
+    // ---------------------------------------------------------------------------------------- Responses
+
+    private static String responsesBody(String extra, String input) {
+        return "{\"model\":\"claude-sonnet-4.5\"" + (extra.isEmpty() ? "" : "," + extra) + ",\"input\":" + input + "}";
+    }
+
+    private static final String FUNCTION_F = "{\"type\":\"function\",\"name\":\"f\",\"parameters\":{\"type\":\"object\"}}";
+    private static final String USER_TEXT = "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"q\"}]}";
+
+    @Test
+    void theCodexRequestForAClaudeModelHasTheFeaturesItAlwaysHasAndNoHardOne() {
+        Detected detected = responses(CodexRequests.CLAUDE_TURN);
+
+        // The web search and the namespace are in every request of the client; the empty include and the store flag set to
+        // false say nothing; the client's own metadata is not read.
+        assertThat(detected.features()).containsExactlyInAnyOrder(Feature.BUILTIN_TOOL, Feature.PROMPT_CACHE_KEY);
+        assertThat(detected.entry()).isEqualTo(Entry.RESPONSES);
+        assertThat(detected.toolContinuation()).isFalse();
+        assertThat(detected.reasoningUnmapped()).isFalse();
+    }
+
+    @Test
+    void theCodexRequestForAGptModelAddsItsReasoningTheEncryptedReasoningAndTheVerbosity() {
+        Detected detected = responses(CodexRequests.GPT_TURN);
+
+        assertThat(detected.features()).containsExactlyInAnyOrder(
+            Feature.BUILTIN_TOOL, Feature.REASONING_EFFORT, Feature.INCLUDE, Feature.VERBOSITY, Feature.PROMPT_CACHE_KEY
+        );
+    }
+
+    @Test
+    void aPlainTextRequestOfTheResponsesApiHasNoFeature() {
+        assertThat(responses(responsesBody("\"instructions\":\"Be brief\",\"temperature\":0.2,\"top_p\":0.9,\"max_output_tokens\":100,\"stream\":true",
+            "\"hello\"")).features()).isEmpty();
+        assertThat(responses(responsesBody("", "[" + USER_TEXT + "]")).features()).isEmpty();
+        assertThat(responses("{}").features()).isEmpty();
+    }
+
+    @Test
+    void functionsTheEditingToolAndTheirCallsAndAnswersAreCarried() {
+        Detected detected = responses(responsesBody("\"tools\":[" + FUNCTION_F + ",{\"type\":\"custom\",\"name\":\"apply_patch\"},"
+            + "{\"type\":\"function\",\"name\":\"apply_patch\",\"parameters\":{}},{\"name\":\"untyped\"}],"
+            + "\"tool_choice\":{\"type\":\"function\",\"name\":\"f\"},\"parallel_tool_calls\":true", "["
+            + USER_TEXT + ",{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"f\",\"arguments\":\"{}\"},"
+            + "{\"type\":\"function_call_output\",\"call_id\":\"c1\",\"output\":\"ok\"},"
+            + "{\"type\":\"custom_tool_call\",\"call_id\":\"c2\",\"name\":\"apply_patch\",\"input\":\"*** Begin Patch\"},"
+            + "{\"type\":\"custom_tool_call_output\",\"call_id\":\"c2\",\"output\":\"done\"},"
+            + "{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}]"));
+
+        assertThat(detected.features()).isEmpty();
+    }
+
+    // ---- the tools ----
+
+    @Test
+    void aCustomToolOtherThanTheEditingToolIsAFeatureNoRelayCarries() {
+        assertThat(responses(responsesBody("\"tools\":[" + FUNCTION_F + ",{\"type\":\"custom\",\"name\":\"shell\",\"format\":{\"type\":\"text\"}}]",
+            "[" + USER_TEXT + "]")).features()).containsExactly(Feature.CUSTOM_TOOL);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "web_search", "web_search_preview", "web_search_2025_08_26", "file_search", "code_interpreter", "image_generation",
+        "computer_use_preview", "computer", "mcp", "local_shell", "tool_search", "namespace", "a_tool_of_a_later_api"
+    })
+    void aToolThatIsNeitherAFunctionNorACustomToolIsABuiltInTool(String type) {
+        assertThat(responses(responsesBody("\"tools\":[" + FUNCTION_F + ",{\"type\":\"" + type + "\"}]", "[" + USER_TEXT + "]")).features())
+            .containsExactly(Feature.BUILTIN_TOOL);
+    }
+
+    @Test
+    void aFunctionWithoutANameIsNothingAsTheConversionLeavesItOut() {
+        assertThat(responses(responsesBody("\"tools\":[{\"type\":\"function\",\"parameters\":{}},{\"type\":\"function\",\"name\":\" \"},"
+            + "null,\"x\",{\"type\":5}]", "[" + USER_TEXT + "]")).features()).isEmpty();
+    }
+
+    @Test
+    void aToolChoiceIsAFeatureWhenTheRelayHasNoWordForItOrTheToolIsNotCarried() {
+        String tools = "\"tools\":[" + FUNCTION_F + ",{\"type\":\"custom\",\"name\":\"apply_patch\"},{\"type\":\"web_search\"}],";
+        for (String carried : List.of("\"auto\"", "\"none\"", "\"required\"", "{\"type\":\"function\",\"name\":\"f\"}",
+            "{\"type\":\"function\",\"function\":{\"name\":\"f\"}}", "{\"type\":\"custom\",\"name\":\"apply_patch\"}",
+            "{\"type\":\"function\",\"name\":\"apply_patch\"}")) {
+            assertThat(responses(responsesBody(tools + "\"tool_choice\":" + carried, "[" + USER_TEXT + "]")).features())
+                .as(carried).containsExactly(Feature.BUILTIN_TOOL);
+        }
+        for (String left : List.of("{\"type\":\"allowed_tools\",\"mode\":\"auto\",\"tools\":[{\"type\":\"function\",\"name\":\"f\"}]}",
+            "{\"type\":\"web_search\"}", "{\"type\":\"function\",\"name\":\"not_declared\"}", "{\"type\":\"custom\",\"name\":\"shell\"}",
+            "{\"type\":\"function\"}", "\"web_search\"", "{}")) {
+            assertThat(responses(responsesBody(tools + "\"tool_choice\":" + left, "[" + USER_TEXT + "]")).features())
+                .as(left).containsExactlyInAnyOrder(Feature.BUILTIN_TOOL, Feature.TOOL_CHOICE);
+        }
+    }
+
+    @Test
+    void aToolChoiceOfARequestWithoutAFunctionIsNotReadAsTheConversionLeavesItOut() {
+        assertThat(responses(responsesBody("\"tools\":[{\"type\":\"web_search\"}],\"tool_choice\":{\"type\":\"allowed_tools\",\"tools\":[]}",
+            "[" + USER_TEXT + "]")).features()).containsExactly(Feature.BUILTIN_TOOL);
+        assertThat(responses(responsesBody("\"tool_choice\":{\"type\":\"allowed_tools\",\"tools\":[]}", "[" + USER_TEXT + "]")).features())
+            .isEmpty();
+    }
+
+    // ---- the chain ----
+
+    @Test
+    void aPreviousResponseIdThatIsStillInTheExpandedRequestIsAChainThisNodeCouldNotExpand() {
+        assertThat(responses(responsesBody("\"previous_response_id\":\"resp_0123\"", "[" + USER_TEXT + "]")).features())
+            .containsExactly(Feature.PREVIOUS_RESPONSE_ID);
+        for (String quiet : List.of("null", "\"\"", "\"  \"")) {
+            assertThat(responses(responsesBody("\"previous_response_id\":" + quiet, "[" + USER_TEXT + "]")).features())
+                .as(quiet).isEmpty();
+        }
+    }
+
+    // ---- the input ----
+
+    @Test
+    void theImagesAndFilesOfTheMessagesOfTheUserAreFoundWhereTheConversionCarriesThem() {
+        String parts = "[{\"type\":\"input_text\",\"text\":\"look\"},{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0KGgo=\"},"
+            + "{\"type\":\"input_file\",\"file_id\":\"file-1\"},{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"AAAA\",\"format\":\"wav\"}}]";
+
+        Detected user = responses(responsesBody("", "[{\"type\":\"message\",\"role\":\"user\",\"content\":" + parts + "}]"));
+        assertThat(user.features()).containsExactlyInAnyOrder(Feature.IMAGE, Feature.FILE, Feature.AUDIO);
+        assertThat(user.imageNotCarried()).isFalse();
+        // An item without a type but with a role is a message, as the conversion has it.
+        Detected untyped = responses(responsesBody("", "[{\"role\":\"user\",\"content\":" + parts + "}]"));
+        assertThat(untyped.features()).containsExactlyInAnyOrder(Feature.IMAGE, Feature.FILE, Feature.AUDIO);
+        assertThat(untyped.imageNotCarried()).isFalse();
+    }
+
+    /**
+     * What the assistant, the developer or the system wrote is its text, whatever else the item holds: the conversion keeps
+     * nothing of the parts of such a message, so a relay would answer without them. An image of them is found, and said not
+     * to be one that any member can carry.
+     */
+    @Test
+    void thePartsOfAMessageThatIsNotTheUsersAreLostAndSaySo() {
+        String parts = "[{\"type\":\"input_text\",\"text\":\"look\"},{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0KGgo=\"},"
+            + "{\"type\":\"input_file\",\"file_id\":\"file-1\"},{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"AAAA\",\"format\":\"wav\"}}]";
+
+        for (String role : List.of("assistant", "developer", "system")) {
+            Detected detected = responses(responsesBody("", "[{\"type\":\"message\",\"role\":\"" + role + "\",\"content\":" + parts + "}]"));
+            assertThat(detected.features()).as(role).containsExactlyInAnyOrder(Feature.IMAGE, Feature.FILE, Feature.AUDIO);
+            assertThat(detected.imageNotCarried()).as(role).isTrue();
+        }
+        // Text is all they hold otherwise.
+        assertThat(responses(responsesBody("", "[{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"rules\"}]}]"))
+            .features()).isEmpty();
+    }
+
+    /**
+     * An image that is only a file of OpenAI (the conversion writes an {@code image_url} without a URL, which the sanitizer
+     * replaces with a note) is not an image any member carries, whatever its setting for vision. The images that name a URL
+     * are, and the fields of the part decide it as the conversion reads them.
+     */
+    @Test
+    void anImageThatIsOnlyAFileIsFoundAsOneNoMemberCarries() {
+        for (String image : List.of("{\"type\":\"input_image\",\"file_id\":\"file-abc123\"}",
+            "{\"type\":\"input_image\",\"file_id\":\"file-abc123\",\"detail\":\"auto\"}",
+            "{\"type\":\"input_image\",\"image_url\":\"\",\"file_id\":\"file-abc123\"}",
+            "{\"type\":\"input_image\",\"image_url\":\"  \"}", "{\"type\":\"input_image\",\"image_url\":{}}", "{\"type\":\"input_image\"}")) {
+            Detected detected = responses(responsesBody("", "[{\"type\":\"message\",\"role\":\"user\",\"content\":"
+                + "[{\"type\":\"input_text\",\"text\":\"what is this?\"}," + image + "]}]"));
+            assertThat(detected.features()).as(image).containsExactly(Feature.IMAGE);
+            assertThat(detected.imageNotCarried()).as(image).isTrue();
+        }
+        for (String image : List.of("{\"type\":\"input_image\",\"image_url\":\"https://x.example/a.png\"}",
+            "{\"type\":\"input_image\",\"image_url\":{\"url\":\"https://x.example/a.png\",\"detail\":\"low\"}}",
+            "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0KGgo=\",\"file_id\":\"file-abc123\"}")) {
+            Detected detected = responses(responsesBody("", "[{\"type\":\"message\",\"role\":\"user\",\"content\":[" + image + "]}]"));
+            assertThat(detected.features()).as(image).containsExactly(Feature.IMAGE);
+            assertThat(detected.imageNotCarried()).as(image).isFalse();
+        }
+        // One image that cannot be carried is enough: the request as a whole loses an image.
+        assertThat(responses(responsesBody("", "[{\"type\":\"message\",\"role\":\"user\",\"content\":["
+            + "{\"type\":\"input_image\",\"image_url\":\"https://x.example/a.png\"},{\"type\":\"input_image\",\"file_id\":\"file-1\"}]}]"))
+            .imageNotCarried()).isTrue();
+    }
+
+    @Test
+    void anImageInTheOutputOfAToolIsAFeatureOfItsOwn() {
+        String output = "[{\"type\":\"input_text\",\"text\":\"saved\"},{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0KGgo=\"},"
+            + "{\"type\":\"input_file\",\"file_id\":\"file-1\"}]";
+        String call = "{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"view_image\",\"arguments\":\"{}\"}";
+
+        assertThat(responses(responsesBody("", "[" + USER_TEXT + "," + call + ",{\"type\":\"function_call_output\",\"call_id\":\"c1\",\"output\":"
+            + output + "}]")).features()).containsExactlyInAnyOrder(Feature.TOOL_OUTPUT_IMAGE, Feature.FILE);
+        assertThat(responses(responsesBody("", "[" + USER_TEXT + "," + call + ",{\"type\":\"custom_tool_call_output\",\"call_id\":\"c1\",\"output\":"
+            + output + "}]")).features()).containsExactlyInAnyOrder(Feature.TOOL_OUTPUT_IMAGE, Feature.FILE);
+        // A text output, as a string or a list, is carried.
+        assertThat(responses(responsesBody("", "[" + USER_TEXT + "," + call + ",{\"type\":\"function_call_output\",\"call_id\":\"c1\","
+            + "\"output\":[{\"type\":\"input_text\",\"text\":\"saved\"}]}]")).features()).isEmpty();
+    }
+
+    @Test
+    void theReasoningOfEarlierTurnsIsFoundAndWhatTheConversionLeavesOutWithoutAWordIsNot() {
+        assertThat(responses(responsesBody("", "[" + USER_TEXT + ",{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[],"
+            + "\"encrypted_content\":\"gAAAA\"}]")).features()).containsExactly(Feature.HISTORY_THINKING);
+        assertThat(responses(responsesBody("", "[" + USER_TEXT + ","
+            + "{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"completed\"},{\"type\":\"a_later_item\"},null,5]")).features())
+            .isEmpty();
+    }
+
+    /**
+     * Context the server holds and the request only points at is lost by the conversion, and a native OpenAI account would
+     * have resolved it: a stored prompt, a conversation, an item of an earlier response, the compaction of a history.
+     */
+    @Test
+    void contextTheServerHoldsIsFoundWhereverTheRequestPointsAtIt() {
+        assertThat(responses(responsesBody("\"conversation\":\"conv_abc123\"", "[" + USER_TEXT + "]")).features())
+            .containsExactly(Feature.SERVER_HELD_CONTEXT);
+        assertThat(responses(responsesBody("\"conversation\":{\"id\":\"conv_abc123\"}", "[" + USER_TEXT + "]")).features())
+            .containsExactly(Feature.SERVER_HELD_CONTEXT);
+        assertThat(responses(responsesBody("\"prompt\":{\"id\":\"pmpt_abc\",\"variables\":{\"city\":\"Paris\"}}", "[" + USER_TEXT + "]")).features())
+            .containsExactly(Feature.SERVER_HELD_CONTEXT);
+        assertThat(responses(responsesBody("", "[{\"type\":\"item_reference\",\"id\":\"msg_stored_earlier\"}," + USER_TEXT + "]")).features())
+            .containsExactly(Feature.SERVER_HELD_CONTEXT);
+        assertThat(responses(responsesBody("", "[{\"type\":\"compaction\",\"encrypted_content\":\"gAAAA\"}," + USER_TEXT + "]")).features())
+            .containsExactly(Feature.SERVER_HELD_CONTEXT);
+        assertThat(responses(responsesBody("", "[{\"type\":\"compaction_summary\",\"encrypted_content\":\"gAAAA\"}," + USER_TEXT + "]")).features())
+            .containsExactly(Feature.SERVER_HELD_CONTEXT);
+        // Nothing filled in is nothing.
+        for (String quiet : List.of("\"conversation\":null", "\"conversation\":\"\"", "\"conversation\":{}", "\"conversation\":{\"id\":\" \"}",
+            "\"prompt\":null", "\"prompt\":{}", "\"prompt\":\"\"")) {
+            assertThat(responses(responsesBody(quiet, "[" + USER_TEXT + "]")).features()).as(quiet).isEmpty();
+        }
+    }
+
+    @Test
+    void theCapOnToolCallsAndTheSummaryOfTheReasoningAreFoundAsFieldsThatAreOnlyLeftOut() {
+        assertThat(responses(responsesBody("\"max_tool_calls\":2", "[" + USER_TEXT + "]")).features()).containsExactly(Feature.MAX_TOOL_CALLS);
+        assertThat(responses(responsesBody("\"max_tool_calls\":null", "[" + USER_TEXT + "]")).features()).isEmpty();
+        for (String summary : List.of("auto", "concise", "detailed")) {
+            Detected detected = responses(responsesBody("\"reasoning\":{\"summary\":\"" + summary + "\"}", "[" + USER_TEXT + "]"));
+            assertThat(detected.features()).as(summary).containsExactly(Feature.REASONING_SUMMARY);
+        }
+        // A client that is configured to want no summary says none.
+        for (String quiet : List.of("null", "\"\"", "\"none\"", "\" None \"")) {
+            assertThat(responses(responsesBody("\"reasoning\":{\"summary\":" + quiet + "}", "[" + USER_TEXT + "]")).features())
+                .as(quiet).isEmpty();
+        }
+    }
+
+    // ---- reasoning, format and the fields only left out ----
+
+    @ParameterizedTest
+    @CsvSource({"minimal", "low", "medium", "high", "xhigh", "none", "a-level-of-a-later-api"})
+    void aReasoningEffortIsTheFeatureTheSanitizerSeesAndIsAlwaysMapped(String effort) {
+        Detected detected = responses(responsesBody("\"reasoning\":{\"effort\":\"" + effort + "\"}", "[" + USER_TEXT + "]"));
+
+        assertThat(detected.features()).containsExactly(Feature.REASONING_EFFORT);
+        assertThat(detected.reasoningUnmapped()).isFalse();
+    }
+
+    @Test
+    void noEffortIsNoReasoningRequest() {
+        for (String reasoning : List.of("null", "{}", "{\"effort\":null}", "{\"effort\":\"\"}", "{\"effort\":\" \"}", "\"high\"")) {
+            assertThat(responses(responsesBody("\"reasoning\":" + reasoning, "[" + USER_TEXT + "]")).features())
+                .as(reasoning).isEmpty();
+        }
+    }
+
+    @Test
+    void aResponseSchemaIsFoundAsTheConversionCarriesItAndAJsonObjectIsNot() {
+        assertThat(responses(responsesBody("\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"s\",\"schema\":{\"type\":\"object\"},\"strict\":true}}",
+            "[" + USER_TEXT + "]")).features()).containsExactly(Feature.JSON_SCHEMA);
+        for (String format : List.of("{\"type\":\"json_object\"}", "{\"type\":\"text\"}", "{\"type\":\"json_schema\",\"name\":\"s\"}", "\"json_schema\"")) {
+            assertThat(responses(responsesBody("\"text\":{\"format\":" + format + "}", "[" + USER_TEXT + "]")).features())
+                .as(format).isEmpty();
+        }
+    }
+
+    @Test
+    void aVerbosityIsAdviceAboutTheLengthAndMediumIsTheDefault() {
+        for (String level : List.of("low", "high", "a-level-of-a-later-api")) {
+            assertThat(responses(responsesBody("\"text\":{\"verbosity\":\"" + level + "\"}", "[" + USER_TEXT + "]")).features())
+                .as(level).containsExactly(Feature.VERBOSITY);
+        }
+        for (String quiet : List.of("\"medium\"", "\" Medium \"", "null", "\"\"")) {
+            assertThat(responses(responsesBody("\"text\":{\"verbosity\":" + quiet + "}", "[" + USER_TEXT + "]")).features())
+                .as(quiet).isEmpty();
+        }
+    }
+
+    @Test
+    void theFieldsThatAreOnlyLeftOutAreSoftFeaturesOfTheResponsesApi() {
+        String body = responsesBody("\"include\":[\"reasoning.encrypted_content\"],\"store\":true,\"truncation\":\"auto\","
+            + "\"prompt_cache_key\":\"k\",\"prompt_cache_retention\":\"24h\",\"safety_identifier\":\"u-hash\",\"metadata\":{\"a\":\"b\"},"
+            + "\"user\":\"u\",\"top_logprobs\":3,\"service_tier\":\"flex\"", "[" + USER_TEXT + "]");
+
+        assertThat(responses(body).features()).containsExactlyInAnyOrder(Feature.INCLUDE, Feature.STORE, Feature.TRUNCATION,
+            Feature.PROMPT_CACHE_KEY, Feature.PROMPT_CACHE_RETENTION, Feature.SAFETY_IDENTIFIER, Feature.METADATA, Feature.USER,
+            Feature.LOGPROBS, Feature.SERVICE_TIER);
+    }
+
+    @Test
+    void theSoftFieldsOfTheResponsesApiAtTheirQuietValuesAreNothing() {
+        String body = responsesBody("\"include\":[],\"store\":false,\"truncation\":\"disabled\",\"prompt_cache_key\":\"\","
+            + "\"prompt_cache_retention\":null,\"safety_identifier\":\" \",\"metadata\":{},\"user\":\"\",\"top_logprobs\":null,"
+            + "\"service_tier\":\"auto\",\"background\":false,\"client_metadata\":{\"session_id\":\"s\"}", "[" + USER_TEXT + "]");
+
+        // service_tier "auto" is a tier and not one of the two that mean fast.
+        assertThat(responses(body).features()).containsExactly(Feature.SERVICE_TIER);
+        assertThat(responses(body.replace("\"service_tier\":\"auto\"", "\"service_tier\":\"priority\"")).features()).isEmpty();
+        assertThat(responses(body.replace("\"service_tier\":\"auto\"", "\"service_tier\":\"fast\"")).features()).isEmpty();
+    }
+
+    // ---- tool continuation, Responses ----
+
+    @Test
+    void toolContinuationOfResponsesIsTheConversionsReading() {
+        String call = "{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"f\",\"arguments\":\"{}\"}";
+        String answer = "{\"type\":\"function_call_output\",\"call_id\":\"c1\",\"output\":\"r\"}";
+        String customAnswer = "{\"type\":\"custom_tool_call_output\",\"call_id\":\"c2\",\"output\":\"r\"}";
+        String reasoning = "{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[]}";
+        String assistant = "{\"type\":\"message\",\"role\":\"assistant\",\"content\":\"a\"}";
+
+        assertThat(responsesContinuation(USER_TEXT)).isFalse();
+        assertThat(responsesContinuation(USER_TEXT, call, answer)).isTrue();
+        assertThat(responsesContinuation(USER_TEXT, call, customAnswer)).isTrue();
+        // The items the conversion leaves out, and the user's text after the answer, are the same turn.
+        assertThat(responsesContinuation(USER_TEXT, call, answer, reasoning)).isTrue();
+        assertThat(responsesContinuation(USER_TEXT, call, answer, USER_TEXT, "{\"type\":\"item_reference\",\"id\":\"m\"}")).isTrue();
+        assertThat(responsesContinuation(USER_TEXT, call, answer, assistant)).isFalse();
+        assertThat(responsesContinuation(USER_TEXT, call, answer, assistant, USER_TEXT)).isFalse();
+        // A call the model made and nobody answered, and what the developer said, are not an answer.
+        assertThat(responsesContinuation(USER_TEXT, answer, call)).isFalse();
+        assertThat(responsesContinuation(USER_TEXT, answer, "{\"type\":\"message\",\"role\":\"developer\",\"content\":\"d\"}")).isFalse();
+        assertThat(responsesContinuation(USER_TEXT, answer, "{\"type\":\"message\",\"role\":\"a-role-of-a-later-api\",\"content\":\"d\"}")).isTrue();
+        assertThat(responsesContinuation("{\"role\":\"assistant\",\"content\":\"a\"}")).isFalse();
+        assertThat(responses("{\"input\":\"text\"}").toolContinuation()).isFalse();
+        assertThat(responses("{}").toolContinuation()).isFalse();
+    }
+
+    private static boolean responsesContinuation(String... items) {
+        return responses(responsesBody("", "[" + String.join(",", items) + "]")).toolContinuation();
+    }
+
     // ---------------------------------------------------------------------------------------- both
 
     @Test
@@ -621,9 +962,13 @@ class RequestFeatureDetectorTest {
         JsonNode chat = tree(chatBody("\"n\":3,\"reasoning_effort\":\"low\"", oneUserMessage("[{\"type\":\"image_url\",\"image_url\":{\"url\":\"u\"}}]")));
         JsonNode chatCopy = chat.deepCopy();
         RequestFeatureDetector.detect(Entry.CHAT, chat);
+        JsonNode codex = tree(CodexRequests.GPT_TURN);
+        JsonNode codexCopy = codex.deepCopy();
+        RequestFeatureDetector.detect(Entry.RESPONSES, codex);
 
         assertThat(body).isEqualTo(copy);
         assertThat(chat).isEqualTo(chatCopy);
+        assertThat(codex).isEqualTo(codexCopy);
     }
 
     @Test
@@ -634,7 +979,7 @@ class RequestFeatureDetectorTest {
     }
 
     @ParameterizedTest
-    @EnumSource(value = Entry.class, names = {"RESPONSES", "GEMINI"})
+    @EnumSource(value = Entry.class, names = {"GEMINI"})
     void anEntryWithoutATableIsNeverCleared(Entry entry) {
         Detected detected = RequestFeatureDetector.detect(entry, tree("{\"model\":\"m\"}"));
 
@@ -658,6 +1003,10 @@ class RequestFeatureDetectorTest {
             + "\"tools\":[null,\"x\"],\"stop\":7,\"n\":\"two\",\"modalities\":\"audio\",\"service_tier\":3}").features()).isEmpty();
         assertThat(messages("{}").features()).isEmpty();
         assertThat(chat("{}").features()).isEmpty();
+        assertThat(responses("{\"input\":[null,1,\"x\",{\"type\":7},{\"role\":5,\"content\":[null,3,{\"type\":7}]},{\"type\":\"function_call_output\",\"output\":7},"
+            + "{\"type\":\"message\",\"role\":\"user\",\"content\":{\"type\":\"input_image\"}}],\"tools\":[null,\"x\",{\"type\":5},{\"function\":7}],"
+            + "\"tool_choice\":7,\"text\":\"plain\",\"reasoning\":7,\"include\":\"x\",\"metadata\":3,\"truncation\":4}").features())
+            .containsExactlyInAnyOrder(Feature.INCLUDE, Feature.METADATA, Feature.TRUNCATION);
     }
 
     @Test
@@ -677,5 +1026,6 @@ class RequestFeatureDetectorTest {
         assertThat(Feature.PROMPT_CACHE_KEY.label()).isEqualTo("prompt_cache_key");
         assertThat(Feature.PROMPT_CACHE_RETENTION.label()).isEqualTo("prompt_cache_retention");
         assertThat(Feature.SAFETY_IDENTIFIER.label()).isEqualTo("safety_identifier");
+        assertThat(Feature.PREVIOUS_RESPONSE_ID.label()).isEqualTo("previous_response_id");
     }
 }

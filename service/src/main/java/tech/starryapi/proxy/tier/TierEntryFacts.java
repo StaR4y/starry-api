@@ -1,6 +1,7 @@
 package tech.starryapi.proxy.tier;
 
 import java.util.Objects;
+import java.util.function.UnaryOperator;
 import tech.starryapi.platform.xproto.ChatWireSanitizer;
 import tech.starryapi.platform.xproto.PairRegistry;
 import tech.starryapi.platform.xproto.RequestFeatureDetector;
@@ -14,14 +15,25 @@ import tools.jackson.databind.JsonNode;
  * {@code output_config}), so this is taken from the original and the original is let go: neither part refers to the body,
  * and a body with large base64 images is not kept alive for the minutes an upstream call can take.
  *
+ * <p>The Responses entry is planned over its own body: that is what its native accounts are sent, what the reservation is
+ * sized from (it counts the reasoning of the history, which a relay is not given) and what names the session. A relay is
+ * given a Chat body made from it (design 7.6), which {@code chatConversion} makes when a relay is looked at.
+ *
  * @param detected the features of the request, with the entry they were found for
  * @param entryDigest what {@link ChatWireSanitizer#sanitize} reads of the original body ({@link
  *     ChatWireSanitizer#entryDigest}); null for the Chat entry, whose Chat body is the client's own
+ * @param chatConversion how the body the request is planned over is made into the Chat body a relay is given; null when
+ *     that body already is one (the Chat entry, and Messages, whose conversion came before the plan)
  */
-public record TierEntryFacts(Detected detected, JsonNode entryDigest) {
+public record TierEntryFacts(Detected detected, JsonNode entryDigest, UnaryOperator<JsonNode> chatConversion) {
 
     public TierEntryFacts {
         Objects.requireNonNull(detected, "detected");
+    }
+
+    /** Facts for a request that is planned over a Chat body. */
+    public TierEntryFacts(Detected detected, JsonNode entryDigest) {
+        this(detected, entryDigest, null);
     }
 
     /** @param clientBody the request as the client sent it; the Chat entry's body is its own Chat body */
@@ -29,5 +41,18 @@ public record TierEntryFacts(Detected detected, JsonNode entryDigest) {
         PairRegistry.Entry registryEntry = PairRegistry.Entry.valueOf(entry.name());
         Detected detected = RequestFeatureDetector.detect(registryEntry, clientBody);
         return new TierEntryFacts(detected, registryEntry == PairRegistry.Entry.CHAT ? null : ChatWireSanitizer.entryDigest(clientBody));
+    }
+
+    /** The same facts, with the conversion that makes the planned body into the Chat body of a relay. */
+    public TierEntryFacts withChatConversion(UnaryOperator<JsonNode> conversion) {
+        return new TierEntryFacts(detected, entryDigest, conversion);
+    }
+
+    /**
+     * The Chat body a relay is given of the request: the body it was planned over when that is one, else its conversion.
+     * It may fail; the caller treats a body that cannot be made as a conversion the relay cannot serve.
+     */
+    JsonNode chatBody(JsonNode planned) {
+        return chatConversion == null ? planned : chatConversion.apply(planned);
     }
 }

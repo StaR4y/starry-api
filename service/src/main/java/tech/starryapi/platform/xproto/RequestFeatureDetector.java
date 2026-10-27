@@ -2,13 +2,16 @@ package tech.starryapi.platform.xproto;
 
 import java.util.Collections;
 import java.util.EnumSet;
+import java.util.HashSet;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
+import tech.starryapi.platform.openai.ApplyPatchEmulation;
 import tech.starryapi.platform.xproto.ChatWireSanitizer.Requested;
 import tech.starryapi.platform.xproto.PairRegistry.Entry;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.JsonNodeFactory;
+import tools.jackson.databind.node.ObjectNode;
 
 /**
  * Finds out what a client's request asks for that an OpenAI-format relay may not be able to give (design 7.9). It reads
@@ -32,10 +35,11 @@ import tools.jackson.databind.node.JsonNodeFactory;
  * features of the Chat entry are kept joined by {@code FeaturePolicySanitizerTest}. Headers are not read, since none
  * reaches a relay.
  *
- * <p>Two entries are known, the ones of design 7.9 that this release can convert: {@link Entry#MESSAGES} (the Anthropic
- * request of Claude Code) and {@link Entry#CHAT}. Any other entry is reported as {@link Feature#UNSUPPORTED_ENTRY},
- * which no member can carry, so that a caller that asks for an entry whose table has not been written cannot send a
- * request to a relay unchecked. The Responses and Gemini tables join with the tasks that write their converters.
+ * <p>Three entries are known, the ones of design 7.9 that this release can convert: {@link Entry#MESSAGES} (the Anthropic
+ * request of Claude Code), {@link Entry#CHAT} and {@link Entry#RESPONSES} (the request of Codex, as the gateway has
+ * expanded it, see {@link #detect}). Any other entry is reported as {@link Feature#UNSUPPORTED_ENTRY}, which no member
+ * can carry, so that a caller that asks for an entry whose table has not been written cannot send a request to a relay
+ * unchecked. The Gemini table joins with the task that writes its converter.
  *
  * <p>The body is not changed, and the detector keeps no state.
  */
@@ -73,6 +77,20 @@ public final class RequestFeatureDetector {
         ANTHROPIC_DEFINED_TOOL("anthropic_defined_tool"),
         MCP_SERVERS("mcp_servers"),
         CONTAINER("container"),
+        /**
+         * A Responses request that continues a response this node could not expand into its history: the relay would be
+         * given the last turn alone. A native Kiro route does the same as it always did (design 4.8, 7.9).
+         */
+        PREVIOUS_RESPONSE_ID("previous_response_id"),
+        /**
+         * Context of a Responses request that the server holds and the request only points at: a {@code conversation}, a
+         * stored {@code prompt}, an {@code item_reference} in the input, a {@code compaction} item (the history Codex
+         * summarised into text only OpenAI can read). The conversion leaves all of them out, so a relay would answer
+         * without the context and be paid for it. Native OpenAI accounts are handed the body whole and resolve them.
+         */
+        SERVER_HELD_CONTEXT("server_held_context"),
+        /** A custom tool of a Responses request other than {@code apply_patch}: a relay's functions cannot stand for its calls. */
+        CUSTOM_TOOL("custom_tool"),
         /** The request is billed as fast: only a member with a priority tier gives what is paid for. Never detected from the body. */
         FAST("fast"),
         /** The entry has no table in this release. */
@@ -83,6 +101,19 @@ public final class RequestFeatureDetector {
         DOCUMENT("document"),
         AUDIO(ChatWireSanitizer.AUDIO),
         FILE(ChatWireSanitizer.FILE),
+        /**
+         * A tool of a Responses request that is neither a function nor {@code apply_patch}: the ones OpenAI runs ({@code
+         * web_search}, {@code file_search}, {@code code_interpreter}, {@code image_generation}, {@code computer_use}, {@code
+         * mcp}), and the ones the client's tool search adds ({@code tool_search}, {@code namespace}). A relay is given
+         * none of them. Codex 0.142.5 declares a {@code web_search} whatever the model, so what leaving it out comes to
+         * is the baseline's to say (design 7.9, {@link FeaturePolicy}).
+         */
+        BUILTIN_TOOL("builtin_tool"),
+        /**
+         * An image in the output of a tool ({@code view_image} of Codex), which the conversion to Chat has no place for:
+         * the text of the output is all a tool message holds.
+         */
+        TOOL_OUTPUT_IMAGE("tool_output_image"),
         /** A {@code tool_choice} of a kind the relay's format has no word for ({@code allowed_tools}): the model would be offered every tool. */
         TOOL_CHOICE(ChatWireSanitizer.TOOL_CHOICE),
         JSON_SCHEMA(ChatWireSanitizer.JSON_SCHEMA),
@@ -115,6 +146,14 @@ public final class RequestFeatureDetector {
          * {@code medium} is the default and is not a feature.
          */
         VERBOSITY("verbosity"),
+        /** The {@code include} of a Responses request: what the answer is to carry besides itself (Codex asks for its encrypted reasoning). */
+        INCLUDE("include"),
+        /** A {@code truncation} of a Responses request other than the default, {@code disabled}. */
+        TRUNCATION("truncation"),
+        /** The {@code max_tool_calls} of a Responses request: a cap on the calls of the tools OpenAI runs, which no relay is given. */
+        MAX_TOOL_CALLS("max_tool_calls"),
+        /** The {@code reasoning.summary} of a Responses request: a relay returns its reasoning as it has it, not as a summary. */
+        REASONING_SUMMARY("reasoning_summary"),
         LOGPROBS("logprobs"),
         USER("user"),
         STORE("store"),
@@ -149,12 +188,21 @@ public final class RequestFeatureDetector {
      * @param reasoningUnmapped the client asked for reasoning at a level no relay setting has a name for (an {@code
      *                          output_config.effort} of a kind this release does not know): it is left out, whatever
      *                          the member
+     * @param imageNotCarried   one of the images of the request is an image the conversion to Chat has no place for, so
+     *                          that no member can carry {@link Feature#IMAGE} whatever its vision setting: an image given
+     *                          only by its {@code file_id} (a relay cannot read the files of OpenAI), or in a message that
+     *                          is not the user's (the text is all the conversion keeps of a developer message)
      */
-    public record Detected(Entry entry, Set<Feature> features, boolean toolContinuation, boolean reasoningUnmapped) {
+    public record Detected(Entry entry, Set<Feature> features, boolean toolContinuation, boolean reasoningUnmapped,
+                           boolean imageNotCarried) {
 
         public Detected {
             Objects.requireNonNull(entry, "entry");
             features = features.isEmpty() ? Set.of() : Collections.unmodifiableSet(EnumSet.copyOf(features));
+        }
+
+        public Detected(Entry entry, Set<Feature> features, boolean toolContinuation, boolean reasoningUnmapped) {
+            this(entry, features, toolContinuation, reasoningUnmapped, false);
         }
 
         public boolean has(Feature feature) {
@@ -170,7 +218,10 @@ public final class RequestFeatureDetector {
 
     /**
      * @param entry the endpoint the request came in through
-     * @param body  the request as the client sent it: the Anthropic body for Messages, the Chat body for Chat
+     * @param body  the request as the client sent it: the Anthropic body for Messages, the Chat body for Chat, and for
+     *              Responses the body after the gateway expanded its {@code previous_response_id} into the input
+     *              ({@code OpenAiResponseStateStore#expand}), so that one that is still there is one this node could not
+     *              expand
      */
     public static Detected detect(Entry entry, JsonNode body) {
         Objects.requireNonNull(entry, "entry");
@@ -180,7 +231,8 @@ public final class RequestFeatureDetector {
         return switch (entry) {
             case MESSAGES -> messages(body);
             case CHAT -> chat(body);
-            case RESPONSES, GEMINI -> new Detected(entry, EnumSet.of(Feature.UNSUPPORTED_ENTRY), false, false);
+            case RESPONSES -> responses(body);
+            case GEMINI -> new Detected(entry, EnumSet.of(Feature.UNSUPPORTED_ENTRY), false, false);
         };
     }
 
@@ -547,6 +599,248 @@ public final class RequestFeatureDetector {
         }
         String normalized = tier.stringValue().strip().toLowerCase(Locale.ROOT);
         return !normalized.equals("priority") && !normalized.equals("fast");
+    }
+
+    // ---- Responses ----
+
+    /**
+     * What a Codex request asks for, read the way {@link ResponsesChatConverter} will convert it (design 7.9, RESPONSES):
+     * a thing is a feature where the conversion does not carry it, and what the conversion carries is none, so that the
+     * policy never promises a relay what the Chat body does not hold. The body is the expanded one, whose input holds
+     * the history of its chain; a {@code previous_response_id} that is still in it is a chain this node could not expand,
+     * which a relay cannot be given (design 4.8).
+     */
+    private static Detected responses(JsonNode body) {
+        EnumSet<Feature> found = EnumSet.noneOf(Feature.class);
+        if (filled(body.path("previous_response_id"))) {
+            found.add(Feature.PREVIOUS_RESPONSE_ID);
+        }
+        if (heldByTheServer(body)) {
+            found.add(Feature.SERVER_HELD_CONTEXT);
+        }
+        if (body.hasNonNull("max_tool_calls")) {
+            found.add(Feature.MAX_TOOL_CALLS);
+        }
+        if (asksForReasoningSummary(body.path("reasoning").path("summary"))) {
+            found.add(Feature.REASONING_SUMMARY);
+        }
+        if (filled(body.path("include"))) {
+            found.add(Feature.INCLUDE);
+        }
+        if (body.path("store").isBoolean() && body.path("store").booleanValue()) {
+            found.add(Feature.STORE);
+        }
+        JsonNode truncation = body.path("truncation");
+        if (filled(truncation) && !"disabled".equalsIgnoreCase(truncation.stringValue("").strip())) {
+            found.add(Feature.TRUNCATION);
+        }
+        if (filled(body.path("prompt_cache_key"))) {
+            found.add(Feature.PROMPT_CACHE_KEY);
+        }
+        if (filled(body.path("prompt_cache_retention"))) {
+            found.add(Feature.PROMPT_CACHE_RETENTION);
+        }
+        if (filled(body.path("safety_identifier"))) {
+            found.add(Feature.SAFETY_IDENTIFIER);
+        }
+        if (filled(body.path("metadata"))) {
+            found.add(Feature.METADATA);
+        }
+        if (filled(body.path("user"))) {
+            found.add(Feature.USER);
+        }
+        if (body.hasNonNull("top_logprobs")) {
+            found.add(Feature.LOGPROBS);
+        }
+        if (otherServiceTier(body.path("service_tier"))) {
+            found.add(Feature.SERVICE_TIER);
+        }
+        JsonNode text = body.path("text");
+        if (changesTheLength(text.path("verbosity"))) {
+            found.add(Feature.VERBOSITY);
+        }
+        if (jsonSchemaFormat(text.path("format")) && text.path("format").path("schema").isObject()) {
+            found.add(Feature.JSON_SCHEMA);
+        }
+        boolean unmapped = responsesReasoning(body.path("reasoning").path("effort"), found);
+        responsesTools(body, found);
+        JsonNode input = body.path("input");
+        boolean[] imageNotCarried = new boolean[1];
+        if (input.isArray()) {
+            for (JsonNode item : input) {
+                if (item.isObject()) {
+                    responsesItem(item, found, imageNotCarried);
+                }
+            }
+        }
+        return new Detected(Entry.RESPONSES, found, responsesToolContinuation(input), unmapped, imageNotCarried[0]);
+    }
+
+    /**
+     * Whether the request points at context that lives on OpenAI's side: a {@code conversation} (an id, or an object
+     * that has one) or a stored {@code prompt}. The items of the input that do the same are found with the input
+     * ({@link #responsesItem}). The conversion carries none of them.
+     */
+    private static boolean heldByTheServer(JsonNode body) {
+        JsonNode conversation = body.path("conversation");
+        return filled(conversation.isObject() ? conversation.path("id") : conversation) || filled(body.path("prompt"));
+    }
+
+    /** {@code none} is how a client configures that it wants no summary; every other value asks for one. */
+    private static boolean asksForReasoningSummary(JsonNode summary) {
+        return filled(summary) && !(summary.isString() && summary.stringValue().strip().equalsIgnoreCase("none"));
+    }
+
+    /** The effort of {@code reasoning} reaches the sanitizer as the {@code reasoning_effort} of the Chat body, so it is asked the same way. */
+    private static boolean responsesReasoning(JsonNode effort, Set<Feature> found) {
+        if (!effort.isString()) {
+            return false;
+        }
+        ObjectNode chat = JsonNodeFactory.instance.objectNode();
+        chat.set("reasoning_effort", effort);
+        return reasoning(chat, NO_CHAT_FIELDS, found);
+    }
+
+    /**
+     * The tools are the functions, which are carried, {@code apply_patch}, which the conversion gives as a function (the
+     * emulation of the native Codex path), and everything else, which it leaves out: a custom tool is HARD on every
+     * baseline (its calls come back as functions the client would not understand), the rest is the baseline's to judge. The
+     * {@code tool_choice} is a feature when it is of a shape a relay has no word for, or names a tool that is not carried;
+     * like the conversion, this reads it only in a request that has a function to choose from.
+     */
+    private static void responsesTools(JsonNode body, Set<Feature> found) {
+        Set<String> carried = new HashSet<>();
+        JsonNode tools = body.path("tools");
+        if (tools.isArray()) {
+            for (JsonNode tool : tools) {
+                if (!tool.isObject()) {
+                    continue;
+                }
+                String type = tool.path("type").stringValue("function");
+                boolean function = "function".equals(type) || type.isBlank();
+                // The conversion also takes the Chat shape of a function, with the function nested.
+                JsonNode source = tool.path("function").isObject() ? tool.path("function") : tool;
+                String name = source.path("name").stringValue("");
+                if (ApplyPatchEmulation.TOOL_NAME.equals(name) && (function || "custom".equals(type))) {
+                    carried.add(name);
+                } else if (function) {
+                    if (!name.isBlank()) {
+                        carried.add(name);
+                    }
+                } else {
+                    found.add("custom".equals(type) ? Feature.CUSTOM_TOOL : Feature.BUILTIN_TOOL);
+                }
+            }
+        }
+        JsonNode choice = body.path("tool_choice");
+        if (!carried.isEmpty() && !choice.isMissingNode() && !choice.isNull() && !carriedChoice(choice, carried)) {
+            found.add(Feature.TOOL_CHOICE);
+        }
+    }
+
+    /**
+     * Whether the sanitizer will find the choice in a form it can pass on: one of the strings a relay knows, or a tool of
+     * the request that is carried (the editing tool whatever type the choice gives it, as the conversion has it).
+     */
+    private static boolean carriedChoice(JsonNode choice, Set<String> carried) {
+        if (!choice.isObject()) {
+            return ChatWireSanitizer.isRelayToolChoice(choice);
+        }
+        String name = ApplyPatchEmulation.toolChoiceName(choice);
+        return carried.contains(name)
+            && (ApplyPatchEmulation.TOOL_NAME.equals(name) || "function".equals(choice.path("type").stringValue("")));
+    }
+
+    /**
+     * The parts of the input the conversion has a place for, the reasoning of earlier turns, which it has not, and the items
+     * that only point at what the server holds.
+     */
+    private static void responsesItem(JsonNode item, Set<Feature> found, boolean[] imageNotCarried) {
+        switch (item.path("type").stringValue(item.has("role") ? "message" : "")) {
+            case "message" -> {
+                // Only the message of the user holds parts: what the assistant, the developer or the system wrote is its text,
+                // and an image given to one of them is lost.
+                boolean user = "user".equals(item.path("role").stringValue("user"));
+                responsesParts(item.path("content"), found, Feature.IMAGE, user, imageNotCarried);
+            }
+            case "function_call_output", "custom_tool_call_output" ->
+                responsesParts(item.path("output"), found, Feature.TOOL_OUTPUT_IMAGE, false, null);
+            case "reasoning" -> found.add(Feature.HISTORY_THINKING);
+            case "item_reference", "compaction", "compaction_summary" -> found.add(Feature.SERVER_HELD_CONTEXT);
+            default -> {
+                // The calls of the tools and the other items of earlier turns that the conversion leaves out are not named.
+            }
+        }
+    }
+
+    /**
+     * @param image what an image of these parts is
+     * @param user whether the parts are the user's, which the conversion keeps images of (an image that names a URL: a relay
+     *     cannot read an OpenAI file)
+     * @param imageNotCarried set when an image of these parts is one the conversion has no place for, whatever the member;
+     *     null where {@code image} already says it (the image in the output of a tool)
+     */
+    private static void responsesParts(JsonNode parts, Set<Feature> found, Feature image, boolean user, boolean[] imageNotCarried) {
+        if (!parts.isArray()) {
+            return;
+        }
+        for (JsonNode part : parts) {
+            switch (part.path("type").stringValue("")) {
+                case "input_image" -> {
+                    found.add(image);
+                    if (imageNotCarried != null && !(user && ResponsesChatConverter.hasImageUrl(part))) {
+                        imageNotCarried[0] = true;
+                    }
+                }
+                case "input_file" -> found.add(Feature.FILE);
+                case "input_audio" -> found.add(Feature.AUDIO);
+                default -> {
+                    // Text is carried.
+                }
+            }
+        }
+    }
+
+    /**
+     * The conversion's reading of the end of the conversation, which the sanitizer reads again in the Chat body: what the
+     * conversion leaves out makes no message, a message of the user is looked through, and the answer to a call is a tool
+     * message while anything else ends the search.
+     */
+    private static boolean responsesToolContinuation(JsonNode input) {
+        if (!input.isArray()) {
+            return false;
+        }
+        for (int i = input.size() - 1; i >= 0; i--) {
+            JsonNode item = input.get(i);
+            if (!item.isObject()) {
+                continue;
+            }
+            switch (item.path("type").stringValue(item.has("role") ? "message" : "")) {
+                case "message" -> {
+                    switch (item.path("role").stringValue("user")) {
+                        case "user" -> {
+                            // The turn is not over until the end of what the user said.
+                        }
+                        case "assistant", "system", "developer" -> {
+                            return false;
+                        }
+                        default -> {
+                            // A role the Responses API does not have makes no message.
+                        }
+                    }
+                }
+                case "function_call", "custom_tool_call" -> {
+                    return false;
+                }
+                case "function_call_output", "custom_tool_call_output" -> {
+                    return true;
+                }
+                default -> {
+                    // reasoning, item_reference and the rest make no message.
+                }
+            }
+        }
+        return false;
     }
 
     // ---- both ----

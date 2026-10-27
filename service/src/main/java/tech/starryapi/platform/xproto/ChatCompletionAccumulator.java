@@ -59,8 +59,8 @@ import tools.jackson.databind.node.ObjectNode;
  * paid for it. A refusal (a 400, 402, 404 or 429 that the mapper decides) is a refusal whenever it comes. That verdict
  * comes before the flag: a chunk that has both an {@code error} and a finish reason of {@code error} (the shape
  * OpenRouter ends a stream with) is the error. A tool call the relay cut off (unreadable arguments) is dropped when the
- * answer ended for length, and is an interruption otherwise. The messages are fixed texts: nothing the relay wrote
- * reaches them.
+ * answer ended for length, and the completion says so ({@link Completion#callCut}); it is an interruption otherwise. The
+ * messages are fixed texts: nothing the relay wrote reaches them.
  *
  * <p>Not decided here: the usage. The accumulator merges what the relay reports, field by field to the largest value
  * seen (a relay may report the prompt in the first chunk and the completion in the last), and hands that over; turning
@@ -87,7 +87,8 @@ public final class ChatCompletionAccumulator {
      * usage the relay reported (an empty object when it reported none). {@code finishReason} is what the relay wrote
      * as the reason, as it wrote it, or null when it wrote none: {@code stopReason} is the platform's reading of it and
      * is {@code END_TURN} or {@code TOOL_USE} for an answer that had no reason, which only the verification of a relay
-     * (design 7.4) needs to tell apart.
+     * (design 7.4) needs to tell apart. {@code callCut} says that the relay ran out of tokens in the middle of a tool call,
+     * which is not among {@code toolUses}: the answer lacks something the model meant to do.
      */
     public record Completion(
         String content,
@@ -95,11 +96,23 @@ public final class ChatCompletionAccumulator {
         List<PlatformToolUse> toolUses,
         StopReason stopReason,
         JsonNode usage,
-        String finishReason
+        String finishReason,
+        boolean callCut
     ) {
 
         public Completion(String content, String reasoningContent, List<PlatformToolUse> toolUses, StopReason stopReason, JsonNode usage) {
             this(content, reasoningContent, toolUses, stopReason, usage, null);
+        }
+
+        public Completion(
+            String content,
+            String reasoningContent,
+            List<PlatformToolUse> toolUses,
+            StopReason stopReason,
+            JsonNode usage,
+            String finishReason
+        ) {
+            this(content, reasoningContent, toolUses, stopReason, usage, finishReason, false);
         }
 
         /** The platform result, with the usage the normalizer made of {@link #usage()}. */
@@ -354,7 +367,7 @@ public final class ChatCompletionAccumulator {
         } else {
             stop = uses.isEmpty() ? StopReason.END_TURN : StopReason.TOOL_USE;
         }
-        return new Completion(content.toString(), reasoning.toString(), List.copyOf(uses), stop, usage, finishReason);
+        return new Completion(content.toString(), reasoning.toString(), List.copyOf(uses), stop, usage, finishReason, dropped);
     }
 
     private void readJsonBody() {

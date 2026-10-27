@@ -1,0 +1,194 @@
+{
+  "path": "/v1/chat/completions",
+  "headers": {
+    "accept": "text/event-stream, application/json",
+    "authorization": "Bearer <relay key>",
+    "content-type": "application/json"
+  },
+  "body": {
+    "model": "relay-gpt",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are Codex, a coding agent based on GPT-5. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.\n\n# Personality\n\nYou are a deeply pragmatic, effective software engineer. You [shortened]\nAnswer in English."
+      },
+      {
+        "role": "system",
+        "content": "<permissions instructions>\nFilesystem sandboxing defines which files can be read or written. `sandbox_mode` is `danger-full-access`: No filesystem sandboxing - all commands are permitted. Network acce [shortened]\n<skills_instructions>\n## Skills\nA skill is a set of instructions provided through a `SKILL.md` source. Below is the list of skills that can be used. Each entry includes a name, description, and source [shortened]"
+      },
+      {
+        "role": "user",
+        "content": "<environment_context>\n  <cwd>/work/project</cwd>\n  <shell>zsh</shell>\n  <current_date>2026-10-27</current_date>\n  <timezone>UTC</timezone>\n  <filesystem><workspace_roots><root>/work/project</root></workspace_roots><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>\n</environment_context>\n\nReply with the single word ok"
+      }
+    ],
+    "max_completion_tokens": 4096,
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "exec_command",
+          "description": "Runs a command in a PTY, returning output or a session ID for ongoing interaction.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "cmd": {
+                "type": "string",
+                "description": "Shell command to execute."
+              },
+              "justification": {
+                "type": "string",
+                "description": "User-facing approval question for `require_escalated`; omit otherwise."
+              },
+              "login": {
+                "type": "boolean",
+                "description": "True runs the shell with -l/-i semantics; false disables them. Defaults to true."
+              },
+              "max_output_tokens": {
+                "type": "number",
+                "description": "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy."
+              },
+              "prefix_rule": {
+                "type": "array",
+                "description": "Reusable approval prefix for `cmd`, only with `sandbox_permissions: \"require_escalated\"`; for exampl [shortened]",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "sandbox_permissions": {
+                "type": "string",
+                "description": "Per-command sandbox override. Defaults to `use_default`; use `require_escalated` for unsandboxed exe [shortened]",
+                "enum": [
+                  "use_default",
+                  "require_escalated"
+                ]
+              },
+              "shell": {
+                "type": "string",
+                "description": "Shell binary to launch. Defaults to the user's default shell."
+              },
+              "tty": {
+                "type": "boolean",
+                "description": "True allocates a PTY for the command; false or omitted uses plain pipes."
+              },
+              "workdir": {
+                "type": "string",
+                "description": "Working directory for the command. Defaults to the turn cwd."
+              },
+              "yield_time_ms": {
+                "type": "number",
+                "description": "Wait before yielding output. Defaults to 10000 ms; effective range is 250-30000 ms."
+              }
+            },
+            "required": [
+              "cmd"
+            ],
+            "additionalProperties": false
+          },
+          "strict": false
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "update_plan",
+          "description": "Updates the task plan.\nProvide an optional explanation and a list of plan items, each with a step and status.\nAt most one step can be in_progress at a time.\n",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "explanation": {
+                "type": "string",
+                "description": "Optional explanation for this plan update."
+              },
+              "plan": {
+                "type": "array",
+                "description": "The list of steps",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "description": "Step status.",
+                      "enum": [
+                        "pending",
+                        "in_progress",
+                        "completed"
+                      ]
+                    },
+                    "step": {
+                      "type": "string",
+                      "description": "Task step text."
+                    }
+                  },
+                  "required": [
+                    "step",
+                    "status"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "plan"
+            ],
+            "additionalProperties": false
+          },
+          "strict": false
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "apply_patch",
+          "description": "Use the `apply_patch` tool to edit files. Pass the whole patch as the `patch` argument, a string that starts with *** Begin Patch and ends with *** End Patch.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "patch": {
+                "type": "string",
+                "description": "Raw apply_patch payload, including the *** Begin Patch and *** End Patch lines."
+              }
+            },
+            "required": [
+              "patch"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "view_image",
+          "description": "View a local image file from the filesystem when visual inspection is needed. Use this for images already available on disk.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "detail": {
+                "type": "string",
+                "description": "Image detail level. Defaults to `high`; use `original` to preserve exact resolution.",
+                "enum": [
+                  "high",
+                  "original"
+                ]
+              },
+              "path": {
+                "type": "string",
+                "description": "Local filesystem path to an image file."
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "additionalProperties": false
+          },
+          "strict": false
+        }
+      }
+    ],
+    "tool_choice": "auto",
+    "parallel_tool_calls": true,
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  }
+}

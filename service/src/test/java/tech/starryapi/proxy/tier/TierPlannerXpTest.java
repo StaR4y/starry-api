@@ -34,12 +34,14 @@ import tech.starryapi.model.ModelPricingService;
 import tech.starryapi.payment.PaymentSettingsService;
 import tech.starryapi.payment.PaymentSettingsService.PaymentConfig;
 import tech.starryapi.platform.anthropic.AnthropicRequestAdapter;
+import tech.starryapi.platform.xproto.CodexRequests;
 import tech.starryapi.platform.xproto.PairRegistry;
 import tech.starryapi.platform.xproto.PairRegistry.Entry;
 import tech.starryapi.platform.xproto.PairRegistry.PairKey;
 import tech.starryapi.platform.xproto.PairRegistry.Registration;
 import tech.starryapi.platform.xproto.PairRegistry.SourceKind;
 import tech.starryapi.platform.xproto.PairRegistry.Status;
+import tech.starryapi.platform.xproto.ResponsesChatConverter;
 import tech.starryapi.platform.xproto.StrictChatLint;
 import tech.starryapi.proxy.tier.TierPlan.Level;
 import tech.starryapi.proxy.tier.TierPlan.Relay;
@@ -53,6 +55,7 @@ import tech.starryapi.sourcetier.SourceTierSnapshot.VendorConfig;
 import tech.starryapi.sourcetier.SourceTierValidator;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
 
 /**
@@ -91,6 +94,7 @@ class TierPlannerXpTest {
     private final DefaultModelCatalogProvider catalog = new DefaultModelCatalogProvider();
     private final ModelPoolKeyResolver keyResolver = new ModelPoolKeyResolver(catalog);
     private final AnthropicRequestAdapter adapter = new AnthropicRequestAdapter(mapper, catalog);
+    private final ResponsesChatConverter converter = new ResponsesChatConverter(mapper);
     private final SourceTierRegistry registry = mock(SourceTierRegistry.class);
     private final AccountPoolService accountPool = mock(AccountPoolService.class);
     private final PaymentSettingsService payments = mock(PaymentSettingsService.class);
@@ -513,6 +517,31 @@ class TierPlannerXpTest {
         assertThat(alias.levels().get(0).relay("relay-1")).isPresent();
         assertThat(alias.levels().get(0).relay("relay-1").orElseThrow().dispatch().wireModel()).isEqualTo("relay-sonnet");
         assertThat(alias.modelKey()).isEqualTo("claude-sonnet-4.5");
+    }
+
+    /**
+     * A relay left out for good (no mapping for the model, not verified, out of the cache) is nothing the exclusion is checked
+     * for, but the exclusion it may be under is the session's all the same: the next turn of the chain may ask for a model it
+     * serves, and then it is the same session.
+     */
+    @Test
+    void aRelayThatSitsATurnOutForWhatHoldsOfTheSessionAndModelStillHasTheSessionItsExclusionIsKeptUnder() {
+        configure(ownerConfiguration(relayMember(), gate("MESSAGES", "ON")));
+        String opusTurn = CLAUDE_CODE.replace("claude-sonnet-4.5", "claude-opus-4.5");
+
+        TierPlan noMapping = planRemembering(messages(opusTurn).withSessionName("key-1:session-1"));
+        assertThat(noMapping.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.NO_MAPPING);
+        assertThat(noMapping.relaySession()).isEqualTo("key-1:session-1");
+
+        cached.remove(relay);
+        switchedOff.add(relay);
+        TierPlan outOfService = planRemembering(messages(CLAUDE_CODE).withSessionName("key-1:session-1"));
+        assertThat(outOfService.xpSkips()).isEmpty();
+        assertThat(outOfService.relaySession()).isEqualTo("key-1:session-1");
+
+        // A relay that no gate lets the key through to is nothing of the session's.
+        configure(ownerConfiguration(relayMember(), gate("MESSAGES", "KEYS", "another-key")));
+        assertThat(planRemembering(messages(opusTurn).withSessionName("key-1:session-1")).relaySession()).isNull();
     }
 
     @Test
@@ -1142,6 +1171,26 @@ class TierPlannerXpTest {
 
         // The feature is the request's own and does not pass; the interruption is for a moment, and is not what is said.
         assertThat(plan.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.FEATURE);
+    }
+
+    /**
+     * The exclusion is checked last, so a relay that sits a turn out for what the request carries is not reached by it; the plan
+     * still has the session the exclusion stands for, to hand it on to the turn that follows (a chain names its session by the
+     * response it continues, which changes with every turn).
+     */
+    @Test
+    void aRelayThatSitsATurnOutForWhatTheRequestCarriesStillHasTheSessionItsExclusionIsHandedOnUnder() {
+        configure(ownerConfiguration(relayMember(), gate("MESSAGES", "ON")));
+        ObjectNode raw = (ObjectNode) json(CLAUDE_CODE);
+        raw.withArray("tools").addObject().put("type", "web_search_20250305").put("name", "web_search");
+
+        TierPlan plan = planRemembering(messages(raw.toString()).withSessionName("key-1:session-1"));
+
+        assertThat(plan.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.FEATURE);
+        assertThat(plan.relaySession()).isEqualTo("key-1:session-1");
+        // A relay left out for what holds for every request (a closed gate) is nothing of the session's.
+        configure(ownerConfiguration(relayMember(), gate("MESSAGES", "KEYS", "another-key")));
+        assertThat(planRemembering(messages(raw.toString()).withSessionName("key-1:session-1")).relaySession()).isNull();
     }
 
     @Test
@@ -1857,6 +1906,387 @@ class TierPlannerXpTest {
         assertThat(TierEntryFacts.of(TierEntry.CHAT, chatBody("claude-sonnet-4.5")).entryDigest()).isNull();
     }
 
+    // ---- the Responses entry (P6-02): Codex, and a chain this node could not expand ----
+
+    private static final PairKey RESPONSES_PAIR = new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.RESPONSES, "anthropic");
+
+    /** A Codex request as the facade will make it: planned over the Chat body of the conversion, the original read for the relays. */
+    private TierPlanRequest responses(String codexBody) {
+        JsonNode raw = json(codexBody);
+        String model = raw.path("model").stringValue();
+        return new TierPlanRequest("request-1", model, model, "Kiro", TierRoute.KIRO, false, false, false, true, false, true,
+            converter.toChat(raw), null, false, "key-1", null)
+            .withEntry(TierEntry.RESPONSES).withEntryFacts(TierEntryFacts.of(TierEntry.RESPONSES, raw));
+    }
+
+    private TierPlanRequest responsesOfGpt(String codexBody) {
+        JsonNode raw = json(codexBody);
+        return new TierPlanRequest("request-1", "gpt-5.5", "gpt-5.5", "OpenAI", TierRoute.OPENAI, false, false, false, true, false,
+            true, converter.toChat(raw), null, false, "key-1", null)
+            .withEntry(TierEntry.RESPONSES).withEntryFacts(TierEntryFacts.of(TierEntry.RESPONSES, raw));
+    }
+
+    /** The request of Codex for a Claude model, with the chain it continues left in the body as an expansion that failed leaves it. */
+    private String codexContinuing(String previousResponseId) {
+        return ((ObjectNode) json(CodexRequests.CLAUDE_TURN)).put("previous_response_id", previousResponseId).toString();
+    }
+
+    @Test
+    void aCodexRequestForAClaudeModelIsPlannedOverTheRelayAndKiro() {
+        configure(ownerConfiguration(relayMember(), gate("RESPONSES", "KEYS", "key-1")));
+
+        TierPlan plan = plan(offering(Status.EXPERIMENTAL, Entry.RESPONSES), responses(CodexRequests.CLAUDE_TURN));
+
+        // The web search and the namespace that Codex declares in every request do not keep the relay out.
+        assertThat(plan.xpSkips()).isEmpty();
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("relay", "kiro");
+        Relay chosen = plan.levels().get(0).relay("relay-1").orElseThrow();
+        assertThat(chosen.dispatch().pair()).isEqualTo(RESPONSES_PAIR);
+        assertThat(chosen.dispatch().wireModel()).isEqualTo("relay-sonnet");
+        assertThat(StrictChatLint.problems(chosen.dispatch().wireBody())).isEmpty();
+        // What the relay is not given is recorded for the log, in the words of the policy.
+        assertThat(chosen.dispatch().degraded()).containsExactlyInAnyOrder("builtin_tool", "prompt_cache_key");
+        assertThat(plan.startLevel().tierId()).isEqualTo("relay");
+        assertThat(plan.unavailableTiers()).isEmpty();
+    }
+
+    @Test
+    void theRelayIsSentTheFunctionsOfCodexAndNothingOfTheRestOfItsRequest() {
+        configure(ownerConfiguration(relayMember(), gate("RESPONSES", "ON")));
+
+        TierPlan plan = plan(offering(Status.VERIFIED, Entry.RESPONSES), responses(CodexRequests.CLAUDE_TURN));
+
+        JsonNode body = plan.levels().get(0).relay("relay-1").orElseThrow().dispatch().wireBody();
+        assertThat(body.path("tools")).extracting(tool -> tool.path("function").path("name").stringValue())
+            .containsExactly("exec_command", "update_plan");
+        assertThat(body.path("tool_choice").stringValue()).isEqualTo("auto");
+        assertThat(body.path("parallel_tool_calls").booleanValue()).isFalse();
+        assertThat(body.path("stream").booleanValue()).isTrue();
+        assertThat(body.path("messages").get(0).path("role").stringValue()).isEqualTo("system");
+        assertThat(body.toString()).doesNotContain("web_search", "multi_agent_v1", "client_metadata", "prompt_cache_key",
+            "x-codex-installation-id");
+        assertThat(body.has("include")).isFalse();
+        assertThat(body.has("store")).isFalse();
+    }
+
+    @Test
+    void theEditingToolOfCodexIsAskedOfTheRelayAsAFunctionWithOneArgument() {
+        configure(ownerConfiguration(relayMember(), gate("RESPONSES", "ON")));
+        ObjectNode raw = (ObjectNode) json(CodexRequests.CLAUDE_TURN);
+        raw.withArray("tools").addObject().put("type", "custom").put("name", "apply_patch").put("description", "Edits files");
+
+        TierPlan plan = plan(offering(Status.VERIFIED, Entry.RESPONSES), responses(raw.toString()));
+
+        assertThat(plan.xpSkips()).isEmpty();
+        JsonNode tools = plan.levels().get(0).relay("relay-1").orElseThrow().dispatch().wireBody().path("tools");
+        JsonNode patch = null;
+        for (JsonNode tool : tools) {
+            if ("apply_patch".equals(tool.path("function").path("name").stringValue())) {
+                patch = tool;
+            }
+        }
+        assertThat(patch).isNotNull();
+        assertThat(patch.path("type").stringValue()).isEqualTo("function");
+        assertThat(patch.path("function").path("parameters").path("required").get(0).stringValue()).isEqualTo("patch");
+    }
+
+    @Test
+    void aCodexRequestForAGptModelIsNotGivenToARelayThatCannotRunItsBuiltInToolsAndIsOnceTheyAreOut() {
+        configureOpenAi(openAiRelayMember(false), gateOf("openai", "RESPONSES", "ON"));
+
+        TierPlan full = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesOfGpt(CodexRequests.GPT_TURN));
+
+        // OpenAI runs the web search and finds the tools of the tool search; a relay cannot, and is not asked to.
+        assertThat(full.xpSkips()).hasSize(1);
+        assertThat(full.xpSkips().getFirst().reason()).isEqualTo(XpSkip.Reason.FEATURE);
+        assertThat(full.xpSkips().getFirst().firstFeature()).isEqualTo("builtin_tool");
+        assertThat(full.levels()).extracting(Level::tierId).containsExactly("official");
+        assertThat(full.unavailableTiers()).isEmpty();
+
+        ObjectNode raw = (ObjectNode) json(CodexRequests.GPT_TURN);
+        ArrayNode kept = mapper.createArrayNode();
+        raw.withArray("tools").forEach(tool -> {
+            if (!List.of("tool_search", "web_search").contains(tool.path("type").stringValue())) {
+                kept.add(tool);
+            }
+        });
+        raw.set("tools", kept);
+        TierPlan lean = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesOfGpt(raw.toString()));
+
+        assertThat(lean.xpSkips()).isEmpty();
+        assertThat(lean.levels()).extracting(Level::tierId).containsExactly("relay", "official");
+        Relay chosen = lean.levels().get(0).relay("relay-1").orElseThrow();
+        assertThat(chosen.dispatch().pair()).isEqualTo(new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.RESPONSES, "openai"));
+        // The length of the answer is advice and the encrypted reasoning is the OpenAI API's: left out, and said (design 7.9, D6).
+        assertThat(chosen.dispatch().degraded()).containsExactlyInAnyOrder("include", "verbosity", "prompt_cache_key", "reasoning_effort");
+        assertThat(chosen.dispatch().wireBody().path("tools")).extracting(tool -> tool.path("function").path("name").stringValue())
+            .containsExactly("exec_command", "apply_patch");
+    }
+
+    /** The plan is made over a Chat body; a request that hands it the Responses body as it came in is not sent to a relay. */
+    @Test
+    void aResponsesBodyThatWasNotConvertedToChatIsNeverSentToARelay() {
+        configure(ownerConfiguration(relayMember(), gate("RESPONSES", "ON")));
+        JsonNode raw = json(CodexRequests.CLAUDE_TURN);
+        TierPlanRequest unconverted = new TierPlanRequest("request-1", "claude-sonnet-4.5", "claude-sonnet-4.5", "Kiro", TierRoute.KIRO,
+            false, false, false, true, false, true, raw, null, false, "key-1", null)
+            .withEntry(TierEntry.RESPONSES).withEntryFacts(TierEntryFacts.of(TierEntry.RESPONSES, raw));
+
+        TierPlan plan = plan(offering(Status.VERIFIED, Entry.RESPONSES), unconverted);
+
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("kiro");
+        assertThat(plan.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.CONVERSION);
+    }
+
+    @Test
+    void aReleaseThatOffersNoResponsesPairHasNoRelayTakePartInACodexRequest() {
+        configure(ownerConfiguration(relayMember(), gate("RESPONSES", "KEYS", "key-1")));
+        PairRegistry withoutResponses = offering(Status.EXPERIMENTAL, Entry.CHAT, Entry.MESSAGES);
+
+        TierPlan plan = plan(withoutResponses, responses(CodexRequests.CLAUDE_TURN));
+
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("kiro");
+        assertThat(plan.xpSkips()).isEmpty();
+        assertThat(planner(withoutResponses).wantsEntryFacts(TierEntry.RESPONSES)).isFalse();
+        assertThat(planner(offering(Status.EXPERIMENTAL, Entry.RESPONSES)).wantsEntryFacts(TierEntry.RESPONSES)).isTrue();
+    }
+
+    @Test
+    void thisReleaseOffersTheResponsesPairsSoARelayTakesPartInACodexRequestOfAKeyOnTheList() {
+        configure(ownerConfiguration(relayMember(), gate("RESPONSES", "KEYS", "key-1")));
+
+        TierPlan plan = plan(PairRegistry.defaults(), responses(CodexRequests.CLAUDE_TURN));
+
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("relay", "kiro");
+        assertThat(planner(PairRegistry.defaults()).wantsEntryFacts(TierEntry.RESPONSES)).isTrue();
+    }
+
+    // ---- a chain this node could not expand (design 4.8, 6.3) ----
+
+    @Test
+    void aChainThisNodeCouldNotExpandLeavesTheRelayOutAndKiroServesItAsItAlwaysDid() {
+        configure(ownerConfiguration(relayMember(), gate("RESPONSES", "ON")));
+
+        TierPlan plan = plan(offering(Status.VERIFIED, Entry.RESPONSES), responses(codexContinuing("resp_0123")));
+
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("kiro");
+        assertThat(plan.xpSkips()).hasSize(1);
+        assertThat(plan.xpSkips().getFirst().reason()).isEqualTo(XpSkip.Reason.FEATURE);
+        assertThat(plan.xpSkips().getFirst().firstFeature()).isEqualTo("previous_response_id");
+        // The tier the chain does not suit is no tier the session was pushed out of (design 4.7).
+        assertThat(plan.unavailableTiers()).isEmpty();
+        assertThat(plan.unavailableAbove(plan.levels().get(0))).isFalse();
+        // The same turn of a chain that was expanded is served by the relay.
+        assertThat(plan(offering(Status.VERIFIED, Entry.RESPONSES), responses(CodexRequests.CLAUDE_TURN)).levels())
+            .extracting(Level::tierId).containsExactly("relay", "kiro");
+    }
+
+    @Test
+    void aChainThisNodeCouldNotExpandThatNoNativeSourceCanServeIsAConflictAndNotAFeature() {
+        configure(ownerConfiguration(relayMember(), gate("RESPONSES", "ON")));
+        cached.remove(kiro);
+        usable.remove(kiro);
+
+        assertThatThrownBy(() -> plan(offering(Status.VERIFIED, Entry.RESPONSES), responses(codexContinuing("resp_0123"))))
+            .isInstanceOfSatisfying(ApiException.class, error -> {
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                assertThat(error.getCode()).isEqualTo("RESPONSE_CHAIN_NOT_PORTABLE");
+                assertThat(error.getMessage()).doesNotContain("relay", "relay-1");
+            });
+        // The same request that continues nothing is served by the relay, and is refused for a feature when it has one.
+        assertThat(plan(offering(Status.VERIFIED, Entry.RESPONSES), responses(CodexRequests.CLAUDE_TURN))
+            .levels()).extracting(Level::tierId).containsExactly("relay");
+        ObjectNode custom = (ObjectNode) json(CodexRequests.CLAUDE_TURN);
+        custom.withArray("tools").addObject().put("type", "custom").put("name", "shell");
+        assertThatThrownBy(() -> plan(offering(Status.VERIFIED, Entry.RESPONSES), responses(custom.toString())))
+            .isInstanceOfSatisfying(ApiException.class, error -> {
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                assertThat(error.getCode()).isEqualTo("SOURCE_TIER_FEATURE_UNSUPPORTED");
+                assertThat(error.getDetails()).isEqualTo(Map.of("feature", "custom_tool"));
+            });
+        // The chain is what is told when the request has a feature besides.
+        custom.put("previous_response_id", "resp_0123");
+        assertThatThrownBy(() -> plan(offering(Status.VERIFIED, Entry.RESPONSES), responses(custom.toString())))
+            .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("RESPONSE_CHAIN_NOT_PORTABLE"));
+    }
+
+    /**
+     * Context that OpenAI holds and the request only points at is not a chain to continue from the history the client holds,
+     * so it is told as a feature of the request; Kiro, which never read it, serves the request as it always did.
+     */
+    @Test
+    void contextTheServerHoldsLeavesTheRelayOutAndIsRefusedByNameWhenOnlyARelayCouldServe() {
+        configure(ownerConfiguration(relayMember(), gate("RESPONSES", "ON")));
+        ObjectNode held = (ObjectNode) json(CodexRequests.CLAUDE_TURN);
+        held.put("conversation", "conv_0123456789");
+
+        TierPlan plan = plan(offering(Status.VERIFIED, Entry.RESPONSES), responses(held.toString()));
+
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("kiro");
+        assertThat(plan.xpSkips()).singleElement().satisfies(skip -> {
+            assertThat(skip.reason()).isEqualTo(XpSkip.Reason.FEATURE);
+            assertThat(skip.firstFeature()).isEqualTo("server_held_context");
+        });
+        cached.remove(kiro);
+        usable.remove(kiro);
+        assertThatThrownBy(() -> plan(offering(Status.VERIFIED, Entry.RESPONSES), responses(held.toString())))
+            .isInstanceOfSatisfying(ApiException.class, error -> {
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                assertThat(error.getCode()).isEqualTo("SOURCE_TIER_FEATURE_UNSUPPORTED");
+                assertThat(error.getDetails()).isEqualTo(Map.of("feature", "server_held_context"));
+            });
+    }
+
+    @Test
+    void aPinToTheRelayTierIsAnsweredWithAConflictForAChainThisNodeCouldNotExpandAndKiroIsStillServed() {
+        configure(ownerConfiguration(relayMember(), gate("RESPONSES", "ON")));
+        TierPlanRequest chain = responses(codexContinuing("resp_0123"));
+
+        // The suffix names the tier: the request is its or nobody's.
+        assertThatThrownBy(() -> plan(offering(Status.VERIFIED, Entry.RESPONSES),
+            chain.withSelector(TierSelectorParser.parse(TierSelectorParser.Source.SUFFIX, "relay"))))
+            .isInstanceOfSatisfying(ApiException.class, error -> {
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.CONFLICT);
+                assertThat(error.getCode()).isEqualTo("RESPONSE_CHAIN_NOT_PORTABLE");
+            });
+        // A header or a preference is a hint: the tier gives way to the one that can serve the chain.
+        TierPlan hinted = plan(offering(Status.VERIFIED, Entry.RESPONSES),
+            chain.withSelector(TierSelectorParser.parse(TierSelectorParser.Source.HEADER, "relay")));
+        assertThat(hinted.levels()).extracting(Level::tierId).containsExactly("kiro");
+        assertThat(hinted.levels().get(0).responseHeaders()).containsEntry(TierResponseHeaders.STATUS, TierResponseHeaders.IGNORED);
+        // The tier of Kiro can be pinned, and is served.
+        assertThat(plan(offering(Status.VERIFIED, Entry.RESPONSES),
+            chain.withSelector(TierSelectorParser.parse(TierSelectorParser.Source.SUFFIX, "kiro"))).levels())
+            .extracting(Level::tierId).containsExactly("kiro");
+    }
+
+    @Test
+    void aBuiltInToolOfAGptRequestThatOnlyARelayCouldServeIsRefusedWithTheToolNamedAndNeverOnAClaudeRoute() {
+        configureOpenAi(openAiRelayMember(false), gateOf("openai", "RESPONSES", "ON"));
+        cached.remove(openAiOfficial);
+        usable.remove(openAiOfficial);
+
+        assertThatThrownBy(() -> plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesOfGpt(CodexRequests.GPT_TURN)))
+            .isInstanceOfSatisfying(ApiException.class, error -> {
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                assertThat(error.getCode()).isEqualTo("SOURCE_TIER_FEATURE_UNSUPPORTED");
+                assertThat(error.getDetails()).isEqualTo(Map.of("feature", "builtin_tool"));
+            });
+        // The same tools on the Claude route are left out, as Kiro leaves them out, and the relay serves.
+        configure(ownerConfiguration(relayMember(), gate("RESPONSES", "ON")));
+        cached.remove(kiro);
+        usable.remove(kiro);
+        TierPlan plan = plan(offering(Status.VERIFIED, Entry.RESPONSES), responses(CodexRequests.CLAUDE_TURN));
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("relay");
+        assertThat(plan.levels().get(0).relays()).hasSize(1);
+    }
+
+    @Test
+    void aLengthOfTheAnswerThatOpenCodeAndCodexSendIsNoReasonToLeaveARelayOut() {
+        configureOpenAi(openAiRelayMember(false), gateOf("openai", "RESPONSES", "ON"));
+        ObjectNode raw = (ObjectNode) json(CodexRequests.GPT_TURN);
+        raw.set("tools", mapper.createArrayNode());
+        raw.putObject("text").put("verbosity", "low");
+
+        TierPlan plan = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesOfGpt(raw.toString()));
+
+        assertThat(plan.xpSkips()).isEmpty();
+        assertThat(plan.levels().get(0).relay("relay-1").orElseThrow().dispatch().degraded()).contains("verbosity");
+    }
+
+    // ---- the Responses entry planned over its own body (P6-03) ----
+
+    /**
+     * A Codex request as the facade plans it: over the Responses body its native accounts are sent (the reservation is sized
+     * from it, and the session is told by it), with the conversion that makes the Chat body of a relay.
+     */
+    private TierPlanRequest responsesOverItsOwnBody(JsonNode raw) {
+        String model = raw.path("model").stringValue();
+        return new TierPlanRequest("request-1", model, model, "Kiro", TierRoute.KIRO, false, false, false, true, false, true,
+            raw, null, false, "key-1", null)
+            .withEntry(TierEntry.RESPONSES)
+            .withEntryFacts(TierEntryFacts.of(TierEntry.RESPONSES, raw).withChatConversion(converter::toChat));
+    }
+
+    @Test
+    void aRelayIsGivenTheConversionOfTheResponsesBodyThePlanIsMadeOver() {
+        configure(ownerConfiguration(relayMember(), gate("RESPONSES", "KEYS", "key-1")));
+        JsonNode raw = json(CodexRequests.CLAUDE_TURN);
+
+        TierPlan own = plan(offering(Status.EXPERIMENTAL, Entry.RESPONSES), responsesOverItsOwnBody(raw));
+        TierPlan converted = plan(offering(Status.EXPERIMENTAL, Entry.RESPONSES), responses(CodexRequests.CLAUDE_TURN));
+
+        assertThat(own.xpSkips()).isEmpty();
+        assertThat(own.levels()).extracting(Level::tierId).containsExactly("relay", "kiro");
+        // The body of the relay is the same whichever way the plan was handed the request.
+        Relay relayOfOwn = own.levels().get(0).relay("relay-1").orElseThrow();
+        assertThat(relayOfOwn.dispatch().wireBody()).isEqualTo(converted.levels().get(0).relay("relay-1").orElseThrow().dispatch().wireBody());
+        assertThat(relayOfOwn.dispatch().wireBody().path("messages").get(0).path("content").stringValue()).isEqualTo("You are Codex.");
+        assertThat(StrictChatLint.problems(relayOfOwn.dispatch().wireBody())).isEmpty();
+        assertThat(relayOfOwn.dispatch().degraded()).containsExactlyInAnyOrder("builtin_tool", "prompt_cache_key");
+    }
+
+    @Test
+    void theNativeTiersAreSizedFromTheResponsesBodyAndNotFromWhatTheConversionKeepsOfIt() {
+        configure(ownerConfiguration(relayMember(), gate("RESPONSES", "KEYS", "key-1")));
+        ObjectNode raw = (ObjectNode) json(CodexRequests.CLAUDE_TURN);
+        // The history of a session carries the reasoning of the earlier turns, which Kiro is sent as part of the request and a
+        // relay is not (it cannot use it): the reservation has to cover what the native accounts are sent.
+        raw.withArray("input").addObject().put("type", "reasoning").put("encrypted_content", "x".repeat(200_000));
+
+        TierPlan plan = plan(offering(Status.EXPERIMENTAL, Entry.RESPONSES), responsesOverItsOwnBody(raw));
+
+        Level kiroTier = plan.levels().stream().filter(level -> level.tierId().equals("kiro")).findFirst().orElseThrow();
+        assertThat(kiroTier.inputBound()).isEqualTo(RequestBounds.kiroInputTokens(raw));
+        assertThat(kiroTier.inputBound()).isGreaterThan(RequestBounds.kiroInputTokens(converter.toChat(raw)) + 150_000);
+        // The relay is bounded by the body it is sent, which does not carry the reasoning.
+        Relay relayOfOwn = plan.levels().get(0).relay("relay-1").orElseThrow();
+        assertThat(relayOfOwn.inputBound()).isLessThan(100_000);
+        assertThat(relayOfOwn.dispatch().wireBody().toString()).doesNotContain("xxxx", "reasoning");
+    }
+
+    @Test
+    void theSessionOfAResponsesRequestIsToldByTheBodyItWasPlannedOver() {
+        configure(ownerConfiguration(relayMember(), gate("RESPONSES", "KEYS", "key-1")));
+        JsonNode raw = json(CodexRequests.CLAUDE_TURN);
+
+        TierPlan own = planRemembering(offering(Status.EXPERIMENTAL, Entry.RESPONSES), responsesOverItsOwnBody(raw));
+
+        assertThat(own.relaySession()).isEqualTo(TierSessionKeys.fingerprint("key-1", "claude-sonnet-4.5", raw));
+        assertThat(own.session().orElseThrow().key()).isEqualTo(own.relaySession());
+    }
+
+    @Test
+    void aConversionThatFailsLeavesTheRelayOutOfThePlanAndNotTheRequest() {
+        configure(ownerConfiguration(relayMember(), gate("RESPONSES", "KEYS", "key-1")));
+        JsonNode raw = json(CodexRequests.CLAUDE_TURN);
+        TierPlanRequest broken = new TierPlanRequest("request-1", "claude-sonnet-4.5", "claude-sonnet-4.5", "Kiro", TierRoute.KIRO, false,
+            false, false, true, false, true, raw, null, false, "key-1", null)
+            .withEntry(TierEntry.RESPONSES)
+            .withEntryFacts(TierEntryFacts.of(TierEntry.RESPONSES, raw).withChatConversion(body -> {
+                throw new IllegalStateException("no conversion today");
+            }));
+
+        TierPlan plan = plan(offering(Status.EXPERIMENTAL, Entry.RESPONSES), broken);
+
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("kiro");
+        assertThat(plan.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.CONVERSION);
+        assertThat(plan.xpSkips().getFirst().detail()).contains("IllegalStateException").doesNotContain("no conversion today");
+    }
+
+    @Test
+    void aPlanThatKeepsARelayFromTheSessionStillNamesTheSessionSoThatTheExclusionCanFollowTheChain() {
+        configure(ownerConfiguration(relayMember(), gate("RESPONSES", "KEYS", "key-1")));
+        sessions.excludeRelay("anthropic", "key-1:resp:one", "relay-1");
+
+        TierPlan plan = planRemembering(offering(Status.EXPERIMENTAL, Entry.RESPONSES),
+            responsesOverItsOwnBody(json(CodexRequests.CLAUDE_TURN)).withSessionName("key-1:resp:one"));
+
+        assertThat(plan.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.INTERRUPTED);
+        assertThat(plan.levels().get(0).relays()).isEmpty();
+        assertThat(plan.relaySession()).isEqualTo("key-1:resp:one");
+    }
+
     // ---- fixtures ----
 
     private static void assertSamePlan(TierPlan actual, TierPlan expected) {
@@ -1911,8 +2341,12 @@ class TierPlannerXpTest {
 
     /** A planner that remembers what the relays did: the interruptions of sessions and the windows their refusals showed. */
     private TierPlan planRemembering(TierPlanRequest request) {
+        return planRemembering(offering(Status.VERIFIED), request);
+    }
+
+    private TierPlan planRemembering(PairRegistry pairs, TierPlanRequest request) {
         return new DefaultSourceTierPlanner(registry, keyResolver, catalog, accountPool, payments, pricing, sessions, true, true,
-            offering(Status.VERIFIED), counts, limits).plan(request).block();
+            pairs, counts, limits).plan(request).block();
     }
 
     /** A Claude Code request that opens with a message of {@code words} words, which makes the prompt about as many tokens. */

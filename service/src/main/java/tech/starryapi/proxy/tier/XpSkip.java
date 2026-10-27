@@ -68,6 +68,19 @@ public record XpSkip(String tierId, String accountId, Reason reason, String deta
         detail = detail == null ? "" : detail;
     }
 
+    /** Whether a {@link Reason#FEATURE} skip is for the feature with this label (it may be for others besides). */
+    public boolean leftOutFor(String feature) {
+        if (reason != Reason.FEATURE) {
+            return false;
+        }
+        for (String label : detail.split(",")) {
+            if (label.equals(feature)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     /** The feature of a {@link Reason#FEATURE} skip that the client is told, the first it asked for; empty for any other. */
     public String firstFeature() {
         if (reason != Reason.FEATURE) {

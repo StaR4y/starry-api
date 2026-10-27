@@ -67,8 +67,10 @@ import tech.starryapi.platform.openai.OpenAiResponseOwnerStore;
 import tech.starryapi.platform.openai.OpenAiResponseStateStore;
 import tech.starryapi.platform.openai.OpenAiUpstreamClient;
 import tech.starryapi.platform.upstream.UpstreamException;
+import tech.starryapi.platform.xproto.PairRegistry;
 import tech.starryapi.platform.xproto.RelayErrorException;
 import tech.starryapi.platform.xproto.RelayUsageNormalizer;
+import tech.starryapi.platform.xproto.ResponsesChatConverter;
 import tech.starryapi.payment.PaymentSettingsService;
 import tech.starryapi.proxy.tier.RequestBounds;
 import tech.starryapi.proxy.tier.TierBilling;
@@ -160,6 +162,7 @@ public class ProxyFacade {
     private OpenAiResponseOwnerStore openAiResponseOwnerStore;
     private TierRuntime tierRuntime;
     private XpDispatcher xpDispatcher;
+    private ResponsesChatConverter responsesChatConverter;
 
     public ProxyFacade(
         ApiKeyService apiKeyService,
@@ -322,9 +325,6 @@ public class ProxyFacade {
         this.tierRuntime = tierRuntime;
     }
 
-    // Spring builds the facade with this one; a second constructor marked for injection fails startup. The dispatcher
-    // of the relays is only used by a tiered request whose plan holds a relay; a facade built without one has none.
-    @Autowired
     ProxyFacade(
         ApiKeyService apiKeyService,
         AccountPoolService accountPoolService,
@@ -381,6 +381,70 @@ public class ProxyFacade {
             tierRuntime
         );
         this.xpDispatcher = xpDispatcher;
+    }
+
+    // Spring builds the facade with this one; a second constructor marked for injection fails startup. The dispatcher
+    // of the relays is only used by a tiered request whose plan holds a relay, and the converter only by a Responses
+    // request that a relay may serve; a facade built without them has none, and no relay serves its requests.
+    @Autowired
+    ProxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        AccountAutoSuspendService accountAutoSuspendService,
+        AccountSettingsService accountSettingsService,
+        DisabledAccountScheduledTestService disabledAccountScheduledTestService,
+        ModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroPayloadFactory payloadFactory,
+        KiroUpstreamClient upstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        OpenAiRequestAdapter openAiRequestAdapter,
+        OpenAiResponseFactory openAiResponseFactory,
+        OpenAiResponseStateStore openAiResponseStateStore,
+        AnthropicRequestAdapter anthropicRequestAdapter,
+        AnthropicResponseFactory anthropicResponseFactory,
+        AnthropicUpstreamClient anthropicUpstreamClient,
+        GeminiRequestAdapter geminiRequestAdapter,
+        GeminiResponseFactory geminiResponseFactory,
+        PaymentSettingsService paymentSettingsService,
+        ModelPricingService modelPricingService,
+        StatsService statsService,
+        AccountAdmissionStore admissionStore,
+        OpenAiResponseOwnerStore openAiResponseOwnerStore,
+        TierRuntime tierRuntime,
+        XpDispatcher xpDispatcher,
+        ResponsesChatConverter responsesChatConverter
+    ) {
+        this(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            accountSettingsService,
+            disabledAccountScheduledTestService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            payloadFactory,
+            upstreamClient,
+            openAiUpstreamClient,
+            openAiRequestAdapter,
+            openAiResponseFactory,
+            openAiResponseStateStore,
+            anthropicRequestAdapter,
+            anthropicResponseFactory,
+            anthropicUpstreamClient,
+            geminiRequestAdapter,
+            geminiResponseFactory,
+            paymentSettingsService,
+            modelPricingService,
+            statsService,
+            admissionStore,
+            openAiResponseOwnerStore,
+            tierRuntime,
+            xpDispatcher
+        );
+        this.responsesChatConverter = responsesChatConverter;
     }
 
     TierRuntime tierRuntime() {
@@ -489,7 +553,8 @@ public class ProxyFacade {
      * this release offers no pair for the entry, or no gate of the entry is open to anyone), which is every request of a
      * deployment without relays. Messages takes it before the body is converted and the reactive chain built (the chain
      * must not keep a body with large images alive), Chat once the caller is authenticated, since its chain holds the body
-     * all along. A body that cannot be read is no reason to fail the request: it goes on without relays.
+     * all along, and Responses once the chain it continues is expanded ({@link #responsesEntryFacts}). A body that cannot be
+     * read is no reason to fail the request: it goes on without relays.
      */
     private TierEntryFacts entryFacts(TierEntry entry, JsonNode body) {
         if (body == null || !body.isObject() || !tierRuntime.planner().wantsEntryFacts(entry)) {
@@ -501,6 +566,22 @@ public class ProxyFacade {
             log.warn("The {} request could not be read for relays and goes on without them: {}", entry, failure.toString());
             return null;
         }
+    }
+
+    /**
+     * What the relays that may serve a Responses request need to know of it: the features, read from the request as the
+     * gateway expanded it (a {@code previous_response_id} still in it names a chain this node holds no history of), and the
+     * conversion that makes the body the plan is sized over, which is the Responses one the native accounts are sent, into
+     * the Chat body a relay is given (design 7.6). The conversion is only made when a relay is looked at. Null when the
+     * planner has no use for the facts, which is every request of a deployment without a relay open to the entry, and for
+     * a facade that was built without the converter.
+     */
+    private TierEntryFacts responsesEntryFacts(JsonNode expandedRequest) {
+        if (responsesChatConverter == null) {
+            return null;
+        }
+        TierEntryFacts facts = entryFacts(TierEntry.RESPONSES, expandedRequest);
+        return facts == null ? null : facts.withChatConversion(responsesChatConverter::toChat);
     }
 
     private static final String GEMINI_PATH_PREFIX = "/v1beta/models/";
@@ -807,13 +888,15 @@ public class ProxyFacade {
             preferDeepSeekAccounts
         );
         // A response chain is told apart by the response it continues, not by the session hint, which falls back to that
-        // id and so changes with every turn; a chain with neither is told by what its turns begin with.
-        String tierSessionName = TierSessionKeys.ofResponses(
+        // id and so changes with every turn; a chain with neither is told by what its turns begin with. Every turn of a
+        // chain is the session of its first, whatever model it asks for: the node knows which session a response was
+        // made under (followTierToNextTurn).
+        String tierSessionName = tierRuntime.bindings().sessionOf(TierSessionKeys.ofResponses(
             principal.keyId(),
             sessionHint(exchange, request, principal.keyId(), ResponseMode.OPENAI_RESPONSES, null),
             codexSessionName(exchange, principal.keyId()),
             previousResponseId
-        );
+        ));
 
         return requireDeepSeekResponsesSupported(preferDeepSeekAccounts, upstreamModel)
             .then(requireFastModeAllowed(fastMode))
@@ -830,7 +913,9 @@ public class ProxyFacade {
                 upstreamRequest,
                 responseAffinity.accountId(),
                 responseAffinity.movable()
-            ).withSessionName(tierSessionName).withSelector(tierChoice.selector()).withEntry(TierEntry.RESPONSES)).flatMap(plan -> {
+            ).withSessionName(tierSessionName).withSelector(tierChoice.selector()).withEntry(TierEntry.RESPONSES)
+                // The chain holds the body all along, so it is read here, once the chain the request continues is expanded.
+                .withEntryFacts(responsesEntryFacts(expandedRequest))).flatMap(plan -> {
                 if (plan.tiered()) {
                     return servedByTiers(plan, exchange, serveTieredResponses(new TieredRequest(
                         plan,
@@ -2072,7 +2157,7 @@ public class ProxyFacade {
         TierRetryPolicy retry = new TierRetryPolicy(walk, run.start(), run.requestMovable());
         TieredEndpoint endpoint = new TieredEndpoint(
             account -> callWithAccount(run.route(), account, run.upstreamRequest(), run.upstreamModel(), run.sessionHint()),
-            (result, account) -> Mono.<ResponseEntity<?>>fromSupplier(() -> run.stream()
+            (result, selection) -> Mono.<ResponseEntity<?>>fromSupplier(() -> run.stream()
                 ? streamResponse(responseMode, run.responseRequest(), run.upstreamModel(), result)
                 : jsonResponse(responseMode, run.responseRequest(), run.upstreamModel(), result)),
             true
@@ -2081,23 +2166,80 @@ public class ProxyFacade {
             run.plan(), Mono.defer(() -> attemptTiered(run, walk, retry, endpoint)));
     }
 
-    /** {@link #serveTieredChat} for the Responses endpoint, whose answer is remembered with the account that gave it. */
+    /**
+     * {@link #serveTieredChat} for the Responses endpoint, whose answer is remembered with the account that gave it. The
+     * answer of a relay is remembered with no owner (design 4.8): the relay holds none of the chain and speaks no Responses
+     * API, and a relay recorded as the owner would have the chain sent to it by a route that knows no tiers, which asks the
+     * owner of a chain for it. The next turn is replayed from the history this node holds, on whichever source the tiers
+     * choose.
+     */
     Mono<ResponseEntity<?>> serveTieredResponses(TieredRequest run) {
         TierWalk walk = new TierWalk(run.plan());
         TierRetryPolicy retry = new TierRetryPolicy(walk, run.start(), run.requestMovable());
+        // The history a client replays can hold the reasoning a relay answered a turn before. An OpenAI account is not sent
+        // that (it is the gateway's own rendering, which no OpenAI model can read back); a vendor without relays is sent
+        // its request as it always was.
+        JsonNode nativeRequest = run.route() == UpstreamRoute.OPENAI && run.plan().vendorHasRelays()
+            ? OpenAiResponseFactory.withoutRenderedReasoning(run.upstreamRequest())
+            : run.upstreamRequest();
         TieredEndpoint endpoint = new TieredEndpoint(
-            account -> callResponsesWithAccount(run.route(), account, run.upstreamRequest(), run.upstreamModel(), run.sessionHint()),
-            (result, account) -> Mono.defer(() -> {
+            account -> callResponsesWithAccount(run.route(), account, nativeRequest, run.upstreamModel(), run.sessionHint()),
+            (result, selection) -> Mono.defer(() -> {
+                ProxyAccountEntity account = selection.account();
+                boolean byRelay = selection.dispatch().kind() != TierDispatch.Kind.NATIVE;
+                ProxyAccountEntity owner = byRelay ? null : account;
+                PlatformCompletionResult answer = byRelay ? responsesAnswerOfRelay(result, run.responseRequest()) : result;
                 PreparedResponse response = run.stream()
-                    ? prepareResponsesStreamResponse(run.responseRequest(), run.upstreamRequest(), run.upstreamModel(), result, account)
-                    : prepareResponsesJsonResponse(run.responseRequest(), run.upstreamRequest(), run.upstreamModel(), result, account);
+                    ? prepareResponsesStreamResponse(run.responseRequest(), run.upstreamRequest(), run.upstreamModel(), answer, owner)
+                    : prepareResponsesJsonResponse(run.responseRequest(), run.upstreamRequest(), run.upstreamModel(), answer, owner);
                 followTierToNextTurn(run, response.responseId());
-                return rememberResponseOwner(response, account).thenReturn(response.response());
+                return byRelay
+                    ? Mono.just(response.response())
+                    : rememberResponseOwner(response, account).thenReturn(response.response());
             }),
-            false
+            true
         );
         return withBilling(run.principal(), run.requestId(), run.requestedModel(), run.upstreamRequest(), run.fastMode(),
             run.plan(), Mono.defer(() -> attemptTiered(run, walk, retry, endpoint)));
+    }
+
+    /**
+     * What an answer of a relay is rendered as on the Responses endpoint, where {@code incomplete} is an error to the
+     * clients that matter: Codex takes {@code response.incomplete} for a failure of the stream and sends the same request
+     * again, five more times, each of which a relay answers and is paid for, and it has run the calls of the answer by then,
+     * as it runs a call when the call arrives. What reaches this method is an answer that can be told at all: one that the
+     * relay's filter stopped, or that the gateway's own bound cut off when it lost a call or has nothing to show, was an
+     * interruption already ({@code XpDispatcher}), and nothing was charged for it.
+     *
+     * <ul>
+     *   <li>An answer the relay broke off at the limit of a client that named none was broken off at the gateway's default
+     *       (the bound the reservation is sized from, which the relay is told it may write). That is no limit of the
+     *       client's to report, and the native accounts' answers, which carry no stop reason, are finished ones: it is
+     *       rendered as one, with the text and the calls it came to. A relay holds the bound where a native account does not
+     *       (Codex accounts strip it), so an answer that was cut inside a call is no finished one and is not among these.
+     *   <li>An answer that is reported as {@code incomplete} (the limit the client wrote was reached) carries no tool call:
+     *       the client may retry it, and a call that was run once must not be run again.
+     * </ul>
+     *
+     * The request log and the metrics keep the stop reason of the relay; this is only how the answer is told.
+     */
+    static PlatformCompletionResult responsesAnswerOfRelay(PlatformCompletionResult answer, JsonNode clientRequest) {
+        PlatformCompletionResult.StopReason stop = answer.stopReason();
+        if (stop == PlatformCompletionResult.StopReason.MAX_TOKENS && !namesAnOutputLimit(clientRequest)) {
+            return new PlatformCompletionResult(answer.content(), answer.reasoningContent(), answer.toolUses(), answer.usage(),
+                null, answer.usageSource(), answer.degraded());
+        }
+        if ((stop == PlatformCompletionResult.StopReason.MAX_TOKENS || stop == PlatformCompletionResult.StopReason.CONTENT_FILTER)
+            && !answer.toolUses().isEmpty()) {
+            return new PlatformCompletionResult(answer.content(), answer.reasoningContent(), List.of(), answer.usage(),
+                stop, answer.usageSource(), answer.degraded());
+        }
+        return answer;
+    }
+
+    /** Whether the client asked for an output limit of its own, in any of the fields {@link #boundedBillingRequest} reads. */
+    private static boolean namesAnOutputLimit(JsonNode request) {
+        return request != null && (request.has("max_output_tokens") || request.has("max_completion_tokens") || request.has("max_tokens"));
     }
 
     /**
@@ -2148,7 +2290,7 @@ public class ProxyFacade {
                                 guardedAttempt,
                                 plan.poolContext(),
                                 run.start()
-                            ).then(Mono.defer(() -> endpoint.respond().apply(result, account))
+                            ).then(Mono.defer(() -> endpoint.respond().apply(result, selection))
                                 .map(response -> withTierHeaders(response, attempt.selection().level())));
                         }
 
@@ -2412,11 +2554,14 @@ public class ProxyFacade {
         // for (a request that names a small limit is still reserved for the default one).
         long forwarded = dispatch.forwardedOutputLimit();
         long outputLimit = forwarded > 0 ? Math.min(run.plan().outputBound(), forwarded) : run.plan().outputBound();
+        // A Responses request that names no limit of its own (Codex never does) has the default one forced onto it.
+        boolean defaultOutputLimit = dispatch.pair().entry() == PairRegistry.Entry.RESPONSES && !namesAnOutputLimit(run.responseRequest());
         return xpDispatcher.dispatch(
             selection.account(),
             dispatch,
             new RelayUsageNormalizer.Limits(relay.inputBound(), outputLimit),
-            timeLimit
+            timeLimit,
+            defaultOutputLimit
         );
     }
 
@@ -2553,19 +2698,22 @@ public class ProxyFacade {
     }
 
     /**
-     * The next turn of a response chain names its session by the response it continues, so the tier of the session is
-     * also registered under the id of the response this turn produced.
+     * The next turn of a response chain names its session by the response it continues, so the node keeps that the response
+     * this turn produced belongs to the session of this turn. The next turn is then the same session, and so the same tier
+     * (design 4.7) for every model the chain has asked for, and the relays that broke off an answer of it a moment ago
+     * (design 7.8) stay out of the plans of its turns, whatever those turns were: it is the retry of this one, and the turns
+     * after it, that must not be given to a relay that may still be generating.
      */
     private void followTierToNextTurn(TieredRequest run, String responseId) {
-        TierPlan.Session session = run.plan().session().orElse(null);
-        if (session == null || responseId == null || responseId.isBlank()) {
+        if (responseId == null || responseId.isBlank()) {
             return;
         }
-        String next = TierSessionKeys.ofResponse(run.principal().keyId(), responseId);
-        tierRuntime.bindings().alias(
-            session.bindingKey(),
-            TierSessionKeys.bindingKey(run.plan().vendor(), run.plan().modelKey(), next)
-        );
+        TierPlan plan = run.plan();
+        TierPlan.Session session = plan.session().orElse(null);
+        String name = session != null ? session.key() : plan.relaySession();
+        if (name != null) {
+            tierRuntime.bindings().follow(TierSessionKeys.ofResponse(run.principal().keyId(), responseId), name);
+        }
     }
 
     /**
@@ -3446,39 +3594,50 @@ public class ProxyFacade {
         return ResponseEntity.ok(body);
     }
 
+    /** @param owner the account that gave the answer and owns the chain it starts; null when no account does (a relay) */
     private PreparedResponse prepareResponsesJsonResponse(
         JsonNode request,
         JsonNode stateRequest,
         String mappedModel,
         PlatformCompletionResult result,
-        ProxyAccountEntity account
+        ProxyAccountEntity owner
     ) {
         ObjectNode body = openAiResponseFactory.responses(
             mappedModel,
             result,
             request.path("previous_response_id").asString(null)
         );
-        openAiResponseStateStore.remember(body, stateRequest, account.getAccountId());
+        rememberResponse(body, stateRequest, owner);
         return new PreparedResponse(ResponseEntity.ok(body), body.path("id").asString(null));
     }
 
+    /** @param owner as for {@link #prepareResponsesJsonResponse} */
     private PreparedResponse prepareResponsesStreamResponse(
         JsonNode request,
         JsonNode stateRequest,
         String mappedModel,
         PlatformCompletionResult result,
-        ProxyAccountEntity account
+        ProxyAccountEntity owner
     ) {
         ObjectNode body = openAiResponseFactory.responses(
             mappedModel,
             result,
             request.path("previous_response_id").asString(null)
         );
-        openAiResponseStateStore.remember(body, stateRequest, account.getAccountId());
+        rememberResponse(body, stateRequest, owner);
         ResponseEntity<Flux<ServerSentEvent<String>>> response = ResponseEntity.ok()
             .contentType(MediaType.TEXT_EVENT_STREAM)
             .body(openAiResponseFactory.responsesStreamEvents(body));
         return new PreparedResponse(response, body.path("id").asString(null));
+    }
+
+    /** An answer no account gave (a relay's) is kept without the reasoning the gateway wrote for it, see {@link OpenAiResponseStateStore#rememberRelayed}. */
+    private void rememberResponse(ObjectNode body, JsonNode stateRequest, ProxyAccountEntity owner) {
+        if (owner == null) {
+            openAiResponseStateStore.rememberRelayed(body, stateRequest);
+        } else {
+            openAiResponseStateStore.remember(body, stateRequest, owner.getAccountId());
+        }
     }
 
     private Mono<Void> rememberResponseOwner(PreparedResponse response, ProxyAccountEntity account) {
@@ -3736,12 +3895,13 @@ public class ProxyFacade {
     /**
      * What differs between the endpoints in the dispatch loop of a tiered request.
      *
-     * @param relays whether the endpoint can be served by a relay: the Chat Completions and Messages entries are, through
-     *     the pairs of the registry; a plan of the Responses entry never holds one
+     * @param respond makes the response of the answer given by the selection (the account and how it was asked)
+     * @param relays whether the endpoint can be served by a relay: the Chat Completions, Messages and Responses entries
+     *     are, through the pairs of the registry; a plan of the Gemini entry never holds one
      */
     private record TieredEndpoint(
         Function<ProxyAccountEntity, Mono<PlatformCompletionResult>> call,
-        BiFunction<PlatformCompletionResult, ProxyAccountEntity, Mono<ResponseEntity<?>>> respond,
+        BiFunction<PlatformCompletionResult, TierSelection, Mono<ResponseEntity<?>>> respond,
         boolean relays
     ) {
     }

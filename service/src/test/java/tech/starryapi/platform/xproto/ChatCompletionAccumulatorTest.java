@@ -356,6 +356,21 @@ class ChatCompletionAccumulatorTest {
         assertThat(completion.stopReason()).isEqualTo(StopReason.MAX_TOKENS);
         assertThat(completion.toolUses()).extracting(PlatformToolUse::name).containsExactly("Done");
         assertThat(completion.content()).isEqualTo("Working on it.");
+        assertThat(completion.callCut()).as("the answer lacks the call that was cut").isTrue();
+    }
+
+    @Test
+    void anAnswerSaysThatACallWasCutOffOnlyWhenOneWas() {
+        // Text that ran out, a whole call, an answer that ended by itself: nothing was lost to the limit that is not in the answer.
+        assertThat(read(message("\"content\":\"A\"", "length")).callCut()).isFalse();
+        assertThat(read(message("\"tool_calls\":[{\"id\":\"a\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]", "length")).callCut()).isFalse();
+        assertThat(read(message("\"content\":\"A\"", "stop")).callCut()).isFalse();
+        assertThat(read(message("\"tool_calls\":[{\"id\":\"a\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]", "tool_calls")).callCut()).isFalse();
+        // The only call of the answer, cut in its arguments, and nothing else of the answer: the same loss.
+        Completion onlyCall = read(message("\"tool_calls\":[{\"id\":\"a\",\"function\":{\"name\":\"f\",\"arguments\":\"{\\\"cmd\\\":\\\"ec\"}}]", "length"));
+        assertThat(onlyCall.callCut()).isTrue();
+        assertThat(onlyCall.toolUses()).isEmpty();
+        assertThat(onlyCall.content()).isEmpty();
     }
 
     @Test

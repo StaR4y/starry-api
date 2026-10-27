@@ -10,6 +10,7 @@ import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import tech.starryapi.account.PoolCell;
 import tech.starryapi.platform.xproto.ChatWireSanitizer.Settings;
 import tech.starryapi.platform.xproto.FeaturePolicy.Baseline;
@@ -20,9 +21,11 @@ import tech.starryapi.platform.xproto.RequestFeatureDetector.Detected;
 import tech.starryapi.platform.xproto.RequestFeatureDetector.Feature;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.ObjectNode;
 
 /**
- * Design 7.9 line by line: for the Messages and Chat entries, what each feature comes to for a member (carried, left out
+ * Design 7.9 line by line: for the Messages, Chat and Responses entries, what each feature comes to for a member (carried, left out
  * and recorded, or the reason to skip the member), under the two baselines of design 7.2 (P3). The scenario tests of the
  * task come first: the Claude Code main loop has no HARD feature, {@code web_search} has, and a {@code gpt} request's
  * images and schemas are HARD where a Claude request's are SOFT.
@@ -82,6 +85,15 @@ class FeaturePolicyTest {
     private static String messagesBody(String extra, String content) {
         return "{\"model\":\"claude-sonnet-4-5\",\"max_tokens\":1024" + (extra.isEmpty() ? "" : "," + extra)
             + ",\"messages\":[{\"role\":\"user\",\"content\":" + content + "}]}";
+    }
+
+    private static Verdict responses(String body, Baseline baseline, Settings member) {
+        return verdict(Entry.RESPONSES, body, baseline, member);
+    }
+
+    private static String responsesBody(String extra, String content) {
+        return "{\"model\":\"claude-sonnet-4.5\"" + (extra.isEmpty() ? "" : "," + extra)
+            + ",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":" + content + "}]}";
     }
 
     private static String chatBody(String extra, String content) {
@@ -627,10 +639,312 @@ class FeaturePolicyTest {
         assertThat(verdict.soft()).isEmpty();
     }
 
+    // ---------------------------------------------------------------------------------------- 7.9, RESPONSES
+
+    /** The routes of the planner (DefaultSourceTierPlanner.nativeUnits) of the two models Codex is used with here. */
+    private static final Baseline CLAUDE_ROUTE = Baseline.of(List.of(PoolCell.KIRO_COMPATIBLE));
+    private static final Baseline GPT_ROUTE = Baseline.of(List.of(PoolCell.OFFICIAL_OPENAI));
+
+    @Test
+    void whatResponsesCarriesNeedsNoSayInAnyWay() {
+        String body = """
+            {"model":"claude-sonnet-4.5","instructions":"rules","max_output_tokens":100,"temperature":0.3,"top_p":1,
+             "parallel_tool_calls":false,"tool_choice":{"type":"function","name":"f"},
+             "tools":[{"type":"function","name":"f","parameters":{"type":"object"}},{"type":"custom","name":"apply_patch"}],
+             "input":[{"type":"message","role":"developer","content":[{"type":"input_text","text":"rules"}]},
+              {"type":"message","role":"user","content":[{"type":"input_text","text":"q"}]},
+              {"type":"function_call","call_id":"c1","name":"f","arguments":"{}"},
+              {"type":"function_call_output","call_id":"c1","output":"r"},
+              {"type":"custom_tool_call","call_id":"c2","name":"apply_patch","input":"*** Begin Patch"},
+              {"type":"custom_tool_call_output","call_id":"c2","output":"done"},
+              {"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]},
+              {"type":"message","role":"user","content":[{"type":"input_text","text":"next"}]}]}
+            """;
+
+        for (Baseline baseline : Baseline.values()) {
+            for (Settings member : allMembers()) {
+                Verdict verdict = responses(body, baseline, member);
+                assertThat(verdict.hard()).isEmpty();
+                assertThat(verdict.soft()).isEmpty();
+            }
+        }
+    }
+
+    /**
+     * Codex declares a cached web search and the sub-agents' namespace in every request it makes for a model it has no
+     * metadata for, so the request of the owner's example has none of the things that keep a relay out (task P6-02).
+     */
+    @Test
+    void theCodexRequestForAClaudeModelHasNoHardFeatureAndItsBuiltInToolsAreOnlyLeftOut() {
+        for (Settings member : allMembers()) {
+            Verdict verdict = responses(CodexRequests.CLAUDE_TURN, CLAUDE_ROUTE, member);
+
+            assertThat(verdict.hard()).as("%s", member).isEmpty();
+            assertThat(verdict.allowed()).isTrue();
+            assertThat(soft(verdict)).containsExactlyInAnyOrder(Feature.BUILTIN_TOOL, Feature.PROMPT_CACHE_KEY);
+        }
+    }
+
+    /**
+     * The same request for a model OpenAI serves is handed to an OpenAI account whole, which runs the web search and finds
+     * the deferred tools: a relay cannot, so it is not given the request at all (design 7.2, P3).
+     */
+    @Test
+    void theCodexRequestForAGptModelKeepsEveryRelayOutBecauseOfItsBuiltInTools() {
+        for (Settings member : allMembers()) {
+            Verdict verdict = responses(CodexRequests.GPT_TURN, GPT_ROUTE, member);
+
+            assertThat(hard(verdict)).as("%s", member).containsExactly(Feature.BUILTIN_TOOL);
+            // What is not the relay's to carry is only left out and recorded; the effort goes with a member that takes it.
+            Set<Feature> left = EnumSet.of(Feature.INCLUDE, Feature.VERBOSITY, Feature.PROMPT_CACHE_KEY);
+            if (!member.reasoningEffort()) {
+                left.add(Feature.REASONING_EFFORT);
+            }
+            assertThat(soft(verdict)).isEqualTo(left);
+        }
+        // Without the tools nothing keeps a relay out.
+        String lean = withoutBuiltInTools(CodexRequests.GPT_TURN);
+        assertThat(lean).doesNotContain("web_search").doesNotContain("tool_search").contains("apply_patch");
+        assertThat(responses(lean, GPT_ROUTE, EFFORT).hard()).isEmpty();
+        assertThat(soft(responses(lean, GPT_ROUTE, EFFORT))).containsExactlyInAnyOrder(Feature.INCLUDE, Feature.VERBOSITY, Feature.PROMPT_CACHE_KEY);
+        assertThat(soft(responses(lean, GPT_ROUTE, NONE))).contains(Feature.REASONING_EFFORT);
+    }
+
+    private static String withoutBuiltInTools(String json) {
+        ObjectNode body = (ObjectNode) tree(json);
+        ArrayNode kept = JSON.createArrayNode();
+        for (JsonNode tool : body.path("tools")) {
+            if (!Set.of("tool_search", "web_search").contains(tool.path("type").stringValue(""))) {
+                kept.add(tool);
+            }
+        }
+        body.set("tools", kept);
+        return body.toString();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "web_search", "web_search_preview", "file_search", "code_interpreter", "image_generation", "computer_use_preview", "mcp",
+        "local_shell", "tool_search", "namespace"
+    })
+    void aBuiltInToolIsHardOnAPassthroughRouteAndSoftOnATextRoute(String type) {
+        String body = responsesBody("\"tools\":[{\"type\":\"function\",\"name\":\"f\"},{\"type\":\"" + type + "\"}]", "\"q\"");
+
+        for (Settings member : allMembers()) {
+            assertThat(hard(responses(body, Baseline.PASSTHROUGH, member))).as("%s", member).containsExactly(Feature.BUILTIN_TOOL);
+            assertThat(responses(body, Baseline.PASSTHROUGH, member).soft()).isEmpty();
+            assertThat(responses(body, Baseline.TEXT_ONLY, member).hard()).isEmpty();
+            assertThat(soft(responses(body, Baseline.TEXT_ONLY, member))).containsExactly(Feature.BUILTIN_TOOL);
+        }
+    }
+
+    @Test
+    void aCustomToolOtherThanTheEditingToolIsHardOnEveryRoute() {
+        String body = responsesBody("\"tools\":[{\"type\":\"custom\",\"name\":\"shell\"}]", "\"q\"");
+
+        for (Baseline baseline : Baseline.values()) {
+            for (Settings member : allMembers()) {
+                assertThat(hard(responses(body, baseline, member))).containsExactly(Feature.CUSTOM_TOOL);
+            }
+        }
+    }
+
+    @Test
+    void aChainThisNodeCouldNotExpandIsHardOnEveryRoute() {
+        String body = responsesBody("\"previous_response_id\":\"resp_0123\"", "\"q\"");
+
+        for (Baseline baseline : Baseline.values()) {
+            for (Settings member : allMembers()) {
+                Verdict verdict = responses(body, baseline, member);
+                assertThat(hard(verdict)).containsExactly(Feature.PREVIOUS_RESPONSE_ID);
+                assertThat(verdict.allowed()).isFalse();
+            }
+        }
+    }
+
+    /**
+     * What the request only points at (a conversation, a stored prompt, an item of an earlier response, a compaction) is held
+     * by OpenAI, which a native account is handed the body for and the conversion to a relay's body cannot make: the relay
+     * would answer without it and be paid for the answer, so it is out on every route, as an unexpandable chain is.
+     */
+    @Test
+    void contextTheServerHoldsIsHardOnEveryRoute() {
+        for (String extra : List.of("\"conversation\":\"conv_abc123\"", "\"conversation\":{\"id\":\"conv_abc123\"}",
+            "\"prompt\":{\"id\":\"pmpt_abc\",\"variables\":{\"city\":\"Paris\"}}")) {
+            for (Baseline baseline : Baseline.values()) {
+                for (Settings member : allMembers()) {
+                    Verdict verdict = responses(responsesBody(extra, "\"q\""), baseline, member);
+                    assertThat(hard(verdict)).as("%s %s %s", extra, baseline, member).containsExactly(Feature.SERVER_HELD_CONTEXT);
+                    assertThat(verdict.allowed()).isFalse();
+                }
+            }
+        }
+        for (String item : List.of("{\"type\":\"item_reference\",\"id\":\"msg_stored_earlier\"}",
+            "{\"type\":\"compaction\",\"encrypted_content\":\"gAAAA\"}")) {
+            String body = "{\"model\":\"m\",\"input\":[" + item + ",{\"type\":\"message\",\"role\":\"user\",\"content\":\"continue\"}]}";
+            for (Baseline baseline : Baseline.values()) {
+                for (Settings member : allMembers()) {
+                    assertThat(hard(responses(body, baseline, member))).as("%s %s %s", item, baseline, member)
+                        .containsExactly(Feature.SERVER_HELD_CONTEXT);
+                }
+            }
+        }
+    }
+
+    /**
+     * An image the conversion has no place for is lost by every member, the one with vision too, so it is what an image
+     * is for a member without: a passthrough route keeps the relay out, a text route leaves the image out and says so.
+     */
+    @Test
+    void anImageTheConversionHasNoPlaceForFollowsTheBaselineWhateverTheVisionOfTheMember() {
+        String fileOnly = responsesBody("", "[{\"type\":\"input_text\",\"text\":\"what is this?\"},{\"type\":\"input_image\",\"file_id\":\"file-abc123\"}]");
+        String inTheDeveloperMessage = "{\"model\":\"m\",\"input\":[{\"type\":\"message\",\"role\":\"developer\",\"content\":"
+            + "[{\"type\":\"input_text\",\"text\":\"use this logo\"},{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0KGgo=\"}]},"
+            + "{\"type\":\"message\",\"role\":\"user\",\"content\":\"q\"}]}";
+
+        for (String body : List.of(fileOnly, inTheDeveloperMessage)) {
+            for (Settings member : allMembers()) {
+                assertThat(hard(responses(body, GPT_ROUTE, member))).as("%s", member).containsExactly(Feature.IMAGE);
+                assertThat(responses(body, GPT_ROUTE, member).soft()).isEmpty();
+                assertThat(responses(body, CLAUDE_ROUTE, member).hard()).isEmpty();
+                assertThat(soft(responses(body, CLAUDE_ROUTE, member))).as("%s", member).containsExactly(Feature.IMAGE);
+            }
+        }
+        // The same image by its URL is the member's to carry.
+        String byUrl = responsesBody("", "[{\"type\":\"input_text\",\"text\":\"what is this?\"},{\"type\":\"input_image\",\"image_url\":\"https://x.example/a.png\"}]");
+        assertThat(responses(byUrl, GPT_ROUTE, VISION).hard()).isEmpty();
+        assertThat(responses(byUrl, GPT_ROUTE, VISION).soft()).isEmpty();
+        assertThat(hard(responses(byUrl, GPT_ROUTE, NONE))).containsExactly(Feature.IMAGE);
+    }
+
+    @Test
+    void theCapOnToolCallsAndTheSummaryOfTheReasoningAreSoftOnEveryRouteAndMember() {
+        String body = responsesBody("\"max_tool_calls\":2,\"reasoning\":{\"summary\":\"auto\"}", "\"q\"");
+
+        for (Baseline baseline : Baseline.values()) {
+            for (Settings member : allMembers()) {
+                Verdict verdict = responses(body, baseline, member);
+                assertThat(verdict.hard()).isEmpty();
+                assertThat(soft(verdict)).containsExactlyInAnyOrder(Feature.MAX_TOOL_CALLS, Feature.REASONING_SUMMARY);
+            }
+        }
+    }
+
+    @Test
+    void theLengthOfTheAnswerOfAResponsesRequestIsSoftOnEveryRouteAndMemberAndMediumIsNothing() {
+        for (Settings member : allMembers()) {
+            for (Baseline baseline : Baseline.values()) {
+                for (String level : List.of("low", "high")) {
+                    Verdict verdict = responses(responsesBody("\"text\":{\"verbosity\":\"" + level + "\"}", "\"q\""), baseline, member);
+
+                    assertThat(verdict.hard()).as("%s %s %s", level, baseline, member).isEmpty();
+                    assertThat(soft(verdict)).containsExactly(Feature.VERBOSITY);
+                }
+                Verdict medium = responses(responsesBody("\"text\":{\"verbosity\":\"medium\"}", "\"q\""), baseline, member);
+                assertThat(medium.hard()).isEmpty();
+                assertThat(medium.soft()).isEmpty();
+            }
+        }
+    }
+
+    @Test
+    void theReasoningEffortOfResponsesIsCarriedToAnEffortMemberOnAnyTurnOfAnOpenAiModelAndLostOnAToolContinuationOfAClaudeModel() {
+        String effort = "\"reasoning\":{\"effort\":\"high\"}";
+        String continuation = "{\"model\":\"m\"," + effort + ",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"q\"},"
+            + "{\"type\":\"function_call\",\"call_id\":\"c\",\"name\":\"f\",\"arguments\":\"{}\"},"
+            + "{\"type\":\"function_call_output\",\"call_id\":\"c\",\"output\":\"r\"}]}";
+        Settings openAi = forModelOf(EFFORT, false);
+        Settings claude = forModelOf(EFFORT, true);
+
+        for (Baseline baseline : Baseline.values()) {
+            assertThat(responses(responsesBody(effort, "\"q\""), baseline, claude).soft()).isEmpty();
+            assertThat(responses(continuation, baseline, openAi).soft()).as("openai %s", baseline).isEmpty();
+            assertThat(responses(continuation, baseline, claude).soft()).as("claude %s", baseline).containsExactly(Feature.REASONING_EFFORT);
+            assertThat(responses(responsesBody(effort, "\"q\""), baseline, NONE).soft()).containsExactly(Feature.REASONING_EFFORT);
+            assertThat(responses(continuation, baseline, claude).hard()).isEmpty();
+        }
+    }
+
+    @Test
+    void theReasoningOfEarlierTurnsAndTheFieldsOnlyLeftOutAreSoftOnEveryRoute() {
+        String body = "{\"model\":\"m\",\"include\":[\"reasoning.encrypted_content\"],\"store\":true,\"truncation\":\"auto\","
+            + "\"prompt_cache_key\":\"k\",\"metadata\":{\"a\":\"b\"},\"service_tier\":\"flex\","
+            + "\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"q\"},{\"type\":\"reasoning\",\"id\":\"rs_1\"}]}";
+
+        for (Baseline baseline : Baseline.values()) {
+            for (Settings member : allMembers()) {
+                Verdict verdict = responses(body, baseline, member);
+                assertThat(verdict.hard()).isEmpty();
+                assertThat(soft(verdict)).containsExactlyInAnyOrder(Feature.INCLUDE, Feature.STORE, Feature.TRUNCATION,
+                    Feature.PROMPT_CACHE_KEY, Feature.METADATA, Feature.SERVICE_TIER, Feature.HISTORY_THINKING);
+            }
+        }
+    }
+
+    /** The image of a user's message is given to a member that has vision; otherwise a route that hands it to its account whole keeps the relay out. */
+    @Test
+    void imagesAndSchemasOfResponsesFollowTheBaselineWhenTheMemberHasNoVisionOrSchema() {
+        String body = responsesBody("\"text\":{\"format\":{\"type\":\"json_schema\",\"name\":\"s\",\"schema\":{\"type\":\"object\"}}}",
+            "[{\"type\":\"input_text\",\"text\":\"describe\"},{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0KGgo=\"}]");
+
+        Verdict gpt = responses(body, GPT_ROUTE, NONE);
+        assertThat(hard(gpt)).containsExactlyInAnyOrder(Feature.IMAGE, Feature.JSON_SCHEMA);
+        assertThat(soft(gpt)).isEmpty();
+        Verdict claude = responses(body, CLAUDE_ROUTE, NONE);
+        assertThat(claude.hard()).isEmpty();
+        assertThat(soft(claude)).containsExactlyInAnyOrder(Feature.IMAGE, Feature.JSON_SCHEMA);
+        for (Baseline baseline : Baseline.values()) {
+            Verdict carried = responses(body, baseline, member(true, true, false, false, false, false));
+            assertThat(carried.hard()).isEmpty();
+            assertThat(carried.soft()).isEmpty();
+        }
+        // Only what the member can carry goes with it.
+        assertThat(hard(responses(body, Baseline.PASSTHROUGH, VISION))).containsExactly(Feature.JSON_SCHEMA);
+        assertThat(hard(responses(body, Baseline.PASSTHROUGH, SCHEMA))).containsExactly(Feature.IMAGE);
+    }
+
+    @Test
+    void anImageInTheOutputOfAToolAndTheAudioAndFilesOfResponsesAreNeverCarriedSoTheBaselineDecides() {
+        String call = "{\"type\":\"function_call\",\"call_id\":\"c1\",\"name\":\"view_image\",\"arguments\":\"{}\"}";
+        String body = "{\"model\":\"m\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":["
+            + "{\"type\":\"input_file\",\"file_id\":\"f1\"},{\"type\":\"input_audio\",\"input_audio\":{\"data\":\"AAAA\",\"format\":\"wav\"}}]},"
+            + call + ",{\"type\":\"function_call_output\",\"call_id\":\"c1\",\"output\":[{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0KGgo=\"}]}]}";
+
+        for (Settings member : allMembers()) {
+            assertThat(hard(responses(body, Baseline.PASSTHROUGH, member)))
+                .containsExactlyInAnyOrder(Feature.FILE, Feature.AUDIO, Feature.TOOL_OUTPUT_IMAGE);
+            assertThat(responses(body, Baseline.TEXT_ONLY, member).hard()).isEmpty();
+            assertThat(soft(responses(body, Baseline.TEXT_ONLY, member)))
+                .containsExactlyInAnyOrder(Feature.FILE, Feature.AUDIO, Feature.TOOL_OUTPUT_IMAGE);
+        }
+    }
+
+    @Test
+    void aToolChoiceThatRestrictsTheToolsOfAResponsesRequestIsHardOnAPassthroughRouteAndSoftOnATextRoute() {
+        String body = responsesBody("\"tools\":[{\"type\":\"function\",\"name\":\"bash\"},{\"type\":\"function\",\"name\":\"read\"}],"
+            + "\"tool_choice\":{\"type\":\"allowed_tools\",\"mode\":\"required\",\"tools\":[{\"type\":\"function\",\"name\":\"read\"}]}", "\"q\"");
+
+        for (Settings member : allMembers()) {
+            assertThat(hard(responses(body, Baseline.PASSTHROUGH, member))).containsExactly(Feature.TOOL_CHOICE);
+            assertThat(responses(body, Baseline.TEXT_ONLY, member).hard()).isEmpty();
+            assertThat(soft(responses(body, Baseline.TEXT_ONLY, member))).containsExactly(Feature.TOOL_CHOICE);
+        }
+    }
+
+    @Test
+    void aFastBilledResponsesRequestNeedsAPriorityTier() {
+        Settings billedFast = member(false, false, false, false, false, true);
+        Settings billedFastWithTier = member(false, false, true, false, false, true);
+
+        assertThat(responses(responsesBody("", "\"q\""), Baseline.PASSTHROUGH, billedFast).hard()).containsExactly(Feature.FAST);
+        assertThat(responses(responsesBody("\"service_tier\":\"priority\"", "\"q\""), Baseline.PASSTHROUGH, billedFastWithTier).hard()).isEmpty();
+        assertThat(responses(responsesBody("\"service_tier\":\"priority\"", "\"q\""), Baseline.PASSTHROUGH, NONE).hard()).isEmpty();
+    }
+
     // ---------------------------------------------------------------------------------------- the rest
 
     @ParameterizedTest
-    @EnumSource(value = Entry.class, names = {"RESPONSES", "GEMINI"})
+    @EnumSource(value = Entry.class, names = {"GEMINI"})
     void anEntryWithoutATableIsHardForEveryMember(Entry entry) {
         for (Baseline baseline : Baseline.values()) {
             for (Settings member : allMembers()) {
@@ -667,7 +981,9 @@ class FeaturePolicyTest {
             RequestFeatureDetector.detect(Entry.MESSAGES, tree(RequestFeatureDetectorTest.CLAUDE_CODE_TURN.formatted(RequestFeatureDetectorTest.NEXT_PROMPT))),
             RequestFeatureDetector.detect(Entry.MESSAGES, tree(RequestFeatureDetectorTest.CLAUDE_CODE_TURN.formatted(RequestFeatureDetectorTest.TOOL_RESULT_LAST))),
             RequestFeatureDetector.detect(Entry.CHAT, tree(chatBody("\"reasoning_effort\":\"low\"," + SCHEMA_FORMAT,
-                "[{\"type\":\"text\",\"text\":\"t\",\"cache_control\":{\"type\":\"ephemeral\"}}," + IMAGE_PART + "," + AUDIO_PART + "," + FILE_PART + "]")))
+                "[{\"type\":\"text\",\"text\":\"t\",\"cache_control\":{\"type\":\"ephemeral\"}}," + IMAGE_PART + "," + AUDIO_PART + "," + FILE_PART + "]"))),
+            RequestFeatureDetector.detect(Entry.RESPONSES, tree(CodexRequests.GPT_TURN)),
+            RequestFeatureDetector.detect(Entry.RESPONSES, tree(CodexRequests.CLAUDE_TURN))
         );
         for (Detected detected : requests) {
             for (Baseline baseline : Baseline.values()) {
@@ -695,12 +1011,14 @@ class FeaturePolicyTest {
             Feature.STOP_SEQUENCES_OVER_4, Feature.N_OVER_ONE, Feature.WEB_SEARCH_OPTIONS, Feature.LEGACY_FUNCTIONS,
             Feature.NON_FUNCTION_TOOL, Feature.WEB_SEARCH, Feature.WEB_FETCH, Feature.CODE_EXECUTION, Feature.BASH_TOOL,
             Feature.TEXT_EDITOR_TOOL, Feature.COMPUTER_TOOL, Feature.MEMORY_TOOL, Feature.ANTHROPIC_DEFINED_TOOL,
-            Feature.MCP_SERVERS, Feature.CONTAINER, Feature.UNSUPPORTED_ENTRY
+            Feature.MCP_SERVERS, Feature.CONTAINER, Feature.PREVIOUS_RESPONSE_ID, Feature.SERVER_HELD_CONTEXT, Feature.CUSTOM_TOOL,
+            Feature.UNSUPPORTED_ENTRY
         );
         Set<Feature> neverHard = EnumSet.complementOf(alwaysHard);
         neverHard.remove(Feature.FAST);
         neverHard.removeAll(EnumSet.of(
-            Feature.IMAGE, Feature.JSON_SCHEMA, Feature.AUDIO, Feature.FILE, Feature.TOOL_CHOICE, Feature.LOGIT_BIAS
+            Feature.IMAGE, Feature.JSON_SCHEMA, Feature.AUDIO, Feature.FILE, Feature.TOOL_CHOICE, Feature.LOGIT_BIAS,
+            Feature.BUILTIN_TOOL, Feature.TOOL_OUTPUT_IMAGE
         ));
 
         for (Entry entry : Entry.values()) {
@@ -722,7 +1040,7 @@ class FeaturePolicyTest {
 
     @Test
     void anEntryWhoseConverterIsNotWrittenCarriesNothingButAPriorityTier() {
-        for (Entry entry : List.of(Entry.RESPONSES, Entry.GEMINI)) {
+        for (Entry entry : List.of(Entry.GEMINI)) {
             Detected detected = new Detected(entry, EnumSet.noneOf(Feature.class), false, false);
             for (Feature feature : Feature.values()) {
                 assertThat(FeaturePolicy.treatment(feature, detected, Baseline.TEXT_ONLY, FULL))
@@ -734,8 +1052,11 @@ class FeaturePolicyTest {
     }
 
     @Test
-    void onlyAChatRequestToAPassthroughRouteMakesTheConditionalFeaturesHard() {
-        Set<Feature> conditional = EnumSet.of(Feature.IMAGE, Feature.JSON_SCHEMA, Feature.AUDIO, Feature.FILE, Feature.TOOL_CHOICE);
+    void onlyAChatOrResponsesRequestToAPassthroughRouteMakesTheConditionalFeaturesHard() {
+        Set<Feature> conditional = EnumSet.of(
+            Feature.IMAGE, Feature.JSON_SCHEMA, Feature.AUDIO, Feature.FILE, Feature.TOOL_CHOICE, Feature.BUILTIN_TOOL,
+            Feature.TOOL_OUTPUT_IMAGE
+        );
         for (Entry entry : Entry.values()) {
             Detected detected = new Detected(entry, EnumSet.noneOf(Feature.class), false, false);
             for (Baseline baseline : Baseline.values()) {
@@ -743,7 +1064,8 @@ class FeaturePolicyTest {
                     for (Feature feature : conditional) {
                         boolean hard = FeaturePolicy.treatment(feature, detected, baseline, member) == Treatment.HARD;
                         assertThat(hard).as("%s %s %s", entry, baseline, feature)
-                            .isEqualTo(entry == Entry.CHAT && baseline == Baseline.PASSTHROUGH && !carries(feature, member));
+                            .isEqualTo((entry == Entry.CHAT || entry == Entry.RESPONSES) && baseline == Baseline.PASSTHROUGH
+                                && !carries(feature, member));
                     }
                 }
             }

@@ -412,6 +412,61 @@ class OpenAiResponseFactoryTest {
             .isEqualTo("max_output_tokens");
     }
 
+    @Test
+    void theReasoningItemTheFactoryWritesIsTheOneItRecognizesAndNoItemOfOpenAIIs() throws Exception {
+        JsonNode response = factory.responses("gpt-5", reasoningResult(), null);
+        JsonNode written = response.path("output").get(0);
+
+        assertThat(written.path("type").asString("")).isEqualTo("reasoning");
+        assertThat(OpenAiResponseFactory.isRenderedReasoning(written)).isTrue();
+        // As a client that sends its history back writes it: without the id and the status.
+        assertThat(OpenAiResponseFactory.isRenderedReasoning(objectMapper.readTree("""
+            {"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"t"}],"encrypted_content":null}"""))).isTrue();
+        for (String openAis : List.of(
+            """
+            {"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"gAAAAB"}""",
+            """
+            {"type":"reasoning","id":"rs_1","summary":[{"type":"summary_text","text":"s"}]}""",
+            """
+            {"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"t"}],"encrypted_content":"gAAAAB"}""",
+            """
+            {"type":"reasoning","summary":[],"content":[{"type":"text","text":"t"}]}""",
+            """
+            {"type":"reasoning","summary":[],"content":[]}""",
+            """
+            {"type":"reasoning","id":"rs_1","summary":[]}""",
+            """
+            {"type":"message","role":"assistant","content":[{"type":"reasoning_text","text":"t"}]}""",
+            "\"reasoning\"")) {
+            assertThat(OpenAiResponseFactory.isRenderedReasoning(objectMapper.readTree(openAis))).as(openAis).isFalse();
+        }
+    }
+
+    @Test
+    void theRenderedReasoningIsTakenOutOfARequestWithoutChangingIt() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+            {"model":"gpt-5.4","store":false,"input":[
+              {"type":"message","role":"user","content":"one"},
+              {"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"relay"}]},
+              {"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"gAAAAB"},
+              {"type":"message","role":"assistant","content":"two"},
+              {"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"relay again"}]}]}""");
+        JsonNode before = request.deepCopy();
+
+        JsonNode without = OpenAiResponseFactory.withoutRenderedReasoning(request);
+
+        assertThat(without.path("input")).extracting(item -> item.path("type").asString("")).containsExactly("message", "reasoning", "message");
+        assertThat(without.path("input").get(1).path("encrypted_content").asString("")).isEqualTo("gAAAAB");
+        assertThat(without.path("model").asString("")).isEqualTo("gpt-5.4");
+        assertThat(without.path("store").booleanValue()).isFalse();
+        assertThat(request).isEqualTo(before);
+        // A request that holds none is the very same request, and so is one whose input is not a list.
+        JsonNode plain = objectMapper.readTree("{\"model\":\"m\",\"input\":[{\"type\":\"message\",\"role\":\"user\",\"content\":\"q\"}]}");
+        assertThat(OpenAiResponseFactory.withoutRenderedReasoning(plain)).isSameAs(plain);
+        JsonNode text = objectMapper.readTree("{\"model\":\"m\",\"input\":\"q\"}");
+        assertThat(OpenAiResponseFactory.withoutRenderedReasoning(text)).isSameAs(text);
+    }
+
     private PlatformCompletionResult textResult() {
         return new PlatformCompletionResult("Hello", new PlatformUsage(10, 2, java.math.BigDecimal.ZERO, 0, 0, 0));
     }

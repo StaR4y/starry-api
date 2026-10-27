@@ -41,6 +41,7 @@ import tech.starryapi.platform.openai.OpenAiResponseFactory;
 import tech.starryapi.platform.openai.OpenAiResponseOwnerStore;
 import tech.starryapi.platform.openai.OpenAiResponseStateStore;
 import tech.starryapi.platform.openai.OpenAiUpstreamClient;
+import tech.starryapi.platform.xproto.ResponsesChatConverter;
 import tech.starryapi.proxy.tier.DefaultSourceTierPlanner;
 import tech.starryapi.proxy.tier.TierEntry;
 import tech.starryapi.proxy.tier.TierPlan;
@@ -91,6 +92,7 @@ class ProxyFacadeTierWiringTest {
     private final AccountAdmissionStore admissionStore = mock(AccountAdmissionStore.class);
     private final OpenAiResponseOwnerStore responseOwnerStore = mock(OpenAiResponseOwnerStore.class);
     private final XpDispatcher xpDispatcher = mock(XpDispatcher.class);
+    private final ResponsesChatConverter responsesChatConverter = new ResponsesChatConverter(new ObjectMapper());
 
     @Test
     void springBuildsTheFacadeWithTheTierRuntimeBean() {
@@ -104,8 +106,9 @@ class ProxyFacadeTierWiringTest {
             assertThat(facade.tierRuntime()).isSameAs(configured);
             assertThat(ReflectionTestUtils.getField(facade, "admissionStore")).isSameAs(admissionStore);
             assertThat(ReflectionTestUtils.getField(facade, "openAiResponseOwnerStore")).isSameAs(responseOwnerStore);
-            // The dispatcher of the relays comes through the same constructor.
+            // The dispatcher of the relays and the converter of the Responses entry come through the same constructor.
             assertThat(ReflectionTestUtils.getField(facade, "xpDispatcher")).isSameAs(xpDispatcher);
+            assertThat(ReflectionTestUtils.getField(facade, "responsesChatConverter")).isSameAs(responsesChatConverter);
         }
     }
 
@@ -222,6 +225,7 @@ class ProxyFacadeTierWiringTest {
         assertThat(mockingDetails(admission).isMock()).isFalse();
         assertThat(ReflectionTestUtils.getField(facade, "openAiResponseOwnerStore")).isNull();
         assertThat(ReflectionTestUtils.getField(facade, "xpDispatcher")).isNull();
+        assertThat(ReflectionTestUtils.getField(facade, "responsesChatConverter")).isNull();
     }
 
     @Test
@@ -239,6 +243,7 @@ class ProxyFacadeTierWiringTest {
         assertThat(ReflectionTestUtils.getField(facade, "admissionStore")).isSameAs(admissionStore);
         assertThat(ReflectionTestUtils.getField(facade, "openAiResponseOwnerStore")).isSameAs(responseOwnerStore);
         assertThat(ReflectionTestUtils.getField(facade, "xpDispatcher")).isNull();
+        assertThat(ReflectionTestUtils.getField(facade, "responsesChatConverter")).isNull();
     }
 
     @Test
@@ -255,6 +260,7 @@ class ProxyFacadeTierWiringTest {
 
         assertThat(facade.tierRuntime()).isSameAs(configured);
         assertThat(ReflectionTestUtils.getField(facade, "xpDispatcher")).isNull();
+        assertThat(ReflectionTestUtils.getField(facade, "responsesChatConverter")).isNull();
     }
 
     private AnnotationConfigApplicationContext context() {
@@ -285,6 +291,7 @@ class ProxyFacadeTierWiringTest {
         context.getBeanFactory().registerSingleton("admissionStore", admissionStore);
         context.getBeanFactory().registerSingleton("openAiResponseOwnerStore", responseOwnerStore);
         context.getBeanFactory().registerSingleton("xpDispatcher", xpDispatcher);
+        context.getBeanFactory().registerSingleton("responsesChatConverter", responsesChatConverter);
         context.getBeanFactory().registerSingleton("proxyProperties", new ProxyProperties());
         context.getBeanFactory().registerSingleton("sourceTierRegistry", mock(SourceTierRegistry.class));
         context.getBeanFactory().registerSingleton("modelPoolKeyResolver", mock(ModelPoolKeyResolver.class));

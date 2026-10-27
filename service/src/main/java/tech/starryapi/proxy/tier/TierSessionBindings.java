@@ -22,9 +22,8 @@ import tech.starryapi.config.ProxyProperties;
  *
  * <p>What counts as the session being used is any request of it that was served, whichever endpoint it came in through
  * and however it chose its tier: an automatic request reads and may write the binding, and one that named its tier
- * leaves the binding as it is and {@link #serve notes} that the session is in use (as does the hand-over of a response
- * chain's binding to the next turn, {@link #alias}). A session that keeps working with pinned requests is not idle, so
- * it is not sent back to the best tier by the time its next automatic request comes.
+ * leaves the binding as it is and {@link #serve notes} that the session is in use. A session that keeps working with
+ * pinned requests is not idle, so it is not sent back to the best tier by the time its next automatic request comes.
  *
  * <p>The store also counts, per session and tier, the dispatches in flight on this node. An account that refuses a
  * request because the same session still has requests running on it (a client that runs sub-agents in parallel) says
@@ -35,6 +34,12 @@ import tech.starryapi.config.ProxyProperties;
  * so it holds whether or not the vendor keeps sessions to their tier, and the switch of the account affinity leaves it
  * alone. It only shapes the plans of that session's next requests, which leave the relay out as they leave out a relay
  * that cannot carry the request.
+ *
+ * <p>A chain of Responses that the client tells apart only by the response each turn continues would be a new session
+ * every turn, with no tier binding and no exclusion carried from one turn to the next, and a turn of another model would
+ * cut the chain's bindings in two. So the store also keeps which session each response belongs to ({@link #follow}): the
+ * next turn looks the name it was given up ({@link #sessionOf}) and is the session of the first turn, with every binding
+ * the session has for the models it asked for and every relay that was kept from it.
  */
 public class TierSessionBindings {
 
@@ -60,8 +65,10 @@ public class TierSessionBindings {
     private final BooleanSupplier enabled;
     private final Cache<String, Binding> bindings;
     private final Cache<String, Boolean> interrupted;
+    /** The session each response of a chain belongs to, by the name its next turn is given. */
+    private final Cache<String, String> chains;
     /** Off for the store that keeps nothing: a cache of no size still shows an entry until its eviction has run. */
-    private final boolean keepsExclusions;
+    private final boolean keepsSessions;
     private final ConcurrentMap<String, Integer> inFlight = new ConcurrentHashMap<>();
 
     public TierSessionBindings(ProxyProperties properties) {
@@ -75,12 +82,18 @@ public class TierSessionBindings {
 
     private TierSessionBindings(BooleanSupplier enabled, Duration ttl, long maximumSize, Ticker ticker) {
         this.enabled = enabled;
+        Duration idle = ttl == null || ttl.isZero() || ttl.isNegative() ? Duration.ofMinutes(10) : ttl;
         this.bindings = Caffeine.newBuilder()
             .maximumSize(maximumSize)
-            .expireAfterAccess(ttl == null || ttl.isZero() || ttl.isNegative() ? Duration.ofMinutes(10) : ttl)
+            .expireAfterAccess(idle)
             .ticker(ticker)
             .build();
-        this.keepsExclusions = maximumSize > 0;
+        this.chains = Caffeine.newBuilder()
+            .maximumSize(maximumSize)
+            .expireAfterAccess(idle)
+            .ticker(ticker)
+            .build();
+        this.keepsSessions = maximumSize > 0;
         this.interrupted = Caffeine.newBuilder()
             .maximumSize(maximumSize)
             .expireAfterWrite(RELAY_EXCLUSION)
@@ -137,14 +150,31 @@ public class TierSessionBindings {
         }
     }
 
-    /** Gives the binding of {@code fromKey}, if any, to {@code toKey} too, which is where the next turn of a response chain looks. */
-    public void alias(String fromKey, String toKey) {
-        if (enabled() && fromKey != null && toKey != null) {
-            Binding current = bindings.getIfPresent(fromKey);
-            if (current != null) {
-                bindings.put(toKey, current);
-            }
+    /**
+     * Says that the next turn of a chain of Responses, which the client names by the response {@code next} it continues, is
+     * the session {@code session} that this turn was made under. Done when a turn has been served and the response it
+     * produced is known. It is no tier binding and is kept whatever the switch of the account affinity says, as the
+     * exclusions are.
+     *
+     * @param next the name the next turn is given ({@link TierSessionKeys#ofResponse})
+     * @param session the name of the session of this turn, which already is the first turn's when the chain is known
+     */
+    public void follow(String next, String session) {
+        if (keepsSessions && next != null && session != null && !next.equals(session)) {
+            chains.put(next, session);
         }
+    }
+
+    /**
+     * The session a name stands for: the session of the first turn when the name is that of a turn that was followed, else
+     * the name itself. Looking a name up counts as using it.
+     */
+    public String sessionOf(String name) {
+        if (!keepsSessions || name == null) {
+            return name;
+        }
+        String session = chains.getIfPresent(name);
+        return session != null ? session : name;
     }
 
     /**
@@ -156,14 +186,14 @@ public class TierSessionBindings {
      *     has no session to tell it by
      */
     public void excludeRelay(String vendor, String sessionKey, String accountId) {
-        if (keepsExclusions && vendor != null && sessionKey != null && accountId != null) {
+        if (keepsSessions && vendor != null && sessionKey != null && accountId != null) {
             interrupted.put(exclusionKey(vendor, sessionKey, accountId), Boolean.TRUE);
         }
     }
 
     /** Whether the relay broke off an answer for the session less than {@link #RELAY_EXCLUSION} ago. */
     public boolean relayExcluded(String vendor, String sessionKey, String accountId) {
-        return keepsExclusions && vendor != null && sessionKey != null && accountId != null
+        return keepsSessions && vendor != null && sessionKey != null && accountId != null
             && interrupted.getIfPresent(exclusionKey(vendor, sessionKey, accountId)) != null;
     }
 

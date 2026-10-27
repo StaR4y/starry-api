@@ -351,9 +351,9 @@ SELECT source_tier_ref, sum(credits) FROM api_usage_events GROUP BY 1;
 
 ## 跨协议中转
 
-**跨协议中转**让一把 **OpenAI 兼容 Key**（第三方中转站）当作另一个厂商某一级的号源：网关把客户端的请求转成 Chat Completions 发给它，再把应答转回客户端的格式，按这一级的价格计费。典型例子：Anthropic 的 1 级放一个能服务 Claude 的 OpenAI 格式中转（系数 1.0），2 级放 Kiro 与 Claude OAuth（系数 0.6）。Claude Code（Messages 入口）和 OpenCode（Chat 入口）的 Claude 请求先试中转，中转用不了或服务不了这个请求时，由 Kiro 兜底。
+**跨协议中转**让一把 **OpenAI 兼容 Key**（第三方中转站）当作另一个厂商某一级的号源：网关把客户端的请求转成 Chat Completions 发给它，再把应答转回客户端的格式，按这一级的价格计费。典型例子：Anthropic 的 1 级放一个能服务 Claude 的 OpenAI 格式中转（系数 1.0），2 级放 Kiro 与 Claude OAuth（系数 0.6）。Claude Code（Messages 入口）、OpenCode（Chat 入口）和 Codex（Responses 入口）的 Claude 请求先试中转，中转用不了或服务不了这个请求时，由 Kiro 兜底。
 
-这一版提供 **Chat 和 Messages 两个入口、anthropic 和 openai 两个厂商**，共四个（入口，厂商）对，全部是**试用中**：门控只能设为「名单里的 Key」，不能对所有 Key 打开（见「门控」）。Responses 入口（Codex）、Gemini 入口和 google 厂商还没有对，Codex 和 Gemini 客户端照常只用原生号源。deepseek 和自定义厂商不能登记中转（`400 SOURCE_PROFILE_NOT_APPLICABLE`）：它们本来就把兼容 Key 当作自己的账号。
+这一版提供 **Chat、Messages 和 Responses 三个入口、anthropic 和 openai 两个厂商**，共六个（入口，厂商）对，全部是**试用中**：门控只能设为「名单里的 Key」，不能对所有 Key 打开（见「门控」）。Gemini 入口和 google 厂商还没有对，Gemini 客户端照常只用原生号源。deepseek 和自定义厂商不能登记中转（`400 SOURCE_PROFILE_NOT_APPLICABLE`）：它们本来就把兼容 Key 当作自己的账号。
 
 > 没有登记中转的部署完全不受影响：没有成员行，跨协议的代码不会被调用，专用排除是空操作，价格、结算、响应和日志都和以前一样。
 
@@ -363,8 +363,8 @@ SELECT source_tier_ref, sum(credits) FROM api_usage_events GROUP BY 1;
 2. **建号池。** 「系统设置 → 号源分级」选 Anthropic，点「套用预设」选「OpenAI 中转 + Kiro」（1 级放中转，2 级放 Kiro 与 Claude OAuth，系数都是 1，Kiro 要便宜多少自己定），改好名字和系数，保存，再把「启用」打开。
 3. **登记中转。** 「跨协议成员（中转）」→「登记中转」：选一把 OpenAI 兼容 Key（只有兼容 Key 能选）和它所在的号池，填好下面的「成员设置」和「映射」，保存。中转单独保存，页面上有没保存的修改时先保存或放弃它们。中转登记在号池里：之后改号池的标识，中转跟着走；删除还登记着中转的号池、或套用预设而预设里没有它所在的号池（预设里标识相同的号池会留住它），页面会拒绝，要先在这里把中转移到别的号池或移除。**从保存起这把 Key 就是专用的**（见下），门控还关着时它也已经不再服务 GLM 等兼容请求。
 4. **验证映射。** 在成员对话框里点「验证映射」（需要缓存口径证据时勾选「同时运行缓存探针」，见下）。只有验证通过的映射才会进入请求的计划。
-5. **对自己的 Key 打开门控。** 「门控」里找到入口（「Messages 入口」是 Claude Code，「Chat Completions 入口」是 OpenCode），状态选「名单里的 Key」，名单里选你自己的 Key（至多 50 把），保存。
-6. **用自己的 Key 试用。** 用 Claude Code 或 OpenCode 发几个请求。「运行状态」里这个中转的层应是「就绪」，尝试数在涨；请求日志的「号源」列显示服务的号池，管理员另能看到派发方式 `OPENAI_CHAT` 和发给中转的模型名。
+5. **对自己的 Key 打开门控。** 「门控」里找到入口（「Messages 入口」是 Claude Code，「Chat Completions 入口」是 OpenCode，「Responses 入口」是 Codex），状态选「名单里的 Key」，名单里选你自己的 Key（至多 50 把），保存。
+6. **用自己的 Key 试用。** 用 Claude Code、OpenCode 或 Codex 发几个请求。「运行状态」里这个中转的层应是「就绪」，尝试数在涨；请求日志的「号源」列显示服务的号池，管理员另能看到派发方式 `OPENAI_CHAT` 和发给中转的模型名。
 7. **盯指标，攒证据。** 见「指标与升级证据」。证据够了、对升级为「已验证」之后，门控才能对所有 Key 打开；在那之前不要把试用放给别人。
 
 ### 成员设置
@@ -449,9 +449,16 @@ SELECT source_tier_ref, sum(credits) FROM api_usage_events GROUP BY 1;
 | 入口 | 硬：跳过中转 | 软：丢掉并记录 |
 | --- | --- | --- |
 | Messages（Claude Code） | 服务端工具和 Anthropic 定义的工具（`web_search`、`web_fetch`、`code_execution`、`bash`、`text_editor`、`computer`、`memory`）、`mcp_servers`、`container`；`stop_sequences` 多于 4 个 | 图片和文档（同原生）、`cache_control`、历史里的 thinking、`top_k`、`metadata`、`service_tier`、`context_management`、其他 beta；`tool_search_tool_*`（去掉这个工具，延迟加载的工具照普通函数发送）；`thinking`（除非成员设为「映射为 reasoning_effort」，且不是 Claude 模型的工具续接轮） |
+| Responses（Codex） | 自定义工具（`apply_patch` 除外）；这个节点展开不了的 `previous_response_id` 链（中转只会拿到最后一轮）；上下文留在 OpenAI 那边、请求里只是指向它的：`conversation`、保存的 `prompt`、`item_reference` 和 `compaction` 项（中转拿不到它们，会在缺了上下文的情况下回答并收费；Kiro 照旧不读它们）。**gpt 类请求**（原生账号会照单转发）还有：OpenAI 自己运行的内置工具（任何不是函数、也不是自定义工具的类型：`web_search`、`file_search`、`code_interpreter`、`image_generation`、`computer_use_preview`、`local_shell`、`mcp` 等）和客户端的工具搜索（`tool_search`、`namespace`），工具输出里的图片（`view_image`），成员不能承载的图片（成员没有 vision，只有 `file_id` 的图片，中转读不了 OpenAI 的文件；developer / system 消息里的图片，转换只保留这类消息的文字）、`json_schema`、音频 / 文件，限定工具的 `tool_choice`（`allowed_tools`） | `reasoning` 项（含加密内容，不能跨号源携带）、`include`、`store`、`truncation`、`max_tool_calls`、`prompt_cache_key`、`metadata`、`service_tier` 等；`reasoning.summary`（`none` 不算）；`text.verbosity` 为 `low` / `high`（同 Chat：Codex 给每个 gpt 请求都带 `low`）；`reasoning.effort`（成员没设映射时丢掉；设了映射就携带，只有 Claude 模型的工具续接轮例外，同 Messages）；**Claude 请求**（原生 Kiro 只读文本）的内置工具、图片（包括上面不能承载的）、`json_schema`、音频 / 文件、限定工具的 `tool_choice`、工具输出里的图片。`apply_patch` 不受影响：中转拿到的是同样的函数，应答里它的调用还是 `custom_tool_call` |
 | Chat（OpenCode 等） | `n` > 1、`stop` 多于 4 个、`web_search_options`、旧版 `functions`、非函数工具；fast 请求而成员没有 `priority_tier`。**gpt 类请求**（原生账号会照单转发）还有：成员不能承载的图片、`json_schema`、音频 / 文件，限定工具的 `tool_choice`（`allowed_tools`），`logit_bias` | `user`、`metadata`、`store`、`logprobs`、`prompt_cache_key` 等；`verbosity` 为 `low` / `high`（只是对回答长短的建议，对所有请求都是软的：OpenCode 给每个 gpt 请求都带 `low`，硬了中转就接不到它的 gpt 请求；`medium` 是默认值，不算特性）；`cache_control`（成员没开透传时）；`reasoning_effort`（成员没设映射时）；**Claude 请求**（原生 Kiro / Anthropic 只读文本）的图片、`json_schema`、音频 / 文件、限定工具的 `tool_choice`、`logit_bias` |
 
-工具调用的 id 由网关重新生成（Messages 是 `toolu_…`，Chat 是 `call_…`），中转给的 id 不会到客户端；每轮都返回 `call_0` 的中转因此没有问题。
+**Codex（Responses 入口）。** Codex 对 Claude 模型声明的 `web_search` 和 `multi_agent_v1` 命名空间，对 Kiro 来说本来就没有用，是软的，Claude 请求照常交给中转。Codex 对 gpt 模型默认还声明 `web_search` 和 `tool_search`，gpt 请求的原生账号（OpenAI、Codex）会收到它们，所以这样的请求是硬的，中转不接，仍由原生账号服务；要让 gpt 请求走中转，请在 Codex 的 `config.toml` 里关掉它们（Codex 0.142.5：`web_search = "disabled"`，`[features]` 里 `multi_agent = false`，工具搜索跟着多智能体功能走）。Codex 不带 `previous_response_id`，每一轮都发完整历史（`store: false`），中转因此可以服务任何一轮；用 `previous_response_id` 续写的客户端，链由这个节点保存的历史展开，展开不了（重启、换了节点、超过 6 小时，或者被这个节点的历史上限挤掉：每个节点最多保存 512 条历史、共 64 MB，满了先删最旧的，压缩后超过 8 MB 的历史根本不保存；Codex 这样每轮都存完整历史的流量会很快占满它，可用 `starry.responses.state-max-total-bytes`、`starry.responses.state-max-entry-bytes` 调大）的请求交不给中转，只剩中转可用时返回 `409 RESPONSE_CHAIN_NOT_PORTABLE`。中转服务的应答**不记 owner**：链的下一轮由网关保存的历史重放，哪个号源都能接，也不会让未分级的 OpenAI 链把请求发给中转。中转应答里的推理项（网关自己渲染的：没有加密内容、没有摘要，只有 `reasoning_text`）会照常给客户端，但不记进链的历史；在有中转成员的 OpenAI 厂商上，客户端回放历史时带回来的这种推理项也不会发给 OpenAI 账号（OpenAI 自己的推理项带加密内容或摘要，原样发送），因为 OpenAI 可能拒绝带着它的 `store: false` 请求，而这种拒绝是请求的失败，不会换别的级别再试（没有中转的厂商照旧原样发送）。因此移除这个厂商的所有中转、或关掉它的分级之后，还在回放这种推理项的会话（Codex 把历史存在本地）会把它们原样发给 OpenAI 账号，OpenAI 可能拒绝；这样的会话需要新开一个。
+
+Codex 不发 `max_output_tokens`，也没有任何设置能让它发（Codex 0.142.5 的配置里没有这样的项），网关按预留的假定把中转限在 4,096 个输出令牌以内（原生 Codex 账号会去掉这个限制，不受它约束；客户端自己写了 `max_output_tokens` 时用它的值）。所以经中转的 Codex 单轮最多写 4,096 个令牌，要放宽只有改网关（设计 O12，待负责人决定）；客户端写 `max_output_tokens` 对 Codex 不是办法。Codex 把 `response.incomplete` 当作流的失败，会把同一个请求再发五次，每一次中转的应答都要付费，而它已经执行过应答里的工具调用，所以中转在这个**网关默认的上限**处停下的应答这样处理：只有文字、没有丢失工具调用的，按完成（`completed`）返回，和原生账号的应答一样，已经完整的工具调用保留；**丢了一个被截断的工具调用**（常见的是一轮的第一个动作就是用一条命令或一个大补丁写大文件），或**没有文字也没有完整的调用**（只有推理）的，是中断：用户得到 `502`、不付费（D8，运营者承担中转白写的令牌），这个会话 2 分钟内不再把请求给这个中转，Codex 自己对 5xx 的重试去原生号池，那里不受 4,096 的约束；没有原生号池可去时，重试得到没有可用账号的 `503`。中转的内容过滤停下的应答同样是中断。只有客户端**自己写的**上限被用尽时，才以 `incomplete`（`max_output_tokens`）结束，并且这样的应答不带工具调用（客户端会重试它）。请求日志和指标仍记中转的停止原因（被中断的尝试是 `INTERRUPTED`，其余如 `MAX_TOKENS`）。
+
+另有一个已知的局限，等负责人决定（设计 O11）：中转的应答只有推理、没有文字也没有工具调用、以 `stop` 结束时，Codex 上渲染成一个推理项加一条空消息，并照常收费，Codex 什么也不显示就结束这一轮（Messages 入口上这样的应答按中断处理，不收费）。目前保持设计 7.15 的说法。
+
+工具调用的 id 由网关重新生成（Messages 是 `toolu_…`，Chat 和 Responses 是 `call_…`），中转给的 id 不会到客户端；每轮都返回 `call_0` 的中转因此没有问题。
 
 **失败怎么办。** 原则是**一次生成**：中转可能已经生成之后，请求绝不再派给别的账号或级别。
 
@@ -507,7 +514,8 @@ SELECT source_tier_ref, sum(credits) FROM api_usage_events GROUP BY 1;
 
 - **Claude Code**（Messages 入口）：文本、工具、并行工具和原生号源一样；截断如实报告（`max_tokens`）；不输出 thinking 块（原生也不）；图片和文档被丢掉（原生也丢）。WebSearch 子请求（`web_search_*`）、没有映射的小模型（如 Haiku）和超长的请求，只让**那一个请求**去原生号池，主循环的号池不变（会话只在真实降级时才换号池）。网关没有 `count_tokens` 端点（所有号源都是 `404`），客户端一般会回退为本地估算。网关不给中转这一级加提示缓存，缓存成本见下一节。
 - **OpenCode**（Chat 入口）：接近透传。「降级后停留」靠它发的 `x-session-affinity`（1.18.16 核对过）。网关合成的流没有 usage 块，OpenCode 无法据此提前压缩上下文；中转的窗口比目录窗口小时，由上下文超长的跨级和「学到的上限」兜底。
-- **Codex、Gemini 客户端**：这一版没有对它们的（入口，厂商）对，只用原生号源。
+- **Codex**（Responses 入口）：Claude 请求由中转服务；gpt 请求只有在关掉 `web_search`、多智能体（工具搜索）之后才会走中转，否则仍由原生账号服务（见上一节）。`apply_patch` 由网关仿真，应答里仍是 `custom_tool_call`。截断：网关默认的 4,096 令牌上限处，只有文字的应答按完成返回，丢了调用或只有推理的是中断（`502`，不收费，重试去原生号池），客户端自己写的上限才是 `incomplete`（见上一节）；会话靠 `session-id` 请求头，没有时靠内容指纹。
+- **Gemini 客户端**：这一版没有它的（入口，厂商）对，只用原生号源。
 
 ### Claude Code 的缓存成本
 

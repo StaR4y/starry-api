@@ -40,6 +40,7 @@ import tech.starryapi.sourcetier.SourceTierSnapshot.MemberModel;
 import tech.starryapi.sourcetier.SourceTierSnapshot.PairGate;
 import tech.starryapi.sourcetier.SourceTierSnapshot.Tier;
 import tech.starryapi.sourcetier.SourceTierValidator;
+import tools.jackson.databind.JsonNode;
 
 /**
  * Decides which of the relays registered in a vendor's tiers may serve one request, and builds what each is sent (design 3,
@@ -96,7 +97,8 @@ final class XpEligibility {
      *     in service for it: a tier of relays that are switched off is then a tier that cannot serve for now, and not a
      *     tier the request has nothing in
      * @param session what the request's session is called for the relays that broke off its answers, which the facade writes
-     *     them under; null when no relay is eligible, and when nothing tells the session from others
+     *     them under; null when no relay of the vendor is open to the request's key (a pair that is not offered or whose gate
+     *     is shut), and when nothing tells the session from others
      */
     record Found(Map<String, List<Eligible>> byTier, List<XpSkip> skips, boolean open, String session) {
 
@@ -118,6 +120,18 @@ final class XpEligibility {
                 .map(XpSkip::firstFeature)
                 .findFirst()
                 .orElse(null);
+        }
+
+        /**
+         * Whether a request that no tier can serve has a relay in these tiers that was left out because the request
+         * continues a response chain that this node could not expand (design 4.8): the request is then refused for the
+         * chain, which the client must not take out of the request as it would a feature, but continue from the history it
+         * holds.
+         */
+        boolean chainRefused(Collection<Tier> tiers) {
+            Set<String> ids = tiers.stream().map(Tier::tierId).collect(Collectors.toSet());
+            String chain = Feature.PREVIOUS_RESPONSE_ID.label();
+            return skips.stream().anyMatch(skip -> ids.contains(skip.tierId()) && skip.leftOutFor(chain));
         }
 
         /**
@@ -152,6 +166,40 @@ final class XpEligibility {
 
     /** The body of one set of settings, and whether it can be sent. */
     private record Built(Wire wire, List<String> problems, long estimatedInput) {
+    }
+
+    /**
+     * The Chat body the relays of one request are given a body from, made when the first relay gets as far as being
+     * built for and shared by the rest: for the entries that are planned over a Chat body it is that body, and for the
+     * Responses entry it is the conversion of the planned one ({@link TierEntryFacts#chatBody}). A conversion that fails
+     * fails every relay's body the same way.
+     */
+    private static final class ChatSource {
+
+        private final TierPlanRequest request;
+        private final TierEntryFacts facts;
+        private JsonNode body;
+        private RuntimeException failure;
+
+        ChatSource(TierPlanRequest request, TierEntryFacts facts) {
+            this.request = request;
+            this.facts = facts;
+        }
+
+        JsonNode get() {
+            if (failure != null) {
+                throw failure;
+            }
+            if (body == null) {
+                try {
+                    body = facts.chatBody(request.upstreamRequest());
+                } catch (RuntimeException broken) {
+                    failure = broken;
+                    throw broken;
+                }
+            }
+            return body;
+        }
     }
 
     private final PairRegistry pairs;
@@ -215,6 +263,7 @@ final class XpEligibility {
         FeaturePolicy.Baseline baseline = FeaturePolicy.Baseline.of(units);
         Map<Settings, Verdict> verdicts = new HashMap<>();
         Map<Settings, Built> built = new HashMap<>();
+        ChatSource chat = new ChatSource(request, facts);
         Map<String, List<Eligible>> eligible = new LinkedHashMap<>();
         List<XpSkip> skips = new ArrayList<>();
         // What the relays that broke off this session's answers are kept from it by; the same name the facade writes them under.
@@ -263,10 +312,10 @@ final class XpEligibility {
             Verdict verdict = verdicts.computeIfAbsent(settings, ignored -> FeaturePolicy.judge(detected, baseline, settings));
             if (!verdict.allowed()) {
                 skips.add(new XpSkip(tierId, member.accountId(), XpSkip.Reason.FEATURE,
-                    verdict.hard().stream().map(Feature::label).collect(Collectors.joining(","))));
+                    verdict.hard().stream().map(Feature::label).distinct().collect(Collectors.joining(","))));
                 continue;
             }
-            Built body = built.computeIfAbsent(settings, ignored -> build(request, facts, settings));
+            Built body = built.computeIfAbsent(settings, ignored -> build(chat, facts, settings));
             XpSkip unfit = unfit(member, mapping, body);
             if (unfit != null) {
                 skips.add(unfit);
@@ -285,7 +334,9 @@ final class XpEligibility {
             eligible.computeIfAbsent(tierId, ignored -> new ArrayList<>())
                 .add(new Eligible(new Relay(dispatch, mapping, body.estimatedInput()), account));
         }
-        return new Found(eligible, List.copyOf(skips), open, eligible.isEmpty() ? null : session);
+        // Whatever the relays did this turn, or were left out for: the session is the one a relay is kept from, and what the
+        // next turn of a response chain is the session of. A relay that is not open to the key is nothing of the session's.
+        return new Found(eligible, List.copyOf(skips), open, open ? session : null);
     }
 
     /**
@@ -325,7 +376,7 @@ final class XpEligibility {
         }
         Settings settings = settings(member, mapping, vendor, request.fastMode());
         return FeaturePolicy.judge(detected, FeaturePolicy.Baseline.of(units), settings).allowed()
-            && unfit(member, mapping, build(request, facts, settings)) == null;
+            && unfit(member, mapping, build(new ChatSource(request, facts), facts, settings)) == null;
     }
 
     /**
@@ -393,14 +444,14 @@ final class XpEligibility {
 
     /**
      * The body for one set of settings, made from the request as it is reserved (so the output limit the reservation
-     * assumes is the one the relay is given) and from what the original body says about reasoning and tool search. A
-     * body that cannot be made, or does not pass the lint, is a conversion this member cannot serve; a defect in the
-     * conversion costs the request its relays, not the request.
+     * assumes is the one the relay is given; the Responses entry's body is converted from that one) and from what the
+     * original body says about reasoning and tool search. A body that cannot be made, or does not pass the lint, is a
+     * conversion this member cannot serve; a defect in the conversion costs the request its relays, not the request.
      */
-    private static Built build(TierPlanRequest request, TierEntryFacts facts, Settings settings) {
+    private static Built build(ChatSource chat, TierEntryFacts facts, Settings settings) {
         try {
             Wire wire = ChatCanonicalizer.canonicalize(
-                ChatWireSanitizer.sanitize(request.upstreamRequest(), facts.entryDigest(), settings, null), settings);
+                ChatWireSanitizer.sanitize(chat.get(), facts.entryDigest(), settings, null), settings);
             List<String> problems = StrictChatLint.problems(wire.body());
             return new Built(wire, problems, problems.isEmpty() ? RelayUsageNormalizer.estimateInputTokens(wire.body()) : 0);
         } catch (RuntimeException failure) {

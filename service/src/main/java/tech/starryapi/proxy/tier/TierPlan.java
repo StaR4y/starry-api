@@ -162,8 +162,8 @@ public final class TierPlan {
      * @param bindingKey the key the session's tier is stored under: the session in this vendor, for this model
      * @param keepsTier whether the request reads the tier its session is bound to and may write it, as an automatic
      *     request does. A request that named its tier is only part of the session: it counts as one of its dispatches
-     *     while it runs, so that a refusal it causes is not taken for other load, it hands the binding on to the
-     *     next turn of a response chain and, once served, notes that the session is in use (so that the binding does
+     *     while it runs, so that a refusal it causes is not taken for other load, it makes the next turn of a response
+     *     chain the same session and, once served, notes that the session is in use (so that the binding does
      *     not expire in the middle of its work), but it never reads or changes the tier the session is bound to.
      */
     public record Session(String key, String bindingKey, boolean keepsTier) {
@@ -547,10 +547,19 @@ public final class TierPlan {
      * client gave the session, or the fingerprint of its beginning ({@link TierSessionKeys#resolve}). The relay is then kept
      * from the same session for a couple of minutes, and the plans of that session's next requests are made without it.
      * Unlike {@link #session()}, which is the session of the tier bindings, it exists whether or not the vendor keeps
-     * sessions to their tier. Null for a plan that has no relay to ask, and when nothing tells the session from others.
+     * sessions to their tier. Null for a plan that no relay takes part in (none is open to the key), and when nothing tells
+     * the session from others; otherwise it is the session whatever the relays did, or were left out for, this time.
      */
     public String relaySession() {
         return relaySession;
+    }
+
+    /**
+     * Whether the vendor has a relay registered in its tiers, whether or not one takes part in this request: a history that
+     * a request replays can hold what a relay answered earlier (the configuration of the plan, not the state of its relays).
+     */
+    public boolean vendorHasRelays() {
+        return tiered && snapshot.members(vendor).stream().anyMatch(SourceTierSnapshot.Member::crossProtocol);
     }
 
     /** The vendor whose tiers the request is served from, as the tier configuration names it. */

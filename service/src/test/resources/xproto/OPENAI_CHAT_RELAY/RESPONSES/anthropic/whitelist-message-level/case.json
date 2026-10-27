@@ -1,0 +1,1 @@
+{"origin": "Codex 0.142.5: the second request of a tool flow as the client sends it, with fields the relay must not be sent added to the items of the history (id, status, name, phase, namespace, extra): derived. The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

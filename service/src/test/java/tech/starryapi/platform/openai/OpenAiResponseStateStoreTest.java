@@ -81,6 +81,44 @@ class OpenAiResponseStateStoreTest {
     }
 
     @Test
+    void anAnswerNoAccountGaveIsRememberedWithoutTheReasoningTheGatewayWroteForIt() throws Exception {
+        JsonNode request = objectMapper.readTree("""
+            {"model":"gpt-5.4","input":[
+              {"type":"message","role":"user","content":"one"},
+              {"type":"reasoning","summary":[],"content":[{"type":"reasoning_text","text":"an earlier relay"}]},
+              {"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"gAAAAB"}]}""");
+        ObjectNode response = (ObjectNode) objectMapper.readTree("""
+            {"id":"resp_relayed","output":[
+              {"type":"reasoning","id":"rs_2","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"thinking it over"}]},
+              {"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"the answer"}]}]}""");
+
+        store.rememberRelayed(response, request);
+
+        assertThat(store.canExpand("resp_relayed")).isTrue();
+        assertThat(store.ownerAccountId("resp_relayed")).isNull();
+        ObjectNode next = (ObjectNode) objectMapper.readTree("{\"model\":\"gpt-5.4\",\"previous_response_id\":\"resp_relayed\",\"input\":\"two\"}");
+        JsonNode input = store.expand(next).path("input");
+        // What OpenAI gave stays; what the gateway rendered, in the request or the answer, does not.
+        assertThat(input).extracting(item -> item.path("type").asString("")).containsExactly("message", "reasoning", "message", "message");
+        assertThat(input.get(1).path("encrypted_content").asString("")).isEqualTo("gAAAAB");
+        assertThat(input.toString()).doesNotContain("thinking it over", "an earlier relay");
+    }
+
+    @Test
+    void anAnswerOfAnAccountIsRememberedWithItsReasoningAsItAlwaysWas() throws Exception {
+        JsonNode request = objectMapper.readTree("{\"model\":\"gpt-5.4\",\"input\":\"one\"}");
+        ObjectNode response = (ObjectNode) objectMapper.readTree("""
+            {"id":"resp_owned","output":[
+              {"type":"reasoning","id":"rs_2","status":"completed","summary":[],"content":[{"type":"reasoning_text","text":"thinking it over"}]},
+              {"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"the answer"}]}]}""");
+
+        store.remember(response, request, "openai-1");
+
+        ObjectNode next = (ObjectNode) objectMapper.readTree("{\"model\":\"gpt-5.4\",\"previous_response_id\":\"resp_owned\",\"input\":\"two\"}");
+        assertThat(store.expand(next).path("input").toString()).contains("thinking it over");
+    }
+
+    @Test
     void leavesUnknownPreviousResponseIdUntouched() throws Exception {
         ObjectNode request = (ObjectNode) objectMapper.readTree("""
             {

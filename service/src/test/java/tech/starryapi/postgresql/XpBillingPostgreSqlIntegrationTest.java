@@ -33,6 +33,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
 import org.springframework.mock.web.server.MockServerWebExchange;
@@ -129,6 +130,8 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
                 new PairRegistry.Registration(PairRegistry.SourceKind.OPENAI_CHAT_RELAY, PairRegistry.Entry.CHAT, "anthropic",
                     PairRegistry.Status.EXPERIMENTAL),
                 new PairRegistry.Registration(PairRegistry.SourceKind.OPENAI_CHAT_RELAY, PairRegistry.Entry.MESSAGES, "anthropic",
+                    PairRegistry.Status.EXPERIMENTAL),
+                new PairRegistry.Registration(PairRegistry.SourceKind.OPENAI_CHAT_RELAY, PairRegistry.Entry.RESPONSES, "anthropic",
                     PairRegistry.Status.EXPERIMENTAL),
                 new PairRegistry.Registration(PairRegistry.SourceKind.OPENAI_CHAT_RELAY, PairRegistry.Entry.CHAT, "openai",
                     PairRegistry.Status.EXPERIMENTAL)));
@@ -231,6 +234,160 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
         assertThat(keyReserved(client)).isEqualByComparingTo("0");
         assertThat(logs(client)).singleElement().satisfies(row -> assertThat(row.get("usage_source")).isEqualTo("CLAMPED"));
         assertThat(reviews(client)).isEmpty();
+    }
+
+    // ---- the Responses entry ----
+
+    @Test
+    void aRelaysAnswerToTheResponsesEntryIsChargedAtThePriceOfItsTierAndTheRestOfTheReservationGoesBack() {
+        Client client = client("10");
+        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+
+        ResponseEntity<?> response = responses(client, responsesBody("hello"));
+
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        JsonNode answer = (JsonNode) response.getBody();
+        assertThat(answer.path("status").asString()).isEqualTo("completed");
+        assertThat(answer.path("output_text").asString()).isEqualTo("from the relay");
+        assertThat(relayBodies).hasSize(1);
+        Map<String, Object> reservation = reservations(client).getLast();
+        assertThat(reservation).containsEntry("status", "SETTLED").containsEntry("served_tier_ref", "anthropic:relay")
+            .containsEntry("last_dispatched_tier_ref", "anthropic:relay");
+        assertThat((BigDecimal) reservation.get("actual_credits")).isEqualByComparingTo(standard.cost(RELAY_USAGE));
+        assertThat((BigDecimal) reservation.get("reserved_credits")).isGreaterThan((BigDecimal) reservation.get("actual_credits"));
+        assertThat(balance(client)).isEqualByComparingTo(new BigDecimal("10").subtract(standard.cost(RELAY_USAGE)));
+        assertThat(keyReserved(client)).isEqualByComparingTo("0");
+        assertThat(events(client)).singleElement().satisfies(event -> {
+            assertThat(event.get("source_tier_ref")).isEqualTo("anthropic:relay");
+            assertThat((BigDecimal) event.get("price_factor")).isEqualByComparingTo("1");
+        });
+        assertThat(logs(client)).singleElement().satisfies(row -> {
+            assertThat(row.get("source_dispatch")).isEqualTo("OPENAI_CHAT");
+            assertThat(row.get("wire_model")).isEqualTo("relay-sonnet");
+            assertThat(row.get("usage_source")).isEqualTo("REPORTED");
+        });
+        assertThat(reviews(client)).isEmpty();
+    }
+
+    /**
+     * Codex names no output limit, so the limit a relay is held to is the gateway's own bound, and an answer that reaches it
+     * is a finished one to the client (an incomplete response is a failed stream to Codex, which sends the request again): what
+     * the relay wrote is charged at the price of its tier, and not above what the tier reserved.
+     */
+    @Test
+    void anAnswerOfTheResponsesEntryCutAtTheGatewaysLimitIsFinishedForTheClientAndChargedForWhatTheRelayWrote() {
+        Client client = client("10");
+        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+        relayAnswers(() -> {
+            ObjectNode reported = objectMapper.createObjectNode();
+            reported.put("prompt_tokens", 500).put("completion_tokens", 900_000);
+            return Mono.just(new Completion("cut off in the mi", "", List.of(), PlatformCompletionResult.StopReason.MAX_TOKENS, reported,
+                "length"));
+        });
+
+        ResponseEntity<?> response = responses(client, responsesBody("hello"));
+
+        JsonNode answer = (JsonNode) response.getBody();
+        assertThat(answer.path("status").asString()).isEqualTo("completed");
+        assertThat(answer.path("output_text").asString()).isEqualTo("cut off in the mi");
+        assertThat(relayBodies.getFirst().path("max_tokens").asInt()).isEqualTo(4096);
+        Map<String, Object> reservation = reservations(client).getLast();
+        assertThat(reservation).containsEntry("status", "SETTLED").containsEntry("served_tier_ref", "anthropic:relay");
+        BigDecimal charged = (BigDecimal) reservation.get("actual_credits");
+        // What the relay says it wrote is held to the 4,096 tokens it was told it may write.
+        assertThat(charged).isEqualByComparingTo(standard.cost(new PlatformUsage(500, 4096, BigDecimal.ZERO, 0, 0, 0)));
+        assertThat(charged).isLessThanOrEqualTo((BigDecimal) reservation.get("reserved_credits"));
+        assertThat(balance(client)).isEqualByComparingTo(new BigDecimal("10").subtract(charged));
+        assertThat(keyReserved(client)).isEqualByComparingTo("0");
+        assertThat(logs(client)).singleElement().satisfies(row -> assertThat(row.get("usage_source")).isEqualTo("CLAMPED"));
+        assertThat(reviews(client)).isEmpty();
+    }
+
+    /**
+     * The same bound, when the relay lost the only call of its answer to it (a big file written by one command, as the first
+     * action of a turn): told as an incomplete response it would be asked for five more times, each charged. It is an
+     * interruption instead: released for good, nothing is charged, nothing is left for review, and the client's retry of the same
+     * request is Kiro's, with the relay kept from the session.
+     */
+    @Test
+    void anAnswerOfTheResponsesEntryThatLostItsOnlyCallToTheGatewaysLimitIsReleasedForGoodAndTheRetryIsKiros() {
+        Client client = client("10");
+        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+        relayAnswers(() -> {
+            ObjectNode reported = objectMapper.createObjectNode();
+            reported.put("prompt_tokens", 500).put("completion_tokens", 900_000);
+            return Mono.just(new Completion("", "", List.of(), PlatformCompletionResult.StopReason.MAX_TOKENS, reported, "length", true));
+        });
+        kiroAnswers(() -> Mono.just(KIRO_ANSWER));
+
+        assertThatThrownBy(() -> responses(client, responsesBody("hello")))
+            .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_GATEWAY));
+
+        assertThat(relayBodies.getFirst().path("max_tokens").asInt()).isEqualTo(4096);
+        verify(kiroClient, never()).complete(any(), any(), anyString());
+        assertThat(reservations(client).getLast()).containsEntry("status", "RELEASED").containsEntry("actual_credits", null)
+            .containsEntry("last_dispatched_tier_ref", "anthropic:relay");
+        assertThat(balance(client)).isEqualByComparingTo("10");
+        assertThat(keyReserved(client)).isEqualByComparingTo("0");
+        assertThat(reviews(client)).isEmpty();
+        assertThat(events(client)).isEmpty();
+        assertThat(logs(client)).singleElement().satisfies(row -> {
+            assertThat(row.get("success")).isEqualTo(false);
+            assertThat(row.get("stop_reason")).isEqualTo("INTERRUPTED");
+        });
+
+        // The retry is Kiro's, once, at the price of Kiro's tier; the relay is not asked again.
+        for (int retry = 0; retry < 2; retry++) {
+            ResponseEntity<?> response = responses(client, responsesBody("hello"));
+            assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
+        }
+        assertThat(relayBodies).hasSize(1);
+        assertThat(balance(client)).isEqualByComparingTo(
+            new BigDecimal("10").subtract(standard.scaled(new BigDecimal("0.6")).cost(KIRO_USAGE).multiply(BigDecimal.valueOf(2))));
+    }
+
+    @Test
+    void aClientOfTheResponsesEntryThatGivesUpWhileTheRelayIsAskedIsReleasedForGoodAndNothingIsLeftForReview() {
+        Client client = client("10");
+        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+        relayAnswers(Mono::never);
+
+        Disposable request = responsesRequest(client, responsesBody("hello")).subscribe(response -> { }, error -> { });
+        await().atMost(Duration.ofSeconds(20)).until(() -> !relayBodies.isEmpty());
+        await().atMost(Duration.ofSeconds(20)).until(() -> status(client, "DISPATCHED"));
+        request.dispose();
+        await().atMost(Duration.ofSeconds(20)).until(() -> !status(client, "DISPATCHED"));
+
+        Map<String, Object> reservation = reservations(client).getLast();
+        assertThat(reservation).containsEntry("status", "RELEASED").containsEntry("actual_credits", null)
+            .containsEntry("last_dispatched_tier_ref", "anthropic:relay");
+        assertThat(balance(client)).isEqualByComparingTo("10");
+        assertThat(keyReserved(client)).isEqualByComparingTo("0");
+        assertThat(reviews(client)).isEmpty();
+        verify(apiKeys).releaseUsage(any(), anyString(), eq(true), eq(CLIENT_DISCONNECTED));
+    }
+
+    @Test
+    void aClientOfTheResponsesEntryThatGivesUpWhileKiroIsAskedAfterTheRelayRefusedIsLeftForReviewAsItAlwaysWas() {
+        Client client = client("10");
+        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+        relayAnswers(() -> Mono.error(relayErrors.fromResponse(404, error("model_not_found", "no such model"), null, "relay", "sk-secret")));
+        List<Object> kiroCalls = new CopyOnWriteArrayList<>();
+        kiroAnswers(() -> {
+            kiroCalls.add("asked");
+            return Mono.never();
+        });
+
+        Disposable request = responsesRequest(client, responsesBody("hello")).subscribe(response -> { }, error -> { });
+        await().atMost(Duration.ofSeconds(20)).until(() -> !kiroCalls.isEmpty());
+        request.dispose();
+        await().atMost(Duration.ofSeconds(20)).until(() -> !status(client, "DISPATCHED"));
+
+        assertThat(reservations(client).getLast()).containsEntry("status", "REVIEW_REQUIRED")
+            .containsEntry("reason", "Client disconnected after dispatch").containsEntry("last_dispatched_tier_ref", "anthropic:kiro");
+        assertThat(reviews(client)).hasSize(1);
+        verify(apiKeys, never()).releaseUsage(any(), anyString(), eq(true), eq(CLIENT_DISCONNECTED));
     }
 
     // ---- the bound of what a relay is sent ----
@@ -534,6 +691,10 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     }
 
     private void ownersExample(Client client, String gatedKey, boolean vision, int imageTokenCap) {
+        ownersExample(client, "CHAT", gatedKey, vision, imageTokenCap);
+    }
+
+    private void ownersExample(Client client, String entry, String gatedKey, boolean vision, int imageTokenCap) {
         relayId = account("OpenAI-compatible", "api-key", "https://relay.example/v1");
         kiroId = account("BuilderId", "idc", null);
         accountPool.refreshCache().block();
@@ -545,7 +706,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
                 new SourceTierDtos.Tier("kiro", 2, "kiro", new BigDecimal("0.6"), List.of("KIRO", "CLAUDE_OAUTH"), null, null, null)),
                 List.of(new SourceTierDtos.Member(relayId, "relay", "OPENAI_CHAT", null, vision, null, null, null, null, "NONE", null,
                     true, true, List.of(new SourceTierDtos.MemberModel(MODEL, "relay-sonnet", 200_000, imageTokenCap, null, null, null)))),
-                List.of(new SourceTierDtos.Gate(null, "CHAT", "KEYS", List.of(gatedKey)))))
+                List.of(new SourceTierDtos.Gate(null, entry, "KEYS", List.of(gatedKey)))))
             .block();
         // A mapping is verified by a probe of the relay: what a probe that passed leaves in the table.
         var member = registry.snapshot().member("anthropic", relayId).orElseThrow();
@@ -659,6 +820,22 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
         return body;
     }
 
+    private ObjectNode responsesBody(String text) {
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("model", MODEL).put("input", text).put("stream", false);
+        return body;
+    }
+
+    private Mono<ResponseEntity<?>> responsesRequest(Client client, ObjectNode body) {
+        MockServerHttpRequest.BodyBuilder request = MockServerHttpRequest.post("/v1/responses")
+            .header("Authorization", "Bearer " + client.token());
+        return facade.responses(body, MockServerWebExchange.from(request));
+    }
+
+    private ResponseEntity<?> responses(Client client, ObjectNode body) {
+        return responsesRequest(client, body).block();
+    }
+
     private Mono<ResponseEntity<?>> chatRequest(Client client, ObjectNode body) {
         MockServerHttpRequest.BodyBuilder request = MockServerHttpRequest.post("/v1/chat/completions")
             .header("Authorization", "Bearer " + client.token());
@@ -696,7 +873,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
 
     private List<Map<String, Object>> logs(Client client) {
         return db.sql("""
-                SELECT success, source_tier_ref, source_dispatch, wire_model, usage_source
+                SELECT success, source_tier_ref, source_dispatch, wire_model, usage_source, stop_reason
                 FROM request_logs WHERE user_id = :user ORDER BY created_at
                 """).bind("user", client.userId()).fetch().all().collectList().block();
     }

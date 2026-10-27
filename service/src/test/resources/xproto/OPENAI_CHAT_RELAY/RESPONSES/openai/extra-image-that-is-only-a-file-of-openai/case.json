@@ -1,0 +1,1 @@
+{"origin": "Codex-style request with an image that is only a file of OpenAI (input_image with a file_id: derived from the capture by adding a user message), for a relay that can see. A relay cannot read the file and the account that serves a gpt request would, so the relay is not asked: it does not answer without the image."}

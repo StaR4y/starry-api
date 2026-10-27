@@ -78,12 +78,14 @@ test('every translation preserves all parameter placeholders', () => {
 
 test('all explicit UI messages have English translations and no raw template text is missed', () => {
   const missing = [];
+  // Chinese text, or the full-width punctuation of one (a key can be only a name and a path joined by a full-width comma).
+  const sourceText = /[\p{Script=Han}\u3000-\u303F\uFF00-\uFFEF]/u;
   function script(source, file) {
     const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
     function visit(node) {
       if (ts.isCallExpression(node) && node.expression.getText(ast) === 't') {
         const key = node.arguments[0];
-        if (key && ts.isStringLiteral(key) && /\p{Script=Han}/u.test(key.text) && !Object.hasOwn(english, key.text.trim())) missing.push(`${file}: ${key.text}`);
+        if (key && ts.isStringLiteral(key) && sourceText.test(key.text) && !Object.hasOwn(english, key.text.trim())) missing.push(`${file}: ${key.text}`);
       }
       ts.forEachChild(node, visit);
     }

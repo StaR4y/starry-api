@@ -1,0 +1,1 @@
+{"origin": "Codex 0.142.5-style client that asks for a length (max_output_tokens), a temperature and a top_p: derived from the capture; the relay is held to the length and given the others. The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

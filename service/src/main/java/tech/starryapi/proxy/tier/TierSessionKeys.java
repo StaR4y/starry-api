@@ -16,8 +16,9 @@ import tools.jackson.databind.JsonNode;
  *       one session, and one that is only the id of the previous response changes every turn. Failing that, the session
  *       header of the Codex CLI ({@link #CODEX_SESSION_HEADER}), which the hint does not read: a Codex session sends
  *       its full history each turn and continues no response, so nothing else in the request names it;
- *   <li>the response it continues, for a Responses request ({@link #ofResponse}). The binding of the session is also
- *       registered under the id of the response the request produces, so that the next turn finds it;
+ *   <li>the response it continues, for a Responses request ({@link #ofResponse}). The node keeps which session the
+ *       response the request produces belongs to ({@link TierSessionBindings#follow}), and a name of this kind is looked
+ *       up there ({@link TierSessionBindings#sessionOf}) so that every turn of a chain is the session of the first;
  *   <li>what the conversation starts with ({@link #fingerprint}), for a client that sends neither: the first system
  *       text and the first user text. Sessions that begin alike share a binding.
  * </ol>

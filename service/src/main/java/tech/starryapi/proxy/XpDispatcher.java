@@ -18,6 +18,7 @@ import tech.starryapi.egress.EgressException;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.core.PlatformCompletionResult.StopReason;
 import tech.starryapi.platform.core.PlatformToolUse;
+import tech.starryapi.platform.openai.ApplyPatchEmulation;
 import tech.starryapi.platform.openai.OpenAiChatRelayClient;
 import tech.starryapi.platform.upstream.UpstreamException;
 import tech.starryapi.platform.xproto.ChatCompletionAccumulator.Completion;
@@ -30,6 +31,7 @@ import tech.starryapi.platform.xproto.RelayUsageNormalizer.Caliber;
 import tech.starryapi.platform.xproto.RelayUsageNormalizer.Limits;
 import tech.starryapi.proxy.tier.TierDispatch;
 import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.JsonNodeFactory;
 import tools.jackson.databind.node.ObjectNode;
 
@@ -49,7 +51,17 @@ import tools.jackson.databind.node.ObjectNode;
  *       them for the next turn. Messages entries get {@code toolu_} ids, the others {@code call_} ones, 24 base62
  *       characters of a secure random each, distinct within the answer. The relay's id is not kept: a client-facing
  *       renderer copies the raw item of a tool call into what it writes, and the relay's id (and the Chat shape of its
- *       item) would reach the client through it, so a tool call leaves here without one.
+ *       item) would reach the client through it, so a tool call leaves here without one. On the Responses entry the
+ *       calls of the editing tool, {@code apply_patch}, are turned into the custom tool calls Codex declared it as, with
+ *       the patch for their input, as the native path does for the accounts that speak Responses ({@link
+ *       ApplyPatchEmulation}; the relay was offered a function of that name with one {@code patch} argument).
+ *   <li><b>An answer the Responses entry cannot be told</b> is an interruption too (see {@link #cannotBeTold}): the clients
+ *       of that entry that matter take {@code response.incomplete} for a failure of the stream and send the request again,
+ *       and a relay that is asked again answers again and is paid for it. So an answer that the relay's filter stopped, and
+ *       one that the gateway's own bound cut off (the client named no limit, so the relay was held to the default the
+ *       reservation assumes) when it lost a call or has nothing to show, are not told as {@code incomplete}: nothing is
+ *       charged for them, the relay is kept from the session for a couple of minutes, and the client's retry reaches
+ *       another source, which is not held to that bound.
  *   <li><b>Every failure is the gateway's own</b>, and never one that leaves a reservation for review: a cross-protocol
  *       attempt is generated once, and whatever goes wrong with it is absorbed by the operator (invariant I7). The
  *       relay client already says what it can prove, and an {@link UpstreamException} it raises is kept (its status is
@@ -76,6 +88,9 @@ class XpDispatcher {
     private static final String BASE62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
     private static final String MESSAGES_TOOL_PREFIX = "toolu_";
     private static final String CALL_TOOL_PREFIX = "call_";
+
+    /** Its response side only reads the arguments of a call, so any mapper will do; the request side is the converter's. */
+    private static final ApplyPatchEmulation APPLY_PATCH = new ApplyPatchEmulation(new ObjectMapper());
 
     /** Statuses of a relay's error that the reservation's release treats as not billed, whatever else they mean. */
     private static final Set<Integer> UNBILLED_CLIENT_STATUSES = Set.of(400, 401, 402, 403, 404, 422, 429);
@@ -107,6 +122,23 @@ class XpDispatcher {
         Limits limits,
         Duration timeLimit
     ) {
+        return dispatch(account, dispatch, limits, timeLimit, false);
+    }
+
+    /**
+     * {@link #dispatch(ProxyAccountEntity, TierDispatch, Limits, Duration)} for a request whose output limit may be the
+     * gateway's own.
+     *
+     * @param defaultOutputLimit whether the limit the relay was told it may write is the default the reservation assumes
+     *     and not one the client wrote: the Responses entry's answers that this bound cut off are judged by it
+     */
+    Mono<PlatformCompletionResult> dispatch(
+        ProxyAccountEntity account,
+        TierDispatch dispatch,
+        Limits limits,
+        Duration timeLimit,
+        boolean defaultOutputLimit
+    ) {
         return Mono.defer(() -> {
             ObjectNode body;
             try {
@@ -117,7 +149,7 @@ class XpDispatcher {
                 return Mono.error(new UpstreamException(502, "The cross-protocol dispatch could not be prepared", true));
             }
             return Mono.defer(() -> client.complete(account, body, timeLimit))
-                .map(completion -> answer(account, dispatch, body, completion, limits))
+                .map(completion -> answer(account, dispatch, body, completion, limits, defaultOutputLimit))
                 .onErrorMap(error -> settled(account, error));
         });
     }
@@ -151,7 +183,8 @@ class XpDispatcher {
         TierDispatch dispatch,
         JsonNode sent,
         Completion completion,
-        Limits limits
+        Limits limits,
+        boolean defaultOutputLimit
     ) {
         // "Contained" is the safe reading of a switch that was left open: a prompt wrongly taken to contain the cache can
         // only be billed less (design 5.8).
@@ -166,6 +199,12 @@ class XpDispatcher {
             // signature), so it would be an empty text block and end_turn: the loop of Claude Code stops without a word
             // and the user pays for tokens that said nothing. The relay generated it: an interruption, as an empty answer.
             throw new RelayAbortedAfterDispatchException("The source returned an answer with no text");
+        }
+        if (dispatch.pair().entry() == Entry.RESPONSES) {
+            String reason = cannotBeTold(completion, defaultOutputLimit);
+            if (reason != null) {
+                throw new RelayAbortedAfterDispatchException(reason);
+            }
         }
         RelayUsageNormalizer.Result usage = RelayUsageNormalizer.normalize(completion, sent, caliber, limits);
         if (usage.suspectedUnderReport()) {
@@ -184,9 +223,44 @@ class XpDispatcher {
     }
 
     /**
+     * Why an answer of the Responses entry is not one to tell the client, or null when it is. {@code incomplete} is the
+     * only thing that entry can say of an answer that did not finish, and Codex takes it for an error of the stream: it
+     * sends the same request again, five more times, and every answer of a relay is paid for by the user who asked, who
+     * is told nothing of it. So the answers that would be told so are not told:
+     *
+     * <ul>
+     *   <li>One that the relay's filter stopped. Another source may answer the request, and the same relay is likely to
+     *       stop the retry in the same place.
+     *   <li>One that the gateway's own bound cut off ({@code defaultOutputLimit}: the client wrote none, so the relay was
+     *       held to the default the reservation assumes, which the native accounts, that strip it, are not) and that lost a
+     *       call to it, or that has nothing the client can show: no text and no whole call, only reasoning. An answer
+     *       that is text alone, or has the calls it came to, is a finished turn to every native account's client and is
+     *       told as {@code completed} by the facade ({@code ProxyFacade#responsesAnswerOfRelay}); one that lost a call
+     *       would end the turn without the step the model was taking, or run the calls it kept without the one it cut.
+     * </ul>
+     *
+     * A limit the client named is its own, and an answer that reached it is {@code incomplete} to the client that asked
+     * for it.
+     */
+    private static String cannotBeTold(Completion completion, boolean defaultOutputLimit) {
+        if (completion.stopReason() == StopReason.CONTENT_FILTER) {
+            return "The source stopped its answer with its content filter";
+        }
+        if (completion.stopReason() == StopReason.MAX_TOKENS && defaultOutputLimit) {
+            boolean text = completion.content() != null && !completion.content().isBlank();
+            boolean calls = completion.toolUses() != null && !completion.toolUses().isEmpty();
+            if (completion.callCut() || (!text && !calls)) {
+                return "The source's answer was cut off before it could be used";
+            }
+        }
+        return null;
+    }
+
+    /**
      * The tool calls of the answer under ids of the gateway's. The relay's own id is not passed on, nor the raw item it
      * came in (the Chat shape of a call, which a Responses renderer would copy into its own item); the name, the
-     * arguments as the relay wrote them and the type are.
+     * arguments as the relay wrote them and the type are, except that a call of the editing tool on the Responses entry
+     * is the custom tool call Codex expects ({@link #editingToolCall}).
      */
     private List<PlatformToolUse> withMintedIds(List<PlatformToolUse> calls, Entry entry) {
         String prefix = entry == Entry.MESSAGES ? MESSAGES_TOOL_PREFIX : CALL_TOOL_PREFIX;
@@ -197,9 +271,21 @@ class XpDispatcher {
             do {
                 id = prefix + randomId();
             } while (!minted.add(id));
-            result.add(new PlatformToolUse(id, call.name(), call.input(), call.type(), call.rawInput(), null));
+            result.add(entry == Entry.RESPONSES && ApplyPatchEmulation.TOOL_NAME.equals(call.name())
+                ? editingToolCall(id, call)
+                : new PlatformToolUse(id, call.name(), call.input(), call.type(), call.rawInput(), null));
         }
         return result;
+    }
+
+    /**
+     * A call of the editing tool as a Responses client is given it: a function to the relay and a custom tool to Codex, so
+     * it is a custom tool call whose input is the patch itself and not the JSON of the arguments.
+     */
+    private static PlatformToolUse editingToolCall(String id, PlatformToolUse call) {
+        String type = APPLY_PATCH.toolUseType(call.type(), call.name());
+        String arguments = call.rawInput() != null ? call.rawInput() : String.valueOf(call.input());
+        return new PlatformToolUse(id, call.name(), call.input(), type, APPLY_PATCH.toolUseRawInput(type, call.name(), arguments), null);
     }
 
     private String randomId() {

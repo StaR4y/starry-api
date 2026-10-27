@@ -1,0 +1,7 @@
+{
+  "status": 503,
+  "error": {
+    "code": "UPSTREAM_ERROR",
+    "message": "Source error 503 (server_error)"
+  }
+}

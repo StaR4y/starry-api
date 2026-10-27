@@ -1,0 +1,13 @@
+[
+  {
+    "type": "function_call_output",
+    "call_id": "${tool.0}",
+    "output": [
+      {
+        "type": "input_image",
+        "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGO4IyeHFTEMLQkAid1GAXiz9RcAAAAASUVORK5CYII=",
+        "detail": "high"
+      }
+    ]
+  }
+]

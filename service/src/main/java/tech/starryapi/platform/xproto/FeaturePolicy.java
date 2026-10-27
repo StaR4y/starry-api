@@ -32,21 +32,32 @@ import tech.starryapi.platform.xproto.RequestFeatureDetector.Feature;
  *   <li><b>The entry and what its conversion carries.</b> A feature is carried only when the conversion of the entry
  *       to the relay's Chat body has it: {@code CONVERTER_CARRIES}. The Chat entry's conversion is the sanitizer
  *       itself, which carries images, cache control, response schemas and reasoning for members that allow them. The
- *       Messages conversion carries the reasoning request only: images, cache control and {@code tool_result.is_error}
- *       stay SOFT until the task that makes them part of the conversion (P8-01) adds them to that table, one by one,
- *       each when its fixtures pass. Nothing is promised that the converter does not do.
+ *       Responses conversion ({@link ResponsesChatConverter}) hands the sanitizer a Chat body that has the images of the
+ *       user's messages, the response schema and the reasoning effort, and none of the rest. The Messages conversion
+ *       carries the reasoning request only: images, cache control and {@code tool_result.is_error} stay SOFT until the
+ *       task that makes them part of the conversion (P8-01) adds them to that table, one by one, each when its fixtures
+ *       pass. Nothing is promised that the converter does not do.
  *   <li><b>The baseline: what the route's native accounts do</b> ({@link Baseline}). A Claude request through Chat
- *       Completions goes to Kiro or an Anthropic key, which read text only: an image or a schema that the member
- *       cannot carry is no loss, SOFT. A {@code gpt-*} request goes to OpenAI, Codex or a compatible key, which are
- *       handed the client's body whole: the same image or schema, audio or file part, that the member cannot carry, and
- *       a {@code tool_choice} that restricts the tools (the {@code allowed_tools} of the OpenAI API, which a relay is
- *       not given) and a {@code logit_bias} (it changes the odds of the words, and no relay is sent it), are HARD, so
- *       that moving to the relay does not drop what the client sent and the native path would have kept. The Messages
- *       entry has no baseline: its conversion has flattened the request before any route (the native path already
- *       drops images and documents there), so these are SOFT for every route. A {@code verbosity} is SOFT on every
- *       baseline and entry (D6): it only asks the model to be brief or full, OpenCode sends it with every request of a gpt
- *       model, and a relay that refused the request for it would never be given one. The sanitizer does not send it and
- *       the request log records it.
+ *       Completions or Responses goes to Kiro or an Anthropic key, which read text only: an image or a schema that the
+ *       member cannot carry is no loss, SOFT, and neither is a tool of the Responses API that is not a function (the
+ *       native conversion makes a function of it that has no name and no parameters, which does nothing). Codex 0.142.5
+ *       declares a {@code web_search} whatever the model, so it matters that this is SOFT and not the reason to skip
+ *       every relay. A
+ *       {@code gpt-*} request goes to OpenAI, Codex or a compatible key, which are handed the client's body whole: the
+ *       same image or schema, audio or file part, that the member cannot carry, a {@code tool_choice} that restricts the
+ *       tools (the {@code allowed_tools} of the OpenAI API, which a relay is not given), a {@code logit_bias} (it changes
+ *       the odds of the words, and no relay is sent it) and the built-in tools of the Responses API (OpenAI runs a {@code
+ *       web_search} itself and gives the model the tools that its tool search finds) are HARD, so that moving to the
+ *       relay does not drop what the client sent and the native path would have kept. The Messages entry has no
+ *       baseline: its conversion has flattened the request before any route (the native path already drops images and
+ *       documents there), so these are SOFT for every route. A {@code verbosity} is SOFT on every baseline and entry
+ *       (D6): it only asks the model to be brief or full, OpenCode sends it with every request of a gpt model, and a
+ *       relay that refused the request for it would never be given one. The sanitizer does not send it and the request
+ *       log records it. Three things of the Responses entry are HARD on every baseline: a custom tool other than {@code
+ *       apply_patch} (a relay's model answers with a function, which the client cannot run as its tool), a chain that
+ *       this node could not expand (the relay would be given the last turn alone, design 4.8) and the context that is
+ *       held on OpenAI's side and only pointed at ({@code conversation}, a stored {@code prompt}, an {@code
+ *       item_reference} or a compaction item: the relay would answer without it and the user would pay for the answer).
  *   <li><b>The member's settings</b>, the same record the sanitizer builds the body from ({@link Settings}): vision,
  *       response schemas, priority tier, cache-control pass-through and reasoning effort. Its {@code billedFastMode}
  *       is how a fast request gets here, because the body does not say whether the request is billed as fast: the
@@ -129,8 +140,9 @@ public final class FeaturePolicy {
     /**
      * The features each entry's conversion can give a relay at all, when the member allows it. The Messages entry
      * gives the reasoning request through the sanitizer (which reads the original body for it); P8-01 adds images,
-     * cache control and the tool-result error flag to its set as each fixture passes. The Responses and Gemini
-     * converters have not been written.
+     * cache control and the tool-result error flag to its set as each fixture passes. The Responses conversion gives
+     * the images of the user's messages, the response schema and the reasoning effort (not the images in the output of a
+     * tool, nor cache control, which the API does not have). The Gemini converter has not been written.
      */
     private static final Map<Entry, Set<Feature>> CONVERTER_CARRIES = carries();
 
@@ -140,7 +152,7 @@ public final class FeaturePolicy {
             Feature.IMAGE, Feature.CACHE_CONTROL, Feature.JSON_SCHEMA, Feature.THINKING, Feature.REASONING_EFFORT
         ));
         carries.put(Entry.MESSAGES, EnumSet.of(Feature.THINKING));
-        carries.put(Entry.RESPONSES, EnumSet.noneOf(Feature.class));
+        carries.put(Entry.RESPONSES, EnumSet.of(Feature.IMAGE, Feature.JSON_SCHEMA, Feature.REASONING_EFFORT));
         carries.put(Entry.GEMINI, EnumSet.noneOf(Feature.class));
         return carries;
     }
@@ -185,7 +197,8 @@ public final class FeaturePolicy {
         return switch (feature) {
             case STOP_SEQUENCES_OVER_4, N_OVER_ONE, WEB_SEARCH_OPTIONS, LEGACY_FUNCTIONS, NON_FUNCTION_TOOL,
                  WEB_SEARCH, WEB_FETCH, CODE_EXECUTION, BASH_TOOL, TEXT_EDITOR_TOOL, COMPUTER_TOOL, MEMORY_TOOL,
-                 ANTHROPIC_DEFINED_TOOL, MCP_SERVERS, CONTAINER, UNSUPPORTED_ENTRY -> Treatment.HARD;
+                 ANTHROPIC_DEFINED_TOOL, MCP_SERVERS, CONTAINER, PREVIOUS_RESPONSE_ID, SERVER_HELD_CONTEXT, CUSTOM_TOOL,
+                 UNSUPPORTED_ENTRY -> Treatment.HARD;
             case FAST -> member.priorityTier() ? Treatment.CARRY : Treatment.HARD;
             case THINKING, REASONING_EFFORT -> carriedIf(
                 entry, feature, member.reasoningEffort()
@@ -194,15 +207,21 @@ public final class FeaturePolicy {
             );
             case CACHE_CONTROL -> carriedIf(entry, feature, member.cacheControlPassthrough());
             case TOOL_RESULT_ERROR -> carriedIf(entry, feature, true);
-            case IMAGE -> carriedOr(entry, feature, member.vision(), baseline);
+            // An image that the conversion has no place for is not carried by a member that can see: the loss is the same
+            // as for a member that cannot, and it is named the same.
+            case IMAGE -> carriedOr(entry, feature, member.vision() && !detected.imageNotCarried(), baseline);
             case JSON_SCHEMA -> carriedOr(entry, feature, member.jsonSchema(), baseline);
-            // No setting of a member lets it carry these, only the baseline says what leaving them out is. The last one
-            // changes the odds of the words of the answer and a passthrough route hands it to the account.
-            case AUDIO, FILE, TOOL_CHOICE, LOGIT_BIAS -> carriedOr(entry, feature, false, baseline);
+            // No setting of a member lets it carry these, only the baseline says what leaving them out is. The logit bias
+            // changes the odds of the words of the answer and a passthrough route hands it to the account; the built-in
+            // tools and the image in the output of a tool are what a passthrough route gives the model and the relay has
+            // no place for.
+            case AUDIO, FILE, TOOL_CHOICE, LOGIT_BIAS, BUILTIN_TOOL, TOOL_OUTPUT_IMAGE ->
+                carriedOr(entry, feature, false, baseline);
             // A verbosity is advice about the length of the answer, left out on every baseline and entry (D6), recorded.
             case DOCUMENT, TOOL_SEARCH, CONTEXT_MANAGEMENT, HISTORY_THINKING, SERVER_TOOL_HISTORY, OUTPUT_CONFIG,
-                 TOP_K, METADATA, SERVICE_TIER, VERBOSITY, LOGPROBS, USER, STORE, PREDICTION, PROMPT_CACHE_KEY,
-                 PROMPT_CACHE_RETENTION, SAFETY_IDENTIFIER, MODALITIES -> Treatment.SOFT;
+                 TOP_K, METADATA, SERVICE_TIER, VERBOSITY, INCLUDE, TRUNCATION, MAX_TOOL_CALLS, REASONING_SUMMARY, LOGPROBS,
+                 USER, STORE, PREDICTION,
+                 PROMPT_CACHE_KEY, PROMPT_CACHE_RETENTION, SAFETY_IDENTIFIER, MODALITIES -> Treatment.SOFT;
         };
     }
 
@@ -219,6 +238,7 @@ public final class FeaturePolicy {
         if (carriedIf(entry, feature, allowed) == Treatment.CARRY) {
             return Treatment.CARRY;
         }
-        return entry == Entry.CHAT && baseline == Baseline.PASSTHROUGH ? Treatment.HARD : Treatment.SOFT;
+        boolean hasBaseline = entry == Entry.CHAT || entry == Entry.RESPONSES;
+        return hasBaseline && baseline == Baseline.PASSTHROUGH ? Treatment.HARD : Treatment.SOFT;
     }
 }

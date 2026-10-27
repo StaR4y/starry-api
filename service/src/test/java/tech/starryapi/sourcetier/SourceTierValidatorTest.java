@@ -769,25 +769,29 @@ class SourceTierValidatorTest {
     }
 
     @Test
-    void thisReleaseTakesRelayRowsAndOpensTheChatAndMessagesPairsToListedKeysOnly() {
+    void thisReleaseTakesRelayRowsAndOpensTheChatMessagesAndResponsesPairsToListedKeysOnly() {
         Config relay = validator.normalize("anthropic", replace(false, RELAY_TIERS,
             List.of(relay("relay-1", "relay", mapping("claude-sonnet-4.5", "x"))), List.of()));
         Config keysGate = validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("MESSAGES", "KEYS", "k"))));
         Config onGate = validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("CHAT", "ON"))));
         Config offGate = validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("CHAT", "OFF"))));
         Config responsesGate = validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("RESPONSES", "KEYS", "k"))));
+        Config responsesOnGate = validator.normalize("openai", replace(false, List.of(), List.of(), List.of(gate("RESPONSES", "ON"))));
+        Config geminiGate = validator.normalize("anthropic", replace(false, List.of(), List.of(), List.of(gate("GEMINI", "KEYS", "k"))));
         Config openaiKeys = validator.normalize("openai", replace(false, List.of(), List.of(), List.of(gate("CHAT", "KEYS", "k"))));
         Config googleKeys = validator.normalize("google", replace(false, List.of(), List.of(), List.of(gate("CHAT", "KEYS", "k"))));
 
-        // The relay is registered (and kept out of the untiered pools, P4-10), and the pairs of the Chat and Messages
-        // entries are on trial (P5-05): open to the keys a gate lists and to no more.
+        // The relay is registered (and kept out of the untiered pools, P4-10), and the pairs of the Chat, Messages and
+        // Responses entries are on trial (P5-05, P6-04): open to the keys a gate lists and to no more.
         assertThatCode(() -> validator.requireSupported(relay)).doesNotThrowAnyException();
         assertThatCode(() -> validator.requireSupported(offGate)).doesNotThrowAnyException();
         assertThatCode(() -> validator.requireSupported(keysGate)).doesNotThrowAnyException();
         assertThatCode(() -> validator.requireSupported(openaiKeys)).doesNotThrowAnyException();
+        assertThatCode(() -> validator.requireSupported(responsesGate)).doesNotThrowAnyException();
         assertRejected(() -> validator.requireSupported(onGate), HttpStatus.CONFLICT, "SOURCE_PAIR_GATE_FORBIDDEN", "experimental");
-        // The Responses entry comes with the sixth phase and the google vendor with the seventh.
-        assertRejected(() -> validator.requireSupported(responsesGate), HttpStatus.BAD_REQUEST, "SOURCE_PAIR_NOT_OFFERED", "is not offered");
+        assertRejected(() -> validator.requireSupported(responsesOnGate), HttpStatus.CONFLICT, "SOURCE_PAIR_GATE_FORBIDDEN", "experimental");
+        // The Gemini entry and the google vendor come with the seventh phase.
+        assertRejected(() -> validator.requireSupported(geminiGate), HttpStatus.BAD_REQUEST, "SOURCE_PAIR_NOT_OFFERED", "is not offered");
         assertRejected(() -> validator.requireSupported(googleKeys), HttpStatus.BAD_REQUEST, "SOURCE_PAIR_NOT_OFFERED", "is not offered");
     }
 

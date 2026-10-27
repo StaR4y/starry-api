@@ -736,6 +736,42 @@ class DefaultSourceTierPlannerTest {
     }
 
     @Test
+    void aRelayThatOwnsAChainThatCanBeReplayedIsNoOwnerEitherAndTheChainIsPlannedWithoutOne() {
+        // The relay of this vendor, and the exclusive relay of another vendor: neither is a member of a tier of the native cells
+        // (design 3, step 4), so the owner of a chain that has its history here is only a preference there is nothing to follow.
+        for (SourceTierSnapshot configuration : List.of(
+            snapshot(List.of(vendor("openai", true)), openAiTiers(), List.of(relayMember("openai", "relay", "official"))),
+            snapshot(List.of(vendor("openai", true)), openAiTiers(), List.of(relayMember("openai", "relay", "official", false))),
+            snapshot(List.of(vendor("anthropic", true), vendor("openai", true)), concat(anthropicTiers(), openAiTiers()),
+                List.of(relayMember("anthropic", "relay", "official"))))) {
+            loaded(configuration);
+            when(accountPool.cachedAccount("relay")).thenReturn(Optional.of(relay));
+            cached.add(relay);
+            usable.add(relay);
+
+            // The model is one that compatible keys serve, so the relay is a candidate of the cell: only its row keeps it out.
+            TierPlan plan = plan(with(openAiRequest(false, false, "relay", true), false, true, false, false));
+
+            assertThat(plan.tiered()).isTrue();
+            assertThat(plan.owner()).isEmpty();
+            assertThat(plan.levels()).isNotEmpty().allSatisfy(level -> assertThat(plan.holds(level, relay)).isFalse());
+            cached.remove(relay);
+            usable.remove(relay);
+        }
+    }
+
+    @Test
+    void aRelayThatOwnsAChainThatCannotBeReplayedRefusesItWithoutNamingTheRelay() {
+        loaded(snapshot(List.of(vendor("anthropic", true), vendor("openai", true)), concat(anthropicTiers(), openAiTiers()),
+            List.of(relayMember("anthropic", "relay", "official"))));
+        when(accountPool.cachedAccount("relay")).thenReturn(Optional.of(relay));
+        cached.add(relay);
+        usable.add(relay);
+
+        assertOwnerMismatch(with(openAiRequest(false, false, "relay", false), false, true, false, false));
+    }
+
+    @Test
     void aRequestWithoutAChainHasNoOwner() {
         loaded(snapshot(List.of(vendor("openai", true)), openAiTiers(), List.of()));
 

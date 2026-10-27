@@ -24,21 +24,26 @@ class PairRegistryTest {
     private static final PairKey MESSAGES_ANTHROPIC = new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.MESSAGES, "anthropic");
 
     @Test
-    void thisReleaseOffersTheChatAndMessagesPairsOfTheAnthropicAndOpenAiVendorsOnTrial() {
+    void thisReleaseOffersTheChatMessagesAndResponsesPairsOfTheAnthropicAndOpenAiVendorsOnTrial() {
         PairRegistry defaults = PairRegistry.defaults();
 
-        // The Responses entry comes with the sixth phase, the Gemini entry and the google vendor with the seventh; the
-        // fifth phase's four pairs stay EXPERIMENTAL until the upgrade task has the evidence (P5-09).
+        // The Gemini entry and the google vendor come with the seventh phase; the pairs of the fifth and the sixth stay
+        // EXPERIMENTAL until the upgrade tasks have the evidence (P5-09, P6-05).
         assertThat(defaults.offeredPairs()).containsExactly(
             new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.CHAT, "anthropic"),
             new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.CHAT, "openai"),
             new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.MESSAGES, "anthropic"),
-            new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.MESSAGES, "openai"));
+            new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.MESSAGES, "openai"),
+            new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.RESPONSES, "anthropic"),
+            new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.RESPONSES, "openai"));
         assertThat(PairRegistry.allPairs()).isNotEmpty().allSatisfy(pair -> {
             boolean offered = defaults.offeredPairs().contains(pair);
             assertThat(defaults.status(pair)).isEqualTo(offered ? Status.EXPERIMENTAL : Status.NOT_OFFERED);
             assertThat(defaults.offered(pair)).isEqualTo(offered);
         });
+        // The Responses pair of the google vendor has no client, and the Gemini entry has no converter yet.
+        assertThat(defaults.status("google", "OPENAI_CHAT", "RESPONSES")).isEqualTo(Status.NOT_OFFERED);
+        assertThat(defaults.status("anthropic", "OPENAI_CHAT", "GEMINI")).isEqualTo(Status.NOT_OFFERED);
     }
 
     @Test
@@ -49,8 +54,9 @@ class PairRegistryTest {
         assertThat(PairRegistry.defaults().offeredPairs()).allSatisfy(pair ->
             assertThat(RequestFeatureDetector.detect(pair.entry(), body).features())
                 .as(pair.toString()).doesNotContain(Feature.UNSUPPORTED_ENTRY));
-        assertThat(RequestFeatureDetector.detect(Entry.RESPONSES, body).features()).contains(Feature.UNSUPPORTED_ENTRY);
+        // The Gemini entry has no table yet, and so no pair: the task that writes its converter lists it (P7-03).
         assertThat(RequestFeatureDetector.detect(Entry.GEMINI, body).features()).contains(Feature.UNSUPPORTED_ENTRY);
+        assertThat(PairRegistry.defaults().offeredPairs()).noneMatch(pair -> pair.entry() == Entry.GEMINI);
     }
 
     @Test

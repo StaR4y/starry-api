@@ -1,0 +1,1 @@
+{"origin": "Codex 0.142.5: the relay breaks off an answer; the client retries the same request, as its SDK does after a 502, and the relay that may still be generating is not asked again. The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

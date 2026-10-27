@@ -7,12 +7,14 @@ import java.util.UUID;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
+import tech.starryapi.common.JsonNodes;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.core.PlatformToolUse;
 import tech.starryapi.platform.core.PlatformUsage;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.JsonNodeFactory;
 import tools.jackson.databind.node.ObjectNode;
 
 @Component
@@ -587,6 +589,63 @@ public class OpenAiResponseFactory {
         text.put("type", "reasoning_text");
         text.put("text", reasoningContent);
         return item;
+    }
+
+    /**
+     * Whether an item of a request's input is a reasoning item as {@link #responseReasoningItem} writes it for an answer
+     * whose source gave its reasoning as text and no more (a relay's {@code reasoning_content}): no summary, no encrypted
+     * content, and the text as {@code reasoning_text}. It is the gateway's own rendering, which no OpenAI model gave and
+     * none can read back: OpenAI's reasoning items have an encrypted content or a summary, and a request that carries one
+     * of these to an OpenAI account with {@code store: false} is a request that account may refuse.
+     */
+    public static boolean isRenderedReasoning(JsonNode item) {
+        if (!item.isObject() || !"reasoning".equals(item.path("type").asString(""))) {
+            return false;
+        }
+        JsonNode encrypted = item.path("encrypted_content");
+        JsonNode summary = item.path("summary");
+        JsonNode content = item.path("content");
+        if (!(encrypted.isMissingNode() || encrypted.isNull() || encrypted.asString("").isBlank())
+            || !(summary.isMissingNode() || summary.isNull() || (summary.isArray() && summary.isEmpty()))
+            || !content.isArray() || content.isEmpty()) {
+            return false;
+        }
+        for (JsonNode part : content) {
+            if (!"reasoning_text".equals(part.path("type").asString(""))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * The request without the reasoning items {@link #isRenderedReasoning} names, or the request itself when it holds none.
+     * The input is rebuilt; everything else is shared with the request, which is not changed.
+     */
+    public static JsonNode withoutRenderedReasoning(JsonNode request) {
+        JsonNode input = request.path("input");
+        if (!request.isObject() || !input.isArray()) {
+            return request;
+        }
+        ArrayNode kept = null;
+        for (int i = 0; i < input.size(); i++) {
+            if (isRenderedReasoning(input.get(i))) {
+                if (kept == null) {
+                    kept = JsonNodeFactory.instance.arrayNode();
+                    for (int before = 0; before < i; before++) {
+                        kept.add(input.get(before));
+                    }
+                }
+            } else if (kept != null) {
+                kept.add(input.get(i));
+            }
+        }
+        if (kept == null) {
+            return request;
+        }
+        ObjectNode copy = JsonNodes.shallowCopy((ObjectNode) request);
+        copy.set("input", kept);
+        return copy;
     }
 
     private String responseReasoningItemText(JsonNode item) {

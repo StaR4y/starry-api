@@ -272,6 +272,98 @@ class XpDispatcherTest {
             .isEqualTo(StopReason.MAX_TOKENS);
     }
 
+    // --- the answers a Responses client cannot be told ---
+
+    private static final JsonNode USAGE_OF_A_CUT_ANSWER = JSON.createObjectNode().put("prompt_tokens", 1300).put("completion_tokens", 4096);
+
+    private static Completion cutAnswer(String text, String reasoning, List<PlatformToolUse> calls, boolean callCut) {
+        return new Completion(text, reasoning, calls, StopReason.MAX_TOKENS, USAGE_OF_A_CUT_ANSWER, "length", callCut);
+    }
+
+    /** The relay that is held to the default of the reservation, by a request that named no limit. */
+    private Mono<PlatformCompletionResult> dispatchedToCodex(Completion completion) {
+        when(client.complete(any(), any(), any())).thenReturn(Mono.just(completion));
+        return dispatcher.dispatch(account, relay(Entry.RESPONSES, body()), LIMITS, LIMIT, true);
+    }
+
+    private void assertInterruptedAndNotBilled(Throwable thrown) {
+        assertThat(thrown).isInstanceOf(RelayAbortedAfterDispatchException.class);
+        assertThat(facade.tierDefinitive(thrown)).isTrue();
+        assertThat(UpstreamFailureClassifier.classify(thrown, account, relay(Entry.RESPONSES, body())).interrupted()).isTrue();
+        assertThat(thrown).hasNoCause().message().doesNotContain(RELAY_WORDS);
+    }
+
+    /**
+     * The 4,096 tokens of the reservation are the gateway's own bound, which the native accounts are not held to. An answer that
+     * lost its call to it was not what the model meant, and told as incomplete it would be asked for five more times.
+     */
+    @Test
+    void anAnswerCutInsideItsOnlyCallAtTheGatewaysBoundIsAnInterruptionOfTheResponsesEntry() {
+        assertInterruptedAndNotBilled(failureOf(dispatchedToCodex(cutAnswer("", "", List.of(), true))));
+    }
+
+    @Test
+    void anAnswerCutInsideACallAfterSomeTextOrAWholeCallIsAnInterruptionToo() {
+        assertInterruptedAndNotBilled(failureOf(dispatchedToCodex(cutAnswer("I will run it.", "", List.of(), true))));
+        assertInterruptedAndNotBilled(failureOf(dispatchedToCodex(cutAnswer("I will run both.", "", List.of(call("call_0", "Read")), true))));
+    }
+
+    @Test
+    void anAnswerOfReasoningAloneCutAtTheGatewaysBoundIsAnInterruptionOfTheResponsesEntry() {
+        assertInterruptedAndNotBilled(failureOf(dispatchedToCodex(cutAnswer("", "thinking at length", List.of(), false))));
+        assertInterruptedAndNotBilled(failureOf(dispatchedToCodex(cutAnswer("  \n", "thinking at length", List.of(), false))));
+    }
+
+    @Test
+    void anAnswerCutAtTheGatewaysBoundThatCanBeToldIsToldWithTheStopReasonForTheFacadeToRender() {
+        PlatformCompletionResult text = dispatchedToCodex(cutAnswer("The answer begins and then", "", List.of(), false)).block(WAIT);
+        PlatformCompletionResult call = dispatchedToCodex(cutAnswer("", "", List.of(call("call_0", "Read")), false)).block(WAIT);
+
+        assertThat(text.stopReason()).isEqualTo(StopReason.MAX_TOKENS);
+        assertThat(text.content()).isEqualTo("The answer begins and then");
+        assertThat(call.stopReason()).isEqualTo(StopReason.MAX_TOKENS);
+        assertThat(call.toolUses()).hasSize(1);
+    }
+
+    @Test
+    void anAnswerTheRelaysFilterStoppedIsAnInterruptionOfTheResponsesEntryWhateverTheLimitIs() {
+        Completion filtered = new Completion("I cannot continue with", "", List.of(), StopReason.CONTENT_FILTER,
+            JSON.createObjectNode().put("prompt_tokens", 1200).put("completion_tokens", 6), "content_filter");
+        when(client.complete(any(), any(), any())).thenReturn(Mono.just(filtered));
+
+        assertInterruptedAndNotBilled(failureOf(dispatcher.dispatch(account, relay(Entry.RESPONSES, body()), LIMITS, LIMIT, true)));
+        assertInterruptedAndNotBilled(failureOf(dispatcher.dispatch(account, relay(Entry.RESPONSES, body()), LIMITS, LIMIT, false)));
+        assertInterruptedAndNotBilled(failureOf(dispatcher.dispatch(account, relay(Entry.RESPONSES, body()), LIMITS, LIMIT)));
+    }
+
+    /** A limit the client wrote is its own: an answer that reached it is the incomplete one that client asked for. */
+    @Test
+    void anAnswerCutAtTheLimitTheClientNamedIsToldWhateverIsLostToIt() {
+        for (Completion cut : List.of(
+            cutAnswer("", "", List.of(), true), cutAnswer("", "thinking at length", List.of(), false), cutAnswer("text", "", List.of(), true))) {
+            when(client.complete(any(), any(), any())).thenReturn(Mono.just(cut));
+
+            PlatformCompletionResult result = dispatcher.dispatch(account, relay(Entry.RESPONSES, body()), LIMITS, LIMIT, false).block(WAIT);
+
+            assertThat(result.stopReason()).isEqualTo(StopReason.MAX_TOKENS);
+        }
+    }
+
+    /** The other entries say what a cut is in their own words (a stop reason that the client handles); nothing changes for them. */
+    @Test
+    void theOtherEntriesAreToldTheseAnswersAsTheyWere() {
+        Completion cut = cutAnswer("", "", List.of(), true);
+        Completion filtered = new Completion("I cannot continue with", "", List.of(), StopReason.CONTENT_FILTER, USAGE_OF_A_CUT_ANSWER, "content_filter");
+        for (Entry entry : List.of(Entry.CHAT, Entry.MESSAGES, Entry.GEMINI)) {
+            when(client.complete(any(), any(), any())).thenReturn(Mono.just(cut));
+            assertThat(dispatcher.dispatch(account, relay(entry, body()), LIMITS, LIMIT, true).block(WAIT).stopReason())
+                .as(entry.name()).isEqualTo(StopReason.MAX_TOKENS);
+            when(client.complete(any(), any(), any())).thenReturn(Mono.just(filtered));
+            assertThat(dispatcher.dispatch(account, relay(entry, body()), LIMITS, LIMIT, true).block(WAIT).stopReason())
+                .as(entry.name()).isEqualTo(StopReason.CONTENT_FILTER);
+        }
+    }
+
     // --- the tool calls ---
 
     @Test
@@ -324,6 +416,71 @@ class XpDispatcherTest {
             assertThat(item.path("arguments").asString()).isEqualTo("{\"path\":\"a\"}");
         }
         assertThat(calls).isEqualTo(2);
+    }
+
+    private static final String PATCH = "*** Begin Patch\n*** Add File: a.txt\n+hello\n*** End Patch\n";
+
+    @Test
+    void aCallOfTheEditingToolOnTheResponsesEntryIsTheCustomToolCallCodexDeclaredItAsWithThePatchForItsInput() throws Exception {
+        when(client.complete(any(), any(), any())).thenReturn(Mono.just(withCalls(patchCall("relay_call_0", patchArguments(PATCH)))));
+
+        PlatformCompletionResult result = dispatcher.dispatch(account, relay(Entry.RESPONSES, body()), LIMITS, LIMIT).block(WAIT);
+
+        PlatformToolUse use = result.toolUses().getFirst();
+        assertThat(use.type()).isEqualTo("custom_tool_call");
+        assertThat(use.name()).isEqualTo("apply_patch");
+        assertThat(use.rawInput()).isEqualTo(PATCH);
+        assertThat(use.id()).matches("call_[0-9A-Za-z]{24}");
+        assertThat(use.rawOutputItem()).as("the relay's own item").isNull();
+        // What Codex is given: a custom tool call under the minted id, whose input is the patch and not the JSON of an argument.
+        JsonNode item = new OpenAiResponseFactory(JSON).responses("claude-sonnet-4.5", result, null).path("output").get(0);
+        assertThat(item.path("type").asString()).isEqualTo("custom_tool_call");
+        assertThat(item.path("name").asString()).isEqualTo("apply_patch");
+        assertThat(item.path("call_id").asString()).isEqualTo(use.id());
+        assertThat(item.path("id").asString()).startsWith("ctc_");
+        assertThat(item.path("input").asString()).isEqualTo(PATCH);
+        assertThat(item.has("arguments")).isFalse();
+        assertThat(item.toString()).doesNotContain("relay_call_0");
+    }
+
+    @Test
+    void thePatchIsTakenOutOfWhateverTheModelWroteAroundIt() {
+        // Words after the patch, which models add, are not part of it; so is a patch the model gave under the name of another argument.
+        String wordy = PATCH.stripTrailing() + "\nThat is the change.";
+        when(client.complete(any(), any(), any())).thenReturn(
+            Mono.just(withCalls(patchCall("a", patchArguments(wordy)), patchCall("b", "{\"input\":" + JSON.valueToTree(PATCH) + "}"),
+                patchCall("c", "{}"))));
+
+        PlatformCompletionResult result = dispatcher.dispatch(account, relay(Entry.RESPONSES, body()), LIMITS, LIMIT).block(WAIT);
+
+        assertThat(result.toolUses()).extracting(PlatformToolUse::rawInput).containsExactly(PATCH, PATCH, "");
+        assertThat(result.toolUses()).extracting(PlatformToolUse::type).containsOnly("custom_tool_call");
+    }
+
+    @Test
+    void theEditingToolIsAFunctionCallOnTheEntriesThatNeverDeclaredItAsACustomTool() {
+        PlatformToolUse call = patchCall("relay_call_0", patchArguments(PATCH));
+        when(client.complete(any(), any(), any())).thenReturn(Mono.just(withCalls(call)));
+
+        for (Entry entry : List.of(Entry.CHAT, Entry.MESSAGES)) {
+            PlatformToolUse use = dispatcher.dispatch(account, relay(entry, body()), LIMITS, LIMIT).block(WAIT).toolUses().getFirst();
+
+            // A client of these entries has a function of that name, called with the arguments the model wrote.
+            assertThat(use.type()).as(entry.name()).isEqualTo("function_call");
+            assertThat(use.rawInput()).as(entry.name()).isEqualTo(patchArguments(PATCH));
+        }
+    }
+
+    @Test
+    void aCallOfAnotherToolOnTheResponsesEntryIsWhatTheRelayMadeOfIt() {
+        when(client.complete(any(), any(), any())).thenReturn(Mono.just(withCalls(call("relay_call_0", "exec_command"))));
+
+        PlatformToolUse use = dispatcher.dispatch(account, relay(Entry.RESPONSES, body()), LIMITS, LIMIT).block(WAIT).toolUses().getFirst();
+
+        assertThat(use.type()).isEqualTo("function_call");
+        assertThat(use.rawInput()).isEqualTo("{\"path\":\"a\"}");
+        assertThat(use.input()).isEqualTo(JSON.createObjectNode().put("path", "a"));
+        assertThat(use.rawOutputItem()).isNull();
     }
 
     @Test
@@ -923,6 +1080,19 @@ class XpDispatcherTest {
         raw.putObject("function").put("name", name).put("arguments", "{\"path\":\"a\"}");
         ObjectNode input = JSON.createObjectNode().put("path", "a");
         return new PlatformToolUse(relayId, name, input, "function_call", "{\"path\":\"a\"}", raw);
+    }
+
+    /** A call of the editing tool as the accumulator makes it, with the arguments exactly as the relay wrote them. */
+    private static PlatformToolUse patchCall(String relayId, String arguments) {
+        ObjectNode raw = JSON.createObjectNode();
+        raw.put("id", relayId);
+        raw.put("type", "function");
+        raw.putObject("function").put("name", "apply_patch").put("arguments", arguments);
+        return new PlatformToolUse(relayId, "apply_patch", JSON.readTree(arguments), "function_call", arguments, raw);
+    }
+
+    private static String patchArguments(String patch) {
+        return JSON.createObjectNode().put("patch", patch).toString();
     }
 
     private static ProxyAccountEntity relayAccount(String baseUrl) {

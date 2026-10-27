@@ -224,10 +224,10 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
 
     @Test
     void aGateThatOpensAPairNoReleaseOffersIsNotStored() {
-        // The Responses and Gemini entries and the google vendor come with the later phases; the Chat and Messages entries of
-        // the anthropic and openai vendors are on trial (P5-05).
+        // The Gemini entry and the google vendor come with the seventh phase; the Chat, Messages and Responses entries of the
+        // anthropic and openai vendors are on trial (P5-05, P6-04).
         List<SourceTierDtos.ReplaceVendor> notOffered = List.of(
-            replace(0L, false, OWNER_TIERS, List.of(), List.of(new SourceTierDtos.Gate(null, "RESPONSES", "KEYS", List.of("key-1")))),
+            replace(0L, false, OWNER_TIERS, List.of(), List.of(new SourceTierDtos.Gate(null, "GEMINI", "KEYS", List.of("key-1")))),
             replace(0L, false, OWNER_TIERS, List.of(), List.of(new SourceTierDtos.Gate(null, "GEMINI", "ON", null))));
 
         for (SourceTierDtos.ReplaceVendor request : notOffered) {
@@ -456,13 +456,14 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
 
         assertThat(overview.configVersion()).isZero();
         // Native tiering, the selectors, the all-endpoints switch and the relay rows are complete in this release; of the
-        // pairs, the Chat and Messages ones of the anthropic and openai vendors are on trial and the others are not offered.
+        // pairs, the Chat, Messages and Responses ones of the anthropic and openai vendors are on trial and the others are not
+        // offered.
         assertThat(overview.runtime().nativeTiers()).isTrue();
         assertThat(overview.runtime().selectors()).isTrue();
         assertThat(overview.runtime().unifyEndpoints()).isTrue();
         assertThat(overview.runtime().xpMembers()).isTrue();
         assertThat(overview.runtime().pairs()).hasSize(12).allSatisfy(pair -> assertThat(pair.status())
-            .as(pair.toString()).isEqualTo(List.of("CHAT", "MESSAGES").contains(pair.entryEndpoint())
+            .as(pair.toString()).isEqualTo(List.of("CHAT", "MESSAGES", "RESPONSES").contains(pair.entryEndpoint())
                 && List.of("anthropic", "openai").contains(pair.vendor()) ? "EXPERIMENTAL" : "NOT_OFFERED"));
         assertThat(overview.vendors()).extracting(SourceTierDtos.Vendor::vendor).startsWith("anthropic", "openai", "google", "deepseek");
         assertThat(overview.vendors()).allSatisfy(vendor -> {

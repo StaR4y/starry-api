@@ -414,6 +414,10 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
      * shorten the conversation for), the same on the first request and on every later one, whether the window is the one the
      * administrator wrote or the one a refusal showed. It is not told about the relays.
      *
+     * <p>A Responses request that continues a chain this node could not expand is refused for that, with a conflict and not
+     * with a feature of the request (design 4.8, 6.3): the relay was left out for its {@code previous_response_id}, and the
+     * client cannot take that out of the request.
+     *
      * <p>Nothing is refused while a relay is only out for a moment ({@link XpSkip.Reason#temporary}): the request may be
      * served by it shortly, and what is refused for good is not a request that would be.
      */
@@ -421,6 +425,15 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         List<Tier> memberless = resolved.availability().memberless();
         if (memberless.isEmpty() || xp.temporarilyOut(memberless)) {
             return resolved;
+        }
+        if (xp.chainRefused(memberless)) {
+            // Not a feature to take out of the request: this node holds no history of the chain, and a relay is not the
+            // account that has it (design 4.8).
+            throw new ApiException(
+                HttpStatus.CONFLICT,
+                "RESPONSE_CHAIN_NOT_PORTABLE",
+                "The response this request continues cannot be continued by the tiers that may serve it"
+            );
         }
         String feature = xp.hardFeature(memberless);
         if (feature != null) {

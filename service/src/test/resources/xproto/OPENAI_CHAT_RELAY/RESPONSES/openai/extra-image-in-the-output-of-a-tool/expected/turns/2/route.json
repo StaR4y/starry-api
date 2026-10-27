@@ -1,0 +1,30 @@
+{
+  "relaysLeftOut": [
+    {
+      "tier": "relay",
+      "account": "relay-1",
+      "reason": "FEATURE",
+      "detail": "tool_output_image"
+    }
+  ],
+  "attempts": [
+    {
+      "account": "codex-1",
+      "tier": "openai:native",
+      "dispatch": "NATIVE",
+      "wireModel": null,
+      "success": true,
+      "status": 200,
+      "inputTokens": 500,
+      "outputTokens": 20,
+      "usageSource": null,
+      "stopReason": null,
+      "degraded": null,
+      "error": null,
+      "nativeToolIds": [
+        "call_jDlvWo7dSQIRaTiADvEXvt8K",
+        "call_jDlvWo7dSQIRaTiADvEXvt8K"
+      ]
+    }
+  ]
+}
