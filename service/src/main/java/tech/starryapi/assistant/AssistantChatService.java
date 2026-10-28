@@ -32,9 +32,13 @@ public class AssistantChatService {
     static final int MAX_TITLE_LIST_CHARS = 1500;
     /**
      * The most a question waits for the documentation index. Loading it is limited in itself, but by minutes (see
-     * {@link AssistantDocsIndex#READ_BUDGET}); a question is answered without excerpts rather than held that long.
+     * {@link AssistantDocsIndex#READ_BUDGET}); a question is answered without excerpts rather than held that long. The
+     * console's own client gives up on a request after 30 seconds and the model needs most of them, so the wait for the
+     * excerpts has to leave that time: a wait of 30 seconds would end in the client's timeout every time, and the answer
+     * without excerpts would never reach it. A healthy load, even of the largest documentation over a slow link to the
+     * database, takes a few seconds at most. The load is not given up with the question: it goes on for the next one.
      */
-    static final Duration RETRIEVAL_TIMEOUT = Duration.ofSeconds(30);
+    static final Duration RETRIEVAL_TIMEOUT = Duration.ofSeconds(8);
     private static final String SITE_URL = "{{site_url}}";
     private static final String API_BASE_URL = "{{api_base_url}}";
 

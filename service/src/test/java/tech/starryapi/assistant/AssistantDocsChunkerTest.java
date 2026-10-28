@@ -360,6 +360,62 @@ class AssistantDocsChunkerTest {
         assertThat(AssistantDocsChunker.withoutMedia("attachment:" + FIRST_ID + "attachment:" + SECOND_ID)).isEmpty();
     }
 
+    /**
+     * A reference whose removal joins the text around it into another one, {@code depth} times over: the text in front of
+     * the first is the word "attachment" repeated, and what is behind each is the colon that completes the next.
+     */
+    private static String joiningReference(int depth, String id) {
+        return "attachment".repeat(depth) + "attachment:11111111" + ":22222222".repeat(depth - 1) + ":" + id;
+    }
+
+    @Test
+    void aReferenceThatTheRemovalOfAnotherOneJoinsIsRemovedTooHoweverDeeplyTheyAreNested() {
+        for (int depth = 1; depth <= 8; depth++) {
+            String joining = joiningReference(depth, FIRST_ID);
+
+            assertThat(AssistantDocsChunker.withoutMedia(joining)).as("a line of code or a title, depth " + depth)
+                .doesNotContain("attachment:").doesNotContainPattern(CLEAN_REFERENCE);
+            assertThat(AssistantDocsChunker.clean(joining)).as("a line of prose, depth " + depth)
+                .doesNotContain("attachment:").doesNotContainPattern(CLEAN_REFERENCE);
+
+            List<Section> sections = AssistantDocsChunker.split(
+                "## 标题 " + joining + "\n正文 " + joining + " 在这里。\n\n```text\n代码 " + joining + "\n```\n", 1);
+            assertThat(sections).as("depth " + depth).isNotEmpty().allSatisfy(section -> {
+                assertThat(section.heading()).doesNotContain("attachment:").doesNotContainPattern(CLEAN_REFERENCE);
+                assertThat(section.body()).doesNotContain("attachment:").doesNotContainPattern(CLEAN_REFERENCE);
+            });
+            assertThat(sections.stream().map(Section::body).collect(java.util.stream.Collectors.joining("\n")))
+                .as("the code and the prose around it stay").contains("正文", "在这里。", "代码");
+        }
+    }
+
+    @Test
+    void aReferenceThatAnEmbedOrAHalfWrittenIdJoinsIsRemovedToo() {
+        for (String joining : List.of(
+            "attachment![图](attachment:" + SECOND_ID + "):" + FIRST_ID,
+            "attachment:" + FIRST_ID.substring(0, 5) + "![图](attachment:" + SECOND_ID + ")" + FIRST_ID.substring(5))) {
+            assertThat(AssistantDocsChunker.withoutMedia(joining)).as(joining).doesNotContainPattern(CLEAN_REFERENCE);
+            assertThat(AssistantDocsChunker.clean(joining)).as(joining).doesNotContainPattern(CLEAN_REFERENCE);
+        }
+    }
+
+    @Test
+    void removingReferencesNestedAsDeeplyAsALineCanHoldTakesNoMoreThanAFewPassesOverIt() {
+        // 3,000 levels (about 100,000 characters, the longest a page may be): taking the references out until none is
+        // left would be a pass over the line for each level.
+        int depth = 3_000;
+        String joining = joiningReference(depth, FIRST_ID);
+
+        long start = System.nanoTime();
+        String withoutMedia = AssistantDocsChunker.withoutMedia(joining);
+        String clean = AssistantDocsChunker.clean(joining);
+        long elapsed = System.nanoTime() - start;
+
+        assertThat(withoutMedia).doesNotContain("attachment:").doesNotContainPattern(CLEAN_REFERENCE);
+        assertThat(clean).doesNotContain("attachment:").doesNotContainPattern(CLEAN_REFERENCE);
+        assertThat(Duration.ofNanos(elapsed)).isLessThan(Duration.ofSeconds(1));
+    }
+
     /** A reference as the model would read it: "attachment:" and an id of eight characters or more that does not run into the next "attachment:". */
     private static final String CLEAN_REFERENCE = "attachment:(?!attachment:)[0-9A-Za-z](?:(?!attachment:)[0-9A-Za-z-]){7,}";
 

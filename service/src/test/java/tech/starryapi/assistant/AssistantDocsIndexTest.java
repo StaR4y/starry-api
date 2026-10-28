@@ -1705,6 +1705,72 @@ class AssistantDocsIndexTest {
         assertThat(source.pageReads).as("a failed check leaves nothing to compare with").hasValue(2);
     }
 
+    /**
+     * A database of published pages as another node can change it between two statements of this one: the fingerprint of
+     * a set of pages is the sorted list of its ids, the list of pages is read in one statement that also makes the
+     * fingerprint of what it lists, and a hook runs after each statement, standing for the other node.
+     */
+    private static final class ChangingDatabase {
+        final List<String> published = new java.util.concurrent.CopyOnWriteArrayList<>(List.of("open"));
+        final AtomicInteger listings = new AtomicInteger();
+        final TestClock clock = new TestClock();
+        volatile Runnable afterFingerprintRead = () -> { };
+
+        private static String fingerprintOf(List<String> ids) {
+            return ids.stream().sorted().collect(java.util.stream.Collectors.joining(","));
+        }
+
+        private static Document document(String id) {
+            return page(id, "页面" + id, "帮助", "", "## 内容\n页面" + id + "里写着 word" + id + "qq。");
+        }
+
+        AssistantDocsIndex index() {
+            return AssistantDocsIndex.streamingWithFingerprint(NO_FILES, () -> Mono.fromSupplier(() -> {
+                listings.incrementAndGet();
+                List<String> listed = List.copyOf(published);
+                return new tech.starryapi.documentation.DocumentationService.PublishedStream(fingerprintOf(listed),
+                    Flux.fromIterable(listed).map(ChangingDatabase::document));
+            }), () -> Mono.fromSupplier(() -> {
+                String read = fingerprintOf(List.copyOf(published));
+                afterFingerprintRead.run();
+                return read;
+            }), clock);
+        }
+    }
+
+    @Test
+    void aPagePublishedBetweenTheFingerprintAndTheListIsNotQuotedAfterItIsWithdrawnAgain() {
+        ChangingDatabase database = new ChangingDatabase();
+        AssistantDocsIndex index = database.index();
+        // Another node publishes "secret" after this node has read the fingerprint and before it lists the pages.
+        database.afterFingerprintRead = () -> {
+            database.published.add("secret");
+            database.afterFingerprintRead = () -> { };
+        };
+
+        assertThat(pageIds(ask(index, "wordsecretqq"))).as("it was published when the pages were listed").containsExactly("secret");
+
+        database.published.remove("secret");
+        database.clock.advance(Duration.ofSeconds(61));
+
+        assertThat(ask(index, "wordsecretqq").chunks()).as("the check finds the pages changed, however the published set looks").isEmpty();
+        assertThat(ask(index, "wordsecretqq").pageTitles()).doesNotContain("页面secret");
+        assertThat(database.listings).as("the pages were read again").hasValue(2);
+        assertThat(pageIds(ask(index, "wordopenqq"))).containsExactly("open");
+    }
+
+    @Test
+    void anUnchangedSetOfPagesIsStillNotReadAgainWhenTheSourceSaysWhichPagesItListed() {
+        ChangingDatabase database = new ChangingDatabase();
+        AssistantDocsIndex index = database.index();
+        assertThat(pageIds(ask(index, "wordopenqq"))).containsExactly("open");
+
+        database.clock.advance(Duration.ofSeconds(61));
+
+        assertThat(pageIds(ask(index, "wordopenqq"))).containsExactly("open");
+        assertThat(database.listings).as("the fingerprint of the listing is the one a check finds").hasValue(1);
+    }
+
     @Test
     void thePagesAreIndexedOnAWorkerThreadNotOnTheThreadThatDeliveredThem() throws Exception {
         AssistantDocsIndex index = new AssistantDocsIndex(NO_FILES,
@@ -2474,6 +2540,33 @@ class AssistantDocsIndexTest {
     }
 
     @Test
+    void aReferenceThatTheRemovalOfAnotherOneJoinsReachesNeitherTheTitleNorTheTextNorTheSources() {
+        String id = "0f0e0d0c-0b0a-4908-8706-050403020100";
+        // Taking the middle reference out joins the rest into "attachment:<id>", which no later pass looked for.
+        String joining = "attachmentattachment:11111111:22222222:" + id;
+        AssistantDocsIndex index = indexOf(page("joined", new Content("页面 " + joining, "帮助", "摘要 " + joining,
+            "## 开票\n关键字 scrubqq " + joining + "\n\n```text\nscrubcodeqq " + joining + "\n```\n", 1,
+            new Translation("Page " + joining, "Help", "Summary " + joining,
+                "## Invoicing\nkeyword scrubqq " + joining + "\n\n```text\nscrubcodeqq " + joining + "\n```\n"))));
+
+        for (String question : List.of("scrubqq scrubcodeqq", "关键字 scrubqq")) {
+            Retrieval found = ask(index, question);
+            List<String> shown = new ArrayList<>(found.sources());
+            shown.addAll(found.pageTitles());
+            found.chunks().forEach(chunk -> {
+                shown.add(chunk.pageTitle());
+                shown.add(chunk.section());
+                shown.add(chunk.summary());
+                shown.add(chunk.body());
+            });
+
+            assertThat(shown).as(question).isNotEmpty().allSatisfy(text ->
+                assertThat(text).doesNotContain("attachment:" + id).doesNotContain("attachment:"));
+            assertThat(found.chunks()).as(question).isNotEmpty();
+        }
+    }
+
+    @Test
     void aPageWhoseTitleIsNothingButAnAttachmentIsLeftOutLikeAPageWithoutATitle() {
         String id = "0f0e0d0c-0b0a-4908-8706-050403020100";
         AssistantDocsIndex index = indexOf(
@@ -2719,6 +2812,74 @@ class AssistantDocsIndexTest {
     }
 
     /**
+     * 31 identifiers of at most 16 characters a question: the vocabulary has nothing to say against them (a page lists
+     * the runs of letters they are made of, or they are made of single letters), and the string search was what they were
+     * looked for with, 16 comparisons for each character of a text of runs.
+     */
+    private static java.util.Map<String, String> shortNamesQuestions(String run) {
+        java.util.Map<String, String> questions = new java.util.LinkedHashMap<>();
+        questions.put("short names, the run first", joined(31, number -> run.repeat(13) + "_" + oneCharacter(number)));
+        questions.put("short names, the run last", joined(31, number -> oneCharacter(number) + "_" + run.repeat(13)));
+        questions.put("short names of single letters", joined(31, number -> (run + "_").repeat(7) + oneCharacter(number)));
+        questions.put("short dotted names", joined(31, number -> run.repeat(14) + "." + oneCharacter(number)));
+        return questions;
+    }
+
+    /** 31 plain words of 16 characters: 15 of the letter and a last character that differs. No page needs more than to list them. */
+    private static String plainWords(String letter) {
+        return joined(31, number -> letter.repeat(15) + oneCharacter(number));
+    }
+
+    /** What a page lists so that the plain words, and the words of 2 to 16 letters that phrases are made of, are words of the index. */
+    private static String plainWordsListing(String letter) {
+        return wordsOf(letter) + " " + plainWords(letter);
+    }
+
+    /**
+     * Words that are plain words, no identifiers, of at most 16 characters: the vocabulary has nothing to say against them
+     * once a page lists them, and the string search compared up to 16 characters at every place of a text of runs of their
+     * letter for each of them (31 words a question, and the phrases of up to 16 characters that two of the shorter ones make).
+     */
+    private static java.util.Map<String, String> plainWordsQuestions(String letter) {
+        java.util.Map<String, String> questions = new java.util.LinkedHashMap<>();
+        int[] lengths = {7, 8, 6, 9, 5, 10, 4, 11, 3};
+        questions.put("31 plain words of 16 characters", plainWords(letter));
+        questions.put("31 plain words of 16 characters, apart", plainWords(letter).replace(' ', '，'));
+        questions.put("phrases of 16 characters", joined(lengths.length, number -> letter.repeat(lengths[number])));
+        return questions;
+    }
+
+    /** A page that lists the words of one letter, 2 to 16 characters long. */
+    private static String wordsOf(String letter) {
+        StringBuilder words = new StringBuilder("词表");
+        for (int length = 2; length <= 16; length++) {
+            words.append(' ').append(letter.repeat(length));
+        }
+        return words.toString();
+    }
+
+    /**
+     * 200 pages whose every field is at its cap once folded: U+FB00 is "ff", so the text is runs of "f" twice as long as
+     * it looks, and the characters of the index are the most there can be (8 million) of the plainest kind.
+     */
+    private static List<Document> foldedPagesAtTheirCaps(String vocabulary) {
+        String ligature = "\uFB00";
+        List<Document> pages = new ArrayList<>();
+        pages.add(page("words", "词表", "分类", "摘要", vocabulary));
+        for (int number = 0; number < 199; number++) {
+            StringBuilder body = new StringBuilder("# ").append(ligature.repeat(99)).append(number).append('\n')
+                .append("## ").append(ligature.repeat(99)).append('\n')
+                .append("### ").append(ligature.repeat(99)).append('\n');
+            while (body.length() < 99_000) {
+                body.append(ligature.repeat(39)).append('\n');
+            }
+            pages.add(page("ff-" + number, new Content(ligature.repeat(96) + number, ligature.repeat(60), ligature.repeat(240),
+                body.toString(), number, null)));
+        }
+        return pages;
+    }
+
+    /**
      * Run by {@link #aQuestionIsAnsweredQuicklyOnAPlatformWhoseStringSearchIsNotSpedUp} (no arguments), in a JVM that has no
      * fast String.indexOf, and by {@link #theWholeTextOfTheDocumentationNeverHasToFitInTheHeapAtOnce} ({@code heap}), in a
      * JVM with a small heap.
@@ -2746,16 +2907,45 @@ class AssistantDocsIndexTest {
         ask(joined, "词表");
         System.out.println("joined-characters=" + joined.searchCharacters());
         System.out.println("joined-worst=" + slowestMillis(joined, topicOfTwelveNames("\u00e9", "\u00ea", 10)));
+
+        // Identifiers of at most 16 characters, over runs of a letter, over a text of single letters between underscores,
+        // and over the most characters an index can hold.
+        AssistantDocsIndex runs = indexOf(runPages(wordsOf("a")));
+        ask(runs, "词表");
+        System.out.println("short-characters=" + runs.searchCharacters());
+        System.out.println("short-worst=" + slowestMillis(runs, shortNamesQuestions("a")));
+        AssistantDocsIndex underscores = indexOf(runPages("词表", ("a_".repeat(795) + "\n\n").repeat(62)));
+        ask(underscores, "词表");
+        System.out.println("short-joined-characters=" + underscores.searchCharacters());
+        System.out.println("short-joined-worst=" + slowestMillis(underscores, shortNamesQuestions("a")));
+        AssistantDocsIndex ligatures = indexOf(foldedPagesAtTheirCaps(wordsOf("f")));
+        ask(ligatures, "词表");
+        System.out.println("short-folded-characters=" + ligatures.searchCharacters());
+        System.out.println("short-folded-worst=" + slowestMillis(ligatures, shortNamesQuestions("f")));
+
+        // Plain words and phrases of at most 16 characters that a page lists, over runs of their letter and over the most
+        // characters an index can hold.
+        AssistantDocsIndex plain = indexOf(runPages(plainWordsListing("a")));
+        ask(plain, "词表");
+        System.out.println("plain-characters=" + plain.searchCharacters());
+        System.out.println("plain-worst=" + slowestMillis(plain, plainWordsQuestions("a")));
+        AssistantDocsIndex plainFolded = indexOf(foldedPagesAtTheirCaps(plainWordsListing("f")));
+        ask(plainFolded, "词表");
+        System.out.println("plain-folded-characters=" + plainFolded.searchCharacters());
+        System.out.println("plain-folded-worst=" + slowestMillis(plainFolded, plainWordsQuestions("f")));
     }
 
     @Test
     void aQuestionIsAnsweredQuicklyOnAPlatformWhoseStringSearchIsNotSpedUp() throws Exception {
         // The cost of String.indexOf where a long prefix of the term matches at many places depends on the JIT having an
-        // intrinsic for it. A JVM without one is what a platform without it is; the bound must not rely on it, nor on the
-        // one for a single character that the matcher of long names jumps with.
+        // intrinsic for it (_indexOfL, _indexOfU, _indexOfUL for a string whose length is not known, _indexOfIL, _indexOfIU,
+        // _indexOfIUL for the one with a start, which the search of the pages calls). A JVM without them is what a platform
+        // without them is; the bound must not rely on it, nor on the one for a single character that the matcher of long
+        // names jumps with.
         Path javaBinary = Path.of(System.getProperty("java.home"), "bin", "java");
         Process process = new ProcessBuilder(javaBinary.toString(), "-XX:+UnlockDiagnosticVMOptions",
-            "-XX:DisableIntrinsic=_indexOfL,_indexOfU,_indexOfUL,_indexOfL_char,_indexOfU_char", "-Xmx768m", "-cp",
+            "-XX:DisableIntrinsic=_indexOfL,_indexOfU,_indexOfUL,_indexOfL_char,_indexOfU_char,_indexOfIL,_indexOfIU,_indexOfIUL",
+            "-Xmx768m", "-cp",
             System.getProperty("java.class.path"), AssistantDocsIndexTest.class.getName()).redirectErrorStream(true).start();
         String output = new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
         assertThat(process.waitFor(2, TimeUnit.MINUTES)).as(output).isTrue();
@@ -2764,7 +2954,13 @@ class AssistantDocsIndexTest {
         assertThat(output).as("the index was full").containsPattern("(?m)^characters=[3-9]\\d{6}");
         assertThat(output).as("the index of Chinese text was full").containsPattern("(?m)^chinese-characters=[6-9]\\d{6}");
         assertThat(output).as("the index of joined letters was full").containsPattern("(?m)^joined-characters=[3-9]\\d{6}");
-        for (String measure : List.of("worst", "chinese-worst", "joined-worst")) {
+        assertThat(output).as("the index of runs was full").containsPattern("(?m)^short-characters=[3-9]\\d{6}");
+        assertThat(output).as("the index of single letters was full").containsPattern("(?m)^short-joined-characters=[3-9]\\d{6}");
+        assertThat(output).as("the index of ligatures was full").containsPattern("(?m)^short-folded-characters=[7-9]\\d{6}");
+        assertThat(output).as("the index of runs for plain words was full").containsPattern("(?m)^plain-characters=[3-9]\\d{6}");
+        assertThat(output).as("the index of ligatures for plain words was full").containsPattern("(?m)^plain-folded-characters=[7-9]\\d{6}");
+        for (String measure : List.of("worst", "chinese-worst", "joined-worst", "short-worst", "short-joined-worst", "short-folded-worst",
+            "plain-worst", "plain-folded-worst")) {
             java.util.regex.Matcher worst = java.util.regex.Pattern.compile("(?m)^" + measure + "=(\\d+)").matcher(output);
             assertThat(worst.find()).as(output).isTrue();
             assertThat(Long.parseLong(worst.group(1))).as(measure + ": " + output).isLessThan(SCORING_LIMIT_MILLIS / 2);
@@ -2914,6 +3110,62 @@ class AssistantDocsIndexTest {
         assertThat(index.mayOccur("keys")).isTrue();
     }
 
+    /** A different letter or digit for each number below 35: the last part of a name, which is no word. */
+    private static String oneCharacter(int number) {
+        return String.valueOf("bcdefghijklmnopqrstuvwxyz0123456789".charAt(number));
+    }
+
+    @Test
+    void anIdentifierOfWhichAWordIsNoWordOfTheDocumentsIsNotLookedForHoweverShortItIs() {
+        // The pages are runs of one letter and one page that lists some words: a name is found only where each of its
+        // words is a whole word of the text, so a name with a word that is nowhere is nowhere.
+        AssistantDocsIndex index = indexOf(runPages("词表 claude code gpt-5.5 config.toml api_key_id"));
+        ask(index, "词表");
+
+        for (String name : List.of("aaaaaaaaaaaaa_x", "x_aaaaaaaaaaaaa", "aaaaaaaaaaaaaa.x", "claude_missing", "missing.toml", "gpt-5.x_nowhere")) {
+            assertThat(index.mayOccur(name)).as(name).isFalse();
+        }
+        for (String name : List.of("claude_code", "config.toml", "gpt-5.5", "api_key_id", "code.x", "a_b_c", "x.1_y", "claude-5.5")) {
+            assertThat(index.mayOccur(name)).as(name + ": every word of it is a word of the documents, or a single character").isTrue();
+        }
+        List<String> searched = new java.util.concurrent.CopyOnWriteArrayList<>();
+        index.searchHook = searched::add;
+        ask(index, joined(31, number -> "aaaaaaaaaaaaa_" + oneCharacter(number)));
+        assertThat(searched).as("a question of such names searches the pages for none of them")
+            .noneMatch(term -> term.contains("_") || term.contains("."));
+    }
+
+    @Test
+    void anIdentifierMadeOfWordsOfTheDocumentsAndNotOneOfTheirLeafHeadingsIsStillLookedFor() {
+        // The section of a chunk is cut where the folded headings are far longer than they were (U+FDFA is 18 characters), and
+        // can leave the last heading out; the heading is kept to search in on its own and its words are words of the index.
+        String body = "# " + "\uFDFA".repeat(100) + "\n## 二级\n### leaf_alpha_beta 标题\n正文内容。";
+        AssistantDocsIndex index = indexOf(page("p", "页面", "分类", "摘要", body));
+        ask(index, "页面");
+
+        assertThat(index.mayOccur("leaf_alpha_beta")).isTrue();
+        assertThat(index.mayOccur("leaf_alpha_missing")).isFalse();
+    }
+
+    @Test
+    void ofTheIdentifiersOfAQuestionNoMoreThanTheLimitAreLookedForHoweverShortTheyAre() {
+        // Single letters between the underscores: the vocabulary has nothing to say against any of these names.
+        AssistantDocsIndex index = indexOf(page("p", "词表", "分类", "摘要", "## 名字\na_b_c_d 和 a_b_c_e 是名字。"));
+        ask(index, "词表");
+        List<String> searched = new java.util.concurrent.CopyOnWriteArrayList<>();
+        index.searchHook = searched::add;
+
+        ask(index, joined(31, number -> "a_b_c_" + oneCharacter(number)));
+
+        assertThat(searched).as("the long terms and the identifiers together").hasSize(AssistantDocsIndex.MAX_LONG_TERMS)
+            .allMatch(term -> term.startsWith("a_b_c_"));
+        List<AssistantDocsIndex.Term> names = new ArrayList<>();
+        for (int number = 0; number < AssistantDocsIndex.MAX_LONG_TERMS + 3; number++) {
+            names.add(new AssistantDocsIndex.Term("a_b_" + number, 4.0, false, false, false, java.util.Set.of()));
+        }
+        assertThat(AssistantDocsIndex.searchable(names, text -> true)).hasSize(AssistantDocsIndex.MAX_LONG_TERMS);
+    }
+
     @Test
     void ofTheLongTermsOfAQueryTheHeaviestAreLookedForAndTheRestAreNotPartOfTheQuestion() {
         java.util.List<AssistantDocsIndex.Term> terms = new ArrayList<>();
@@ -2934,6 +3186,65 @@ class AssistantDocsIndexTest {
             .contains("known_identifier_8", "known_identifier_13", "known_identifier_1");
         assertThat(AssistantDocsIndex.searchable(terms.subList(0, 1 + AssistantDocsIndex.MAX_LONG_TERMS), text -> true))
             .as("up to the limit nothing is left out").hasSize(1 + AssistantDocsIndex.MAX_LONG_TERMS);
+    }
+
+    @Test
+    void aQuestionOfPlainWordsAndPhrasesOfAtMostSixteenCharactersIsAnsweredQuicklyWhereverTheTextIsRunsOfTheirLetter() {
+        // A page lists the words, so that the vocabulary lets them through; the other pages are runs of the letter they
+        // begin with, or the ligatures that fold to it, to the caps of the index. 39 terms: the words and their phrases.
+        for (java.util.Map.Entry<String, List<Document>> hostile : java.util.Map.of(
+            "a", runPages(plainWordsListing("a")), "f", foldedPagesAtTheirCaps(plainWordsListing("f"))).entrySet()) {
+            AssistantDocsIndex index = indexOf(hostile.getValue());
+            ask(index, "词表");
+            assertThat(index.searchCharacters()).as("the index is full").isGreaterThan(3_000_000);
+
+            assertThat(Duration.ofMillis(slowestMillis(index, plainWordsQuestions(hostile.getKey()))))
+                .as(hostile.getKey()).isLessThan(Duration.ofMillis(SCORING_LIMIT_MILLIS));
+        }
+    }
+
+    @Test
+    void everyTermButAPairOrALoneCharacterOfIdeographsIsLookedForWithTheLinearMatcher() {
+        for (String term : List.of("key", "aaaaaaaaaaaaaaab", "aaaaaaa aaaaaaaa", "api key", "api_key", "gpt-5.5", "config.toml",
+            "x", "é", "ﬀ", "a".repeat(AssistantDocsIndex.LINEAR_TERM_CHARS + 1), "7", "kérnel")) {
+            assertThat(AssistantDocsIndex.usesLinearMatcher(term)).as(term).isTrue();
+        }
+        for (String term : List.of("文件", "删", "发票", "株甲")) {
+            assertThat(AssistantDocsIndex.usesLinearMatcher(term)).as(term).isFalse();
+        }
+    }
+
+    @Test
+    void aPhraseIsFoundByTheLinearMatcherExactlyWhereTheStringSearchFindsIt() {
+        Random random = new Random(29);
+        for (String alphabet : List.of("aabb  s_.-1é", "aa  b  ", "ab ab ab ab", "aab  \u337f\u00e9s")) {
+            for (int round = 0; round < 40_000; round++) {
+                StringBuilder builder = new StringBuilder();
+                for (int length = random.nextInt(90); length > 0; length--) {
+                    builder.append(alphabet.charAt(random.nextInt(alphabet.length())));
+                }
+                String text = builder.toString();
+                String term = randomWord(random) + " " + randomWord(random);
+                int[] failure = AssistantDocsIndex.failureTable(term);
+                java.util.BitSet mask = AssistantDocsIndex.wordMask(text);
+                for (int limit : new int[] {1, 3, 100}) {
+                    int expected = AssistantDocsIndex.occurrences(text, null, term, limit);
+                    assertThat(AssistantDocsIndex.occurrences(text, null, term, limit, failure))
+                        .as("'%s' in '%s' by the linear matcher, up to %d", term, text, limit).isEqualTo(expected);
+                    assertThat(AssistantDocsIndex.occurrences(text, mask, term, limit, failure))
+                        .as("'%s' in '%s' by the linear matcher and the mask, up to %d", term, text, limit).isEqualTo(expected);
+                }
+            }
+        }
+    }
+
+    /** A word of one to four letters of {@code ab} and {@code s} (an ending), the way a question writes the words of a phrase. */
+    private static String randomWord(Random random) {
+        StringBuilder word = new StringBuilder();
+        for (int length = 1 + random.nextInt(4); length > 0; length--) {
+            word.append("aabs".charAt(random.nextInt(4)));
+        }
+        return word.toString();
     }
 
     @Test
@@ -3091,6 +3402,12 @@ class AssistantDocsIndexTest {
                     .isEqualTo(Math.min(limit, expected));
                 assertThat(AssistantDocsIndex.occurrences(text, AssistantDocsIndex.wordMask(text), term, limit))
                     .as("'%s' in '%s' by mask, up to %d", term, text, limit).isEqualTo(Math.min(limit, expected));
+                int[] failure = AssistantDocsIndex.failureTable(term);
+                assertThat(AssistantDocsIndex.occurrences(text, null, term, limit, failure))
+                    .as("'%s' in '%s' by the linear matcher, up to %d", term, text, limit).isEqualTo(Math.min(limit, expected));
+                assertThat(AssistantDocsIndex.occurrences(text, AssistantDocsIndex.wordMask(text), term, limit, failure))
+                    .as("'%s' in '%s' by the linear matcher and the mask, up to %d", term, text, limit)
+                    .isEqualTo(Math.min(limit, expected));
             }
         }
     }

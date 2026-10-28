@@ -368,6 +368,36 @@ class AssistantChatServiceTest {
         assertThat(systemPromptOf(upstream.getFirst())).as("answered without excerpts and without a list of pages").isEqualTo(ADMIN_PROMPT);
     }
 
+    @Test
+    void aQuestionIsAnsweredWithoutExcerptsWellBeforeTheConsolesClientGivesUp() {
+        // The console's HTTP client gives up after 30 seconds (webui/src/utils/http.ts) and the model takes most of that, so
+        // an index that is stuck must not be waited for anything like as long: the answer would come after the client left.
+        AssistantSettingsService settings = mock(AssistantSettingsService.class);
+        when(settings.get()).thenReturn(Mono.just(new Settings(true, "鲸鱼助手", "你好", ADMIN_PROMPT, "auto", 8, 0.2)));
+        ProxyFacade proxy = mock(ProxyFacade.class);
+        List<JsonNode> upstream = new ArrayList<>();
+        when(proxy.completeAnonymousChat(any(), any())).thenAnswer(invocation -> {
+            upstream.add(invocation.getArgument(0));
+            return Mono.just("我不太确定。");
+        });
+        AssistantDocsIndex stuck = mock(AssistantDocsIndex.class);
+        when(stuck.retrieveFor(any(), any())).thenReturn(Mono.never());
+        AssistantChatService service = new AssistantChatService(settings, stuck, proxy, mock(AccountPoolService.class),
+            JsonMapper.builder().build(), siteUrl(null));
+
+        reactor.test.StepVerifier.withVirtualTime(() -> service.chat(
+                new ChatRequest(List.of(new ChatMessage("user", "怎么创建 API Key"))),
+                MockServerWebExchange.from(MockServerHttpRequest.post("/assistant/chat"))))
+            .thenAwait(java.time.Duration.ofSeconds(10))
+            .assertNext(response -> {
+                assertThat(response.reply()).isEqualTo("我不太确定。");
+                assertThat(response.sources()).isEmpty();
+            })
+            .expectComplete()
+            .verify(java.time.Duration.ofSeconds(5));
+        assertThat(upstream).as("the model was asked once, without excerpts").hasSize(1);
+    }
+
     private static List<Document> clientGuide() {
         return List.of(page("claude-code", "手动配置 Claude Code", "连接客户端", """
             ## 手动设置环境变量

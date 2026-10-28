@@ -68,6 +68,8 @@ class AssistantDocsPostgreSqlTest {
     private AssistantDocsIndex index;
     private final AtomicInteger loads = new AtomicInteger();
     private final AtomicInteger fingerprintReads = new AtomicInteger();
+    /** What another node does right after this one has read the fingerprint of the published pages. */
+    private volatile java.util.function.Supplier<Mono<Void>> afterFingerprintRead = Mono::empty;
     private final AssistantDocsIndexTest.TestClock clock = new AssistantDocsIndexTest.TestClock();
 
     @Configuration
@@ -116,12 +118,13 @@ class AssistantDocsPostgreSqlTest {
         context.registerBean(DocumentationService.class);
         // The same wiring as production, except that the loaders are wrapped to count how often they are read and
         // that the clock is the test's own.
-        context.registerBean(AssistantDocsIndex.class, () -> AssistantDocsIndex.streaming(NO_FILES, () -> {
+        context.registerBean(AssistantDocsIndex.class, () -> AssistantDocsIndex.streamingWithFingerprint(NO_FILES, () -> {
             loads.incrementAndGet();
-            return context.getBean(DocumentationService.class).publishedPageStream();
+            return context.getBean(DocumentationService.class).publishedStream();
         }, () -> {
             fingerprintReads.incrementAndGet();
-            return context.getBean(DocumentationService.class).publishedFingerprint();
+            return context.getBean(DocumentationService.class).publishedFingerprint()
+                .flatMap(read -> afterFingerprintRead.get().thenReturn(read));
         }, clock));
         context.refresh();
         documentation = context.getBean(DocumentationService.class);
@@ -604,6 +607,30 @@ class AssistantDocsPostgreSqlTest {
         clock.advance(Duration.ofSeconds(61));
         assertThat(ask("rewrittenqq").chunks()).hasSize(1);
         assertThat(loads).hasValue(3);
+    }
+
+    @Test
+    void aPagePublishedByAnotherNodeBetweenTheFingerprintAndTheListIsNotQuotedAfterItIsWithdrawnAgain() {
+        String secret = createPage("竞态页面", "## 内容\n这里写着 racesecretqq。", null, false);
+        var db = DatabaseClient.create(ConnectionFactories.get(r2dbcUrl));
+        // Another node publishes the page right after this one has read the fingerprint, before it lists the pages.
+        afterFingerprintRead = () -> {
+            afterFingerprintRead = Mono::empty;
+            return db.sql("UPDATE documentation_pages SET published = draft, published_at = clock_timestamp() WHERE id = :id")
+                .bind("id", secret).fetch().rowsUpdated().then();
+        };
+
+        assertThat(pageIds(ask("racesecretqq"))).as("published when the pages were listed").containsExactly(secret);
+        assertThat(loads).hasValue(1);
+
+        // Another node withdraws it again; this one is told nothing.
+        db.sql("UPDATE documentation_pages SET published = NULL WHERE id = :id").bind("id", secret).fetch().rowsUpdated().block(TIMEOUT);
+        clock.advance(Duration.ofSeconds(61));
+
+        assertThat(ask("racesecretqq").chunks()).as("quoted until another change comes, before the fix").isEmpty();
+        assertThat(ask("racesecretqq").pageTitles()).doesNotContain("竞态页面");
+        assertThat(loads).as("the check found the pages changed").hasValue(2);
+        assertThat(ask("怎么创建 API Key").chunks()).as("the other pages are still there").isNotEmpty();
     }
 
     // ---- attachments never reach the prompt --------------------------------------------------------------------

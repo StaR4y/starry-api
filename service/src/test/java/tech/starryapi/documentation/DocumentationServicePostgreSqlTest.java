@@ -271,6 +271,9 @@ class DocumentationServicePostgreSqlTest {
             assertThat(service.publishedPages().block(TIMEOUT)).isEmpty();
             assertThat(service.publishedFingerprint().block(TIMEOUT))
                 .as("no rows to aggregate: not a digest, but a value all the same").isEqualTo("");
+            var empty = service.publishedStream().block(TIMEOUT);
+            assertThat(empty.fingerprint()).as("the same value, with no row to take it from").isEqualTo("");
+            assertThat(empty.pages().collectList().block(TIMEOUT)).isEmpty();
         } finally {
             db.sql("UPDATE documentation_pages SET deleted = FALSE WHERE id = ANY(CAST(:ids AS text[]))")
                 .bind("ids", published.toArray(new String[0])).fetch().rowsUpdated().block(TIMEOUT);
@@ -330,6 +333,68 @@ class DocumentationServicePostgreSqlTest {
             .isEqualTo(pages.size() - 1);
         assertThat(service.publishedPages().block(TIMEOUT).stream().filter(d -> d.id().equals(damaged)).findFirst().orElseThrow().content())
             .as("as the list has it").isNull();
+    }
+
+    @Test void thePublishedPageReadHasOnlyTheMembersOfAPageSoARowOfOtherMembersOrOfWrongTypesIsNeverReadWhole() {
+        var db = DatabaseClient.create(ConnectionFactories.get(r2dbcUrl));
+        String run = "-" + UUID.randomUUID().toString().substring(0, 8);
+        String padded = "cut-padded" + run;
+        String fake = "cut-fake" + run;
+        String nested = "cut-nested" + run;
+        String big = "p".repeat(2_000_000);
+        // Members the page does not have, in the page and in its translation, as a row written by hand or restored from a dump may.
+        String paddedContent = "{\"title\":\"填充\",\"category\":\"Test\",\"summary\":\"摘要\",\"body\":" + json("## a" + "b".repeat(300_000))
+            + ",\"sortOrder\":2,\"padding\":" + json(big) + ",\"more\":{\"deep\":[" + json(big) + "]},"
+            + "\"english\":{\"title\":\"Padded\",\"category\":\"Test\",\"summary\":\"\",\"body\":" + json("## c\nd") + ",\"padding\":" + json(big) + "}}";
+        // A translation that is a long string, and texts that are arrays or objects, where text is expected.
+        String fakeContent = "{\"title\":\"假的\",\"category\":\"Test\",\"summary\":\"\",\"body\":\"x\",\"sortOrder\":3,\"english\":" + json(big) + "}";
+        String nestedContent = "{\"title\":\"嵌套\",\"category\":\"Test\",\"summary\":\"\",\"body\":[" + json(big) + "],\"sortOrder\":4,"
+            + "\"english\":{\"title\":{\"x\":" + json(big) + "},\"category\":\"Test\",\"summary\":\"\",\"body\":\"y\"}}";
+        for (String[] row : new String[][] {{padded, paddedContent}, {fake, fakeContent}, {nested, nestedContent}}) {
+            db.sql("INSERT INTO documentation_pages (id, draft, published, published_at) VALUES (:id, CAST(:content AS jsonb), CAST(:content AS jsonb), clock_timestamp())")
+                .bind("id", row[0]).bind("content", row[1]).fetch().rowsUpdated().block(TIMEOUT);
+        }
+
+        var paddedRow = unproxied.publishedPage(padded).block(TIMEOUT);
+        assertThat(paddedRow.json().length()).as("the body is cut and nothing else is long")
+            .isLessThan(DocumentationService.ASSISTANT_BODY_CHARS + 2_000);
+        assertThat(paddedRow.json()).doesNotContain("padding", "more", "deep");
+        var fakeRow = unproxied.publishedPage(fake).block(TIMEOUT);
+        assertThat(fakeRow.json().length()).as("the long string that is not a translation stays in the database").isLessThan(1_000);
+        var nestedRow = unproxied.publishedPage(nested).block(TIMEOUT);
+        assertThat(nestedRow.json().length()).as("so do the arrays and objects that are not text").isLessThan(1_000);
+
+        var pages = service.publishedPageStream().collectList().block(TIMEOUT);
+        var paddedPage = pages.stream().filter(d -> d.id().equals(padded)).findFirst().orElseThrow();
+        assertThat(paddedPage.content()).as("a page with members it does not have is still a page").isNotNull();
+        assertThat(paddedPage.content().title()).isEqualTo("填充");
+        assertThat(paddedPage.content().sortOrder()).isEqualTo(2);
+        assertThat(paddedPage.content().body()).hasSize(DocumentationService.ASSISTANT_BODY_CHARS);
+        assertThat(paddedPage.content().english().body()).isEqualTo("## c\nd");
+        assertThat(pages.stream().filter(d -> d.id().equals(fake)).findFirst().orElseThrow().content())
+            .as("a translation that is a string cannot be read, as whole").isNull();
+        assertThat(pages.stream().filter(d -> d.id().equals(nested)).findFirst().orElseThrow().content())
+            .as("nor can a body that is a list").isNull();
+        assertThat(service.publishedPages().block(TIMEOUT).stream().filter(d -> d.id().equals(fake)).findFirst().orElseThrow().content())
+            .as("as the whole read has it").isNull();
+    }
+
+    @Test void thePublishedStreamMakesTheFingerprintOfTheSetItListsAndItIsTheOneACheckFinds() {
+        var db = DatabaseClient.create(ConnectionFactories.get(r2dbcUrl));
+        var stream = service.publishedStream().block(TIMEOUT);
+
+        assertThat(stream.fingerprint()).hasSize(32).isEqualTo(service.publishedFingerprint().block(TIMEOUT));
+        assertThat(stream.pages().collectList().block(TIMEOUT)).extracting(Document::id).contains("getting-started", "faq");
+
+        var page = service.create(content("Streamed", "body"), "test").block(TIMEOUT);
+        service.save(page.id(), new Save(page.draft(), page.version(), true), "test").block(TIMEOUT);
+        var published = service.publishedStream().block(TIMEOUT);
+        assertThat(published.fingerprint()).as("a publication").isNotEqualTo(stream.fingerprint())
+            .isEqualTo(service.publishedFingerprint().block(TIMEOUT));
+        assertThat(published.pages().collectList().block(TIMEOUT)).extracting(Document::id).contains(page.id());
+
+        db.sql("UPDATE documentation_pages SET published = NULL WHERE id = :id").bind("id", page.id()).fetch().rowsUpdated().block(TIMEOUT);
+        assertThat(service.publishedStream().block(TIMEOUT).fingerprint()).as("a withdrawal").isEqualTo(stream.fingerprint());
     }
 
     private String json(String text) {

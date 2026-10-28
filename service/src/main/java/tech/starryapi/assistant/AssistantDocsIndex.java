@@ -49,6 +49,7 @@ import tech.starryapi.documentation.DocumentationDtos.Document;
 import tech.starryapi.documentation.DocumentationDtos.Translation;
 import tech.starryapi.documentation.DocumentationPublicationChanged;
 import tech.starryapi.documentation.DocumentationService;
+import tech.starryapi.documentation.DocumentationService.PublishedStream;
 
 /**
  * What the whale assistant can look things up in: the published pages of the in-console 使用文档 (Chinese and, where a
@@ -154,15 +155,18 @@ public class AssistantDocsIndex {
      */
     static final int MAX_TERM_CHARS = 64;
     /**
-     * A term longer than this is looked for with a matcher whose time is linear in the text, whatever the text is. A
-     * substring search that the JIT or the platform does not speed up costs the length of the text times that of the term
-     * where a long prefix of the term matches at many places and the whole term at none, as in pages that have long runs
-     * of one letter (a placeholder, a line to fill in, pasted data).
+     * A term longer than this, and any identifier (see {@link #isLinearTerm}), counts against {@link #MAX_LONG_TERMS}. Every
+     * term that is not a pair or a single character of ideographs (see {@link #usesLinearMatcher}), short words and phrases
+     * included, is looked for with a matcher whose time is linear in the text, whatever the text is. A substring search
+     * costs the length of the text times that of the term where a long prefix of the term matches at many places and the
+     * whole term at none, as in pages that have long runs of one letter (a placeholder, a line to fill in, pasted data), with
+     * or without the speed the JIT gives it; the vocabulary does not rule such a word out when a page lists it.
      */
     static final int LINEAR_TERM_CHARS = 16;
     /**
-     * How many terms longer than {@link #LINEAR_TERM_CHARS} one query looks for. Each costs a pass over all the text of
-     * the index, however short the pass is made; the ones of least weight, and the later of equal weight, are left out.
+     * How many terms one query looks for that are longer than {@link #LINEAR_TERM_CHARS} or are identifiers (see
+     * {@link #isLinearTerm}). Each costs a pass over all the text of the index, however short the pass is made; the ones of
+     * least weight, and the later of equal weight, are left out.
      */
     static final int MAX_LONG_TERMS = 12;
 
@@ -343,7 +347,7 @@ public class AssistantDocsIndex {
      * delivers them, one at a time ({@link #pageStream}; then this is null), and a cheap value that changes when they do.
      */
     private final Supplier<Mono<List<Document>>> pages;
-    private final Supplier<Flux<Document>> pageStream;
+    private final Supplier<Mono<PublishedStream>> pageStream;
     private final Supplier<Mono<String>> fingerprint;
     private final List<Entry> fileEntries;
     private final Clock clock;
@@ -405,7 +409,7 @@ public class AssistantDocsIndex {
 
     @Autowired
     public AssistantDocsIndex(DocumentationService documentation) {
-        this(Path.of(System.getProperty("user.dir", ".")), null, documentation::publishedPageStream,
+        this(Path.of(System.getProperty("user.dir", ".")), null, documentation::publishedStream,
             documentation::publishedFingerprint, MONOTONIC);
     }
 
@@ -432,10 +436,19 @@ public class AssistantDocsIndex {
      */
     static AssistantDocsIndex streaming(Path root, Supplier<Flux<Document>> pageStream,
         Supplier<Mono<String>> fingerprint, Clock clock) {
+        return streamingWithFingerprint(root, () -> Mono.fromSupplier(() -> new PublishedStream(null, pageStream.get())), fingerprint, clock);
+    }
+
+    /**
+     * The same for a source that says which pages it listed: the fingerprint it delivers with them is the one kept with the
+     * snapshot (see {@link PublishedStream}), as in production.
+     */
+    static AssistantDocsIndex streamingWithFingerprint(Path root, Supplier<Mono<PublishedStream>> pageStream,
+        Supplier<Mono<String>> fingerprint, Clock clock) {
         return new AssistantDocsIndex(root, null, pageStream, fingerprint, clock);
     }
 
-    private AssistantDocsIndex(Path root, Supplier<Mono<List<Document>>> pages, Supplier<Flux<Document>> pageStream,
+    private AssistantDocsIndex(Path root, Supplier<Mono<List<Document>>> pages, Supplier<Mono<PublishedStream>> pageStream,
         Supplier<Mono<String>> fingerprint, Clock clock) {
         this.fileEntries = loadFiles(root);
         this.pages = pages;
@@ -697,7 +710,9 @@ public class AssistantDocsIndex {
                 if (expiredOnly && current.isPresent() && current.get().equals(previous.fingerprint())) {
                     return Mono.just(previous.renewed(clock.millis() + CACHE_TTL));
                 }
-                // The fingerprint is read first: a publish in between makes the next check reload once more.
+                // The fingerprint that is kept with the pages is the one of the pages that were read (see streamed), not
+                // this one, which another node's publish or withdrawal can make a description of other pages: what is
+                // kept then equals the fingerprint of a later state, and the snapshot is taken for current for good.
                 return pageStream != null
                     ? streamed(wanted, current.orElse(null))
                     : listed(wanted, current.orElse(null));
@@ -736,13 +751,25 @@ public class AssistantDocsIndex {
      * may be far more than the heap has room for, while the chunks that are kept are limited to
      * {@link #MAX_PAGE_CHUNKS}. The read fails when no page comes for {@link #readTimeout}, not because it takes long.
      */
-    private Mono<Snapshot> streamed(long wanted, String fingerprint) {
-        return Flux.defer(pageStream)
+    private Mono<Snapshot> streamed(long wanted, String read) {
+        return Mono.defer(pageStream)
             .timeout(readTimeout)
-            .publishOn(Schedulers.boundedElastic(), 1)
-            .reduceWith(Pages::new, Pages::addGuarded)
-            .timeout(readBudget)
-            .map(collected -> completed(() -> collected.snapshot(wanted, fingerprint), wanted, fingerprint));
+            .switchIfEmpty(Mono.error(() -> new IllegalStateException("The source of the documentation pages delivered nothing")))
+            .flatMap(stream -> {
+                // The fingerprint of the pages whose ids were listed, made by the statement that lists them; it describes
+                // what is read, whatever happens to the published pages meanwhile. The one read before the load, which a
+                // source that cannot say (a test's) falls back to, can describe other pages: a page published after it
+                // and before the list is in the snapshot but not in it, and when the page is withdrawn again the
+                // published pages match it once more, so that every check finds the snapshot current and the page is
+                // quoted until another change comes or the node restarts.
+                String fingerprint = stream.fingerprint() != null ? stream.fingerprint() : read;
+                return stream.pages()
+                    .timeout(readTimeout)
+                    .publishOn(Schedulers.boundedElastic(), 1)
+                    .reduceWith(Pages::new, Pages::addGuarded)
+                    .map(collected -> completed(() -> collected.snapshot(wanted, fingerprint), wanted, fingerprint));
+            })
+            .timeout(readBudget);
     }
 
     /**
@@ -1031,7 +1058,7 @@ public class AssistantDocsIndex {
                 Set<String> inEntry = new HashSet<>();
                 int[] pairsInEntry = new int[64];
                 int pairCount = 0;
-                for (String text : List.of(entry.title(), entry.section(), entry.category(), entry.summary(), entry.body())) {
+                for (String text : List.of(entry.title(), entry.section(), entry.leaf(), entry.category(), entry.summary(), entry.body())) {
                     for (String term : scan(text, Integer.MAX_VALUE, false).terms().keySet()) {
                         if (isPair(term)) {
                             if (pairCount == pairsInEntry.length) {
@@ -1136,7 +1163,34 @@ public class AssistantDocsIndex {
         if (space >= 0) {
             return vocabulary.contains(term.substring(0, space)) && vocabulary.contains(term.substring(space + 1));
         }
-        return isCompound(term) || vocabulary.contains(term);
+        return isCompound(term) ? partsAreWords(term, vocabulary) : vocabulary.contains(term);
+    }
+
+    /**
+     * Whether every run of two or more letters and digits in an identifier is a word of the index. A whole identifier is
+     * found only where it begins a word and ends one, so each run in it is a whole run of the text, and every run of
+     * two or more characters of every field is a word of the vocabulary. A run of one character is not (a word has two),
+     * so "a_b_c" is not ruled out by it. An identifier may stand in front of a longer one ("config.toml.bak"), which
+     * adds runs after it and none to it.
+     */
+    private static boolean partsAreWords(String name, Vocabulary vocabulary) {
+        int length = name.length();
+        int index = 0;
+        while (index < length) {
+            if (!isWordChar(name.charAt(index))) {
+                index++;
+                continue;
+            }
+            int end = index + 1;
+            while (end < length && isWordChar(name.charAt(end))) {
+                end++;
+            }
+            if (end - index >= 2 && !vocabulary.contains(name.substring(index, end))) {
+                return false;
+            }
+            index = end;
+        }
+        return true;
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -1280,14 +1334,22 @@ public class AssistantDocsIndex {
             byte[] inBody = new byte[rows];
             byte[] inPage = new byte[rows];
             int frequency = 0;
+            // The page's title, category and summary are the same strings in all its chunks (see PageFold), and a section's
+            // heading is the same in the chunks it is cut into; these follow one another, so each is searched once for the
+            // run of chunks that has it, not once for each of up to 2000 chunks.
+            Seen leaf = new Seen();
+            Seen section = new Seen();
+            Seen title = new Seen();
+            Seen category = new Seen();
+            Seen summary = new Seen();
             for (int row = 0; row < rows; row++) {
                 Entry entry = entries.get(row);
-                boolean own = contains(entry.leaf(), word, failure);
-                int heading = own || contains(entry.section(), word, failure) ? SECTION_POINTS : 0;
+                boolean own = leaf.in(entry.leaf(), word, failure);
+                int heading = own || section.in(entry.section(), word, failure) ? SECTION_POINTS : 0;
                 int body = BODY_POINTS * occurrences(entry.body(), entry.bodyWords(), word, MAX_BODY_HITS, failure);
-                int page = TITLE_POINTS * (contains(entry.title(), word, failure) ? 1 : 0)
-                    + CATEGORY_POINTS * (contains(entry.category(), word, failure) ? 1 : 0)
-                    + SUMMARY_POINTS * (contains(entry.summary(), word, failure) ? 1 : 0);
+                int page = (title.in(entry.title(), word, failure) ? TITLE_POINTS : 0)
+                    + (category.in(entry.category(), word, failure) ? CATEGORY_POINTS : 0)
+                    + (summary.in(entry.summary(), word, failure) ? SUMMARY_POINTS : 0);
                 inHeading[row] = (byte) heading;
                 inOwnHeading[row] = own;
                 inBody[row] = (byte) body;
@@ -1300,21 +1362,36 @@ public class AssistantDocsIndex {
         }
     }
 
+    /** Whether a term is in a field of the chunks, kept for the chunks that follow with the same text in it. */
+    private static final class Seen {
+
+        private String text;
+        private boolean found;
+
+        boolean in(String field, String term, int[] failure) {
+            if (text == null || !text.equals(field)) {
+                text = field;
+                found = contains(field, term, failure);
+            }
+            return found;
+        }
+    }
+
     /**
      * What the terms of one question find in the chunks, term by term and each term once: the question and the follow-up
      * reading of the same message ({@link Plan}) look for the same words of the topic, and a word costs a pass over the
      * text of the whole index, which for a long name is the greater part of the cost of the question. So the cost of a
      * question is that of its distinct terms however many readings of it there are.
      *
-     * <p>Of the terms longer than {@link #LINEAR_TERM_CHARS} that could occur at most {@link #MAX_LONG_TERMS} are looked for
-     * in all, the readings together (see {@link #searchable}).
+     * <p>Of the terms longer than {@link #LINEAR_TERM_CHARS} and the identifiers that could occur at most
+     * {@link #MAX_LONG_TERMS} are looked for in all, the readings together (see {@link #searchable}).
      */
     private static final class Lookup {
 
         private final List<Entry> entries;
         private final Vocabulary vocabulary;
         private final Map<String, Column> columns = new HashMap<>();
-        /** The terms longer than {@link #LINEAR_TERM_CHARS} that the question looks for, whichever reading they belong to. */
+        /** The long terms and identifiers ({@link #isLinearTerm}) that the question looks for, whichever reading they belong to. */
         private final Set<String> longTerms = new HashSet<>();
         private final Consumer<String> searched;
 
@@ -1337,8 +1414,8 @@ public class AssistantDocsIndex {
                     return Column.none(entries.size());
                 }
                 searched.accept(word);
-                // The failure table of a long term, made once for the question: see LINEAR_TERM_CHARS.
-                return Column.of(entries, word, word.length() > LINEAR_TERM_CHARS ? failureTable(word) : null);
+                // The failure table of the term, made once for the question: see LINEAR_TERM_CHARS.
+                return Column.of(entries, word, usesLinearMatcher(word) ? failureTable(word) : null);
             });
         }
     }
@@ -1696,7 +1773,7 @@ public class AssistantDocsIndex {
 
     /**
      * The terms of a query that are looked for: all of them, except that of the terms that could occur and are longer than
-     * {@link #LINEAR_TERM_CHARS} only {@link #MAX_LONG_TERMS} are kept, the heaviest first and, of equal weight, the
+     * {@link #LINEAR_TERM_CHARS} or are identifiers only {@link #MAX_LONG_TERMS} are kept, the heaviest first and, of equal weight, the
      * earlier in the query. A term that is left out is not part of the question any more, not one that the documents lack.
      */
     static List<Term> searchable(List<Term> terms, Predicate<String> mayOccur) {
@@ -1713,7 +1790,7 @@ public class AssistantDocsIndex {
         List<Integer> newTerms = new ArrayList<>();
         for (int column = 0; column < terms.size(); column++) {
             String text = terms.get(column).text();
-            if (text.length() > LINEAR_TERM_CHARS && !admitted.contains(text) && mayOccur.test(text)) {
+            if (isLinearTerm(text) && !admitted.contains(text) && mayOccur.test(text)) {
                 newTerms.add(column);
             }
         }
@@ -2376,6 +2453,28 @@ public class AssistantDocsIndex {
         return term.indexOf('_') >= 0 || term.indexOf('.') >= 0 || term.indexOf('-') >= 0;
     }
 
+    /**
+     * A term that counts against {@link #MAX_LONG_TERMS}: one longer than {@link #LINEAR_TERM_CHARS}, and any identifier.
+     * The vocabulary rules out a word that no page has, but can say little about an identifier (see {@link #partsAreWords}:
+     * nothing of its single characters, and a page may list the rest), so its length says nothing of what looking for it
+     * costs: a name of 15 characters made of one letter and underscores is found at every other character of a text that
+     * is made of them.
+     */
+    private static boolean isLinearTerm(String term) {
+        return term.length() > LINEAR_TERM_CHARS || isCompound(term);
+    }
+
+    /**
+     * Whether a term is looked for with the linear matcher: every term but a pair or a single character of ideographs, which
+     * the string search compares two characters at a time at most. The vocabulary says only that some page has a word, not
+     * that the text of the others lacks its beginning, and a page can list the words: 31 words of 16 letters that differ in the
+     * last one are all words of the index, and the string search compares 16 characters at every place of a text made of runs
+     * of that letter, for each of them. The linear matcher costs about the same as the string search on text of any other kind.
+     */
+    static boolean usesLinearMatcher(String term) {
+        return !isCjk(term.charAt(0)) || isLinearTerm(term);
+    }
+
     private static boolean contains(String text, String term, int[] failure) {
         return occurrences(text, null, term, 1, failure) > 0;
     }
@@ -2450,7 +2549,9 @@ public class AssistantDocsIndex {
         boolean latin = !isCjk(term.charAt(0));
         boolean whole = latin && isCompound(term);
         if (failure != null) {
-            return linearOccurrences(text, words, term, failure, latin, whole, limit);
+            return latin && isSingleWord(term)
+                ? wordOccurrences(text, words, term, limit)
+                : linearOccurrences(text, words, term, failure, latin, whole, limit);
         }
         int found = 0;
         int from = 0;
@@ -2484,7 +2585,8 @@ public class AssistantDocsIndex {
     }
 
     /**
-     * The same count in one pass over the text, whatever the text is (Knuth, Morris and Pratt). It finds what
+     * The same count in one pass over the text, whatever the text is (Knuth, Morris and Pratt), for a phrase, an identifier
+     * or a term of any other shape; a term that is one word has {@link #wordOccurrences}. It finds what
      * {@link #occurrences} finds with the string search: every place where the term is found that starts a word and ends
      * one, those that begin inside the previous match passed over.
      *
@@ -2536,6 +2638,39 @@ public class AssistantDocsIndex {
             }
         }
         return found;
+    }
+
+    /**
+     * The same count for a term that is one word (see {@link #isSingleWord}), in time linear in the text as well. A word of
+     * the text begins at the start of a run of word characters and nowhere inside one, so a place that is not the start of a
+     * run is no match, and neither is a start where the term is not found: the rest of that run is crossed in one step
+     * whether the term was found there or not, and a run costs at most the length of the term whatever its own length is.
+     */
+    private static int wordOccurrences(String text, BitSet words, String term, int limit) {
+        char first = term.charAt(0);
+        int found = 0;
+        int from = 0;
+        while (found < limit) {
+            int at = text.indexOf(first, from);
+            if (at < 0) {
+                break;
+            }
+            if (!startsInsideWord(text, at, false) && text.startsWith(term, at) && wordEndsAt(text, at + term.length())) {
+                found++;
+            }
+            from = endOfWordRun(text, words, at);
+        }
+        return found;
+    }
+
+    /** Whether a term is one word: nothing but letters and digits (see {@link #isWordChar}), so that it cannot span two words. */
+    private static boolean isSingleWord(String term) {
+        for (int index = 0; index < term.length(); index++) {
+            if (!isWordChar(term.charAt(index))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** For each prefix of the term, the length of its longest proper prefix that is also its suffix. */

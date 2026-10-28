@@ -176,7 +176,7 @@ final class AssistantDocsChunker {
     static String clean(String line) {
         String text = IMAGE.matcher(line).replaceAll("");
         text = INTERNAL_LINK.matcher(text).replaceAll("$1");
-        text = ATTACHMENT_REFERENCE.matcher(text).replaceAll("");
+        text = withoutAttachments(text, false);
         text = withoutMediaUrls(text);
         text = stripHtml(text);
         // Taking the tags out can join the pieces of a reference that had a tag in the middle ("attach<b>ment:<id>"), and
@@ -192,10 +192,30 @@ final class AssistantDocsChunker {
     static String withoutMedia(String line) {
         String text = line;
         if (text.contains("attachment:")) {
-            text = ATTACHMENT_EMBED.matcher(text).replaceAll("");
-            text = ATTACHMENT_REFERENCE.matcher(text).replaceAll("");
+            text = withoutAttachments(text, true);
         }
         return withoutMediaUrls(text);
+    }
+
+    /**
+     * Removes the attachment references (and, if asked, the embeds) of a text so that none is left in it, including one
+     * that the removal itself would make: taking "attachment:11111111" out of "attachmentattachment:11111111:<id>" joins the
+     * rest into "attachment:<id>", and the next pass would take that out and join the next, as deeply as the text allows.
+     *
+     * <p>Removing them leaves the text as it was around them, which is what a page that has no such joins gets. If a reference
+     * is left in the result, the removal is made again from the start with a space in the place of each, so that the text on
+     * the two sides of one is never joined. A reference is a run of characters without a space, so one in that result would
+     * be a run of the text as it was, which the removal would have taken out: none is left. That is two passes more over the
+     * text, not one for each level of nesting.
+     */
+    private static String withoutAttachments(String text, boolean embeds) {
+        String removed = removeAttachments(text, embeds, "");
+        return ATTACHMENT_REFERENCE.matcher(removed).find() ? removeAttachments(text, embeds, " ") : removed;
+    }
+
+    private static String removeAttachments(String text, boolean embeds, String gap) {
+        String kept = embeds ? ATTACHMENT_EMBED.matcher(text).replaceAll(gap) : text;
+        return ATTACHMENT_REFERENCE.matcher(kept).replaceAll(gap);
     }
 
     /** Drops every whitespace-delimited token that contains a documentation media path, scanning once. */

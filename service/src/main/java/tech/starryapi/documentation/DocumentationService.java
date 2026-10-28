@@ -141,28 +141,58 @@ public class DocumentationService {
     static final int ASSISTANT_CATEGORY_CHARS = 120;
     static final int ASSISTANT_SUMMARY_CHARS = 480;
     static final int ASSISTANT_BODY_CHARS = 200_000;
+    /** A sort order that is a string is read as a number: no number the page can have is longer. */
+    static final int ASSISTANT_SORT_ORDER_CHARS = 64;
 
-    /** The member of a JSON object that is cut to {@code limit} characters when it is a string; nothing when it is not. */
-    private static String cut(String object, String key, int limit) {
-        return "CASE WHEN jsonb_typeof(%1$s->'%2$s') = 'string' THEN jsonb_build_object('%2$s', left(%1$s->>'%2$s', %3$d)) ELSE '{}'::jsonb END"
-            .formatted(object, key, limit);
+    /**
+     * A member of a JSON object as the assistant reads it: a string cut to {@code limit} characters, a number, a boolean or
+     * a null as it is, and an array or object, which {@link Content} cannot read as text either, as an empty one (so the
+     * page stays unreadable, as it is when read whole, and what is in it never leaves the database). Nothing when the
+     * member is not there.
+     */
+    private static String member(String object, String key, int limit) {
+        return ("CASE jsonb_typeof(%1$s->'%2$s') WHEN 'string' THEN to_jsonb(left(%1$s->>'%2$s', %3$d)) "
+            + "WHEN 'array' THEN '[]'::jsonb WHEN 'object' THEN '{}'::jsonb ELSE %1$s->'%2$s' END").formatted(object, key, limit);
     }
 
-    private static String cuts(String object) {
-        return String.join(" || ", cut(object, "title", ASSISTANT_TITLE_CHARS), cut(object, "category", ASSISTANT_CATEGORY_CHARS),
-            cut(object, "summary", ASSISTANT_SUMMARY_CHARS), cut(object, "body", ASSISTANT_BODY_CHARS));
+    /** The four texts of a page or of its translation, each cut to what the assistant reads of it. */
+    private static String texts(String object) {
+        return String.join(", ", "'title', " + member(object, "title", ASSISTANT_TITLE_CHARS),
+            "'category', " + member(object, "category", ASSISTANT_CATEGORY_CHARS),
+            "'summary', " + member(object, "summary", ASSISTANT_SUMMARY_CHARS),
+            "'body', " + member(object, "body", ASSISTANT_BODY_CHARS));
     }
 
-    /** The published JSON of a page with the text of its fields cut as above, in both languages. */
-    private static final String CUT_PUBLISHED = "CASE WHEN jsonb_typeof(published) = 'object' THEN published || " + cuts("published")
-        + " || CASE WHEN jsonb_typeof(published->'english') = 'object' THEN jsonb_build_object('english', (published->'english') || "
-        + cuts("(published->'english')") + ") ELSE '{}'::jsonb END ELSE published END";
+    /**
+     * The published JSON of a page as the assistant reads it, in both languages: only the members that {@link Content}
+     * and {@link Translation} have, the text of each cut as above. Everything else in the row (a member of another name,
+     * whatever its size, an {@code english} that is not an object) is left behind in the database, so that a row that was
+     * not saved through the API cannot make a read as long as its JSON is. (The table only holds objects; should it ever
+     * hold another value, an empty array stands for it, which {@link Content} cannot read.)
+     */
+    private static final String CUT_PUBLISHED = "CASE jsonb_typeof(published) WHEN 'object' THEN jsonb_strip_nulls(jsonb_build_object("
+        + texts("published") + ", 'sortOrder', " + member("published", "sortOrder", ASSISTANT_SORT_ORDER_CHARS)
+        + ", 'english', CASE WHEN published->'english' IS NULL OR jsonb_typeof(published->'english') = 'null' THEN NULL "
+        + "WHEN jsonb_typeof(published->'english') = 'object' THEN jsonb_strip_nulls(jsonb_build_object("
+        + texts("(published->'english')") + ")) ELSE '[]'::jsonb END)) ELSE '[]'::jsonb END";
 
-    /** The sort of the published pages in a catalog: by sort order (a damaged one last), then title, then id. */
-    private static final String PUBLISHED_ORDER = """
-        ORDER BY CASE WHEN published->>'sortOrder' ~ '^-?[0-9]{1,9}$' THEN (published->>'sortOrder')::integer END NULLS LAST,
-            published->>'title', id LIMIT 200
-        """;
+    /**
+     * What a fingerprint is made of: for each published page its id, the time it was published and the size of its JSON.
+     * Both {@link #publishedFingerprint()} and {@link #publishedStream()} take it of a relation with those columns
+     * ({@code id}, {@code published_at}, {@code size}), so that the one of a read and the one a check compares it with are
+     * the same value for the same pages.
+     */
+    private static final String FINGERPRINT_OF_PAGES =
+        "coalesce(md5(string_agg(id || '@' || coalesce(published_at::text, '') || '#' || size, ',' ORDER BY id)), '')";
+
+    /**
+     * The pages of {@link #publishedStream()} and the fingerprint of the set that was listed to read them, which is the
+     * set the pages are of: it is made by the statement that lists them, and not by a statement of its own before or
+     * after it, between which another node can publish or withdraw a page. A fingerprint read apart from the pages
+     * can describe other pages than the ones read; a withdrawal then brings it back to a value that was kept, and a
+     * cache that compares it never reads the pages again.
+     */
+    public record PublishedStream(String fingerprint, Flux<Document> pages) { }
 
     /**
      * The same pages as {@link #publishedPages()} in the same order, for the assistant, which keeps a few thousand
@@ -172,27 +202,37 @@ public class DocumentationService {
      * pages of two languages of 100,000 characters, which is more with the escapes of control characters) is hundreds of
      * megabytes. A row whose JSON cannot be read comes back with no content, as in {@link #documents}.
      *
-     * <p>Each page is a query of its own, after one for the ids in catalog order. One query for all of them would not
+     * <p>Each page is a query of its own, after one for the ids in catalog order, which also makes the fingerprint of
+     * the published pages (see {@link PublishedStream}). One query for all of them would not
      * hold the rows back: the driver asks the network for 256 messages at a time whatever the subscriber asks of it, so
      * the whole result would be received into direct buffers while the consumer is busy with the first row, and a
      * subscriber that gives up then (the index does, after a read timeout) leaves them unreleased. Direct memory is
      * capped (256 MB in the deployment) and shared with the HTTP server and the proxy: a few such reads would fail every
      * allocation of the node until a restart. A fetch size does not help, the driver asks for the next batch of a cursor
      * without waiting for demand. With a query for a page the driver never holds more than the row in hand and the next.
-     * A page that was unpublished or deleted since the ids were read is left out, and one published since is read by the
-     * next load, which the change or the fingerprint brings about.
+     * A page that was unpublished or deleted since the ids were read is left out, and one published since is not read
+     * (it is not in the fingerprint either, so the next check finds the pages changed).
      */
-    public Flux<Document> publishedPageStream() {
-        return db.sql("SELECT id FROM documentation_pages WHERE deleted = FALSE AND published IS NOT NULL " + PUBLISHED_ORDER)
-            .map((r, m) -> r.get("id", String.class)).all().collectList()
-            .flatMapMany(Flux::fromIterable)
-            .concatMap(this::publishedPage, 1)
-            .publishOn(Schedulers.boundedElastic(), 1)
-            .map(row -> new Document(row.id(), readableContent(row.json()), row.publishedAt(), List.<Attachment>of()));
+    public Mono<PublishedStream> publishedStream() {
+        return db.sql("WITH pages AS (SELECT id, published_at, pg_column_size(published) AS size, "
+                + "CASE WHEN published->>'sortOrder' ~ '^-?[0-9]{1,9}$' THEN (published->>'sortOrder')::integer END AS sort_order, "
+                + "published->>'title' AS title FROM documentation_pages WHERE deleted = FALSE AND published IS NOT NULL) "
+                + "SELECT id, (SELECT " + FINGERPRINT_OF_PAGES + " FROM pages) AS fingerprint FROM pages "
+                + "ORDER BY sort_order NULLS LAST, title, id LIMIT 200")
+            .map((r, m) -> List.of(r.get("id", String.class), r.get("fingerprint", String.class))).all().collectList()
+            .map(rows -> new PublishedStream(rows.isEmpty() ? "" : rows.getFirst().get(1),
+                Flux.fromIterable(rows).concatMap(row -> publishedPage(row.getFirst()), 1)
+                    .publishOn(Schedulers.boundedElastic(), 1)
+                    .map(row -> new Document(row.id(), readableContent(row.json()), row.publishedAt(), List.<Attachment>of()))));
     }
 
-    /** One published page, cut as in {@link #publishedPageStream()}; nothing if it is not published or has been deleted. */
-    private Mono<PublishedRow> publishedPage(String id) {
+    /** The pages of {@link #publishedStream()} without the fingerprint. */
+    public Flux<Document> publishedPageStream() {
+        return publishedStream().flatMapMany(PublishedStream::pages);
+    }
+
+    /** One published page, cut as in {@link #publishedStream()}; nothing if it is not published or has been deleted. */
+    Mono<PublishedRow> publishedPage(String id) {
         return db.sql("SELECT id, (" + CUT_PUBLISHED + ")::text AS content, published_at FROM documentation_pages "
                 + "WHERE id = :id AND deleted = FALSE AND published IS NOT NULL")
             .bind("id", id).map((r, m) -> new PublishedRow(r.get("id", String.class), r.get("content", String.class),
@@ -206,13 +246,13 @@ public class DocumentationService {
 
     /**
      * A short value that changes whenever a page is published, re-published, unpublished or deleted (a draft save
-     * does not change it), so that a cache of {@link #publishedPages()} can tell cheaply whether it is out of date.
+     * does not change it), so that a cache of {@link #publishedPages()} can tell cheaply whether it is out of date. The
+     * same value as {@link PublishedStream#fingerprint()} for the same pages.
      */
     public Mono<String> publishedFingerprint() {
-        return db.sql("""
-            SELECT coalesce(md5(string_agg(id || '@' || coalesce(published_at::text, '') || '#' || pg_column_size(published), ',' ORDER BY id)), '') AS fingerprint
-            FROM documentation_pages WHERE deleted = FALSE AND published IS NOT NULL
-            """).map(r -> r.get("fingerprint", String.class)).one();
+        return db.sql("SELECT " + FINGERPRINT_OF_PAGES + " AS fingerprint FROM (SELECT id, published_at, pg_column_size(published) AS size "
+                + "FROM documentation_pages WHERE deleted = FALSE AND published IS NOT NULL) pages")
+            .map(r -> r.get("fingerprint", String.class)).one();
     }
 
     public Mono<List<AdminEntry>> listAdmin() {
