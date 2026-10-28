@@ -28,7 +28,8 @@ import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Function;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -41,6 +42,7 @@ import org.springframework.transaction.event.TransactionalEventListener;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
+import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 import tech.starryapi.documentation.DocumentationDtos.Content;
 import tech.starryapi.documentation.DocumentationDtos.Document;
@@ -52,7 +54,9 @@ import tech.starryapi.documentation.DocumentationService;
  * What the whale assistant can look things up in: the published pages of the in-console 使用文档 (Chinese and, where a
  * page has one, English) and, for development checkouts, README.md and docs/*.md under the working directory.
  *
- * <p>The pages are read through R2DBC into one immutable snapshot shared by all questions. The snapshot is rebuilt
+ * <p>The pages are read through R2DBC, one at a time, each turned into its chunks as it arrives (so that the text of all
+ * of them never has to be in the heap at once, see {@link Pages}), into one immutable snapshot shared by all questions.
+ * The snapshot is rebuilt
  * lazily, by a single load however many questions arrive meanwhile, when {@link DocumentationService} reports a
  * publish, unpublish or delete that has committed (this node) or a restore clears the caches ({@link #invalidate()}),
  * and, for changes made on other nodes, when it is older than {@link #CACHE_TTL} <em>and</em> the cheap fingerprint of
@@ -62,8 +66,8 @@ import tech.starryapi.documentation.DocumentationService;
  * pages into a snapshot makes a limit too), the assistant carries on with the file chunks only and tries again shortly.
  *
  * <p>Both language versions of a page are matched as one document and the one in the reader's language is quoted.
- * Questions are scored on the parallel scheduler, never on the thread that delivered the snapshot, which is a database
- * event loop.
+ * Questions are scored on threads of their own (see {@link #SEARCH_THREADS}), never on the thread that delivered the
+ * snapshot, which is a database event loop, nor on Reactor's shared parallel scheduler.
  */
 @Component
 public class AssistantDocsIndex {
@@ -80,15 +84,31 @@ public class AssistantDocsIndex {
      * the pages would also cut off one that is slow but healthy (tens of megabytes over a remote database).
      */
     static final Duration READ_TIMEOUT = Duration.ofSeconds(15);
-    /** The most that reading the pages may take in all, however steadily the rows keep coming. */
+    /** The most that reading the pages, and turning each into chunks as it arrives, may take in all, however steadily the rows keep coming. */
     static final Duration READ_BUDGET = Duration.ofMinutes(5);
     /**
-     * The most that turning the pages into a snapshot may take once they are read. It is CPU work on a worker thread and
+     * The most that turning the chunks of the pages into a snapshot may take once they are read. It is CPU work on a worker thread and
      * covered by no timeout of its own; this is what keeps a build that never reports back (see {@link Load}) from holding
      * every question for good.
      */
     static final Duration BUILD_BUDGET = Duration.ofMinutes(2);
     private static final long WARN_INTERVAL = 60_000;
+    /**
+     * How many questions may be scored at the same time: half the cores, at least one. Scoring is CPU work that a hostile
+     * question can make long, and it must neither take every core nor run on Reactor's shared parallel scheduler, whose
+     * workers also run the timers of the whole application (every {@code timeout} and {@code delay} of the egress, the
+     * subscriptions and this index): held there, it would delay all of them.
+     */
+    static final int SEARCH_THREADS = Math.max(1, Runtime.getRuntime().availableProcessors() / 2);
+    /** How many questions may wait for a thread, for each thread; one more is answered without excerpts, as after a timeout. */
+    static final int SEARCH_QUEUE_PER_THREAD = 64;
+    /**
+     * The threads that score questions. They are daemon threads that go when they have been idle for a minute. A task that
+     * is cancelled while it waits is dropped; one that has begun runs to its end, which the limits on a question's terms
+     * make a matter of milliseconds.
+     */
+    private static final Scheduler SEARCH = Schedulers.newBoundedElastic(
+        SEARCH_THREADS, SEARCH_QUEUE_PER_THREAD, "assistant-search", 60, true);
 
     static final int MAX_RESULTS = 6;
     static final int MIN_RESULTS = 4;
@@ -127,6 +147,24 @@ public class AssistantDocsIndex {
     private static final int MAX_PHRASES = 8;
     /** How many terms of a message are looked at before the ones to search for are chosen. */
     private static final int MAX_CANDIDATE_TERMS = 600;
+    /**
+     * A word or identifier of a question longer than this is not looked for, and no phrase is made of it: it is ignored,
+     * not cut (a prefix would find what the question did not ask for). The longest name a document has is far shorter (the
+     * longest key of the settings has 58 characters), and the cost of looking for a term grows with its length.
+     */
+    static final int MAX_TERM_CHARS = 64;
+    /**
+     * A term longer than this is looked for with a matcher whose time is linear in the text, whatever the text is. A
+     * substring search that the JIT or the platform does not speed up costs the length of the text times that of the term
+     * where a long prefix of the term matches at many places and the whole term at none, as in pages that have long runs
+     * of one letter (a placeholder, a line to fill in, pasted data).
+     */
+    static final int LINEAR_TERM_CHARS = 16;
+    /**
+     * How many terms longer than {@link #LINEAR_TERM_CHARS} one query looks for. Each costs a pass over all the text of
+     * the index, however short the pass is made; the ones of least weight, and the later of equal weight, are left out.
+     */
+    static final int MAX_LONG_TERMS = 12;
 
     // What a mention of a word is worth in points, before the rarity of the word is taken into account: one in a
     // title or a heading counts far more than one in running text, of which up to three are counted.
@@ -300,8 +338,12 @@ public class AssistantDocsIndex {
     // Endings a Latin word may carry and still count as the same word: key / keys, create / created.
     private static final Set<String> WORD_ENDINGS = Set.of("s", "es", "d", "ed", "ing");
 
-    /** Where the published pages come from: the pages themselves, and a cheap value that changes when they do. */
+    /**
+     * Where the published pages come from: the pages themselves, either all at once (a test's way) or, as the database
+     * delivers them, one at a time ({@link #pageStream}; then this is null), and a cheap value that changes when they do.
+     */
     private final Supplier<Mono<List<Document>>> pages;
+    private final Supplier<Flux<Document>> pageStream;
     private final Supplier<Mono<String>> fingerprint;
     private final List<Entry> fileEntries;
     private final Clock clock;
@@ -324,6 +366,12 @@ public class AssistantDocsIndex {
     volatile Thread lastBuildThread;
     /** The thread the last question was scored on, for the same reason. */
     volatile Thread lastSearchThread;
+    /** Where questions are scored; a test replaces it. */
+    volatile Scheduler searchScheduler = SEARCH;
+    /** Called with every page as it is turned into chunks, where a failure is the page's; a test makes it fail. */
+    volatile Consumer<Document> pageHook = document -> { };
+    /** Called with each term that the chunks are gone through for, in the order of the searches; a test counts them. */
+    volatile Consumer<String> searchHook = term -> { };
 
     /**
      * How old a snapshot is, how long to wait before trying again and when a warning was last logged are measured on
@@ -357,24 +405,8 @@ public class AssistantDocsIndex {
 
     @Autowired
     public AssistantDocsIndex(DocumentationService documentation) {
-        this(Path.of(System.getProperty("user.dir", ".")),
-            () -> pagesFrom(documentation.publishedRowStream(), READ_TIMEOUT, documentation::documents),
+        this(Path.of(System.getProperty("user.dir", ".")), null, documentation::publishedPageStream,
             documentation::publishedFingerprint, MONOTONIC);
-    }
-
-    /**
-     * The pages from the rows as they arrive. The read fails when no row comes for {@code silence}, which a connection
-     * that is gone without a reset does; it does not fail because it takes long, as a large documentation over a slow link
-     * does. The rows are parsed on a worker thread, not on the database connection's event loop that delivers them.
-     */
-    static <T> Mono<List<Document>> pagesFrom(Flux<T> rows, Duration silence, Function<List<T>, List<Document>> parse) {
-        return rows.timeout(silence).collectList().publishOn(Schedulers.boundedElastic()).map(list -> {
-            try {
-                return parse.apply(list);
-            } catch (StackOverflowError | OutOfMemoryError | LinkageError fatal) {
-                throw new IllegalStateException("The documentation pages could not be read: " + fatal, fatal);
-            }
-        });
     }
 
     /** Files only; there are no 使用文档 pages. */
@@ -389,8 +421,25 @@ public class AssistantDocsIndex {
 
     AssistantDocsIndex(Path root, Supplier<Mono<List<Document>>> pages, Supplier<Mono<String>> fingerprint,
         Clock clock) {
+        this(root, pages, null, fingerprint, clock);
+    }
+
+    /**
+     * Pages as the database delivers them, one at a time: each is turned into chunks as it arrives and nothing but the
+     * chunks is kept (see {@link Pages}). The read fails when no page comes for {@link #readTimeout}, which a connection
+     * that is gone without a reset does; it does not fail because it takes long, as a large documentation over a slow link
+     * does.
+     */
+    static AssistantDocsIndex streaming(Path root, Supplier<Flux<Document>> pageStream,
+        Supplier<Mono<String>> fingerprint, Clock clock) {
+        return new AssistantDocsIndex(root, null, pageStream, fingerprint, clock);
+    }
+
+    private AssistantDocsIndex(Path root, Supplier<Mono<List<Document>>> pages, Supplier<Flux<Document>> pageStream,
+        Supplier<Mono<String>> fingerprint, Clock clock) {
         this.fileEntries = loadFiles(root);
         this.pages = pages;
+        this.pageStream = pageStream;
         this.fingerprint = fingerprint;
         this.clock = clock;
     }
@@ -471,9 +520,9 @@ public class AssistantDocsIndex {
         List<String> earlier = earlierQuestions == null ? List.of() : earlierQuestions.stream()
             .filter(message -> message != null && !message.isBlank()).limit(MAX_EARLIER_MESSAGES).toList();
         // The snapshot is delivered on whatever thread finished loading it, in production a database event loop;
-        // scoring is CPU work and happens on the parallel scheduler instead.
+        // scoring is CPU work and happens on threads of its own instead (see SEARCH).
         return snapshot()
-            .publishOn(Schedulers.parallel())
+            .publishOn(searchScheduler)
             .map(current -> {
                 lastSearchThread = Thread.currentThread();
                 return search(current, question, earlier);
@@ -499,6 +548,12 @@ public class AssistantDocsIndex {
     long retainedCharacters() {
         Snapshot current = snapshot.get();
         return current == null ? 0 : current.entries().stream().mapToLong(entry -> entry.chunk().body().length()).sum();
+    }
+
+    /** Whether a term can occur in any chunk of the current snapshot, as the search decides it; for the tests. */
+    boolean mayOccur(String term) {
+        Snapshot current = snapshot.get();
+        return current != null && mayOccur(term, current.vocabulary());
     }
 
     /** How many words are kept as strings and how many pairs of Chinese characters as ints; for the tests. */
@@ -633,7 +688,7 @@ public class AssistantDocsIndex {
         // A read that never returns (a connection that died without a reset) is a failure like any other: without
         // a limit it would hold every question of this node for as long as the operating system keeps the socket. The
         // fingerprint is a few bytes and is limited in all; the pages are limited where their rows arrive (see
-        // pagesFrom), so that a large documentation over a slow link is still read, and here only by a generous budget.
+        // streamed), so that a large documentation over a slow link is still read, and here only by a generous budget.
         return Mono.defer(fingerprint)
             .timeout(readTimeout)
             .map(Optional::of)
@@ -643,10 +698,9 @@ public class AssistantDocsIndex {
                     return Mono.just(previous.renewed(clock.millis() + CACHE_TTL));
                 }
                 // The fingerprint is read first: a publish in between makes the next check reload once more.
-                return Mono.defer(pages)
-                    .timeout(readBudget)
-                    .publishOn(Schedulers.boundedElastic())
-                    .map(loaded -> buildSafely(loaded, wanted, current.orElse(null)));
+                return pageStream != null
+                    ? streamed(wanted, current.orElse(null))
+                    : listed(wanted, current.orElse(null));
             })
             .onErrorResume(error -> {
                 warn("Could not load the published documentation pages for the assistant; answering without them", error);
@@ -662,16 +716,45 @@ public class AssistantDocsIndex {
         return new Snapshot(entries, twins, List.of(), fingerprint, wanted, until, Vocabulary.of(entries));
     }
 
+    /** The pages, all of them at once from a supplier that limits its own read; they are turned into a snapshot on a worker thread. */
+    private Mono<Snapshot> listed(long wanted, String fingerprint) {
+        return Mono.defer(pages)
+            .timeout(readBudget)
+            .publishOn(Schedulers.boundedElastic())
+            .map(loaded -> completed(() -> {
+                Pages collected = new Pages();
+                for (Document document : loaded) {
+                    collected.add(document);
+                }
+                return collected.snapshot(wanted, fingerprint);
+            }, wanted, fingerprint));
+    }
+
+    /**
+     * The pages as the database delivers them. Each is turned into chunks on a worker thread (not the database
+     * connection's event loop) as soon as it arrives, and only one is in hand at a time: the text of all of them together
+     * may be far more than the heap has room for, while the chunks that are kept are limited to
+     * {@link #MAX_PAGE_CHUNKS}. The read fails when no page comes for {@link #readTimeout}, not because it takes long.
+     */
+    private Mono<Snapshot> streamed(long wanted, String fingerprint) {
+        return Flux.defer(pageStream)
+            .timeout(readTimeout)
+            .publishOn(Schedulers.boundedElastic(), 1)
+            .reduceWith(Pages::new, Pages::addGuarded)
+            .timeout(readBudget)
+            .map(collected -> completed(() -> collected.snapshot(wanted, fingerprint), wanted, fingerprint));
+    }
+
     /**
      * A failure of the build that the text of the pages decides would repeat on every attempt, so it is not retried until
      * something changes. Running out of memory is not decided by the pages alone: it is the heap of the moment, which other
      * work may have been filling, so it is retried like any failure to load. The snapshot then has no fingerprint, and the
      * pages are read again instead of being taken for unchanged.
      */
-    private Snapshot buildSafely(List<Document> documents, long wanted, String fingerprint) {
+    private Snapshot completed(Supplier<Snapshot> build, long wanted, String fingerprint) {
         lastBuildThread = Thread.currentThread();
         try {
-            return build(documents, wanted, fingerprint);
+            return build.get();
         } catch (OutOfMemoryError error) {
             // Reactor would rethrow it where it is thrown and the load would never finish.
             warn("Ran out of memory indexing the published documentation pages for the assistant; answering without them", error);
@@ -683,58 +766,129 @@ public class AssistantDocsIndex {
         }
     }
 
-    /** One published page, chunked in the languages it has. */
+    /**
+     * One published page, chunked in the languages it has. Of the English version it keeps what the snapshot uses and
+     * not the version itself: its body is parsed and then of no more use, and 200 of them are tens of megabytes held for
+     * nothing until the last page is read.
+     *
+     * @param englishTitle    the title of the English version; empty when there is none
+     * @param englishCategory the category of the English version; empty when there is none
+     * @param englishSummary  the summary of the English version, cleaned; empty when there is none
+     * @param englishParsed   the English version's chunks; null when the page has no English version
+     * @param chineseTotal    how many chunks the Chinese text had before {@link Pages} cut it down to what can be kept
+     * @param englishTotal    the same for the English text; 0 when there is none
+     */
     private record PageText(String id, String title, String category, String summary,
-        AssistantDocsChunker.Parsed chinese, Translation english, String englishTitle,
-        AssistantDocsChunker.Parsed englishParsed) {
+        AssistantDocsChunker.Parsed chinese, String englishTitle, String englishCategory, String englishSummary,
+        AssistantDocsChunker.Parsed englishParsed, int chineseTotal, int englishTotal) {
+
+        /** The same page with at most {@code limit} chunks of each language. */
+        PageText limitedTo(int limit) {
+            AssistantDocsChunker.Parsed zh = limited(chinese, limit);
+            AssistantDocsChunker.Parsed en = limited(englishParsed, limit);
+            return zh == chinese && en == englishParsed ? this : new PageText(id, title, category, summary, zh,
+                englishTitle, englishCategory, englishSummary, en, chineseTotal, englishTotal);
+        }
+
+        private static AssistantDocsChunker.Parsed limited(AssistantDocsChunker.Parsed parsed, int limit) {
+            // A copy, so that the longer list, and the text of the chunks cut off, can go.
+            return parsed == null || parsed.sections().size() <= limit ? parsed
+                : new AssistantDocsChunker.Parsed(List.copyOf(parsed.sections().subList(0, limit)), parsed.headings());
+        }
     }
 
-    private Snapshot build(List<Document> documents, long wanted, String fingerprint) {
-        List<PageText> texts = new ArrayList<>();
-        List<String> titles = new ArrayList<>();
-        for (Document document : documents) {
+    /**
+     * The pages as they are turned into chunks, one after the other. The most that can be kept in the end is
+     * {@link #MAX_PAGE_CHUNKS} chunks, shared out fairly ({@link #fairLimit}), and the share only shrinks as pages are
+     * added. So after each page the chunks beyond the share are dropped: what is held is about what the snapshot will keep
+     * plus the page in hand, however many pages there are and however long. Waiting for all of them before cutting would
+     * hold the whole text of the documentation (up to 200 pages of two languages of 100,000 characters each) in the heap
+     * at once, along with its rows.
+     */
+    private final class Pages {
+
+        private final List<PageText> texts = new ArrayList<>();
+        private final List<String> titles = new ArrayList<>();
+        /** How many chunks each language version of each page had; the share is worked out from them. */
+        private final List<Integer> sizes = new ArrayList<>();
+        private int limit = Integer.MAX_VALUE;
+        /** The error the JVM cannot recover from that stopped the pages from being read, if one did. */
+        private Error failure;
+
+        /** For a stream of pages: an error that Reactor would rethrow where it is thrown is kept for the end instead. */
+        Pages addGuarded(Document document) {
+            if (failure == null) {
+                try {
+                    add(document);
+                } catch (Error fatal) {
+                    failure = fatal;
+                    texts.clear();
+                    titles.clear();
+                    sizes.clear();
+                }
+            }
+            return this;
+        }
+
+        void add(Document document) {
+            PageText page;
             try {
-                PageText page = pageText(document);
+                pageHook.accept(document);
+                page = pageText(document);
                 if (page == null) {
                     warn("A published documentation page has no usable content and is left out of the assistant"
                         + (document == null ? "" : " (page " + document.id() + ")"), null);
-                    continue;
+                    return;
                 }
-                texts.add(page);
-                titles.add(page.english() == null || page.englishTitle().equals(page.title())
-                    ? page.title() : page.title() + " / " + page.englishTitle());
             } catch (RuntimeException | StackOverflowError error) {
                 warn("Could not read a published documentation page for the assistant; leaving it out"
                     + (document == null ? "" : " (page " + document.id() + ")"), error);
+                return;
+            }
+            texts.add(page);
+            titles.add(page.englishParsed() == null || page.englishTitle().equals(page.title())
+                ? page.title() : page.title() + " / " + page.englishTitle());
+            sizes.add(page.chineseTotal());
+            if (page.englishParsed() != null) {
+                sizes.add(page.englishTotal());
+            }
+            limit = fairLimit(sizes);
+            if (limit != Integer.MAX_VALUE) {
+                texts.replaceAll(text -> text.limitedTo(limit));
             }
         }
-        int limit = fairLimit(texts);
-        List<Entry> entries = new ArrayList<>();
-        List<int[]> twinPairs = new ArrayList<>();
-        for (PageText page : texts) {
-            int languages = (page.chinese().sections().isEmpty() ? 0 : ZH)
-                | (page.englishParsed() == null || page.englishParsed().sections().isEmpty() ? 0 : EN);
-            Map<Integer, List<Integer>> chinese = addChunks(entries, page, page.title(), page.category(), page.chinese(),
-                "zh", languages, limit);
-            if (page.englishParsed() != null) {
-                Translation english = page.english();
-                Map<Integer, List<Integer>> translated = addChunks(entries, page, page.englishTitle(),
-                    english.category(), page.englishParsed(), "en", languages, limit);
-                if (page.chinese().headings() == page.englishParsed().headings()) {
-                    pairTwins(chinese, translated, twinPairs);
+
+        Snapshot snapshot(long wanted, String fingerprint) {
+            if (failure != null) {
+                throw failure;
+            }
+            List<Entry> entries = new ArrayList<>();
+            List<int[]> twinPairs = new ArrayList<>();
+            for (PageText page : texts) {
+                int languages = (page.chinese().sections().isEmpty() ? 0 : ZH)
+                    | (page.englishParsed() == null || page.englishParsed().sections().isEmpty() ? 0 : EN);
+                Map<Integer, List<Integer>> chinese = addChunks(entries, page, page.title(), page.category(),
+                    page.summary(), page.chinese(), page.chineseTotal(), "zh", languages, limit);
+                if (page.englishParsed() != null) {
+                    Map<Integer, List<Integer>> translated = addChunks(entries, page, page.englishTitle(),
+                        page.englishCategory(), page.englishSummary(), page.englishParsed(), page.englishTotal(), "en",
+                        languages, limit);
+                    if (page.chinese().headings() == page.englishParsed().headings()) {
+                        pairTwins(chinese, translated, twinPairs);
+                    }
                 }
             }
+            entries.addAll(fileEntries);
+            int[] twins = new int[entries.size()];
+            Arrays.fill(twins, -1);
+            for (int[] pair : twinPairs) {
+                twins[pair[0]] = pair[1];
+                twins[pair[1]] = pair[0];
+            }
+            List<Entry> all = List.copyOf(entries);
+            return new Snapshot(all, twins, List.copyOf(titles), fingerprint, wanted, clock.millis() + CACHE_TTL,
+                Vocabulary.of(all));
         }
-        entries.addAll(fileEntries);
-        int[] twins = new int[entries.size()];
-        Arrays.fill(twins, -1);
-        for (int[] pair : twinPairs) {
-            twins[pair[0]] = pair[1];
-            twins[pair[1]] = pair[0];
-        }
-        List<Entry> all = List.copyOf(entries);
-        return new Snapshot(all, twins, List.copyOf(titles), fingerprint, wanted, clock.millis() + CACHE_TTL,
-            Vocabulary.of(all));
     }
 
     private PageText pageText(Document document) {
@@ -750,10 +904,13 @@ public class AssistantDocsIndex {
         String englishTitle = english == null || english.title() == null ? "" : pageTitle(english.title());
         boolean translated = english != null && !englishTitle.isBlank()
             && english.body() != null && !english.body().isBlank();
+        AssistantDocsChunker.Parsed chinese = AssistantDocsChunker.parse(page.body(), 1);
+        AssistantDocsChunker.Parsed englishParsed = translated ? AssistantDocsChunker.parse(english.body(), 1) : null;
         return new PageText(document.id(), title, nullToEmpty(page.category()),
-            AssistantDocsChunker.clean(nullToEmpty(page.summary())), AssistantDocsChunker.parse(page.body(), 1),
-            translated ? english : null, englishTitle,
-            translated ? AssistantDocsChunker.parse(english.body(), 1) : null);
+            AssistantDocsChunker.clean(nullToEmpty(page.summary())), chinese, translated ? englishTitle : "",
+            translated ? nullToEmpty(english.category()) : "",
+            translated ? AssistantDocsChunker.clean(nullToEmpty(english.summary())) : "", englishParsed,
+            chinese.sections().size(), englishParsed == null ? 0 : englishParsed.sections().size());
     }
 
     /**
@@ -767,14 +924,14 @@ public class AssistantDocsIndex {
 
     /** Adds a page's chunks in one language and returns, for each heading, where its chunks went. */
     private Map<Integer, List<Integer>> addChunks(List<Entry> entries, PageText page, String title, String category,
-        AssistantDocsChunker.Parsed parsed, String language, int languages, int limit) {
+        String summary, AssistantDocsChunker.Parsed parsed, int total, String language, int languages, int limit) {
         Map<Integer, List<Integer>> byOrdinal = new HashMap<>();
-        String summary = "zh".equals(language)
-            ? page.summary() : AssistantDocsChunker.clean(nullToEmpty(page.english().summary()));
         List<AssistantDocsChunker.Section> sections = parsed.sections();
-        if (sections.size() > limit) {
+        if (total > limit) {
             warn("The published documentation is too large to index completely; only the first " + limit
                 + " passages of '" + title + "' are searched by the assistant", null);
+        }
+        if (sections.size() > limit) {
             sections = sections.subList(0, limit);
         }
         // What the page says about itself is folded once and shared by all its chunks, not copied into each of them.
@@ -804,15 +961,8 @@ public class AssistantDocsIndex {
     }
 
     /** The largest number of chunks any page may contribute so that all together stay within the cap. */
-    private static int fairLimit(List<PageText> pages) {
-        List<Integer> sizes = new ArrayList<>();
+    private static int fairLimit(List<Integer> sizes) {
         long total = 0;
-        for (PageText page : pages) {
-            sizes.add(page.chinese().sections().size());
-            if (page.englishParsed() != null) {
-                sizes.add(page.englishParsed().sections().size());
-            }
-        }
         for (int size : sizes) {
             total += size;
         }
@@ -974,11 +1124,19 @@ public class AssistantDocsIndex {
     }
 
     /**
-     * Whether a term can occur in any chunk: a letter pair or a word has to be a word of the index. A single character
-     * and a phrase are not words of it, and an identifier may stand in front of a longer one ("config.toml.bak").
+     * Whether a term can occur in any chunk: a letter pair or a word has to be a word of the index. A phrase can only
+     * occur where its two words do (the second with an ending, which the index keeps the stem of too). A single
+     * character is not a word of it, and an identifier may stand in front of a longer one ("config.toml.bak").
      */
     private static boolean mayOccur(String term, Vocabulary vocabulary) {
-        return term.length() < 2 || term.indexOf(' ') >= 0 || isCompound(term) || vocabulary.contains(term);
+        if (term.length() < 2) {
+            return true;
+        }
+        int space = term.indexOf(' ');
+        if (space >= 0) {
+            return vocabulary.contains(term.substring(0, space)) && vocabulary.contains(term.substring(space + 1));
+        }
+        return isCompound(term) || vocabulary.contains(term);
     }
 
     // ---------------------------------------------------------------------------------------------------------
@@ -1083,7 +1241,7 @@ public class AssistantDocsIndex {
      *                 reason phrase of a status code, a tag of pasted HTML)
      * @param adjacent for a pair of Chinese characters, the pairs next to it in the message; each shares a character
      */
-    private record Term(String text, double weight, boolean previous, boolean phrase, boolean soft,
+    record Term(String text, double weight, boolean previous, boolean phrase, boolean soft,
         Set<String> adjacent) {
 
         static Term of(String text, Candidate candidate, boolean previous, double factor) {
@@ -1101,48 +1259,108 @@ public class AssistantDocsIndex {
     }
 
     /**
-     * What every term finds in every chunk (points, before the rarity of the term), and in how many chunks it occurs. The
+     * What one term finds in every chunk (points, before the rarity of the term), and in how many chunks it occurs. The
      * heading and the body of a chunk are counted apart, because the one word of a follow-up counts only the body.
+     *
+     * @param inHeading    for each chunk: at most 5
+     * @param inOwnHeading for each chunk: whether the term is in the chunk's own heading and not only in one above it
+     * @param inBody       for each chunk: at most 3
+     * @param inPage       for each chunk: at most 6 + 3 + 2; a byte holds each
      */
-    private record Matches(int columns, byte[] inHeading, boolean[] inOwnHeading, byte[] inBody, byte[] inPage,
-        int[] frequency) {
+    private record Column(byte[] inHeading, boolean[] inOwnHeading, byte[] inBody, byte[] inPage, int frequency) {
 
-        static Matches of(List<Entry> entries, List<Term> terms, Vocabulary vocabulary) {
-            int columns = terms.size();
-            byte[] inHeading = new byte[entries.size() * columns];
-            boolean[] inOwnHeading = new boolean[entries.size() * columns];
-            byte[] inBody = new byte[entries.size() * columns];
-            byte[] inPage = new byte[entries.size() * columns];
-            int[] frequency = new int[columns];
-            // A term that is not a word of the documents is found nowhere; looking for it would only cost time.
-            boolean[] possible = new boolean[columns];
-            for (int column = 0; column < columns; column++) {
-                possible[column] = mayOccur(terms.get(column).text(), vocabulary);
-            }
-            for (int row = 0; row < entries.size(); row++) {
+        static Column none(int rows) {
+            return new Column(new byte[rows], new boolean[rows], new byte[rows], new byte[rows], 0);
+        }
+
+        static Column of(List<Entry> entries, String word, int[] failure) {
+            int rows = entries.size();
+            byte[] inHeading = new byte[rows];
+            boolean[] inOwnHeading = new boolean[rows];
+            byte[] inBody = new byte[rows];
+            byte[] inPage = new byte[rows];
+            int frequency = 0;
+            for (int row = 0; row < rows; row++) {
                 Entry entry = entries.get(row);
-                for (int column = 0; column < columns; column++) {
-                    if (!possible[column]) {
-                        continue;
-                    }
-                    String word = terms.get(column).text();
-                    // At most 5 in the heading, 3 in the body and 6 + 3 + 2 in the page: a byte holds each.
-                    boolean own = contains(entry.leaf(), word);
-                    int heading = own || contains(entry.section(), word) ? SECTION_POINTS : 0;
-                    int body = BODY_POINTS * occurrences(entry.body(), entry.bodyWords(), word, MAX_BODY_HITS);
-                    int page = TITLE_POINTS * (contains(entry.title(), word) ? 1 : 0)
-                        + CATEGORY_POINTS * (contains(entry.category(), word) ? 1 : 0)
-                        + SUMMARY_POINTS * (contains(entry.summary(), word) ? 1 : 0);
-                    inHeading[row * columns + column] = (byte) heading;
-                    inOwnHeading[row * columns + column] = own;
-                    inBody[row * columns + column] = (byte) body;
-                    inPage[row * columns + column] = (byte) page;
-                    if (heading + body + page > 0) {
-                        frequency[column]++;
-                    }
+                boolean own = contains(entry.leaf(), word, failure);
+                int heading = own || contains(entry.section(), word, failure) ? SECTION_POINTS : 0;
+                int body = BODY_POINTS * occurrences(entry.body(), entry.bodyWords(), word, MAX_BODY_HITS, failure);
+                int page = TITLE_POINTS * (contains(entry.title(), word, failure) ? 1 : 0)
+                    + CATEGORY_POINTS * (contains(entry.category(), word, failure) ? 1 : 0)
+                    + SUMMARY_POINTS * (contains(entry.summary(), word, failure) ? 1 : 0);
+                inHeading[row] = (byte) heading;
+                inOwnHeading[row] = own;
+                inBody[row] = (byte) body;
+                inPage[row] = (byte) page;
+                if (heading + body + page > 0) {
+                    frequency++;
                 }
             }
-            return new Matches(columns, inHeading, inOwnHeading, inBody, inPage, frequency);
+            return new Column(inHeading, inOwnHeading, inBody, inPage, frequency);
+        }
+    }
+
+    /**
+     * What the terms of one question find in the chunks, term by term and each term once: the question and the follow-up
+     * reading of the same message ({@link Plan}) look for the same words of the topic, and a word costs a pass over the
+     * text of the whole index, which for a long name is the greater part of the cost of the question. So the cost of a
+     * question is that of its distinct terms however many readings of it there are.
+     *
+     * <p>Of the terms longer than {@link #LINEAR_TERM_CHARS} that could occur at most {@link #MAX_LONG_TERMS} are looked for
+     * in all, the readings together (see {@link #searchable}).
+     */
+    private static final class Lookup {
+
+        private final List<Entry> entries;
+        private final Vocabulary vocabulary;
+        private final Map<String, Column> columns = new HashMap<>();
+        /** The terms longer than {@link #LINEAR_TERM_CHARS} that the question looks for, whichever reading they belong to. */
+        private final Set<String> longTerms = new HashSet<>();
+        private final Consumer<String> searched;
+
+        /** @param searched told each term that the chunks are gone through for, which is once however many readings ask for it */
+        Lookup(List<Entry> entries, Vocabulary vocabulary, Consumer<String> searched) {
+            this.entries = entries;
+            this.vocabulary = vocabulary;
+            this.searched = searched;
+        }
+
+        /** The terms of a reading that the question looks for; see {@link #searchable}. */
+        List<Term> searchable(List<Term> terms) {
+            return AssistantDocsIndex.searchable(terms, text -> mayOccur(text, vocabulary), longTerms);
+        }
+
+        Column column(String text) {
+            return columns.computeIfAbsent(text, word -> {
+                // A term that is not a word of the documents is found nowhere; looking for it would only cost time.
+                if (!mayOccur(word, vocabulary)) {
+                    return Column.none(entries.size());
+                }
+                searched.accept(word);
+                // The failure table of a long term, made once for the question: see LINEAR_TERM_CHARS.
+                return Column.of(entries, word, word.length() > LINEAR_TERM_CHARS ? failureTable(word) : null);
+            });
+        }
+    }
+
+    /** What the terms of one reading of a question find, a {@link Column} for each. */
+    private record Matches(Column[] columns) {
+
+        static Matches of(List<Term> terms, Lookup lookup) {
+            Column[] columns = new Column[terms.size()];
+            for (int column = 0; column < columns.length; column++) {
+                columns[column] = lookup.column(terms.get(column).text());
+            }
+            return new Matches(columns);
+        }
+
+        /** In how many chunks each term occurs, in the order of the terms. */
+        int[] frequency() {
+            int[] frequency = new int[columns.length];
+            for (int column = 0; column < frequency.length; column++) {
+                frequency[column] = columns[column].frequency();
+            }
+            return frequency;
         }
 
         /**
@@ -1156,23 +1374,23 @@ public class AssistantDocsIndex {
 
         /** Points of a term in the headings a chunk sits under, its own included: 5. */
         int heading(int row, int column) {
-            return inHeading[row * columns + column];
+            return columns[column].inHeading()[row];
         }
 
         /** Whether the term is in the chunk's own heading and not only in one above it. */
         boolean ownHeading(int row, int column) {
-            return inOwnHeading[row * columns + column];
+            return columns[column].inOwnHeading()[row];
         }
 
         /** Points of a term in the body of a chunk: 1 per mention, at most 3. */
         int body(int row, int column) {
-            return inBody[row * columns + column];
+            return columns[column].inBody()[row];
         }
 
         /** Points of a term in the page of a chunk (title 6, category 3, summary 2). */
         int page(int row, int twin, int column) {
-            int own = inPage[row * columns + column];
-            return twin >= 0 ? Math.max(own, inPage[twin * columns + column]) : own;
+            int own = columns[column].inPage()[row];
+            return twin >= 0 ? Math.max(own, columns[column].inPage()[twin]) : own;
         }
     }
 
@@ -1190,12 +1408,13 @@ public class AssistantDocsIndex {
 
         static Worth of(List<Term> terms, Matches matches, int rows) {
             double[] value = new double[terms.size()];
+            int[] occurring = matches.frequency();
             Map<String, Integer> frequencies = new HashMap<>();
             double strongest = 0;
             boolean anchorKnown = false;
             for (int column = 0; column < value.length; column++) {
                 Term term = terms.get(column);
-                int frequency = matches.frequency()[column];
+                int frequency = occurring[column];
                 value[column] = term.weight() * Math.log(1.0 + (double) rows / (1 + frequency));
                 if (!term.previous() && !term.phrase()) {
                     frequencies.put(term.text(), frequency);
@@ -1226,7 +1445,7 @@ public class AssistantDocsIndex {
                 if (term.previous() || term.phrase()) {
                     continue;
                 }
-                if (matches.frequency()[column] > 0) {
+                if (occurring[column] > 0) {
                     known += value[column];
                     knownTopic += term.soft() ? 0 : value[column];
                     anchored |= term.anchor();
@@ -1300,10 +1519,12 @@ public class AssistantDocsIndex {
             return new Retrieval(List.of(), current.pageTitles());
         }
         int reader = readerOf(question, earlier);
-        Ranking ranking = rank(current, plan.main(), reader);
+        // The two readings of a message look for the same words of the topic; each word is looked for once.
+        Lookup lookup = new Lookup(entries, current.vocabulary(), searchHook);
+        Ranking ranking = rank(current, plan.main(), reader, lookup);
         // A short message none of whose words any page has ("再讲讲") is about the question before it.
         if (!ranking.known() && plan.fallback() != null) {
-            ranking = rank(current, plan.fallback(), reader);
+            ranking = rank(current, plan.fallback(), reader, lookup);
         }
         return new Retrieval(select(ranking.chunks()), current.pageTitles());
     }
@@ -1366,10 +1587,10 @@ public class AssistantDocsIndex {
     }
 
     /** The chunks that answer the question well enough to be quoted, best first. */
-    private static Ranking rank(Snapshot current, Query query, int reader) {
+    private static Ranking rank(Snapshot current, Query query, int reader, Lookup lookup) {
         List<Entry> entries = current.entries();
-        List<Term> terms = query.terms();
-        Matches matches = Matches.of(entries, terms, current.vocabulary());
+        List<Term> terms = lookup.searchable(query.terms());
+        Matches matches = Matches.of(terms, lookup);
         Worth worth = Worth.of(terms, matches, entries.size());
         if (worth.ideal() <= 0) {
             return new Ranking(List.of(), false);
@@ -1471,6 +1692,47 @@ public class AssistantDocsIndex {
         }
         ranked.sort(BEST_FIRST);
         return new Ranking(ranked, true);
+    }
+
+    /**
+     * The terms of a query that are looked for: all of them, except that of the terms that could occur and are longer than
+     * {@link #LINEAR_TERM_CHARS} only {@link #MAX_LONG_TERMS} are kept, the heaviest first and, of equal weight, the
+     * earlier in the query. A term that is left out is not part of the question any more, not one that the documents lack.
+     */
+    static List<Term> searchable(List<Term> terms, Predicate<String> mayOccur) {
+        return searchable(terms, mayOccur, new HashSet<>());
+    }
+
+    /**
+     * The same for a question that is read more than once (the message, and the follow-up reading of it): the limit holds
+     * for the question, not for each reading. {@code admitted} holds the long terms of the earlier readings, which are
+     * kept, since looking for them again costs nothing, and takes the long terms of this one that are kept besides, up to
+     * the limit.
+     */
+    static List<Term> searchable(List<Term> terms, Predicate<String> mayOccur, Set<String> admitted) {
+        List<Integer> newTerms = new ArrayList<>();
+        for (int column = 0; column < terms.size(); column++) {
+            String text = terms.get(column).text();
+            if (text.length() > LINEAR_TERM_CHARS && !admitted.contains(text) && mayOccur.test(text)) {
+                newTerms.add(column);
+            }
+        }
+        int room = Math.max(0, MAX_LONG_TERMS - admitted.size());
+        if (newTerms.size() <= room) {
+            newTerms.forEach(column -> admitted.add(terms.get(column).text()));
+            return terms;
+        }
+        newTerms.sort(Comparator.comparingDouble((Integer column) -> terms.get(column).weight()).reversed()
+            .thenComparingInt(Integer::intValue));
+        newTerms.subList(0, room).forEach(column -> admitted.add(terms.get(column).text()));
+        Set<Integer> left = new HashSet<>(newTerms.subList(room, newTerms.size()));
+        List<Term> kept = new ArrayList<>(terms.size() - left.size());
+        for (int column = 0; column < terms.size(); column++) {
+            if (!left.contains(column)) {
+                kept.add(terms.get(column));
+            }
+        }
+        return kept;
     }
 
     /** Takes the best chunks: few from the same page, the version in the reader's language, within the budget. */
@@ -1866,10 +2128,18 @@ public class AssistantDocsIndex {
                         end = hyphen;
                     }
                 }
-                String token = folded.substring(index, end);
-                while (token.endsWith("_")) {
-                    token = token.substring(0, token.length() - 1);
+                int tokenEnd = end;
+                while (tokenEnd > index + 1 && folded.charAt(tokenEnd - 1) == '_') {
+                    tokenEnd--;
                 }
+                if (question && tokenEnd - index > MAX_TERM_CHARS) {
+                    // Not looked for, and no phrase is made of it or across it: see MAX_TERM_CHARS.
+                    lastWord = null;
+                    afterStatus = false;
+                    index = end;
+                    continue;
+                }
+                String token = folded.substring(index, tokenEnd);
                 if (isCompound(token)) {
                     if (token.length() >= 4 || hasDigit(token)) {
                         add(terms, token, IDENTIFIER_WEIGHT, index, false, Set.of());
@@ -2106,8 +2376,8 @@ public class AssistantDocsIndex {
         return term.indexOf('_') >= 0 || term.indexOf('.') >= 0 || term.indexOf('-') >= 0;
     }
 
-    private static boolean contains(String text, String term) {
-        return occurrences(text, null, term, 1) > 0;
+    private static boolean contains(String text, String term, int[] failure) {
+        return occurrences(text, null, term, 1, failure) > 0;
     }
 
     /** Marks the word characters (see {@link #isWordChar}) of a text, one bit each, so that a run of them is crossed 64 at a time. */
@@ -2139,6 +2409,21 @@ public class AssistantDocsIndex {
     }
 
     /**
+     * Where the run of word characters and underscores that contains {@code from} ends: the part of an identifier that no
+     * whole identifier can begin inside of.
+     */
+    private static int endOfNameRun(String text, BitSet words, int from) {
+        int end = from;
+        while (true) {
+            end = endOfWordRun(text, words, end);
+            if (end >= text.length() || text.charAt(end) != '_') {
+                return end;
+            }
+            end++;
+        }
+    }
+
+    /**
      * How often the term occurs, counting up to {@code limit}. A Latin word has to be a word of the text, possibly
      * with an ending such as "s" or "ed": "key" matches "keys", but "ai" does not match "email" and "code" does not
      * match "codex". A whole identifier has to stand alone: "api_key" is not found inside "api_key_id".
@@ -2150,11 +2435,23 @@ public class AssistantDocsIndex {
      * @param words the {@link #wordMask} of the text, which makes crossing a long run cheap; null for a short text
      */
     static int occurrences(String text, BitSet words, String term, int limit) {
+        return occurrences(text, words, term, limit, null);
+    }
+
+    /**
+     * @param failure the {@link #failureTable} of the term, to find it in time linear in the length of the text; null to
+     *                use {@link String#indexOf}, which is faster for a short term but, where the text is a long run of
+     *                the term's first letters, takes the length of the text times that of the term
+     */
+    static int occurrences(String text, BitSet words, String term, int limit, int[] failure) {
         if (text.isEmpty()) {
             return 0;
         }
         boolean latin = !isCjk(term.charAt(0));
         boolean whole = latin && isCompound(term);
+        if (failure != null) {
+            return linearOccurrences(text, words, term, failure, latin, whole, limit);
+        }
         int found = 0;
         int from = 0;
         while (found < limit) {
@@ -2162,23 +2459,99 @@ public class AssistantDocsIndex {
             if (at < 0) {
                 break;
             }
-            from = at + 1;
-            if (latin) {
-                int end = at + term.length();
-                boolean startsWord = at > 0 && (isWordChar(text.charAt(at - 1)) || (whole && text.charAt(at - 1) == '_'));
-                boolean endsWord = whole
-                    ? end >= text.length()
-                        || !(isWordChar(text.charAt(end)) || text.charAt(end) == '_' || continuesName(text, end, term))
-                    : wordEndsAt(text, end);
-                if (startsWord || !endsWord) {
-                    from = endOfWordRun(text, words, at) + 1;
-                    continue;
-                }
+            if (latin && (startsInsideWord(text, at, whole) || !endsWord(text, at, term, whole))) {
+                from = endOfWordRun(text, words, at) + 1;
+                continue;
             }
             found++;
             from = at + term.length();
         }
         return found;
+    }
+
+    /** Whether a Latin term found at {@code at} begins in the middle of a word (or of an identifier, if it is one). */
+    private static boolean startsInsideWord(String text, int at, boolean whole) {
+        return at > 0 && (isWordChar(text.charAt(at - 1)) || (whole && text.charAt(at - 1) == '_'));
+    }
+
+    /** Whether a Latin term found at {@code at} ends a word (possibly with an ending), or is a whole identifier. */
+    private static boolean endsWord(String text, int at, String term, boolean whole) {
+        int end = at + term.length();
+        return whole
+            ? end >= text.length()
+                || !(isWordChar(text.charAt(end)) || text.charAt(end) == '_' || continuesName(text, end, term))
+            : wordEndsAt(text, end);
+    }
+
+    /**
+     * The same count in one pass over the text, whatever the text is (Knuth, Morris and Pratt). It finds what
+     * {@link #occurrences} finds with the string search: every place where the term is found that starts a word and ends
+     * one, those that begin inside the previous match passed over.
+     *
+     * <p>Whatever the text is written in, a character is looked at once or, where nothing is begun, not at all:
+     * <ul>
+     * <li>while no partial match is alive the search jumps to the next place where the term's first character is
+     * ({@link String#indexOf(int, int)}), so that a text without it, or with it rarely, is crossed at the speed of that
+     * search and no character of it costs a test of what kind it is;
+     * <li>a match that begins inside a word is no match, so no partial match is kept that began there, and once none is
+     * alive the rest of the word is crossed in one step (by the mask of the text, if it has one): a long run of letters
+     * costs the number of its words, not its length. For a whole identifier the run is that of word characters and
+     * underscores, since nothing can begin after either: "a_a_a_a_…" is crossed in one step as well.
+     * </ul>
+     */
+    private static int linearOccurrences(String text, BitSet words, String term, int[] failure, boolean latin,
+        boolean whole, int limit) {
+        int length = term.length();
+        char first = term.charAt(0);
+        int found = 0;
+        int free = 0;
+        int matched = 0;
+        for (int index = 0; index < text.length(); index++) {
+            if (matched == 0) {
+                index = text.indexOf(first, index);
+                if (index < 0) {
+                    break;
+                }
+            }
+            char value = text.charAt(index);
+            while (matched > 0
+                && (term.charAt(matched) != value || (latin && startsInsideWord(text, index - matched, whole)))) {
+                matched = failure[matched - 1];
+            }
+            if (value == term.charAt(matched) && (matched > 0 || !latin || !startsInsideWord(text, index, whole))) {
+                matched++;
+            }
+            if (matched == length) {
+                int at = index - length + 1;
+                matched = failure[length - 1];
+                if (at >= free && (!latin || endsWord(text, at, term, whole))) {
+                    if (++found >= limit) {
+                        break;
+                    }
+                    free = at + length;
+                }
+            } else if (matched == 0 && latin
+                && ((words != null ? words.get(index) : isWordChar(value)) || (whole && value == '_'))) {
+                index = (whole ? endOfNameRun(text, words, index) : endOfWordRun(text, words, index)) - 1;
+            }
+        }
+        return found;
+    }
+
+    /** For each prefix of the term, the length of its longest proper prefix that is also its suffix. */
+    static int[] failureTable(String term) {
+        int[] failure = new int[term.length()];
+        int matched = 0;
+        for (int index = 1; index < term.length(); index++) {
+            while (matched > 0 && term.charAt(index) != term.charAt(matched)) {
+                matched = failure[matched - 1];
+            }
+            if (term.charAt(index) == term.charAt(matched)) {
+                matched++;
+            }
+            failure[index] = matched;
+        }
+        return failure;
     }
 
     /**
@@ -2235,10 +2608,13 @@ public class AssistantDocsIndex {
         return text != null && text.chars().anyMatch(value -> isCjk((char) value));
     }
 
-    private static boolean isCjk(char value) {
-        Character.UnicodeBlock block = Character.UnicodeBlock.of(value);
-        return block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS
-            || block == Character.UnicodeBlock.CJK_COMPATIBILITY_IDEOGRAPHS;
+    /**
+     * The ideographs: the blocks CJK Unified Ideographs and CJK Compatibility Ideographs. Two comparisons, not
+     * {@link Character.UnicodeBlock#of}, which is a binary search and costs some twenty times as much per character; this
+     * is asked of every character of the text the matchers go through.
+     */
+    static boolean isCjk(char value) {
+        return (value >= 0x4E00 && value <= 0x9FFF) || (value >= 0xF900 && value <= 0xFAFF);
     }
 
     /** Logs at WARN at most once a minute, so a database outage does not flood the log with every question. */

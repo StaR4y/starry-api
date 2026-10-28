@@ -78,7 +78,11 @@ class DocumentationServicePostgreSqlTest {
         transactions.setTransactionAttributeSource(new AnnotationTransactionAttributeSource());
         var proxy = new ProxyFactory(target);
         proxy.setProxyTargetClass(true);
-        proxy.addAdvice(transactions);
+        // Transactional where the service says so and nowhere else, as in the application: advice on every method would
+        // begin a transaction for each read too, and with this unpooled connection factory leave a connection open for each.
+        proxy.addAdvisor(new org.springframework.aop.support.DefaultPointcutAdvisor(
+            org.springframework.aop.support.annotation.AnnotationMatchingPointcut.forMethodAnnotation(
+                org.springframework.transaction.annotation.Transactional.class), transactions));
         service = (DocumentationService) proxy.getProxy();
     }
 
@@ -122,6 +126,86 @@ class DocumentationServicePostgreSqlTest {
         assertThatThrownBy(() -> service.withdraw(page.id(), again.version(), true, "test").block(TIMEOUT))
             .isInstanceOf(ApiException.class);
         assertThat(events).as("a rejected change announces nothing").hasSize(3);
+    }
+
+    @Test void aWithdrawalThatIsCancelledWhileItRunsIsAnnouncedAllTheSame() {
+        var page = service.create(content("Cancelled", "body"), "test").block(TIMEOUT);
+        var published = service.save(page.id(), new Save(page.draft(), page.version(), true), "test").block(TIMEOUT);
+        events.clear();
+
+        // The administrator's browser goes away while the statement is on its way: the request is cancelled, and the
+        // statement, which commits by itself, may well have been applied. This node must not go on quoting the page.
+        reactor.core.Disposable request = service.withdraw(page.id(), published.version(), false, "test").subscribe();
+        request.dispose();
+
+        awaitEvents(1);
+        assertThat(events).singleElement().isInstanceOfSatisfying(PayloadApplicationEvent.class, event ->
+            assertThat(event.getPayload()).isEqualTo(new DocumentationPublicationChanged(page.id())));
+        assertThat(service.readAdmin(page.id()).block(TIMEOUT).published()).as("it was announced once it was applied").isNull();
+    }
+
+    @Test void aWithdrawalThatIsCancelledWhileItWaitsForALockIsAnnouncedOnlyOnceItIsApplied() throws Exception {
+        var page = service.create(content("Locked", "body"), "test").block(TIMEOUT);
+        var published = service.save(page.id(), new Save(page.draft(), page.version(), true), "test").block(TIMEOUT);
+        events.clear();
+        // Another request holds the row (an upload takes FOR UPDATE on the page), so the withdrawal waits behind it.
+        var locker = Mono.from(ConnectionFactories.get(r2dbcUrl).create()).block(TIMEOUT);
+        try {
+            Mono.from(locker.beginTransaction()).block(TIMEOUT);
+            Flux.from(locker.createStatement("SELECT id FROM documentation_pages WHERE id = $1 FOR UPDATE").bind(0, page.id()).execute())
+                .flatMap(result -> result.map((row, metadata) -> row.get("id", String.class))).blockLast(TIMEOUT);
+
+            reactor.core.Disposable request = service.withdraw(page.id(), published.version(), false, "test").subscribe();
+            Thread.sleep(500);
+            request.dispose();
+            Thread.sleep(500);
+            // Announcing now would let a question that arrives in this window read the page as still published, and cache
+            // it: the statement commits later and nothing would tell this node.
+            assertThat(events).as("the statement has not been applied, and may never be").isEmpty();
+
+            Mono.from(locker.commitTransaction()).block(TIMEOUT);
+            awaitEvents(1);
+            assertThat(service.readAdmin(page.id()).block(TIMEOUT).published()).as("announced once applied").isNull();
+            assertThat(events).singleElement().isInstanceOfSatisfying(PayloadApplicationEvent.class, event ->
+                assertThat(event.getPayload()).isEqualTo(new DocumentationPublicationChanged(page.id())));
+        } finally {
+            Mono.from(locker.close()).block(TIMEOUT);
+        }
+    }
+
+    @Test void aWithdrawalThatTheEditorOfThePageHasMadeStaleWhileItWaitsAnnouncesNothingEvenIfItIsCancelled() throws Exception {
+        var page = service.create(content("Stale", "body"), "test").block(TIMEOUT);
+        var published = service.save(page.id(), new Save(page.draft(), page.version(), true), "test").block(TIMEOUT);
+        events.clear();
+        var locker = Mono.from(ConnectionFactories.get(r2dbcUrl).create()).block(TIMEOUT);
+        try {
+            Mono.from(locker.beginTransaction()).block(TIMEOUT);
+            Flux.from(locker.createStatement("UPDATE documentation_pages SET version = version + 1 WHERE id = $1").bind(0, page.id()).execute())
+                .flatMap(result -> result.getRowsUpdated()).blockLast(TIMEOUT);
+
+            reactor.core.Disposable request = service.withdraw(page.id(), published.version(), false, "test").subscribe();
+            Thread.sleep(300);
+            request.dispose();
+            Mono.from(locker.commitTransaction()).block(TIMEOUT);
+            Thread.sleep(1000);
+
+            assertThat(events).as("the statement changed nothing: the page was edited meanwhile").isEmpty();
+            assertThat(service.readAdmin(page.id()).block(TIMEOUT).published()).isNotNull();
+        } finally {
+            Mono.from(locker.close()).block(TIMEOUT);
+        }
+    }
+
+    private void awaitEvents(int count) {
+        long deadline = System.nanoTime() + TIMEOUT.toNanos();
+        while (events.size() < count && System.nanoTime() < deadline) {
+            try {
+                Thread.sleep(20);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
     }
 
     @Test void publishedPagesAreTheReaderCopyOnly() {
@@ -200,6 +284,60 @@ class DocumentationServicePostgreSqlTest {
         assertThat(rows).extracting(DocumentationService.PublishedRow::id).contains("getting-started", "api-keys");
         assertThat(rows).allSatisfy(row -> assertThat(row.json()).startsWith("{"));
         assertThat(unproxied.documents(rows)).isEqualTo(service.publishedPages().block(TIMEOUT));
+    }
+
+    @Test void thePublishedPageStreamDeliversTheSamePagesInTheSameOrderOneByOne() {
+        var streamed = service.publishedPageStream().collectList().block(TIMEOUT);
+
+        assertThat(streamed).isNotEmpty().isEqualTo(service.publishedPages().block(TIMEOUT));
+        assertThat(streamed).filteredOn(d -> d.id().equals("api-keys")).singleElement()
+            .satisfies(d -> assertThat(d.content().english()).isNotNull());
+    }
+
+    @Test void thePublishedPageStreamHasTheTextOfThePagesAndNotItsJsonAndCutsWhatIsFarLongerThanAPageMayBe() {
+        var db = DatabaseClient.create(ConnectionFactories.get(r2dbcUrl));
+        String run = "-" + UUID.randomUUID().toString().substring(0, 8);
+        String control = "stream-control" + run;
+        String huge = "stream-huge" + run;
+        String damaged = "stream-damaged" + run;
+        // Every control character is six characters of JSON (\u0001); the page itself is allowed 100,000 of them.
+        String controlBody = "## 标题\n" + "\u0001".repeat(99_990);
+        String hugeBody = "字".repeat(DocumentationService.ASSISTANT_BODY_CHARS + 5_000);
+        for (String[] row : new String[][] {
+            {control, "{\"title\":\"控制字符\",\"category\":\"Test\",\"summary\":\"\",\"body\":" + json(controlBody)
+                + ",\"sortOrder\":3,\"english\":{\"title\":\"Control\",\"category\":\"Test\",\"summary\":\"\",\"body\":" + json("x\u0001y") + "}}"},
+            {huge, "{\"title\":" + json("题".repeat(500)) + ",\"category\":\"Test\",\"summary\":" + json("摘".repeat(900))
+                + ",\"body\":" + json(hugeBody) + ",\"sortOrder\":4}"},
+            {damaged, "{\"title\":5,\"category\":\"Test\",\"summary\":null,\"body\":[1],\"sortOrder\":\"abc\",\"english\":\"x\"}"}}) {
+            db.sql("INSERT INTO documentation_pages (id, draft, published, published_at) VALUES (:id, CAST(:content AS jsonb), CAST(:content AS jsonb), clock_timestamp())")
+                .bind("id", row[0]).bind("content", row[1]).fetch().rowsUpdated().block(TIMEOUT);
+        }
+
+        var pages = service.publishedPageStream().collectList().block(TIMEOUT);
+
+        var controlPage = pages.stream().filter(d -> d.id().equals(control)).findFirst().orElseThrow();
+        assertThat(controlPage.content().body()).as("the text, not its escapes").isEqualTo(controlBody);
+        assertThat(controlPage.content().sortOrder()).isEqualTo(3);
+        assertThat(controlPage.content().english().body()).isEqualTo("x\u0001y");
+        var hugePage = pages.stream().filter(d -> d.id().equals(huge)).findFirst().orElseThrow();
+        assertThat(hugePage.content().body()).hasSize(DocumentationService.ASSISTANT_BODY_CHARS);
+        assertThat(hugePage.content().title()).hasSize(DocumentationService.ASSISTANT_TITLE_CHARS);
+        assertThat(hugePage.content().summary()).hasSize(DocumentationService.ASSISTANT_SUMMARY_CHARS);
+        assertThat(hugePage.content().english()).isNull();
+        var damagedPage = pages.stream().filter(d -> d.id().equals(damaged)).findFirst().orElseThrow();
+        assertThat(damagedPage.content()).as("it cannot be read, and is passed on as such").isNull();
+        assertThat(pages.indexOf(damagedPage)).as("a sort order that is not a number comes last, as in the list")
+            .isEqualTo(pages.size() - 1);
+        assertThat(service.publishedPages().block(TIMEOUT).stream().filter(d -> d.id().equals(damaged)).findFirst().orElseThrow().content())
+            .as("as the list has it").isNull();
+    }
+
+    private String json(String text) {
+        try {
+            return new ObjectMapper().writeValueAsString(text);
+        } catch (Exception e) {
+            throw new IllegalStateException(e);
+        }
     }
 
     @Test void thePublishedRowStreamDeliversTheSameRowsInTheSameOrderOneByOne() {

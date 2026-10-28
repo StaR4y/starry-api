@@ -1719,7 +1719,7 @@ class AssistantDocsIndexTest {
     }
 
     @Test
-    void questionsAreScoredOnTheParallelSchedulerWhicheverThreadDeliversTheSnapshot() {
+    void questionsAreScoredOnTheirOwnThreadsWhicheverThreadDeliversTheSnapshot() {
         // The thread of a database connection: the pages and the fingerprint arrive on it, and so does every renewal.
         Scheduler io = Schedulers.newSingle("fake-db-io");
         try {
@@ -1737,7 +1737,8 @@ class AssistantDocsIndexTest {
             Thread renewed = index.lastSearchThread;
 
             for (Thread searched : List.of(first, cached, renewed)) {
-                assertThat(searched.getName()).startsWith("parallel-").doesNotStartWith("fake-db-io");
+                assertThat(searched.getName()).startsWith("assistant-search-").doesNotStartWith("fake-db-io");
+                assertThat(Schedulers.isNonBlockingThread(searched)).as("not a Reactor event loop or parallel thread").isFalse();
             }
         } finally {
             io.dispose();
@@ -1967,32 +1968,45 @@ class AssistantDocsIndexTest {
     }
 
     @Test
-    void aReadOfThePagesIsNotCutOffForTakingLongAsLongAsItDeliversRows() {
+    void aReadOfThePagesIsNotCutOffForTakingLongAsLongAsItDeliversPages() {
         AtomicInteger reads = new AtomicInteger();
-        // 8 rows, one every 60 ms: about half a second in all, but never 250 ms without a row.
-        AssistantDocsIndex index = new AssistantDocsIndex(NO_FILES, () -> {
+        // 8 pages, one every 60 ms: about half a second in all, but never 250 ms without one.
+        AssistantDocsIndex index = AssistantDocsIndex.streaming(NO_FILES, () -> {
             reads.incrementAndGet();
-            return AssistantDocsIndex.pagesFrom(Flux.interval(Duration.ofMillis(60)).take(8).map(row -> "第" + row + "行的发票说明。"),
-                Duration.ofMillis(250), rows -> List.of(page("p", "发票", "帮助", "", "## 内容\n" + String.join("\n\n", rows))));
-        }, new TestClock());
+            return Flux.interval(Duration.ofMillis(60)).take(8)
+                .map(row -> page("p" + row, "发票" + row, "帮助", "", "## 内容\n第" + row + "页的发票说明。"));
+        }, Mono::empty, new TestClock());
         index.readTimeout = Duration.ofMillis(250);
 
         Retrieval slow = ask(index, "发票");
 
-        assertThat(slow.chunks()).as("the whole read took longer than the limit on silence").hasSize(1);
-        assertThat(slow.chunks().getFirst().body()).contains("第0行", "第7行");
+        assertThat(slow.pageTitles()).as("the whole read took longer than the limit on silence").hasSize(8);
+        assertThat(slow.chunks()).isNotEmpty();
         assertThat(reads).hasValue(1);
     }
 
     @Test
-    void aReadOfThePagesThatStopsDeliveringRowsFailsAfterTheSilenceLimit() {
-        Flux<String> stalled = Flux.concat(Flux.just("第一行"), Flux.never());
+    void aReadOfThePagesThatStopsDeliveringFailsAfterTheSilenceLimit() {
+        TestClock clock = new TestClock();
+        AtomicInteger reads = new AtomicInteger();
+        AssistantDocsIndex index = AssistantDocsIndex.streaming(NO_FILES, () -> {
+            reads.incrementAndGet();
+            return Flux.concat(Flux.just(page("p", "发票", "帮助", "", "## 内容\n发票说明。")), Flux.never());
+        }, Mono::empty, clock);
+        index.readTimeout = Duration.ofMillis(200);
 
-        assertThat(org.assertj.core.api.Assertions.catchThrowable(() ->
-            AssistantDocsIndex.pagesFrom(stalled, Duration.ofMillis(200), rows -> List.of()).block(TIMEOUT)))
-            .hasRootCauseInstanceOf(java.util.concurrent.TimeoutException.class);
-        assertThat(AssistantDocsIndex.pagesFrom(Flux.<String>empty(), Duration.ofMillis(200), rows -> List.of()).block(TIMEOUT))
-            .as("no rows at all is an empty list, not a failure").isEmpty();
+        long start = System.nanoTime();
+        Retrieval stalled = index.retrieve("发票", "").block(Duration.ofSeconds(5));
+
+        assertThat(Duration.ofNanos(System.nanoTime() - start)).as("failed after the silence limit, not the budget").isLessThan(Duration.ofSeconds(4));
+        assertThat(stalled.chunks()).as("answered without the pages, not the one that came").isEmpty();
+        assertThat(stalled.pageTitles()).isEmpty();
+        clock.advance(Duration.ofSeconds(11));
+        ask(index, "发票");
+        assertThat(reads).as("and tried again soon").hasValue(2);
+
+        AssistantDocsIndex none = AssistantDocsIndex.streaming(NO_FILES, Flux::empty, Mono::empty, new TestClock());
+        assertThat(ask(none, "发票").chunks()).as("no pages at all is an empty list, not a failure").isEmpty();
     }
 
     @Test
@@ -2318,21 +2332,54 @@ class AssistantDocsIndexTest {
     }
 
     @Test
-    void anErrorTheJvmCannotRecoverFromWhileParsingTheRowsIsAnOrdinaryFailureToLoad() {
-        for (Throwable fatal : List.of(new OutOfMemoryError("test"), new StackOverflowError("test"), new LinkageError("test"))) {
-            Throwable failure = org.assertj.core.api.Assertions.catchThrowable(() ->
-                AssistantDocsIndex.pagesFrom(Flux.just("一行"), Duration.ofSeconds(1), rows -> {
-                    if (fatal instanceof OutOfMemoryError oom) {
-                        throw oom;
-                    }
-                    if (fatal instanceof StackOverflowError overflow) {
-                        throw overflow;
-                    }
-                    throw (LinkageError) fatal;
-                }).block(Duration.ofSeconds(3)));
+    void anErrorTheJvmCannotRecoverFromWhileTurningAPageIntoChunksStillEndsTheLoadAndTheOthersAreAnswered() {
+        for (Error fatal : List.of(new OutOfMemoryError("test"), new LinkageError("test"))) {
+            TestClock clock = new TestClock();
+            AtomicInteger loads = new AtomicInteger();
+            AssistantDocsIndex index = AssistantDocsIndex.streaming(NO_FILES, () -> {
+                loads.incrementAndGet();
+                return Flux.just(page("a", "发票", "帮助", "", "## 开票\n在发票页面申请开票。"),
+                    page("boom", "发票二", "帮助", "", "## 开票\n在发票页面申请开票。"),
+                    page("c", "发票三", "帮助", "", "## 开票\n在发票页面申请开票。"));
+            }, () -> Mono.just("unchanged"), clock);
+            index.pageHook = document -> {
+                if (document.id().equals("boom")) {
+                    throw fatal;
+                }
+            };
 
-            assertThat(failure).as(fatal.getClass().getSimpleName()).hasRootCause(fatal);
+            Retrieval during = index.retrieve("发票", "").block(Duration.ofSeconds(5));
+            assertThat(during.chunks()).as(fatal.getClass().getSimpleName() + ": the load ended, without the pages").isEmpty();
+            assertThat(during.pageTitles()).isEmpty();
+            assertThat(loads).hasValue(1);
+
+            index.pageHook = document -> { };
+            clock.advance(Duration.ofMillis(AssistantDocsIndex.RETRY_AFTER + 1));
+            if (!(fatal instanceof OutOfMemoryError)) {
+                // The text of the pages decides it, and would again: not before something changes. The heap of the moment
+                // does not, so running out of it is tried again soon, as after any failure to load.
+                assertThat(ask(index, "发票").pageTitles()).isEmpty();
+                assertThat(loads).hasValue(1);
+                index.invalidate();
+            }
+            assertThat(ask(index, "发票").pageTitles()).as("and the pages are read again").hasSize(3);
+            assertThat(loads).hasValue(2);
         }
+    }
+
+    @Test
+    void aPageThatOverflowsTheStackWhileItIsTurnedIntoChunksIsLeftOutAndTheOthersAreKept() {
+        AssistantDocsIndex index = AssistantDocsIndex.streaming(NO_FILES, () ->
+            Flux.just(page("a", "发票", "帮助", "", "## 开票\n在发票页面申请开票。"),
+                page("boom", "发票二", "帮助", "", "## 开票\n在发票页面申请开票。"),
+                page("c", "发票三", "帮助", "", "## 开票\n在发票页面申请开票。")), Mono::empty, new TestClock());
+        index.pageHook = document -> {
+            if (document.id().equals("boom")) {
+                throw new StackOverflowError("test");
+            }
+        };
+
+        assertThat(ask(index, "发票").pageTitles()).containsExactly("发票", "发票三");
     }
 
     @Test
@@ -2477,6 +2524,543 @@ class AssistantDocsIndexTest {
 
     /** A question takes some tens of milliseconds here, and took seconds (2.5 s and 4 s, a hundred times as long) before. */
     private static final long SCORING_LIMIT_MILLIS = 500;
+
+    // ---- what a hostile question can cost ---------------------------------------------------------------------------
+
+    /**
+     * The worst case for a substring search: the index full (2000 chunks) of runs of one letter, in both languages, and a
+     * page that lists words. A term made of that letter matches a long way into every run and nowhere as a whole.
+     */
+    private static List<Document> runPages(String vocabulary) {
+        return runPages(vocabulary, ("a".repeat(1590) + "\n\n").repeat(62));
+    }
+
+    private static List<Document> runPages(String vocabulary, String run) {
+        List<Document> pages = new ArrayList<>();
+        pages.add(page("words", "词表", "分类", "摘要", vocabulary));
+        for (int number = 0; number < 20; number++) {
+            pages.add(page("run-" + number, new Content("页面" + number, "分类", "摘要", run, number + 1,
+                new Translation("Page " + number, "Category", "Summary", run))));
+        }
+        return pages;
+    }
+
+    private static String joined(int count, java.util.function.IntFunction<String> word) {
+        return java.util.stream.IntStream.range(0, count).mapToObj(word).collect(java.util.stream.Collectors.joining(" "));
+    }
+
+    /** Questions of up to 4000 characters that cost seconds before: long names, dotted numbers, long words that make phrases. */
+    private static java.util.Map<String, String> hostileQuestions() {
+        java.util.Map<String, String> questions = new java.util.LinkedHashMap<>();
+        questions.put("long identifiers", joined(9, number -> "a".repeat(398 - number) + "_x"));
+        questions.put("longer identifiers", joined(4, number -> "a".repeat(798 - number) + "_x"));
+        questions.put("dotted numbers", joined(9, number -> "a".repeat(197) + ".1_" + "a".repeat(197) + "." + (number + 2)));
+        questions.put("long words", joined(10, number -> "a".repeat(300 + number)));
+        return questions;
+    }
+
+    /** The slowest of the questions, each asked on its own, then as the follow-up's topic and after six of its kind; the best of three rounds. */
+    private static long slowestMillis(AssistantDocsIndex index, java.util.Map<String, String> questions) {
+        long slowest = 0;
+        for (java.util.Map.Entry<String, String> hostile : questions.entrySet()) {
+            String question = hostile.getValue();
+            String[] six = new String[6];
+            java.util.Arrays.fill(six, question);
+            for (Supplier<Retrieval> ask : List.<Supplier<Retrieval>>of(
+                () -> ask(index, question),
+                () -> askAfter(index, "再讲讲", question),
+                () -> askAfter(index, "那怎么改", question),
+                () -> askAfter(index, question, six))) {
+                long best = Long.MAX_VALUE;
+                for (int round = 0; round < 3; round++) {
+                    long start = System.nanoTime();
+                    ask.get();
+                    best = Math.min(best, System.nanoTime() - start);
+                }
+                slowest = Math.max(slowest, TimeUnit.NANOSECONDS.toMillis(best));
+            }
+        }
+        return slowest;
+    }
+
+    @Test
+    void aQuestionOfLongNamesAndWordsIsAnsweredQuicklyWhereverThePagesHaveLongRunsOfLetters() {
+        AssistantDocsIndex index = indexOf(runPages("词表"));
+        ask(index, "词表");
+        assertThat(index.searchCharacters()).as("the index is full").isGreaterThan(3_000_000);
+
+        for (java.util.Map.Entry<String, String> hostile : hostileQuestions().entrySet()) {
+            assertThat(Duration.ofMillis(slowestMillis(index, java.util.Map.of(hostile.getKey(), hostile.getValue()))))
+                .as(hostile.getKey()).isLessThan(Duration.ofMillis(SCORING_LIMIT_MILLIS));
+        }
+    }
+
+    /**
+     * Chinese pages that fill the index to the caps of its folded fields (2000 chunks; the title, category, summary and
+     * headings of each at their longest): the characters are ones that normalization expands (U+337F folds to four
+     * ideographs), so that every field sits at its cap, and the text is the documentation's own language.
+     */
+    private static List<Document> chinesePagesAtTheirCaps() {
+        String expanding = "\u337f";
+        List<Document> pages = new ArrayList<>();
+        for (int number = 0; number < 200; number++) {
+            StringBuilder body = new StringBuilder("# ").append(expanding.repeat(99)).append(number).append('\n')
+                .append("## ").append(expanding.repeat(99)).append('\n')
+                .append("### ").append(expanding.repeat(99)).append('\n');
+            while (body.length() < 99_000) {
+                body.append(expanding.repeat(39)).append('\n');
+            }
+            pages.add(page("zh-" + number, new Content(expanding.repeat(96) + number, expanding.repeat(60),
+                expanding.repeat(240), body.toString(), number, null)));
+        }
+        return pages;
+    }
+
+    /**
+     * Twelve names of {@code parts} parts joined by underscores, each part {@code part} or, in one of the first four
+     * places, {@code other}: all longer than a long term and made of the same few parts, so that the topic of a question
+     * that holds them has only a few terms more than names and is kept as the topic of a follow-up.
+     */
+    private static String twelveNames(String part, String other, int parts) {
+        return joined(12, mask -> java.util.stream.IntStream.range(0, parts)
+            .mapToObj(place -> place < 4 && (mask >> place & 1) == 1 ? other : part)
+            .collect(java.util.stream.Collectors.joining("_")));
+    }
+
+    /** The topic of twelve names; {@link #slowestMillis} asks it alone, as the topic of "再讲讲" and of "那怎么改", and after six questions of its kind. */
+    private static java.util.Map<String, String> topicOfTwelveNames(String part, String other, int parts) {
+        return java.util.Map.of("twelve names", twelveNames(part, other, parts));
+    }
+
+    @Test
+    void aTopicOfLongNamesAndItsFollowUpAreAnsweredQuicklyOnAnIndexFullOfChineseText() {
+        // Chinese is the documentation's own language: the matcher for long terms must not cost more per character on
+        // ideographs than on letters. It cost 28 ns for each (a lookup of the Unicode block of every character, 850
+        // times the string search), twelve names a question, twice for a follow-up that read the same topic again:
+        // seconds of a search thread's time for one short question.
+        AssistantDocsIndex index = indexOf(chinesePagesAtTheirCaps());
+        ask(index, "标题");
+        assertThat(index.searchCharacters()).as("the index is full").isGreaterThan(6_000_000);
+
+        assertThat(Duration.ofMillis(slowestMillis(index, topicOfTwelveNames("aaaa", "bbbb", 4))))
+            .isLessThan(Duration.ofMillis(SCORING_LIMIT_MILLIS));
+    }
+
+    @Test
+    void aTopicOfLongNamesAndItsFollowUpAreAnsweredQuicklyWhereverTheTextIsRunsOfOneLetterJoinedByUnderscores() {
+        // No word of such a text is longer than a letter, and the names of the question begin with that letter: a partial
+        // match is begun everywhere and no run of word characters is long enough to be crossed in one step.
+        for (String letter : List.of("a", "\u00e9")) {
+            String run = ((letter + "_").repeat(795) + "\n\n").repeat(62);
+            AssistantDocsIndex index = indexOf(runPages("词表", run));
+            ask(index, "词表");
+            assertThat(index.searchCharacters()).as("the index is full").isGreaterThan(3_000_000);
+
+            assertThat(Duration.ofMillis(slowestMillis(index, topicOfTwelveNames(letter, letter.equals("a") ? "b" : "\u00ea", 10))))
+                .as(letter).isLessThan(Duration.ofMillis(SCORING_LIMIT_MILLIS / 2));
+        }
+    }
+
+    @Test
+    void theFollowUpReadingOfAMessageDoesNotSearchTheDocumentsAgainForWhatTheQuestionAlreadySearchedFor() {
+        AssistantDocsIndex index = indexOf(page("p", "发票", "帮助", "", "## 开票\n在发票页面申请开票。invoice_number_field 是发票编号。"));
+        List<String> searched = new java.util.concurrent.CopyOnWriteArrayList<>();
+        index.searchHook = searched::add;
+        String topic = "invoice_number_field 发票";
+
+        assertThat(ask(index, topic).chunks()).isNotEmpty();
+        assertThat(searched).as("the terms of a question with one reading").contains("invoice_number_field").doesNotHaveDuplicates();
+        searched.clear();
+
+        // None of the words of "再讲讲" is a word of the documents: the question is read again as a follow-up of the topic.
+        assertThat(askAfter(index, "再讲讲", topic).chunks()).as("found by the follow-up reading").isNotEmpty();
+        assertThat(searched).as("the topic is in both readings and the chunks are gone through for it once")
+            .contains("invoice_number_field").doesNotHaveDuplicates();
+    }
+
+    @Test
+    void ofTheLongTermsOfAQuestionNoMoreThanTheLimitAreLookedForWhicheverReadingsTheyBelongTo() {
+        java.util.Set<String> admitted = new java.util.HashSet<>();
+        List<AssistantDocsIndex.Term> main = new ArrayList<>();
+        List<AssistantDocsIndex.Term> followUp = new ArrayList<>();
+        for (int number = 0; number < AssistantDocsIndex.MAX_LONG_TERMS; number++) {
+            main.add(new AssistantDocsIndex.Term("known_identifier_" + number, 1.0, true, false, false, java.util.Set.of()));
+            followUp.add(new AssistantDocsIndex.Term("known_identifier_" + number, 1.0, false, false, false, java.util.Set.of()));
+        }
+        followUp.add(new AssistantDocsIndex.Term("another_known_identifier", 9.0, false, false, false, java.util.Set.of()));
+
+        assertThat(AssistantDocsIndex.searchable(main, text -> true, admitted)).hasSize(AssistantDocsIndex.MAX_LONG_TERMS);
+        assertThat(AssistantDocsIndex.searchable(followUp, text -> true, admitted)).extracting(AssistantDocsIndex.Term::text)
+            .as("the twelve of the first reading, which cost nothing to look for again; the thirteenth is not part of the question")
+            .hasSize(AssistantDocsIndex.MAX_LONG_TERMS).doesNotContain("another_known_identifier");
+    }
+
+    @Test
+    void theBlocksOfIdeographsAreToldApartFromEverythingElseAsTheUnicodeBlocksOfTheJdkDo() {
+        for (int value = Character.MIN_VALUE; value <= Character.MAX_VALUE; value++) {
+            Character.UnicodeBlock block = Character.UnicodeBlock.of((char) value);
+            boolean expected = block == Character.UnicodeBlock.CJK_UNIFIED_IDEOGRAPHS
+                || block == Character.UnicodeBlock.CJK_COMPATIBILITY_IDEOGRAPHS;
+            assertThat(AssistantDocsIndex.isCjk((char) value)).as("U+%04X", value).isEqualTo(expected);
+        }
+    }
+
+    /**
+     * Names and words that are no longer than a name may be, and that the string search finds slow where the text is a run
+     * of the letters they end with: a question of 15 of them took 450 ms with the string search, a hundred times what the
+     * linear matcher takes. They are words of the index (a page lists them), which is what lets them through the checks.
+     */
+    private static java.util.Map<String, String> longestNamesQuestions() {
+        java.util.Map<String, String> questions = new java.util.LinkedHashMap<>();
+        questions.put("identifiers of the greatest length", joined(15, number -> "x0_" + "a".repeat(40 + number)));
+        questions.put("dotted numbers of the greatest length", joined(15, number -> "x.1_" + "a".repeat(40 + number)));
+        questions.put("words of the greatest length", joined(15, number -> "a".repeat(30 + number)));
+        return questions;
+    }
+
+    /**
+     * Run by {@link #aQuestionIsAnsweredQuicklyOnAPlatformWhoseStringSearchIsNotSpedUp} (no arguments), in a JVM that has no
+     * fast String.indexOf, and by {@link #theWholeTextOfTheDocumentationNeverHasToFitInTheHeapAtOnce} ({@code heap}), in a
+     * JVM with a small heap.
+     */
+    public static void main(String[] arguments) {
+        if (arguments.length > 0 && arguments[0].equals("heap")) {
+            loadTheLargestDocumentation();
+            return;
+        }
+        StringBuilder vocabulary = new StringBuilder("词表");
+        for (int length = 20; length <= 70; length++) {
+            vocabulary.append(' ').append("a".repeat(length));
+        }
+        AssistantDocsIndex index = indexOf(runPages(vocabulary.toString()));
+        ask(index, "词表");
+        System.out.println("characters=" + index.searchCharacters());
+        System.out.println("worst=" + slowestMillis(index, longestNamesQuestions()));
+
+        // The text of the documentation's own language, every field at its cap, and a text of names made of one letter.
+        AssistantDocsIndex chinese = indexOf(chinesePagesAtTheirCaps());
+        ask(chinese, "标题");
+        System.out.println("chinese-characters=" + chinese.searchCharacters());
+        System.out.println("chinese-worst=" + slowestMillis(chinese, topicOfTwelveNames("aaaa", "bbbb", 4)));
+        AssistantDocsIndex joined = indexOf(runPages("词表", (("\u00e9" + "_").repeat(795) + "\n\n").repeat(62)));
+        ask(joined, "词表");
+        System.out.println("joined-characters=" + joined.searchCharacters());
+        System.out.println("joined-worst=" + slowestMillis(joined, topicOfTwelveNames("\u00e9", "\u00ea", 10)));
+    }
+
+    @Test
+    void aQuestionIsAnsweredQuicklyOnAPlatformWhoseStringSearchIsNotSpedUp() throws Exception {
+        // The cost of String.indexOf where a long prefix of the term matches at many places depends on the JIT having an
+        // intrinsic for it. A JVM without one is what a platform without it is; the bound must not rely on it, nor on the
+        // one for a single character that the matcher of long names jumps with.
+        Path javaBinary = Path.of(System.getProperty("java.home"), "bin", "java");
+        Process process = new ProcessBuilder(javaBinary.toString(), "-XX:+UnlockDiagnosticVMOptions",
+            "-XX:DisableIntrinsic=_indexOfL,_indexOfU,_indexOfUL,_indexOfL_char,_indexOfU_char", "-Xmx768m", "-cp",
+            System.getProperty("java.class.path"), AssistantDocsIndexTest.class.getName()).redirectErrorStream(true).start();
+        String output = new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        assertThat(process.waitFor(2, TimeUnit.MINUTES)).as(output).isTrue();
+
+        assertThat(process.exitValue()).as(output).isZero();
+        assertThat(output).as("the index was full").containsPattern("(?m)^characters=[3-9]\\d{6}");
+        assertThat(output).as("the index of Chinese text was full").containsPattern("(?m)^chinese-characters=[6-9]\\d{6}");
+        assertThat(output).as("the index of joined letters was full").containsPattern("(?m)^joined-characters=[3-9]\\d{6}");
+        for (String measure : List.of("worst", "chinese-worst", "joined-worst")) {
+            java.util.regex.Matcher worst = java.util.regex.Pattern.compile("(?m)^" + measure + "=(\\d+)").matcher(output);
+            assertThat(worst.find()).as(output).isTrue();
+            assertThat(Long.parseLong(worst.group(1))).as(measure + ": " + output).isLessThan(SCORING_LIMIT_MILLIS / 2);
+        }
+    }
+
+    /**
+     * The largest documentation the limits allow: 200 pages of a title and two bodies of 100,000 characters of text that is
+     * not repeated (random Chinese characters in both, so that the strings are two bytes a character and the vocabulary is
+     * large), made one at a time as they are asked for, the way the database delivers them. At the last page, with the
+     * pages before it in the index's hands, the heap in use is reported: it holds what the snapshot will keep and the page
+     * in hand, and not the text of the pages that are read.
+     */
+    private static void loadTheLargestDocumentation() {
+        Random random = new Random(42);
+        Flux<Document> pages = Flux.range(0, 200).map(number -> {
+            StringBuilder chinese = new StringBuilder("## 标题").append(number).append('\n');
+            for (int index = 0; index < 99_990; index++) {
+                chinese.append(index % 40 == 39 ? '\n' : (char) (0x4E00 + random.nextInt(3000)));
+            }
+            StringBuilder english = new StringBuilder("## Title ").append(number).append('\n');
+            for (int index = 0; index < 99_990; index++) {
+                english.append(index % 40 == 39 ? '\n' : (char) (0x4E00 + random.nextInt(3000)));
+            }
+            return page("page-" + number, new Content("页面" + number, "分类", "摘要", chinese.toString(), number,
+                new Translation("Page " + number, "Category", "Summary", english.toString())));
+        });
+        AssistantDocsIndex index = AssistantDocsIndex.streaming(NO_FILES, () -> pages, Mono::empty, new TestClock());
+        index.pageHook = document -> {
+            if (document.id().equals("page-199")) {
+                System.gc();
+                Runtime runtime = Runtime.getRuntime();
+                System.out.println("heap-at-last-page=" + (runtime.totalMemory() - runtime.freeMemory()));
+            }
+        };
+        Retrieval found = index.retrieve("标题" + 7, "").block(Duration.ofMinutes(2));
+        System.out.println("titles=" + found.pageTitles().size() + " characters=" + index.searchCharacters());
+    }
+
+    @Test
+    void theWholeTextOfTheDocumentationNeverHasToFitInTheHeapAtOnce() throws Exception {
+        // 200 pages of 200,000 characters are 40 million characters, 80 MB of Chinese text, several times that as rows of
+        // escaped JSON and again as the chunks of every page before the share of each is known. The chunks that are kept
+        // are 3.2 million characters. The JVM exits, as in production (docs/PERFORMANCE.md), if it runs out of memory.
+        Path javaBinary = Path.of(System.getProperty("java.home"), "bin", "java");
+        Process process = new ProcessBuilder(javaBinary.toString(), "-Xmx" + HEAP_FOR_THE_LARGEST_DOCUMENTATION_MEGABYTES + "m",
+            "-XX:+ExitOnOutOfMemoryError", "-cp", System.getProperty("java.class.path"),
+            AssistantDocsIndexTest.class.getName(), "heap").redirectErrorStream(true).start();
+        String output = new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        assertThat(process.waitFor(3, TimeUnit.MINUTES)).as(output).isTrue();
+
+        assertThat(process.exitValue()).as(output).isZero();
+        assertThat(output).as("every page is listed, and the chunks fill the index").containsPattern("titles=200 characters=[2-9]\\d{6}");
+        java.util.regex.Matcher heap = java.util.regex.Pattern.compile("heap-at-last-page=(\\d+)").matcher(output);
+        assertThat(heap.find()).as(output).isTrue();
+        // 20 MB or so: the chunks kept so far, the vocabulary of none yet, the page in hand. The 200 English bodies of the
+        // pages before it, which nothing uses once they are parsed, are another 40 MB.
+        assertThat(Long.parseLong(heap.group(1))).as("heap in use at the last page: " + output)
+            .isLessThan(HEAP_IN_USE_AT_THE_LAST_PAGE_MEGABYTES * 1024 * 1024);
+    }
+
+    private static final long HEAP_IN_USE_AT_THE_LAST_PAGE_MEGABYTES = 40;
+
+    private static final int HEAP_FOR_THE_LARGEST_DOCUMENTATION_MEGABYTES = 112;
+
+    @Test
+    void pagesDeliveredOneAtATimeMakeTheSnapshotOfPagesDeliveredTogetherEvenWhereTheyAreMoreThanFitAndAreCutDownAsTheyCome() {
+        // 40 pages of very different lengths in two languages that differ: far more than 2000 chunks, so that the share of
+        // each page shrinks as pages are added and is a different one at every step.
+        Random random = new Random(5);
+        List<Document> pages = new ArrayList<>();
+        for (int number = 0; number < 40; number++) {
+            StringBuilder chinese = new StringBuilder();
+            StringBuilder english = new StringBuilder();
+            for (int section = 0, sections = 5 + random.nextInt(120); section < sections; section++) {
+                chinese.append("## 小节").append(number).append("甲").append(section).append("\n")
+                    .append(("说明文字" + number + "x" + section + "。").repeat(8 + random.nextInt(60))).append("\n\n");
+            }
+            for (int section = 0, sections = 5 + random.nextInt(120); section < sections; section++) {
+                english.append("## Section ").append(number).append("a").append(section).append("\n")
+                    .append(("Explanation text" + number + "x" + section + ". ").repeat(8 + random.nextInt(60))).append("\n\n");
+            }
+            pages.add(page("p" + number, new Content("页面" + number, "分类", "摘要", chinese.toString(), number,
+                number % 3 == 0 ? null : new Translation("Page " + number, "Category", "Summary", english.toString()))));
+        }
+        AssistantDocsIndex together = indexOf(pages);
+        AssistantDocsIndex oneByOne = AssistantDocsIndex.streaming(NO_FILES, () -> Flux.fromIterable(pages), Mono::empty, new TestClock());
+
+        for (String question : List.of("小节3甲5", "小节17甲60", "小节39甲0", "说明文字12x3", "Section 21a7", "Explanation text5x2", "页面9")) {
+            Retrieval expected = ask(together, question);
+            assertThat(ask(oneByOne, question)).as(question).isEqualTo(expected);
+        }
+        long source = 0;
+        for (Document document : pages) {
+            source += AssistantDocsChunker.parse(document.content().body(), 1).sections().size();
+            if (document.content().english() != null) {
+                source += AssistantDocsChunker.parse(document.content().english().body(), 1).sections().size();
+            }
+        }
+        assertThat(source).as("more chunks than the index keeps, so that the share of every page shrinks as pages come")
+            .isGreaterThan(AssistantDocsIndex.MAX_PAGE_CHUNKS * 3L / 2);
+        assertThat(oneByOne.retainedCharacters()).isEqualTo(together.retainedCharacters());
+        assertThat(oneByOne.searchCharacters()).isEqualTo(together.searchCharacters());
+        assertThat(oneByOne.vocabularySizes()).isEqualTo(together.vocabularySizes());
+    }
+
+    @Test
+    void aWordOrNameLongerThanAnyNameIsNotLookedForAndMakesNoPhrase() {
+        String atTheLimit = "a".repeat(AssistantDocsIndex.MAX_TERM_CHARS);
+        String beyond = "a".repeat(AssistantDocsIndex.MAX_TERM_CHARS + 1);
+
+        assertThat(AssistantDocsIndex.terms(atTheLimit + " 发票")).contains(atTheLimit, "发票");
+        assertThat(AssistantDocsIndex.terms(beyond + " 发票")).doesNotContain(beyond).contains("发票");
+        assertThat(AssistantDocsIndex.terms(beyond.substring(0, 40) + "_" + "b".repeat(30))).as("not cut: neither the whole nor a part")
+            .isEmpty();
+        assertThat(AssistantDocsIndex.terms("x".repeat(70) + ".1_b")).isEmpty();
+        assertThat(AssistantDocsIndex.terms("bc" + "_".repeat(100))).as("trailing underscores are not part of the name").contains("bc");
+        assertThat(AssistantDocsIndex.phrases("alpha " + atTheLimit + " beta")).containsExactly("alpha " + atTheLimit, atTheLimit + " beta");
+        assertThat(AssistantDocsIndex.phrases("alpha " + beyond + " beta")).as("no phrase with it or across it").isEmpty();
+        assertThat(AssistantDocsIndex.phrases("alpha beta")).containsExactly("alpha beta");
+    }
+
+    @Test
+    void aQuestionWithAnEnormousNameStillFindsWhatTheRestOfItAsksFor() {
+        AssistantDocsIndex index = help();
+        Retrieval plain = ask(index, "怎么创建 API Key");
+        Retrieval withName = ask(index, "怎么创建 API Key " + "x".repeat(300) + "_" + "y".repeat(300) + " " + "z".repeat(500));
+
+        assertThat(plain.chunks()).isNotEmpty();
+        assertThat(withName.chunks()).isEqualTo(plain.chunks());
+    }
+
+    @Test
+    void aPhraseIsLookedForOnlyWhereBothOfItsWordsAreWordsOfTheIndex() {
+        AssistantDocsIndex index = indexOf(page("p", "发票", "帮助", "", "## 开票\nClaude Code 和 keys 的说明，还有 gpt-5.5 与 config.toml。"));
+        ask(index, "发票");
+
+        assertThat(index.mayOccur("claude code")).as("both are words of the index").isTrue();
+        assertThat(index.mayOccur("code keys")).isTrue();
+        assertThat(index.mayOccur("claude key")).as("the second as a stem of the word with an ending").isTrue();
+        assertThat(index.mayOccur("claude missing")).as("the second is nowhere").isFalse();
+        assertThat(index.mayOccur("missing code")).as("the first is nowhere").isFalse();
+        assertThat(index.mayOccur("missing absent")).isFalse();
+        assertThat(index.mayOccur("gpt-5.5")).as("an identifier may stand in front of a longer one").isTrue();
+        assertThat(index.mayOccur("config.toml")).isTrue();
+        assertThat(index.mayOccur("nowhere")).as("a word").isFalse();
+        assertThat(index.mayOccur("keys")).isTrue();
+    }
+
+    @Test
+    void ofTheLongTermsOfAQueryTheHeaviestAreLookedForAndTheRestAreNotPartOfTheQuestion() {
+        java.util.List<AssistantDocsIndex.Term> terms = new ArrayList<>();
+        // Short terms and long ones that could not occur are never counted against the limit.
+        terms.add(new AssistantDocsIndex.Term("short", 1.0, false, false, false, java.util.Set.of()));
+        terms.add(new AssistantDocsIndex.Term("a".repeat(30) + "_unknown", 4.0, false, false, false, java.util.Set.of()));
+        for (int number = 0; number < AssistantDocsIndex.MAX_LONG_TERMS + 3; number++) {
+            double weight = number % 2 == 0 ? 1.0 : 4.0;
+            terms.add(new AssistantDocsIndex.Term("known_identifier_" + number, weight, false, false, false, java.util.Set.of()));
+        }
+
+        List<String> kept = AssistantDocsIndex.searchable(terms, text -> !text.endsWith("_unknown")).stream()
+            .map(AssistantDocsIndex.Term::text).toList();
+
+        assertThat(kept).hasSize(terms.size() - 3).contains("short", "a".repeat(30) + "_unknown");
+        // Fifteen long terms, seven of weight 4 (odd numbers) and eight of weight 1: the last three of weight 1 are the ones left out.
+        assertThat(kept).doesNotContain("known_identifier_14", "known_identifier_12", "known_identifier_10")
+            .contains("known_identifier_8", "known_identifier_13", "known_identifier_1");
+        assertThat(AssistantDocsIndex.searchable(terms.subList(0, 1 + AssistantDocsIndex.MAX_LONG_TERMS), text -> true))
+            .as("up to the limit nothing is left out").hasSize(1 + AssistantDocsIndex.MAX_LONG_TERMS);
+    }
+
+    @Test
+    void aTermIsFoundByTheLinearMatcherExactlyWhereTheStringSearchFindsIt() {
+        // The second alphabet is mostly letters and underscores: long runs of an identifier, in which no whole name can begin.
+        for (String alphabet : List.of("aabbab _-.1é汉s", "aab__b_-.é_a_ \u337f\u00e9")) {
+            assertTheLinearMatcherFindsWhatTheStringSearchFinds(alphabet);
+        }
+    }
+
+    private static void assertTheLinearMatcherFindsWhatTheStringSearchFinds(String alphabet) {
+        Random random = new Random(13);
+        for (int round = 0; round < 60_000; round++) {
+            StringBuilder builder = new StringBuilder();
+            for (int length = random.nextInt(90); length > 0; length--) {
+                builder.append(alphabet.charAt(random.nextInt(alphabet.length())));
+            }
+            String text = builder.toString();
+            String term;
+            if (random.nextBoolean() && text.length() > 2) {
+                int from = random.nextInt(text.length() - 1);
+                term = text.substring(from, Math.min(text.length(), from + 1 + random.nextInt(8)));
+            } else {
+                StringBuilder word = new StringBuilder();
+                for (int length = 1 + random.nextInt(5); length > 0; length--) {
+                    word.append("ab_-.1".charAt(random.nextInt(6)));
+                }
+                term = word.toString();
+            }
+            if (term.isBlank() || term.startsWith("_") || term.contains(" ")) {
+                continue;
+            }
+            int[] failure = AssistantDocsIndex.failureTable(term);
+            java.util.BitSet mask = AssistantDocsIndex.wordMask(text);
+            for (int limit : new int[] {1, 3, 100}) {
+                int expected = AssistantDocsIndex.occurrences(text, null, term, limit);
+                assertThat(AssistantDocsIndex.occurrences(text, null, term, limit, failure))
+                    .as("'%s' in '%s' by the linear matcher, up to %d", term, text, limit).isEqualTo(expected);
+                assertThat(AssistantDocsIndex.occurrences(text, mask, term, limit, failure))
+                    .as("'%s' in '%s' by the linear matcher and the mask, up to %d", term, text, limit).isEqualTo(expected);
+                assertThat(AssistantDocsIndex.occurrences(text, mask, term, limit))
+                    .as("'%s' in '%s' by the string search and the mask, up to %d", term, text, limit).isEqualTo(expected);
+            }
+        }
+    }
+
+    @Test
+    void theLinearMatcherDoesNotLookAtAnyPlaceTwiceHoweverPeriodicTheTextAndTheTermAre() {
+        String text = "a".repeat(200_000);
+        String term = "a".repeat(60) + "x";
+        int[] failure = AssistantDocsIndex.failureTable(term);
+        long start = System.nanoTime();
+        for (int round = 0; round < 50; round++) {
+            assertThat(AssistantDocsIndex.occurrences(text, null, term, 3, failure)).isZero();
+        }
+        assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(2));
+        assertThat(AssistantDocsIndex.failureTable("abab")).containsExactly(0, 0, 1, 2);
+        assertThat(AssistantDocsIndex.failureTable("aaaa")).containsExactly(0, 1, 2, 3);
+        assertThat(AssistantDocsIndex.failureTable("x")).containsExactly(0);
+        assertThat(AssistantDocsIndex.occurrences("aaaa x aaaa", null, "aaa", 5, AssistantDocsIndex.failureTable("aaa")))
+            .as("a place that begins inside the previous match is passed over, as by the string search").isEqualTo(
+                AssistantDocsIndex.occurrences("aaaa x aaaa", null, "aaa", 5));
+    }
+
+    // ---- where the questions are scored -------------------------------------------------------------------------------
+
+    @Test
+    void aQuestionIsScoredEvenWhenEveryWorkerOfReactorsParallelSchedulerIsBusy() throws Exception {
+        // Reactor's timers (every Mono.delay and timeout of the application) run on the workers of the parallel scheduler.
+        AssistantDocsIndex index = indexOf(page("p", "发票", "帮助", "", "## 开票\n在发票页面申请开票。"));
+        assertThat(ask(index, "发票").chunks()).hasSize(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        List<reactor.core.Disposable> busy = new ArrayList<>();
+        // One task for each worker, so that all of them are held; a question that needs one of them waits for it.
+        for (int worker = 0; worker < Schedulers.DEFAULT_POOL_SIZE; worker++) {
+            busy.add(Schedulers.parallel().schedule(() -> {
+                try {
+                    release.await();
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
+            }));
+        }
+        try {
+            Retrieval during = index.retrieve("发票", "").block(Duration.ofSeconds(5));
+            assertThat(during.chunks()).as("scored while every parallel worker is held").hasSize(1);
+        } finally {
+            release.countDown();
+            busy.forEach(reactor.core.Disposable::dispose);
+        }
+    }
+
+    @Test
+    void aQuestionThatFindsNoThreadAndNoPlaceInTheQueueIsAnsweredWithoutExcerptsAtOnce() throws Exception {
+        AssistantDocsIndex index = indexOf(page("p", "发票", "帮助", "", "## 开票\n在发票页面申请开票。"));
+        assertThat(ask(index, "发票").chunks()).hasSize(1);
+        Scheduler narrow = Schedulers.newBoundedElastic(1, 1, "narrow-search", 60, true);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch started = new java.util.concurrent.CountDownLatch(1);
+        index.searchScheduler = narrow;
+        try {
+            narrow.schedule(() -> {
+                started.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            assertThat(started.await(5, TimeUnit.SECONDS)).as("the only thread is busy, and the queue is empty").isTrue();
+            CompletableFuture<Retrieval> waiting = index.retrieve("发票", "").toFuture();
+            Thread.sleep(100);
+            assertThat(waiting).as("waits for the only thread").isNotDone();
+
+            long start = System.nanoTime();
+            Retrieval turnedAway = index.retrieve("发票", "").block(Duration.ofSeconds(5));
+            assertThat(turnedAway.chunks()).as("no place in the queue: answered without excerpts, and not left waiting").isEmpty();
+            assertThat(Duration.ofNanos(System.nanoTime() - start)).isLessThan(Duration.ofSeconds(2));
+
+            release.countDown();
+            assertThat(waiting.get(5, TimeUnit.SECONDS).chunks()).as("the one that waited is answered in its turn").hasSize(1);
+        } finally {
+            release.countDown();
+            narrow.dispose();
+        }
+    }
+
 
     @Test
     void aWordIsFoundWhereARunOfLettersIsTheWordOrTheWordWithAnEndingWhetherTheRunsAreCrossedByMaskOrByCharacter() {

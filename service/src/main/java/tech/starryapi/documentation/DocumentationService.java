@@ -2,6 +2,7 @@ package tech.starryapi.documentation;
 
 import io.r2dbc.spi.Row;
 import java.net.URI;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -18,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.reactive.TransactionContextManager;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 import tech.starryapi.admin.SystemSettingRepository;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.documentation.DocumentationDtos.*;
@@ -130,6 +132,73 @@ public class DocumentationService {
                 r.get("published_at", Instant.class))).all();
     }
 
+    /**
+     * What the assistant reads of a page, at most: twice the limits of {@link Content} and {@link Translation} (a title of
+     * 100 characters, a category of 60, a summary of 240, a body of 100,000), so that a page that was saved through the
+     * API is never touched and one that was not cannot make a read as long as its text is.
+     */
+    static final int ASSISTANT_TITLE_CHARS = 200;
+    static final int ASSISTANT_CATEGORY_CHARS = 120;
+    static final int ASSISTANT_SUMMARY_CHARS = 480;
+    static final int ASSISTANT_BODY_CHARS = 200_000;
+
+    /** The member of a JSON object that is cut to {@code limit} characters when it is a string; nothing when it is not. */
+    private static String cut(String object, String key, int limit) {
+        return "CASE WHEN jsonb_typeof(%1$s->'%2$s') = 'string' THEN jsonb_build_object('%2$s', left(%1$s->>'%2$s', %3$d)) ELSE '{}'::jsonb END"
+            .formatted(object, key, limit);
+    }
+
+    private static String cuts(String object) {
+        return String.join(" || ", cut(object, "title", ASSISTANT_TITLE_CHARS), cut(object, "category", ASSISTANT_CATEGORY_CHARS),
+            cut(object, "summary", ASSISTANT_SUMMARY_CHARS), cut(object, "body", ASSISTANT_BODY_CHARS));
+    }
+
+    /** The published JSON of a page with the text of its fields cut as above, in both languages. */
+    private static final String CUT_PUBLISHED = "CASE WHEN jsonb_typeof(published) = 'object' THEN published || " + cuts("published")
+        + " || CASE WHEN jsonb_typeof(published->'english') = 'object' THEN jsonb_build_object('english', (published->'english') || "
+        + cuts("(published->'english')") + ") ELSE '{}'::jsonb END ELSE published END";
+
+    /** The sort of the published pages in a catalog: by sort order (a damaged one last), then title, then id. */
+    private static final String PUBLISHED_ORDER = """
+        ORDER BY CASE WHEN published->>'sortOrder' ~ '^-?[0-9]{1,9}$' THEN (published->>'sortOrder')::integer END NULLS LAST,
+            published->>'title', id LIMIT 200
+        """;
+
+    /**
+     * The same pages as {@link #publishedPages()} in the same order, for the assistant, which keeps a few thousand
+     * passages of them and no more. A page's JSON is cut in the database to what the assistant reads of its text (see
+     * {@link #ASSISTANT_BODY_CHARS}), and the pages are read one at a time and parsed on a worker thread as they come: a
+     * caller that handles each page as it arrives never holds more than one, where the JSON of all of them (up to 200
+     * pages of two languages of 100,000 characters, which is more with the escapes of control characters) is hundreds of
+     * megabytes. A row whose JSON cannot be read comes back with no content, as in {@link #documents}.
+     *
+     * <p>Each page is a query of its own, after one for the ids in catalog order. One query for all of them would not
+     * hold the rows back: the driver asks the network for 256 messages at a time whatever the subscriber asks of it, so
+     * the whole result would be received into direct buffers while the consumer is busy with the first row, and a
+     * subscriber that gives up then (the index does, after a read timeout) leaves them unreleased. Direct memory is
+     * capped (256 MB in the deployment) and shared with the HTTP server and the proxy: a few such reads would fail every
+     * allocation of the node until a restart. A fetch size does not help, the driver asks for the next batch of a cursor
+     * without waiting for demand. With a query for a page the driver never holds more than the row in hand and the next.
+     * A page that was unpublished or deleted since the ids were read is left out, and one published since is read by the
+     * next load, which the change or the fingerprint brings about.
+     */
+    public Flux<Document> publishedPageStream() {
+        return db.sql("SELECT id FROM documentation_pages WHERE deleted = FALSE AND published IS NOT NULL " + PUBLISHED_ORDER)
+            .map((r, m) -> r.get("id", String.class)).all().collectList()
+            .flatMapMany(Flux::fromIterable)
+            .concatMap(this::publishedPage, 1)
+            .publishOn(Schedulers.boundedElastic(), 1)
+            .map(row -> new Document(row.id(), readableContent(row.json()), row.publishedAt(), List.<Attachment>of()));
+    }
+
+    /** One published page, cut as in {@link #publishedPageStream()}; nothing if it is not published or has been deleted. */
+    private Mono<PublishedRow> publishedPage(String id) {
+        return db.sql("SELECT id, (" + CUT_PUBLISHED + ")::text AS content, published_at FROM documentation_pages "
+                + "WHERE id = :id AND deleted = FALSE AND published IS NOT NULL")
+            .bind("id", id).map((r, m) -> new PublishedRow(r.get("id", String.class), r.get("content", String.class),
+                r.get("published_at", Instant.class))).one();
+    }
+
     /** Parses the rows of {@link #publishedRows()}; a row whose JSON cannot be read comes back with no content. */
     public List<Document> documents(List<PublishedRow> rows) {
         return rows.stream().map(row -> new Document(row.id(), readableContent(row.json()), row.publishedAt(), List.<Attachment>of())).toList();
@@ -193,11 +262,47 @@ public class DocumentationService {
             .doOnSuccess(d -> log.info("documentation action={} actor={} id={} version={}", request.publish() ? "publish" : "save-draft", actor, id, d.version()));
     }
 
+    /**
+     * How long a withdrawal whose caller has gone is waited for before it is announced all the same: the statement may be
+     * waiting for a lock for as long as the transaction that holds it takes. The node's own cache is then at most its time
+     * to live out of date, as it is for a change made on another node.
+     */
+    static final Duration ABANDONED_WITHDRAWAL_WAIT = Duration.ofMinutes(1);
+
+    /**
+     * Unpublishes or deletes a page. The statement commits by itself, whoever is still listening: a request that is
+     * cancelled while it runs (the administrator closes the browser) leaves the page withdrawn all the same. So the
+     * change is announced whenever the statement may have been applied, not only when its result comes back and the
+     * caller is still there: after a cancel, once the statement has settled, and after a failure of the statement itself,
+     * where it is not known. Only a statement that is known to have changed nothing (the page was edited or deleted
+     * meanwhile) announces nothing.
+     *
+     * <p>After a cancel the announcement waits for the statement. It may still be on its way, or waiting for a lock (an
+     * upload takes the page {@code FOR UPDATE}); announced at the moment of the cancel it would make the next question
+     * read the page as published and keep it, and the statement commits after that with nothing to tell this node. The
+     * statement is shared ({@code cache}), so that the caller's cancel does not stop it and the wait for its outcome does
+     * not run it again.
+     */
     public Mono<Void> withdraw(String id, long version, boolean delete, String actor) {
-        return db.sql("UPDATE documentation_pages SET published = NULL, published_at = NULL, deleted = :deleted, version = version + 1, updated_at = clock_timestamp() WHERE id = :id AND version = :version AND deleted = FALSE")
-            .bind("id", id).bind("version", version).bind("deleted", delete).fetch().rowsUpdated().flatMap(this::changed)
-            .then(Mono.defer(() -> publicationChanged(id)))
-            .doOnSuccess(v -> log.info("documentation action={} actor={} id={}", delete ? "delete" : "unpublish", actor, id));
+        return Mono.defer(() -> {
+            Mono<Long> statement = db.sql("UPDATE documentation_pages SET published = NULL, published_at = NULL, deleted = :deleted, version = version + 1, updated_at = clock_timestamp() WHERE id = :id AND version = :version AND deleted = FALSE")
+                .bind("id", id).bind("version", version).bind("deleted", delete).fetch().rowsUpdated().cache();
+            return statement
+                .doOnError(error -> announce(id))
+                .flatMap(this::changed)
+                .then(Mono.defer(() -> publicationChanged(id)))
+                .doOnCancel(() -> announceWhenSettled(statement, id))
+                .doOnSuccess(v -> log.info("documentation action={} actor={} id={}", delete ? "delete" : "unpublish", actor, id));
+        });
+    }
+
+    /** Announces the change when the statement of a withdrawal whose caller is gone has settled: applied, failed, or not heard of. */
+    private void announceWhenSettled(Mono<Long> statement, String id) {
+        statement.timeout(ABANDONED_WITHDRAWAL_WAIT).subscribe(rows -> {
+            if (rows == 1) {
+                announce(id);
+            }
+        }, error -> announce(id));
     }
 
     @Transactional
@@ -278,6 +383,10 @@ public class DocumentationService {
             .<ApplicationEvent>map(transaction -> new PayloadApplicationEvent<>(transaction, change))
             .onErrorResume(NoTransactionException.class, e -> Mono.just(new PayloadApplicationEvent<>(this, change)))
             .doOnNext(events::publishEvent).then();
+    }
+    /** The same announcement without a subscriber to wait for it: for a signal that comes when nobody is listening any more. */
+    private void announce(String id) {
+        events.publishEvent(new PayloadApplicationEvent<>(this, new DocumentationPublicationChanged(id)));
     }
     private Mono<Void> changed(long n) {
         return n == 1 ? Mono.empty() : Mono.error(new ApiException(HttpStatus.CONFLICT, "DOCUMENTATION_CONFLICT", "文档已被修改或删除，请重新加载后再编辑"));

@@ -360,6 +360,56 @@ class AssistantDocsChunkerTest {
         assertThat(AssistantDocsChunker.withoutMedia("attachment:" + FIRST_ID + "attachment:" + SECOND_ID)).isEmpty();
     }
 
+    /** A reference as the model would read it: "attachment:" and an id of eight characters or more that does not run into the next "attachment:". */
+    private static final String CLEAN_REFERENCE = "attachment:(?!attachment:)[0-9A-Za-z](?:(?!attachment:)[0-9A-Za-z-]){7,}";
+
+    /** References that a tag or a mark in the middle hides from the scrub that comes first: they join when it is taken out. */
+    private static List<String> brokenReferences() {
+        String media = "/documentation/media/" + FIRST_ID + "?expires=1&admin=true&signature=abc";
+        return List.of(
+            "attach**ment:" + FIRST_ID, "attach`ment:" + FIRST_ID + "`", "attach*ment:" + FIRST_ID, "attach<b>ment:" + FIRST_ID,
+            "attach</i>ment:" + FIRST_ID, "attachment<b></b>:" + FIRST_ID, "attachment:<b>" + FIRST_ID.substring(0, 8) + "</b>",
+            "/documentation/me**dia/" + FIRST_ID + "?admin=true&signature=abc", "/docu**mentation/media/" + FIRST_ID + "?signature=1",
+            "/documentation/<i>media/" + FIRST_ID + "?admin=true&signature=def", media.replace("media", "me<b>dia"));
+    }
+
+    @Test
+    void aReferenceThatOnlyEmphasisOrATagKeepsApartIsRemovedWhenTheyAreTakenOut() {
+        for (String broken : brokenReferences()) {
+            List<Section> sections = AssistantDocsChunker.split(
+                "## 标题 " + broken + "\n正文在这里 " + broken + " 和更多的文字。\n\n### 小节 " + broken + "\n小节的内容，也有 " + broken + " 在其中。\n", 1);
+
+            assertThat(sections).as(broken).isNotEmpty().allSatisfy(section -> {
+                assertThat(section.heading()).as(broken).doesNotContainPattern(CLEAN_REFERENCE).doesNotContain("documentation/media");
+                assertThat(section.body()).as(broken).doesNotContainPattern(CLEAN_REFERENCE).doesNotContain("documentation/media");
+            });
+            assertThat(AssistantDocsChunker.clean("文字 " + broken)).as(broken)
+                .doesNotContainPattern(CLEAN_REFERENCE).doesNotContain("documentation/media");
+        }
+    }
+
+    @Test
+    void noMixOfMarksTagsAndReferencesLeavesAReferenceInAHeadingOrALine() {
+        java.util.Random random = new java.util.Random(11);
+        List<String> pieces = List.of("attach", "ment:", "attachment:", FIRST_ID, FIRST_ID.substring(0, 9), "<b>", "</i>", "<br>", "**", "*", "`",
+            "/documentation/", "media/", "me", "dia/", "?signature=1", " ", " ", "x", "![图](a)", "[文](#b)", "&admin=true");
+        for (int round = 0; round < 20_000; round++) {
+            StringBuilder text = new StringBuilder();
+            for (int part = 1 + random.nextInt(8); part > 0; part--) {
+                text.append(pieces.get(random.nextInt(pieces.size())));
+            }
+            String markdown = "## 标题 " + text + "\n" + text + "\n";
+
+            for (Section section : AssistantDocsChunker.split(markdown, 1)) {
+                for (String shown : List.of(section.heading(), section.body())) {
+                    assertThat(shown).as(markdown).doesNotContainPattern(CLEAN_REFERENCE).doesNotContain("/documentation/media/");
+                }
+            }
+            assertThat(AssistantDocsChunker.clean(text.toString())).as(text.toString())
+                .doesNotContainPattern(CLEAN_REFERENCE).doesNotContain("/documentation/media/");
+        }
+    }
+
     // ---- long blocks keep their shape --------------------------------------------------------------------------
 
     @Test
@@ -647,6 +697,101 @@ class AssistantDocsChunkerTest {
         });
         String all = String.join("\n", pieces.stream().map(Section::body).toList());
         assertThat(all).contains("echo line-0 &&", "echo line-299 &&");
+    }
+
+    /** The piece is one fenced block: its first line opens a fence, and the first line that closes it is the last one. */
+    private static void assertWholeFencedBlock(String piece) {
+        String[] lines = piece.split("\n", -1);
+        java.util.regex.Matcher opener = java.util.regex.Pattern.compile("^(`{3,}|~{3,})[^`]*$").matcher(lines[0]);
+        assertThat(opener.matches()).as("opens a fence: %s", lines[0]).isTrue();
+        String fence = opener.group(1);
+        int closing = -1;
+        for (int index = 1; index < lines.length && closing < 0; index++) {
+            String line = lines[index].strip();
+            if (line.length() >= fence.length() && line.chars().allMatch(value -> value == fence.charAt(0))) {
+                closing = index;
+            }
+        }
+        assertThat(closing).as("the first line that closes %s%nin%n%s", fence, piece).isEqualTo(lines.length - 1);
+    }
+
+    @Test
+    void aLineInsideALongFenceThatIsAsLongAsThePiecesFenceDoesNotCloseThePiecesEarly() {
+        for (char fence : new char[] {'`', '~'}) {
+            String marker = String.valueOf(fence).repeat(20);
+            String inner = String.valueOf(fence).repeat(18);
+            StringBuilder code = new StringBuilder("## 代码\n\n").append(marker).append("markdown\n").append(inner).append('\n');
+            for (int line = 0; line < 400; line++) {
+                code.append("第 ").append(line).append(" 行的内容，用来把这个代码块切成几段\n");
+            }
+            code.append(inner).append('\n').append(marker).append('\n');
+
+            List<Section> pieces = AssistantDocsChunker.split(code.toString(), 1);
+
+            assertThat(pieces).as("cut into several pieces").hasSizeGreaterThan(2);
+            assertThat(pieces).allSatisfy(section -> {
+                assertThat(section.body().length()).isLessThanOrEqualTo(AssistantDocsChunker.MAX_CHUNK_CHARS);
+                assertWholeFencedBlock(section.body());
+            });
+            String all = String.join("\n", pieces.stream().map(Section::body).toList());
+            assertThat(all).contains("第 0 行", "第 399 行").contains(inner);
+        }
+    }
+
+    @Test
+    void aFenceOfOneKindIsLeftForTheOtherWhenTheCodeNeedsALongOneOfTheFirst() {
+        String marker = "`".repeat(40);
+        StringBuilder code = new StringBuilder("## 代码\n\n").append(marker).append("bash\n").append("`".repeat(30)).append('\n');
+        for (int line = 0; line < 100; line++) {
+            code.append("echo ").append(line).append(" && sleep 1 # 一行代码\n");
+        }
+        code.append(marker).append('\n');
+
+        List<Section> pieces = AssistantDocsChunker.split(code.toString(), 1);
+
+        assertThat(pieces).hasSizeGreaterThan(1).allSatisfy(section -> {
+            assertWholeFencedBlock(section.body());
+            assertThat(section.body()).startsWith("~~~bash\n").endsWith("\n~~~");
+        });
+    }
+
+    @Test
+    void aBlockWhoseCodeHasLongFenceLinesOfBothKindsIsCutWithoutAFenceAndSaysSo() {
+        String marker = "`".repeat(40);
+        StringBuilder code = new StringBuilder("## 代码\n\n").append(marker).append("markdown\n")
+            .append("`".repeat(30)).append('\n').append("~".repeat(30)).append('\n');
+        for (int line = 0; line < 100; line++) {
+            code.append("第 ").append(line).append(" 行的内容，用来把这个代码块切成几段\n");
+        }
+        code.append(marker).append('\n');
+
+        List<Section> pieces = AssistantDocsChunker.split(code.toString(), 1);
+
+        assertThat(pieces).hasSizeGreaterThan(1).allSatisfy(section -> {
+            assertThat(section.body()).startsWith(AssistantDocsChunker.UNFENCED_NOTE + "\n");
+            assertThat(section.body().length()).isLessThanOrEqualTo(AssistantDocsChunker.MAX_CHUNK_CHARS);
+            assertThat(section.body().lines().skip(1).filter(line -> line.startsWith("```") || line.startsWith("~~~")).count())
+                .as("only the lines of the code itself, no fence of ours").isLessThanOrEqualTo(2);
+        });
+        String all = String.join("\n", pieces.stream().map(Section::body).toList());
+        assertThat(all).contains("第 0 行", "第 99 行");
+    }
+
+    @Test
+    void theLanguageOfAFenceOfTildesIsKeptWithoutBackticksWhenThePiecesTakeBackticks() {
+        String marker = "~".repeat(40);
+        StringBuilder code = new StringBuilder("## 代码\n\n").append(marker).append("a`b\n").append("~".repeat(30)).append('\n');
+        for (int line = 0; line < 100; line++) {
+            code.append("第 ").append(line).append(" 行的内容，用来把这个代码块切成几段\n");
+        }
+        code.append(marker).append('\n');
+
+        List<Section> pieces = AssistantDocsChunker.split(code.toString(), 1);
+
+        assertThat(pieces).hasSizeGreaterThan(1).allSatisfy(section -> {
+            assertWholeFencedBlock(section.body());
+            assertThat(section.body()).startsWith("```ab\n");
+        });
     }
 
     @Test

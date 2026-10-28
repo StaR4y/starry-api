@@ -2,6 +2,10 @@ package tech.starryapi.assistant;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.ByteBufAllocatorMetricProvider;
+import io.netty.util.ResourceLeakDetector;
+import io.r2dbc.spi.Connection;
 import io.r2dbc.spi.ConnectionFactories;
 import io.r2dbc.spi.ConnectionFactory;
 import java.nio.file.Path;
@@ -19,6 +23,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.reactivestreams.Subscription;
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
@@ -28,6 +33,9 @@ import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.transaction.ReactiveTransactionManager;
 import org.springframework.transaction.annotation.EnableTransactionManagement;
 import org.springframework.transaction.reactive.TransactionalOperator;
+import reactor.core.publisher.BaseSubscriber;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 import org.testcontainers.DockerClientFactory;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import tech.starryapi.admin.SystemSettingRepository;
@@ -108,9 +116,9 @@ class AssistantDocsPostgreSqlTest {
         context.registerBean(DocumentationService.class);
         // The same wiring as production, except that the loaders are wrapped to count how often they are read and
         // that the clock is the test's own.
-        context.registerBean(AssistantDocsIndex.class, () -> new AssistantDocsIndex(NO_FILES, () -> {
+        context.registerBean(AssistantDocsIndex.class, () -> AssistantDocsIndex.streaming(NO_FILES, () -> {
             loads.incrementAndGet();
-            return context.getBean(DocumentationService.class).publishedPages();
+            return context.getBean(DocumentationService.class).publishedPageStream();
         }, () -> {
             fingerprintReads.incrementAndGet();
             return context.getBean(DocumentationService.class).publishedFingerprint();
@@ -687,5 +695,131 @@ class AssistantDocsPostgreSqlTest {
         clock.advance(Duration.ofSeconds(11));
         ask("sortgoodqq");
         assertThat(loads).as("nothing failed, so nothing is retried").hasValue(1);
+    }
+
+    @Test
+    void aQuestionAskedWhileACancelledWithdrawalWaitsForALockDoesNotKeepThePageOnceTheWithdrawalIsApplied() throws Exception {
+        String id = createPage("撤回测试", "## 内容\n这里写着 zorbwithdrawqq。", null, true);
+        assertThat(pageIds(ask("zorbwithdrawqq"))).as("published").containsExactly(id);
+        var current = documentation.readAdmin(id).block(TIMEOUT);
+        // An upload takes the page FOR UPDATE, so the withdrawal waits behind it; the administrator closes the browser meanwhile.
+        Connection locker = Mono.from(ConnectionFactories.get(r2dbcUrl).create()).block(TIMEOUT);
+        try {
+            Mono.from(locker.beginTransaction()).block(TIMEOUT);
+            Flux.from(locker.createStatement("SELECT id FROM documentation_pages WHERE id = $1 FOR UPDATE").bind(0, id).execute())
+                .flatMap(result -> result.map((row, metadata) -> row.get("id", String.class))).blockLast(TIMEOUT);
+            reactor.core.Disposable request = documentation.withdraw(id, current.version(), false, "test").subscribe();
+            Thread.sleep(500);
+            request.dispose();
+            Thread.sleep(200);
+            assertThat(pageIds(ask("zorbwithdrawqq"))).as("a question in the window: the page is still published").containsExactly(id);
+
+            Mono.from(locker.commitTransaction()).block(TIMEOUT);
+            // The statement goes through and is announced; the node must not go on quoting the page until the time to live is out.
+            long deadline = System.nanoTime() + Duration.ofSeconds(10).toNanos();
+            while (!ask("zorbwithdrawqq").chunks().isEmpty() && System.nanoTime() < deadline) {
+                Thread.sleep(50);
+            }
+            assertThat(ask("zorbwithdrawqq").chunks()).as("withdrawn, and seen at once").isEmpty();
+        } finally {
+            Mono.from(locker.close()).block(TIMEOUT);
+        }
+    }
+
+    // ---- the driver's direct memory ----------------------------------------------------------------------------
+
+    /** What Netty's default allocator holds in direct buffers: the rows the driver has received and not yet handed on are in it. */
+    private static long nettyDirectMemory() {
+        return ByteBufAllocator.DEFAULT instanceof ByteBufAllocatorMetricProvider provider
+            ? provider.metric().usedDirectMemory() : io.netty.util.internal.PlatformDependent.usedDirectMemory();
+    }
+
+    /** Pages of 100,000 characters of Chinese text, published, so that the rows are some 300 KB each. */
+    private void publishLargePages(int count) {
+        DatabaseClient.create(ConnectionFactories.get(r2dbcUrl)).sql("""
+            INSERT INTO documentation_pages (id, draft, published, published_at)
+            SELECT 'large-' || :run || '-' || n, content, content, clock_timestamp() FROM (
+                SELECT n, jsonb_build_object('title', '大页面 ' || n, 'category', 'AssistantTest', 'summary', '', 'sortOrder', n,
+                    'body', E'## 大页面\\n' || repeat('第' || n || '行的文字，说明一二三四五六七八九十。' || E'\\n', 5000)) AS content
+                FROM generate_series(1, :count) AS n) AS pages
+            """).bind("run", UUID.randomUUID().toString()).bind("count", count).fetch().rowsUpdated().block(TIMEOUT);
+    }
+
+    /** Waits until the direct memory is no more than {@code limit} above {@code baseline}, or for ten seconds; the last reading. */
+    private static long settledAbove(long baseline, long limit) throws InterruptedException {
+        long above = nettyDirectMemory() - baseline;
+        for (int tries = 0; tries < 100 && above > limit; tries++) {
+            Thread.sleep(100);
+            above = nettyDirectMemory() - baseline;
+        }
+        return above;
+    }
+
+    private static final long DIRECT_MEMORY_SLACK = 4L * 1024 * 1024;
+
+    @Test
+    void aReadThatIsGivenUpWhileTheIndexIsHeldUpLeavesNoRowsOfTheResultBufferedInTheDriversDirectMemory() throws Exception {
+        // The driver asks the network for 256 messages at a time whatever the consumer asks it for, so a result of many
+        // large rows is received into direct buffers while the consumer is still busy with the first. A read that is
+        // cancelled then (the index gives up after READ_TIMEOUT) left those buffers unreleased for good, and direct
+        // memory is capped at 256 MB: after a few such loads every allocation of the node failed.
+        publishLargePages(60);
+        ResourceLeakDetector.Level level = ResourceLeakDetector.getLevel();
+        ResourceLeakDetector.setLevel(ResourceLeakDetector.Level.PARANOID);
+        try {
+            assertThat(ask("大页面").chunks()).as("an ordinary load first, which also warms the allocator up").isNotEmpty();
+            Thread.sleep(500);
+            long baseline = nettyDirectMemory();
+
+            index.readTimeout = Duration.ofSeconds(1);
+            for (int round = 0; round < 2; round++) {
+                // The consumer is held up for longer than the read may go without a page, at the first page of each read.
+                AtomicInteger pages = new AtomicInteger();
+                index.pageHook = document -> {
+                    if (pages.getAndIncrement() == 0) {
+                        try {
+                            Thread.sleep(2500);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                };
+                index.invalidate();
+                assertThat(ask("大页面").chunks()).as("the read timed out: answered without the pages").isEmpty();
+                Thread.sleep(3000);
+                assertThat(settledAbove(baseline, DIRECT_MEMORY_SLACK)).as("direct memory above the baseline after the %d. cancelled read", round + 1)
+                    .isLessThanOrEqualTo(DIRECT_MEMORY_SLACK);
+            }
+        } finally {
+            ResourceLeakDetector.setLevel(level);
+        }
+    }
+
+    @Test
+    void aStreamOfPagesThatIsHeldAtOneRowHoldsNoMoreThanThatRowInTheDriversDirectMemory() throws Exception {
+        publishLargePages(60);
+        assertThat(ask("大页面").chunks()).as("an ordinary load first, which also warms the allocator up").isNotEmpty();
+        Thread.sleep(500);
+        long baseline = nettyDirectMemory();
+        AtomicInteger received = new AtomicInteger();
+        BaseSubscriber<Document> holder = new BaseSubscriber<>() {
+            @Override
+            protected void hookOnSubscribe(Subscription subscription) {
+                request(1);
+            }
+
+            @Override
+            protected void hookOnNext(Document value) {
+                received.incrementAndGet();
+            }
+        };
+        documentation.publishedPageStream().subscribe(holder);
+        Thread.sleep(2000);
+
+        assertThat(received).as("one page was taken, as asked").hasValue(1);
+        assertThat(nettyDirectMemory() - baseline).as("direct memory above the baseline while the stream is held at one row")
+            .isLessThanOrEqualTo(DIRECT_MEMORY_SLACK);
+        holder.cancel();
+        assertThat(settledAbove(baseline, DIRECT_MEMORY_SLACK)).as("and after it is cancelled").isLessThanOrEqualTo(DIRECT_MEMORY_SLACK);
     }
 }

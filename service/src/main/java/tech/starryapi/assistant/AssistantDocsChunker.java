@@ -29,9 +29,13 @@ final class AssistantDocsChunker {
     /**
      * The longest fence that opens and closes a piece of a cut block of code. A block may be opened by a fence of any
      * length (up to the whole text of the page); repeating that at both ends of every piece would make the pieces many
-     * times longer than the block, so the pieces get a fence of their own, however long the block's was.
+     * times longer than the block, so the pieces get a fence of their own, however long the block's was. It is the first
+     * characters of the block's fence when the code allows that, and otherwise one that the code cannot close early (see
+     * {@link #pieceFence}); a block whose code allows no fence this short is cut without one.
      */
     static final int MAX_FENCE_CHARS = 16;
+    /** The first line of every piece of a block of code that is cut without a fence. */
+    static final String UNFENCED_NOTE = "[code, fence left out because the code contains fence lines]";
 
     // Possessive on purpose: "." does not match U+0085, U+2028 or U+2029, which String.lines() leaves inside a line, so
     // with backtracking a long run of fence characters that ends in one of them is retried once per character and the
@@ -175,7 +179,9 @@ final class AssistantDocsChunker {
         text = ATTACHMENT_REFERENCE.matcher(text).replaceAll("");
         text = withoutMediaUrls(text);
         text = stripHtml(text);
-        return text.stripTrailing();
+        // Taking the tags out can join the pieces of a reference that had a tag in the middle ("attach<b>ment:<id>"), and
+        // the page shows such a line as it is written, so the scrub that comes last is the one that counts.
+        return withoutMedia(text).stripTrailing();
     }
 
     /**
@@ -309,7 +315,8 @@ final class AssistantDocsChunker {
     }
 
     private static String headingText(String markdown) {
-        String text = EMPHASIS.matcher(clean(markdown)).replaceAll("").strip();
+        // Emphasis marks inside a reference ("attach**ment:<id>") are removed after clean() has looked for it.
+        String text = withoutMedia(EMPHASIS.matcher(clean(markdown)).replaceAll("")).strip();
         if (text.length() <= MAX_HEADING_CHARS) {
             return text;
         }
@@ -457,14 +464,19 @@ final class AssistantDocsChunker {
             Matcher opener = FENCE.matcher(lines.getFirst());
             if (opener.matches()) {
                 String marker = opener.group(1);
-                String fence = marker.length() > MAX_FENCE_CHARS ? marker.substring(0, MAX_FENCE_CHARS) : marker;
                 String[] info = opener.group(2).strip().split("\\s+", 2);
                 String language = info[0].length() > 30 ? info[0].substring(0, 30) : info[0];
                 lines.removeFirst();
                 if (!lines.isEmpty() && closesFence(lines.getLast(), marker)) {
                     lines.removeLast();
                 }
-                return cutLines(lines, fence + language, fence, lead);
+                String fence = pieceFence(lines, marker);
+                if (fence == null) {
+                    return cutLines(lines, UNFENCED_NOTE, "", lead);
+                }
+                // The info string of a fence of backticks may not contain one.
+                String tag = fence.charAt(0) == '`' ? language.replace("`", "") : language;
+                return cutLines(lines, fence + tag, fence, lead);
             }
         }
         if (lines.size() > 2 && isTableHeader(lines.get(0)) && isTableSeparator(lines.get(1))) {
@@ -474,6 +486,48 @@ final class AssistantDocsChunker {
             }
         }
         return cutLines(lines, "", "", lead);
+    }
+
+    /**
+     * The fence that opens and closes every piece of a cut block of code, or null when the code allows none that is no
+     * longer than {@link #MAX_FENCE_CHARS}. A fence is closed by any line of at least its length that is nothing but its
+     * character, so it has to be longer than every such line in the code. The first characters of the block's own fence
+     * are enough while the code has no line of that many (a block is closed by the first line that closes its fence, so
+     * the code of a short fence never has one). The code of a long fence may well have a line of 16 or more characters of
+     * the same kind: one of 18 backticks inside a fence of 20 closes a fence of 16 early and leaves the rest of the piece
+     * to be read as text. Then the other fence character is tried, and a block that has both kinds of line goes without.
+     */
+    private static String pieceFence(List<String> code, String marker) {
+        char opening = marker.charAt(0);
+        int preferred = Math.min(marker.length(), MAX_FENCE_CHARS);
+        int needed = Math.max(preferred, fenceNeededBy(code, opening));
+        if (needed <= MAX_FENCE_CHARS) {
+            return String.valueOf(opening).repeat(needed);
+        }
+        char other = opening == '`' ? '~' : '`';
+        int neededOther = fenceNeededBy(code, other);
+        return neededOther <= MAX_FENCE_CHARS ? String.valueOf(other).repeat(neededOther) : null;
+    }
+
+    /** The length of the shortest fence of {@code character} that no line of the code closes. */
+    private static int fenceNeededBy(List<String> code, char character) {
+        int longest = 0;
+        for (String line : code) {
+            String trimmed = line.strip();
+            if (trimmed.length() > longest && consistsOf(trimmed, character)) {
+                longest = trimmed.length();
+            }
+        }
+        return Math.max(3, longest + 1);
+    }
+
+    private static boolean consistsOf(String text, char character) {
+        for (int index = 0; index < text.length(); index++) {
+            if (text.charAt(index) != character) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** @param lead a short paragraph that introduces the block and is put in front of its first piece; may be null */
