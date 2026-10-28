@@ -1,6 +1,12 @@
 # The calls the facade made for a vendor without tiers, scenario by scenario, in order (see
 # SelectForPoolCallSequenceSnapshotTest). Taken from the facade as it was before tiered source pools (commit dbcc0c0)
-# and unchanged since: a scenario that has to be edited here changes what a deployment without tiers does.
+# and unchanged since: a scenario that has to be edited here changes what a deployment without tiers does. The two
+# Responses scenarios (responseOwner, responseOwnerGone) were edited on 2026-10-27 for the owner's decision D11, and again
+# for D14 (the default is 16,000, not the model's maximum): a Responses request that names no output limit is held to
+# the default of the gateway (16,000, no more than the model writes: 64,000 for gpt-5.4) and no longer to 4,096, so the
+# reservation and the body the upstream is sent changed, and the facade looks the model's maximum up in the price catalog
+# once (pricing.maxOutputTokens). The in-flight tokens admission is asked for did not change: they are still sized from
+# 4,096 (out=4096), as they were.
 # <id> stands for an id the facade generates; json#... is the start of the SHA-256 of the body sent to the upstream.
 
 @@ kiroRoute
@@ -239,16 +245,17 @@ pool.circuitTier(glm-1, ctx[glm5.3/glm5.3/OpenAI-compatible/epoch=null])
 pool.circuitEpoch(ctx[glm5.3/glm5.3/OpenAI-compatible/epoch=null])
 
 @@ responseOwner
+pricing.maxOutputTokens(gpt-5.4)
 pool.captureCircuitEpoch()
 pool.captureCircuitPool(gpt-5.4, gpt-5.4, OpenAI, null)
 payments.config()
 pricing.billingQuote(gpt-5.4, false, 1)
-keys.reserveUsage(principal:key-1, <id>, 0.066162, {"model":"gpt-5.4","input":0.000003,"output":0.000015,"cacheRead":3E-7,"cacheWrite":0.00000375,"fallback":0.000003})
+keys.reserveUsage(principal:key-1, <id>, 0.244725, {"model":"gpt-5.4","input":0.000003,"output":0.000015,"cacheRead":3E-7,"cacheWrite":0.00000375,"fallback":0.000003})
 pool.selectOpenAiAccountByIdForPool(openai-1, ctx[gpt-5.4/gpt-5.4/OpenAI/epoch=null])
 admission.acquire(request[account=openai-1 in=59 out=4096 model=gpt-5.4 endpoint=/v1/responses])
 admission.markDispatched(UUID)
 keys.markUsageDispatched(principal:key-1, <id>)
-openai.completeResponses(openai-1, json#2509d0b9, gpt-5.4)
+openai.completeResponses(openai-1, json#72ebcb6e, gpt-5.4)
 pool.commitSessionAffinity(ctx[gpt-5.4/gpt-5.4/OpenAI/epoch=null], key-1:resp_known, openai-1, false)
 admission.reconcile(AdmissionResult)
 pool.recordCircuitSuccess(ctx[gpt-5.4/gpt-5.4/OpenAI/epoch=null], openai-1)
@@ -259,17 +266,18 @@ pool.circuitTier(openai-1, ctx[gpt-5.4/gpt-5.4/OpenAI/epoch=null])
 pool.circuitEpoch(ctx[gpt-5.4/gpt-5.4/OpenAI/epoch=null])
 
 @@ responseOwnerGone
+pricing.maxOutputTokens(gpt-5.4)
 pool.captureCircuitEpoch()
 pool.captureCircuitPool(gpt-5.4, gpt-5.4, OpenAI, null)
 payments.config()
 pricing.billingQuote(gpt-5.4, false, 1)
-keys.reserveUsage(principal:key-1, <id>, 0.066162, {"model":"gpt-5.4","input":0.000003,"output":0.000015,"cacheRead":3E-7,"cacheWrite":0.00000375,"fallback":0.000003})
+keys.reserveUsage(principal:key-1, <id>, 0.244725, {"model":"gpt-5.4","input":0.000003,"output":0.000015,"cacheRead":3E-7,"cacheWrite":0.00000375,"fallback":0.000003})
 pool.selectOpenAiAccountByIdForPool(openai-gone, ctx[gpt-5.4/gpt-5.4/OpenAI/epoch=null])
 pool.selectOpenAiApiKeyAccountForPool(key-1:resp_known, ctx[gpt-5.4/gpt-5.4/OpenAI/epoch=null])
 admission.acquire(request[account=openai-2 in=59 out=4096 model=gpt-5.4 endpoint=/v1/responses])
 admission.markDispatched(UUID)
 keys.markUsageDispatched(principal:key-1, <id>)
-openai.completeResponses(openai-2, json#2509d0b9, gpt-5.4)
+openai.completeResponses(openai-2, json#72ebcb6e, gpt-5.4)
 pool.commitSessionAffinity(ctx[gpt-5.4/gpt-5.4/OpenAI/epoch=null], key-1:resp_known, openai-2, false)
 admission.reconcile(AdmissionResult)
 pool.recordCircuitSuccess(ctx[gpt-5.4/gpt-5.4/OpenAI/epoch=null], openai-2)

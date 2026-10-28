@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -81,6 +82,7 @@ import tech.starryapi.platform.gemini.GeminiRequestAdapter;
 import tech.starryapi.platform.gemini.GeminiResponseFactory;
 import tech.starryapi.platform.kiro.KiroPayloadFactory;
 import tech.starryapi.platform.kiro.KiroUpstreamClient;
+import tech.starryapi.platform.openai.ApplyPatchEmulation;
 import tech.starryapi.platform.openai.OpenAiRequestAdapter;
 import tech.starryapi.platform.openai.OpenAiResponseFactory;
 import tech.starryapi.platform.openai.OpenAiResponseOwnerStore;
@@ -95,6 +97,7 @@ import tech.starryapi.platform.xproto.PairRegistry.Status;
 import tech.starryapi.platform.xproto.RelayAbortedAfterDispatchException;
 import tech.starryapi.platform.xproto.RelayAnswerWithheldException;
 import tech.starryapi.platform.xproto.RelayErrorMapper;
+import tech.starryapi.platform.xproto.RelayUsageNormalizer;
 import tech.starryapi.platform.xproto.RelayUsageNormalizer.Limits;
 import tech.starryapi.platform.xproto.ResponsesChatConverter;
 import tech.starryapi.proxy.tier.DefaultSourceTierPlanner;
@@ -143,9 +146,16 @@ class ProxyFacadeTieredXpResponsesTest {
         new BigDecimal("0.000003"), new BigDecimal("0.000015"), new BigDecimal("0.0000003"),
         new BigDecimal("0.00000375"), new BigDecimal("0.000003"));
     private static final String CALL_ID = "call_ABCDEFGHIJKLMNOPQRSTUVWX";
+    /**
+     * The limit a request that names none is held to (D14): the default of the gateway, which claude-sonnet-4.5 writes, the
+     * catalog listing 64,000 for it.
+     */
+    private static final int DEFAULT_OUTPUT = 16_000;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final DefaultModelCatalogProvider modelCatalog = new DefaultModelCatalogProvider();
+    /** What the operator set the default output of a Responses request that names none to: the facades of this test are built with it. */
+    private long defaultOutputTokens = ProxyProperties.DEFAULT_RESPONSES_OUTPUT_TOKENS;
     private final ApiKeyService apiKeyService = mock(ApiKeyService.class);
     private final AccountPoolService accountPool = mock(AccountPoolService.class);
     private final AccountAdmissionStore admissionStore = mock(AccountAdmissionStore.class);
@@ -174,6 +184,11 @@ class ProxyFacadeTieredXpResponsesTest {
     private final List<ProxyAccountEntity> cached = new ArrayList<>();
     /** Accounts admission refuses. */
     private final Set<String> busy = new HashSet<>();
+    /**
+     * Accounts in the cooldown or the quarantine of the allocation lifecycle (design 4.1, layer 3): they are still in the cache and
+     * not out of quota, so the plan counts them, but selection does not pick them and the pool does not call them selectable.
+     */
+    private final Set<String> cooling = new HashSet<>();
     /** What each Kiro account answers; an account that is not listed answers {@link #KIRO_ANSWER}. */
     private final Map<String, Supplier<Mono<PlatformCompletionResult>>> kiroAnswers = new HashMap<>();
     /** What each relay answers; a relay that is not listed answers {@link #RELAY_ANSWER}. */
@@ -182,11 +197,16 @@ class ProxyFacadeTieredXpResponsesTest {
     private final List<String> dispatched = new ArrayList<>();
     /** The dispatches that were made to relays, in order. */
     private final List<TierDispatch> relayDispatches = new ArrayList<>();
+    /** The time each dispatch to a relay was given, in order. */
+    private final List<Duration> relayTimeLimits = new ArrayList<>();
+    /** What each relay refuses of the request it is shown, if it does: the error it answers with, or null where it serves. */
+    private final Map<String, Function<TierDispatch, Throwable>> relayRefuses = new HashMap<>();
     /** What the Kiro accounts were asked, as the payload factory made it. */
     private final List<JsonNode> kiroPayloads = new ArrayList<>();
     /** The requests the planner made a plan for, as the entries handed them over. */
     private final List<TierPlanRequest> planned = new ArrayList<>();
     private final ProxyAccountEntity relay = account("relay-1", "OpenAI-compatible", "api-key", "https://relay.example/v1");
+    private final ProxyAccountEntity secondRelay = account("relay-2", "OpenAI-compatible", "api-key", "https://relay-two.example/v1");
     private Limits lastLimits;
     /** Whether the output limit of each dispatch to a relay was the gateway's own default, in order. */
     private final List<Boolean> defaultOutputLimits = new ArrayList<>();
@@ -222,13 +242,15 @@ class ProxyFacadeTieredXpResponsesTest {
         when(accountPool.isUsable(any())).thenReturn(true);
         when(accountPool.selectInScope(any(), any(), anyString(), any(), any(), anyBoolean())).thenAnswer(invocation -> {
             Predicate<ProxyAccountEntity> filter = invocation.getArgument(1);
-            Optional<ProxyAccountEntity> found = cached.stream().filter(filter).filter(accountPool::isUsable).findFirst();
+            Optional<ProxyAccountEntity> found = cached.stream().filter(filter).filter(accountPool::isUsable)
+                .filter(account -> !cooling.contains(account.getAccountId())).findFirst();
             return found.<Mono<ProxyAccountEntity>>map(Mono::just).orElseGet(() -> Mono.error(
                 new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", invocation.getArgument(2))));
         });
         when(accountPool.hasSelectableAccount(any())).thenAnswer(invocation -> {
             Predicate<ProxyAccountEntity> filter = invocation.getArgument(0);
-            return Mono.just(cached.stream().anyMatch(filter));
+            return Mono.just(cached.stream().filter(accountPool::isUsable)
+                .anyMatch(account -> !cooling.contains(account.getAccountId()) && filter.test(account)));
         });
         when(accountPool.refreshCacheIfStale()).thenReturn(Mono.empty());
         when(admissionStore.acquire(any())).thenAnswer(invocation -> {
@@ -256,9 +278,14 @@ class ProxyFacadeTieredXpResponsesTest {
             ProxyAccountEntity account = invocation.getArgument(0);
             relayDispatches.add(invocation.getArgument(1));
             lastLimits = invocation.getArgument(2);
+            relayTimeLimits.add(invocation.getArgument(3));
             defaultOutputLimits.add(invocation.getArgument(4));
             dispatched.add(account.getAccountId());
             TierDispatch dispatch = invocation.getArgument(1);
+            Throwable refusal = relayRefuses.getOrDefault(account.getAccountId(), ignored -> null).apply(dispatch);
+            if (refusal != null) {
+                return Mono.error(refusal);
+            }
             return relayAnswers.getOrDefault(account.getAccountId(), () -> Mono.just(RELAY_ANSWER)).get()
                 .map(answer -> new PlatformCompletionResult(answer.content(), answer.reasoningContent(), answer.toolUses(), answer.usage(),
                     answer.stopReason(), answer.usageSource(), dispatch.degraded()));
@@ -324,9 +351,10 @@ class ProxyFacadeTieredXpResponsesTest {
         assertThat(body.path("tools")).extracting(tool -> tool.path("function").path("name").asString())
             .containsExactly("exec_command", "update_plan");
         assertThat(body.path("tool_choice").asString()).isEqualTo("auto");
-        // The limit the reservation assumes, which the request did not name, is the one the relay is given and held to.
-        assertThat(body.path("max_tokens").asInt()).isEqualTo(4096);
-        assertThat(lastLimits.maxOutputTokens()).isEqualTo(4096);
+        // The limit the reservation assumes, which the request did not name, is the one the relay is given and held to: the
+        // default output of the gateway.
+        assertThat(body.path("max_tokens").asInt()).isEqualTo(DEFAULT_OUTPUT);
+        assertThat(lastLimits.maxOutputTokens()).isEqualTo(DEFAULT_OUTPUT);
         assertThat(body.path("stream").booleanValue()).isTrue();
         assertThat(body.toString()).doesNotContain("web_search", "multi_agent_v1", "client_metadata", "prompt_cache_key",
             "x-codex-installation-id", "previous_response_id");
@@ -451,7 +479,7 @@ class ProxyFacadeTieredXpResponsesTest {
     }
 
     /**
-     * Codex names no output limit, so the 4,096 tokens the relay was told it may write are the gateway's own bound. Codex takes
+     * Codex names no output limit, so the tokens the relay was told it may write are the gateway's own bound. Codex takes
      * a response that is incomplete for a failed stream and sends the request again, five more times, and every answer of the
      * relay is paid for: the answer is a finished one, as the answer of every native account is.
      */
@@ -473,7 +501,7 @@ class ProxyFacadeTieredXpResponsesTest {
         assertThat(whole.path("status").asString()).isEqualTo("completed");
         assertThat(whole.path("incomplete_details").isNull()).isTrue();
         // The relay was told the bound, and the request log and the charge are of what it wrote.
-        assertThat(relayDispatches.getFirst().wireBody().path("max_tokens").asInt()).isEqualTo(4096);
+        assertThat(relayDispatches.getFirst().wireBody().path("max_tokens").asInt()).isEqualTo(DEFAULT_OUTPUT);
         verify(apiKeyService, times(2)).accountUsageServed(any(), anyString(), any(), eq(8_000L), eq(1_000L), eq("anthropic:relay"), eq(1), any());
         assertThat(logs().getFirst().stopReason()).isEqualTo("MAX_TOKENS");
     }
@@ -577,10 +605,60 @@ class ProxyFacadeTieredXpResponsesTest {
     }
 
     /**
-     * The 4,096 tokens a request that names no limit is held to are the gateway's for every source, not the relay's alone: Kiro
-     * is sent them as its {@code maxTokens} (it is the bound the reservation is sized from, and what the facade has always sent
-     * the accounts of this route). So the client whose retry is Kiro's is not given a source that lets a long write complete;
-     * only Codex accounts, which drop the field, are. The documentation says so (design 7.10, O12).
+     * The operator paid for the answer that was held back, and the row of the attempt says what the relay reported of it (D11)
+     * in columns of their own: the tokens and the credits of the row are the user's usage and charge, which are nothing.
+     */
+    @Test
+    void theUsageTheRelayReportedOfAnAnswerHeldBackIsOnItsLogRowApartFromTheUsageOfTheUser() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        fails(relayAnswers, "relay-1", new RelayAnswerWithheldException("The source's answer was cut off before it could be used",
+            new PlatformUsage(60_000, 4_096, BigDecimal.ZERO, 0, 0, 0)));
+
+        assertThatThrownBy(() -> responses(codexTurn(), "codex-session-1")).isInstanceOf(ApiException.class);
+
+        StatsService.RequestLog row = onlyLog();
+        assertThat(row.stopReason()).isEqualTo("WITHHELD");
+        assertThat(row.success()).isFalse();
+        assertThat(row.inputTokens()).isZero();
+        assertThat(row.outputTokens()).isZero();
+        assertThat(row.credits()).isEqualByComparingTo(BigDecimal.ZERO);
+        assertThat(row.withheldInputTokens()).isEqualTo(60_000L);
+        assertThat(row.withheldOutputTokens()).isEqualTo(4_096L);
+        // Nothing is charged, and the reservation is released for good.
+        verify(apiKeyService, never()).accountUsageServed(any(), anyString(), any(), anyLong(), anyLong(), anyString(), anyInt(), any());
+        verify(apiKeyService, never()).accountUsage(any(), anyString(), any(), anyLong(), anyLong());
+        verify(apiKeyService).releaseUsage(any(), anyString(), eq(true), anyString());
+    }
+
+    /** A held back answer whose usage is not known leaves the columns empty, as a failure of any other kind does. */
+    @Test
+    void aHeldBackAnswerWithoutAUsageAndAFailureOfAnotherKindLeaveTheWithheldColumnsEmpty() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        fails(relayAnswers, "relay-1", new RelayAnswerWithheldException("The source stopped its answer with its content filter"));
+        assertThatThrownBy(() -> responses(codexTurn(), "codex-session-1")).isInstanceOf(ApiException.class);
+        assertThat(onlyLog().withheldInputTokens()).isNull();
+        assertThat(onlyLog().withheldOutputTokens()).isNull();
+    }
+
+    @Test
+    void anInterruptedRelayLeavesTheWithheldColumnsEmpty() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        fails(relayAnswers, "relay-1", new RelayAbortedAfterDispatchException("The exchange with the source failed after the request was sent"));
+
+        assertThatThrownBy(() -> responses(codexTurn(), "codex-session-1")).isInstanceOf(ApiException.class);
+
+        assertThat(onlyLog().stopReason()).isEqualTo("INTERRUPTED");
+        assertThat(onlyLog().withheldInputTokens()).isNull();
+        assertThat(onlyLog().withheldOutputTokens()).isNull();
+    }
+
+    /**
+     * The limit a request that names none is held to, the default output of the gateway (D11, D14), is the gateway's for every source, not
+     * the relay's alone: Kiro is sent it as its {@code maxTokens} (it is the bound the reservation is sized from). Codex
+     * accounts, which drop the field, are the only ones that are not held to it (design 7.10).
      */
     @Test
     void kiroIsHeldToTheSameDefaultOutputLimitAsTheRelayWhenTheClientNamesNone() {
@@ -592,11 +670,845 @@ class ProxyFacadeTieredXpResponsesTest {
         responses(codexTurn().put("stream", false));
         responses(codexTurn().put("stream", false).put("max_output_tokens", 20_000));
 
-        assertThat(lastLimits.maxOutputTokens()).isEqualTo(4096);
-        assertThat(relayDispatches.getFirst().wireBody().path("max_tokens").asInt()).isEqualTo(4096);
+        assertThat(lastLimits.maxOutputTokens()).isEqualTo(DEFAULT_OUTPUT);
+        assertThat(relayDispatches.getFirst().wireBody().path("max_tokens").asInt()).isEqualTo(DEFAULT_OUTPUT);
         assertThat(kiroPayloads).hasSize(2);
-        assertThat(kiroPayloads.get(0).path("inferenceConfig").path("maxTokens").asInt()).isEqualTo(4096);
+        assertThat(kiroPayloads.get(0).path("inferenceConfig").path("maxTokens").asInt()).isEqualTo(DEFAULT_OUTPUT);
         assertThat(kiroPayloads.get(1).path("inferenceConfig").path("maxTokens").asInt()).as("the client's own limit is kept").isEqualTo(20_000);
+    }
+
+    /** A model the catalog does not list has no maximum to be held to: it keeps the limit the gateway has always given it, whatever the default is. */
+    @Test
+    void aModelTheCatalogDoesNotListIsHeldToTheFallbackLimitWhenTheClientNamesNone() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+
+        responses(codexTurn().put("stream", false).put("model", "claude-unlisted-9"));
+
+        // The relay has no mapping for it, so Kiro serves.
+        assertThat(relayDispatches).isEmpty();
+        assertThat(kiroPayloads.getFirst().path("inferenceConfig").path("maxTokens").asInt()).isEqualTo(4096);
+    }
+
+    /**
+     * The reservation is sized from the same limit: a request that names none reserves the output of the default, and one that
+     * names its own limit the output of that.
+     */
+    @Test
+    void theReservationAssumesTheLimitTheRequestIsHeldToAndIsAsBigAsTheDefaultWhenTheClientNamesNone() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+
+        responses(codexTurn().put("stream", false));
+        responses(codexTurn().put("stream", false).put("max_output_tokens", 2000));
+
+        ArgumentCaptor<BigDecimal> reserved = ArgumentCaptor.forClass(BigDecimal.class);
+        verify(apiKeyService, times(2)).reserveUsage(any(), anyString(), reserved.capture(), anyString());
+        // $15/M out: the full tier reserves about 0.24 for 16,000 tokens and about 0.03 for 2,000, plus the same input.
+        assertThat(reserved.getAllValues().get(0)).isGreaterThan(new BigDecimal("0.24")).isLessThan(new BigDecimal("0.3"));
+        assertThat(reserved.getAllValues().get(1)).isGreaterThan(new BigDecimal("0.03")).isLessThan(new BigDecimal("0.1"));
+    }
+
+    /**
+     * The in-flight output tokens an account is admitted for stay what they were (4,096) whenever the limit of the request is
+     * the gateway's, whichever source is asked: the cap on an account's in-flight tokens is an existing one, and the default
+     * is for the reservation and the body. A limit the client wrote is held for as written.
+     */
+    @Test
+    void admissionIsAskedForTheFourThousandItAlwaysWasWhenTheClientNamesNoLimitForRelayAndKiroAlike() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+
+        responses(codexTurn().put("stream", false));
+        responses(codexTurn().put("stream", false).put("max_output_tokens", 20_000));
+        busy.add("relay-1");
+        responses(codexTurn().put("stream", false));
+
+        ArgumentCaptor<AdmissionRequest> asked = ArgumentCaptor.forClass(AdmissionRequest.class);
+        verify(admissionStore, times(4)).acquire(asked.capture());
+        assertThat(asked.getAllValues()).extracting(AdmissionRequest::accountId, AdmissionRequest::reservedOutputTokens)
+            .containsExactly(
+                org.assertj.core.groups.Tuple.tuple("relay-1", 4096L),
+                org.assertj.core.groups.Tuple.tuple("relay-1", 20_000L),
+                org.assertj.core.groups.Tuple.tuple("relay-1", 4096L),
+                org.assertj.core.groups.Tuple.tuple("kiro-1", 4096L));
+        // The body they are sent and the reservation are the default all the same.
+        assertThat(relayDispatches.getFirst().wireBody().path("max_tokens").asInt()).isEqualTo(DEFAULT_OUTPUT);
+        assertThat(kiroPayloads.getFirst().path("inferenceConfig").path("maxTokens").asInt()).isEqualTo(DEFAULT_OUTPUT);
+    }
+
+    /**
+     * The default is the operator's to set (STARRY_RESPONSES_DEFAULT_OUTPUT_TOKENS): it is the one number that the relay is told
+     * it may write and is held to, that Kiro is sent, and that the reservation is sized from, however high it is set (the
+     * models of this test write 64,000).
+     */
+    @Test
+    void theDefaultOutputTheOperatorSetIsTheOneTheRelayKiroAndTheReservationAreHeldTo() {
+        defaultOutputTokens = 32_000;
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+
+        responses(codexTurn().put("stream", false));
+        busy.add("relay-1");
+        responses(codexTurn().put("stream", false));
+
+        assertThat(relayDispatches.getFirst().wireBody().path("max_tokens").asInt()).isEqualTo(32_000);
+        assertThat(lastLimits.maxOutputTokens()).isEqualTo(32_000);
+        assertThat(kiroPayloads.getFirst().path("inferenceConfig").path("maxTokens").asInt()).isEqualTo(32_000);
+        ArgumentCaptor<BigDecimal> reserved = ArgumentCaptor.forClass(BigDecimal.class);
+        verify(apiKeyService, times(2)).reserveUsage(any(), anyString(), reserved.capture(), anyString());
+        // $15/M out: about 0.48 for 32,000 tokens, plus the input.
+        assertThat(reserved.getAllValues()).allSatisfy(hold -> assertThat(hold).isGreaterThan(new BigDecimal("0.48")).isLessThan(new BigDecimal("0.55")));
+        // Admission is asked for the 4,096 it always was.
+        ArgumentCaptor<AdmissionRequest> asked = ArgumentCaptor.forClass(AdmissionRequest.class);
+        verify(admissionStore, times(3)).acquire(asked.capture());
+        assertThat(asked.getAllValues()).extracting(AdmissionRequest::reservedOutputTokens).containsOnly(4096L);
+    }
+
+    /**
+     * The window of the relay has to hold the prompt and the output the operator's default comes to: a turn that fits it with the
+     * 16,000 does not with 32,000, and is Kiro's then. The setting moves the line, and nothing else does.
+     */
+    @Test
+    void theWindowOfTheRelayHoldsThePromptAndTheDefaultOutputTheOperatorSet() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+
+        ResponseEntity<?> sixteen = responses(promptOf(170_000, null));
+        defaultOutputTokens = 32_000;
+        ResponseEntity<?> thirtyTwo = responses(promptOf(170_000, null));
+
+        assertThat(dispatched).containsExactly("relay-1", "kiro-1");
+        assertThat(sixteen.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(thirtyTwo.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
+        assertThat(relayDispatches).hasSize(1);
+        assertThat(relayDispatches.getFirst().wireBody().path("max_tokens").asInt()).isEqualTo(16_000);
+        assertThat(kiroPayloads.getFirst().path("inferenceConfig").path("maxTokens").asInt()).isEqualTo(32_000);
+        // Nothing was asked of the relay that it could refuse, so nothing was learned.
+        MemberModel mapping = mapping(relayMember("relay-1"), relay);
+        assertThat(learnedLimits.refusedFrom(mapping)).isEmpty();
+        assertThat(learnedLimits.refusedFromWithGatewayOutput(mapping)).isEmpty();
+    }
+
+    /** A prompt about as long as a Codex session gets after a few dozen turns: an estimated {@code tokens}, in one text. */
+    private ObjectNode promptOf(int tokens, Integer limit) {
+        ObjectNode body = plain("a".repeat(tokens * 4), null);
+        if (limit != null) {
+            body.put("max_output_tokens", limit);
+        }
+        return body;
+    }
+
+    /**
+     * The window of the relay (200,000 here) has to hold the output the gateway chose besides the prompt: a turn of 190,000
+     * tokens and the 16,000 of the default do not fit, and the relay that would refuse it is not asked. The same turn with a limit
+     * of the client's own is the relay's, as it was before the gateway chose a limit: only the prompt was ever measured.
+     */
+    @Test
+    void aTurnWhoseOutputTheGatewayChoseOutgrowsTheWindowBesidesItsPromptIsKirosAndTheRelayIsNotAsked() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+
+        ResponseEntity<?> gateway = responses(promptOf(190_000, null));
+        ResponseEntity<?> clients = responses(promptOf(190_000, 8_000));
+        ResponseEntity<?> shorter = responses(promptOf(100_000, null));
+
+        assertThat(dispatched).containsExactly("kiro-1", "relay-1", "relay-1");
+        assertThat(gateway.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
+        assertThat(clients.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(shorter.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        // No attempt is made at the relay, so nothing is left for review and nothing is learned from it.
+        verify(apiKeyService, never()).releaseUsage(any(), anyString(), anyBoolean(), anyString());
+        MemberModel mapping = mapping(relayMember("relay-1"), relay);
+        assertThat(learnedLimits.refusedFrom(mapping)).isEmpty();
+        assertThat(learnedLimits.refusedFromWithGatewayOutput(mapping)).isEmpty();
+    }
+
+    /**
+     * Where the relay is the only source the client allows (a pin to its tier by the suffix), a turn whose prompt and the
+     * default output do not fit its window is still the relay's: it was served before D11, and Codex has no way to name a
+     * limit that would make it fit. The relay is given the request it had before D11 (the 4,096), not an output cut to the room
+     * the window appears to leave, which an estimate of the prompt that is short would turn into a refusal that HEAD never gave.
+     * It is charged for no more than the 4,096, and the reservation is the default all the same.
+     */
+    @Test
+    void aTurnPinnedToTheRelayWhoseWindowDoesNotHoldTheDefaultOutputBesidesItsPromptIsGivenTheOutputItHadBeforeD11() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        ObjectNode pinned = promptOf(190_000, null);
+        pinned.put("model", "claude-sonnet-4.5@relay");
+
+        ResponseEntity<?> response = responses(pinned);
+
+        assertThat(dispatched).containsExactly("relay-1");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.MODE)).isEqualTo("pinned");
+        assertThat(relayDispatches.getFirst().wireBody().path("max_tokens").asLong()).isEqualTo(4_096L);
+        assertThat(lastLimits.maxOutputTokens()).isEqualTo(4_096L);
+        assertThat(defaultOutputLimits).as("the client named none: 4,096 is the gateway's own bound, as it was").containsExactly(true);
+        ArgumentCaptor<BigDecimal> reserved = ArgumentCaptor.forClass(BigDecimal.class);
+        verify(apiKeyService).reserveUsage(any(), anyString(), reserved.capture(), anyString());
+        assertThat(reserved.getValue()).as("the default is reserved").isGreaterThan(new BigDecimal("0.24"));
+        // Nothing was left out, so nothing was learned either.
+        MemberModel mapping = mapping(relayMember("relay-1"), relay);
+        assertThat(learnedLimits.refusedFrom(mapping)).isEmpty();
+        assertThat(learnedLimits.refusedFromWithGatewayOutput(mapping)).isEmpty();
+    }
+
+    /** A turn of 190,000 tokens with no output limit, as Codex sends it, pinned to the tier of relays. */
+    private ObjectNode longTurnPinnedToTheRelays() {
+        ObjectNode turn = promptOf(190_000, null);
+        turn.put("model", "claude-sonnet-4.5@relay");
+        return turn;
+    }
+
+    /**
+     * The first relay of the tier (200,000) cannot hold the turn and the default output, and the second one (400,000) can: it
+     * serves the turn and holds its answer back, which keeps it out for the session for two minutes. The retry of Codex is then
+     * the first relay's, with the output it had before D11, as it is the only source left: the answer is not a 503 for as long
+     * as the other relay is out, and the turn is served by a relay that served it before.
+     */
+    @Test
+    void theRetryOfAnAnswerHeldBackByTheLargerRelayIsServedByTheSmallerOneWithTheOutputItHadBeforeD11() {
+        configure(ownerWithTwoRelays(gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, secondRelay, kiro("kiro-1"));
+        fails(relayAnswers, "relay-2", new RelayAnswerWithheldException("The source's answer was cut off before it could be used"));
+
+        assertThatThrownBy(() -> responses(longTurnPinnedToTheRelays(), "codex-session-1")).isInstanceOfSatisfying(ApiException.class,
+            error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_GATEWAY));
+        assertThat(dispatched).containsExactly("relay-2");
+        assertThat(relayDispatches.getFirst().wireBody().path("max_tokens").asLong()).isEqualTo(DEFAULT_OUTPUT);
+
+        ResponseEntity<?> retry = responses(longTurnPinnedToTheRelays(), "codex-session-1");
+
+        assertThat(dispatched).containsExactly("relay-2", "relay-1");
+        assertThat(retry.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(relayDispatches.getLast().wireBody().path("max_tokens").asLong()).isEqualTo(4_096L);
+        assertThat(lastLimits.maxOutputTokens()).isEqualTo(4_096L);
+        // Another session is not kept from the larger relay, and the gateway's output is held to the window as before.
+        dispatched.clear();
+        relayAnswers.clear();
+        responses(longTurnPinnedToTheRelays(), "codex-session-2");
+        assertThat(dispatched).containsExactly("relay-2");
+        assertThat(relayDispatches.getLast().wireBody().path("max_tokens").asLong()).isEqualTo(DEFAULT_OUTPUT);
+    }
+
+    /** The same, for a vendor with no account of the route outside the tier of relays: no pin is needed for the relay to be the only source. */
+    @Test
+    void theRetryOfAnAnswerHeldBackByTheLargerRelayIsServedByTheSmallerOneWhereTheVendorHasNoNativeAccount() {
+        configure(ownerWithTwoRelays(gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, secondRelay);
+        fails(relayAnswers, "relay-2", new RelayAnswerWithheldException("The source's answer was cut off before it could be used"));
+        Supplier<ObjectNode> turn = () -> promptOf(190_000, null);
+
+        assertThatThrownBy(() -> responses(turn.get(), "codex-session-1")).isInstanceOfSatisfying(ApiException.class,
+            error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_GATEWAY));
+
+        ResponseEntity<?> retry = responses(turn.get(), "codex-session-1");
+
+        assertThat(dispatched).containsExactly("relay-2", "relay-1");
+        assertThat(retry.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(relayDispatches.getLast().wireBody().path("max_tokens").asLong()).isEqualTo(4_096L);
+    }
+
+    /**
+     * The relay refuses the turn it was given as its only source (the estimate of the prompt was short, or the window was
+     * written too large): that is what the same turn would have met before D11, and it teaches what it taught then. The smaller
+     * turns of the session are still the relay's, and so is the same turn with a limit of the client's own that is not larger;
+     * only this size and larger are not asked again.
+     */
+    @Test
+    void aRelayThatRefusedTheTurnItWasGivenAsItsOnlySourceStillServesTheSmallerTurnsOfTheSession() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        fails(relayAnswers, "relay-1", relayErrors.fromResponse(400,
+            error("context_length_exceeded", "maximum context length is 200000 tokens ... (190000 in the messages, 4096 in the completion)"),
+            null, "relay-1", "sk-secret"));
+        ObjectNode longTurn = promptOf(190_000, null);
+        longTurn.put("model", "claude-sonnet-4.5@relay");
+
+        assertThatThrownBy(() -> responses(longTurn)).isInstanceOfSatisfying(ApiException.class, error -> {
+            assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+            assertThat(error.getMessage()).contains("prompt is too long");
+        });
+
+        MemberModel taught = mapping(relayMember("relay-1"), relay);
+        assertThat(learnedLimits.refusedFrom(taught).getAsLong()).as("the prompt is what was too long").isBetween(190_000L, 190_100L);
+        assertThat(learnedLimits.refusedFromWithGatewayOutput(taught)).isEmpty();
+
+        relayAnswers.clear();
+        dispatched.clear();
+        ObjectNode shorter = promptOf(185_000, null);
+        shorter.put("model", "claude-sonnet-4.5@relay");
+        ResponseEntity<?> served = responses(shorter);
+        ObjectNode again = promptOf(190_000, null);
+        again.put("model", "claude-sonnet-4.5@relay");
+
+        assertThat(served.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(dispatched).containsExactly("relay-1");
+        assertThat(relayDispatches.getLast().wireBody().path("max_tokens").asLong()).isEqualTo(4_096L);
+        assertThatThrownBy(() -> responses(again)).isInstanceOfSatisfying(ApiException.class,
+            error -> assertThat(error.getMessage()).contains("prompt is too long"));
+        assertThat(dispatched).as("not asked again").containsExactly("relay-1");
+    }
+
+    /**
+     * Kiro is an account of the route whose quota is spent: the relay is the one source that can serve the turn now, and
+     * before D11 it did, with the 4,096. The default output is Kiro's to have when it can serve.
+     */
+    @Test
+    void aTurnTheDefaultOutputDoesNotFitTheRelayIsServedByItWhenKirosAccountsCannotServeNow() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        ProxyAccountEntity kiroAccount = kiro("kiro-1");
+        add(relay, kiroAccount);
+        when(accountPool.isUsable(kiroAccount)).thenReturn(false);
+
+        ResponseEntity<?> response = responses(promptOf(190_000, null));
+
+        assertThat(dispatched).containsExactly("relay-1");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(relayDispatches.getFirst().wireBody().path("max_tokens").asLong()).isEqualTo(4_096L);
+        when(accountPool.isUsable(kiroAccount)).thenReturn(true);
+        dispatched.clear();
+        ResponseEntity<?> back = responses(promptOf(190_000, null));
+        assertThat(dispatched).containsExactly("kiro-1");
+        assertThat(back.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
+    }
+
+    /**
+     * Kiro's accounts can serve (their quota is not spent) but are busy when the request is admitted, which the plan cannot
+     * know: the relay that the default output left out is not planned for the request, so it waits for Kiro and is answered
+     * with the retryable 503 (O15 records the choice). Nothing is dispatched, so nothing is left for review.
+     */
+    @Test
+    void aTurnTheDefaultOutputDoesNotFitTheRelayWaitsForKiroWhenKirosAccountsAreOnlyBusy() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        busy.add("kiro-1");
+
+        assertThatThrownBy(() -> responses(promptOf(190_000, null))).isInstanceOfSatisfying(ApiException.class,
+            error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE));
+
+        assertThat(dispatched).isEmpty();
+        MemberModel mapping = mapping(relayMember("relay-1"), relay);
+        assertThat(learnedLimits.refusedFrom(mapping)).isEmpty();
+        assertThat(learnedLimits.refusedFromWithGatewayOutput(mapping)).isEmpty();
+    }
+
+    /**
+     * Kiro's accounts are in the cooldown of the allocation lifecycle (a 429, a 5xx a minute ago): they are in the cache and not out
+     * of quota, so the plan counts them, but selection finds none, as it would for the whole minute. The relay that the default
+     * output left out is the one source that can serve the turn, and before D11 it did, with the 4,096: the request is not a 503
+     * for as long as Kiro cools down.
+     */
+    @Test
+    void aTurnTheDefaultOutputDoesNotFitTheRelayIsServedByItWhenKirosAccountsAreCoolingDown() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        cooling.add("kiro-1");
+
+        ResponseEntity<?> first = responses(promptOf(190_000, null));
+        ResponseEntity<?> retry = responses(promptOf(190_000, null));
+
+        assertThat(dispatched).containsExactly("relay-1", "relay-1");
+        assertThat(first.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(retry.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(relayOutputs()).containsExactly(4_096L, 4_096L);
+        assertThat(lastLimits.maxOutputTokens()).isEqualTo(4_096L);
+        // Kiro is back: the output the gateway chose is Kiro's to write again.
+        cooling.clear();
+        dispatched.clear();
+        ResponseEntity<?> back = responses(promptOf(190_000, null));
+        assertThat(dispatched).containsExactly("kiro-1");
+        assertThat(back.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
+    }
+
+    /** The vendor has no native account on the route: the larger relay of the tier cools down, and the smaller one serves the turn it was left out of. */
+    @Test
+    void aTurnTheDefaultOutputDoesNotFitTheSmallerRelayIsServedByItWhenTheLargerOneIsCoolingDown() {
+        configure(ownerWithTwoRelays(gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, secondRelay);
+        cooling.add("relay-2");
+
+        ResponseEntity<?> response = responses(promptOf(190_000, null));
+
+        assertThat(dispatched).containsExactly("relay-1");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(relayOutputs()).containsExactly(4_096L);
+        // The larger one is back, and the turn is its own again with the output the gateway chose.
+        cooling.clear();
+        dispatched.clear();
+        responses(promptOf(190_000, null));
+        assertThat(dispatched).containsExactly("relay-2");
+        assertThat(relayOutputs().getLast()).isEqualTo((long) DEFAULT_OUTPUT);
+    }
+
+    /** The same for a request pinned to the tier of relays by the suffix, with Kiro usable outside the pin. */
+    @Test
+    void aTurnPinnedToTheRelaysIsServedByTheSmallerOneWhenTheLargerOneIsCoolingDown() {
+        configure(ownerWithTwoRelays(gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, secondRelay, kiro("kiro-1"));
+        cooling.add("relay-2");
+
+        ResponseEntity<?> response = responses(longTurnPinnedToTheRelays());
+
+        assertThat(dispatched).containsExactly("relay-1");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.MODE)).isEqualTo("pinned");
+        assertThat(relayOutputs()).containsExactly(4_096L);
+    }
+
+    /**
+     * Cooling down is not the only thing between a relay and a turn: the larger relay can also be busy when the request is
+     * admitted, which the plan cannot see before the request is dispatched (the same open question as for Kiro, O15). Nothing is
+     * dispatched, nothing is left for review, and the client is told to try again.
+     */
+    @Test
+    void aTurnTheDefaultOutputDoesNotFitTheSmallerRelayWaitsForTheLargerOneWhenItIsOnlyBusy() {
+        configure(ownerWithTwoRelays(gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, secondRelay);
+        busy.add("relay-2");
+
+        assertThatThrownBy(() -> responses(promptOf(190_000, null))).isInstanceOfSatisfying(ApiException.class,
+            error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE));
+
+        assertThat(dispatched).isEmpty();
+    }
+
+    /**
+     * A relay that refuses such a request for its length (its real window is smaller than the one written) is taught about
+     * requests like it only: a Codex turn of the same prompt that names a limit of its own is still the relay's, as a Chat
+     * or Messages request of that size is, and is not made to skip it for six hours by the default output.
+     */
+    @Test
+    void aRefusalForLengthOfATurnWithTheGatewaysOutputTeachesTurnsLikeItAndNotARequestOfTheSamePromptWithALimitOfItsOwn() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        fails(relayAnswers, "relay-1", relayErrors.fromResponse(400,
+            error("context_length_exceeded", "maximum context length is 110000 tokens ... (100000 in the messages, 16000 in the completion)"),
+            null, "relay-1", "sk-secret"));
+
+        ResponseEntity<?> crossed = responses(promptOf(100_000, null));
+
+        // The relay was asked (116,000 of the 200,000 it claims), refused, and Kiro answered.
+        assertThat(dispatched).containsExactly("relay-1", "kiro-1");
+        assertThat(crossed.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
+        MemberModel taught = mapping(relayMember("relay-1"), relay);
+        assertThat(learnedLimits.refusedFrom(taught)).as("the prompt alone was not shown to be too long").isEmpty();
+        assertThat(learnedLimits.refusedFromWithGatewayOutput(taught).getAsLong()).isBetween(116_000L, 122_000L);
+
+        relayAnswers.clear();
+        dispatched.clear();
+        ResponseEntity<?> ownLimit = responses(promptOf(100_000, 4_096));
+        ResponseEntity<?> sameAgain = responses(promptOf(100_000, null));
+
+        assertThat(dispatched).containsExactly("relay-1", "kiro-1");
+        assertThat(ownLimit.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(sameAgain.getHeaders().getFirst(TierResponseHeaders.TIER)).as("a request like the one refused").isEqualTo("kiro");
+    }
+
+    // ---- the relay is the only source and counts more than the estimate ----
+
+    /**
+     * A relay whose count of the prompt is {@code counts} times the gateway's estimate (characters over four: a tokenizer finds more
+     * in code and in other languages), refusing what that and the output limit it is told come to over {@code window}, in the
+     * words of vLLM (which the mapper knows for a refusal of the length) or in the Anthropic style (which it does not).
+     */
+    private void relayCounts(String accountId, double counts, int window, boolean vllmWording) {
+        relayRefuses.put(accountId, dispatch -> {
+            long counted = Math.round(RelayUsageNormalizer.estimateInputTokens(dispatch.wireBody()) * counts);
+            long output = dispatch.forwardedOutputLimit();
+            if (counted + output <= window) {
+                return null;
+            }
+            String body = vllmWording
+                ? error("context_length_exceeded", "maximum context length is " + window + " tokens ... (" + counted
+                    + " in the messages, " + output + " in the completion)")
+                : error("invalid_request_error", "input length and `max_tokens` exceed context limit: " + counted + " + " + output
+                    + " > " + window + ", decrease input length or `max_tokens` and try again");
+            return relayErrors.fromResponse(400, body, null, accountId, "sk-secret");
+        });
+    }
+
+    private List<Long> relayOutputs() {
+        return relayDispatches.stream().map(TierDispatch::forwardedOutputLimit).toList();
+    }
+
+    /**
+     * The relay the turn is pinned to counts 5% more than the estimate, so that the 16,000 the gateway chose does not fit beside
+     * the prompt though the estimate said it does. Before D11 the turn was sent 4,096 and served, and Codex does not retry a 400:
+     * the relay is asked again within the dispatch, with that request, and serves it. One admission, one reservation and one
+     * settlement: the second request is not a dispatch of its own.
+     */
+    @Test
+    void aPinnedRelayThatCountsMoreThanTheEstimateAndRefusesTheOutputTheGatewayChoseIsAskedAgainWithTheOutputItHadBeforeD11() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        relayCounts("relay-1", 1.05, 200_000, true);
+        ObjectNode turn = promptOf(180_000, null);
+        turn.put("model", "claude-sonnet-4.5@relay");
+
+        ResponseEntity<?> response = responses(turn);
+
+        assertThat(dispatched).containsExactly("relay-1", "relay-1");
+        assertThat(response.getStatusCode().value()).isEqualTo(200);
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(relayOutputs()).containsExactly((long) DEFAULT_OUTPUT, 4_096L);
+        assertThat(lastLimits.maxOutputTokens()).as("charged for no more than it was told it may write").isEqualTo(4_096L);
+        assertThat(defaultOutputLimits).as("the client named none, in both").containsExactly(true, true);
+        assertThat(relayTimeLimits.get(1)).as("the time of the dispatch is shared").isLessThanOrEqualTo(relayTimeLimits.get(0));
+        verify(admissionStore, times(1)).acquire(any());
+        verify(apiKeyService, times(1)).reserveUsage(any(), anyString(), any(), anyString());
+        verify(apiKeyService, never()).releaseUsage(any(), anyString(), anyBoolean(), anyString());
+        verify(apiKeyService, times(1)).accountUsageServed(any(), anyString(), any(), anyLong(), anyLong(), anyString(), anyInt(), any());
+        StatsService.RequestLog row = onlyLog();
+        assertThat(row.success()).isTrue();
+        assertThat(row.accountId()).isEqualTo("relay-1");
+        // The refusal of the length with the gateway's output taught what it taught before: this size and that output, no more.
+        MemberModel taught = mapping(relayMember("relay-1"), relay);
+        assertThat(learnedLimits.refusedFrom(taught)).as("the prompt alone was not shown to be too long").isEmpty();
+        assertThat(learnedLimits.refusedFromWithGatewayOutput(taught).getAsLong()).isBetween(196_000L, 196_100L);
+    }
+
+    /** The same where the vendor has no native account on the route, with no pin: the relay is the only source all the same. */
+    @Test
+    void aRelayThatIsTheOnlySourceOfTheVendorIsAskedAgainWithTheOutputItHadBeforeD11() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay);
+        relayCounts("relay-1", 1.05, 200_000, true);
+
+        ResponseEntity<?> response = responses(promptOf(180_000, null));
+
+        assertThat(dispatched).containsExactly("relay-1", "relay-1");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(relayOutputs()).containsExactly((long) DEFAULT_OUTPUT, 4_096L);
+        verify(apiKeyService, never()).releaseUsage(any(), anyString(), anyBoolean(), anyString());
+    }
+
+    /**
+     * A relay whose words for a prompt that does not fit are not the ones the mapper knows (the Anthropic style) teaches nothing,
+     * and refused every turn of the band before: the refusal is a refusal of the request all the same, given before anything was
+     * generated, and the relay is asked again with the request it had before D11 for every turn.
+     */
+    @Test
+    void aRelayWhoseWordsForTheLengthAreNotKnownIsAskedAgainAndTeachesNothing() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay);
+        relayCounts("relay-1", 1.05, 200_000, false);
+
+        ResponseEntity<?> first = responses(promptOf(180_000, null));
+        ResponseEntity<?> second = responses(promptOf(178_000, null));
+
+        assertThat(first.getStatusCode().value()).isEqualTo(200);
+        assertThat(second.getStatusCode().value()).isEqualTo(200);
+        assertThat(dispatched).containsExactly("relay-1", "relay-1", "relay-1", "relay-1");
+        assertThat(relayOutputs()).containsExactly((long) DEFAULT_OUTPUT, 4_096L, (long) DEFAULT_OUTPUT, 4_096L);
+        MemberModel mapping = mapping(relayMember("relay-1"), relay);
+        assertThat(learnedLimits.refusedFrom(mapping)).isEmpty();
+        assertThat(learnedLimits.refusedFromWithGatewayOutput(mapping)).isEmpty();
+    }
+
+    /**
+     * Four turns of a session that cross the same band from below: each is refused with the 16,000 and served with the 4,096, and
+     * the refusal that is read teaches the smallest size, so no turn of the band is turned away and none is sent the 16,000 above it.
+     */
+    @Test
+    void theTurnsOfASessionThatCrossTheBandOfARelayThatCountsMoreAreAllServedByIt() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay);
+        relayCounts("relay-1", 1.05, 200_000, true);
+
+        for (int tokens : new int[] {183_000, 180_000, 178_000, 176_000}) {
+            assertThat(responses(promptOf(tokens, null)).getStatusCode().value()).isEqualTo(200);
+        }
+
+        assertThat(dispatched).hasSize(8);
+        assertThat(relayOutputs()).containsExactly(16_000L, 4_096L, 16_000L, 4_096L, 16_000L, 4_096L, 16_000L, 4_096L);
+        assertThat(learnedLimits.refusedFromWithGatewayOutput(mapping(relayMember("relay-1"), relay)).getAsLong())
+            .as("the smallest turn refused with the gateway's output").isBetween(192_000L, 192_100L);
+    }
+
+    /**
+     * The relay refuses the 4,096 too: the prompt is too long for it however the output is cut, which is what the same turn met
+     * before D11. The client is told so, the length it taught is the prompt's, and the same turn is not asked of the relay again.
+     */
+    @Test
+    void aRelayThatRefusesTheOutputItHadBeforeD11TooIsAnsweredAsBeforeAndTeachesThePrompt() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay);
+        relayCounts("relay-1", 1.2, 200_000, true);
+
+        assertThatThrownBy(() -> responses(promptOf(180_000, null))).isInstanceOfSatisfying(ApiException.class, error -> {
+            assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+            assertThat(error.getMessage()).contains("prompt is too long");
+        });
+
+        assertThat(dispatched).containsExactly("relay-1", "relay-1");
+        assertThat(relayOutputs()).containsExactly((long) DEFAULT_OUTPUT, 4_096L);
+        MemberModel taught = mapping(relayMember("relay-1"), relay);
+        assertThat(learnedLimits.refusedFrom(taught).getAsLong()).as("the prompt is what was too long").isBetween(180_000L, 180_100L);
+        assertThat(learnedLimits.refusedFromWithGatewayOutput(taught).getAsLong()).isBetween(196_000L, 196_100L);
+        verify(apiKeyService).releaseUsage(any(), anyString(), eq(true), anyString());
+        verify(apiKeyService, never()).accountUsageServed(any(), anyString(), any(), anyLong(), anyLong(), anyString(), anyInt(), any());
+        // The same turn again: the relay is not asked, and the client is told what it was told.
+        assertThatThrownBy(() -> responses(promptOf(180_000, null))).isInstanceOfSatisfying(ApiException.class,
+            error -> assertThat(error.getMessage()).contains("prompt is too long"));
+        assertThat(dispatched).as("not asked again").hasSize(2);
+    }
+
+    /**
+     * Native accounts are in reach (Kiro, however busy): the relay that cannot give the output the gateway chose is left for them, as
+     * it is when the estimate shows it, and is not asked a second time for a smaller output.
+     */
+    @Test
+    void aRelayThatRefusesTheOutputTheGatewayChoseIsNotAskedAgainWhereNativeAccountsAreInReach() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        relayCounts("relay-1", 1.05, 200_000, true);
+
+        ResponseEntity<?> response = responses(promptOf(180_000, null));
+
+        assertThat(dispatched).containsExactly("relay-1", "kiro-1");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
+        assertThat(relayOutputs()).containsExactly((long) DEFAULT_OUTPUT);
+        assertThat(kiroPayloads.getFirst().path("inferenceConfig").path("maxTokens").asInt()).isEqualTo(DEFAULT_OUTPUT);
+    }
+
+    /**
+     * Kiro's accounts exist but cannot serve now (their quota is spent): they are not in the plan, and the relay is the only source
+     * the request has. Its refusal of the output the gateway chose is answered by the request it had before D11, and not by a
+     * retryable error whose retry is served only if the refusal was one the mapper reads.
+     */
+    @Test
+    void aRelayThatRefusesTheOutputTheGatewayChoseIsAskedAgainWhenKirosAccountsCannotServeNow() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        ProxyAccountEntity kiroAccount = kiro("kiro-1");
+        add(relay, kiroAccount);
+        when(accountPool.isUsable(kiroAccount)).thenReturn(false);
+        relayCounts("relay-1", 1.05, 200_000, false);
+
+        ResponseEntity<?> response = responses(promptOf(180_000, null));
+
+        assertThat(dispatched).containsExactly("relay-1", "relay-1");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(relayOutputs()).containsExactly((long) DEFAULT_OUTPUT, 4_096L);
+    }
+
+    /** Kiro's accounts can serve but are busy: they stay the choice (O15), the client is told to try again, and the relay is not asked for less. */
+    @Test
+    void aRelayThatRefusesTheOutputTheGatewayChoseIsNotAskedAgainWhenKirosAccountsAreOnlyBusy() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        busy.add("kiro-1");
+        relayCounts("relay-1", 1.05, 200_000, true);
+
+        assertThatThrownBy(() -> responses(promptOf(180_000, null))).isInstanceOfSatisfying(ApiException.class,
+            error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE));
+
+        assertThat(dispatched).containsExactly("relay-1");
+        assertThat(relayOutputs()).containsExactly((long) DEFAULT_OUTPUT);
+        verify(apiKeyService).releaseUsage(any(), anyString(), eq(true), anyString());
+    }
+
+    /**
+     * Kiro's accounts are cooling down: the plan counts them, selection finds none for the minute, so the crossing a refusal would
+     * make finds nothing and the client would be told to try again, for a turn that was served before D11. The relay is the one
+     * source the request can have now, and it is asked again.
+     */
+    @Test
+    void aRelayThatRefusesTheOutputTheGatewayChoseIsAskedAgainWhenKirosAccountsAreCoolingDown() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        cooling.add("kiro-1");
+        relayCounts("relay-1", 1.05, 200_000, true);
+
+        ResponseEntity<?> response = responses(promptOf(180_000, null));
+
+        assertThat(dispatched).containsExactly("relay-1", "relay-1");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(relayOutputs()).containsExactly((long) DEFAULT_OUTPUT, 4_096L);
+        verify(apiKeyService, never()).releaseUsage(any(), anyString(), anyBoolean(), anyString());
+    }
+
+    /**
+     * What the stand-in for a relay answers when its upstream writes at most {@code cap} tokens: the 400 of an OpenAI-compatible
+     * backend for a {@code max_tokens} over it, whatever the prompt. The mapper does not read it as a refusal of the length.
+     */
+    private void relayWritesAtMost(String accountId, int cap) {
+        relayRefuses.put(accountId, dispatch -> dispatch.forwardedOutputLimit() <= cap
+            ? null
+            : relayErrors.fromResponse(400, error("invalid_request_error",
+                "Invalid max_tokens value, the valid range of max_tokens is [1, " + cap + "]"), null, accountId, "sk-secret"));
+    }
+
+    /**
+     * The upstream of the relay writes at most 8,192 tokens, less than the 16,000 the gateway chose: it refuses every Codex turn that
+     * names no limit, however short, and that is no refusal of the length, so nothing is learned. With Kiro below it, the output the
+     * gateway chose is Kiro's (design 7.10, O15): the relay is not asked for less, and Kiro serves each turn at Kiro's price. The
+     * operator keeps the setting at or below the smallest output of their relays to keep the relay in service (operations manual).
+     */
+    @Test
+    void aRelayWhoseUpstreamWritesLessThanTheDefaultOutputRefusesEveryTurnAndKiroServesThem() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        relayWritesAtMost("relay-1", 8_192);
+
+        for (int turn = 0; turn < 3; turn++) {
+            ResponseEntity<?> response = responses(promptOf(10_000, null));
+            assertThat(response.getStatusCode().value()).isEqualTo(200);
+            assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
+        }
+
+        assertThat(dispatched).containsExactly("relay-1", "kiro-1", "relay-1", "kiro-1", "relay-1", "kiro-1");
+        assertThat(relayOutputs()).containsExactly(16_000L, 16_000L, 16_000L);
+        MemberModel mapping = mapping(relayMember("relay-1"), relay);
+        assertThat(learnedLimits.refusedFrom(mapping)).as("nothing of the length was shown").isEmpty();
+        assertThat(learnedLimits.refusedFromWithGatewayOutput(mapping)).isEmpty();
+        // The setting at the relay's output: the relay serves again, with nothing refused.
+        defaultOutputTokens = 8_192;
+        dispatched.clear();
+        ResponseEntity<?> within = responses(promptOf(10_000, null));
+        assertThat(dispatched).containsExactly("relay-1");
+        assertThat(within.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+    }
+
+    /** Kiro is busy: the relay is not asked for less, the client is told to try again, and nothing is learned from a refusal that is not about the length. */
+    @Test
+    void aRelayWhoseUpstreamWritesLessThanTheDefaultOutputIsATryAgainForEveryTurnWhileKiroIsBusy() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        busy.add("kiro-1");
+        relayWritesAtMost("relay-1", 8_192);
+
+        for (int turn = 0; turn < 2; turn++) {
+            assertThatThrownBy(() -> responses(promptOf(10_000, null))).isInstanceOfSatisfying(ApiException.class,
+                error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE));
+        }
+
+        assertThat(dispatched).containsExactly("relay-1", "relay-1");
+        assertThat(relayOutputs()).containsExactly(16_000L, 16_000L);
+        assertThat(learnedLimits.refusedFromWithGatewayOutput(mapping(relayMember("relay-1"), relay))).isEmpty();
+    }
+
+    /** The relay is the only source (the vendor has no native account on the route): it is asked again with the 4,096 for every turn, two requests each, and serves. */
+    @Test
+    void aRelayWhoseUpstreamWritesLessThanTheDefaultOutputIsAskedTwiceForEveryTurnWhenItIsTheOnlySource() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay);
+        relayWritesAtMost("relay-1", 8_192);
+
+        for (int turn = 0; turn < 2; turn++) {
+            ResponseEntity<?> response = responses(promptOf(10_000, null));
+            assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        }
+
+        assertThat(dispatched).containsExactly("relay-1", "relay-1", "relay-1", "relay-1");
+        assertThat(relayOutputs()).containsExactly(16_000L, 4_096L, 16_000L, 4_096L);
+        verify(admissionStore, times(2)).acquire(any());
+        verify(apiKeyService, never()).releaseUsage(any(), anyString(), anyBoolean(), anyString());
+    }
+
+    /** A limit of the client's own is the client's to size: a relay that refuses it is not asked for less, and Kiro takes the turn. */
+    @Test
+    void aRelayThatRefusesAnOutputTheClientWroteIsLeftToKiro() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        relayWritesAtMost("relay-1", 8_192);
+
+        ResponseEntity<?> response = responses(promptOf(10_000, 16_000));
+
+        assertThat(dispatched).containsExactly("relay-1", "kiro-1");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
+        assertThat(relayOutputs()).containsExactly(16_000L);
+    }
+
+    /** A relay that refuses the request for something the output has nothing to do with is left to Kiro as well, and asked once. */
+    @Test
+    void aRelayThatRefusesTheRequestForAnotherReasonIsAskedOnceAndKiroTakesTheTurn() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        relayRefuses.put("relay-1", dispatch -> relayErrors.fromResponse(400,
+            error("invalid_request_error", "Unsupported parameter: 'parallel_tool_calls'"), null, "relay-1", "sk-secret"));
+
+        ResponseEntity<?> response = responses(promptOf(10_000, null));
+
+        assertThat(dispatched).containsExactly("relay-1", "kiro-1");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
+        assertThat(relayOutputs()).containsExactly(16_000L);
+    }
+
+    /**
+     * A refusal that is not of the length is asked again too when the natives below cannot be picked now: the same rule, for the same
+     * reason (design 4.1, layer 3), whatever the refusal was about.
+     */
+    @Test
+    void aRelayWhoseUpstreamWritesLessThanTheDefaultOutputIsAskedAgainWhileKiroIsCoolingDown() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        cooling.add("kiro-1");
+        relayWritesAtMost("relay-1", 8_192);
+
+        ResponseEntity<?> response = responses(promptOf(10_000, null));
+
+        assertThat(dispatched).containsExactly("relay-1", "relay-1");
+        assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(relayOutputs()).containsExactly(16_000L, 4_096L);
+    }
+
+    /** The output a request names itself was never the gateway's to cut: a relay that refuses it is refused as before. */
+    @Test
+    void aRelayThatRefusesAnOutputTheClientWroteIsNotAskedAgain() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay);
+        relayCounts("relay-1", 1.05, 200_000, true);
+
+        assertThatThrownBy(() -> responses(promptOf(180_000, 16_000))).isInstanceOfSatisfying(ApiException.class,
+            error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST));
+
+        assertThat(dispatched).containsExactly("relay-1");
+    }
+
+    /**
+     * The dispatch is given a time (the member's 30 seconds here) and a refusal that came after some of it leaves less than the
+     * least a relay is asked with: the relay is not asked a second time in time it could not answer in.
+     */
+    @Test
+    void aRelayIsNotAskedAgainWithLessTimeThanTheLeastItIsAskedWith() {
+        Member member = new Member("anthropic", "relay-1", "relay", "OPENAI_CHAT", true, false, false, false, false, true, "NONE", 30, true, true);
+        configure(owner(member, gate("RESPONSES", "KEYS", "key-1")));
+        add(relay);
+        relayCounts("relay-1", 1.05, 200_000, true);
+
+        assertThatThrownBy(() -> responses(promptOf(180_000, null))).isInstanceOfSatisfying(ApiException.class,
+            error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST));
+
+        assertThat(dispatched).containsExactly("relay-1");
+        assertThat(relayTimeLimits).containsExactly(Duration.ofSeconds(30));
+    }
+
+    /**
+     * What a native source does with a turn longer than the request timeout (STARRY_REQUEST_TIMEOUT, 300 s) is not new with
+     * the default output, which lets a Codex turn run for minutes: Kiro and the official keys are asked for the whole answer
+     * under that timeout, and one that ran out after the request was sent may still be generated and billed upstream. So the
+     * reservation, which is the default output, is left for review and not released, and nothing is charged; the operator
+     * is told in the operations manual to raise the timeout together with the default (STARRY_RESPONSES_DEFAULT_OUTPUT_TOKENS).
+     */
+    @Test
+    void aKiroTurnThatRunsOutOfTheRequestTimeoutKeepsTheReservationOfTheDefaultOutputForReview() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        busy.add("relay-1");
+        kiroAnswers.put("kiro-1", () -> Mono.error(new TimeoutException("no answer within the request timeout")));
+
+        assertThatThrownBy(() -> responses(codexTurn().put("stream", false))).isInstanceOf(ApiException.class);
+
+        assertThat(dispatched).containsExactly("kiro-1");
+        ArgumentCaptor<BigDecimal> reserved = ArgumentCaptor.forClass(BigDecimal.class);
+        verify(apiKeyService).reserveUsage(any(), anyString(), reserved.capture(), anyString());
+        assertThat(reserved.getValue()).as("the default, about 0.24 of $15/M").isGreaterThan(new BigDecimal("0.24"));
+        verify(apiKeyService).releaseUsage(any(), anyString(), eq(false), anyString());
+        verify(apiKeyService, never()).releaseUsage(any(), anyString(), eq(true), anyString());
+        verify(apiKeyService, never()).accountUsageServed(any(), anyString(), any(), anyLong(), anyLong(), anyString(), anyInt(), any());
     }
 
     /**
@@ -1345,20 +2257,203 @@ class ProxyFacadeTieredXpResponsesTest {
             .filter(JsonNode::isArray).flatMap(uses -> StreamSupport.stream(uses.spliterator(), false)).findFirst().orElseThrow();
         assertThat(call.path("name").asString()).isEqualTo("apply_patch");
         assertThat(call.path("toolUseId").asString()).isEqualTo(callId);
-        // The argument is the one Kiro was declared the tool with (the string property of the client's function, or `input` for
-        // a custom tool, whose schema is empty), not the `patch` of the function the relays are given.
+        // The argument is the one Kiro was declared the tool with: the `patch` of the function the relays are given when the client
+        // declared the tool as a custom tool (D13), the string property of the client's own function when it declared one.
         JsonNode declared = payload.path("conversationState").path("currentMessage").path("userInputMessage").path("userInputMessageContext")
             .path("tools").get(0).path("toolSpecification");
+        String argument = "function".equals(declaredAs) ? "input" : "patch";
         assertThat(declared.path("name").asString()).isEqualTo("apply_patch");
-        assertThat(declared.path("inputSchema").path("json").path("properties").propertyNames())
-            .containsExactlyElementsOf("function".equals(declaredAs) ? List.of("input") : List.of());
-        assertThat(call.path("input").propertyNames()).containsExactly("input");
-        assertThat(call.path("input").path("input").asString()).as("the patch the client was given, which ends its line").isEqualTo(PATCH + "\n");
+        assertThat(declared.path("inputSchema").path("json").path("properties").propertyNames()).containsExactly(argument);
+        assertThat(call.path("input").propertyNames()).containsExactly(argument);
+        assertThat(call.path("input").path(argument).asString()).as("the patch the client was given, which ends its line").isEqualTo(PATCH + "\n");
         JsonNode results = payload.path("conversationState").path("currentMessage").path("userInputMessage")
             .path("userInputMessageContext").path("toolResults");
         assertThat(results).hasSize(1);
         assertThat(results.get(0).path("toolUseId").asString()).isEqualTo(callId);
         assertThat(results.get(0).toString()).contains("Done!");
+    }
+
+    // ---- the editing tool on the Kiro and Anthropic routes of a vendor that has relays (D13) ----
+
+    /** What Kiro answers when it calls the editing tool: a function call with the argument it was declared the tool with. */
+    private PlatformCompletionResult kiroPatchCall(String argument) {
+        return new PlatformCompletionResult("", "", List.of(new PlatformToolUse("tooluse_kiro_1", "apply_patch",
+            objectMapper.createObjectNode().put(argument, PATCH))), USAGE);
+    }
+
+    private static JsonNode declaredToKiro(JsonNode payload) {
+        return payload.path("conversationState").path("currentMessage").path("userInputMessage").path("userInputMessageContext")
+            .path("tools").get(0).path("toolSpecification");
+    }
+
+    /**
+     * Codex 0.142.5 applies a patch only as a custom tool call, and aborts the turn on a function call for the editing tool. A relay
+     * answers with the custom tool call already; Kiro is declared the editing tool as the function the relays are given, and what it
+     * calls it with is told as the custom tool call, so that a turn that falls from the relay to Kiro applies the patch as well.
+     */
+    @Test
+    void kiroIsDeclaredTheEditingToolAsThePatchFunctionAndItsPatchIsToldAsACustomToolCall() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        busy.add("relay-1");
+        kiroAnswers.put("kiro-1", () -> Mono.just(kiroPatchCall("patch")));
+
+        ResponseEntity<?> streamed = responses(patchRequest("custom").put("stream", true));
+        JsonNode whole = (JsonNode) responses(patchRequest("custom")).getBody();
+
+        assertThat(dispatched).containsExactly("kiro-1", "kiro-1");
+        JsonNode declared = declaredToKiro(kiroPayloads.getFirst());
+        assertThat(declared.path("name").asString()).isEqualTo("apply_patch");
+        assertThat(declared.path("description").asString()).isEqualTo(ApplyPatchEmulation.CHAT_DESCRIPTION);
+        assertThat(declared.path("inputSchema").path("json").path("properties").propertyNames()).containsExactly("patch");
+        assertThat(declared.path("inputSchema").path("json").path("required")).extracting(JsonNode::asString).containsExactly("patch");
+        assertThat(declared.path("inputSchema").path("json").path("properties").path("patch").path("type").asString()).isEqualTo("string");
+        for (JsonNode answer : List.of(finalResponse(streamed), whole)) {
+            JsonNode call = answer.path("output").get(0);
+            assertThat(call.path("type").asString()).isEqualTo("custom_tool_call");
+            assertThat(call.path("name").asString()).isEqualTo("apply_patch");
+            assertThat(call.path("call_id").asString()).isEqualTo("tooluse_kiro_1");
+            assertThat(call.path("input").asString()).as("the patch itself, which ends its line").isEqualTo(PATCH + "\n");
+            assertThat(call.has("arguments")).isFalse();
+        }
+        assertThat(eventTypes(streamed)).contains("response.custom_tool_call_input.done").doesNotContain("response.function_call_arguments.done");
+    }
+
+    @Test
+    void anAnthropicKeyIsDeclaredTheEditingToolAsThePatchFunctionAndItsPatchIsToldAsACustomToolCall() {
+        configure(ownerWithAnthropicKeys(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, anthropicKey("anthropic-1"));
+        busy.add("relay-1");
+        List<JsonNode> asked = new ArrayList<>();
+        when(anthropicClient.complete(any(), any(), anyString())).thenAnswer(invocation -> {
+            asked.add(invocation.getArgument(1));
+            dispatched.add(((ProxyAccountEntity) invocation.getArgument(0)).getAccountId());
+            return Mono.just(kiroPatchCall("patch"));
+        });
+
+        JsonNode answer = (JsonNode) responses(patchRequest("custom")).getBody();
+
+        assertThat(dispatched).containsExactly("anthropic-1");
+        JsonNode declared = asked.getFirst().path("tools").get(0).path("function");
+        assertThat(declared.path("name").asString()).isEqualTo("apply_patch");
+        assertThat(declared.path("description").asString()).isEqualTo(ApplyPatchEmulation.CHAT_DESCRIPTION);
+        assertThat(declared.path("parameters").path("properties").propertyNames()).containsExactly("patch");
+        assertThat(declared.path("parameters").path("required")).extracting(JsonNode::asString).containsExactly("patch");
+        JsonNode call = answer.path("output").get(0);
+        assertThat(call.path("type").asString()).isEqualTo("custom_tool_call");
+        assertThat(call.path("input").asString()).isEqualTo(PATCH + "\n");
+    }
+
+    /** A tool choice that forces the tool the client declared as a custom one names the function it is declared as to these routes. */
+    @Test
+    void aToolChoiceThatForcesTheEditingToolNamesTheFunctionTheAnthropicKeyIsDeclared() {
+        configure(ownerWithAnthropicKeys(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, anthropicKey("anthropic-1"));
+        busy.add("relay-1");
+        List<JsonNode> asked = new ArrayList<>();
+        when(anthropicClient.complete(any(), any(), anyString())).thenAnswer(invocation -> {
+            asked.add(invocation.getArgument(1));
+            return Mono.just(KIRO_ANSWER);
+        });
+
+        responses(patchRequestForcing());
+
+        JsonNode choice = asked.getFirst().path("tool_choice");
+        assertThat(choice.path("type").asString()).isEqualTo("function");
+        assertThat(choice.path("function").path("name").asString()).isEqualTo("apply_patch");
+    }
+
+    private ObjectNode patchRequestForcing() {
+        ObjectNode request = patchRequest("custom");
+        request.set("tool_choice", objectMapper.readTree("{\"type\":\"custom\",\"name\":\"apply_patch\"}"));
+        return request;
+    }
+
+    /**
+     * The client that declared the tool as a function (Codex's JSON tool) is told the function it declared, and what Kiro calls it
+     * with stays a function call, which that tool accepts: only the declaration as a custom tool is turned into the patch function.
+     */
+    @Test
+    void aClientThatDeclaredTheEditingToolAsAFunctionIsDeclaredItAsItWasAndIsToldAFunctionCall() {
+        configure(owner(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        busy.add("relay-1");
+        kiroAnswers.put("kiro-1", () -> Mono.just(kiroPatchCall("input")));
+
+        JsonNode answer = (JsonNode) responses(patchRequest("function")).getBody();
+
+        JsonNode declared = declaredToKiro(kiroPayloads.getFirst());
+        assertThat(declared.path("description").asString()).isEqualTo("apply a patch");
+        assertThat(declared.path("inputSchema").path("json").path("properties").propertyNames()).containsExactly("input");
+        JsonNode call = answer.path("output").get(0);
+        assertThat(call.path("type").asString()).isEqualTo("function_call");
+        assertThat(objectMapper.readTree(call.path("arguments").asString()).path("input").asString()).isEqualTo(PATCH);
+    }
+
+    /** A vendor whose tiers hold no relay is declared the tool as it always was, with the client's words and no properties, and is told function calls. */
+    @Test
+    void aVendorWithoutRelaysIsDeclaredTheEditingToolAsItAlwaysWasAndIsToldFunctionCalls() {
+        configure(SourceTierSnapshot.of(7L, List.of(new VendorConfig("anthropic", true, false, false, true, 16, true, 7L)),
+            List.of(tier("kiro", 1, "1", AccountAllocationCategory.KIRO, AccountAllocationCategory.CLAUDE_OAUTH)),
+            List.of(), List.of(), List.of()));
+        add(kiro("kiro-1"));
+        kiroAnswers.put("kiro-1", () -> Mono.just(kiroPatchCall("input")));
+
+        JsonNode answer = (JsonNode) responses(patchRequest("custom")).getBody();
+
+        JsonNode declared = declaredToKiro(kiroPayloads.getFirst());
+        assertThat(declared.path("description").asString()).isEqualTo("apply a patch");
+        assertThat(declared.path("inputSchema").path("json").path("properties").propertyNames()).isEmpty();
+        assertThat(answer.path("output").get(0).path("type").asString()).isEqualTo("function_call");
+    }
+
+    /**
+     * A chain that goes from the relay to Kiro and back applies every patch: each of the calls is a custom tool call in the chain,
+     * whoever made it, and the relay is replayed both as the calls of the function it was declared, with their results.
+     */
+    @Test
+    void aChainFromTheRelayToKiroAndBackToTheRelayAppliesEveryPatchAndReplaysEachOfThem() {
+        relayAnswers.put("relay-1", () -> Mono.just(patchCall()));
+        configure(ownerWithoutStickySessions(relayMember("relay-1"), gate("RESPONSES", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        kiroAnswers.put("kiro-1", () -> Mono.just(kiroPatchCall("patch")));
+        ObjectNode first = patchRequest("custom");
+        JsonNode one = finalResponse(responses(first));
+        assertThat(one.path("output").path(0).path("type").asString()).isEqualTo("custom_tool_call");
+        assertThat(one.path("output").path(0).path("call_id").asString()).isEqualTo(CALL_ID);
+
+        // The relay is busy for the second turn: Kiro is replayed the relay's patch with the argument it was declared, and patches too.
+        busy.add("relay-1");
+        ObjectNode second = plain("ignored", one.path("id").asString());
+        second.set("tools", first.path("tools").deepCopy());
+        second.putArray("input").addObject().put("type", "custom_tool_call_output").put("call_id", CALL_ID).put("output", "Done!");
+        JsonNode two = finalResponse(responses(second));
+        assertThat(dispatched).containsExactly("relay-1", "kiro-1");
+        JsonNode replayed = StreamSupport.stream(kiroPayloads.getFirst().path("conversationState").path("history").spliterator(), false)
+            .map(turn -> turn.path("assistantResponseMessage").path("toolUses")).filter(JsonNode::isArray)
+            .flatMap(uses -> StreamSupport.stream(uses.spliterator(), false)).findFirst().orElseThrow();
+        assertThat(replayed.path("input").path("patch").asString()).isEqualTo(PATCH + "\n");
+        assertThat(two.path("output").path(0).path("type").asString()).isEqualTo("custom_tool_call");
+        assertThat(two.path("output").path(0).path("call_id").asString()).isEqualTo("tooluse_kiro_1");
+        assertThat(two.path("output").path(0).path("input").asString()).isEqualTo(PATCH + "\n");
+
+        // The relay is back for the third turn, and is sent both patches, as calls of the function it was declared, with their results.
+        busy.clear();
+        ObjectNode third = plain("ignored", two.path("id").asString());
+        third.set("tools", first.path("tools").deepCopy());
+        third.putArray("input").addObject().put("type", "custom_tool_call_output").put("call_id", "tooluse_kiro_1").put("output", "Applied!");
+        responses(third);
+        assertThat(dispatched).containsExactly("relay-1", "kiro-1", "relay-1");
+        JsonNode messages = relayDispatches.getLast().wireBody().path("messages");
+        List<JsonNode> calls = StreamSupport.stream(messages.spliterator(), false)
+            .filter(message -> message.path("tool_calls").isArray())
+            .flatMap(message -> StreamSupport.stream(message.path("tool_calls").spliterator(), false)).toList();
+        assertThat(calls).extracting(call -> call.path("id").asString()).containsExactly(CALL_ID, "tooluse_kiro_1");
+        assertThat(calls).extracting(call -> call.path("function").path("name").asString()).containsOnly("apply_patch");
+        assertThat(calls).extracting(call -> objectMapper.readTree(call.path("function").path("arguments").asString()).path("patch").asString())
+            .containsExactly(PATCH + "\n", PATCH + "\n");
+        assertThat(StreamSupport.stream(messages.spliterator(), false).filter(message -> "tool".equals(message.path("role").asString()))
+            .map(message -> message.path("content").asString())).containsExactly("Done!", "Applied!");
     }
 
     /** The chain and the client's request are not changed by it, and a vendor without relays is sent what its client sent. */
@@ -1701,13 +2796,15 @@ class ProxyFacadeTieredXpResponsesTest {
     }
 
     private ProxyFacade facade(PairRegistry pairs, ResponsesChatConverter converter) {
+        ProxyProperties properties = new ProxyProperties();
+        properties.setResponsesDefaultOutputTokens(defaultOutputTokens);
         return new ProxyFacade(
             apiKeyService, accountPool, mock(AccountAutoSuspendService.class), accountSettings, scheduledTests, modelCatalog,
             modelMapping, rateLimiter, new KiroPayloadFactory(objectMapper, modelCatalog), kiroClient, openAiClient,
             new OpenAiRequestAdapter(objectMapper, modelCatalog), new OpenAiResponseFactory(objectMapper), stateStore,
             new AnthropicRequestAdapter(objectMapper, modelCatalog), new AnthropicResponseFactory(objectMapper), anthropicClient,
             new GeminiRequestAdapter(objectMapper), new GeminiResponseFactory(objectMapper), payments, pricing, statsService,
-            admissionStore, ownerStore, new TierRuntime(recording(pairs), bindings, learnedLimits), xpDispatcher, converter);
+            admissionStore, ownerStore, new TierRuntime(recording(pairs), bindings, learnedLimits), xpDispatcher, converter, properties);
     }
 
     /** The facade as it is built without the converter of the Responses entry: the constructor the other tests use. */
@@ -1781,6 +2878,31 @@ class ProxyFacadeTieredXpResponsesTest {
             List.of(member), List.of(mapping(member, relay)), List.of(gates));
     }
 
+    /** {@link #owner} with a second relay in the first tier, whose window (400,000) holds what the first one's (200,000) does not. */
+    private SourceTierSnapshot ownerWithTwoRelays(PairGate... gates) {
+        Member first = relayMember("relay-1");
+        Member second = relayMember("relay-2");
+        return SourceTierSnapshot.of(7L, List.of(vendor()), List.of(
+            tier("relay", 1, "1"),
+            tier("kiro", 2, "0.6", AccountAllocationCategory.KIRO, AccountAllocationCategory.CLAUDE_OAUTH)),
+            List.of(first, second), List.of(mapping(first, relay), mapping(second, secondRelay, 400_000)), List.of(gates));
+    }
+
+    /**
+     * The owner's example with the Anthropic keys in place of Kiro: the relay as the first tier, the keys as the second at 0.8.
+     * The keys serve the Responses entry when the vendor serves every endpoint from the Anthropic route (the all-endpoints switch).
+     */
+    private SourceTierSnapshot ownerWithAnthropicKeys(Member member, PairGate... gates) {
+        return SourceTierSnapshot.of(7L, List.of(new VendorConfig("anthropic", true, true, false, true, 16, true, 7L)), List.of(
+            tier("relay", 1, "1"),
+            tier("anthropic-keys", 2, "0.8", AccountAllocationCategory.OFFICIAL_API_KEY)),
+            List.of(member), List.of(mapping(member, relay)), List.of(gates));
+    }
+
+    private static ProxyAccountEntity anthropicKey(String accountId) {
+        return account(accountId, "Anthropic", "api-key", null);
+    }
+
     /** {@link #owner}, for a vendor that does not keep a session in the tier it was pushed down to. */
     private SourceTierSnapshot ownerWithoutStickySessions(Member member, PairGate... gates) {
         return SourceTierSnapshot.of(7L, List.of(new VendorConfig("anthropic", true, false, false, false, 16, true, 7L)), List.of(
@@ -1795,9 +2917,13 @@ class ProxyFacadeTieredXpResponsesTest {
 
     /** A mapping of the model Codex asks for, verified for the account as it is now. */
     private static MemberModel mapping(Member member, ProxyAccountEntity account) {
-        MemberModel unverified = new MemberModel(member.vendor(), member.accountId(), "claude-sonnet-4.5", "relay-sonnet", 200_000, 8192,
+        return mapping(member, account, 200_000);
+    }
+
+    private static MemberModel mapping(Member member, ProxyAccountEntity account, int window) {
+        MemberModel unverified = new MemberModel(member.vendor(), member.accountId(), "claude-sonnet-4.5", "relay-sonnet", window, 8192,
             true, null, null);
-        return new MemberModel(member.vendor(), member.accountId(), "claude-sonnet-4.5", "relay-sonnet", 200_000, 8192, true,
+        return new MemberModel(member.vendor(), member.accountId(), "claude-sonnet-4.5", "relay-sonnet", window, 8192, true,
             Instant.parse("2026-10-26T00:00:00Z"), SourceTierValidator.mappingFingerprint(member, unverified, account));
     }
 

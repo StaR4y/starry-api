@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.OptionalInt;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.concurrent.atomic.AtomicLong;
@@ -195,6 +196,14 @@ public class ModelPricingService {
         // Runs for every proxied request. It used to query and re-parse the rules each time while cost() already
         // used the snapshot; the snapshot is invalidated on every local change and expires after a few seconds.
         return rulesSnapshot().map(rules -> quote(resolvePricing(rules, model, null, multiplier), fastMode));
+    }
+
+    /**
+     * The most output tokens the official price catalog lists for the model, which is what the upstream of that model
+     * itself holds a request to; empty when the catalog does not list the model or lists it with none.
+     */
+    public OptionalInt maxOutputTokens(String model) {
+        return officialModelPricingService.maxOutputTokens(model);
     }
 
     BigDecimal cost(List<ModelPricingRule> rules, String model, PlatformUsage usage,

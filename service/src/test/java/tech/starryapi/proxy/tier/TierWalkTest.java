@@ -142,6 +142,17 @@ class TierWalkTest {
     }
 
     @Test
+    void theTiersBelowATierAreTheOnesAfterItInThePlanWhateverTheWalkOffers() {
+        TierPlan plan = plan();
+        TierWalk walk = new TierWalk(plan);
+        walk.moveBelow(plan.levels().get(0));
+
+        assertThat(tierIds(walk.tiersBelow(plan.levels().get(0)))).containsExactly("oauth", "kiro");
+        assertThat(tierIds(walk.tiersBelow(plan.levels().get(1)))).containsExactly("kiro");
+        assertThat(walk.tiersBelow(plan.levels().get(2))).isEmpty();
+    }
+
+    @Test
     void aNarrowedWalkSaysSoAndIgnoresWhereItResumes() {
         TierPlan plan = plan();
         TierWalk walk = new TierWalk(plan);

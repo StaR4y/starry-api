@@ -291,8 +291,8 @@
 
 - 依赖：P5-02
 - 文件：`service/src/main/java/tech/starryapi/proxy/tier/XpLearnedLimits.java`, `service/src/main/java/tech/starryapi/proxy/tier/TierSessionBindings.java`, `service/src/main/java/tech/starryapi/proxy/tier/DefaultSourceTierPlanner.java`
-- 内容：设计 7.8：（成员, 映射）上下文上限 6 小时 TTL；（tierSessionKey, 成员）中断后排除 2 分钟；计划以结构原因剪枝，不写 D4 绑定。
-- 测试：压缩请求超窗后同会话后续超长请求直接 Kiro、短请求回中转；中断后客户端重试去其他成员。
+- 内容：设计 7.8：（成员, 映射）上下文上限 6 小时 TTL；（tierSessionKey, 成员）中断后排除 2 分钟；计划以结构原因剪枝，不写 D4 绑定。第 6 阶段评审后（D11，D14 改了默认值：可配置，默认 16,000，不超过模型的最大输出）：输出上限是网关选的请求（Responses 入口没写上限且默认大于 4096）被拒时，学到的是「输入加这个输出」，只对同类请求生效（`XpLearnedLimits.learn(mapping, 输入, 网关输出)`、`refusedFromWithGatewayOutput`），`XpEligibility.unfit` 同样把这个输出计入窗口。唯一能用的中转（固定到只有中转的号池、没有原生账号，或原生账号现在都选不到：额度耗尽、挂起、冷却或隔离，`DefaultSourceTierPlanner.selectableNow`）改收 D11 之前的请求（输出 4096，`evaluateWithinWindows`、`Built.withTheOutputOfBefore`），被拒时学到的是那时学到的输入大小，不压到窗口剩下的（设计 7.10、O15）。第四轮评审后：估算放得下、中转自己数出来放不下而拒绝网关选的输出时，这个中转（唯一能用的号源：`TierRetryPolicy.mayAskRelayAgain`，下一级的原生账号现在选得到的就交给它们：`ProxyFacade.hasSelectableNativeBelow`）在同一次派发里再被问一次 D11 之前的请求（`ProxyFacade.askAgain`、`TierPlan.Relay.withTheOutputOfBefore`），同一个账号、同一次准入、同一份预留，第一次的拒绝（措辞认得时）照常学到「输入加这个输出」，第二次也被拒才学到输入大小。
+- 测试：压缩请求超窗后同会话后续超长请求直接 Kiro、短请求回中转；中断后客户端重试去其他成员；网关选的输出和输入装不进窗口的中转被 CONTEXT 跳过，客户端自己写的输出不计入；这样的拒绝不让同样大小、输出由客户端写的请求（或 Messages 请求）跳过中转（`TierPlannerXpTest`、`XpLearnedLimitsTest`、`ProxyFacadeTieredXpResponsesTest`）。
 - 验收：不影响 D4 绑定。
 
 ### P5-04 跨协议输入上界与 XP_IN_FLIGHT
@@ -358,7 +358,7 @@
 - 依赖：P6-01
 - 文件：`service/src/main/java/tech/starryapi/platform/xproto/RequestFeatureDetector.java`, `service/src/main/java/tech/starryapi/proxy/tier/DefaultSourceTierPlanner.java`
 - 内容：7.9 RESPONSES 表（透传基线）；不可展开链 HARD 与 409；owner 为跨协议成员时忽略；设计 O9 已由负责人决定（D6，2026-10-26）：`text.verbosity` 的 low/high 对中转成员是 SOFT，与 CHAT 一致。
-- 测试：Codex 请求无 HARD；内置工具按基线（透传型 HARD，Kiro 类 SOFT，设计 O10）；上下文留在 OpenAI 那边的（`conversation`、`prompt`、`item_reference`、compaction）HARD；只有 file_id 的图片按无 vision 处理；只剩跨协议时 409。
+- 测试：Codex 请求无 HARD；内置工具按基线（透传型 HARD，Kiro 类 SOFT，设计 D9）；上下文留在 OpenAI 那边的（`conversation`、`prompt`、`item_reference`、compaction）HARD；只有 file_id 的图片按无 vision 处理；只剩跨协议时 409。
 - 验收：与设计一致。
 
 ### P6-03 Responses 入口派发、不记 owner、incomplete
@@ -366,8 +366,8 @@
 - 依赖：P6-02
 - 文件：`service/src/main/java/tech/starryapi/proxy/ProxyFacade.java`, `service/src/main/java/tech/starryapi/proxy/XpDispatcher.java`, `service/src/main/java/tech/starryapi/proxy/tier/TierSessionBindings.java`, `service/src/test/java/tech/starryapi/proxy/ProxyFacadeTieredXpResponsesTest.java`
 - 内容：OPENAI_CHAT 时 XpDispatcher，否则 callResponsesWithAccount；跨协议成功时 owner 记 null（不调 rememberResponseOwner，状态存储 accountId 为 null）；本轮产生的 response id 记为本轮会话的一部分（链的下一轮是同一个会话），不论本轮由谁服务、有没有分级的计划（未分级厂商的一轮、不保留会话的厂商的一轮也登记）。
-- 测试：Codex 多轮；截断（网关默认上限处：只有文字按 completed；丢了被截断的调用、只有推理、被内容过滤停下是被扣下的应答，502 不收费、不是中转的故障（不冷却、不计账号错误），`stop_reason` 记 `WITHHELD`，重试去下一个号源，它也被同一个 4,096 约束，除非是 Codex 账号，设计 7.10、O12；客户端自己的上限给 incomplete 且不带调用）；链的各轮是同一个会话（3 轮链降级后保持 L2，换了别的模型或别的厂商的模型的一轮之后仍保持）；中转答的 `apply_patch` 调用及其结果在下一轮落到 Kiro 时作为函数调用重放；函数工具的 schema 和 strict 原样发给中转；跨协议服务后未分级 OPENAI 链不选中中转；中转的推理项不记进链历史、不发给 OpenAI 账号；中转被中断后的 2 分钟排除经过中转因特性、缺映射被跳过或别的模型的一轮，仍然对链的下一轮有效。
-- 验收：原生 Responses 不变。
+- 测试：Codex 多轮；截断（网关默认上限处：只有文字按 completed；丢了被截断的调用、只有推理、被内容过滤停下是被扣下的应答，502 不收费、不是中转的故障（不冷却、不计账号错误），`stop_reason` 记 `WITHHELD`，重试去下一个号源，它也被同一个上限（没写上限的 Responses 请求是网关的默认输出，D14：默认 16,000，不超过该模型的最大输出）约束，除非是 Codex 账号，设计 7.10、D11、D14；被扣下的那一行的 `withheld_input_tokens`、`withheld_output_tokens` 记中转报告的用量，用户的令牌和费用仍是 0；客户端自己的上限给 incomplete 且不带调用）；链的各轮是同一个会话（3 轮链降级后保持 L2，换了别的模型或别的厂商的模型的一轮之后仍保持）；中转答的 `apply_patch` 调用及其结果在下一轮落到 Kiro 时作为函数调用重放，参数是 Kiro 被告知的补丁函数的 `patch`（客户端声明成自定义工具、厂商有中转时，Kiro 和 Anthropic Key 也以补丁函数声明并答 `custom_tool_call`，中转 → Kiro → 中转的链上每个补丁都应用，设计 D13）；函数工具的 schema 和 strict 原样发给中转；跨协议服务后未分级 OPENAI 链不选中中转；中转的推理项不记进链历史、不发给 OpenAI 账号；中转被中断后的 2 分钟排除经过中转因特性、缺映射被跳过或别的模型的一轮，仍然对链的下一轮有效。
+- 验收：原生 Responses 不变，除 D11、D14（没写上限的请求的默认输出上限和预留：可配置，默认 16,000，不超过该模型的最大输出）和 D13（在有中转成员的厂商上，Kiro 和 Anthropic Key 把客户端声明成自定义工具的 `apply_patch` 当作补丁函数声明，并把它们的调用渲染成 `custom_tool_call`）。
 
 ### P6-04 Responses 夹具与 EXPERIMENTAL
 

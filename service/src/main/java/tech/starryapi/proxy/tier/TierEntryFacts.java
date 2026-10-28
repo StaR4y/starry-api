@@ -24,11 +24,20 @@ import tools.jackson.databind.JsonNode;
  *     ChatWireSanitizer#entryDigest}); null for the Chat entry, whose Chat body is the client's own
  * @param chatConversion how the body the request is planned over is made into the Chat body a relay is given; null when
  *     that body already is one (the Chat entry, and Messages, whose conversion came before the plan)
+ * @param gatewayOutput whether the output limit of the planned body is one the gateway chose and not the client: the
+ *     default, which a Responses request that names no limit is given (D11, D14, design 7.10). A relay's window has to
+ *     hold that output besides the prompt then, which it is not asked of a limit the client wrote (the client's to size)
+ *     or of the 4,096 the other entries give
  */
-public record TierEntryFacts(Detected detected, JsonNode entryDigest, UnaryOperator<JsonNode> chatConversion) {
+public record TierEntryFacts(Detected detected, JsonNode entryDigest, UnaryOperator<JsonNode> chatConversion, boolean gatewayOutput) {
 
     public TierEntryFacts {
         Objects.requireNonNull(detected, "detected");
+    }
+
+    /** Facts for a request whose output limit is not the gateway's own, planned over a body that is converted for a relay. */
+    public TierEntryFacts(Detected detected, JsonNode entryDigest, UnaryOperator<JsonNode> chatConversion) {
+        this(detected, entryDigest, chatConversion, false);
     }
 
     /** Facts for a request that is planned over a Chat body. */
@@ -45,7 +54,12 @@ public record TierEntryFacts(Detected detected, JsonNode entryDigest, UnaryOpera
 
     /** The same facts, with the conversion that makes the planned body into the Chat body of a relay. */
     public TierEntryFacts withChatConversion(UnaryOperator<JsonNode> conversion) {
-        return new TierEntryFacts(detected, entryDigest, conversion);
+        return new TierEntryFacts(detected, entryDigest, conversion, gatewayOutput);
+    }
+
+    /** The same facts, saying whether the output limit of the planned body is the gateway's own. */
+    public TierEntryFacts withGatewayOutput(boolean gatewayOutput) {
+        return new TierEntryFacts(detected, entryDigest, chatConversion, gatewayOutput);
     }
 
     /**

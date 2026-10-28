@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
@@ -111,6 +112,11 @@ class TierPlannerXpTest {
     private final List<ProxyAccountEntity> usable = new ArrayList<>();
     /** The accounts that are switched off: in no cache, but in the table. */
     private final List<ProxyAccountEntity> switchedOff = new ArrayList<>();
+    /**
+     * The accounts in the cooldown or the quarantine of the allocation lifecycle (design 4.1, layer 3): in the cache and available,
+     * so the plan counts them, and selection finds none of them.
+     */
+    private final List<ProxyAccountEntity> cooling = new ArrayList<>();
 
     private final ProxyAccountEntity kiro = account("kiro", "BuilderId", "idc", null);
     private final ProxyAccountEntity officialAnthropic = account("anthropic-official", "Anthropic", "api-key", null);
@@ -126,6 +132,10 @@ class TierPlannerXpTest {
             return cached.stream().filter(filter).toList();
         });
         when(accountPool.isUsable(any())).thenAnswer(invocation -> usable.contains(invocation.<ProxyAccountEntity>getArgument(0)));
+        when(accountPool.hasSelectableAccount(any())).thenAnswer(invocation -> {
+            Predicate<ProxyAccountEntity> filter = invocation.getArgument(0);
+            return Mono.just(cached.stream().filter(usable::contains).filter(account -> !cooling.contains(account)).anyMatch(filter));
+        });
         when(accountPool.switchedOffAccounts()).thenAnswer(invocation -> Mono.just(List.copyOf(switchedOff)));
         cached.addAll(List.of(kiro, relay));
         usable.addAll(cached);
@@ -1039,6 +1049,657 @@ class TierPlannerXpTest {
         // A short request is the relay's again, and the one that fits the window it was shown to have is not asked about.
         assertThat(smaller.xpSkips()).isEmpty();
         assertThat(smaller.levels()).extracting(Level::tierId).containsExactly("relay", "kiro");
+    }
+
+    // ---- the output limit the gateway chose (D11) is part of what the window holds ----
+
+    /**
+     * A Codex request for a Claude model with a prompt of about {@code words} tokens, as the facade plans it: the model's
+     * maximum is on the body as its output limit, and {@code gatewayChose} says whether it was the gateway that put it there
+     * (the client named none) or the client that wrote it.
+     */
+    private TierPlanRequest responsesWithALimit(int words, long limit, boolean gatewayChose) {
+        ObjectNode raw = (ObjectNode) json(CodexRequests.CLAUDE_TURN);
+        raw.withArray("input").addObject().put("type", "message").put("role", "user").putArray("content").addObject()
+            .put("type", "input_text").put("text", "word ".repeat(words));
+        raw.put("max_output_tokens", limit);
+        return responses(raw.toString()).withEntryFacts(TierEntryFacts.of(TierEntry.RESPONSES, raw).withGatewayOutput(gatewayChose));
+    }
+
+    private void configureResponsesWindow(int window) {
+        Member member = relayMember();
+        configure(ownerConfiguration(member, List.of(mapping(member, "claude-sonnet-4.5", "relay-sonnet", window, true)),
+            gate("RESPONSES", "ON")));
+    }
+
+    @Test
+    void aRelayIsLeftOutOfARequestWhoseOutputTheGatewayChoseWhenThePromptAndThatOutputOutgrowItsWindow() {
+        configureResponsesWindow(400_000);
+        Relay measured = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true))
+            .levels().get(0).relay("relay-1").orElseThrow();
+        assertThat(measured.gatewayOutput()).isEqualTo(64_000);
+        int total = (int) (measured.estimatedInput() + 64_000);
+
+        // The window that holds the prompt and the output is the relay's ...
+        configureResponsesWindow(total);
+        TierPlan fits = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true));
+        assertThat(fits.xpSkips()).isEmpty();
+        assertThat(fits.levels()).extracting(Level::tierId).containsExactly("relay", "kiro");
+
+        // ... and one token less is not: the relay would be asked, and refuse, every Codex turn that long.
+        configureResponsesWindow(total - 1);
+        TierPlan outgrown = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true));
+        assertThat(outgrown.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.CONTEXT);
+        assertThat(outgrown.xpSkips().getFirst().detail()).contains("an output of up to 64000", "the window is " + (total - 1));
+        assertThat(outgrown.levels()).extracting(Level::tierId).containsExactly("kiro");
+        // The tier below serving it is the request's reason and not the tier's: nobody is pushed down.
+        assertThat(outgrown.unavailableTiers()).isEmpty();
+    }
+
+    @Test
+    void anOutputLimitTheClientWroteIsNotPartOfTheWindowAsItNeverWas() {
+        configureResponsesWindow(400_000);
+        Relay measured = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, false))
+            .levels().get(0).relay("relay-1").orElseThrow();
+        assertThat(measured.gatewayOutput()).isZero();
+
+        // Only the prompt is measured against the window, whatever limit the client asked for.
+        configureResponsesWindow((int) measured.estimatedInput());
+        TierPlan plan = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, false));
+
+        assertThat(plan.xpSkips()).isEmpty();
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("relay", "kiro");
+    }
+
+    /**
+     * A refusal of a request with the gateway's own output says nothing of the prompt alone: a Chat or Messages request of the
+     * same size, whose output is its own, is still the relay's. (It is the length of the prompt together with the maximum of
+     * the model that was too much.)
+     */
+    @Test
+    void whatARelayRefusedOfARequestWithTheGatewaysOutputIsNotHeldAgainstARequestOfTheSamePromptWithAnOutputOfItsOwn() {
+        configureResponsesWindow(400_000);
+        Relay served = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true))
+            .levels().get(0).relay("relay-1").orElseThrow();
+
+        limits.learn(served.mapping(), served.estimatedInput(), served.gatewayOutput());
+
+        TierPlan again = planRemembering(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true));
+        assertThat(again.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.CONTEXT);
+        assertThat(again.xpSkips().getFirst().detail()).contains("was refused for its length");
+        assertThat(again.levels()).extracting(Level::tierId).containsExactly("kiro");
+        // The same prompt with a limit of the client's own, on the Responses entry and on the Messages one, is the relay's.
+        TierPlan own = planRemembering(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 4_096, false));
+        assertThat(own.xpSkips()).isEmpty();
+        assertThat(own.levels()).extracting(Level::tierId).containsExactly("relay", "kiro");
+        // A shorter prompt with the gateway's own output is the relay's as well.
+        TierPlan shorter = planRemembering(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(10_000, 64_000, true));
+        assertThat(shorter.xpSkips()).isEmpty();
+    }
+
+    @Test
+    void whatARelayRefusedOfARequestWithTheGatewaysOutputKeepsAMessagesRequestOfTheSamePromptWithItsRelay() {
+        Member member = relayMember();
+        configure(ownerConfiguration(member, List.of(mapping(member, "claude-sonnet-4.5", "relay-sonnet", 400_000, true)),
+            gate("RESPONSES", "ON"), gate("MESSAGES", "ON")));
+        Relay served = plan(offering(Status.VERIFIED, Entry.RESPONSES, Entry.MESSAGES), responsesWithALimit(20_000, 64_000, true))
+            .levels().get(0).relay("relay-1").orElseThrow();
+        limits.learn(served.mapping(), served.estimatedInput(), served.gatewayOutput());
+
+        TierPlan messages = planRemembering(offering(Status.VERIFIED, Entry.RESPONSES, Entry.MESSAGES), messages(conversationOf(20_000)));
+
+        assertThat(messages.xpSkips()).isEmpty();
+        assertThat(messages.levels()).extracting(Level::tierId).containsExactly("relay", "kiro");
+    }
+
+    // ---- a relay that is the only source of the request is given the request it had before D11 ----
+
+    private static final TierSelectorParser.Selector PIN_TO_THE_RELAY = TierSelectorParser.parse(TierSelectorParser.Source.SUFFIX, "relay");
+
+    /** The estimated prompt of {@code responsesWithALimit(words, ...)}, measured on a relay whose window is far above it. */
+    private long promptOf(int words) {
+        configureResponsesWindow(400_000);
+        return plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(words, 64_000, true))
+            .levels().get(0).relay("relay-1").orElseThrow().estimatedInput();
+    }
+
+    @Test
+    void aRequestPinnedToTheRelayTierIsServedByItWithTheOutputItHadBeforeD11WhenTheOutputTheGatewayChoseWouldNotFit() {
+        long input = promptOf(20_000);
+        configureResponsesWindow((int) input + 30_000);
+
+        TierPlan plan = plan(offering(Status.VERIFIED, Entry.RESPONSES),
+            responsesWithALimit(20_000, 64_000, true).withSelector(PIN_TO_THE_RELAY));
+
+        // Before D11 this was the relay's request (4,096 fit); with the model's 64,000 it was refused as too long, though the
+        // prompt fits. The relay is given the request it was given before, which the estimate of the prompt cannot spoil: the
+        // window still holds the prompt with all the room it had.
+        Relay served = plan.levels().get(0).relay("relay-1").orElseThrow();
+        assertThat(plan.pinned()).isTrue();
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("relay");
+        assertThat(served.dispatch().forwardedOutputLimit()).isEqualTo(4_096);
+        assertThat(served.dispatch().wireBody().path("max_tokens").longValue()).isEqualTo(4_096);
+        assertThat(served.gatewayOutput()).as("not the gateway's output the window is measured against any more").isZero();
+        assertThat(plan.xpSkips()).isEmpty();
+        // The relay is charged for what it was told it may write and no more; the tier still reserves the gateway's output.
+        assertThat(plan.outputBound()).isEqualTo(64_000);
+        Level level = plan.levels().get(0);
+        assertThat(level.estimate()).isEqualByComparingTo(STANDARD.estimate(level.inputBound(), 64_000));
+        // Nothing was left out, so nothing is counted as left out.
+        assertThat(counts.snapshot()).isEmpty();
+    }
+
+    /** The body, the estimate and the answer to a refusal are those of a request that wrote the 4,096 itself, which is what it was. */
+    @Test
+    void theRelayOfARequestHeldToTheOutputOfBeforeIsSentTheBodyOfTheRequestThatNamedFourThousandAndNinetySix() {
+        long input = promptOf(20_000);
+        configureResponsesWindow((int) input + 30_000);
+
+        Relay held = plan(offering(Status.VERIFIED, Entry.RESPONSES),
+            responsesWithALimit(20_000, 64_000, true).withSelector(PIN_TO_THE_RELAY)).levels().get(0).relay("relay-1").orElseThrow();
+        Relay before = plan(offering(Status.VERIFIED, Entry.RESPONSES),
+            responsesWithALimit(20_000, 4_096, false).withSelector(PIN_TO_THE_RELAY)).levels().get(0).relay("relay-1").orElseThrow();
+
+        assertThat(held.dispatch().wireBody().toString()).isEqualTo(before.dispatch().wireBody().toString());
+        assertThat(held.estimatedInput()).isEqualTo(before.estimatedInput());
+        assertThat(held.gatewayOutput()).isEqualTo(before.gatewayOutput()).isZero();
+    }
+
+    @Test
+    void aWindowThatLeavesLessThanTheFourThousandAPromptWasGivenBeforeD11IsStillTheRelaysToRefuseOrServeAsItWas() {
+        long input = promptOf(20_000);
+        configureResponsesWindow((int) input + 1_000);
+
+        TierPlan plan = plan(offering(Status.VERIFIED, Entry.RESPONSES),
+            responsesWithALimit(20_000, 64_000, true).withSelector(PIN_TO_THE_RELAY));
+
+        // The request is what it was before the gateway chose a limit: the prompt fits, and 4,096 is the limit.
+        Relay served = plan.levels().get(0).relay("relay-1").orElseThrow();
+        assertThat(served.dispatch().forwardedOutputLimit()).isEqualTo(4_096);
+        assertThat(served.gatewayOutput()).as("no longer the gateway's output the window is measured against").isZero();
+
+        // And a prompt that is over the window by itself is still too long.
+        configureResponsesWindow((int) input - 2);
+        assertThatThrownBy(() -> plan(offering(Status.VERIFIED, Entry.RESPONSES),
+            responsesWithALimit(20_000, 64_000, true).withSelector(PIN_TO_THE_RELAY)))
+            .satisfies(TierPlannerXpTest::assertPromptTooLong);
+    }
+
+    @Test
+    void aVendorWithNoNativeAccountForTheRouteServesAnAutomaticRequestByTheRelayWithTheOutputItHadBeforeD11() {
+        long input = promptOf(20_000);
+        configureResponsesWindow((int) input + 30_000);
+        cached.remove(kiro);
+        usable.remove(kiro);
+
+        TierPlan plan = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true));
+
+        assertThat(plan.pinned()).isFalse();
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("relay");
+        assertThat(plan.levels().get(0).relay("relay-1").orElseThrow().dispatch().forwardedOutputLimit()).isEqualTo(4_096);
+        assertThat(plan.xpSkips()).isEmpty();
+    }
+
+    @Test
+    void theOutputOfBeforeIsOnlyGivenWhereNothingElseCanServeAndTheTierBelowServesAsItDid() {
+        long input = promptOf(20_000);
+        configureResponsesWindow((int) input + 30_000);
+        TierSelectorParser.Selector orBelow = TierSelectorParser.parse(TierSelectorParser.Source.SUFFIX, "relay+");
+
+        TierPlan automatic = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true));
+        TierPlan range = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true).withSelector(orBelow));
+
+        // Kiro is a source of the request and writes what the gateway's output allows: the relay stays out of it.
+        assertThat(automatic.levels()).extracting(Level::tierId).containsExactly("kiro");
+        assertThat(range.levels()).extracting(Level::tierId).containsExactly("kiro");
+        assertThat(automatic.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.CONTEXT);
+        assertThat(range.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.CONTEXT);
+        assertThat(counts.snapshot().values()).containsExactly(2L);
+    }
+
+    @Test
+    void aRelayThatIsOutForAMomentIsNoReasonToCallThePromptTooLongWhenTheOutputIsTheOneOfBefore() {
+        long input = promptOf(20_000);
+        configureResponsesWindow((int) input + 30_000);
+        sessions.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+
+        TierPlan plan = planRemembering(offering(Status.VERIFIED, Entry.RESPONSES),
+            responsesWithALimit(20_000, 64_000, true).withSessionName("key-1:session-1").withSelector(PIN_TO_THE_RELAY));
+
+        // The prompt fits: it is the relay being out for two minutes that keeps the request, as for any other request.
+        assertThat(plan.pinned()).isTrue();
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("relay");
+        assertThat(plan.levels().get(0).relays()).isEmpty();
+        assertThat(plan.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.INTERRUPTED);
+    }
+
+    /**
+     * The refusal of the request a relay is given as its only source is the refusal of the request it was given before D11, and
+     * teaches what that taught: this prompt and larger ones are its to refuse, and smaller ones are still its to serve (HEAD).
+     * A window that is a few tokens too small for the prompt it was shown to hold must not turn the smaller turns of the session
+     * away for six hours, as it did when the relay was told to fill the window with the output.
+     */
+    @Test
+    void aRelayThatRefusedTheRequestItWasGivenAsItsOnlySourceIsAskedAgainForSmallerPromptsAndNotForTheSizeItRefused() {
+        long input = promptOf(20_000);
+        configureResponsesWindow((int) input + 30_000);
+        TierPlanRequest request = responsesWithALimit(20_000, 64_000, true).withSelector(PIN_TO_THE_RELAY);
+        Relay served = planRemembering(offering(Status.VERIFIED, Entry.RESPONSES), request).levels().get(0).relay("relay-1").orElseThrow();
+        // Its real window is smaller than the one written, or the estimate of the prompt was short: it refused this request.
+        limits.learn(served.mapping(), served.estimatedInput(), served.gatewayOutput());
+
+        assertThatThrownBy(() -> planRemembering(offering(Status.VERIFIED, Entry.RESPONSES), request))
+            .satisfies(TierPlannerXpTest::assertPromptTooLong);
+        for (int words : new int[] {19_000, 15_000, 12_000, 6_000, 5_000}) {
+            TierPlan smaller = planRemembering(offering(Status.VERIFIED, Entry.RESPONSES),
+                responsesWithALimit(words, 64_000, true).withSelector(PIN_TO_THE_RELAY));
+            Relay relayed = smaller.levels().get(0).relay("relay-1").orElseThrow();
+            assertThat(relayed.estimatedInput()).isLessThan(served.estimatedInput());
+            assertThat(relayed.dispatch().forwardedOutputLimit()).as("%d words", words).isEqualTo(4_096);
+        }
+        // It is the request a client that wrote 4,096 itself would have sent, and is refused as that one is.
+        assertThatThrownBy(() -> planRemembering(offering(Status.VERIFIED, Entry.RESPONSES),
+            responsesWithALimit(20_000, 4_096, false).withSelector(PIN_TO_THE_RELAY)))
+            .satisfies(TierPlannerXpTest::assertPromptTooLong);
+    }
+
+    /**
+     * What a relay refused of a request with the gateway's own output (the default output, when the window held it; 64,000
+     * in these tests) says nothing of the request it had before the gateway chose that output: a vendor whose relay is the
+     * only source still sends that one, whatever the total the refusal came to.
+     */
+    @Test
+    void whatARelayRefusedWithTheGatewaysOutputNeverTurnsAwayTheRequestItHadBeforeWhenItIsTheOnlySource() {
+        long input = promptOf(20_000);
+        configureResponsesWindow((int) input + 64_000 + 5_000);
+        Relay full = planRemembering(offering(Status.VERIFIED, Entry.RESPONSES),
+            responsesWithALimit(20_000, 64_000, true).withSelector(PIN_TO_THE_RELAY)).levels().get(0).relay("relay-1").orElseThrow();
+        assertThat(full.gatewayOutput()).as("the window holds the gateway's output").isEqualTo(64_000);
+        limits.learn(full.mapping(), full.estimatedInput(), full.gatewayOutput());
+
+        // The same prompt is no longer sent with the maximum: with kiro below it goes there, and as the only source it is
+        // given the 4,096 it had.
+        TierPlan pinned = planRemembering(offering(Status.VERIFIED, Entry.RESPONSES),
+            responsesWithALimit(20_000, 64_000, true).withSelector(PIN_TO_THE_RELAY));
+        TierPlan automatic = planRemembering(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true));
+
+        Relay held = pinned.levels().get(0).relay("relay-1").orElseThrow();
+        assertThat(held.dispatch().forwardedOutputLimit()).isEqualTo(4_096);
+        assertThat(held.gatewayOutput()).isZero();
+        assertThat(automatic.levels()).extracting(Level::tierId).containsExactly("kiro");
+        // The refusal of that request is the plain one, and a prompt as large is then too long, as it was.
+        limits.learn(held.mapping(), held.estimatedInput(), held.gatewayOutput());
+        assertThatThrownBy(() -> planRemembering(offering(Status.VERIFIED, Entry.RESPONSES),
+            responsesWithALimit(20_000, 64_000, true).withSelector(PIN_TO_THE_RELAY)))
+            .satisfies(TierPlannerXpTest::assertPromptTooLong);
+    }
+
+    /** A window of 64,000 or less holds the gateway's output (64,000 in these tests) beside no prompt at all: the request is the relay's all the same. */
+    @Test
+    void aRelayWhoseWindowCannotHoldTheModelsMaximumStillServesEveryPromptThatFitsAfterItRefusedALargerOne() {
+        configureResponsesWindow(60_000);
+        Relay big = plan(offering(Status.VERIFIED, Entry.RESPONSES),
+            responsesWithALimit(20_000, 64_000, true).withSelector(PIN_TO_THE_RELAY)).levels().get(0).relay("relay-1").orElseThrow();
+        assertThat(big.dispatch().forwardedOutputLimit()).isEqualTo(4_096);
+        limits.learn(big.mapping(), big.estimatedInput(), big.gatewayOutput());
+
+        for (int words : new int[] {19_000, 5_000, 100}) {
+            TierPlan smaller = planRemembering(offering(Status.VERIFIED, Entry.RESPONSES),
+                responsesWithALimit(words, 64_000, true).withSelector(PIN_TO_THE_RELAY));
+            assertThat(smaller.levels().get(0).relay("relay-1").orElseThrow().dispatch().forwardedOutputLimit())
+                .as("%d words", words).isEqualTo(4_096);
+        }
+    }
+
+    // ---- native accounts that cannot serve now are no source of the request ----
+
+    /**
+     * Kiro is an account of the route, and out of quota (or suspended for it): the relay that the gateway's output left out is
+     * the only source that can serve the request now, and before D11 it did. Nothing is refused and nothing waits for Kiro.
+     */
+    @Test
+    void aRelayLeftOutForTheOutputIsGivenTheRequestOfBeforeWhenTheNativeAccountsOfTheRouteCannotServeNow() {
+        long input = promptOf(20_000);
+        configureResponsesWindow((int) input + 30_000);
+        usable.remove(kiro);
+        TierSelectorParser.Selector orBelow = TierSelectorParser.parse(TierSelectorParser.Source.SUFFIX, "relay+");
+
+        TierPlan automatic = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true));
+        TierPlan range = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true).withSelector(orBelow));
+
+        for (TierPlan plan : List.of(automatic, range)) {
+            assertThat(plan.levels()).extracting(Level::tierId).containsExactly("relay");
+            Relay served = plan.levels().get(0).relay("relay-1").orElseThrow();
+            assertThat(served.dispatch().forwardedOutputLimit()).isEqualTo(4_096);
+            assertThat(plan.xpSkips()).isEmpty();
+            assertThat(plan.outputBound()).isEqualTo(64_000);
+        }
+        assertThat(counts.snapshot()).isEmpty();
+    }
+
+    /** Kiro serves it again as soon as it can, with the gateway's output, and the relay is out of the request as it was. */
+    @Test
+    void kiroServesTheRequestWithTheModelsMaximumAsSoonAsItsAccountsCanServeAgain() {
+        long input = promptOf(20_000);
+        configureResponsesWindow((int) input + 30_000);
+        usable.remove(kiro);
+        assertThat(plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true)).levels())
+            .extracting(Level::tierId).containsExactly("relay");
+
+        usable.add(kiro);
+        TierPlan back = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true));
+
+        assertThat(back.levels()).extracting(Level::tierId).containsExactly("kiro");
+        assertThat(back.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.CONTEXT);
+    }
+
+    /**
+     * Kiro's accounts are cooling down: the plan counts them (they are in the cache, and not out of quota) and selection finds none
+     * for the minute or more the cooldown lasts. The relay the output left out is the one source that can serve the request now, and
+     * it is given the request of before D11; once Kiro is back it is Kiro's again with the output the gateway chose.
+     */
+    @Test
+    void theRelayTheOutputLeftOutServesTheRequestWhileKirosAccountsAreCoolingDown() {
+        long input = promptOf(20_000);
+        configureResponsesWindow((int) input + 30_000);
+        cooling.add(kiro);
+
+        TierPlan plan = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true));
+
+        // Kiro's tier stays in the plan below the relay's, as a tier whose accounts are only not to be had for the moment.
+        assertRelayOneServesWithTheOutputOfBefore(plan, "relay", "kiro");
+        cooling.clear();
+        TierPlan back = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true));
+        assertThat(back.levels()).extracting(Level::tierId).containsExactly("kiro");
+    }
+
+    /** The larger relay of the tier is cooling down, and Kiro's tier is not in the pin: the smaller relay serves what its window would not hold with the output. */
+    @Test
+    void theSmallerRelayServesWhatItsWindowDoesNotHoldWithTheOutputWhileTheLargerOneIsCoolingDown() {
+        long input = promptOf(20_000);
+        configureTwoRelaysForResponses((int) input + 30_000);
+        cooling.add(secondRelay);
+        TierSelectorParser.Selector toTheRelays = TierSelectorParser.parse(TierSelectorParser.Source.SUFFIX, "relay");
+
+        TierPlan pinned = planRemembering(offering(Status.VERIFIED, Entry.RESPONSES),
+            responsesWithALimit(20_000, 64_000, true).withSelector(toTheRelays));
+        TierPlan automatic = planRemembering(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true));
+
+        assertThat(pinned.pinned()).isTrue();
+        assertThat(pinned.levels()).extracting(Level::tierId).containsExactly("relay");
+        assertThat(pinned.levels().get(0).relay("relay-1")).isPresent();
+        // Kiro can serve, so the relay that was left out for the output stays out when no pin keeps the request to the relays.
+        assertThat(automatic.levels()).extracting(Level::tierId).containsExactly("relay", "kiro");
+        assertThat(automatic.levels().get(0).relay("relay-1")).isEmpty();
+        assertThat(automatic.levels().get(0).relay("relay-2")).isPresent();
+    }
+
+    /** Nothing in the plan can be selected, and neither can the relay that was left out: the request stays what it was. */
+    @Test
+    void aRequestWhoseRelayAndNativeAccountsAreAllCoolingDownKeepsTheNativePlan() {
+        long input = promptOf(20_000);
+        configureResponsesWindow((int) input + 30_000);
+        cooling.add(kiro);
+        cooling.add(relay);
+
+        TierPlan plan = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true));
+
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("kiro");
+        assertThat(plan.levels().get(0).relay("relay-1")).isEmpty();
+    }
+
+    /** A client that pinned Kiro's tier asked for that tier alone: the relay is not its way round Kiro's quota. */
+    @Test
+    void aRequestPinnedToKirosTierIsNotGivenToTheRelayWhenKirosAccountsCannotServeNow() {
+        long input = promptOf(20_000);
+        configureResponsesWindow((int) input + 30_000);
+        usable.remove(kiro);
+        TierSelectorParser.Selector toKiro = TierSelectorParser.parse(TierSelectorParser.Source.SUFFIX, "kiro");
+
+        TierPlan plan = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true).withSelector(toKiro));
+
+        assertThat(plan.pinned()).isTrue();
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("kiro");
+    }
+
+    /** Neither source can serve now: the request waits for the native accounts as it does when nothing else is out. */
+    @Test
+    void aRequestWhoseRelayAndNativeAccountsCannotServeNowKeepsTheNativePlan() {
+        long input = promptOf(20_000);
+        configureResponsesWindow((int) input + 30_000);
+        usable.remove(kiro);
+        usable.remove(relay);
+
+        TierPlan plan = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true));
+
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("kiro");
+        assertThat(plan.levels().get(0).relay("relay-1")).isEmpty();
+    }
+
+    /** A prompt that is longer than the window by itself is not served by it, however the native accounts are. */
+    @Test
+    void aPromptOverTheWindowIsStillTheNativeAccountsToWaitForWhenTheyAreOutOfQuota() {
+        long input = promptOf(20_000);
+        configureResponsesWindow((int) input - 2);
+        usable.remove(kiro);
+
+        TierPlan plan = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true));
+
+        // As any request of a vendor whose native accounts are all out: it waits for them (503 later), and is not refused for
+        // a length the native accounts can hold.
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("kiro");
+        assertThat(plan.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.CONTEXT);
+    }
+
+    // ---- a relay the output left out is the only source when nothing else of the tiers can serve the request either ----
+
+    /** Two relays in the first tier: relay-1 with a window of {@code small} tokens, relay-2 with one of 400,000. */
+    private void configureTwoRelaysForResponses(int small) {
+        Member first = relayMember("relay-1", false);
+        Member second = relayMember("relay-2", false);
+        if (!cached.contains(secondRelay)) {
+            cached.add(secondRelay);
+            usable.add(secondRelay);
+        }
+        configure(ownerConfigurationWith(List.of(first, second), List.of(
+            mapping(first, relay, "claude-sonnet-4.5", "relay-sonnet", small, true),
+            mapping(second, secondRelay, "claude-sonnet-4.5", "relay-sonnet", 400_000, true)), gate("RESPONSES", "ON")));
+    }
+
+    /** The plan serves the request by relay-1 alone, with the output the request had before D11. */
+    private static void assertRelayOneServesWithTheOutputOfBefore(TierPlan plan, String... tiers) {
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly(tiers);
+        Relay served = plan.levels().get(0).relay("relay-1").orElseThrow();
+        assertThat(served.dispatch().forwardedOutputLimit()).isEqualTo(4_096);
+        assertThat(served.gatewayOutput()).isZero();
+        assertThat(plan.xpSkips()).extracting(XpSkip::accountId).doesNotContain("relay-1");
+    }
+
+    /**
+     * Relay-2 would hold the prompt and the output both, and has broken off an answer for the session a moment ago; relay-1 is
+     * left out for the output alone. Relay-1 is the one source the request can be served by, and it served it before D11: it is
+     * not refused for a relay that is back in two minutes, and the retry of an answer that was held back (Codex sends it up to
+     * five times) is not left without a source because the other relay is the one that answered.
+     */
+    @Test
+    void aRelayLeftOutForTheOutputIsGivenTheRequestOfBeforeWhenItsNeighbourIsOutForAMoment() {
+        long input = promptOf(20_000);
+        configureTwoRelaysForResponses((int) input + 30_000);
+        sessions.excludeRelay("anthropic", "key-1:session-1", "relay-2");
+        TierPlanRequest turn = responsesWithALimit(20_000, 64_000, true).withSessionName("key-1:session-1");
+        TierSelectorParser.Selector orBelow = TierSelectorParser.parse(TierSelectorParser.Source.SUFFIX, "relay+");
+
+        // Kiro can serve: it serves, as it does for any request the relay was left out of, and nobody is pushed down.
+        TierPlan kiroServes = planRemembering(offering(Status.VERIFIED, Entry.RESPONSES), turn);
+        assertThat(kiroServes.levels()).extracting(Level::tierId).containsExactly("kiro");
+        assertThat(kiroServes.xpSkips()).extracting(XpSkip::accountId, XpSkip::reason).containsExactlyInAnyOrder(
+            org.assertj.core.groups.Tuple.tuple("relay-1", XpSkip.Reason.CONTEXT),
+            org.assertj.core.groups.Tuple.tuple("relay-2", XpSkip.Reason.INTERRUPTED));
+
+        // A pin to the tier of relays alone, by the suffix or with "+", which Kiro is no part of.
+        TierPlan pinned = planRemembering(offering(Status.VERIFIED, Entry.RESPONSES), turn.withSelector(PIN_TO_THE_RELAY));
+        assertThat(pinned.pinned()).isTrue();
+        assertRelayOneServesWithTheOutputOfBefore(pinned, "relay");
+        assertThat(pinned.xpSkips()).extracting(XpSkip::accountId, XpSkip::reason)
+            .containsExactly(org.assertj.core.groups.Tuple.tuple("relay-2", XpSkip.Reason.INTERRUPTED));
+        assertThat(pinned.outputBound()).isEqualTo(64_000);
+
+        // And a vendor that has no native account for the route at all.
+        cached.remove(kiro);
+        usable.remove(kiro);
+        TierPlan alone = planRemembering(offering(Status.VERIFIED, Entry.RESPONSES), turn);
+        assertThat(alone.pinned()).isFalse();
+        assertRelayOneServesWithTheOutputOfBefore(alone, "relay");
+        TierPlan range = planRemembering(offering(Status.VERIFIED, Entry.RESPONSES), turn.withSelector(orBelow));
+        assertRelayOneServesWithTheOutputOfBefore(range, "relay");
+    }
+
+    /** The neighbour is switched off, and a hint keeps the request to the tier: the relay that is in service serves it. */
+    @Test
+    void aHintForTheRelayTierIsServedByTheRelayTheOutputLeftOutWhenItsNeighbourIsSwitchedOff() {
+        long input = promptOf(20_000);
+        configureTwoRelaysForResponses((int) input + 30_000);
+        cached.remove(secondRelay);
+        usable.remove(secondRelay);
+        switchedOff.add(secondRelay);
+
+        TierPlan hinted = plan(offering(Status.VERIFIED, Entry.RESPONSES),
+            responsesWithALimit(20_000, 64_000, true).withSelector(TierSelectorParser.fromHeader("relay")));
+
+        assertThat(hinted.pinned()).isTrue();
+        assertRelayOneServesWithTheOutputOfBefore(hinted, "relay");
+        // Without a hint the request is Kiro's, as for any request the relay was left out of.
+        TierPlan automatic = plan(offering(Status.VERIFIED, Entry.RESPONSES), responsesWithALimit(20_000, 64_000, true));
+        assertThat(automatic.levels()).extracting(Level::tierId).containsExactly("kiro");
+    }
+
+    /** Nothing is gained where the relay the output left out is out for a moment itself: the tier waits, as it did. */
+    @Test
+    void aRelayLeftOutForTheOutputThatIsOutForAMomentItselfKeepsTheTierWaitingAsItDid() {
+        long input = promptOf(20_000);
+        configureTwoRelaysForResponses((int) input + 30_000);
+        sessions.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+        sessions.excludeRelay("anthropic", "key-1:session-1", "relay-2");
+
+        TierPlan plan = planRemembering(offering(Status.VERIFIED, Entry.RESPONSES),
+            responsesWithALimit(20_000, 64_000, true).withSessionName("key-1:session-1").withSelector(PIN_TO_THE_RELAY));
+
+        assertThat(plan.pinned()).isTrue();
+        assertThat(plan.levels()).extracting(Level::tierId).containsExactly("relay");
+        assertThat(plan.levels().get(0).relays()).isEmpty();
+        assertThat(plan.xpSkips()).extracting(XpSkip::reason).contains(XpSkip.Reason.INTERRUPTED);
+    }
+
+    /** An openai vendor whose first relay sees images (window {@code seeing}) and whose second does not (400,000). */
+    private void configureTwoOpenAiRelays(int seeing) {
+        Member sees = openAiRelayMember(false, true);
+        Member blind = new Member("openai", "relay-2", "relay", "OPENAI_CHAT", true, false, false, false, false, true, "NONE", 540,
+            true, true);
+        if (!cached.contains(secondRelay)) {
+            cached.add(secondRelay);
+            usable.add(secondRelay);
+        }
+        configure(SourceTierSnapshot.of(7L, List.of(vendor("openai")), List.of(
+            tier("openai", "relay", 1, "relay", "1"),
+            tier("openai", "official", 2, "official", "0.5", AccountAllocationCategory.OFFICIAL_API_KEY)
+        ), List.of(sees, blind), List.of(
+            mapping(sees, relay, "gpt-5.5", "relay-gpt", seeing, true),
+            mapping(blind, secondRelay, "gpt-5.5", "relay-gpt", 400_000, true)), List.of(gateOf("openai", "RESPONSES", "ON"))));
+        if (!cached.contains(openAiOfficial)) {
+            cached.add(openAiOfficial);
+            usable.add(openAiOfficial);
+        }
+    }
+
+    /** A Codex turn for a GPT model with a prompt of about {@code words} tokens, with the output limit the gateway chose. */
+    private TierPlanRequest gptTurn(int words, long limit, boolean withAnImage) {
+        ObjectNode raw = (ObjectNode) json(CodexRequests.GPT_TURN);
+        ArrayNode kept = mapper.createArrayNode();
+        raw.withArray("tools").forEach(tool -> {
+            if (!List.of("tool_search", "web_search").contains(tool.path("type").stringValue())) {
+                kept.add(tool);
+            }
+        });
+        raw.set("tools", kept);
+        ArrayNode content = raw.withArray("input").addObject().put("type", "message").put("role", "user").putArray("content");
+        content.addObject().put("type", "input_text").put("text", "word ".repeat(words));
+        if (withAnImage) {
+            content.addObject().put("type", "input_image").put("image_url", "data:image/png;base64,AAAA");
+        }
+        raw.put("max_output_tokens", limit);
+        return responsesOfGpt(raw.toString()).withEntryFacts(TierEntryFacts.of(TierEntry.RESPONSES, raw).withGatewayOutput(true));
+    }
+
+    /**
+     * The relay that sees images is left out for the output alone; the one that does not is left out for the image, a feature
+     * the request carries that the official keys of the route carry too. The request is refused for that feature, naming one
+     * that the first relay carries, though before D11 it served the request.
+     */
+    @Test
+    void aRelayLeftOutForTheOutputIsGivenTheRequestOfBeforeWhenItsNeighbourIsLeftOutForAFeatureItCarries() {
+        configureTwoOpenAiRelays(400_000);
+        long input = plan(offering(Status.VERIFIED, Entry.RESPONSES), gptTurn(20_000, 64_000, true).withSelector(PIN_TO_THE_RELAY))
+            .levels().get(0).relay("relay-1").orElseThrow().estimatedInput();
+        configureTwoOpenAiRelays((int) input + 30_000);
+
+        TierPlan pinned = plan(offering(Status.VERIFIED, Entry.RESPONSES), gptTurn(20_000, 64_000, true).withSelector(PIN_TO_THE_RELAY));
+
+        assertRelayOneServesWithTheOutputOfBefore(pinned, "relay");
+        assertThat(pinned.xpSkips()).extracting(XpSkip::accountId, XpSkip::reason, XpSkip::detail)
+            .containsExactly(org.assertj.core.groups.Tuple.tuple("relay-2", XpSkip.Reason.FEATURE, "image"));
+        // No official key to serve it: the relay is the one source, as it was.
+        cached.remove(openAiOfficial);
+        usable.remove(openAiOfficial);
+        TierPlan alone = plan(offering(Status.VERIFIED, Entry.RESPONSES), gptTurn(20_000, 64_000, true));
+        assertRelayOneServesWithTheOutputOfBefore(alone, "relay");
+    }
+
+    /** The control: nothing sees the image and the output is not the reason, so the request is refused for the feature as it was. */
+    @Test
+    void anImageNoRelayOfTheTierSeesIsStillRefusedByName() {
+        configureOpenAi(openAiRelayMember(false, false), gateOf("openai", "RESPONSES", "ON"));
+
+        assertThatThrownBy(() -> plan(offering(Status.VERIFIED, Entry.RESPONSES),
+            gptTurn(20_000, 64_000, true).withSelector(PIN_TO_THE_RELAY)))
+            .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getCode()).isEqualTo("SOURCE_TIER_FEATURE_UNSUPPORTED"));
+    }
+
+    /** The same request with the account that owns the chain it continues, which is a preference where the chain can move. */
+    private static TierPlanRequest ownedBy(TierPlanRequest r, String ownerAccountId) {
+        return new TierPlanRequest(r.requestId(), r.requestedModel(), r.upstreamModel(), r.providerHint(), r.route(),
+            r.preferDeepSeekAccounts(), r.openAiCompatibleModel(), r.preferCodexAccounts(), r.isolateCodexPool(), r.fastMode(),
+            r.billed(), r.upstreamRequest(), ownerAccountId, true, r.keyId(), r.sessionName(), r.selector(), r.entry(),
+            r.keyHoldsPreference(), r.suffixTakenOff(), r.entryFacts());
+    }
+
+    /**
+     * The chain can be replayed anywhere and its owner, an official key, is out of quota: nothing native can serve it, and the
+     * walk of the request starts at the relay that the output left out, as before D11, so the owner is no reason to keep the
+     * relay out of the plan and the request waiting for a key that has no quota.
+     */
+    @Test
+    void aRelayLeftOutForTheOutputServesAChainThatCanMoveWhenItsOwnerCannotServe() {
+        Member sees = openAiRelayMember(false, true);
+        configureOpenAi(sees, gateOf("openai", "RESPONSES", "ON"));
+        long input = plan(offering(Status.VERIFIED, Entry.RESPONSES), gptTurn(20_000, 64_000, false))
+            .levels().get(0).relay("relay-1").orElseThrow().estimatedInput();
+        configure(SourceTierSnapshot.of(7L, List.of(vendor("openai")), List.of(
+            tier("openai", "relay", 1, "relay", "1"),
+            tier("openai", "official", 2, "official", "0.5", AccountAllocationCategory.OFFICIAL_API_KEY)
+        ), List.of(sees), List.of(mapping(sees, "gpt-5.5", "relay-gpt", (int) input + 30_000, true)),
+            List.of(gateOf("openai", "RESPONSES", "ON"))));
+        when(accountPool.cachedAccount("openai-official")).thenReturn(Optional.of(openAiOfficial));
+
+        // The owner can serve: it does, as any native source does.
+        TierPlan owned = plan(offering(Status.VERIFIED, Entry.RESPONSES), ownedBy(gptTurn(20_000, 64_000, false), "openai-official"));
+        assertThat(owned.levels()).extracting(Level::tierId).containsExactly("official");
+        assertThat(owned.owner()).isPresent();
+
+        usable.remove(openAiOfficial);
+        TierPlan relayed = plan(offering(Status.VERIFIED, Entry.RESPONSES), ownedBy(gptTurn(20_000, 64_000, false), "openai-official"));
+
+        assertRelayOneServesWithTheOutputOfBefore(relayed, "relay");
+        assertThat(relayed.owner()).as("the chain moves to the relay").isEmpty();
     }
 
     @Test

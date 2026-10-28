@@ -32,11 +32,15 @@ public final class StatsDtos {
         String wireModel,
         String usageSource,
         String stopReason,
-        String degradedFeatures
+        String degradedFeatures,
+        Long withheldInputTokens,
+        Long withheldOutputTokens
     ) {
         /**
          * A row of a request that was not served from source tiers, or a row a user reads: the source columns are
-         * left out of the JSON when they are null.
+         * left out of the JSON when they are null. {@code withheldInputTokens} and {@code withheldOutputTokens} are what a
+         * relay reported of an answer the gateway held back, which the operator carried: only the administrator's log has
+         * them, and they are no part of {@code inputTokens} and {@code outputTokens}, the usage of the user.
          */
         public RequestLogResponse(
             String requestId,
@@ -54,7 +58,7 @@ public final class StatsDtos {
             Instant createdAt
         ) {
             this(requestId, apiKeyId, accountId, path, model, statusCode, success, inputTokens, outputTokens, credits,
-                latencyMs, errorMessage, createdAt, null, null, null, null, null, null, null, null, null, null);
+                latencyMs, errorMessage, createdAt, null, null, null, null, null, null, null, null, null, null, null, null);
         }
     }
 

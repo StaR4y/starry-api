@@ -98,8 +98,55 @@ class XpLearnedLimitsTest {
         MemberModel mapping = mapping("relay-1", "claude-sonnet-4.5", "relay-sonnet", 200_000, "hash-1");
 
         XpLearnedLimits.disabled().learn(mapping, 150_000);
+        XpLearnedLimits.disabled().learn(mapping, 150_000, 64_000);
 
         assertThat(XpLearnedLimits.disabled().refusedFrom(mapping)).isEmpty();
+        assertThat(XpLearnedLimits.disabled().refusedFromWithGatewayOutput(mapping)).isEmpty();
+    }
+
+    @Test
+    void aRefusalOfARequestWhoseOutputTheGatewayChoseTeachesRequestsLikeItAndNoOther() {
+        MemberModel mapping = mapping("relay-1", "claude-sonnet-4.5", "relay-sonnet", 200_000, "hash-1");
+
+        // A prompt of 146,000 and the model's maximum of 64,000 together did not fit: nothing is known of 146,000 alone.
+        limits.learn(mapping, 146_000, 64_000);
+
+        assertThat(limits.refusedFrom(mapping)).as("the prompt alone was never shown to be too long").isEmpty();
+        assertThat(limits.refusedFromWithGatewayOutput(mapping)).hasValue(210_000);
+    }
+
+    @Test
+    void whatARelayRefusedWithAnOutputTheClientWroteStillHoldsForEveryRequestAndWhatItRefusedWithTheGatewaysIsKeptApart() {
+        MemberModel mapping = mapping("relay-1", "claude-sonnet-4.5", "relay-sonnet", 200_000, "hash-1");
+
+        limits.learn(mapping, 150_000);
+        limits.learn(mapping, 130_000, 64_000);
+
+        assertThat(limits.refusedFrom(mapping)).hasValue(150_000);
+        assertThat(limits.refusedFromWithGatewayOutput(mapping)).hasValue(194_000);
+    }
+
+    @Test
+    void theSizeOfTheGatewaysOutputKindOnlyGoesDownToo() {
+        MemberModel mapping = mapping("relay-1", "claude-sonnet-4.5", "relay-sonnet", 200_000, "hash-1");
+
+        limits.learn(mapping, 150_000, 64_000);
+        limits.learn(mapping, 160_000, 64_000);
+        assertThat(limits.refusedFromWithGatewayOutput(mapping)).hasValue(214_000);
+
+        limits.learn(mapping, 120_000, 64_000);
+        assertThat(limits.refusedFromWithGatewayOutput(mapping)).hasValue(184_000);
+    }
+
+    @Test
+    void anOutputOfNoSizeIsTheOrdinaryKind() {
+        MemberModel mapping = mapping("relay-1", "claude-sonnet-4.5", "relay-sonnet", 200_000, "hash-1");
+
+        limits.learn(mapping, 150_000, 0);
+        limits.learn(mapping, 140_000, -5);
+
+        assertThat(limits.refusedFrom(mapping)).hasValue(140_000);
+        assertThat(limits.refusedFromWithGatewayOutput(mapping)).isEmpty();
     }
 
     private static MemberModel mapping(String accountId, String modelId, String wireModel, int window, String verifiedHash) {

@@ -356,7 +356,9 @@ public final class SourceTierDtos {
      * request went on elsewhere and the account rests) and {@code withheld} (the relay answered and the gateway held the
      * answer back, as the Responses entry must for an answer its client would take for a failure: nobody was charged, and it
      * is nothing of the relay's reliability, so it is no part of {@code interrupted}); the rest of {@code failed} is anything
-     * else. {@code estimated} and
+     * else. {@code withheldInputTokens} and {@code withheldOutputTokens} are what the relay reported of the withheld answers
+     * (read as the usage of a served one is): the operator's cost, which the user was not charged and which is no part of the
+     * usage the user's statistics count. {@code estimated} and
      * {@code clamped} are answered attempts whose usage was not what the relay reported, {@code degraded} those that
      * left a feature of the request out. {@code p95Ms} is the 95th percentile of the latency of the answered ones, absent
      * when none was.
@@ -371,6 +373,8 @@ public final class SourceTierDtos {
         long modelNotServed,
         long keyRefused,
         long withheld,
+        long withheldInputTokens,
+        long withheldOutputTokens,
         long estimated,
         long clamped,
         long degraded,

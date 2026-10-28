@@ -2,6 +2,7 @@ package tech.starryapi.proxy.tier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.OptionalInt;
 import org.junit.jupiter.api.Test;
 import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.model.DefaultModelCatalogProvider;
@@ -26,6 +27,58 @@ class RequestBoundsTest {
         // The default stands in for a missing max_output_tokens, so a small max_tokens still reserves for 4096.
         assertThat(RequestBounds.outputTokens(json("{\"max_tokens\": 100}"))).isEqualTo(4096);
         assertThat(RequestBounds.outputTokens(json("{}"))).isEqualTo(4096);
+    }
+
+    // ---- the body a relay had before the gateway chose an output ----
+
+    @Test
+    void theBodyOfBeforeHoldsTheOutputLimitsToTheFallbackAndLeavesTheRestAndTheBodyItWasGiven() {
+        ObjectNode body = (ObjectNode) json("{\"model\": \"m\", \"max_tokens\": 16000, \"messages\": [{\"role\": \"user\", \"content\": \"hi\"}]}");
+
+        ObjectNode before = RequestBounds.withTheOutputOfBefore(body);
+
+        assertThat(before.path("max_tokens").asLong()).isEqualTo(RequestBounds.FALLBACK_OUTPUT_TOKENS);
+        assertThat(before.path("messages")).isEqualTo(body.path("messages"));
+        assertThat(body.path("max_tokens").asLong()).as("the body it was given is not changed").isEqualTo(16000);
+        ObjectNode completion = (ObjectNode) json("{\"max_completion_tokens\": 32000, \"max_tokens\": 32000}");
+        assertThat(RequestBounds.withTheOutputOfBefore(completion).path("max_completion_tokens").asLong()).isEqualTo(4096);
+        assertThat(RequestBounds.withTheOutputOfBefore(completion).path("max_tokens").asLong()).isEqualTo(4096);
+        // A limit below it is not raised, and a body that names none is not given one.
+        assertThat(RequestBounds.withTheOutputOfBefore(json("{\"max_tokens\": 100}")).path("max_tokens").asLong()).isEqualTo(100);
+        assertThat(RequestBounds.withTheOutputOfBefore(json("{\"stream\": true}")).has("max_tokens")).isFalse();
+    }
+
+    // ---- the default of a request that names no output ----
+
+    /** The model writes the smaller of what the two catalogs list when both do, what one lists when only one does, else 4,096. */
+    @Test
+    void theModelWritesTheSmallerOfTheTwoCatalogsAndWhicheverListsWhenOnlyOneDoes() {
+        assertThat(RequestBounds.modelMaximumOutput(OptionalInt.of(384_000), OptionalInt.of(8_192))).isEqualTo(8_192);
+        assertThat(RequestBounds.modelMaximumOutput(OptionalInt.of(64_000), OptionalInt.of(128_000))).isEqualTo(64_000);
+        assertThat(RequestBounds.modelMaximumOutput(OptionalInt.of(64_000), OptionalInt.empty())).isEqualTo(64_000);
+        assertThat(RequestBounds.modelMaximumOutput(OptionalInt.empty(), OptionalInt.of(16_384))).isEqualTo(16_384);
+        assertThat(RequestBounds.modelMaximumOutput(OptionalInt.empty(), OptionalInt.empty())).isEqualTo(4096);
+        // A figure that is no figure (0) does not lower it to nothing.
+        assertThat(RequestBounds.modelMaximumOutput(OptionalInt.of(0), OptionalInt.of(16_384))).isEqualTo(16_384);
+        assertThat(RequestBounds.modelMaximumOutput(OptionalInt.of(64_000), OptionalInt.of(0))).isEqualTo(64_000);
+        assertThat(RequestBounds.modelMaximumOutput(OptionalInt.of(-5), OptionalInt.of(0))).isEqualTo(4096);
+    }
+
+    @Test
+    void theDefaultOutputIsTheSettingUnlessTheModelWritesLess() {
+        // Claude and GPT: both catalogs list 64,000, so the setting stands.
+        assertThat(RequestBounds.defaultOutputTokens(16_000, OptionalInt.of(64_000), OptionalInt.of(64_000))).isEqualTo(16_000);
+        // DeepSeek v4: 384,000 in the model list and 8,192 in the price catalog.
+        assertThat(RequestBounds.defaultOutputTokens(16_000, OptionalInt.of(384_000), OptionalInt.of(8_192))).isEqualTo(8_192);
+        // A raised setting is held to what the model writes, and a lowered one is not raised to it.
+        assertThat(RequestBounds.defaultOutputTokens(100_000, OptionalInt.of(64_000), OptionalInt.of(64_000))).isEqualTo(64_000);
+        assertThat(RequestBounds.defaultOutputTokens(2_048, OptionalInt.of(64_000), OptionalInt.of(64_000))).isEqualTo(2_048);
+        // A model that writes less than the old 4,096 is held to that.
+        assertThat(RequestBounds.defaultOutputTokens(16_000, OptionalInt.of(2_048), OptionalInt.empty())).isEqualTo(2_048);
+        // A model nobody gives a figure for gets the fallback, whatever the setting is.
+        assertThat(RequestBounds.defaultOutputTokens(100_000, OptionalInt.empty(), OptionalInt.empty())).isEqualTo(4096);
+        // And nothing above what a client may ask for.
+        assertThat(RequestBounds.defaultOutputTokens(5_000_000, OptionalInt.of(2_000_000), OptionalInt.empty())).isEqualTo(1_000_000);
     }
 
     // ---- a route that takes the whole request ----

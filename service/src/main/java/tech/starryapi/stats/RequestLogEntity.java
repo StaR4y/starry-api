@@ -39,6 +39,8 @@ public class RequestLogEntity {
     private String usageSource;
     private String stopReason;
     private String degradedFeatures;
+    private Long withheldInputTokens;
+    private Long withheldOutputTokens;
     private Instant createdAt;
 
     public Long getId() {
@@ -271,6 +273,22 @@ public class RequestLogEntity {
 
     public void setDegradedFeatures(String degradedFeatures) {
         this.degradedFeatures = degradedFeatures;
+    }
+
+    public Long getWithheldInputTokens() {
+        return withheldInputTokens;
+    }
+
+    public void setWithheldInputTokens(Long withheldInputTokens) {
+        this.withheldInputTokens = withheldInputTokens;
+    }
+
+    public Long getWithheldOutputTokens() {
+        return withheldOutputTokens;
+    }
+
+    public void setWithheldOutputTokens(Long withheldOutputTokens) {
+        this.withheldOutputTokens = withheldOutputTokens;
     }
 
     public Instant getCreatedAt() {

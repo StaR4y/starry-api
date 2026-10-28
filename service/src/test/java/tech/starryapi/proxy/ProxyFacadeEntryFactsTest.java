@@ -162,12 +162,13 @@ class ProxyFacadeEntryFactsTest {
         assertThat(facts.detected().has(Feature.PREVIOUS_RESPONSE_ID)).isFalse();
         assertThat(seen.upstreamRequest().has("previous_response_id")).isFalse();
         assertThat(seen.upstreamRequest().path("input")).hasSize(3);
-        // The plan is made over the body the native accounts are sent, with the output limit forced ...
+        // The plan is made over the body the native accounts are sent, with the output limit forced (the default of the gateway,
+        // 16,000 tokens, since the request names none and this model writes 64,000) ...
         assertThat(seen.upstreamRequest().has("messages")).isFalse();
-        assertThat(seen.upstreamRequest().path("max_output_tokens").asInt()).isEqualTo(4096);
+        assertThat(seen.upstreamRequest().path("max_output_tokens").asInt()).isEqualTo(16_000);
         // ... and the relay is given the conversion of that body.
         JsonNode chat = facts.chatConversion().apply(seen.upstreamRequest());
-        assertThat(chat.path("max_tokens").asInt()).isEqualTo(4096);
+        assertThat(chat.path("max_tokens").asInt()).isEqualTo(16_000);
         assertThat(chat.path("messages")).extracting(message -> message.path("role").asString())
             .containsExactly("user", "assistant", "user");
         assertThat(chat.path("messages").get(1).path("content").asString()).isEqualTo("all done");

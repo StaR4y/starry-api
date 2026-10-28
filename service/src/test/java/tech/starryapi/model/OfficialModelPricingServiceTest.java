@@ -39,6 +39,22 @@ class OfficialModelPricingServiceTest {
     }
 
     @Test
+    void listsTheMostOutputTokensTheCatalogGivesAModelAndNothingForAModelItDoesNotListOrListsWithNone() {
+        // What the upstream of a model itself holds a request to, read under the same ids as the price (a dotted Claude id,
+        // a chat alias), so that the default of a request that names no limit can be held to it.
+        assertThat(service.maxOutputTokens("gpt-4o")).hasValue(16_384);
+        assertThat(service.maxOutputTokens("chatgpt-4o")).hasValue(16_384);
+        assertThat(service.maxOutputTokens("openai/gpt-4.1")).hasValue(32_768);
+        assertThat(service.maxOutputTokens("gpt-4")).hasValue(4_096);
+        assertThat(service.maxOutputTokens("gpt-5.4")).hasValue(128_000);
+        assertThat(service.maxOutputTokens("claude-sonnet-4.5")).hasValue(64_000);
+        assertThat(service.maxOutputTokens("claude-opus-4-1")).hasValue(32_000);
+        assertThat(service.maxOutputTokens("a-model-nobody-lists")).isEmpty();
+        assertThat(service.maxOutputTokens(null)).isEmpty();
+        assertThat(service.maxOutputTokens("gpt-4o-mini-tts")).as("a catalog entry with no output figure").isEmpty();
+    }
+
+    @Test
     void resolvesCatalogAliasesWithoutUsingRoutingTargets() {
         OfficialPriceMatch gpt = service.resolve("gpt-5.5", true).orElseThrow();
         OfficialPriceMatch sonnet = service.resolve("sonnet", true).orElseThrow();

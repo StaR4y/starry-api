@@ -850,6 +850,18 @@ export function withheldPercent(figures: SourceTierXpFigures): number | null {
   return percentOf(figures.withheld, figures.attempts);
 }
 
+/**
+ * 被扣下的应答里中转报告的令牌（运营者承担的成本，用户没被收费）；没有被扣下的应答，或中转没报告任何用量时是 null。
+ * 旧节点的状态里没有这两个字段，按没有算。
+ */
+export function withheldTokens(
+  figures: SourceTierXpFigures,
+): { input: number; output: number } | null {
+  const input = figures.withheldInputTokens ?? 0;
+  const output = figures.withheldOutputTokens ?? 0;
+  return input > 0 || output > 0 ? { input, output } : null;
+}
+
 export type FigureKind = 'success' | 'estimated' | 'unbilled' | 'conversionRejected' | 'withheld';
 
 /** 指标的提示色：估算超过 5%、中断达到 2%、转换被拒达到 1% 标红（升级标准的界限），成功率低于 90% 标黄，有被扣下的应答标黄（没有升级标准） */

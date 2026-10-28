@@ -13,6 +13,8 @@
       "usageSource": null,
       "stopReason": "WITHHELD",
       "degraded": "builtin_tool,prompt_cache_key",
+      "withheldInputTokens": 1200,
+      "withheldOutputTokens": 40,
       "error": "The source stopped its answer with its content filter"
     }
   ]

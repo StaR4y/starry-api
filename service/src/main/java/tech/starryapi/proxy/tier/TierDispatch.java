@@ -94,6 +94,11 @@ public record TierDispatch(
      * has no body of its own, and for a body that names none.
      */
     public long forwardedOutputLimit() {
+        return outputLimitOf(wireBody);
+    }
+
+    /** The output limit a relay body names, {@code max_completion_tokens} before {@code max_tokens}; 0 for a body that names none. */
+    public static long outputLimitOf(JsonNode wireBody) {
         if (wireBody == null) {
             return 0;
         }

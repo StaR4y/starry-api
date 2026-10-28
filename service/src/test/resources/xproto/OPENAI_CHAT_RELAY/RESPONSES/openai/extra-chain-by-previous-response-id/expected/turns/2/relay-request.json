@@ -29,7 +29,7 @@
         "content": "And what is two and two?"
       }
     ],
-    "max_completion_tokens": 4096,
+    "max_completion_tokens": 16000,
     "tools": [
       {
         "type": "function",

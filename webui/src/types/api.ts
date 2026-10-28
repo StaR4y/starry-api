@@ -959,6 +959,12 @@ export interface RequestLog {
   usageSource?: string | null;
   stopReason?: string | null;
   degradedFeatures?: string | null;
+  /**
+   * 网关扣下的应答里，中转报告的令牌：运营者承担的成本。用户没被收费，也不在 inputTokens / outputTokens 里（那两个是用户的
+   * 用量，这样的行是 0），只有管理员的日志有。
+   */
+  withheldInputTokens?: number | null;
+  withheldOutputTokens?: number | null;
 }
 
 export interface ActiveUserUsage {

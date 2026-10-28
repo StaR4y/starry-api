@@ -68,7 +68,7 @@ class SourceTiersMigrationPostgreSqlIntegrationTest extends PostgreSqlIntegratio
 
             assertThat(columns(db, "request_logs")).contains("source_tier_ref", "source_tier_level", "source_tier_name",
                 "price_factor", "tier_selection", "source_dispatch", "wire_model", "usage_source", "stop_reason",
-                "degraded_features");
+                "degraded_features", "withheld_input_tokens", "withheld_output_tokens");
             assertThat(columns(db, "billing_reservations")).contains("served_tier_ref", "served_tier_level",
                 "served_price_factor", "last_dispatched_tier_ref", "last_dispatched_at");
             assertThat(columns(db, "api_usage_events")).contains("source_tier_ref", "price_factor");
@@ -76,6 +76,7 @@ class SourceTiersMigrationPostgreSqlIntegrationTest extends PostgreSqlIntegratio
             assertThat(scalar(db, "SELECT setting_value FROM system_settings WHERE setting_key = 'source_tier_config_version'"))
                 .isEqualTo("0");
             assertThat(scalar(db, "SELECT success FROM flyway_schema_history WHERE version = '29'")).isEqualTo(true);
+            assertThat(scalar(db, "SELECT success FROM flyway_schema_history WHERE version = '31'")).isEqualTo(true);
 
             String vendor = vendor(db);
             Map<String, Object> vendorRow = rows(db, "SELECT * FROM source_tier_vendors WHERE vendor = ?", vendor).getFirst();
@@ -421,6 +422,7 @@ class SourceTiersMigrationPostgreSqlIntegrationTest extends PostgreSqlIntegratio
               AND stop_reason = 'END_TURN' AND degraded_features = 'cache_control,top_k'
               AND circuit_key = 'anthropic:claude' AND circuit_tier = 'primary' AND upstream_model = 'claude-sonnet-4.5'
               AND upstream_success AND circuit_epoch = '00000000-0000-0000-0000-000000000042'::uuid AND credits = 0.5
+              AND withheld_input_tokens = 60000 AND withheld_output_tokens = 4096
             """;
         try (Connection owner = owner(freshUrl); Connection app = runtimeConnection(freshUrl)) {
             // Months beyond the twelve the baseline creates land in the default partition until a partition exists.
@@ -825,7 +827,8 @@ class SourceTiersMigrationPostgreSqlIntegrationTest extends PostgreSqlIntegratio
             assertThat(log).containsEntry("circuit_key", "openai:gpt").containsEntry("source_tier_ref", null)
                 .containsEntry("source_tier_level", null).containsEntry("source_tier_name", null).containsEntry("price_factor", null)
                 .containsEntry("tier_selection", null).containsEntry("source_dispatch", null).containsEntry("wire_model", null)
-                .containsEntry("usage_source", null).containsEntry("stop_reason", null).containsEntry("degraded_features", null);
+                .containsEntry("usage_source", null).containsEntry("stop_reason", null).containsEntry("degraded_features", null)
+                .containsEntry("withheld_input_tokens", null).containsEntry("withheld_output_tokens", null);
 
             // The old four-argument function keeps working for a request reserved before the upgrade ...
             String legacy = reserve(db, billing, "1", "{}");
@@ -949,10 +952,11 @@ class SourceTiersMigrationPostgreSqlIntegrationTest extends PostgreSqlIntegratio
         update(db, """
             INSERT INTO request_logs(request_id, path, model, status_code, success, credits, circuit_key, circuit_tier, upstream_model,
                 upstream_success, circuit_epoch, source_tier_ref, source_tier_level, source_tier_name, price_factor, tier_selection,
-                source_dispatch, wire_model, usage_source, stop_reason, degraded_features, created_at)
+                source_dispatch, wire_model, usage_source, stop_reason, degraded_features, withheld_input_tokens, withheld_output_tokens,
+                created_at)
             VALUES (?, '/v1/messages', 'claude-sonnet-4.5', 200, TRUE, 0.5, 'anthropic:claude', 'primary', 'claude-sonnet-4.5',
                 TRUE, '00000000-0000-0000-0000-000000000042'::uuid, 'ref-' || ?, 3, 'relay', 0.6, 'AUTO', 'OPENAI_CHAT', 'wire-model',
-                'REPORTED', 'END_TURN', 'cache_control,top_k', %s + make_interval(secs => ?))
+                'REPORTED', 'END_TURN', 'cache_control,top_k', 60000, 4096, %s + make_interval(secs => ?))
             """.formatted(monthStart(monthsAhead)), requestId, requestId, secondsIntoMonth);
     }
 

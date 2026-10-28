@@ -17,6 +17,7 @@
     sourceTiersApi,
     type SourceTierMember,
     type SourceTierVendor,
+    type SourceTierXpFigures,
     type SourceTierXpRelay,
     type SourceTierXpStatus,
   } from '@/api/sourceTiers';
@@ -34,6 +35,7 @@
     successPercent,
     unbilledPercent,
     withheldPercent,
+    withheldTokens,
   } from './xpMeta';
 
   const props = defineProps<{
@@ -72,6 +74,19 @@
 
   function accountName(accountId: string) {
     return accountById.value.get(accountId)?.email || accountId;
+  }
+
+  /** 「扣下」的提示：谁承担，以及中转为这些被扣下的应答报告的令牌（有的话） */
+  function withheldHint(figures: SourceTierXpFigures): string {
+    const hint = t(
+      '网关把中转的应答扣下（内容过滤，或在网关自己的输出上限处丢了调用）：没人为它付费，由你承担；不是中转的故障',
+    );
+    const tokens = withheldTokens(figures);
+    if (!tokens) return hint;
+    return `${hint}。${t('中转为这些应答报告的用量：输入 {p0}、输出 {p1} 个令牌', {
+      p0: formatNumber(tokens.input),
+      p1: formatNumber(tokens.output),
+    })}`;
   }
 
   function tierLabel(tierId: string) {
@@ -253,14 +268,7 @@
             >
               {{ t('中断 {p0}', { p0: formatNumber(row.figures.interrupted) }) }}
             </el-tag>
-            <el-tooltip
-              :content="
-                t(
-                  '网关把中转的应答扣下（内容过滤，或在网关自己的输出上限处丢了调用）：没人为它付费，由你承担；不是中转的故障',
-                )
-              "
-              placement="top"
-            >
+            <el-tooltip :content="withheldHint(row.figures)" placement="top">
               <el-tag
                 :type="figureTone('withheld', withheldPercent(row.figures))"
                 size="small"

@@ -1196,6 +1196,11 @@ public final class XpPairHarness {
                 one.put("usageSource", log.usageSource());
                 one.put("stopReason", log.stopReason());
                 one.put("degraded", log.degradedFeatures());
+                // What the relay reported of an answer the gateway held back is the operator's: its own columns, apart from the tokens above.
+                if (log.withheldInputTokens() != null || log.withheldOutputTokens() != null) {
+                    one.put("withheldInputTokens", log.withheldInputTokens());
+                    one.put("withheldOutputTokens", log.withheldOutputTokens());
+                }
                 one.put("error", log.errorMessage());
                 natives.stream().filter(n -> n.account().equals(log.accountId())).findFirst()
                     .ifPresent(n -> {

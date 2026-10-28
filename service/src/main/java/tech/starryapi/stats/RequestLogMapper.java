@@ -29,7 +29,9 @@ final class RequestLogMapper {
             entity.getWireModel(),
             entity.getUsageSource(),
             entity.getStopReason(),
-            entity.getDegradedFeatures()
+            entity.getDegradedFeatures(),
+            entity.getWithheldInputTokens(),
+            entity.getWithheldOutputTokens()
         );
     }
 }

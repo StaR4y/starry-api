@@ -311,12 +311,65 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
             List<PoolCell> units = nativeUnits(routed);
             String modelKey = modelKey(vendor, routed.upstreamModel());
             XpEligibility.Found xp = relays.evaluate(routed, snapshot, vendor, modelKey, units, tiers);
-            skipCounts.add(vendor, xp.entry(), xp.skips());
-            // A chain no tier can continue is refused here, before the price of the model is even looked up.
-            return resolve(routed, snapshot, config, vendor, modelKey, units, xp, chosen, tiers)
-                .flatMap(resolved -> standardPrice(routed)
-                    .map(price -> build(routed, snapshot, config, vendor, modelKey, units, xp, resolved, price.orElse(null), unified)));
+            Mono<Resolved> resolved = resolve(routed, snapshot, config, vendor, modelKey, units, xp, chosen, tiers);
+            if (xp.outputBound()) {
+                // A relay was left out only because the output the gateway chose does not fit beside the prompt in its window.
+                // Where the plan has nothing to serve the request with, that relay is its only source, and the request it was
+                // given before D11 is still its own: the same prompt, with the 4,096 it had. Nothing to serve with is a refusal
+                // of any kind (the prompt is too long for the one relay, or a feature that the other relays lack and this one
+                // carries), which gives way to whatever the relays alone are planned to do; it is also a plan in which no tier
+                // has an account or a relay that can serve now (the other relays out for a moment or switched off, no native
+                // account on the route, native accounts of which none can serve, the owner of a chain among them), which gives
+                // way if the relays alone can serve; and it is a plan whose accounts none can be selected now, being in the
+                // cooldown or the quarantine of the allocation lifecycle (design 4.1, layer 3): the plan counts them, selection
+                // finds none for as long as that lasts, and the relays alone are not to wait for it if one of them can be
+                // selected. Anywhere else a native source serves, as is; and if the relays alone cannot serve it either, the
+                // request stays what it was. What is only busy at admission (layer 4) is not known before the request is
+                // dispatched, and is waited for (O15).
+                Mono<Resolved> relaysAlone = Mono.defer(() -> resolve(routed, snapshot, config, vendor, modelKey, units,
+                    relays.evaluateWithinWindows(routed, snapshot, vendor, modelKey, units, tiers), chosen, tiers));
+                resolved = resolved
+                    .flatMap(plan -> plan.availability().servesNothing()
+                        ? relaysAlone.filter(again -> !again.availability().servesNothing())
+                            .onErrorResume(ApiException.class, ignored -> Mono.empty())
+                            .defaultIfEmpty(plan)
+                        : selectableNow(plan, snapshot, vendor, units).flatMap(selectable -> selectable
+                            ? Mono.just(plan)
+                            : relaysAlone.filterWhen(again -> selectableNow(again, snapshot, vendor, units))
+                                .onErrorResume(ApiException.class, ignored -> Mono.empty())
+                                .defaultIfEmpty(plan)))
+                    .onErrorResume(ApiException.class, refusal -> relaysAlone.onErrorMap(ApiException.class, ignored -> refusal));
+            }
+            // A chain no tier can continue is refused here, before the price of the model is even looked up. The relays that
+            // were left out of the plan that is made are the ones counted: those of the plan that was refused when none is.
+            return resolved
+                .doOnNext(plan -> skipCounts.add(vendor, plan.xp().entry(), plan.xp().skips()))
+                .doOnError(ignored -> skipCounts.add(vendor, xp.entry(), xp.skips()))
+                .flatMap(plan -> standardPrice(routed)
+                    .map(price -> build(routed, snapshot, config, vendor, modelKey, units, plan, price.orElse(null), unified)));
         });
+    }
+
+    /**
+     * Whether selection could pick an account for the plan right now: one of the native accounts of the route in a tier that
+     * serves, or one of the relays that were found eligible in such a tier, that is cached, available and let through by the
+     * allocation lifecycle (not cooling down or quarantined), the layers 1 to 3 of design 4.1. {@link #availability} stops at
+     * the second: an account in the cooldown of a 429 or a 5xx, for a minute or more, still counts there. What only a request
+     * meets (admission) is not counted. False for a plan that has nothing to serve the request with.
+     */
+    private Mono<Boolean> selectableNow(Resolved resolved, SourceTierSnapshot snapshot, String vendor, List<PoolCell> units) {
+        if (resolved.availability().servesNothing()) {
+            return Mono.just(false);
+        }
+        Set<String> serving = resolved.availability().serving().stream().map(Tier::tierId).collect(Collectors.toSet());
+        Set<String> relayIds = serving.stream()
+            .flatMap(tierId -> resolved.xp().byTier().getOrDefault(tierId, List.of()).stream())
+            .map(eligible -> eligible.account().getAccountId())
+            .collect(Collectors.toSet());
+        Predicate<ProxyAccountEntity> onRoute = account -> units.stream().anyMatch(cell -> cell.predicate().test(account));
+        return accountPool.hasSelectableAccount(account -> relayIds.contains(account.getAccountId())
+            || (onRoute.test(account)
+                && TierMembership.nativeTierOf(snapshot, vendor, account).map(tier -> serving.contains(tier.tierId())).orElse(false)));
     }
 
     /**
@@ -346,7 +399,8 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         TierPlan.Session session,
         TierSessionBindings.Binding bound,
         Tier ownerTier,
-        Availability availability
+        Availability availability,
+        XpEligibility.Found xp
     ) {
     }
 
@@ -488,6 +542,11 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
             Availability walked = availability(choice.candidates(), null, false, units, xp, snapshot, vendor);
             if (ownerTier.tierId().equals(startTier(walked.serving(), snapshot, vendor, bound).tierId())) {
                 availability = availability(choice.candidates(), ownerTier, false, units, xp, snapshot, vendor);
+                // The owner's tier is always among the tiers that serve, whether its accounts can or not; the walk that had no
+                // owner is the one that tells whether anything can serve the request now.
+                if (walked.stalled()) {
+                    availability = availability.asStalled();
+                }
             } else {
                 ownerTier = null;
                 availability = walked;
@@ -495,7 +554,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         } else {
             availability = availability(choice.candidates(), ownerTier, !request.responseMovable(), units, xp, snapshot, vendor);
         }
-        return new Resolved(choice, session, bound, ownerTier, availability);
+        return new Resolved(choice, session, bound, ownerTier, availability, xp);
     }
 
     /** The place of the tier a session is bound to in the order the tiers have now; the place it was bound at if it is gone. */
@@ -672,11 +731,11 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         String vendor,
         String modelKey,
         List<PoolCell> units,
-        XpEligibility.Found xp,
         Resolved resolved,
         BillingQuote standardPrice,
         boolean unified
     ) {
+        XpEligibility.Found xp = resolved.xp();
         Choice choice = resolved.choice();
         Availability availability = resolved.availability();
         Tier ownerTier = resolved.ownerTier();
@@ -1013,7 +1072,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
             List<Tier> withAccounts = tiers.stream().filter(tier -> placed.contains(tier.tierId())).toList();
             return withAccounts.isEmpty()
                 ? new Availability(tiers, List.of(), tiers)
-                : new Availability(withAccounts, List.of(), List.of());
+                : new Availability(withAccounts, List.of(), List.of(), true);
         }
         // A tier that has a relay sat out for this request is not one the request found with nothing to offer, even when
         // the members that did take part cannot serve now (design 4.2: only the layers 1 to 4 count; 4.7).
@@ -1029,9 +1088,26 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
 
     /**
      * The tiers that stay in the plan, those left out for having accounts of the route that are all unavailable, and
-     * those that stay although none has an account of the route at all.
+     * those that stay although none has an account of the route at all; and whether the tiers that stay are there only
+     * because they have accounts, none of which can serve now ({@code stalled}), or because one of them owns the chain the
+     * request continues, which none of the accounts of the route can serve either: there is nothing the plan can serve the
+     * request with.
      */
-    private record Availability(List<Tier> serving, List<Tier> unavailable, List<Tier> memberless) {
+    private record Availability(List<Tier> serving, List<Tier> unavailable, List<Tier> memberless, boolean stalled) {
+
+        Availability(List<Tier> serving, List<Tier> unavailable, List<Tier> memberless) {
+            this(serving, unavailable, memberless, false);
+        }
+
+        /** Whether no tier of the plan has an account or a relay that can serve the request now. */
+        boolean servesNothing() {
+            return stalled || !memberless.isEmpty();
+        }
+
+        /** The same tiers, for a plan that keeps the tier of the chain's owner although no account of the route can serve now. */
+        Availability asStalled() {
+            return new Availability(serving, unavailable, memberless, true);
+        }
     }
 
     /**

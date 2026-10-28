@@ -1,5 +1,6 @@
 package tech.starryapi.platform.openai;
 
+import tech.starryapi.platform.core.PlatformToolUse;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ArrayNode;
@@ -160,6 +161,17 @@ public final class ApplyPatchEmulation {
             return CUSTOM_TOOL_CALL;
         }
         return type;
+    }
+
+    /**
+     * A call of the editing tool that a model made as a function, as the custom tool call its client expects: the type the
+     * call has once it is known by name, and the patch itself for its input and not the JSON of the arguments. The call is
+     * given {@code id}, and nothing of the item it came in is kept.
+     */
+    public PlatformToolUse editingToolCall(String id, PlatformToolUse call) {
+        String type = toolUseType(call.type(), call.name());
+        String arguments = call.rawInput() != null ? call.rawInput() : String.valueOf(call.input());
+        return new PlatformToolUse(id, call.name(), call.input(), type, toolUseRawInput(type, call.name(), arguments), null);
     }
 
     /** The input of a custom call of the editing tool, normalized; any other call keeps the arguments it has. */

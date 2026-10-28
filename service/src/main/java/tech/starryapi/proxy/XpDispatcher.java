@@ -18,6 +18,7 @@ import tech.starryapi.egress.EgressException;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.core.PlatformCompletionResult.StopReason;
 import tech.starryapi.platform.core.PlatformToolUse;
+import tech.starryapi.platform.core.PlatformUsage;
 import tech.starryapi.platform.openai.ApplyPatchEmulation;
 import tech.starryapi.platform.openai.OpenAiChatRelayClient;
 import tech.starryapi.platform.upstream.UpstreamException;
@@ -65,7 +66,8 @@ import tools.jackson.databind.node.ObjectNode;
  *       another source. That source is held to the same bound unless it is a Codex account (the other native sources are
  *       sent the default as well, see {@link #cannotBeTold}), so the retry is no promise that the answer fits. It is a
  *       {@link RelayAnswerWithheldException}, which is an interruption to the request and none to the relay's health: the
- *       relay did what it was asked.
+ *       relay did what it was asked. It carries what the relay reported of the answer, read as a served answer's usage is,
+ *       for the request log to show the operator what it cost (D11); the user is still charged nothing.
  *   <li><b>Every failure is the gateway's own</b>, and never one that leaves a reservation for review: a cross-protocol
  *       attempt is generated once, and whatever goes wrong with it is absorbed by the operator (invariant I7). The
  *       relay client already says what it can prove, and an {@link UpstreamException} it raises is kept (its status is
@@ -207,7 +209,7 @@ class XpDispatcher {
         if (dispatch.pair().entry() == Entry.RESPONSES) {
             String reason = cannotBeTold(completion, defaultOutputLimit);
             if (reason != null) {
-                throw new RelayAnswerWithheldException(reason);
+                throw new RelayAnswerWithheldException(reason, withheldUsage(account, completion, sent, caliber, limits));
             }
         }
         RelayUsageNormalizer.Result usage = RelayUsageNormalizer.normalize(completion, sent, caliber, limits);
@@ -227,6 +229,28 @@ class XpDispatcher {
     }
 
     /**
+     * What the relay reported of an answer that is held back, read as the usage of a served answer is, so that the request
+     * log shows the operator what the answer cost (D11). Nothing is charged for it, whatever it says. The answer is held back
+     * all the same when the usage cannot be read: it is no reason to make the failure another kind, which would count against
+     * the relay.
+     */
+    private static PlatformUsage withheldUsage(
+        ProxyAccountEntity account,
+        Completion completion,
+        JsonNode sent,
+        Caliber caliber,
+        Limits limits
+    ) {
+        try {
+            return RelayUsageNormalizer.normalize(completion, sent, caliber, limits).usage();
+        } catch (RuntimeException unreadable) {
+            log.warn("The usage of a withheld answer could not be read: source={} cause={}",
+                account.getAccountId(), unreadable.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    /**
      * Why an answer of the Responses entry is not one to tell the client, or null when it is. {@code incomplete} is the
      * only thing that entry can say of an answer that did not finish, and Codex takes it for an error of the stream: it
      * sends the same request again, five more times, and every answer of a relay is paid for by the user who asked, who
@@ -236,13 +260,13 @@ class XpDispatcher {
      *   <li>One that the relay's filter stopped. Another source may answer the request, and the same relay is likely to
      *       stop the retry in the same place.
      *   <li>One that the gateway's own bound cut off ({@code defaultOutputLimit}: the client wrote none, so the relay was
-     *       held to the default the reservation assumes) and that lost a call to it, or that has nothing the client can
-     *       show: no text and no whole call, only reasoning. The bound is the gateway's for every source: Codex accounts
-     *       drop the field, but Kiro, official OpenAI keys and Anthropic keys are sent the same 4,096 when the client names
-     *       none, and Kiro's answer has no stop reason, so a native source renders what it was cut at as a finished
-     *       answer. An answer that is text alone, or has the calls it came to, is told as {@code completed} by the facade
-     *       ({@code ProxyFacade#responsesAnswerOfRelay}) as a native source's is; one that lost a call would end the turn
-     *       without the step the model was taking, or run the calls it kept without the one it cut.
+     *       held to the default the reservation assumes, D14) and that lost a call to it, or that has
+     *       nothing the client can show: no text and no whole call, only reasoning. The bound is the gateway's for every
+     *       source: Codex accounts drop the field, but Kiro, official OpenAI keys and Anthropic keys are sent the same one
+     *       when the client names none, and Kiro's answer has no stop reason, so a native source renders what it was cut at
+     *       as a finished answer. An answer that is text alone, or has the calls it came to, is told as {@code completed}
+     *       by the facade ({@code ProxyFacade#responsesAnswerOfRelay}) as a native source's is; one that lost a call would
+     *       end the turn without the step the model was taking, or run the calls it kept without the one it cut.
      * </ul>
      *
      * A limit the client named is its own, and an answer that reached it is {@code incomplete} to the client that asked
@@ -266,7 +290,7 @@ class XpDispatcher {
      * The tool calls of the answer under ids of the gateway's. The relay's own id is not passed on, nor the raw item it
      * came in (the Chat shape of a call, which a Responses renderer would copy into its own item); the name, the
      * arguments as the relay wrote them and the type are, except that a call of the editing tool on the Responses entry
-     * is the custom tool call Codex expects ({@link #editingToolCall}).
+     * is the custom tool call Codex expects ({@link ApplyPatchEmulation#editingToolCall}).
      */
     private List<PlatformToolUse> withMintedIds(List<PlatformToolUse> calls, Entry entry) {
         String prefix = entry == Entry.MESSAGES ? MESSAGES_TOOL_PREFIX : CALL_TOOL_PREFIX;
@@ -278,20 +302,10 @@ class XpDispatcher {
                 id = prefix + randomId();
             } while (!minted.add(id));
             result.add(entry == Entry.RESPONSES && ApplyPatchEmulation.TOOL_NAME.equals(call.name())
-                ? editingToolCall(id, call)
+                ? APPLY_PATCH.editingToolCall(id, call)
                 : new PlatformToolUse(id, call.name(), call.input(), call.type(), call.rawInput(), null));
         }
         return result;
-    }
-
-    /**
-     * A call of the editing tool as a Responses client is given it: a function to the relay and a custom tool to Codex, so
-     * it is a custom tool call whose input is the patch itself and not the JSON of the arguments.
-     */
-    private static PlatformToolUse editingToolCall(String id, PlatformToolUse call) {
-        String type = APPLY_PATCH.toolUseType(call.type(), call.name());
-        String arguments = call.rawInput() != null ? call.rawInput() : String.valueOf(call.input());
-        return new PlatformToolUse(id, call.name(), call.input(), type, APPLY_PATCH.toolUseRawInput(type, call.name(), arguments), null);
     }
 
     private String randomId() {

@@ -1,8 +1,11 @@
 package tech.starryapi.proxy.tier;
 
+import java.util.List;
+import java.util.OptionalInt;
 import java.util.Set;
 import tech.starryapi.common.JsonNodes;
 import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.node.ObjectNode;
 
 /**
  * How much a request can ask the upstream to read and write, as the upper bound a reservation is sized from. The
@@ -15,7 +18,10 @@ public final class RequestBounds {
     private static final long ENVELOPE = 1024L;
     /** Server-side response chains and remote media can hide input tokens from the local request. */
     private static final long HIDDEN_INPUT_FLOOR = 1_000_000L;
-    private static final long DEFAULT_OUTPUT_TOKENS = 4096L;
+    /** What a request that names no output limit is held to by every entry but Responses, and by Responses for a model of unknown maximum. */
+    public static final long FALLBACK_OUTPUT_TOKENS = 4096L;
+    /** The most output tokens a request may ask for; the facade turns a client's larger limit away. */
+    public static final long MAX_OUTPUT_TOKENS = 1_000_000L;
     private static final Set<String> MEDIA_TYPES = Set.of("input_image", "input_file", "input_audio", "image", "document");
     /** The parts whose text a Kiro message keeps; any other part is dropped. */
     private static final Set<String> TEXT_PARTS = Set.of("text", "input_text", "output_text", "refusal");
@@ -23,10 +29,51 @@ public final class RequestBounds {
     private RequestBounds() {
     }
 
-    /** The most output tokens the request allows; the limit the facade forces onto every request when it has none. */
+    /**
+     * The most output the model writes, as far as the gateway knows (D14): the smaller of the figure the model list shows
+     * ({@code listed}) and the one the official price catalog lists ({@code priced}) when both are known, whichever is known
+     * when only one is, and {@link #FALLBACK_OUTPUT_TOKENS} for a model that neither gives a figure for. A figure below 1 is
+     * no figure.
+     */
+    public static long modelMaximumOutput(OptionalInt listed, OptionalInt priced) {
+        boolean listedFigure = listed.isPresent() && listed.getAsInt() > 0;
+        boolean pricedFigure = priced.isPresent() && priced.getAsInt() > 0;
+        if (listedFigure && pricedFigure) {
+            return Math.min(listed.getAsInt(), priced.getAsInt());
+        }
+        if (listedFigure) {
+            return listed.getAsInt();
+        }
+        return pricedFigure ? priced.getAsInt() : FALLBACK_OUTPUT_TOKENS;
+    }
+
+    /**
+     * The limit a request that names none is given (D14): the default the operator configured ({@code configured}), no more
+     * than the model writes ({@link #modelMaximumOutput}) and no more than {@link #MAX_OUTPUT_TOKENS}.
+     */
+    public static long defaultOutputTokens(long configured, OptionalInt listed, OptionalInt priced) {
+        return Math.min(Math.min(configured, modelMaximumOutput(listed, priced)), MAX_OUTPUT_TOKENS);
+    }
+
+    /**
+     * The relay body as it was before the gateway chose an output limit for a request that named none (D11, D14): the same
+     * body with its {@code max_completion_tokens} and {@code max_tokens} held to {@link #FALLBACK_OUTPUT_TOKENS}, which is the
+     * request a relay was served and refused for then. The body it is given is not changed.
+     */
+    public static ObjectNode withTheOutputOfBefore(JsonNode wireBody) {
+        ObjectNode sized = JsonNodes.shallowCopy((ObjectNode) wireBody);
+        for (String field : List.of("max_completion_tokens", "max_tokens")) {
+            if (sized.path(field).asLong(0) > FALLBACK_OUTPUT_TOKENS) {
+                sized.put(field, FALLBACK_OUTPUT_TOKENS);
+            }
+        }
+        return sized;
+    }
+
+    /** The most output tokens the request allows; the facade has put the limit it is held to onto every request that named none. */
     public static long outputTokens(JsonNode request) {
         return Math.max(request.path("max_completion_tokens").asLong(0),
-            Math.max(request.path("max_tokens").asLong(0), request.path("max_output_tokens").asLong(DEFAULT_OUTPUT_TOKENS)));
+            Math.max(request.path("max_tokens").asLong(0), request.path("max_output_tokens").asLong(FALLBACK_OUTPUT_TOKENS)));
     }
 
     /**

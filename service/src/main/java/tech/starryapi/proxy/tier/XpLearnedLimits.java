@@ -24,6 +24,14 @@ import tech.starryapi.sourcetier.SourceTierSnapshot.MemberModel;
  * refusal that came from the input and the output limit together teaches a limit that is a little low for requests that
  * ask for less output, which only costs those requests the relay.
  *
+ * <p>That holds while the output is small beside the prompt. A request whose output limit the gateway chose (the default
+ * that a Responses request which names none is given, D11 and D14) can be refused for the prompt and that limit together
+ * by a relay that would take the same prompt with the limit of a Chat or Messages request, and the default is some
+ * thousands of tokens more. What such a refusal teaches is kept apart, as the size of the prompt plus that limit, and is
+ * applied only to requests whose limit the gateway chose; the other requests are not turned away by it, and what they
+ * taught is applied to every request, since a prompt as large as one that was refused with a small output is refused
+ * with any.
+ *
  * <p>The knowledge is that of the mapping as it was configured: a mapping whose window, wire name or verification was
  * changed since is another mapping, and begins with nothing. It is local to the node, does not outlive a restart and
  * is forgotten after {@link #TTL}, when the next request that is too large for the relay is allowed to ask it again.
@@ -36,12 +44,16 @@ public class XpLearnedLimits {
     private static final long MAXIMUM_SIZE = 10_000;
     private static final XpLearnedLimits DISABLED = new XpLearnedLimits(0, Ticker.systemTicker());
 
-    /** A mapping as it was configured: the row, the name the relay is asked for, its window and what it was verified for. */
-    private record Key(String vendor, String accountId, String modelId, String upstreamModel, int window, String verifiedHash) {
+    /**
+     * A mapping as it was configured: the row, the name the relay is asked for, its window and what it was verified for;
+     * and whether what is kept is for requests whose output limit the gateway chose.
+     */
+    private record Key(String vendor, String accountId, String modelId, String upstreamModel, int window, String verifiedHash,
+                       boolean gatewayOutput) {
 
-        static Key of(MemberModel mapping) {
+        static Key of(MemberModel mapping, boolean gatewayOutput) {
             return new Key(mapping.vendor(), mapping.accountId(), mapping.modelId().toLowerCase(Locale.ROOT),
-                mapping.upstreamModel(), mapping.maxContextTokens(), mapping.verifiedHash());
+                mapping.upstreamModel(), mapping.maxContextTokens(), mapping.verifiedHash(), gatewayOutput);
         }
     }
 
@@ -78,15 +90,46 @@ public class XpLearnedLimits {
      *     relay for this mapping again, until it is forgotten. Nothing is learned from a size below 1.
      */
     public void learn(MemberModel mapping, long estimatedInput) {
+        learn(mapping, estimatedInput, 0);
+    }
+
+    /**
+     * A relay refused a prompt for its length when the output limit it was sent was the gateway's own.
+     *
+     * @param estimatedInput as {@link #learn(MemberModel, long)}
+     * @param gatewayOutput the output limit the gateway chose for the request, or 0 when the client wrote its own, or the
+     *     relay was given the 4,096 the request had before the gateway chose one (then this is {@link #learn(MemberModel,
+     *     long)}). What is learned is the size of the prompt together with that limit, and holds for requests whose limit
+     *     the gateway chose, not for the others.
+     */
+    public void learn(MemberModel mapping, long estimatedInput, long gatewayOutput) {
         if (!keeps || estimatedInput < 1) {
             return;
         }
-        refused.asMap().merge(Key.of(mapping), estimatedInput, Math::min);
+        long output = Math.max(0, gatewayOutput);
+        refused.asMap().merge(Key.of(mapping, output > 0), estimatedInput + output, Math::min);
     }
 
-    /** The smallest estimated size the relay refused for the mapping, if this node has seen it refuse one. */
+    /**
+     * The smallest estimated size the relay refused for the mapping, if this node has seen it refuse one, whatever the
+     * output limit of the request was: a request with a prompt as large is refused again. Not the size a refusal of a
+     * request with the gateway's own limit taught ({@link #refusedFromWithGatewayOutput}).
+     */
     public OptionalLong refusedFrom(MemberModel mapping) {
-        Long size = keeps ? refused.getIfPresent(Key.of(mapping)) : null;
+        return refused(Key.of(mapping, false));
+    }
+
+    /**
+     * The smallest size of the prompt and the gateway's own output limit together that the relay refused for the mapping,
+     * if this node has seen it refuse one: a request whose limit the gateway chose is not sent when its prompt and that limit
+     * come to as much.
+     */
+    public OptionalLong refusedFromWithGatewayOutput(MemberModel mapping) {
+        return refused(Key.of(mapping, true));
+    }
+
+    private OptionalLong refused(Key key) {
+        Long size = keeps ? refused.getIfPresent(key) : null;
         return size == null ? OptionalLong.empty() : OptionalLong.of(size);
     }
 

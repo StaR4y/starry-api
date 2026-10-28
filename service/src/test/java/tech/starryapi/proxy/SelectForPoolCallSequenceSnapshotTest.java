@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Predicate;
@@ -418,7 +419,7 @@ class SelectForPoolCallSequenceSnapshotTest {
                 case "retest" -> retest;
                 case "kiro", "openai", "anthropic" -> upstream(invocation.getArgument(0));
                 case "payments" -> Mono.just(paymentConfig());
-                case "pricing" -> Mono.just(QUOTE);
+                case "pricing" -> method.equals("maxOutputTokens") ? OptionalInt.empty() : Mono.just(QUOTE);
                 default -> emptyOf(invocation);
             };
         }

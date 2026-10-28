@@ -110,7 +110,7 @@ class SourceTierAdminControllerTest {
 
     @Test
     void theStatusOfAVendorWithRelaysCarriesTheirLayersPairsFiguresAndSkips() {
-        SourceTierDtos.XpFigures figures = new SourceTierDtos.XpFigures(40, 36, 4, 2, 1, 0, 1, 0, 0, 3, 0, 5, 1800L);
+        SourceTierDtos.XpFigures figures = new SourceTierDtos.XpFigures(40, 36, 4, 2, 1, 0, 1, 0, 0, 0, 0, 3, 0, 5, 1800L);
         when(status.status()).thenReturn(Mono.just(new SourceTierDtos.Status(Instant.parse("2026-10-25T08:00:00Z"), 7L, 15, List.of(
             new SourceTierDtos.VendorStatus("anthropic", "Anthropic", true, true, 100, 30, List.of(
                 new SourceTierDtos.TierStatus("relay", 1, "Relay", true, true,
@@ -136,7 +136,7 @@ class SourceTierAdminControllerTest {
 
     @Test
     void theEvidenceIsAskedForAWindowOfDaysAndDefaultsToThirty() {
-        SourceTierDtos.XpFigures figures = new SourceTierDtos.XpFigures(250, 240, 4, 2, 0, 0, 0, 0, 0, 10, 0, 0, null);
+        SourceTierDtos.XpFigures figures = new SourceTierDtos.XpFigures(250, 240, 4, 2, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, null);
         List<SourceTierDtos.Criterion> criteria = XpPairStandard.evaluate(figures, 0, true);
         when(status.evidence(anyInt())).thenReturn(Mono.just(new SourceTierDtos.Evidence(Instant.parse("2026-10-26T08:00:00Z"),
             Instant.parse("2026-09-26T08:00:00Z"), 30, 7L, Instant.parse("2026-10-25T05:00:00Z"), List.of(

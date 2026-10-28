@@ -39,7 +39,7 @@ const {
   cacheCostWarning, exclusiveWarning, limitsNote, durationNote, isOpenAiCompatibleKey, relayCandidates, catalogModelsOf,
   coveredAliases, catalogWindow, prefillContext, prefillContexts, suggestWireName, pairStatusOf, allowedGateStates, gateOf,
   gateState, gateKeys, setGate, gateProblem, blockingGateProblem, percentOf, successPercent, estimatedPercent, unbilledPercent,
-  withheldPercent, conversionRejectedPercent, figureTone, formatLatency, skipReasonLabel, skipReasonHint, criterionValue, criterionNote, lintCountPartial, unmetCriteria, evidenceFileName,
+  withheldPercent, withheldTokens, conversionRejectedPercent, figureTone, formatLatency, skipReasonLabel, skipReasonHint, criterionValue, criterionNote, lintCountPartial, unmetCriteria, evidenceFileName,
   relayErrorMessage, verificationOf, probeLabel, verifyTargets, ENTRY_ENDPOINTS,
 } = meta;
 meta.setLocale('zh-CN');
@@ -1253,6 +1253,14 @@ test('the figures of the window are shares of the attempts or of the answered at
   assert.equal(withheldPercent(figures({ attempts: 0, withheld: 0 })), null);
   assert.equal(successPercent(figures({ attempts: 0, served: 0 })), null);
   assert.equal(estimatedPercent(figures({ served: 0 })), null);
+});
+
+test('the tokens a relay reported for the answers the gateway held back are shown only when there are some', () => {
+  assert.equal(withheldTokens(figures()), null);
+  assert.equal(withheldTokens(figures({ withheld: 2, withheldInputTokens: 0, withheldOutputTokens: 0 })), null);
+  assert.deepEqual(withheldTokens(figures({ withheld: 2, withheldInputTokens: 61200, withheldOutputTokens: 36096 })), { input: 61200, output: 36096 });
+  // A held back answer whose usage the relay never gave still counts as held back, with no tokens.
+  assert.deepEqual(withheldTokens(figures({ withheldOutputTokens: 4096 })), { input: 0, output: 4096 });
 });
 
 test('a figure turns red at the line the upgrade standard draws', () => {

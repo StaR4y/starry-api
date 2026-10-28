@@ -11,10 +11,12 @@ import tech.starryapi.account.AccountPoolRequestContext;
 import tech.starryapi.account.PoolCell;
 import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.model.BillingQuote;
+import tech.starryapi.platform.xproto.RelayUsageNormalizer;
 import tech.starryapi.sourcetier.SourceTierSnapshot;
 import tech.starryapi.sourcetier.SourceTierSnapshot.MemberModel;
 import tech.starryapi.sourcetier.SourceTierSnapshot.Tier;
 import tech.starryapi.sourcetier.SourceTierSnapshot.VendorConfig;
+import tools.jackson.databind.node.ObjectNode;
 
 /**
  * What the planner decides about one request before anything is reserved, and what the request then goes by to the end
@@ -134,11 +136,35 @@ public final class TierPlan {
      * @param mapping the row of the relay that serves the model, with the window and the image cap the bounds use
      * @param estimatedInput what the body weighs, as it was measured against the window of the mapping; what a relay that
      *     refuses the prompt for its length is taught about its window (design 7.8)
+     * @param gatewayOutput the output limit the body is sent with when the gateway chose it and not the client (D11, D14,
+     *     design 7.10), which the window was measured against besides the prompt; 0 for a limit the client wrote, the entry's
+     *     usual 4,096, and the 4,096 a relay that nothing else can stand in for is given in place of the gateway's. A relay
+     *     that refuses such a request for its length is taught about requests like it only.
      */
-    public record Relay(TierDispatch dispatch, MemberModel mapping, long estimatedInput) {
+    public record Relay(TierDispatch dispatch, MemberModel mapping, long estimatedInput, long gatewayOutput) {
+
+        public Relay(TierDispatch dispatch, MemberModel mapping, long estimatedInput) {
+            this(dispatch, mapping, estimatedInput, 0);
+        }
 
         public String accountId() {
             return dispatch.member().accountId();
+        }
+
+        /**
+         * The relay as the request was given to it before the gateway chose an output limit: the same body with the limit held
+         * to {@link RequestBounds#FALLBACK_OUTPUT_TOKENS}, the prompt measured again on it, and no gateway output. What a relay
+         * that is the only source of a request, and that refused it with the gateway's output, is asked once more (design
+         * 7.10). Empty for a relay whose limit is the client's, or that was given this one already.
+         */
+        public Optional<Relay> withTheOutputOfBefore() {
+            if (gatewayOutput <= 0) {
+                return Optional.empty();
+            }
+            ObjectNode sized = RequestBounds.withTheOutputOfBefore(dispatch.wireBody());
+            TierDispatch before = new TierDispatch(dispatch.kind(), dispatch.pair(), dispatch.modelId(), dispatch.wireModel(),
+                dispatch.member(), sized, dispatch.outgoingEndpoint(), dispatch.degraded());
+            return Optional.of(new Relay(before, mapping, RelayUsageNormalizer.estimateInputTokens(sized), 0));
         }
 
         /**

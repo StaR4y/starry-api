@@ -9,8 +9,10 @@ import org.junit.jupiter.api.Test;
 import tech.starryapi.platform.xproto.PairRegistry.Entry;
 import tech.starryapi.platform.xproto.PairRegistry.PairKey;
 import tech.starryapi.platform.xproto.PairRegistry.SourceKind;
+import tech.starryapi.platform.xproto.RelayUsageNormalizer;
 import tech.starryapi.proxy.tier.TierDispatch.Kind;
 import tech.starryapi.sourcetier.SourceTierSnapshot.Member;
+import tech.starryapi.sourcetier.SourceTierSnapshot.MemberModel;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
@@ -72,6 +74,32 @@ class TierDispatchTest {
         assertThat(relayWith(JSON.createObjectNode().put("max_tokens", -5)).forwardedOutputLimit()).isZero();
         assertThat(relayWith(JSON.createObjectNode().put("max_tokens", "many")).forwardedOutputLimit()).isZero();
         assertThat(TierDispatch.nativeDispatch().forwardedOutputLimit()).isZero();
+    }
+
+    @Test
+    void aRelayAsItWasGivenTheRequestBeforeTheGatewayChoseAnOutputIsTheSameBodyHeldToTheFallbackAndMeasuredAgain() {
+        ObjectNode body = JSON.createObjectNode().put("max_tokens", 16_000);
+        body.putArray("messages").addObject().put("role", "user").put("content", "a".repeat(4_000));
+        TierDispatch dispatch = TierDispatch.openAiChat(PAIR, "claude-sonnet-4.5", "Wire-Name", member("OPENAI_CHAT"), body, List.of("verbosity"));
+        MemberModel mapping = new MemberModel("anthropic", "relay-1", "claude-sonnet-4.5", "Wire-Name", 200_000, 8192, true, null, null);
+        TierPlan.Relay relay = new TierPlan.Relay(dispatch, mapping, 1_100, 16_000);
+
+        TierPlan.Relay before = relay.withTheOutputOfBefore().orElseThrow();
+
+        assertThat(before.dispatch().forwardedOutputLimit()).isEqualTo(RequestBounds.FALLBACK_OUTPUT_TOKENS);
+        assertThat(before.gatewayOutput()).as("the limit is no longer the gateway's").isZero();
+        assertThat(before.mapping()).isSameAs(mapping);
+        assertThat(before.accountId()).isEqualTo("relay-1");
+        assertThat(before.dispatch().wireModel()).isEqualTo("Wire-Name");
+        assertThat(before.dispatch().modelId()).isEqualTo("claude-sonnet-4.5");
+        assertThat(before.dispatch().degraded()).containsExactly("verbosity");
+        assertThat(before.dispatch().wireBody().path("messages")).isEqualTo(body.path("messages"));
+        assertThat(before.estimatedInput()).as("measured on its own body").isEqualTo(RelayUsageNormalizer.estimateInputTokens(before.dispatch().wireBody()));
+        assertThat(before.inputBound()).as("never above what the tier reserved for").isLessThanOrEqualTo(relay.inputBound());
+        assertThat(relay.dispatch().forwardedOutputLimit()).as("the relay it was made from is not changed").isEqualTo(16_000);
+        // Nothing to give back where the limit is the client's, or the request was given the fallback already.
+        assertThat(before.withTheOutputOfBefore()).isEmpty();
+        assertThat(new TierPlan.Relay(dispatch, mapping, 1_100).withTheOutputOfBefore()).isEmpty();
     }
 
     private static TierDispatch relayWith(ObjectNode body) {

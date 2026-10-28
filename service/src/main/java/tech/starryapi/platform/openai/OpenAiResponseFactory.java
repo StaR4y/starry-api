@@ -24,6 +24,9 @@ public class OpenAiResponseFactory {
     /** The argument a replayed call of a custom tool is written with when no function of the client says another. */
     private static final String CUSTOM_CALL_ARGUMENT = "input";
 
+    /** What the static helpers below write of the editing tool; it keeps nothing, and its mapper only makes nodes. */
+    private static final ApplyPatchEmulation EDITING_TOOL = new ApplyPatchEmulation(new ObjectMapper());
+
     private final ObjectMapper objectMapper;
 
     public OpenAiResponseFactory(ObjectMapper objectMapper) {
@@ -657,11 +660,12 @@ public class OpenAiResponseFactory {
      * holds none: {@code custom_tool_call} is a {@code function_call} and {@code custom_tool_call_output} a {@code
      * function_call_output}, which is all the conversion of the Kiro and Anthropic routes ({@code
      * OpenAiRequestAdapter#responsesToChat}) knows how to replay. The text of a call is its one string argument, in the
-     * shape those routes declare the tool: they are given the client's own declaration of it (not the one-argument
-     * {@code patch} function of {@link ApplyPatchEmulation}, which only the relays and the OpenAI route are given), so the
-     * argument is the string property that the client's function declares ({@code input} for the JSON tool Codex has), and
-     * {@code input} for a tool the client declared as a custom tool, which those routes are given with no properties. The
-     * input is rebuilt; everything else is shared with the request, which is not changed.
+     * shape those routes declare the tool, which this reads from the tools of the request it is given: the string property
+     * that the client's function declares ({@code input} for the JSON tool Codex has), and {@code input} for a tool the client
+     * declared as a custom tool, which those routes are given with no properties. For a vendor that has relays the facade
+     * declares such a custom tool to them as the gateway's {@code patch} function first ({@link
+     * #withEditingToolAsPatchFunction}), and the argument read here is then {@code patch}. The input is rebuilt; everything
+     * else is shared with the request, which is not changed.
      *
      * <p>A relay serves the editing tool as a custom tool call whatever the client declared it as (it is what Codex expects),
      * and the chain keeps that call. Replayed to a source of those routes it was a blank user message, and the patch with
@@ -698,6 +702,68 @@ public class OpenAiResponseFactory {
         return copy;
     }
 
+    /** Whether the client declared the editing tool, {@code apply_patch}, as a custom tool (as Codex does), and not as a function. */
+    public static boolean declaresEditingToolAsCustom(JsonNode request) {
+        JsonNode tools = request.path("tools");
+        if (!tools.isArray()) {
+            return false;
+        }
+        for (JsonNode tool : tools) {
+            if (isCustomEditingTool(tool)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isCustomEditingTool(JsonNode tool) {
+        return "custom".equals(tool.path("type").asString("")) && ApplyPatchEmulation.TOOL_NAME.equals(tool.path("name").asString(""));
+    }
+
+    /**
+     * The request with the editing tool, when the client declared it as a custom tool, declared as the gateway's function for
+     * it (the function the relays are given, {@link ApplyPatchEmulation#chatFunctionTool}: the {@code patch} argument and the
+     * gateway's own description of it; the OpenAI route is given the same argument in the Responses shape with the client's
+     * description, {@link ApplyPatchEmulation#functionTool}), or the request itself when it holds none. A {@code tool_choice}
+     * that forces the tool follows it. This is for the Kiro and Anthropic routes of a vendor that has relays: they are told
+     * the same function a relay is, so that the call of a history that a relay made, replayed with the {@code patch} argument
+     * ({@link #withCustomCallsAsFunctionCalls} reads the argument from this declaration), is the call of the function they
+     * were declared, and so that their own calls can be told as the custom tool calls Codex applies ({@link
+     * #withEditingCallsAsCustomCalls}). Everything else is shared with the request, which is not changed.
+     */
+    public static JsonNode withEditingToolAsPatchFunction(JsonNode request) {
+        if (!request.isObject() || !declaresEditingToolAsCustom(request)) {
+            return request;
+        }
+        ArrayNode tools = JsonNodeFactory.instance.arrayNode();
+        for (JsonNode tool : request.path("tools")) {
+            tools.add(isCustomEditingTool(tool) ? EDITING_TOOL.chatFunctionTool(tool) : tool);
+        }
+        ObjectNode copy = JsonNodes.shallowCopy((ObjectNode) request);
+        copy.set("tools", tools);
+        if (request.has("tool_choice")) {
+            copy.set("tool_choice", EDITING_TOOL.chatToolChoice(request.path("tool_choice")));
+        }
+        return copy;
+    }
+
+    /**
+     * The answer of an account that speaks no custom tools (Kiro, an Anthropic key) with its calls of the editing tool told as
+     * the custom tool calls the client declared it as, the patch for their input; or the answer itself when it has none. It is
+     * what the relays and the OpenAI route answer with already ({@link ApplyPatchEmulation#editingToolCall}); Codex 0.142.5
+     * applies a custom tool call and reports a {@code function_call} for the editing tool as an incompatible payload.
+     */
+    public static PlatformCompletionResult withEditingCallsAsCustomCalls(PlatformCompletionResult result) {
+        if (result.toolUses().stream().noneMatch(call -> ApplyPatchEmulation.TOOL_NAME.equals(call.name()))) {
+            return result;
+        }
+        List<PlatformToolUse> calls = result.toolUses().stream()
+            .map(call -> ApplyPatchEmulation.TOOL_NAME.equals(call.name()) ? EDITING_TOOL.editingToolCall(call.id(), call) : call)
+            .toList();
+        return new PlatformCompletionResult(result.content(), result.reasoningContent(), calls, result.usage(), result.stopReason(),
+            result.usageSource(), result.degraded());
+    }
+
     private static ObjectNode customCallAsFunctionCall(JsonNode item, JsonNode tools) {
         ObjectNode call = JsonNodes.shallowCopy((ObjectNode) item);
         call.put("type", "function_call");
@@ -712,9 +778,9 @@ public class OpenAiResponseFactory {
     }
 
     /**
-     * The argument of the editing tool as the Kiro and Anthropic routes declare it: the string property of the function the
-     * client declared (the one that is required, else the first), or {@code input} when the client declared the tool as a custom
-     * tool, which those routes give an empty schema, or did not declare it at all.
+     * The argument of the editing tool as the Kiro and Anthropic routes declare it: the string property of the function it is
+     * declared as (the one that is required, else the first), or {@code input} when the tool is declared as a custom tool,
+     * which those routes give an empty schema, or not at all.
      */
     private static String editingToolArgument(JsonNode tools) {
         if (!tools.isArray()) {

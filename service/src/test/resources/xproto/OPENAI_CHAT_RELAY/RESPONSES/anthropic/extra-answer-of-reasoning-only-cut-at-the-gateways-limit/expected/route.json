@@ -13,6 +13,8 @@
       "usageSource": null,
       "stopReason": "WITHHELD",
       "degraded": "builtin_tool,prompt_cache_key",
+      "withheldInputTokens": 1200,
+      "withheldOutputTokens": 16000,
       "error": "The source's answer was cut off before it could be used"
     }
   ]

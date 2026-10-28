@@ -80,7 +80,7 @@ public class SourceTierStatusService {
     static final String LAYER_BUSY = "busy";
     static final String LAYER_READY = "ready";
 
-    private static final SourceTierDtos.XpFigures NO_FIGURES = new SourceTierDtos.XpFigures(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null);
+    private static final SourceTierDtos.XpFigures NO_FIGURES = new SourceTierDtos.XpFigures(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null);
 
     private final SourceTierRegistry registry;
     private final SourceTierRuntimeInfo runtime;
@@ -626,11 +626,13 @@ public class SourceTierStatusService {
             count(*) FILTER (WHERE NOT success AND stop_reason = '%s') AS model_not_served,
             count(*) FILTER (WHERE NOT success AND stop_reason = '%s') AS key_refused,
             count(*) FILTER (WHERE NOT success AND stop_reason = '%s') AS withheld,
+            COALESCE(sum(withheld_input_tokens) FILTER (WHERE NOT success AND stop_reason = '%s'), 0) AS withheld_input_tokens,
+            COALESCE(sum(withheld_output_tokens) FILTER (WHERE NOT success AND stop_reason = '%s'), 0) AS withheld_output_tokens,
             count(*) FILTER (WHERE success AND usage_source = 'ESTIMATED') AS estimated,
             count(*) FILTER (WHERE success AND usage_source = 'CLAMPED') AS clamped,
             count(*) FILTER (WHERE success AND degraded_features IS NOT NULL AND degraded_features <> '') AS degraded,
             percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) FILTER (WHERE success) AS p95""".formatted(
-            INTERRUPTED, CONVERSION_REJECTED, CONTEXT_EXCEEDED, MODEL_NOT_SERVED, KEY_REFUSED, WITHHELD);
+            INTERRUPTED, CONVERSION_REJECTED, CONTEXT_EXCEEDED, MODEL_NOT_SERVED, KEY_REFUSED, WITHHELD, WITHHELD, WITHHELD);
 
         private static final String RELAY_ATTEMPTS = """
             FROM request_logs
@@ -731,6 +733,8 @@ public class SourceTierStatusService {
                 count(row.get("model_not_served", Number.class)),
                 count(row.get("key_refused", Number.class)),
                 count(row.get("withheld", Number.class)),
+                count(row.get("withheld_input_tokens", Number.class)),
+                count(row.get("withheld_output_tokens", Number.class)),
                 count(row.get("estimated", Number.class)),
                 count(row.get("clamped", Number.class)),
                 count(row.get("degraded", Number.class)),

@@ -25,6 +25,7 @@
     pairStatusLabel,
     successPercent,
     unmetCriteria,
+    withheldTokens,
   } from './xpMeta';
   import { formatPercent } from './tierStatusMeta';
 
@@ -218,6 +219,17 @@
                   p6: formatNumber(pair.figures.conversionRejected),
                   p7: formatNumber(pair.figures.estimated),
                   p8: formatLatency(pair.figures.p95Ms),
+                },
+              )
+            }}
+          </p>
+          <p v-if="withheldTokens(pair.figures)" class="pair__figures">
+            {{
+              t(
+                '被扣下的应答，中转报告的用量（没向用户收费，由你承担）：输入 {p0}、输出 {p1} 个令牌',
+                {
+                  p0: formatNumber(withheldTokens(pair.figures)?.input),
+                  p1: formatNumber(withheldTokens(pair.figures)?.output),
                 },
               )
             }}

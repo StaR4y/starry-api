@@ -628,6 +628,43 @@ class TierRetryPolicyTest {
         assertThat(uncertain.narrowed()).isTrue();
     }
 
+    // ---- a relay asked once more within its dispatch ----
+
+    @Test
+    void aRelayMayBeAskedOnceMoreWhileTheRequestIsYoungAndNothingElseMayHaveGenerated() {
+        TierWalk walk = new TierWalk(plan(true));
+        TierRetryPolicy policy = policy(walk, true);
+        Level last = walk.plan().levels().getLast();
+
+        assertThat(policy.mayAskRelayAgain(last, true)).isTrue();
+        clock.advance(TierRetryPolicy.CROSS_TIER_DEADLINE);
+        assertThat(policy.mayAskRelayAgain(last, true)).as("at the deadline, as a crossing may still be made").isTrue();
+        clock.advance(Duration.ofSeconds(1));
+        assertThat(policy.mayAskRelayAgain(last, true)).as("past it").isFalse();
+    }
+
+    @Test
+    void aRelayIsNotAskedOnceMoreAfterAFailureThatMayHaveGeneratedOrBeenBilled() {
+        TierWalk walk = new TierWalk(plan(true));
+        TierRetryPolicy policy = policy(walk, true);
+        policy.onFailure(failure(walk, 0, "official-1", rejected(), false, TWO));
+
+        assertThat(policy.mayAskRelayAgain(walk.plan().levels().getLast(), true)).isFalse();
+    }
+
+    /** It is asked where the refusal has nowhere to cross to, and where no native account is in reach to cross to. */
+    @Test
+    void aRelayIsAskedOnceMoreOnlyWhereTheRequestHasNoTierWithNativeAccountsBelowIt() {
+        TierWalk walk = new TierWalk(plan(true));
+        TierRetryPolicy policy = policy(walk, true);
+        Level first = walk.plan().levels().getFirst();
+        Level last = walk.plan().levels().getLast();
+
+        assertThat(policy.mayAskRelayAgain(last, true)).as("no tier below").isTrue();
+        assertThat(policy.mayAskRelayAgain(first, false)).as("a tier below, but no native account in reach of it").isTrue();
+        assertThat(policy.mayAskRelayAgain(first, true)).as("native accounts below, busy or not").isFalse();
+    }
+
     @Test
     void aRefusalOfARequestOlderThanTheDeadlineDoesNotCross() {
         TierWalk walk = new TierWalk(plan(true));

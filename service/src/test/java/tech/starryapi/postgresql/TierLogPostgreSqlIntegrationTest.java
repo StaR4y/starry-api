@@ -190,6 +190,50 @@ class TierLogPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSupport 
         assertThat(row.degradedFeatures()).isEqualTo("images");
     }
 
+    /**
+     * The relay was paid for an answer the gateway held back (D11) and the user was not: the row keeps what the relay reported
+     * in columns of their own, only the administrator reads them, and the tokens the user's statistics sum stay what the user
+     * was served, which is nothing.
+     */
+    @Test
+    void aHeldBackAnswerKeepsWhatTheRelayReportedApartFromTheUsageOfTheUser() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String user = "held-" + suffix;
+        StatsService.RequestLog failed = new StatsService.RequestLog("held-" + suffix, "key-1", user, "relay-1", "/v1/responses",
+            "claude-sonnet-4.5", 502, false, 0, 0, BigDecimal.ZERO, 120, "The source's answer was cut off before it could be used");
+        stats.log(failed.withSource(new StatsService.SourceColumns("anthropic:relay", 1, "relay", BigDecimal.ONE, "AUTO",
+            "OPENAI_CHAT", "wire", null, "WITHHELD", "builtin_tool", 60_000L, 4_096L))).block();
+
+        try (Connection db = owner()) {
+            Map<String, Object> stored = onlyRow(db, "held-" + suffix);
+            assertThat(stored).containsEntry("withheld_input_tokens", 60_000L).containsEntry("withheld_output_tokens", 4_096L)
+                .containsEntry("input_tokens", 0L).containsEntry("output_tokens", 0L).containsEntry("stop_reason", "WITHHELD");
+            assertThat((BigDecimal) stored.get("credits")).isEqualByComparingTo("0");
+        }
+
+        // The user's own log does not select the columns, and nothing the user's statistics sum is more than it was.
+        StatsDtos.RequestLogResponse mine = analytics.logsForUser(user, null, null, null, 50).block().items().getFirst();
+        assertThat(mine.withheldInputTokens()).isNull();
+        assertThat(mine.withheldOutputTokens()).isNull();
+        assertThat(mine.inputTokens()).isZero();
+        assertThat(mine.outputTokens()).isZero();
+        StatsDtos.UsageSummaryResponse usage = analytics.usageSummaryForUser(user).block();
+        assertThat(usage.totalRequests()).isEqualTo(1L);
+        assertThat(usage.failedRequests()).isEqualTo(1L);
+        assertThat(usage.totalInputTokens()).isZero();
+        assertThat(usage.totalOutputTokens()).isZero();
+        assertThat(usage.totalTokens()).isZero();
+
+        AdminAuth adminAuth = mock(AdminAuth.class);
+        when(adminAuth.verifyAdmin(any())).thenReturn(new AdminPrincipal("root", "root", "ADMIN", null, true));
+        AdminStatsController controller = new AdminStatsController(logs, mock(PerformanceMetricService.class), analytics, adminAuth);
+        StatsDtos.RequestLogResponse admin = controller.logs(null).block().data().stream()
+            .filter(item -> item.requestId().equals("held-" + suffix)).findFirst().orElseThrow();
+        assertThat(admin.withheldInputTokens()).isEqualTo(60_000L);
+        assertThat(admin.withheldOutputTokens()).isEqualTo(4_096L);
+        assertThat(admin.inputTokens()).isZero();
+    }
+
     // ---- the billing review ----
 
     @Test

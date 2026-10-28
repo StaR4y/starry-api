@@ -291,6 +291,11 @@ public final class TierWalk {
         return indexOf(level) < plan.levels().size() - 1;
     }
 
+    /** The tiers of the plan below {@code level}, whatever the walk still offers. */
+    public List<Level> tiersBelow(Level level) {
+        return plan.levels().subList(indexOf(level) + 1, plan.levels().size());
+    }
+
     /**
      * Keeps the rest of the request at {@code level} and below: a request that failed in a tier is retried there or in a
      * tier under it, never in a tier above, even if that has recovered since.

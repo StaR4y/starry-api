@@ -491,8 +491,8 @@ class SourceTierStatusServiceTest {
     private static final XpSkipCounts.Key SKIP_LINT = new XpSkipCounts.Key("anthropic", "MESSAGES", "official", XpSkip.Reason.CONVERSION);
 
     private static SourceTierDtos.XpFigures figures(long attempts, long served, long interrupted, long conversionRejected, long estimated) {
-        return new SourceTierDtos.XpFigures(attempts, served, attempts - served, interrupted, conversionRejected, 0, 0, 0, 0, estimated,
-            0, 0, 1200L);
+        return new SourceTierDtos.XpFigures(attempts, served, attempts - served, interrupted, conversionRejected, 0, 0, 0, 0, 0, 0,
+            estimated, 0, 0, 1200L);
     }
 
     @Test
@@ -642,7 +642,7 @@ class SourceTierStatusServiceTest {
         assertThat(chat.criteria()).filteredOn(criterion -> !criterion.met()).extracting(SourceTierDtos.Criterion::name)
             .containsExactly("requests", "conversionRejected");
         SourceTierDtos.PairEvidence openai = evidence.pairs().get(2);
-        assertThat(openai.figures()).isEqualTo(new SourceTierDtos.XpFigures(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null));
+        assertThat(openai.figures()).isEqualTo(new SourceTierDtos.XpFigures(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null));
         assertThat(openai.meetsStandard()).as("no attempts at all").isFalse();
         assertThat(openai.gate()).isEqualTo("OFF");
     }

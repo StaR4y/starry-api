@@ -303,9 +303,9 @@ class XpDispatcherTest {
     }
 
     /**
-     * The 4,096 tokens of the reservation are the gateway's own bound (Codex accounts drop it; Kiro, official keys and Anthropic
-     * keys are sent it too). An answer that lost its call to it was not what the model meant, and told as incomplete it would be
-     * asked for five more times.
+     * The limit of the reservation (the 4,096 tokens of these tests; the default output of the gateway in production) is the gateway's
+     * own bound when the client named none (Codex accounts drop it; Kiro, official keys and Anthropic keys are sent it too). An
+     * answer that lost its call to it was not what the model meant, and told as incomplete it would be asked for five more times.
      */
     @Test
     void anAnswerCutInsideItsOnlyCallAtTheGatewaysBoundIsAnInterruptionOfTheResponsesEntry() {
@@ -344,6 +344,53 @@ class XpDispatcherTest {
         assertInterruptedAndNotBilled(failureOf(dispatcher.dispatch(account, relay(Entry.RESPONSES, body()), LIMITS, LIMIT, true)));
         assertInterruptedAndNotBilled(failureOf(dispatcher.dispatch(account, relay(Entry.RESPONSES, body()), LIMITS, LIMIT, false)));
         assertInterruptedAndNotBilled(failureOf(dispatcher.dispatch(account, relay(Entry.RESPONSES, body()), LIMITS, LIMIT)));
+    }
+
+    /**
+     * The operator paid for the answer that is held back, and what the relay reported of it goes out with the failure for the
+     * request log (D11), read as the usage of a served answer is: the cache added to the prompt as the member's caliber says,
+     * and the counts bounded by what the tier reserved. The user is charged nothing, whatever it says.
+     */
+    @Test
+    void anAnswerThatIsHeldBackCarriesWhatTheRelayReportedOfItAsAServedAnswersUsageIsRead() {
+        RelayAnswerWithheldException cut = (RelayAnswerWithheldException) failureOf(dispatchedToCodex(cutAnswer("", "", List.of(), true)));
+        assertThat(cut.usage().inputTokens()).isEqualTo(1300);
+        assertThat(cut.usage().outputTokens()).isEqualTo(4096);
+        assertThat(UpstreamFailureClassifier.classify(cut, account, relay(Entry.RESPONSES, body())).withheldUsage()).isEqualTo(cut.usage());
+
+        // Cache read that is separate from the prompt is part of the input, and a count over the reservation is cut to it.
+        Completion filtered = new Completion("I cannot continue with", "", List.of(), StopReason.CONTENT_FILTER,
+            JSON.readTree("{\"prompt_tokens\":2000,\"completion_tokens\":9000,\"cache_read_input_tokens\":6000}"), "content_filter");
+        when(client.complete(any(), any(), any())).thenReturn(Mono.just(filtered));
+        RelayAnswerWithheldException blocked = (RelayAnswerWithheldException) failureOf(
+            dispatcher.dispatch(account, relay(Entry.RESPONSES, body(), member(false, true), List.of()), LIMITS, LIMIT, true));
+        assertThat(blocked.usage().inputTokens()).isEqualTo(8000);
+        assertThat(blocked.usage().cacheReadTokens()).isEqualTo(6000);
+        assertThat(blocked.usage().outputTokens()).isEqualTo(4096);
+    }
+
+    /** A relay that said nothing of what it spent is estimated, as it is for an answer that is served. */
+    @Test
+    void anAnswerThatIsHeldBackWithoutUsageIsEstimatedFromWhatWasWritten() {
+        Completion silent = new Completion("", "thinking at length, and at some length", List.of(), StopReason.MAX_TOKENS,
+            JSON.createObjectNode(), "length", false);
+        when(client.complete(any(), any(), any())).thenReturn(Mono.just(silent));
+
+        RelayAnswerWithheldException held = (RelayAnswerWithheldException) failureOf(
+            dispatcher.dispatch(account, relay(Entry.RESPONSES, body()), LIMITS, LIMIT, true));
+
+        assertThat(held.usage().inputTokens()).isGreaterThan(0);
+        assertThat(held.usage().outputTokens()).isGreaterThan(0);
+    }
+
+    /** The failures of the other kinds carry none: only an answer the gateway held back was generated and not charged for. */
+    @Test
+    void aFailureThatIsNoAnswerHeldBackHasNoUsage() {
+        Throwable broken = new RelayAbortedAfterDispatchException("The exchange with the source failed after the request was sent");
+
+        assertThat(UpstreamFailureClassifier.classify(broken, account, relay(Entry.RESPONSES, body())).withheldUsage()).isNull();
+        assertThat(UpstreamFailureClassifier.classify(new RelayAnswerWithheldException("held, usage unknown"), account,
+            relay(Entry.RESPONSES, body())).withheldUsage()).isNull();
     }
 
     /** A limit the client wrote is its own: an answer that reached it is the incomplete one that client asked for. */

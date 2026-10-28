@@ -13,6 +13,7 @@ import tech.starryapi.account.AccountPoolService;
 import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.account.allocation.AccountFailureScope;
 import tech.starryapi.egress.EgressException;
+import tech.starryapi.platform.core.PlatformUsage;
 import tech.starryapi.platform.upstream.UpstreamException;
 import tech.starryapi.platform.xproto.RelayAbortedAfterDispatchException;
 import tech.starryapi.platform.xproto.RelayAnswerWithheldException;
@@ -608,6 +609,15 @@ final class UpstreamFailureClassifier {
          */
         boolean withheld() {
             return relayFailure == RelayFailure.WITHHELD;
+        }
+
+        /**
+         * What the relay reported of the answer the gateway held back, as the usage of a served answer is read (D11), or null
+         * when this is not such a failure or the usage could not be read. It is the operator's cost: the request log keeps it
+         * apart from the tokens of the user's usage, which stay 0 because nothing is charged.
+         */
+        PlatformUsage withheldUsage() {
+            return withheld() && failure instanceof RelayAnswerWithheldException held ? held.usage() : null;
         }
 
         /** The relay refused the prompt for its length, which this node keeps (design 7.8) so as not to ask for the same again. */

@@ -1,9 +1,9 @@
 {
-  "reserved": "0.080318",
+  "reserved": "0.258882",
   "settled": {
-    "credits": "0.076542",
-    "inputTokens": 5034,
-    "outputTokens": 4096,
+    "credits": "0.255105",
+    "inputTokens": 5035,
+    "outputTokens": 16000,
     "tier": "anthropic:relay",
     "level": 1,
     "priceFactor": "1"

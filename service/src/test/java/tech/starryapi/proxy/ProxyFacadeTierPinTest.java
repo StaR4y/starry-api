@@ -1358,14 +1358,15 @@ class ProxyFacadeTierPinTest {
         String first = responseId(responses("gpt-5.4", null, "s1"));
         busy.clear();
         String second = responseId(responses("gpt-5.4@official", first, "s1"));
-        // The balance covers what the Codex tier reserves (about 0.033) and not what the official tier does (about 0.068).
-        reserveOnlyUpTo("0.04");
+        // The balance covers what the Codex tier reserves (about 0.12) and not what the official tier does (about 0.25): a
+        // Responses request that names no limit is reserved for the default output of the gateway (16,000 tokens).
+        reserveOnlyUpTo("0.18");
 
         ResponseEntity<?> automatic = responses("gpt-5.4", second, "s1");
 
         assertServedBy(automatic, "codex", "2", "auto", "served");
         assertThat(ledger.holdLevels()).containsExactly("openai:codex");
-        assertThat(ledger.reservedCredits()).isLessThanOrEqualTo(new BigDecimal("0.04"));
+        assertThat(ledger.reservedCredits()).isLessThanOrEqualTo(new BigDecimal("0.18"));
     }
 
     @Test

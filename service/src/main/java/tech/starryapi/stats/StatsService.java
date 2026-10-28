@@ -44,6 +44,8 @@ public class StatsService {
         entity.setUsageSource(clip(event.usageSource(), 32));
         entity.setStopReason(clip(event.stopReason(), 32));
         entity.setDegradedFeatures(clip(event.degradedFeatures(), 512));
+        entity.setWithheldInputTokens(event.withheldInputTokens());
+        entity.setWithheldOutputTokens(event.withheldOutputTokens());
         return repository.save(entity).then();
     }
 
@@ -89,7 +91,9 @@ public class StatsService {
         String wireModel,
         String usageSource,
         String stopReason,
-        String degradedFeatures
+        String degradedFeatures,
+        Long withheldInputTokens,
+        Long withheldOutputTokens
     ) {
         /** A row of a request that is not served from source tiers: none of the source columns is set. */
         public RequestLog(
@@ -131,6 +135,8 @@ public class StatsService {
                 upstreamModel,
                 upstreamSuccess,
                 circuitEpoch,
+                null,
+                null,
                 null,
                 null,
                 null,
@@ -217,7 +223,9 @@ public class StatsService {
                 source.wireModel(),
                 source.usageSource(),
                 source.stopReason(),
-                source.degradedFeatures()
+                source.degradedFeatures(),
+                source.withheldInputTokens(),
+                source.withheldOutputTokens()
             );
         }
     }
@@ -231,6 +239,9 @@ public class StatsService {
      * @param factor the tier's price factor, which the attempt would be charged at
      * @param selection how the tier was chosen: AUTO or PINNED
      * @param dispatch how the request was sent, when that was not natively
+     * @param withheldInputTokens what a relay reported as the input of an answer the gateway held back (D11), or null: the
+     *     operator's cost, which is no usage of the user's, so it is not among the tokens of the row
+     * @param withheldOutputTokens the same for the output
      */
     public record SourceColumns(
         String tierRef,
@@ -242,7 +253,25 @@ public class StatsService {
         String wireModel,
         String usageSource,
         String stopReason,
-        String degradedFeatures
+        String degradedFeatures,
+        Long withheldInputTokens,
+        Long withheldOutputTokens
     ) {
+
+        /** The columns of an attempt that was answered or failed with nothing held back. */
+        public SourceColumns(
+            String tierRef,
+            Integer level,
+            String name,
+            BigDecimal factor,
+            String selection,
+            String dispatch,
+            String wireModel,
+            String usageSource,
+            String stopReason,
+            String degradedFeatures
+        ) {
+            this(tierRef, level, name, factor, selection, dispatch, wireModel, usageSource, stopReason, degradedFeatures, null, null);
+        }
     }
 }

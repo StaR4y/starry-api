@@ -2826,7 +2826,9 @@ class ProxyFacadeRoutingTest {
 
     private JsonNode billingRequest(JsonNode request, boolean responses) {
         var expected = ((tools.jackson.databind.node.ObjectNode) request).deepCopy();
-        expected.put(responses ? "max_output_tokens" : "max_tokens", 4096L);
+        // A request that names no limit is held to 4,096 tokens on the Chat entry and to the default of the gateway (16,000, no more
+        // than the model writes: 64,000 for the gpt-5.4 these tests use) on the Responses entry.
+        expected.put(responses ? "max_output_tokens" : "max_tokens", responses ? 16_000L : 4096L);
         return expected;
     }
 

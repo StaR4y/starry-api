@@ -39,7 +39,8 @@ import tech.starryapi.proxy.tier.TierPlan.Level;
  *       anything: it is a definitive failure that is retried like one of a busy account, in the tier and then in the tier
  *       below, and is never what the request ends with. What the client is told when nothing is left is the facade's to say.
  *   <li>A relay that refuses the request itself (a prompt longer than its window, a conversion it will not take) is
- *       not asked again, in its tier or by another relay, since another relay would be given the same request. The request
+ *       not asked again, in its tier or by another relay, since another relay would be given the same request (but for the one
+ *       request more that its own dispatch may make where it is the only source, {@link #mayAskRelayAgain}). The request
  *       may cross once, and only to the native accounts of a tier below ({@link #onRelayRefusal}); it counts against the
  *       budget like any dispatch, or takes the reserved slot when the budget is spent.
  *   <li>A request does not go to another account when the lease on its reservation could not be renewed to cover one more
@@ -241,6 +242,28 @@ public final class TierRetryPolicy {
         walk.crossedToNative(level);
         log.info("Tiered request leaves tier {} for the native accounts below it: a relay refused the request", level.tierRef());
         return onReservedSlot ? Outcome.RETRY_ON_RESERVED_SLOT : Outcome.RETRY;
+    }
+
+    /**
+     * Whether a relay that refused the request itself, before it generated anything, may be asked once more within the same
+     * dispatch, with the request it was given before the gateway chose an output limit (D11, D14, design 7.10). That is not a
+     * dispatch of its own: it has the account, the admission and the lease of the one that was refused, and only the time
+     * that dispatch was left. It is asked when {@link #onRelayRefusal} has nowhere to cross it to that is meant to serve the
+     * output the gateway chose: the plan has no tier below the relay's (the others cannot serve now, or the client's choice
+     * keeps the request from them), or no native account of those tiers is in reach of the request. Where there is one, it
+     * serves the output the gateway chose, busy or not, and the relay is left for it.
+     *
+     * <p>What stops it is the request's own state, the same that stops a crossing: an earlier attempt failed in a way that may
+     * have generated or been billed (a second generation must not follow it), or the request is older than {@link
+     * #CROSS_TIER_DEADLINE}.
+     *
+     * @param level the tier of the relay that refused
+     * @param nativesInReach whether native accounts of the tiers below are in reach of the request after this refusal: accounts
+     *     that the plan counts ({@link TierPlan#retriesAfterRelayRefusal}) and that selection could pick now (the facade asks the
+     *     pool; one that is cooling down for a minute is not in reach, as one whose quota is spent is not)
+     */
+    public synchronized boolean mayAskRelayAgain(Level level, boolean nativesInReach) {
+        return !mayHaveGenerated && !pastDeadline() && (!walk.hasTierBelow(level) || !nativesInReach);
     }
 
     /**

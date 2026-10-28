@@ -188,6 +188,13 @@
             <el-descriptions-item v-if="detail.degradedFeatures" :label="t('降级特性')">
               {{ detail.degradedFeatures }}
             </el-descriptions-item>
+            <el-descriptions-item
+              v-if="detail.withheldInputTokens != null || detail.withheldOutputTokens != null"
+              :label="t('被扣下应答的用量（运营者承担）')"
+            >
+              {{ formatNumber(detail.withheldInputTokens) }} /
+              {{ formatNumber(detail.withheldOutputTokens) }}
+            </el-descriptions-item>
           </template>
           <el-descriptions-item v-if="detail.errorMessage" :label="t('错误')">
             <pre class="error-block">{{ detail.errorMessage }}</pre>

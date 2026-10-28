@@ -587,6 +587,8 @@ public class StatsAnalyticsService {
             null,
             null,
             null,
+            null,
+            null, // withheld_input_tokens, withheld_output_tokens
             null
         );
     }

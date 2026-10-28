@@ -4,9 +4,17 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import tech.starryapi.proxy.tier.RequestBounds;
 
 @ConfigurationProperties(prefix = "starry.proxy")
 public class ProxyProperties {
+
+    /** What a Responses request that names no output limit is given, when the model writes that much (D14). */
+    public static final long DEFAULT_RESPONSES_OUTPUT_TOKENS = 16_000L;
+    /** The least the default may be set to: the 4,096 the gateway gave before D11. The setting raises it, it does not cut answers shorter. */
+    public static final long MIN_RESPONSES_OUTPUT_TOKENS = RequestBounds.FALLBACK_OUTPUT_TOKENS;
+    /** The most the default may be set to: the most output a client itself may ask for. */
+    public static final long MAX_RESPONSES_OUTPUT_TOKENS = RequestBounds.MAX_OUTPUT_TOKENS;
 
     private String adminToken = "";
     private String webuiUrl = "";
@@ -23,6 +31,7 @@ public class ProxyProperties {
     private Duration quotaReset = Duration.ofHours(1);
     private double probabilisticRetryChance = 0.1;
     private long maxRequestBodyBytes = 10 * 1024 * 1024;
+    private long responsesDefaultOutputTokens = DEFAULT_RESPONSES_OUTPUT_TOKENS;
     private Kiro kiro = new Kiro();
 
     public enum AccountSelectionStrategy {
@@ -148,6 +157,23 @@ public class ProxyProperties {
 
     public void setMaxRequestBodyBytes(long maxRequestBodyBytes) {
         this.maxRequestBodyBytes = maxRequestBodyBytes;
+    }
+
+    /**
+     * The output limit of a Responses request that names none (Codex never does), for every source that is sent one; the
+     * model's own maximum output is the most it is ever given. A value outside the range is refused at startup.
+     */
+    public long getResponsesDefaultOutputTokens() {
+        return responsesDefaultOutputTokens;
+    }
+
+    public void setResponsesDefaultOutputTokens(long responsesDefaultOutputTokens) {
+        if (responsesDefaultOutputTokens < MIN_RESPONSES_OUTPUT_TOKENS || responsesDefaultOutputTokens > MAX_RESPONSES_OUTPUT_TOKENS) {
+            throw new IllegalArgumentException("starry.proxy.responses-default-output-tokens (STARRY_RESPONSES_DEFAULT_OUTPUT_TOKENS)"
+                + " must be between " + MIN_RESPONSES_OUTPUT_TOKENS + " and " + MAX_RESPONSES_OUTPUT_TOKENS
+                + ", not " + responsesDefaultOutputTokens);
+        }
+        this.responsesDefaultOutputTokens = responsesDefaultOutputTokens;
     }
 
     public Kiro getKiro() {

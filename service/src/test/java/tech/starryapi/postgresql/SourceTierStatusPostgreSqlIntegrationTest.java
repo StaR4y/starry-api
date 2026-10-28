@@ -312,6 +312,44 @@ class SourceTierStatusPostgreSqlIntegrationTest extends PostgreSqlIntegrationTes
             .singleElement().satisfies(criterion -> assertThat(criterion.value()).isZero());
     }
 
+    /**
+     * The relay was paid for the answers the gateway held back (D11), and the status page shows what it cost the operator next to
+     * how many there were: the tokens the relay reported of them, summed by relay and by pair, in the window of the page and in
+     * the days of the evidence. A held back answer whose usage was not known adds none, and the tokens of the other kinds of failure
+     * are not counted here.
+     */
+    @Test
+    void whatTheRelayReportedOfTheAnswersTheGatewayHeldBackIsSummedBesideTheirCount() {
+        String relay = configureAnthropicWithRelay();
+        Instant now = Instant.now();
+        withheldLog(relay, 60_000L, 4_096L, now.minus(1, ChronoUnit.MINUTES));
+        withheldLog(relay, 1_200L, 32_000L, now.minus(2, ChronoUnit.MINUTES));
+        withheldLog(relay, null, null, now.minus(3, ChronoUnit.MINUTES));
+        relayLog(relay, "/v1/responses", true, 100, "REPORTED", "END_TURN", null, now.minus(1, ChronoUnit.MINUTES));
+        // Older than the window of the status page, and inside the days of the evidence.
+        withheldLog(relay, 5_000L, 500L, now.minus(2, ChronoUnit.DAYS));
+
+        SourceTierDtos.XpStatus xp = status().status().block().vendors().stream()
+            .filter(vendor -> vendor.vendor().equals("anthropic")).findFirst().orElseThrow().xp();
+
+        SourceTierDtos.XpFigures figures = xp.relays().getFirst().figures();
+        assertThat(figures.withheld()).isEqualTo(3);
+        assertThat(figures.withheldInputTokens()).isEqualTo(61_200L);
+        assertThat(figures.withheldOutputTokens()).isEqualTo(36_096L);
+        SourceTierDtos.XpFigures responses = xp.pairs().stream().filter(pair -> pair.entryEndpoint().equals("RESPONSES")).findFirst()
+            .orElseThrow().figures();
+        assertThat(responses.withheldInputTokens()).isEqualTo(61_200L);
+        assertThat(responses.withheldOutputTokens()).isEqualTo(36_096L);
+        SourceTierDtos.XpFigures evidence = pair(status().evidence(7).block(), "anthropic", "RESPONSES").figures();
+        assertThat(evidence.withheld()).isEqualTo(4);
+        assertThat(evidence.withheldInputTokens()).isEqualTo(66_200L);
+        assertThat(evidence.withheldOutputTokens()).isEqualTo(36_596L);
+        // Nothing is added to what the failures of the other kinds are, and the other entries have none.
+        assertThat(evidence.interrupted()).isZero();
+        assertThat(xp.pairs().stream().filter(pair -> pair.entryEndpoint().equals("MESSAGES")).findFirst().orElseThrow().figures()
+            .withheldInputTokens()).isZero();
+    }
+
     private static SourceTierDtos.PairEvidence pair(SourceTierDtos.Evidence evidence, String vendor, String entry) {
         return evidence.pairs().stream().filter(pair -> pair.vendor().equals(vendor) && pair.entryEndpoint().equals(entry))
             .findFirst().orElseThrow();
@@ -363,6 +401,22 @@ class SourceTierStatusPostgreSqlIntegrationTest extends PostgreSqlIntegrationTes
         spec = usageSource == null ? spec.bindNull("usageSource", String.class) : spec.bind("usageSource", usageSource);
         spec = stopReason == null ? spec.bindNull("stopReason", String.class) : spec.bind("stopReason", stopReason);
         spec = degraded == null ? spec.bindNull("degraded", String.class) : spec.bind("degraded", degraded);
+        spec.fetch().rowsUpdated().block();
+    }
+
+    private void withheldLog(String accountId, Long inputTokens, Long outputTokens, Instant at) {
+        String id = "st-" + UUID.randomUUID().toString().substring(0, 8);
+        requests.add(id);
+        DatabaseClient.GenericExecuteSpec spec = db.sql("""
+                INSERT INTO request_logs (request_id, account_id, path, status_code, success, latency_ms, created_at, source_tier_ref,
+                    source_tier_level, source_tier_name, price_factor, tier_selection, source_dispatch, wire_model, stop_reason,
+                    withheld_input_tokens, withheld_output_tokens)
+                VALUES (:id, :account, '/v1/responses', 502, false, 100, :at, 'anthropic:relay', 1, 'n', 1, 'AUTO', 'OPENAI_CHAT',
+                    'relay/sonnet', 'WITHHELD', :input, :output)
+                """)
+            .bind("id", id).bind("account", accountId).bind("at", at);
+        spec = inputTokens == null ? spec.bindNull("input", Long.class) : spec.bind("input", inputTokens);
+        spec = outputTokens == null ? spec.bindNull("output", Long.class) : spec.bind("output", outputTokens);
         spec.fetch().rowsUpdated().block();
     }
 
