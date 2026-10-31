@@ -324,6 +324,51 @@ class ChatCompletionAccumulatorTest {
         assertThat(completion.toolUses().get(1).input().path("y").asInt()).isEqualTo(2);
     }
 
+    /** The thought signature of a Gemini model is on the call as Google's OpenAI-compatible API writes it; nothing else of {@code extra_content} is kept. */
+    @Test
+    void theThoughtSignatureOfACallInAJsonAnswerIsKeptAndOnlyThat() {
+        Completion completion = read("""
+            {"choices":[{"message":{"content":null,"tool_calls":[
+            {"id":"call_0","type":"function","extra_content":{"google":{"thought_signature":"SIG-0","other":"x"},"vendor":{"k":1}},
+             "function":{"name":"Read","arguments":"{}"}},
+            {"id":"call_1","type":"function","function":{"name":"Bash","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}""");
+
+        assertThat(completion.toolUses()).extracting(PlatformToolUse::thoughtSignature).containsExactly("SIG-0", null);
+        assertThat(completion.toolUses().get(0).rawOutputItem().has("extra_content")).isFalse();
+        assertThat(completion.toolUses().get(0).toString()).doesNotContain("vendor");
+    }
+
+    @Test
+    void theThoughtSignatureOfACallInAStreamIsTheFirstOneItsPiecesCarry() {
+        Completion completion = read(stream(
+            ROLE,
+            delta("{\"tool_calls\":[{\"index\":0,\"id\":\"a\",\"type\":\"function\",\"function\":{\"name\":\"One\",\"arguments\":\"{\\\"x\\\":\"}}]}"),
+            delta("{\"tool_calls\":[{\"index\":0,\"extra_content\":{\"google\":{\"thought_signature\":\"SIG-A\"}},\"function\":{\"arguments\":\"1}\"}}]}"),
+            delta("{\"tool_calls\":[{\"index\":0,\"extra_content\":{\"google\":{\"thought_signature\":\"SIG-LATER\"}},\"function\":{\"arguments\":\"\"}}]}"),
+            delta("{\"tool_calls\":[{\"index\":1,\"id\":\"b\",\"type\":\"function\",\"function\":{\"name\":\"Two\",\"arguments\":\"{}\"}}]}"),
+            finish("tool_calls"),
+            DONE));
+
+        assertThat(completion.toolUses()).extracting(PlatformToolUse::name).containsExactly("One", "Two");
+        assertThat(completion.toolUses()).extracting(PlatformToolUse::thoughtSignature).containsExactly("SIG-A", null);
+    }
+
+    @Test
+    void aThoughtSignatureThatIsBlankNotATextOrLongerThanASignatureCanBeIsNotKept() {
+        String tooLong = "S".repeat(PlatformToolUse.MAX_THOUGHT_SIGNATURE_LENGTH + 1);
+        String longest = "S".repeat(PlatformToolUse.MAX_THOUGHT_SIGNATURE_LENGTH);
+        Completion completion = read("""
+            {"choices":[{"message":{"tool_calls":[
+            {"id":"a","extra_content":{"google":{"thought_signature":"  "}},"function":{"name":"f","arguments":"{}"}},
+            {"id":"b","extra_content":{"google":{"thought_signature":7}},"function":{"name":"f","arguments":"{}"}},
+            {"id":"c","extra_content":{"google":"SIG"},"function":{"name":"f","arguments":"{}"}},
+            {"id":"d","extra_content":{"google":{"thought_signature":"%s"}},"function":{"name":"f","arguments":"{}"}},
+            {"id":"e","extra_content":{"google":{"thought_signature":"%s"}},"function":{"name":"f","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"""
+            .formatted(tooLong, longest));
+
+        assertThat(completion.toolUses()).extracting(PlatformToolUse::thoughtSignature).containsExactly(null, null, null, null, longest);
+    }
+
     @Test
     void anEmptyToolCallEntryIsNotACall() {
         Completion completion = read(stream(

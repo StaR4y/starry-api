@@ -83,6 +83,8 @@ import tech.starryapi.platform.openai.OpenAiResponseOwnerStore;
 import tech.starryapi.platform.openai.OpenAiResponseStateStore;
 import tech.starryapi.platform.openai.OpenAiUpstreamClient;
 import tech.starryapi.platform.upstream.UpstreamException;
+import tech.starryapi.platform.xproto.AnthropicChatWireConverter;
+import tech.starryapi.platform.xproto.GeminiChatConverter;
 import tech.starryapi.proxy.tier.DefaultSourceTierPlanner;
 import tech.starryapi.proxy.tier.TierSessionBindings;
 import tech.starryapi.proxy.tier.TierRuntime;
@@ -193,6 +195,31 @@ class SelectForPoolCallSequenceSnapshotTest {
         run.messages("claude-sonnet-4.5");
 
         run.assertJournal("anthropicRouteFallsBackToKiro");
+    }
+
+    // ---- the Gemini endpoint: a Claude model on generateContent is on the Kiro route ----
+
+    @ParameterizedTest
+    @EnumSource(Variant.class)
+    void aGeminiRequestForAClaudeModelAsksTheKiroPoolOnceAndSettlesTheStandardPrice(Variant variant) {
+        Run run = new Run(variant);
+        run.selects("selectKiroAccountForPool", kiro("kiro-1"));
+
+        run.gemini("claude-sonnet-4.5");
+
+        run.assertJournal("geminiKiroRoute");
+    }
+
+    @ParameterizedTest
+    @EnumSource(Variant.class)
+    void aFailureOnTheGeminiEndpointAsksTheKiroPoolAgainWithTheAccountsAlreadyTried(Variant variant) {
+        Run run = new Run(variant);
+        run.selects("selectKiroAccountForPool", kiro("kiro-1"), kiro("kiro-2"));
+        run.upstreamFails("kiro-1", new UpstreamException(429, "slow down", true));
+
+        run.gemini("claude-sonnet-4.5");
+
+        run.assertJournal("geminiKiroRouteRetry");
     }
 
     // ---- the OpenAI route ----
@@ -397,7 +424,8 @@ class SelectForPoolCallSequenceSnapshotTest {
             return new ProxyFacade(apiKeyService, accountPool, mock(AccountAutoSuspendService.class), accountSettings,
                 retestService, modelCatalog, modelMapping, rateLimiter, payloadFactory, kiroClient, openAiClient,
                 openAiAdapter, openAiFactory, stateStore, anthropicAdapter, anthropicFactory, anthropicClient,
-                geminiAdapter, geminiFactory, payments, pricing, statsService, admissionStore, ownerStore, runtime);
+                geminiAdapter, geminiFactory, payments, pricing, statsService, admissionStore, ownerStore, runtime,
+                mock(XpDispatcher.class), null, new GeminiChatConverter(objectMapper), new AnthropicChatWireConverter(objectMapper));
         }
 
         private <T> T recording(Class<T> type, String label) {
@@ -499,6 +527,12 @@ class SelectForPoolCallSequenceSnapshotTest {
             body.put("model", model).put("max_tokens", 4096);
             body.putArray("messages").addObject().put("role", "user").put("content", "hi");
             facade.messages(body, exchange("/v1/messages")).block();
+        }
+
+        void gemini(String model) {
+            ObjectNode body = objectMapper.createObjectNode();
+            body.putArray("contents").addObject().put("role", "user").putArray("parts").addObject().put("text", "hi");
+            facade.geminiGenerateContent(model, body, exchange("/v1beta/models/" + model + ":generateContent")).block();
         }
 
         void responses(String previousResponseId) {

@@ -38,6 +38,55 @@ class OpenAiResponseFactoryTest {
         assertThat(call.path("status").asString("")).isEqualTo("completed");
     }
 
+    private PlatformCompletionResult signedAndUnsigned() throws Exception {
+        return new PlatformCompletionResult(
+            "",
+            "",
+            List.of(
+                new PlatformToolUse("call_1", "lookup", objectMapper.readTree("{\"q\":1}"), "function_call", "{\"q\":1}", null, "SIG-1"),
+                new PlatformToolUse("call_2", "other", objectMapper.readTree("{}"))
+            ),
+            new PlatformUsage(10, 2, java.math.BigDecimal.ZERO, 0, 0, 0),
+            PlatformCompletionResult.StopReason.TOOL_USE,
+            PlatformCompletionResult.UsageSource.REPORTED,
+            List.of()
+        );
+    }
+
+    /** The signature of a Gemini model's call goes to the Chat client as Google's OpenAI-compatible API writes it, and only then. */
+    @Test
+    void aChatCompletionGivesTheThoughtSignatureOfACallAsExtraContent() throws Exception {
+        JsonNode calls = factory.chatCompletion("gemini-2.5-pro", signedAndUnsigned()).path("choices").get(0).path("message").path("tool_calls");
+
+        assertThat(calls.get(0).path("extra_content")).isEqualTo(objectMapper.readTree("{\"google\":{\"thought_signature\":\"SIG-1\"}}"));
+        assertThat(calls.get(0).propertyNames()).containsExactly("id", "type", "function", "extra_content");
+        assertThat(calls.get(1).has("extra_content")).isFalse();
+    }
+
+    @Test
+    void aChatStreamGivesTheThoughtSignatureOfACallWithTheCall() throws Exception {
+        List<JsonNode> chunks = factory.chatStreamEvents("gemini-2.5-pro", signedAndUnsigned())
+            .map(ServerSentEvent::data)
+            .filter(data -> !"[DONE]".equals(data))
+            .map(objectMapper::readTree)
+            .collectList()
+            .block();
+
+        JsonNode first = chunks.get(0).path("choices").get(0).path("delta").path("tool_calls").get(0);
+        JsonNode second = chunks.get(1).path("choices").get(0).path("delta").path("tool_calls").get(0);
+        assertThat(first.path("extra_content").path("google").path("thought_signature").asString("")).isEqualTo("SIG-1");
+        assertThat(second.has("extra_content")).isFalse();
+    }
+
+    @Test
+    void aCallWithoutASignatureIsRenderedAsItAlwaysWasInEveryMode() throws Exception {
+        PlatformCompletionResult native1 = new PlatformCompletionResult(
+            "", List.of(new PlatformToolUse("toolu_1", "Bash", objectMapper.readTree("{}"))), PlatformUsage.zero());
+
+        assertThat(factory.chatCompletion("claude-sonnet-4.5", native1).toString()).doesNotContain("extra_content", "thought");
+        assertThat(factory.responses("claude-sonnet-4.5", signedAndUnsigned(), null).toString()).doesNotContain("extra_content", "SIG-1");
+    }
+
     @Test
     void chatStreamReturnsToolCallDeltas() throws Exception {
         PlatformCompletionResult result = new PlatformCompletionResult(

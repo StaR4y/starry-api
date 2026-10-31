@@ -34,6 +34,7 @@ import tech.starryapi.model.ModelPricingService;
 import tech.starryapi.payment.PaymentSettingsService;
 import tech.starryapi.payment.PaymentSettingsService.PaymentConfig;
 import tech.starryapi.platform.anthropic.AnthropicRequestAdapter;
+import tech.starryapi.platform.xproto.AnthropicChatWireConverter;
 import tech.starryapi.platform.xproto.CodexRequests;
 import tech.starryapi.platform.xproto.PairRegistry;
 import tech.starryapi.platform.xproto.PairRegistry.Entry;
@@ -95,6 +96,7 @@ class TierPlannerXpTest {
     private final ModelPoolKeyResolver keyResolver = new ModelPoolKeyResolver(catalog);
     private final AnthropicRequestAdapter adapter = new AnthropicRequestAdapter(mapper, catalog);
     private final ResponsesChatConverter converter = new ResponsesChatConverter(mapper);
+    private final AnthropicChatWireConverter wireConverter = new AnthropicChatWireConverter(mapper);
     private final SourceTierRegistry registry = mock(SourceTierRegistry.class);
     private final AccountPoolService accountPool = mock(AccountPoolService.class);
     private final PaymentSettingsService payments = mock(PaymentSettingsService.class);
@@ -823,6 +825,140 @@ class TierPlannerXpTest {
         assertThat(first.relays()).hasSize(1);
         assertThat(second.inputBound()).isLessThan(5_000);
         assertThat(first.inputBound()).isBetween(5_000L, 20_000L);
+    }
+
+    // ---- the original-body conversion of the Messages entry (P8-01) ----
+
+    /** A Claude Code request whose last message holds a screenshot, as the client sends it (a base64 source). */
+    private String claudeCodeWithAScreenshot(String source) {
+        ObjectNode raw = (ObjectNode) json(CLAUDE_CODE);
+        ArrayNode content = raw.withArray("messages").addObject().put("role", "user").putArray("content");
+        content.addObject().put("type", "text").put("text", "what is on the screen");
+        content.addObject().put("type", "image").set("source", json(source));
+        return raw.toString();
+    }
+
+    private static final String INLINE_SCREENSHOT = "{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"" + "A".repeat(100_000) + "\"}";
+
+    /** A Messages request as the facade with the converter makes it: a relay is given the conversion of the original. */
+    private TierPlanRequest messagesWithTheConverter(String claudeBody) {
+        JsonNode raw = json(claudeBody);
+        String model = raw.path("model").stringValue();
+        return messagesRequest(model, "key-1", adapter.messagesToChat(raw)).withEntryFacts(TierEntryFacts.of(TierEntry.MESSAGES, raw)
+            .withChatConversion(planned -> {
+                ObjectNode converted = wireConverter.toChat(raw);
+                converted.set("max_tokens", planned.path("max_tokens"));
+                return converted;
+            }));
+    }
+
+    @Test
+    void aScreenshotIsReservedForByTheCapOfTheMappingForARelayThatSeesItAndKiroIsNotRaisedToTheFloor() {
+        // The Kiro cell is sent text only, and a relay with vision is sent the screenshot: a data URI the bound counts as
+        // the cap of its mapping, not as the 1,000,000 tokens of input the gateway cannot see (design 5.2).
+        Member seeing = relayMember("relay-1", true);
+        configure(ownerConfiguration(seeing, List.of(mapping(seeing, "claude-sonnet-4.5", "relay-sonnet", 200_000, 5_000, true)),
+            gate("MESSAGES", "ON")));
+
+        TierPlan plan = plan(offering(Status.VERIFIED), messagesWithTheConverter(claudeCodeWithAScreenshot(INLINE_SCREENSHOT)));
+
+        Level first = plan.levels().get(0);
+        Level second = plan.levels().get(1);
+        Relay served = first.relay("relay-1").orElseThrow();
+        assertThat(served.dispatch().wireBody().toString()).contains("image_url", "data:image/png;base64,");
+        assertThat(first.inputBound()).isBetween(5_000L, 20_000L);
+        assertThat(first.inputBound()).isEqualTo(RequestBounds.xpInputTokens(served.dispatch().wireBody(), 5_000));
+        assertThat(second.inputBound()).isLessThan(5_000);
+        assertThat(plan.reservation()).isEqualByComparingTo(first.estimate().max(second.estimate()));
+        assertThat(plan.reservation()).isLessThan(STANDARD.scaled(BigDecimal.ONE).estimate(1_000_000L, 4096));
+    }
+
+    @Test
+    void aScreenshotForARelayWithoutVisionAddsNothingToTheBoundOfItsTier() {
+        Member blind = relayMember("relay-1", false);
+        configure(ownerConfiguration(blind, List.of(mapping(blind, "claude-sonnet-4.5", "relay-sonnet", 200_000, 5_000, true)),
+            gate("MESSAGES", "ON")));
+
+        TierPlan plan = plan(offering(Status.VERIFIED), messagesWithTheConverter(claudeCodeWithAScreenshot(INLINE_SCREENSHOT)));
+
+        Relay served = plan.levels().get(0).relay("relay-1").orElseThrow();
+        // The model is told the image was there; the data does not go, so it is not counted.
+        assertThat(served.dispatch().wireBody().toString()).contains("[image omitted]").doesNotContain("image_url", "AAAAAAAA");
+        assertThat(plan.levels().get(0).inputBound()).isLessThan(5_000);
+        assertThat(served.dispatch().degraded()).contains("image");
+    }
+
+    @Test
+    void anImageFromAnAddressRaisesTheBoundOfThatRelayToTheFloorAndOnlyThatRelays() {
+        Member seeing = relayMember("relay-1", true);
+        configure(ownerConfiguration(seeing, List.of(mapping(seeing, "claude-sonnet-4.5", "relay-sonnet", 200_000, 5_000, true)),
+            gate("MESSAGES", "ON")));
+
+        TierPlan plan = plan(offering(Status.VERIFIED),
+            messagesWithTheConverter(claudeCodeWithAScreenshot("{\"type\":\"url\",\"url\":\"https://images.example/cat.png\"}")));
+
+        assertThat(plan.levels().get(0).relay("relay-1").orElseThrow().dispatch().wireBody().toString())
+            .contains("https://images.example/cat.png");
+        assertThat(plan.levels().get(0).inputBound()).isEqualTo(1_000_000L);
+        assertThat(plan.levels().get(1).inputBound()).isLessThan(5_000);
+    }
+
+    /**
+     * The tiers are reserved for different amounts of input here (the relay is sent the address of the image and the gateway cannot
+     * size what it fetches, Kiro is sent the text), so the tier that reserves less is the one of the higher factor: the advice
+     * says it reserves less, and does not call it cheaper.
+     */
+    @Test
+    void theAdviceForAnImageFromAnAddressSaysThatAPoolReservesLessWhenItsInputIsBoundedAndItsFactorIsHigher() {
+        Member seeing = relayMember("relay-1", true);
+        configure(SourceTierSnapshot.of(7L, List.of(new VendorConfig("anthropic", true, false, true, true, 16, true, 7L)),
+            List.of(tier("anthropic", "relay", 1, "relay", "0.5"), tier("anthropic", "kiro", 2, "kiro", "1", KIRO, CLAUDE_OAUTH)),
+            List.of(seeing), List.of(mapping(seeing, "claude-sonnet-4.5", "relay-sonnet", 200_000, 5_000, true)),
+            List.of(gate("MESSAGES", "ON"))));
+
+        TierPlan plan = plan(offering(Status.VERIFIED),
+            messagesWithTheConverter(claudeCodeWithAScreenshot("{\"type\":\"url\",\"url\":\"https://images.example/cat.png\"}")));
+
+        assertThat(plan.levels().get(0).inputBound()).isEqualTo(1_000_000L);
+        assertThat(plan.levels().get(1).inputBound()).isLessThan(5_000);
+        assertThat(plan.levels().get(1).estimate()).isLessThan(plan.levels().get(0).estimate());
+        assertThat(plan.levels().get(1).quote().estimate(1_000, 0)).isGreaterThan(plan.levels().get(0).quote().estimate(1_000, 0));
+        assertThat(plan.lowBalanceHint()).startsWith("；可以改选预留更少的号池（").doesNotContain("更便宜").contains("kiro").contains("系数 1）");
+    }
+
+    /**
+     * The relay's body and Kiro's differ by a few bytes, so the two tiers are reserved for slightly different input; that is no
+     * reason to stop calling a pool that reserves less and has the lower factor a cheaper one. The advice says "reserves less"
+     * only when a tier that reserves less is no cheaper than the one that reserves the most.
+     */
+    @Test
+    void theAdviceOfAPlainRequestStillCallsThePoolThatReservesLessAndHasTheLowerFactorCheaper() {
+        Member seeing = relayMember("relay-1", true);
+        configure(SourceTierSnapshot.of(7L, List.of(new VendorConfig("anthropic", true, false, true, true, 16, true, 7L)),
+            List.of(tier("anthropic", "relay", 1, "relay", "1"), tier("anthropic", "kiro", 2, "kiro", "0.6", KIRO, CLAUDE_OAUTH)),
+            List.of(seeing), List.of(mapping(seeing, "claude-sonnet-4.5", "relay-sonnet", 200_000, 5_000, true)),
+            List.of(gate("MESSAGES", "ON"))));
+
+        TierPlan plan = plan(offering(Status.VERIFIED), messagesWithTheConverter(CLAUDE_CODE));
+
+        assertThat(plan.levels().get(0).relay("relay-1")).isPresent();
+        assertThat(plan.levels().get(0).inputBound()).as("the two bodies are not the same size").isNotEqualTo(plan.levels().get(1).inputBound());
+        assertThat(plan.levels().get(1).estimate()).isLessThan(plan.levels().get(0).estimate());
+        assertThat(plan.lowBalanceHint()).startsWith("；可以改选更便宜的号池（").doesNotContain("预留更少").contains("kiro").contains("系数 0.6）");
+    }
+
+    @Test
+    void theBodyOfARequestWithoutAnythingNewIsTheSameWhetherOrNotTheConverterIsThere() {
+        Member blind = relayMember("relay-1", false);
+        configure(ownerConfiguration(blind, gate("MESSAGES", "ON")));
+
+        TierPlan converted = plan(offering(Status.VERIFIED), messagesWithTheConverter(CLAUDE_CODE.replace(
+            ",\"cache_control\":{\"type\":\"ephemeral\"}", "")));
+        TierPlan nativeBody = plan(offering(Status.VERIFIED), messages(CLAUDE_CODE.replace(",\"cache_control\":{\"type\":\"ephemeral\"}", "")));
+
+        assertThat(converted.levels().get(0).relay("relay-1").orElseThrow().dispatch().wireBody())
+            .isEqualTo(nativeBody.levels().get(0).relay("relay-1").orElseThrow().dispatch().wireBody());
+        assertThat(converted.reservation()).isEqualByComparingTo(nativeBody.reservation());
     }
 
     // ---- availability, D4 and the cells of a tier ----

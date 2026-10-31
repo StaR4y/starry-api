@@ -65,7 +65,10 @@ import tools.jackson.databind.node.ObjectNode;
  * <p>Not decided here: the usage. The accumulator merges what the relay reports, field by field to the largest value
  * seen (a relay may report the prompt in the first chunk and the completion in the last), and hands that over; turning
  * it into billable tokens is the usage normalizer's work. Tool calls come out with the relay's own ids, which may be
- * empty or repeat between answers; the dispatcher mints the ones the client sees.
+ * empty or repeat between answers; the dispatcher mints the ones the client sees. A call keeps the one thing of the
+ * relay's own that has to reach the client with it, the thought signature a Gemini model puts on a call (Google's
+ * OpenAI-compatible format writes it as {@code extra_content.google.thought_signature}, design 7.6): it is read from the
+ * pieces of the call, the first one that has it, and nothing else of {@code extra_content} is kept.
  *
  * <p>One instance reads one answer, from one thread at a time.
  */
@@ -533,6 +536,9 @@ public final class ChatCompletionAccumulator {
             if (target.id.isEmpty()) {
                 target.id = id;
             }
+            if (target.thoughtSignature == null) {
+                target.thoughtSignature = ChatWireSanitizer.thoughtSignatureOf(call);
+            }
             if (function != null && function.isObject()) {
                 // The name is taken once: relays that repeat it in every chunk would otherwise double it.
                 if (target.name.isEmpty()) {
@@ -772,6 +778,7 @@ public final class ChatCompletionAccumulator {
 
         String id = "";
         String name = "";
+        String thoughtSignature;
         private final StringBuilder arguments = new StringBuilder();
 
         // The shape of the arguments is kept as they are appended, so that asking for it costs nothing however many pieces
@@ -939,7 +946,7 @@ public final class ChatCompletionAccumulator {
             ObjectNode function = raw.putObject("function");
             function.put("name", functionName);
             function.put("arguments", rawInput);
-            return new PlatformToolUse(id, functionName, input, "function_call", rawInput, raw);
+            return new PlatformToolUse(id, functionName, input, "function_call", rawInput, raw, thoughtSignature);
         }
     }
 }

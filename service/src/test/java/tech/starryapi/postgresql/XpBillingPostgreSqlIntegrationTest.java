@@ -143,6 +143,8 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
                     PairRegistry.Status.EXPERIMENTAL),
                 new PairRegistry.Registration(PairRegistry.SourceKind.OPENAI_CHAT_RELAY, PairRegistry.Entry.RESPONSES, "anthropic",
                     PairRegistry.Status.EXPERIMENTAL),
+                new PairRegistry.Registration(PairRegistry.SourceKind.OPENAI_CHAT_RELAY, PairRegistry.Entry.GEMINI, "anthropic",
+                    PairRegistry.Status.EXPERIMENTAL),
                 new PairRegistry.Registration(PairRegistry.SourceKind.OPENAI_CHAT_RELAY, PairRegistry.Entry.CHAT, "openai",
                     PairRegistry.Status.EXPERIMENTAL)));
             return new TierRuntime(new DefaultSourceTierPlanner(registry, keyResolver, modelCatalog, accountPool, paymentSettings,
@@ -576,6 +578,81 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
         assertThat(reservation).containsEntry("status", "SETTLED").containsEntry("served_tier_ref", "anthropic:relay");
     }
 
+    /**
+     * A user who has almost nothing left sends a screenshot (design 7.6, P8-01): the reservation is a bound of what the
+     * tiers can be sent, and the screenshot is counted as the cap of its mapping where a relay is sent it and not at all
+     * where Kiro is sent the text. It is not the 1,000,000 tokens of input that an image the gateway cannot count would be.
+     */
+    @Test
+    void aScreenshotOfClaudeCodeDoesNotMakeAUserWithAlmostNothingLeftPayForTheMillionTokenFloor() {
+        Client client = client("1");
+        ownersExample(client, "MESSAGES", client.keyId(), true, 5_000);
+        BigDecimal floor = standard.estimate(1_000_000L, 4096);
+        assertThat(floor).as("the floor is more than this user has").isGreaterThan(new BigDecimal("1"));
+
+        ResponseEntity<?> answered = messages(client, messagesBodyWithScreenshot("A".repeat(200_000)));
+
+        assertThat(answered.getStatusCode().is2xxSuccessful()).isTrue();
+        // The relay was sent the screenshot (it is the first tier), as an image and not as the placeholder of a text-only member.
+        assertThat(relayBodies).singleElement().satisfies(body -> assertThat(body.toString()).contains("image_url", "data:image/png;base64,"));
+        Map<String, Object> reservation = reservations(client).getLast();
+        BigDecimal reserved = (BigDecimal) reservation.get("reserved_credits");
+        assertThat(reserved).isLessThan(floor).isLessThan(new BigDecimal("1"));
+        assertThat(reserved).isGreaterThan(standard.estimate(5_000L, 4096));
+        assertThat(reservation).containsEntry("status", "SETTLED").containsEntry("served_tier_ref", "anthropic:relay");
+        assertThat(keyReserved(client)).isEqualByComparingTo("0");
+    }
+
+    @Test
+    void aScreenshotOfOpenCodeDoesNotMakeAUserWithAlmostNothingLeftPayForTheMillionTokenFloorEither() {
+        Client client = client("1");
+        ownersExample(client, true, 5_000);
+        BigDecimal floor = standard.estimate(1_000_000L, 4096);
+
+        ResponseEntity<?> answered = chat(client, chatBodyWithImage("data:image/png;base64," + "A".repeat(200_000)));
+
+        assertThat(answered.getStatusCode().is2xxSuccessful()).isTrue();
+        BigDecimal reserved = (BigDecimal) reservations(client).getLast().get("reserved_credits");
+        assertThat(reserved).isLessThan(floor).isLessThan(new BigDecimal("1"));
+        assertThat(reservations(client).getLast()).containsEntry("status", "SETTLED").containsEntry("served_tier_ref", "anthropic:relay");
+    }
+
+    /**
+     * The all-endpoints switch moves OpenCode's request for a Claude model onto the Anthropic route, whose cells are an Anthropic key
+     * and Kiro: both are sent the text of the request (the key has no image part), so the screenshot is no reason to reserve the
+     * million tokens of a body that is handed over whole, and a user with almost nothing left is served as on Kiro's route.
+     */
+    @Test
+    void aScreenshotOfOpenCodeOnTheAnthropicRouteOfTheAllEndpointsSwitchDoesNotMakeAUserWithAlmostNothingLeftPayTheFloorEither() {
+        Client client = client("1");
+        ownersExample(client, true, 5_000);
+        db.sql("UPDATE source_tier_vendors SET unify_endpoints = TRUE WHERE vendor = 'anthropic'").fetch().rowsUpdated().block();
+        registry.refresh().block();
+        BigDecimal floor = standard.estimate(1_000_000L, 4096);
+
+        ResponseEntity<?> answered = chat(client, chatBodyWithImage("data:image/png;base64," + "A".repeat(200_000)));
+
+        assertThat(answered.getStatusCode().is2xxSuccessful()).isTrue();
+        BigDecimal reserved = (BigDecimal) reservations(client).getLast().get("reserved_credits");
+        assertThat(reserved).isLessThan(floor).isLessThan(new BigDecimal("1"));
+        assertThat(reservations(client).getLast()).containsEntry("status", "SETTLED").containsEntry("served_tier_ref", "anthropic:relay");
+    }
+
+    @Test
+    void aScreenshotThatTheRelayDoesNotTakeIsServedByKiroForTheSameLittleMoney() {
+        Client client = client("1");
+        ownersExample(client, "MESSAGES", client.keyId(), true, 5_000);
+        relayAnswers(() -> Mono.error(relayErrors.fromResponse(429, error("rate_limit_exceeded", "slow down"), null, "relay", "sk-secret")));
+
+        ResponseEntity<?> answered = messages(client, messagesBodyWithScreenshot("A".repeat(200_000)));
+
+        // Kiro is sent the text of the request: its screenshot is nothing it reads, so it is nothing to pay for either.
+        assertThat(answered.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
+        assertThat(reservations(client).getLast()).containsEntry("status", "SETTLED").containsEntry("served_tier_ref", "anthropic:kiro");
+        assertThat((BigDecimal) reservations(client).getLast().get("reserved_credits")).isLessThan(new BigDecimal("1"));
+        assertThat(reviews(client)).isEmpty();
+    }
+
     @Test
     void aTierOfRelaysAloneIsReservedForByWhatItsRelayIsSentWhereTheOfficialKeysOfTheSameRequestAreSentTheWholeImage() {
         Client client = client("100");
@@ -663,6 +740,140 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
 
         BigDecimal reserved = (BigDecimal) reservations(client).getLast().get("reserved_credits");
         assertThat(reserved).isEqualByComparingTo(standard.estimate(1_000_000L, 4096));
+    }
+
+    // ---- the Gemini entry ----
+
+    /**
+     * A Gemini client that shows a screenshot to a user with almost nothing left: the relay is sent it (it has vision) and the tier is
+     * reserved for it as its mapping says an image costs, where the million tokens of an image the gateway cannot count would be
+     * more than the user has. Gemini's model is Claude on Kiro's route, whose cells read the text.
+     */
+    @Test
+    void aGeminiClientsScreenshotDoesNotMakeAUserWithAlmostNothingLeftPayForTheMillionTokenFloor() {
+        Client client = client("1");
+        ownersExample(client, "GEMINI", client.keyId(), true, 5_000);
+        BigDecimal floor = standard.estimate(1_000_000L, 4096);
+        assertThat(floor).as("the floor is more than this user has").isGreaterThan(new BigDecimal("1"));
+
+        ResponseEntity<?> answered = geminiRequest(client, MODEL, geminiBody("A".repeat(200_000), null)).block();
+
+        assertThat(answered.getStatusCode().is2xxSuccessful()).isTrue();
+        assertThat(answered.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(relayBodies).singleElement().satisfies(body -> assertThat(body.toString()).contains("image_url", "data:image/png;base64,"));
+        Map<String, Object> reservation = reservations(client).getLast();
+        BigDecimal reserved = (BigDecimal) reservation.get("reserved_credits");
+        assertThat(reserved).isLessThan(floor).isLessThan(new BigDecimal("1"));
+        assertThat(reserved).isGreaterThan(standard.estimate(5_000L, 4096));
+        assertThat(reservation).containsEntry("status", "SETTLED").containsEntry("served_tier_ref", "anthropic:relay");
+        assertThat((BigDecimal) reservation.get("actual_credits")).isEqualByComparingTo(standard.cost(RELAY_USAGE));
+        assertThat(keyReserved(client)).isEqualByComparingTo("0");
+        assertThat(logs(client)).singleElement().satisfies(row -> {
+            assertThat(row.get("source_dispatch")).isEqualTo("OPENAI_CHAT");
+            assertThat(row.get("usage_source")).isEqualTo("REPORTED");
+        });
+        assertThat(reviews(client)).isEmpty();
+    }
+
+    @Test
+    void aGeminiRequestTheRelayCutOffReleasesTheReservationAndKiroIsNotAsked() {
+        Client client = client("10");
+        ownersExample(client, "GEMINI", client.keyId(), false, 8192);
+        relayAnswers(() -> Mono.error(new RelayAbortedAfterDispatchException("The exchange with the source failed after the request was sent")));
+
+        assertThatThrownBy(() -> geminiRequest(client, MODEL, geminiBody(null, null)).block()).isInstanceOf(ApiException.class);
+
+        verify(kiroClient, never()).complete(any(), any(), anyString());
+        assertThat(reservations(client).getLast()).containsEntry("status", "RELEASED").containsEntry("actual_credits", null)
+            .containsEntry("last_dispatched_tier_ref", "anthropic:relay");
+        assertThat(balance(client)).isEqualByComparingTo("10");
+        assertThat(keyReserved(client)).isEqualByComparingTo("0");
+        assertThat(reviews(client)).isEmpty();
+        assertThat(logs(client)).singleElement().satisfies(row -> {
+            assertThat(row.get("success")).isEqualTo(false);
+            assertThat(row.get("source_dispatch")).isEqualTo("OPENAI_CHAT");
+        });
+    }
+
+    @Test
+    void aGeminiClientThatGivesUpWhileTheRelayIsAskedIsReleasedForGoodAndNothingIsLeftForReview() {
+        Client client = client("10");
+        ownersExample(client, "GEMINI", client.keyId(), false, 8192);
+        relayAnswers(Mono::never);
+
+        Disposable request = geminiRequest(client, MODEL, geminiBody(null, null)).subscribe(response -> { }, error -> { });
+        await().atMost(Duration.ofSeconds(20)).until(() -> !relayBodies.isEmpty());
+        await().atMost(Duration.ofSeconds(20)).until(() -> status(client, "DISPATCHED"));
+        request.dispose();
+        await().atMost(Duration.ofSeconds(20)).until(() -> !status(client, "DISPATCHED"));
+
+        assertThat(reservations(client).getLast()).containsEntry("status", "RELEASED").containsEntry("actual_credits", null)
+            .containsEntry("last_dispatched_tier_ref", "anthropic:relay");
+        assertThat(balance(client)).isEqualByComparingTo("10");
+        assertThat(keyReserved(client)).isEqualByComparingTo("0");
+        assertThat(reviews(client)).isEmpty();
+        verify(apiKeys).releaseUsage(any(), anyString(), eq(true), eq(CLIENT_DISCONNECTED));
+    }
+
+    @Test
+    void aGeminiRequestTheRelayRefusesIsServedByKiroAtThePriceOfItsTier() {
+        Client client = client("10");
+        ownersExample(client, "GEMINI", client.keyId(), true, 5_000);
+        relayAnswers(() -> Mono.error(relayErrors.fromResponse(429, error("rate_limit_exceeded", "slow down"), null, "relay", "sk-secret")));
+
+        ResponseEntity<?> answered = geminiRequest(client, MODEL, geminiBody("A".repeat(200_000), 100)).block();
+
+        assertThat(answered.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
+        Map<String, Object> reservation = reservations(client).getLast();
+        assertThat(reservation).containsEntry("status", "SETTLED").containsEntry("served_tier_ref", "anthropic:kiro");
+        assertThat((BigDecimal) reservation.get("served_price_factor")).isEqualByComparingTo("0.6");
+        assertThat((BigDecimal) reservation.get("actual_credits")).isEqualByComparingTo(standard.scaled(new BigDecimal("0.6")).cost(KIRO_USAGE));
+        assertThat(keyReserved(client)).isEqualByComparingTo("0");
+        assertThat(reviews(client)).isEmpty();
+    }
+
+    @Test
+    void aGeminiRequestTheRelayDoesNotKnowTheKeyOfIsServedByKiroAndTheRelaysRowSaysSo() {
+        Client client = client("10");
+        ownersExample(client, "GEMINI", client.keyId(), false, 5_000);
+        relayAnswers(() -> Mono.error(relayErrors.fromResponse(401, error("invalid_api_key", "bad key"), null, "relay", "sk-secret")));
+
+        ResponseEntity<?> answered = geminiRequest(client, MODEL, geminiBody(null, null)).block();
+
+        assertThat(answered.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
+        assertThat(reservations(client).getLast()).containsEntry("status", "SETTLED").containsEntry("served_tier_ref", "anthropic:kiro");
+        assertThat(logs(client)).anySatisfy(row -> {
+            assertThat(row.get("source_dispatch")).isEqualTo("OPENAI_CHAT");
+            assertThat(row.get("stop_reason")).isEqualTo("KEY_REFUSED");
+        });
+        assertThat(reviews(client)).isEmpty();
+    }
+
+    /**
+     * The relay reports far more than it was asked for: the output is held to the limit the client wrote (it is the limit the relay
+     * was told, as {@code max_tokens}) and the input to the bound of the tier, and the charge is the cost of that.
+     */
+    @Test
+    void aRelaysUsageIsHeldToTheLimitAGeminiClientWroteAndToTheBoundOfItsTier() {
+        Client client = client("10");
+        ownersExample(client, "GEMINI", client.keyId(), false, 5_000);
+        relayAnswers(() -> Mono.just(relayAnswer(new PlatformUsage(9_999_999L, 9_999_999L, BigDecimal.ZERO, 0, 0, 0))));
+
+        geminiRequest(client, MODEL, geminiBody(null, 100)).block();
+
+        assertThat(relayBodies).singleElement().satisfies(body -> assertThat(body.path("max_tokens").asInt()).isEqualTo(100));
+        Map<String, Object> reservation = reservations(client).getLast();
+        BigDecimal reserved = (BigDecimal) reservation.get("reserved_credits");
+        BigDecimal charged = (BigDecimal) reservation.get("actual_credits");
+        assertThat(reservation).containsEntry("status", "SETTLED").containsEntry("served_tier_ref", "anthropic:relay");
+        assertThat(charged).isPositive().isLessThanOrEqualTo(reserved);
+        assertThat(logs(client)).singleElement().satisfies(row -> {
+            assertThat(row.get("usage_source")).isEqualTo("CLAMPED");
+            assertThat(((Number) row.get("output_tokens")).longValue()).isEqualTo(100L);
+        });
+        assertThat(balance(client)).isEqualByComparingTo(new BigDecimal("10").subtract(charged));
+        assertThat(keyReserved(client)).isEqualByComparingTo("0");
+        assertThat(reviews(client)).isEmpty();
     }
 
     // ---- the client gives up ----
@@ -1203,6 +1414,36 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
         return body;
     }
 
+    /** What Claude Code sends when the user shows it a screenshot: a text block and an image block with the data in it. */
+    private ObjectNode messagesBodyWithScreenshot(String data) {
+        ObjectNode body = objectMapper.createObjectNode();
+        body.put("model", MODEL).put("max_tokens", 4096);
+        var content = body.putArray("messages").addObject().put("role", "user").putArray("content");
+        content.addObject().put("type", "text").put("text", "what is in this picture");
+        content.addObject().put("type", "image").putObject("source").put("type", "base64").put("media_type", "image/png").put("data", data);
+        return body;
+    }
+
+    /** A {@code generateContent} request of a Gemini client: a question and, when {@code data} is given, an inline image. */
+    private ObjectNode geminiBody(String data, Integer maxOutputTokens) {
+        ObjectNode body = objectMapper.createObjectNode();
+        var parts = body.putArray("contents").addObject().put("role", "user").putArray("parts");
+        parts.addObject().put("text", "what is in this picture");
+        if (data != null) {
+            parts.addObject().putObject("inlineData").put("mimeType", "image/png").put("data", data);
+        }
+        if (maxOutputTokens != null) {
+            body.putObject("generationConfig").put("maxOutputTokens", maxOutputTokens);
+        }
+        return body;
+    }
+
+    private Mono<ResponseEntity<?>> geminiRequest(Client client, String model, ObjectNode body) {
+        MockServerHttpRequest.BodyBuilder request = MockServerHttpRequest.post("/v1beta/models/" + model + ":generateContent")
+            .header("Authorization", "Bearer " + client.token());
+        return facade.geminiGenerateContent(model, body, MockServerWebExchange.from(request));
+    }
+
     private ObjectNode gptBodyWithImage(String url) {
         ObjectNode body = chatBodyWithImage(url);
         body.put("model", "gpt-5.5");
@@ -1223,6 +1464,12 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
 
     private ResponseEntity<?> responses(Client client, ObjectNode body) {
         return responsesRequest(client, body).block();
+    }
+
+    private ResponseEntity<?> messages(Client client, ObjectNode body) {
+        MockServerHttpRequest.BodyBuilder request = MockServerHttpRequest.post("/v1/messages")
+            .header("Authorization", "Bearer " + client.token());
+        return facade.messages(body, MockServerWebExchange.from(request)).block();
     }
 
     private Mono<ResponseEntity<?>> chatRequest(Client client, ObjectNode body) {

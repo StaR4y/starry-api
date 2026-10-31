@@ -44,9 +44,18 @@ import tools.jackson.databind.node.ObjectNode;
  *   <li>{@link #STREAM}, for a member that asks the relay for a stream: the first prompt again as an event stream with
  *       usage chunks.
  *   <li>{@link #VISION}, for a member with vision: a one-pixel PNG and a question about it.
+ *   <li>{@link #CACHE_CONTROL}, for a member that passes cache control through: the tool loop again, with the markers where
+ *       Claude Code puts them: a {@code cache_control} on the text part of the system message, and on the assistant message
+ *       that has the call and the tool message that answers it (the markers of a message of its own in Chat, not of a part). A
+ *       relay that refuses a marker in one of those places would refuse the traffic, one request after the other, and its tier
+ *       would only cost a failed attempt each.
  * </ol>
  *
- * The tool probes use the member's stream setting, so they read the answer the way traffic does.
+ * The tool probes use the member's stream setting, so they read the answer the way traffic does. For a member of the {@code
+ * google} vendor the call of the tool loop is given the placeholder signature that the sanitizer gives every unsigned call of
+ * such a body ({@link ChatWireSanitizer#SKIP_THOUGHT_SIGNATURE}), as the history of traffic has it: a Gemini 3 model refuses
+ * a history whose first call is not signed. The cache probe carries the marker as well, so that a relay that caches on
+ * markers alone can be seen to cache at all.
  */
 final class XpProbes {
 
@@ -55,6 +64,7 @@ final class XpProbes {
     static final String TOOL_LOOP = "tool_loop";
     static final String STREAM = "stream";
     static final String VISION = "vision";
+    static final String CACHE_CONTROL = "cache_control";
     static final String CACHE = "cache";
     /** Not a question to the relay: the finding that a "not contained" setting has no evidence behind it (see {@link XpCacheEvidence}). */
     static final String CACHE_EVIDENCE = "cache_evidence";
@@ -67,8 +77,13 @@ final class XpProbes {
     /** A 1x1 PNG. */
     static final String PIXEL = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
 
-    /** The prompt of the cache probe is this sentence (ten tokens) this many times: about 1,200 tokens, over the 1,024 caches start at. */
-    static final int CACHE_SENTENCES = 120;
+    /**
+     * The prompt of the cache probe is this sentence (ten tokens) this many times: about 4,800 tokens, over the most a model's
+     * cache starts at (4,096 tokens for the newest Claude models; 1,024 or 2,048 for the others). A shorter prompt is silently not
+     * cached by a model with a larger minimum, the probe would find no evidence, and a relay that reports its prompt without the
+     * cache could never be saved as such.
+     */
+    static final int CACHE_SENTENCES = 480;
     private static final String CACHE_SENTENCE = "The quick brown fox jumps over the lazy dog. ";
 
     private static final JsonNodeFactory FACTORY = JsonNodeFactory.instance;
@@ -100,6 +115,9 @@ final class XpProbes {
         if (member.vision()) {
             probes.add(new Probe(VISION, wire(setup, vision(setup), member.upstreamStream()), completion -> null));
         }
+        if (member.cacheControlPassthrough()) {
+            probes.add(new Probe(CACHE_CONTROL, wire(setup, marked(setup), member.upstreamStream()), XpProbes::judgeMarkedLoop));
+        }
         return probes;
     }
 
@@ -109,8 +127,10 @@ final class XpProbes {
      */
     static ObjectNode cacheRequest(Setup setup, String nonce) {
         ObjectNode chat = chat(setup, 16);
-        chat.putArray("messages").add(message("user", "Marker " + nonce + ". " + CACHE_SENTENCE.repeat(CACHE_SENTENCES)
-            + "\nReply with the single word: ok"));
+        String prompt = "Marker " + nonce + ". " + CACHE_SENTENCE.repeat(CACHE_SENTENCES) + "\nReply with the single word: ok";
+        // A relay that caches where it is told to caches nothing of a prompt that has no marker, and the probe would conclude
+        // nothing for it (and so a relay that reports its prompt without the cache could never be saved as such).
+        chat.putArray("messages").add(setup.member().cacheControlPassthrough() ? markedMessage(prompt) : message("user", prompt));
         return wire(setup, chat, setup.member().upstreamStream());
     }
 
@@ -127,6 +147,41 @@ final class XpProbes {
         message.put("role", role);
         message.put("content", text);
         return message;
+    }
+
+    /** A user message whose text is one part with the cache control Claude Code puts on the end of what it sends. */
+    private static ObjectNode markedMessage(String text) {
+        return markedMessage("user", text);
+    }
+
+    private static ObjectNode markedMessage(String role, String text) {
+        ObjectNode message = FACTORY.objectNode();
+        message.put("role", role);
+        ObjectNode part = message.putArray("content").addObject();
+        part.put("type", "text");
+        part.put("text", text);
+        part.putObject("cache_control").put("type", "ephemeral");
+        return message;
+    }
+
+    /**
+     * The tool loop with the markers of a request of Claude Code: on the part of the system message, and on the assistant
+     * message with the call and the tool message with its result, which are the places where a marker is a field of a message and
+     * not of a part (the sanitizer sends all three to a member that passes cache control through).
+     */
+    private static ObjectNode marked(Setup setup) {
+        ObjectNode chat = toolLoop(setup);
+        ArrayNode messages = (ArrayNode) chat.path("messages").deepCopy();
+        ArrayNode marked = chat.putArray("messages");
+        marked.add(markedMessage("system", "You are a test harness. Answer in one short sentence."));
+        for (JsonNode message : messages) {
+            ObjectNode copy = (ObjectNode) message;
+            if (!"user".equals(copy.path("role").asString(""))) {
+                copy.putObject("cache_control").put("type", "ephemeral");
+            }
+            marked.add(copy);
+        }
+        return chat;
     }
 
     private static ObjectNode basic(Setup setup) {
@@ -198,7 +253,8 @@ final class XpProbes {
         Member member = setup.member();
         Settings settings = new Settings(member.vision(), member.jsonSchema(), member.priorityTier(),
             member.cacheControlPassthrough(), stream, "EFFORT".equals(member.reasoningMode()), false, setup.maxCompletionTokens(),
-            ChatWireSanitizer.dropsReasoningOnContinuation(member.vendor()), ChatWireSanitizer.needsToolsForToolHistory(member.vendor()));
+            ChatWireSanitizer.dropsReasoningOnContinuation(member.vendor()), ChatWireSanitizer.needsToolsForToolHistory(member.vendor()),
+            ChatWireSanitizer.carriesThoughtSignatures(member.vendor()), ChatWireSanitizer.claudeSampling(member.vendor()));
         Wire wire = ChatCanonicalizer.canonicalize(ChatWireSanitizer.sanitize(chat, null, settings, setup.model().upstreamModel()), settings);
         List<String> problems = StrictChatLint.problems(wire.body());
         if (!problems.isEmpty()) {
@@ -242,6 +298,11 @@ final class XpProbes {
             return "The function call does not have the arguments that were asked for";
         }
         return null;
+    }
+
+    private static String judgeMarkedLoop(Completion completion) {
+        String problem = judgeUsage(completion);
+        return problem != null ? problem : judgeFinalAnswer(completion);
     }
 
     private static String judgeFinalAnswer(Completion completion) {

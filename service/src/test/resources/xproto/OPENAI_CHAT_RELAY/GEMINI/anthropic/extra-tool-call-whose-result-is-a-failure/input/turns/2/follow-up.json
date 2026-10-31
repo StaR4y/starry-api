@@ -1,0 +1,16 @@
+[
+  {
+    "role": "user",
+    "parts": [
+      {
+        "functionResponse": {
+          "id": "${tool.0}",
+          "name": "read_file",
+          "response": {
+            "output": "File not found: /nonexistent/starry-p5-05.txt"
+          }
+        }
+      }
+    ]
+  }
+]

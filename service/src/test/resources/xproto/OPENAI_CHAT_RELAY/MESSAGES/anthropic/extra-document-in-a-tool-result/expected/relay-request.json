@@ -1,0 +1,238 @@
+{
+  "path": "/v1/chat/completions",
+  "headers": {
+    "accept": "text/event-stream, application/json",
+    "authorization": "Bearer <relay key>",
+    "content-type": "application/json"
+  },
+  "body": {
+    "model": "relay-sonnet",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a Claude agent, built on Anthropic's Claude Agent SDK.\n\nYou are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF chall [shortened]"
+      },
+      {
+        "role": "user",
+        "content": "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n- deep-research: Deep research harness — fan-out web searches, fetch sources, adversarially verify claims, synthesize [shortened]\n<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is 2026-10-26.\n\n      IMPORTANT: this context may or may not be relevant to your tas [shortened]\nLook at red.png"
+      }
+    ],
+    "max_tokens": 32000,
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "Agent",
+          "description": "Launch a new agent to handle complex, multi-step tasks. Each agent type has specific capabilities and tools available to it.\n\nAvailable agent types and the tool [shortened]",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "description": {
+                "type": "string",
+                "description": "A short (3-5 word) description of the task"
+              },
+              "prompt": {
+                "type": "string",
+                "description": "The task for the agent to perform"
+              },
+              "subagent_type": {
+                "type": "string",
+                "description": "The type of specialized agent to use for this task"
+              },
+              "model": {
+                "type": "string",
+                "description": "Optional model override for this agent. Takes precedence over the agent definition's model frontmatt [shortened]",
+                "enum": [
+                  "sonnet",
+                  "opus",
+                  "haiku"
+                ]
+              },
+              "run_in_background": {
+                "type": "boolean",
+                "description": "Set to true to run this agent in the background. You will be notified when it completes."
+              },
+              "isolation": {
+                "type": "string",
+                "description": "Isolation mode. \"worktree\" creates a temporary git worktree so the agent works on an isolated copy o [shortened]",
+                "enum": [
+                  "worktree"
+                ]
+              }
+            },
+            "required": [
+              "description",
+              "prompt"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Bash",
+          "description": "Executes a given bash command and returns its output.\n\nThe working directory persists between commands, but shell state does not. The shell environment is initi [shortened]",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string",
+                "description": "The command to execute"
+              },
+              "timeout": {
+                "type": "number",
+                "description": "Optional timeout in milliseconds (max 600000)"
+              },
+              "description": {
+                "type": "string",
+                "description": "Clear, concise description of what this command does in active voice. Never use words like \"complex\" [shortened]"
+              },
+              "run_in_background": {
+                "type": "boolean",
+                "description": "Set to true to run this command in the background."
+              },
+              "dangerouslyDisableSandbox": {
+                "type": "boolean",
+                "description": "Set this to true to dangerously override sandbox mode and run commands without sandboxing."
+              }
+            },
+            "required": [
+              "command"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Edit",
+          "description": "Performs exact string replacements in files.\n\nUsage:\n- You must use your `Read` tool at least once in the conversation before editing. This tool will error if y [shortened]",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string",
+                "description": "The absolute path to the file to modify"
+              },
+              "old_string": {
+                "type": "string",
+                "description": "The text to replace"
+              },
+              "new_string": {
+                "type": "string",
+                "description": "The text to replace it with (must be different from old_string)"
+              },
+              "replace_all": {
+                "type": "boolean",
+                "description": "Replace all occurrences of old_string (default false)"
+              }
+            },
+            "required": [
+              "file_path",
+              "old_string",
+              "new_string"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Read",
+          "description": "Reads a file from the local filesystem. You can access any file directly by using this tool.\nAssume this tool is able to read all files on the machine. If the U [shortened]",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string",
+                "description": "The absolute path to the file to read"
+              },
+              "offset": {
+                "type": "integer",
+                "description": "The line number to start reading from. Only provide if the file is too large to read at once"
+              },
+              "limit": {
+                "type": "integer",
+                "description": "The number of lines to read. Only provide if the file is too large to read at once."
+              },
+              "pages": {
+                "type": "string",
+                "description": "Page range for PDF files (e.g., \"1-5\", \"3\", \"10-20\"). Only applicable to PDF files. Maximum 20 pages [shortened]"
+              }
+            },
+            "required": [
+              "file_path"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "WebSearch",
+          "description": "\n- Allows Claude to search the web and use the results to inform responses\n- Provides up-to-date information for current events and recent data\n- Returns search [shortened]",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "query": {
+                "type": "string",
+                "description": "The search query to use"
+              },
+              "allowed_domains": {
+                "type": "array",
+                "description": "Only include search results from these domains",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "blocked_domains": {
+                "type": "array",
+                "description": "Never include search results from these domains",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "query"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "Write",
+          "description": "Writes a file to the local filesystem.\n\nUsage:\n- This tool will overwrite the existing file if there is one at the provided path.\n- If this is an existing file, [shortened]",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string",
+                "description": "The absolute path to the file to write (must be absolute, not relative)"
+              },
+              "content": {
+                "type": "string",
+                "description": "The content to write to the file"
+              }
+            },
+            "required": [
+              "file_path",
+              "content"
+            ],
+            "additionalProperties": false
+          }
+        }
+      }
+    ],
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  }
+}

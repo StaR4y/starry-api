@@ -1,0 +1,25 @@
+[
+  {
+    "role": "user",
+    "parts": [
+      {
+        "functionResponse": {
+          "id": "${tool.0}",
+          "name": "run_shell_command",
+          "response": {
+            "output": "first\n"
+          }
+        }
+      },
+      {
+        "functionResponse": {
+          "id": "${tool.1}",
+          "name": "run_shell_command",
+          "response": {
+            "output": "second\n"
+          }
+        }
+      }
+    ]
+  }
+]

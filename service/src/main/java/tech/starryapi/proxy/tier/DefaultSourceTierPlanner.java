@@ -27,6 +27,7 @@ import tech.starryapi.model.BillingQuote;
 import tech.starryapi.model.ModelCatalogProvider;
 import tech.starryapi.model.ModelPricingService;
 import tech.starryapi.payment.PaymentSettingsService;
+import tech.starryapi.platform.xproto.FeaturePolicy;
 import tech.starryapi.platform.xproto.PairRegistry;
 import tech.starryapi.platform.xproto.RelayErrorException;
 import tech.starryapi.proxy.tier.TierPlan.Level;
@@ -682,7 +683,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         Tier ownerTier = resolved.ownerTier();
         TierPlan.Session session = resolved.session();
         TierSessionBindings.Binding bound = resolved.bound();
-        long nativeInputBound = inputBound(request.upstreamRequest(), units);
+        long nativeInputBound = inputBound(request.upstreamRequest(), units, xp.open());
         long outputBound = RequestBounds.outputTokens(request.upstreamRequest());
         boolean gatewayOutput = request.entryFacts() != null && request.entryFacts().gatewayOutput();
         TierPlan.Mode mode = choice.pinned() ? TierPlan.Mode.PINNED : TierPlan.Mode.AUTO;
@@ -856,9 +857,11 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
      * <p>The words are those the advice always had (the dearest tier, cheaper tiers) for as long as every tier is reserved
      * for the output the request is limited to, when the tier that reserves the most is the dearest and the ones that
      * reserve less are the cheaper. Once a tier is reserved for less than that (a tier of relays alone, for a request whose
-     * limit the gateway chose, D15) that is no longer so: a tier of a higher factor can reserve less than one of a lower, and
-     * the words are about what is reserved, with the factors given for the user to read the prices by. Only a plan with such
-     * a tier gets the new words, so that a vendor whose tiers have no relays says what it said before.
+     * limit the gateway chose, D15), or when a relay is reserved for an image it is sent as the mapping says (or as a million
+     * tokens, for one that is only pointed at) so that a tier of a higher factor reserves less than one of a lower, that is no
+     * longer so: the words are about what is reserved, with the factors given for the user to read the prices by. Only a plan
+     * with such a tier gets the new words, so that a vendor whose tiers have no relays, and a plan whose tiers are reserved in
+     * the order of their factors, say what they said before.
      *
      * <p>The {@code model@tier} spelling is the one the suffix is taken off for (see {@link #takesSuffix}): the model as
      * the request wrote it, on the vendor that serves it, which is the vendor of this plan. It is not for an id that a
@@ -888,7 +891,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         if (reservingLess.isEmpty()) {
             return null;
         }
-        boolean byAmount = reservedBelowTheLimit(levels, compared);
+        boolean byAmount = reservedBelowTheLimit(levels, compared) || notCheaper(levels, reservingLess, reserved);
         if (!config.publicListing()) {
             return byAmount
                 ? "；预估费用按可能服务本次请求的号池里预留最多的那个计算，实际按服务它的号池计价"
@@ -912,6 +915,21 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
                 .map(level -> (suffix ? request.requestedModel() + "@" + level.tierId() : level.tierId()) + "（系数 "
                     + level.factor().stripTrailingZeros().toPlainString() + "）")
                 .collect(Collectors.joining("、"));
+    }
+
+    /**
+     * Whether a tier that reserves less is no cheaper than the one that reserves the most (the lowest factor among the tiers
+     * that reserve {@code reserved}): a relay is sent an image as the few thousand tokens its mapping says, or as a million when
+     * it is only pointed at, where a native account is sent the text alone, so the tiers are not always reserved in the order of
+     * their factors. When every tier that reserves less has the lower factor the advice is about cheaper tiers, as it always was.
+     */
+    private static boolean notCheaper(List<Level> levels, List<Level> reservingLess, BigDecimal reserved) {
+        BigDecimal dearest = levels.stream()
+            .filter(level -> level.estimate() != null && level.estimate().compareTo(reserved) == 0)
+            .map(Level::factor)
+            .min(Comparator.naturalOrder())
+            .orElse(null);
+        return dearest != null && reservingLess.stream().anyMatch(level -> level.factor().compareTo(dearest) >= 0);
     }
 
     /**
@@ -1149,11 +1167,19 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
      * The most input tokens any cell of the route can be sent. A cell that is sent the whole request is bounded by the
      * request and by the floor for hidden input; a Kiro cell only ever sees text, which is never more than that, so
      * it only decides the bound when it is the route's sole cell.
+     *
+     * <p>Where a relay takes part in the request the bound is the baseline's ({@link FeaturePolicy.Baseline}): an Anthropic key
+     * is sent the text of the request like Kiro is (its upstream client has no image part), so a route of the two is bounded by
+     * the text, and a user with a low balance is not refused for a million tokens of a screenshot that no native account is sent,
+     * while a relay that sees it is reserved for it by its mapping. Where no relay takes part (a vendor with tiers and no relays,
+     * an entry that is not read for them, a gate that is shut to the key) the bound is what it always was, the same as an
+     * untiered request of the route is reserved at (design 0, I4).
      */
-    private static long inputBound(JsonNode body, List<PoolCell> units) {
-        return units.stream().anyMatch(cell -> cell != PoolCell.KIRO_COMPATIBLE)
-            ? RequestBounds.nativeInputTokens(body)
-            : RequestBounds.kiroInputTokens(body);
+    private static long inputBound(JsonNode body, List<PoolCell> units, boolean relaysTakePart) {
+        boolean textOnly = relaysTakePart
+            ? FeaturePolicy.Baseline.of(units) == FeaturePolicy.Baseline.TEXT_ONLY
+            : units.stream().noneMatch(cell -> cell != PoolCell.KIRO_COMPATIBLE);
+        return textOnly ? RequestBounds.kiroInputTokens(body) : RequestBounds.nativeInputTokens(body);
     }
 
     /**

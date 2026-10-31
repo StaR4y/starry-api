@@ -1,0 +1,19 @@
+{
+  "relaysLeftOut": [],
+  "attempts": [
+    {
+      "account": "relay-1",
+      "tier": "google:relay",
+      "dispatch": "OPENAI_CHAT",
+      "wireModel": "relay-gemini",
+      "success": false,
+      "status": 503,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "usageSource": null,
+      "stopReason": null,
+      "degraded": "top_k,reasoning_summary",
+      "error": "Source error 503 (server_error)"
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+[
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "tool_result",
+        "content": [
+          {
+            "type": "text",
+            "text": "Screenshot saved to /work/project/screen.png"
+          },
+          {
+            "type": "image",
+            "source": {
+              "type": "base64",
+              "data": "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGO4IyeHFTEMLQkAid1GAXiz9RcAAAAASUVORK5CYII=",
+              "media_type": "image/png"
+            }
+          }
+        ],
+        "tool_use_id": "${tool.0}",
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      }
+    ]
+  }
+]

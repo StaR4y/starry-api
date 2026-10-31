@@ -1,0 +1,1 @@
+{"origin": "OpenCode 1.18.16 (a Claude model in the capture; the model is changed to gemini-2.5-pro): a relay that gives every tool call the id call_0; on the third turn it stops serving the model and the native tier takes over the conversation. The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

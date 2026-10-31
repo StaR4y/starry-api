@@ -210,9 +210,10 @@ final class XpEligibility {
 
     /**
      * The Chat body the relays of one request are given a body from, made when the first relay gets as far as being
-     * built for and shared by the rest: for the entries that are planned over a Chat body it is that body, and for the
-     * Responses entry it is the conversion of the planned one ({@link TierEntryFacts#chatBody}). A conversion that fails
-     * fails every relay's body the same way.
+     * built for and shared by the rest: for the Chat entry it is the planned body, and for the others it is the conversion
+     * of it ({@link TierEntryFacts#chatBody}): the Responses one made of the planned body, the Messages and Gemini ones the
+     * body their converters made of the original at the entry, under the output limit of the planned one. A conversion that
+     * fails fails every relay's body the same way.
      */
     private static final class ChatSource {
 
@@ -517,7 +518,9 @@ final class XpEligibility {
             billedFastMode,
             ChatWireSanitizer.usesMaxCompletionTokens(mapping.modelId()),
             ChatWireSanitizer.dropsReasoningOnContinuation(vendor),
-            ChatWireSanitizer.needsToolsForToolHistory(vendor)
+            ChatWireSanitizer.needsToolsForToolHistory(vendor),
+            ChatWireSanitizer.carriesThoughtSignatures(vendor),
+            ChatWireSanitizer.claudeSampling(vendor)
         );
     }
 
@@ -526,7 +529,8 @@ final class XpEligibility {
      * from that one) and from what the original body says about reasoning and tool search. The output limit is the one of the
      * request, unless {@code output} says what a relay is given for a limit the gateway chose (D15, {@link Outputs}). A body
      * that cannot be made, or does not pass the lint, is a conversion this member cannot serve; a defect in the conversion
-     * costs the request its relays, not the request.
+     * costs the request its relays, not the request. (The names of the functions of a Gemini request are held to what the
+     * upstreams of the other vendors take by the policy, as a feature, and not here: they are the client's, not a defect.)
      */
     private static Built build(ChatSource chat, TierEntryFacts facts, Settings settings, long output) {
         try {

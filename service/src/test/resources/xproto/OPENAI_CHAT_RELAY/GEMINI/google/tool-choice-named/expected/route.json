@@ -1,0 +1,19 @@
+{
+  "relaysLeftOut": [],
+  "attempts": [
+    {
+      "account": "relay-1",
+      "tier": "google:relay",
+      "dispatch": "OPENAI_CHAT",
+      "wireModel": "relay-gemini",
+      "success": true,
+      "status": 200,
+      "inputTokens": 1300,
+      "outputTokens": 48,
+      "usageSource": "REPORTED",
+      "stopReason": "TOOL_USE",
+      "degraded": "top_k,reasoning_summary",
+      "error": null
+    }
+  ]
+}

@@ -12,7 +12,7 @@
       "outputTokens": 24,
       "usageSource": "REPORTED",
       "stopReason": "END_TURN",
-      "degraded": "builtin_tool,metadata,service_tier,logprobs,user,store,prompt_cache_key,prompt_cache_retention,safety_identifier",
+      "degraded": "builtin_tool,metadata,service_tier,logprobs,user,store,prompt_cache_key,prompt_cache_retention,safety_identifier,top_p",
       "error": null
     }
   ]

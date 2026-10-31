@@ -14,7 +14,14 @@
       },
       {
         "role": "user",
-        "content": "[non-text content omitted]"
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEUlEQVR4nGO4IyeHFTEMLQkAid1GAXiz9RcAAAAASUVORK5CYII="
+            }
+          }
+        ]
       }
     ],
     "max_tokens": 32000,

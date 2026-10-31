@@ -15,6 +15,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import tech.starryapi.model.DefaultModelCatalogProvider;
 import tech.starryapi.platform.anthropic.AnthropicRequestAdapter;
+import tech.starryapi.platform.core.PlatformToolUse;
 import tech.starryapi.platform.openai.OpenAiUpstreamClient;
 import tech.starryapi.platform.xproto.ChatWireSanitizer.Settings;
 import tech.starryapi.platform.xproto.ChatWireSanitizer.Wire;
@@ -37,7 +38,7 @@ class ChatWireSanitizerTest {
         return new Settings(
             names.contains("vision"), names.contains("jsonSchema"), names.contains("priority"), names.contains("cache"),
             names.contains("stream"), names.contains("effort"), names.contains("fast"), names.contains("maxCompletion"),
-            names.contains("claude"), names.contains("claude")
+            names.contains("claude"), names.contains("claude"), names.contains("signs"), names.contains("sampling")
         );
     }
 
@@ -80,6 +81,49 @@ class ChatWireSanitizerTest {
             "stream");
         assertThat(wire.body().toString()).doesNotContain("user_secret_1", "u-1", "resp_1", "s-1", "s-2", "claude-sonnet-4.5");
         assertThat(wire.body().path("stream").booleanValue()).isFalse();
+    }
+
+    /**
+     * Claude's upstream refuses a temperature above 1 and a request that sets the temperature and the top_p together, and a relay
+     * in front of it passes the error on, so each attempt would fail; a Gemini client sets both as a matter of course (its
+     * temperature goes to 2). The temperature stays, at 1 at most, and the top_p goes, and both losses are recorded.
+     */
+    @Test
+    void aModelWithClaudesSamplingKeepsTheTemperatureAtOneAtMostAndNeverSendsTheTopPBesideIt() {
+        Wire both = sanitize(chat("\"temperature\":1.5,\"top_p\":0.9"), "sampling");
+        assertThat(both.body().path("temperature").numberValue().doubleValue()).isEqualTo(1.0);
+        assertThat(both.body().has("top_p")).isFalse();
+        assertThat(both.degraded()).containsExactly("temperature", "top_p");
+
+        Wire usual = sanitize(chat("\"temperature\":1,\"top_p\":0.95"), "sampling");
+        assertThat(usual.body().path("temperature").numberValue().doubleValue()).isEqualTo(1.0);
+        assertThat(usual.body().has("top_p")).isFalse();
+        assertThat(usual.degraded()).containsExactly("top_p");
+
+        Wire hot = sanitize(chat("\"temperature\":2"), "sampling");
+        assertThat(hot.body().path("temperature").numberValue().doubleValue()).isEqualTo(1.0);
+        assertThat(hot.degraded()).containsExactly("temperature");
+
+        // One of them alone is what Claude takes, and is sent as written; nothing is lost, so nothing is recorded.
+        Wire temperature = sanitize(chat("\"temperature\":0.2"), "sampling");
+        assertThat(temperature.body().path("temperature").numberValue().doubleValue()).isEqualTo(0.2);
+        Wire topP = sanitize(chat("\"top_p\":0.9"), "sampling");
+        assertThat(topP.body().path("top_p").numberValue().doubleValue()).isEqualTo(0.9);
+        assertThat(temperature.degraded()).isEmpty();
+        assertThat(topP.degraded()).isEmpty();
+    }
+
+    @Test
+    void aModelWithoutClaudesSamplingIsSentTheTemperatureAndTheTopPAsTheClientWroteThem() {
+        Wire wire = sanitize(chat("\"temperature\":1.5,\"top_p\":0.9"));
+
+        assertThat(wire.body().path("temperature").numberValue().doubleValue()).isEqualTo(1.5);
+        assertThat(wire.body().path("top_p").numberValue().doubleValue()).isEqualTo(0.9);
+        assertThat(wire.degraded()).isEmpty();
+        assertThat(ChatWireSanitizer.claudeSampling("anthropic")).isTrue();
+        for (String vendor : new String[] {"openai", "google", "deepseek", null}) {
+            assertThat(ChatWireSanitizer.claudeSampling(vendor)).as(String.valueOf(vendor)).isFalse();
+        }
     }
 
     @Test
@@ -401,6 +445,90 @@ class ChatWireSanitizerTest {
             [{"id":"a","type":"function","function":{"name":"f","arguments":"{\\"k\\":1}"}},
              {"id":"","type":"function","function":{"name":"g","arguments":""}},
              {"id":"n","type":"function","function":{"name":"h","arguments":""}}]"""));
+    }
+
+    private static final String SIGNED_CALLS = """
+        {"messages":[{"role":"user","content":"x"},
+         {"role":"assistant","content":null,"tool_calls":[
+          {"id":"a","type":"function","function":{"name":"f","arguments":"{}"},
+           "extra_content":{"google":{"thought_signature":"SIG-A","other":1},"vendor":{"k":1}}},
+          {"id":"b","type":"function","function":{"name":"g","arguments":"{}"}}]}]}""";
+
+    /** The signature of a Gemini model's call goes back with it, built anew from the signature alone; nothing a client put beside it does. */
+    @Test
+    void theThoughtSignatureOfACallIsSentToAModelThatSignsAndIsBuiltFromTheSignatureAlone() {
+        Wire wire = sanitize(SIGNED_CALLS, "signs");
+
+        JsonNode calls = wire.body().path("messages").get(1).path("tool_calls");
+        assertThat(calls.get(0)).isEqualTo(tree("""
+            {"id":"a","type":"function","function":{"name":"f","arguments":"{}"},"extra_content":{"google":{"thought_signature":"SIG-A"}}}"""));
+        assertThat(calls.get(1).has("extra_content")).isFalse();
+        assertThat(calls.get(0).propertyNames()).isSubsetOf(ChatWireSanitizer.TOOL_CALL_KEYS);
+        assertThat(StrictChatLint.problems(wire.body())).isEmpty();
+        assertThat(wire.degraded()).isEmpty();
+    }
+
+    @Test
+    void theThoughtSignatureOfACallIsNeverSentToAModelWhoseVendorDoesNotSign() {
+        Wire wire = sanitize(SIGNED_CALLS);
+
+        assertThat(wire.body().toString()).doesNotContain("extra_content", "SIG-A");
+    }
+
+    @Test
+    void aThoughtSignatureThatCannotBeOneIsNotSent() {
+        String tooLong = "S".repeat(PlatformToolUse.MAX_THOUGHT_SIGNATURE_LENGTH + 1);
+        for (String extra : List.of("{\"google\":{\"thought_signature\":\"  \"}}", "{\"google\":{\"thought_signature\":4}}",
+            "{\"google\":\"SIG\"}", "\"SIG\"", "{\"google\":{\"thought_signature\":\"" + tooLong + "\"}}")) {
+            Wire wire = sanitize("{\"messages\":[{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"a\",\"function\":{\"name\":\"f\"},"
+                + "\"extra_content\":" + extra + "}]}]}", "signs");
+
+            // Not the junk: the call is as good as unsigned, and the first call of a message of a model that signs is given the bypass.
+            assertThat(wire.body().path("messages").get(0).path("tool_calls").get(0).path("extra_content"))
+                .as(extra.length() > 100 ? "too long" : extra)
+                .isEqualTo(tree("{\"google\":{\"thought_signature\":\"skip_thought_signature_validator\"}}"));
+            assertThat(wire.body().toString()).as(extra.length() > 100 ? "too long" : extra).doesNotContain("SIG", tooLong);
+        }
+    }
+
+    /**
+     * Gemini 3 refuses a history whose first call of a step is unsigned, and a call that a native source made, or that a client
+     * rebuilt without its {@code extra_content}, has no signature: the first call of every message gets the value Google
+     * documents for it, whichever message it is in, so that the same history is the same bytes at every request.
+     */
+    @Test
+    void theFirstUnsignedCallOfEveryMessageOfAModelThatSignsIsGivenTheBypassAndNoOtherIs() {
+        Wire wire = sanitize("""
+            {"messages":[{"role":"user","content":"x"},
+             {"role":"assistant","content":null,"tool_calls":[{"id":"a","function":{"name":"f","arguments":"{}"}},
+               {"id":"b","function":{"name":"g","arguments":"{}"}}]},
+             {"role":"tool","tool_call_id":"a","content":"1"},{"role":"tool","tool_call_id":"b","content":"2"},
+             {"role":"assistant","content":null,"tool_calls":[{"id":"c","function":{"name":"f","arguments":"{}"},
+               "extra_content":{"google":{"thought_signature":"SIG-C"}}},{"id":"d","function":{"name":"g","arguments":"{}"}}]},
+             {"role":"tool","tool_call_id":"c","content":"3"},{"role":"tool","tool_call_id":"d","content":"4"},
+             {"role":"assistant","content":null,"tool_calls":[{"id":"e","function":{"name":"f","arguments":"{}"}}]}]}""", "signs");
+
+        JsonNode messages = wire.body().path("messages");
+        String bypass = ChatWireSanitizer.SKIP_THOUGHT_SIGNATURE;
+        assertThat(messages.get(1).path("tool_calls").get(0).path("extra_content").path("google").path("thought_signature").stringValue())
+            .isEqualTo(bypass);
+        assertThat(messages.get(1).path("tool_calls").get(1).has("extra_content")).isFalse();
+        assertThat(messages.get(4).path("tool_calls").get(0).path("extra_content").path("google").path("thought_signature").stringValue())
+            .isEqualTo("SIG-C");
+        assertThat(messages.get(4).path("tool_calls").get(1).has("extra_content")).isFalse();
+        assertThat(messages.get(7).path("tool_calls").get(0).path("extra_content").path("google").path("thought_signature").stringValue())
+            .isEqualTo(bypass);
+        assertThat(StrictChatLint.problems(wire.body())).isEmpty();
+        assertThat(wire.degraded()).isEmpty();
+    }
+
+    @Test
+    void theBypassIsNeverSentToAModelWhoseVendorDoesNotSign() {
+        Wire wire = sanitize("""
+            {"messages":[{"role":"user","content":"x"},
+             {"role":"assistant","content":null,"tool_calls":[{"id":"a","function":{"name":"f","arguments":"{}"}}]}]}""");
+
+        assertThat(wire.body().toString()).doesNotContain("extra_content", ChatWireSanitizer.SKIP_THOUGHT_SIGNATURE);
     }
 
     @Test
@@ -812,12 +940,21 @@ class ChatWireSanitizerTest {
     }
 
     @Test
-    void onlyAnAnthropicModelNeedsToolsForItsToolHistory() {
+    void onlyAnAnthropicOrGoogleModelNeedsToolsForItsToolHistory() {
         assertThat(ChatWireSanitizer.needsToolsForToolHistory("anthropic")).isTrue();
+        assertThat(ChatWireSanitizer.needsToolsForToolHistory("google")).isTrue();
         assertThat(ChatWireSanitizer.needsToolsForToolHistory("openai")).isFalse();
-        assertThat(ChatWireSanitizer.needsToolsForToolHistory("google")).isFalse();
         assertThat(ChatWireSanitizer.needsToolsForToolHistory("deepseek")).isFalse();
         assertThat(ChatWireSanitizer.needsToolsForToolHistory(null)).isFalse();
+    }
+
+    @Test
+    void onlyAGoogleModelSignsItsToolCalls() {
+        assertThat(ChatWireSanitizer.carriesThoughtSignatures("google")).isTrue();
+        assertThat(ChatWireSanitizer.carriesThoughtSignatures("anthropic")).isFalse();
+        assertThat(ChatWireSanitizer.carriesThoughtSignatures("openai")).isFalse();
+        assertThat(ChatWireSanitizer.carriesThoughtSignatures("deepseek")).isFalse();
+        assertThat(ChatWireSanitizer.carriesThoughtSignatures(null)).isFalse();
     }
 
     @Test

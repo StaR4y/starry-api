@@ -1,0 +1,68 @@
+{
+  "path": "/v1/chat/completions",
+  "headers": {
+    "accept": "text/event-stream, application/json",
+    "authorization": "Bearer <relay key>",
+    "content-type": "application/json"
+  },
+  "body": {
+    "model": "relay-sonnet",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are an interactive CLI agent specializing in software engineering tasks. Your primary goal is to help users safely and efficiently, adhering strictly to the following instructions and utilizing your available tools. [shortened]"
+      },
+      {
+        "role": "user",
+        "content": "Reply with the single word ok"
+      }
+    ],
+    "max_tokens": 4096,
+    "temperature": 1,
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "run_shell_command",
+          "description": "Runs a command. [shortened]",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string",
+                "description": "The command"
+              },
+              "timeout": {
+                "type": "integer"
+              },
+              "env": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "command"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "now",
+          "description": "The time. [shortened]",
+          "parameters": {
+            "type": "object",
+            "properties": {}
+          }
+        }
+      }
+    ],
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  }
+}

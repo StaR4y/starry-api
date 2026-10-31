@@ -498,7 +498,8 @@ class ChatWirePipelineTest {
         return block;
     }
 
-    private static ObjectNode randomAnthropicRequest(Random random, int serial) {
+    /** A Messages request of the kinds a client can send: tool histories with results that are empty, images, errors. */
+    static ObjectNode randomAnthropicRequest(Random random, int serial) {
         ObjectNode request = JSON.createObjectNode();
         request.put("model", "claude-sonnet-4.5");
         request.put("max_tokens", 1 + random.nextInt(4000));

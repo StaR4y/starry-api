@@ -2522,7 +2522,7 @@
   "专用": "Dedicated",
   "默认开启：这把 Key 只服务中转的请求，不再服务 GLM 等未分级的兼容模型，也不作为 Responses 链的 owner。": "On by default: this key serves relay requests only. It no longer serves untiered compatible models such as GLM, and is no owner of Responses chains.",
   "图片": "Images",
-  "中转的这些模型能看图。关闭时图片被丢掉（Kiro 也只取文本），而原生账号能看图的 gpt 类请求带了图就不派给中转。": "The relay's models can read images. When off, images are dropped (Kiro takes text only too), and a gpt-style request with an image, which native accounts handle, is not sent to the relay.",
+  "中转的这些模型能看图。关闭时图片换成「[image omitted]」的标记（模型知道图片在那里，Kiro 也只取文本），而原生账号能看图的 gpt 类请求带了图就不派给中转。": "The relay's models can read images. When off, images are replaced by an \"[image omitted]\" marker (the model knows an image was there; Kiro takes text only too), and a gpt-style request with an image, which native accounts handle, is not sent to the relay.",
   "中转支持 response_format 的 json_schema。关闭时降为 json_object，或（原生账号会照做的 gpt 类请求）不派给中转。": "The relay supports json_schema in response_format. When off it is lowered to json_object, or (for gpt-style requests native accounts would honour) the request is not sent to the relay.",
   "中转支持 service_tier: priority。只有按 fast 计费的 OpenAI 请求会用到；关闭时 fast 请求不派给中转。": "The relay supports service_tier: priority. Only OpenAI requests billed as fast use it; when off, fast requests are not sent to the relay.",
   "把客户端消息里的 cache_control 原样发给中转。只在中转认得它时打开，严格的中转会因它回 400。": "Send the cache_control of the client's messages to the relay as it is. Turn it on only if the relay understands it; a strict relay answers 400 because of it.",
@@ -2542,7 +2542,7 @@
   "写": "write",
   "保存会让这些映射变回未验证，需要重新验证：{p0}": "Saving makes these mappings unverified again, and they need to be verified anew: {p0}",
   "验证": "Verification",
-  "用请求真正使用的客户端和解析器向中转发探针：基本问答、函数调用、两轮工具循环，以及（按设置）流式和图片。全部通过的映射才会被请求用到；设置、模型名或账号地址变了，验证自动失效。探针要花中转的令牌，由你承担；同一个账号 30 秒只能验证一次，整体最长 4 分钟。": "Probes the relay with the client and parsers requests are really served with: a basic answer, a function call, a two-round tool loop and (as configured) streaming and images. Only mappings that pass everything are used by requests; changing the settings, the model name or the account's address voids the verification. The probes cost the relay's tokens, which you carry; an account can be verified once in 30 seconds, and a whole run takes at most 4 minutes.",
+  "用请求真正使用的客户端和解析器向中转发探针：基本问答、函数调用、两轮工具循环，以及（按设置）流式、图片和缓存标记。全部通过的映射才会被请求用到；设置、模型名或账号地址变了，验证自动失效。探针要花中转的令牌，由你承担；同一个账号 30 秒只能验证一次，整体最长 4 分钟。": "Probes the relay with the client and parsers requests are really served with: a basic answer, a function call, a two-round tool loop and (as configured) streaming, images and the cache marker. Only mappings that pass everything are used by requests; changing the settings, the model name or the account's address voids the verification. The probes cost the relay's tokens, which you carry; an account can be verified once in 30 seconds, and a whole run takes at most 4 minutes.",
   "这次验证（最多 {p0} 个）": "Verify now (at most {p0})",
   "同时运行缓存探针（每个映射多问两次约 1,200 令牌的提示）": "Also run the cache probe (two more prompts of about 1,200 tokens per mapping)",
   "验证映射": "Verify mappings",
@@ -2590,7 +2590,8 @@
   "已含在 prompt_tokens 内": "included in prompt_tokens",
   "不含在 prompt_tokens 内": "not included in prompt_tokens",
   "判断不了": "cannot tell",
-  "网关不给 Claude Code 发往中转的请求加提示缓存：system 和历史被压平成文本，cache_control 会被丢弃。除非中转自己按前缀自动缓存，否则每一轮都按全价计输入，而 Kiro 会计缓存读。号池系数相同时，中转所在的级别可能比 Kiro 每轮贵出数倍；请把中转所在号池的系数定得能覆盖这一点。": "The gateway adds no prompt cache to the requests Claude Code sends to a relay: the system prompt and history are flattened to text and cache_control is dropped. Unless the relay caches prefixes by itself, every turn is billed at the full input price, whereas Kiro counts cache reads. With the same factor, the relay's tier can cost several times what Kiro does per turn; set the factor of the relay's tier so that it covers this.",
+  "这把中转同时打开了 cache_control 和「映射为 reasoning_effort」：reasoning_effort 只在用户提示的轮次发，工具结果之后的轮次不发（那一轮没有可回放的签名思考块）。中转若把它映射成 Claude 的思考开关，同一场对话里思考会来回切换，每次切换都让整段消息缓存失效，整个历史按缓存写价而不是读价计费（Sonnet 上贵 12.5 倍），每个用户提示至少两次。要稳定地用上缓存，请把「思考映射」设为「不发送」。": "This relay has both cache_control and \"map to reasoning_effort\" turned on: reasoning_effort is sent on the turns of a user prompt and not on the turns that follow a tool result (such a turn has no signed thinking block to replay). If the relay maps it to Claude's thinking switch, thinking is toggled back and forth within one conversation, every toggle invalidates the whole message cache, and the whole history is billed at the cache write price instead of the read price (12.5 times as much on Sonnet), at least twice per user prompt. To use the cache steadily, set \"Thinking mapping\" to \"Do not send\".",
+  "这把中转没有打开 cache_control，网关不会把 Claude Code 的缓存标记发给它：Claude Code 每轮重发整个历史，除非中转自己按前缀自动缓存，否则每一轮都按全价计输入，而 Kiro 会计缓存读。号池系数相同时，中转所在的级别可能比 Kiro 每轮贵出数倍；请在中转认得 cache_control 时打开它，或把中转所在号池的系数定得能覆盖这一点。": "This relay is not set to take cache_control, so the gateway does not send it the cache marks of Claude Code: Claude Code resends the whole history every turn, and unless the relay caches prefixes by itself, every turn is billed at the full input price, whereas Kiro counts cache reads. With the same factor, the relay's tier can cost several times what Kiro does per turn; turn cache_control on if the relay understands it, or set the factor of the relay's tier so that it covers this.",
   "关闭「专用」后，这把 Key 同时还服务 GLM 等未分级的兼容模型请求。只服务 Claude 的中转会对这些请求回 404（不重试），并且它的自动测试和定时复测会用第一条映射的模型名，由结果决定它在 GLM 池里的去留。": "With \"Dedicated\" off, this key also serves untiered compatible-model requests such as GLM. A relay that serves only Claude answers those with 404 (not retried), and its automatic tests and scheduled retests use the first mapping's model name, whose result decides whether it stays in the GLM pool.",
   "这把 Key 没有设并发和每分钟请求数上限（兼容 Key 默认不限）。「繁忙算不可用」几乎不会触发，请求主要靠中转返回 429 之后才会改用下一级。要让网关在中转繁忙前就改用下一级，请在账号的分配设置里设上限。": "This key has no concurrency or requests-per-minute limit (compatible keys are unlimited by default). \"Busy counts as unavailable\" will hardly ever trigger, so requests move on to the next tier mostly after the relay answers 429. To make the gateway use the next tier before the relay is busy, set limits in the account's allocation settings.",
   "不使用上游流式时，中转要在网关的读超时（默认 {p0} 秒）内返回第一个字节，单次时限超过它不起作用。需要更长的生成时间请打开「上游流式」。": "Without upstream streaming the relay must return its first byte within the gateway's read timeout ({p0} seconds by default), so a time limit above it has no effect. Turn on \"Upstream streaming\" for longer generations.",
@@ -2647,5 +2648,6 @@
   "这个版本还没有提供这个入口的这个对，门控不能打开。": "This version does not offer this pair for this entry yet, so its gate cannot be opened.",
   "试用中的对只能对名单里的 Key 打开，不能设为「所有 Key」。": "A pair on trial can be opened to listed keys only, not set to \"Every key\".",
   "不开放": "Off",
-  "尚未开放": "Not open yet"
+  "尚未开放": "Not open yet",
+  "缓存标记": "Cache marker"
 }

@@ -23,6 +23,7 @@ import tech.starryapi.platform.openai.ApplyPatchEmulation;
 import tech.starryapi.platform.openai.OpenAiChatRelayClient;
 import tech.starryapi.platform.upstream.UpstreamException;
 import tech.starryapi.platform.xproto.ChatCompletionAccumulator.Completion;
+import tech.starryapi.platform.xproto.ChatWireSanitizer;
 import tech.starryapi.platform.xproto.PairRegistry.Entry;
 import tech.starryapi.platform.xproto.RelayAbortedAfterDispatchException;
 import tech.starryapi.platform.xproto.RelayAnswerWithheldException;
@@ -222,7 +223,7 @@ class XpDispatcher {
         return new PlatformCompletionResult(
             completion.content(),
             completion.reasoningContent(),
-            withMintedIds(completion.toolUses(), dispatch.pair().entry()),
+            withMintedIds(completion.toolUses(), dispatch.pair().entry(), ChatWireSanitizer.carriesThoughtSignatures(dispatch.pair().vendor())),
             usage.usage(),
             completion.stopReason(),
             usage.source(),
@@ -291,10 +292,14 @@ class XpDispatcher {
     /**
      * The tool calls of the answer under ids of the gateway's. The relay's own id is not passed on, nor the raw item it
      * came in (the Chat shape of a call, which a Responses renderer would copy into its own item); the name, the
-     * arguments as the relay wrote them and the type are, except that a call of the editing tool on the Responses entry
-     * is the custom tool call Codex expects ({@link ApplyPatchEmulation#editingToolCall}).
+     * arguments as the relay wrote them and the type are, and so is the thought signature of a Gemini model (the client
+     * has to give it back with the call, and no renderer but the Chat and Gemini ones writes it), except that a call of the
+     * editing tool on the Responses entry is the custom tool call Codex expects ({@link ApplyPatchEmulation#editingToolCall}).
+     * The signature is passed on only for a pair of the vendor that signs ({@code carriesSignatures}): the same relay would
+     * otherwise show a client of another vendor's pair which model is behind it, and the next request of that client could
+     * not send the signature back to a source of its vendor anyway.
      */
-    private List<PlatformToolUse> withMintedIds(List<PlatformToolUse> calls, Entry entry) {
+    private List<PlatformToolUse> withMintedIds(List<PlatformToolUse> calls, Entry entry, boolean carriesSignatures) {
         String prefix = entry == Entry.MESSAGES ? MESSAGES_TOOL_PREFIX : CALL_TOOL_PREFIX;
         Set<String> minted = new HashSet<>();
         List<PlatformToolUse> result = new ArrayList<>(calls.size());
@@ -305,7 +310,8 @@ class XpDispatcher {
             } while (!minted.add(id));
             result.add(entry == Entry.RESPONSES && ApplyPatchEmulation.TOOL_NAME.equals(call.name())
                 ? APPLY_PATCH.editingToolCall(id, call)
-                : new PlatformToolUse(id, call.name(), call.input(), call.type(), call.rawInput(), null));
+                : new PlatformToolUse(id, call.name(), call.input(), call.type(), call.rawInput(), null,
+                    carriesSignatures ? call.thoughtSignature() : null));
         }
         return result;
     }

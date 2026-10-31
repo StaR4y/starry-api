@@ -11,7 +11,7 @@ import tech.starryapi.sourcetier.SourceTierRuntimeInfo.PairStatus;
 class SourceTierRuntimeInfoTest {
 
     @Test
-    void thisReleaseRunsTheNativeTiersTheSelectorsTheAllEndpointsSwitchTheRelayRowsAndTheChatMessagesAndResponsesPairsOnTrial() {
+    void thisReleaseRunsTheNativeTiersTheSelectorsTheAllEndpointsSwitchTheRelayRowsAndTheChatMessagesResponsesAndGeminiPairsOnTrial() {
         SourceTierRuntimeInfo runtime = new SourceTierRuntimeInfo();
 
         // Native tiering (P2-09), the selectors (P3-01) and the all-endpoints switch (P3-03) are complete: requests are
@@ -22,14 +22,18 @@ class SourceTierRuntimeInfoTest {
         assertThat(runtime.unifyEndpoints()).isTrue();
         // A relay can be registered (P4-10): the pools of untiered traffic leave it out from then on.
         assertThat(runtime.xpMembers()).isTrue();
-        // The Chat, Messages and Responses pairs of the anthropic and openai vendors are offered on trial (P5-05, P6-04):
-        // their gates open to listed keys only. Everything else the cross-protocol phases bring is still off.
-        assertThat(runtime.pairs()).isNotEmpty().allSatisfy(pair -> {
-            boolean offered = List.of("CHAT", "MESSAGES", "RESPONSES").contains(pair.entryEndpoint())
-                && List.of("anthropic", "openai").contains(pair.vendor());
+        // The Chat, Messages and Responses pairs of the anthropic and openai vendors (P5-05, P6-04), the Gemini entry for the
+        // anthropic and google vendors and the Chat entry for google (P7-03) are offered on trial: their gates open to listed
+        // keys only. Everything else the cross-protocol phases bring is still off.
+        List<String> offered = List.of(
+            "anthropic/CHAT", "openai/CHAT", "google/CHAT", "anthropic/MESSAGES", "openai/MESSAGES",
+            "anthropic/RESPONSES", "openai/RESPONSES", "anthropic/GEMINI", "google/GEMINI");
+        assertThat(runtime.pairs()).isNotEmpty().allSatisfy(pair ->
             assertThat(runtime.pairStatus(pair.vendor(), pair.sourceProtocol(), pair.entryEndpoint()))
-                .as(pair.toString()).isEqualTo(offered ? PairStatus.EXPERIMENTAL : PairStatus.NOT_OFFERED);
-        });
+                .as(pair.toString())
+                .isEqualTo(offered.contains(pair.vendor() + "/" + pair.entryEndpoint()) ? PairStatus.EXPERIMENTAL : PairStatus.NOT_OFFERED));
+        assertThat(runtime.pairs().stream().filter(pair -> offered.contains(pair.vendor() + "/" + pair.entryEndpoint())).count())
+            .isEqualTo(offered.size());
     }
 
     @Test

@@ -115,6 +115,19 @@ class StrictChatLintTest {
     }
 
     @Test
+    void theExtraContentOfACallIsAThoughtSignatureAndNothingElse() {
+        String signed = "{\"id\":\"a\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"},\"extra_content\":%s}";
+        String message = "{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[%s]}";
+
+        assertThat(problems(body("[" + USER + "," + message.formatted(signed.formatted("{\"google\":{\"thought_signature\":\"SIG\"}}")) + "]"))).isEmpty();
+        for (String extra : List.of("{\"google\":{\"thought_signature\":\"SIG\",\"x\":1}}", "{\"google\":{\"thought_signature\":\"SIG\"},\"y\":1}",
+            "{\"google\":{}}", "{\"google\":{\"thought_signature\":\" \"}}", "{\"google\":{\"thought_signature\":7}}",
+            "{\"vendor\":{\"thought_signature\":\"SIG\"}}", "\"SIG\"", "null", "{}")) {
+            assertThat(problems(body("[" + USER + "," + message.formatted(signed.formatted(extra)) + "]"))).as(extra).isNotEmpty();
+        }
+    }
+
+    @Test
     void aToolChoiceMustBeOneOfTheWhitelistedFormsForTheToolsOfTheBody() {
         String tools = "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"f\"}}]";
         for (String legal : List.of("\"auto\"", "\"none\"", "\"required\"", "{\"type\":\"function\",\"function\":{\"name\":\"f\"}}")) {
@@ -154,6 +167,7 @@ class StrictChatLintTest {
     void everyKeyTheSanitizerCanProduceIsKnownToTheLint() {
         assertThat(ChatWireSanitizer.BODY_KEYS).contains("model", "messages", "stream", "stream_options", "reasoning_effort");
         assertThat(ChatWireSanitizer.MESSAGE_KEYS).containsExactlyInAnyOrder("role", "content", "tool_calls", "tool_call_id", "cache_control");
+        assertThat(ChatWireSanitizer.TOOL_CALL_KEYS).containsExactlyInAnyOrder("id", "type", "function", "extra_content");
         assertThat(ChatWireSanitizer.PART_KEYS).containsExactlyInAnyOrder("type", "text", "image_url", "cache_control");
     }
 
@@ -290,5 +304,31 @@ class StrictChatLintTest {
 
         assertThat(problems).hasSize(20);
         assertThat(String.join("\n", problems)).doesNotContain(secret);
+    }
+
+    // ---------------------------------------------------------------------------------------- the names of functions
+
+    /**
+     * Gemini takes function names with dots and colons up to 128 characters, and an MCP server adds such names to a Gemini
+     * client's tools; the OpenAI format and Anthropic's take letters, digits, underscores and hyphens, at most 64. The check is
+     * not part of {@link StrictChatLint#problems}: the other entries are held to it by the API their client was written for, and
+     * the policy judges it, as a feature of the Gemini request ({@code RequestFeatureDetector.Feature#FUNCTION_NAME}).
+     */
+    @Test
+    void aNameThatGeminiTakesAndTheOtherFormatsDoNotIsNotAProblemOfTheBody() {
+        String tools = "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"%s\"}}]";
+        String dotted = "{" + tools.formatted("server.tool:run") + ",\"messages\":[" + USER + "]}";
+        String longName = "{" + tools.formatted("n".repeat(65)) + ",\"messages\":[" + USER + "]}";
+        String inAHistory = "{\"messages\":[" + USER + "," + assistantCalling(call("c1", "ns.call"))
+            + ",{\"role\":\"tool\",\"tool_call_id\":\"c1\",\"content\":\"ok\"}]}";
+
+        for (String body : List.of(dotted, longName, inAHistory)) {
+            assertThat(StrictChatLint.problems(tree(body))).as("the lint of the body itself does not judge names").isEmpty();
+        }
+        assertThat(StrictChatLint.isUpstreamFunctionName("read_file-2")).isTrue();
+        assertThat(StrictChatLint.isUpstreamFunctionName("n".repeat(64))).isTrue();
+        for (String name : List.of("server.tool:run", "n".repeat(65), "")) {
+            assertThat(StrictChatLint.isUpstreamFunctionName(name)).as(name).isFalse();
+        }
     }
 }

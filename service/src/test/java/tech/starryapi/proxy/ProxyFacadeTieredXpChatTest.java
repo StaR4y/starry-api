@@ -91,6 +91,7 @@ import tech.starryapi.platform.openai.OpenAiResponseOwnerStore;
 import tech.starryapi.platform.openai.OpenAiResponseStateStore;
 import tech.starryapi.platform.openai.OpenAiUpstreamClient;
 import tech.starryapi.platform.upstream.UpstreamException;
+import tech.starryapi.platform.xproto.GeminiChatConverter;
 import tech.starryapi.platform.xproto.PairRegistry;
 import tech.starryapi.platform.xproto.PairRegistry.Entry;
 import tech.starryapi.platform.xproto.PairRegistry.Registration;
@@ -1936,10 +1937,11 @@ class ProxyFacadeTieredXpChatTest {
     }
 
     @Test
-    void aGeminiRequestIsServedByTheNativeTiersAsBeforeWhateverRelayTheVendorHasAndHoweverOpenItsGateIs() {
+    void aGeminiRequestIsServedByTheNativeTiersAsBeforeWhateverRelayTheVendorHasWhileTheGateOfItsOwnEntryIsShut() {
         configureTheRelayOpenToTheKeyBesideKiro();
 
-        ResponseEntity<?> response = facade().geminiGenerateContent("claude-sonnet-4.5", geminiBody(), exchange(GEMINI_PATH, null)).block();
+        ResponseEntity<?> response = facadeWithTheGeminiConverter()
+            .geminiGenerateContent("claude-sonnet-4.5", geminiBody(), exchange(GEMINI_PATH, null)).block();
 
         assertServedByANativeTierAndNeverReadForRelays(response, "kiro-1", "anthropic:kiro", "kiro", "2");
         assertThat(response.getHeaders().getFirst(TierResponseHeaders.STATUS)).isEqualTo("served");
@@ -1947,10 +1949,11 @@ class ProxyFacadeTieredXpChatTest {
     }
 
     @Test
-    void aGeminiRequestThatNamedTheRelayTierByHeaderIsServedAutomaticallyAsBefore() {
+    void aGeminiRequestThatNamedTheRelayTierByHeaderIsServedAutomaticallyAsBeforeWhileTheGateOfItsOwnEntryIsShut() {
         configureTheRelayOpenToTheKeyBesideKiro();
 
-        ResponseEntity<?> response = facade().geminiGenerateContent("claude-sonnet-4.5", geminiBody(), namingTheRelayTier(GEMINI_PATH)).block();
+        ResponseEntity<?> response = facadeWithTheGeminiConverter()
+            .geminiGenerateContent("claude-sonnet-4.5", geminiBody(), namingTheRelayTier(GEMINI_PATH)).block();
 
         assertServedByANativeTierAndNeverReadForRelays(response, "kiro-1", "anthropic:kiro", "kiro", "2");
         assertThat(response.getHeaders().getFirst(TierResponseHeaders.MODE)).isEqualTo("auto");
@@ -2088,6 +2091,15 @@ class ProxyFacadeTieredXpChatTest {
 
     /** A facade that serves every tiered request as one that began {@code age} ago, as the deadline for crossing counts it. */
     private ProxyFacade facade(PairRegistry pairs, Duration age) {
+        return facade(pairs, age, null);
+    }
+
+    /** As the facade is built by Spring, which gives the Gemini entry the converter its relays are given requests by. */
+    private ProxyFacade facadeWithTheGeminiConverter() {
+        return facade(offering(), Duration.ZERO, new GeminiChatConverter(objectMapper));
+    }
+
+    private ProxyFacade facade(PairRegistry pairs, Duration age, GeminiChatConverter geminiConverter) {
         DefaultSourceTierPlanner planner = new DefaultSourceTierPlanner(registry, new ModelPoolKeyResolver(modelCatalog), modelCatalog,
             accountPool, payments, pricing, bindings, true, true, pairs, new XpSkipCounts(), learnedLimits);
         TierRuntime.Planner recording = new TierRuntime.Planner() {
@@ -2132,7 +2144,9 @@ class ProxyFacadeTieredXpChatTest {
             admissionStore,
             ownerStore,
             new TierRuntime(recording, bindings, learnedLimits),
-            xpDispatcher
+            xpDispatcher,
+            null,
+            geminiConverter
         ) {
             @Override
             Mono<ResponseEntity<?>> serveTieredChat(TieredRequest run, ResponseMode responseMode) {

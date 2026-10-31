@@ -562,6 +562,11 @@ class DefaultSourceTierPlannerTest {
         assertThat(plan.levels().get(0).inputBound()).isLessThan(5_000);
     }
 
+    /**
+     * A vendor with tiers and no relays is reserved as it was before there were relays (design 0, I4): an Anthropic key is a cell
+     * that is not Kiro, so the route of the two is bounded as an untiered request of it is, and an inline image raises the bound.
+     * (Where a relay takes part the route is bounded by its text, which TierPlannerXpTest holds.)
+     */
     @Test
     void aRouteWithAccountsThatTakeImagesStillRaisesTheBoundToTheFloor() {
         loaded(snapshot(List.of(vendor("anthropic", true)), anthropicTiers(), List.of()));
@@ -569,6 +574,18 @@ class DefaultSourceTierPlannerTest {
 
         TierPlan plan = plan(requestWith(body, TierRoute.ANTHROPIC));
 
+        assertThat(plan.levels()).allSatisfy(level -> assertThat(level.inputBound()).isEqualTo(1_000_000L));
+    }
+
+    @Test
+    void aRouteWithAnAccountThatIsSentTheWholeBodyStillRaisesTheBoundToTheFloor() {
+        loaded(snapshot(List.of(vendor("openai", true)), openAiTiers(), List.of()));
+        ObjectNode body = bodyWithInlineImage("gpt-5.5", 200_000);
+
+        TierPlan plan = plan(new TierPlanRequest("request-1", "gpt-5.5", "gpt-5.5", "OpenAI", TierRoute.OPENAI, false, false, false,
+            true, false, true, body, null, false, null, null));
+
+        assertThat(plan.levels()).isNotEmpty();
         assertThat(plan.levels()).allSatisfy(level -> assertThat(level.inputBound()).isEqualTo(1_000_000L));
     }
 

@@ -1,0 +1,36 @@
+{
+  "path": "/v1/chat/completions",
+  "headers": {
+    "accept": "text/event-stream, application/json",
+    "authorization": "Bearer <relay key>",
+    "content-type": "application/json"
+  },
+  "body": {
+    "model": "relay-gemini",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are an interactive CLI agent specializing in software engineering tasks. Your primary goal is to help users safely and efficiently, adhering strictly to the following instructions and utilizing your available tools. [shortened]"
+      },
+      {
+        "role": "user",
+        "content": "Run echo hello with bash"
+      },
+      {
+        "role": "assistant",
+        "content": "I will run it.\n\nTool use: run_shell_command\nInput: {\"command\":\"echo hello\"}"
+      },
+      {
+        "role": "user",
+        "content": "Tool result:\n{\"output\":\"hello\\n\"}\n\nSummarize what we did"
+      }
+    ],
+    "max_tokens": 4096,
+    "temperature": 1,
+    "top_p": 0.95,
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  }
+}

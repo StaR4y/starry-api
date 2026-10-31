@@ -1,0 +1,6 @@
+data: {"id":"chatcmpl-relay0001","object":"chat.completion.chunk","created":1700000000,"model":"relay-model","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-relay0001","object":"chat.completion.chunk","created":1700000000,"model":"relay-model","choices":[{"index":0,"delta":{"content":"Hello from the"},"finish_reason":null}]}
+
+data: {"error": {"message": "upstream failed at relay.internal.example.com (https://relay.internal.example.com/v1) with key sk-relay-secret while reading the user's prompt about taxes", "type": "server_error"}}
+

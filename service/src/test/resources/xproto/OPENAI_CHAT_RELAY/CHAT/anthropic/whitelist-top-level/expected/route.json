@@ -12,7 +12,7 @@
       "outputTokens": 24,
       "usageSource": "REPORTED",
       "stopReason": "END_TURN",
-      "degraded": "cache_control,top_k,logprobs,user,store,prompt_cache_key",
+      "degraded": "cache_control,top_k,logprobs,user,store,prompt_cache_key,top_p",
       "error": null
     }
   ]

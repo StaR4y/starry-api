@@ -106,18 +106,27 @@ public final class PairRegistry {
 
     /**
      * What this release offers: the Chat Completions, Messages and Responses entries, for the models of the anthropic and
-     * the openai vendors, on trial. They are the entries of the clients the fifth and the sixth phase of the plan are for
-     * (OpenCode, Claude Code, Codex), and they stay EXPERIMENTAL, open to the API keys an administrator lists, until the
-     * upgrade tasks of the phases (P5-09, P6-05) have the evidence of the status page for each. The Gemini entry and the
-     * google vendor come with the seventh phase.
+     * the openai vendors, the Gemini entry for those of the anthropic and the google vendors, and the Chat Completions entry
+     * for the google ones, all on trial. They are the entries of the clients the fifth, the sixth and the seventh phase of
+     * the plan are for (OpenCode, Claude Code, Codex, and the clients of the Gemini SDKs), and they stay EXPERIMENTAL, open to
+     * the API keys an administrator lists, until the upgrade tasks of the phases (P5-09, P6-05, P7-04) have the evidence of the
+     * status page for each. The Gemini entry is the non-streaming {@code :generateContent}: the conversation loop of the Gemini
+     * CLI calls {@code :streamGenerateContent}, which the gateway does not route until the streaming of the ninth phase, so
+     * the CLI reaches the pairs with its utility requests only (a summary, the fallback of a web fetch: its web fetch request
+     * declares {@code urlContext}, and a search request {@code googleSearch}, which no relay can do, so those are served by the
+     * native sources) and the evidence of P7-04 has to come from an SDK client until then. A Gemini client asking for a gpt model, Messages and Responses requests for a Gemini
+     * model have no client to speak of and are left out.
      */
     private static final List<Registration> OFFERED = List.of(
         new Registration(SourceKind.OPENAI_CHAT_RELAY, Entry.CHAT, "anthropic", Status.EXPERIMENTAL),
         new Registration(SourceKind.OPENAI_CHAT_RELAY, Entry.CHAT, "openai", Status.EXPERIMENTAL),
+        new Registration(SourceKind.OPENAI_CHAT_RELAY, Entry.CHAT, "google", Status.EXPERIMENTAL),
         new Registration(SourceKind.OPENAI_CHAT_RELAY, Entry.MESSAGES, "anthropic", Status.EXPERIMENTAL),
         new Registration(SourceKind.OPENAI_CHAT_RELAY, Entry.MESSAGES, "openai", Status.EXPERIMENTAL),
         new Registration(SourceKind.OPENAI_CHAT_RELAY, Entry.RESPONSES, "anthropic", Status.EXPERIMENTAL),
-        new Registration(SourceKind.OPENAI_CHAT_RELAY, Entry.RESPONSES, "openai", Status.EXPERIMENTAL)
+        new Registration(SourceKind.OPENAI_CHAT_RELAY, Entry.RESPONSES, "openai", Status.EXPERIMENTAL),
+        new Registration(SourceKind.OPENAI_CHAT_RELAY, Entry.GEMINI, "anthropic", Status.EXPERIMENTAL),
+        new Registration(SourceKind.OPENAI_CHAT_RELAY, Entry.GEMINI, "google", Status.EXPERIMENTAL)
     );
 
     private static final PairRegistry DEFAULTS = new PairRegistry(OFFERED);

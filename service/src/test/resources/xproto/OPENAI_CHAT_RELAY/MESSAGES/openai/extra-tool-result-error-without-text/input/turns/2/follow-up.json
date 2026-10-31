@@ -1,0 +1,12 @@
+[
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "tool_result",
+        "is_error": true,
+        "tool_use_id": "${tool.0}"
+      }
+    ]
+  }
+]

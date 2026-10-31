@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -69,6 +70,9 @@ import tech.starryapi.platform.openai.OpenAiResponseOwnerStore;
 import tech.starryapi.platform.openai.OpenAiResponseStateStore;
 import tech.starryapi.platform.openai.OpenAiUpstreamClient;
 import tech.starryapi.platform.upstream.UpstreamException;
+import tech.starryapi.platform.xproto.AnthropicChatWireConverter;
+import tech.starryapi.platform.xproto.GeminiChatConverter;
+import tech.starryapi.platform.xproto.GeminiRequestNormalizer;
 import tech.starryapi.platform.xproto.PairRegistry;
 import tech.starryapi.platform.xproto.RelayErrorException;
 import tech.starryapi.platform.xproto.RelayUsageNormalizer;
@@ -165,6 +169,8 @@ public class ProxyFacade {
     private TierRuntime tierRuntime;
     private XpDispatcher xpDispatcher;
     private ResponsesChatConverter responsesChatConverter;
+    private GeminiChatConverter geminiChatConverter;
+    private AnthropicChatWireConverter anthropicChatWireConverter;
     /** The limit of a Responses request that names none, before the model's own maximum is applied (D14). */
     private long responsesDefaultOutputTokens = ProxyProperties.DEFAULT_RESPONSES_OUTPUT_TOKENS;
 
@@ -447,11 +453,132 @@ public class ProxyFacade {
         this.responsesChatConverter = responsesChatConverter;
     }
 
-    // Spring builds the facade with this one; a second constructor marked for injection fails startup. The dispatcher
-    // of the relays is only used by a tiered request whose plan holds a relay, and the converter only by a Responses
-    // request that a relay may serve; a facade built without them has none, and no relay serves its requests. A facade
-    // built without the settings is given the default ones.
-    @Autowired
+    ProxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        AccountAutoSuspendService accountAutoSuspendService,
+        AccountSettingsService accountSettingsService,
+        DisabledAccountScheduledTestService disabledAccountScheduledTestService,
+        ModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroPayloadFactory payloadFactory,
+        KiroUpstreamClient upstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        OpenAiRequestAdapter openAiRequestAdapter,
+        OpenAiResponseFactory openAiResponseFactory,
+        OpenAiResponseStateStore openAiResponseStateStore,
+        AnthropicRequestAdapter anthropicRequestAdapter,
+        AnthropicResponseFactory anthropicResponseFactory,
+        AnthropicUpstreamClient anthropicUpstreamClient,
+        GeminiRequestAdapter geminiRequestAdapter,
+        GeminiResponseFactory geminiResponseFactory,
+        PaymentSettingsService paymentSettingsService,
+        ModelPricingService modelPricingService,
+        StatsService statsService,
+        AccountAdmissionStore admissionStore,
+        OpenAiResponseOwnerStore openAiResponseOwnerStore,
+        TierRuntime tierRuntime,
+        XpDispatcher xpDispatcher,
+        ResponsesChatConverter responsesChatConverter,
+        GeminiChatConverter geminiChatConverter
+    ) {
+        this(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            accountSettingsService,
+            disabledAccountScheduledTestService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            payloadFactory,
+            upstreamClient,
+            openAiUpstreamClient,
+            openAiRequestAdapter,
+            openAiResponseFactory,
+            openAiResponseStateStore,
+            anthropicRequestAdapter,
+            anthropicResponseFactory,
+            anthropicUpstreamClient,
+            geminiRequestAdapter,
+            geminiResponseFactory,
+            paymentSettingsService,
+            modelPricingService,
+            statsService,
+            admissionStore,
+            openAiResponseOwnerStore,
+            tierRuntime,
+            xpDispatcher,
+            responsesChatConverter
+        );
+        this.geminiChatConverter = geminiChatConverter;
+    }
+
+    ProxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        AccountAutoSuspendService accountAutoSuspendService,
+        AccountSettingsService accountSettingsService,
+        DisabledAccountScheduledTestService disabledAccountScheduledTestService,
+        ModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroPayloadFactory payloadFactory,
+        KiroUpstreamClient upstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        OpenAiRequestAdapter openAiRequestAdapter,
+        OpenAiResponseFactory openAiResponseFactory,
+        OpenAiResponseStateStore openAiResponseStateStore,
+        AnthropicRequestAdapter anthropicRequestAdapter,
+        AnthropicResponseFactory anthropicResponseFactory,
+        AnthropicUpstreamClient anthropicUpstreamClient,
+        GeminiRequestAdapter geminiRequestAdapter,
+        GeminiResponseFactory geminiResponseFactory,
+        PaymentSettingsService paymentSettingsService,
+        ModelPricingService modelPricingService,
+        StatsService statsService,
+        AccountAdmissionStore admissionStore,
+        OpenAiResponseOwnerStore openAiResponseOwnerStore,
+        TierRuntime tierRuntime,
+        XpDispatcher xpDispatcher,
+        ResponsesChatConverter responsesChatConverter,
+        GeminiChatConverter geminiChatConverter,
+        AnthropicChatWireConverter anthropicChatWireConverter
+    ) {
+        this(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            accountSettingsService,
+            disabledAccountScheduledTestService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            payloadFactory,
+            upstreamClient,
+            openAiUpstreamClient,
+            openAiRequestAdapter,
+            openAiResponseFactory,
+            openAiResponseStateStore,
+            anthropicRequestAdapter,
+            anthropicResponseFactory,
+            anthropicUpstreamClient,
+            geminiRequestAdapter,
+            geminiResponseFactory,
+            paymentSettingsService,
+            modelPricingService,
+            statsService,
+            admissionStore,
+            openAiResponseOwnerStore,
+            tierRuntime,
+            xpDispatcher,
+            responsesChatConverter,
+            geminiChatConverter
+        );
+        this.anthropicChatWireConverter = anthropicChatWireConverter;
+    }
+
     ProxyFacade(
         ApiKeyService apiKeyService,
         AccountPoolService accountPoolService,
@@ -510,6 +637,78 @@ public class ProxyFacade {
             tierRuntime,
             xpDispatcher,
             responsesChatConverter
+        );
+        this.responsesDefaultOutputTokens = properties.getResponsesDefaultOutputTokens();
+    }
+
+    // Spring builds the facade with this one; a second constructor marked for injection fails startup. The dispatcher
+    // of the relays is only used by a tiered request whose plan holds a relay, and the converters only by a Responses, a
+    // Gemini or a Messages request that a relay may serve; a facade built without the first two has none, and no relay
+    // serves their requests, and one built without the Messages converter gives its relays the Chat body the native accounts
+    // are sent. A facade built without the settings is given the default ones.
+    @Autowired
+    ProxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        AccountAutoSuspendService accountAutoSuspendService,
+        AccountSettingsService accountSettingsService,
+        DisabledAccountScheduledTestService disabledAccountScheduledTestService,
+        ModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroPayloadFactory payloadFactory,
+        KiroUpstreamClient upstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        OpenAiRequestAdapter openAiRequestAdapter,
+        OpenAiResponseFactory openAiResponseFactory,
+        OpenAiResponseStateStore openAiResponseStateStore,
+        AnthropicRequestAdapter anthropicRequestAdapter,
+        AnthropicResponseFactory anthropicResponseFactory,
+        AnthropicUpstreamClient anthropicUpstreamClient,
+        GeminiRequestAdapter geminiRequestAdapter,
+        GeminiResponseFactory geminiResponseFactory,
+        PaymentSettingsService paymentSettingsService,
+        ModelPricingService modelPricingService,
+        StatsService statsService,
+        AccountAdmissionStore admissionStore,
+        OpenAiResponseOwnerStore openAiResponseOwnerStore,
+        TierRuntime tierRuntime,
+        XpDispatcher xpDispatcher,
+        ResponsesChatConverter responsesChatConverter,
+        GeminiChatConverter geminiChatConverter,
+        AnthropicChatWireConverter anthropicChatWireConverter,
+        ProxyProperties properties
+    ) {
+        this(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            accountSettingsService,
+            disabledAccountScheduledTestService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            payloadFactory,
+            upstreamClient,
+            openAiUpstreamClient,
+            openAiRequestAdapter,
+            openAiResponseFactory,
+            openAiResponseStateStore,
+            anthropicRequestAdapter,
+            anthropicResponseFactory,
+            anthropicUpstreamClient,
+            geminiRequestAdapter,
+            geminiResponseFactory,
+            paymentSettingsService,
+            modelPricingService,
+            statsService,
+            admissionStore,
+            openAiResponseOwnerStore,
+            tierRuntime,
+            xpDispatcher,
+            responsesChatConverter,
+            geminiChatConverter,
+            anthropicChatWireConverter
         );
         this.responsesDefaultOutputTokens = properties.getResponsesDefaultOutputTokens();
     }
@@ -582,8 +781,8 @@ public class ProxyFacade {
     }
 
     public Mono<ResponseEntity<?>> messages(JsonNode request, ServerWebExchange exchange) {
-        // The conversion drops what a relay has to be judged by; it is read from the original, which is then let go.
-        TierEntryFacts entryFacts = entryFacts(TierEntry.MESSAGES, request);
+        // The conversion drops what a relay has to be judged by and is given; both are taken from the original, which is then let go.
+        TierEntryFacts entryFacts = messagesEntryFacts(request);
         ObjectNode chat = anthropicRequestAdapter.messagesToChat(request);
         return authenticateAndLimit(exchange)
             .zipWith(routingPolicy())
@@ -599,6 +798,9 @@ public class ProxyFacade {
     }
 
     public Mono<ResponseEntity<?>> geminiGenerateContent(String model, JsonNode request, ServerWebExchange exchange) {
+        // As Messages: the conversion drops what a relay has to be judged by (images, tools that are not functions), so the
+        // original is read before it, and then let go.
+        TierEntryFacts entryFacts = geminiEntryFacts(model, request);
         ObjectNode chat = geminiRequestAdapter.generateContentToChat(model, request);
         String path = geminiPath(model);
         return authenticateAndLimit(exchange)
@@ -610,7 +812,7 @@ public class ProxyFacade {
                 path,
                 ResponseMode.GEMINI_GENERATE_CONTENT,
                 tuple.getT2(),
-                null
+                entryFacts
             ));
     }
 
@@ -618,21 +820,44 @@ public class ProxyFacade {
      * What the relays that may serve a request need to know of the body as the client sent it; null when the planner has
      * no use for it (no relay could be given a request of the entry: none is registered in a tier that is switched on, or
      * this release offers no pair for the entry, or no gate of the entry is open to anyone), which is every request of a
-     * deployment without relays. Messages takes it before the body is converted and the reactive chain built (the chain
-     * must not keep a body with large images alive), Chat once the caller is authenticated, since its chain holds the body
+     * deployment without relays. Messages and Gemini take it before the body is converted and the reactive chain built (the
+     * chain must not keep a body with large images alive), Chat once the caller is authenticated, since its chain holds the body
      * all along, and Responses once the chain it continues is expanded ({@link #responsesEntryFacts}). A body that cannot be
      * read is no reason to fail the request: it goes on without relays.
      */
     private TierEntryFacts entryFacts(TierEntry entry, JsonNode body) {
-        if (body == null || !body.isObject() || !tierRuntime.planner().wantsEntryFacts(entry)) {
-            return null;
-        }
+        return wantsEntryFacts(entry, body) ? factsOf(entry, body) : null;
+    }
+
+    private TierEntryFacts factsOf(TierEntry entry, JsonNode body) {
         try {
             return TierEntryFacts.of(entry, body);
         } catch (RuntimeException failure) {
             log.warn("The {} request could not be read for relays and goes on without them: {}", entry, failure.toString());
             return null;
         }
+    }
+
+    private boolean wantsEntryFacts(TierEntry entry, JsonNode body) {
+        return body != null && body.isObject() && tierRuntime.planner().wantsEntryFacts(entry);
+    }
+
+    /**
+     * What the relays that may serve a Messages request need to know of it (design 7.6, MESSAGES): the features, read from the
+     * original, and the Chat body a relay is given, which {@link AnthropicChatWireConverter} makes of the original: the entry's
+     * own conversion to Chat (the one the native accounts are sent, and the plan is sized and named over) is text alone, and
+     * a relay is given the images of the user's turns, the cache controls and the failure of a tool result as well. It is made
+     * here, as the Gemini one is, so that the original is let go and what the request keeps for the minutes the upstream call
+     * can take is the converted body (it holds the images a relay may be given). A request the converter cannot read is no
+     * reason to fail it: it costs the request its relays. A facade built without the converter gives its relays the Chat
+     * body the native accounts are sent, as it always did.
+     */
+    private TierEntryFacts messagesEntryFacts(JsonNode request) {
+        TierEntryFacts facts = entryFacts(TierEntry.MESSAGES, request);
+        if (facts == null || anthropicChatWireConverter == null) {
+            return facts;
+        }
+        return withConvertedChat(facts, () -> anthropicChatWireConverter.toChat(request));
     }
 
     /**
@@ -652,6 +877,123 @@ public class ProxyFacade {
         }
         TierEntryFacts facts = entryFacts(TierEntry.RESPONSES, expandedRequest);
         return facts == null ? null : facts.withChatConversion(responsesChatConverter::toChat).withGatewayOutput(gatewayOutput);
+    }
+
+    /**
+     * What the relays that may serve a Gemini request need to know of it (design 7.6, GEMINI): the features, read from the
+     * original, and the Chat body a relay is given, which {@link GeminiChatConverter} makes of the original and the entry's
+     * own conversion to Chat (the one the native accounts are sent, and the plan is sized and named over) cannot be: it
+     * pairs a call and its answer by name, and has no place for images or thought signatures. Made here and not when a relay
+     * is looked at, so that the original is let go as the Messages one is: what the request keeps for the minutes the
+     * upstream call can take is the one converted body (it holds the images a relay may be given, as the Chat entry keeps its
+     * own body), not that and the original. A request the converter cannot read is no reason to fail it: it costs the request
+     * its relays, as a body that does not pass the lint does. Null when the planner has no use for the facts, which is every
+     * request of a deployment without a relay open to the entry, and for a facade that was built without the converter.
+     * The facts and the converted body are made of the request with its field names written in camelCase
+     * ({@link GeminiRequestNormalizer}); the native tiers are given the request as the client sent it.
+     */
+    private TierEntryFacts geminiEntryFacts(String model, JsonNode request) {
+        if (geminiChatConverter == null || !wantsEntryFacts(TierEntry.GEMINI, request)) {
+            return null;
+        }
+        // The API takes the names of its fields in camelCase and in snake_case, and the Python SDK and the REST reference write
+        // the second in the messages: the detector, the digest and the converter read one spelling, so the relays are judged
+        // and sent the same request whichever the client used. The native tiers get the request as the client sent it (I4).
+        JsonNode relayView;
+        try {
+            relayView = GeminiRequestNormalizer.normalize(request);
+        } catch (RuntimeException failure) {
+            log.warn("The Gemini request could not be read for relays and goes on without them: {}", failure.toString());
+            return null;
+        }
+        TierEntryFacts facts = factsOf(TierEntry.GEMINI, relayView);
+        if (facts == null) {
+            return null;
+        }
+        return withConvertedChat(facts, () -> geminiChatConverter.toChat(model, relayView));
+    }
+
+    /**
+     * The facts with the Chat body a relay is given, made now by {@code conversion} from the original and kept as the one
+     * body of the request (the conversion that is applied later makes nothing and holds nothing of the original). A
+     * conversion that fails fails when a relay is looked at, and only costs the request its relays. The body is kept only
+     * until the request is planned ({@link TierEntryFacts#release}): the plan holds the bodies of the relays it chose, and a
+     * request that no relay serves would otherwise hold a copy of its images for as long as the upstream call takes.
+     */
+    private static TierEntryFacts withConvertedChat(TierEntryFacts facts, Supplier<ObjectNode> conversion) {
+        ObjectNode relayChat = null;
+        RuntimeException failure = null;
+        try {
+            relayChat = conversion.get();
+        } catch (RuntimeException broken) {
+            failure = broken;
+        }
+        return facts.withChatConversion(new ConvertedChat(relayChat, failure));
+    }
+
+    /** The Chat body the entry converted for the relays, until the plan is made. */
+    private static final class ConvertedChat implements UnaryOperator<JsonNode>, TierEntryFacts.Releasable {
+
+        private volatile ObjectNode converted;
+        private final RuntimeException failure;
+
+        ConvertedChat(ObjectNode converted, RuntimeException failure) {
+            this.converted = converted;
+            this.failure = failure;
+        }
+
+        @Override
+        public JsonNode apply(JsonNode planned) {
+            if (failure != null) {
+                throw failure;
+            }
+            ObjectNode held = converted;
+            if (held == null) {
+                throw new IllegalStateException("The converted body was let go when the request was planned");
+            }
+            return withTheOutputLimitOf(held, planned);
+        }
+
+        @Override
+        public void release() {
+            converted = null;
+        }
+    }
+
+    /** The plan of a request, and then the facts it was made from are let go. */
+    private static Mono<TierPlan> releasingTheFacts(Mono<TierPlan> plan, TierEntryFacts facts) {
+        return facts == null ? plan : plan
+            .doOnEach(signal -> {
+                if (signal.isOnNext() || signal.isOnError()) {
+                    facts.release();
+                }
+            })
+            .doOnCancel(facts::release);
+    }
+
+    /**
+     * The Chat body of a relay with the output limit the request is reserved and sent by: the largest the client wrote or
+     * the {@link RequestBounds#FALLBACK_OUTPUT_TOKENS} the planned body was given, as the Chat entry's relays are sent the
+     * planned body whole. The conversion has the client's {@code maxOutputTokens} and nothing for a request that names none.
+     * Where the conversion has one that the planned body does not (a limit written in snake_case, which the entry's own
+     * conversion does not read), the relay is sent the smaller of the two: the reservation covers the planned limit, and the
+     * client asked for no more than its own.
+     */
+    private static JsonNode withTheOutputLimitOf(ObjectNode relayChat, JsonNode planned) {
+        long limit = 0;
+        for (String field : java.util.List.of("max_tokens", "max_completion_tokens", "max_output_tokens")) {
+            JsonNode value = planned.path(field);
+            if (value.isIntegralNumber() && value.canConvertToLong()) {
+                limit = Math.max(limit, value.longValue());
+            }
+        }
+        JsonNode own = relayChat.path("max_tokens");
+        if (own.isIntegralNumber() && own.canConvertToLong() && own.longValue() > 0) {
+            limit = limit > 0 ? Math.min(limit, own.longValue()) : own.longValue();
+        }
+        ObjectNode sized = JsonNodes.shallowCopy(relayChat);
+        sized.put("max_tokens", limit > 0 ? limit : RequestBounds.FALLBACK_OUTPUT_TOKENS);
+        return sized;
     }
 
     private static final String GEMINI_PATH_PREFIX = "/v1beta/models/";
@@ -688,8 +1030,9 @@ public class ProxyFacade {
     // entryFacts is what the relays of the tiers need to know of the body as the client sent it (TierEntryFacts), or null
     // when none is needed. Messages and Gemini convert the body before this point, and capturing it in the reactive chain
     // would keep a body with large base64 images alive for the whole upstream call, so the entry derives what is needed from
-    // the original before the chain is built, and only that is captured. The Gemini endpoint has no pair a relay could
-    // serve yet and takes none.
+    // the original before the chain is built, and only that is captured. What it captures includes the body the converter
+    // made for the relays (it has the images), which is let go when the request is planned (TierEntryFacts#release): from
+    // then on the images are held by the plan, for the relays it chose, and by nothing else.
     private Mono<ResponseEntity<?>> invokeChat(
         JsonNode clientRequest,
         ServerWebExchange exchange,
@@ -747,7 +1090,7 @@ public class ProxyFacade {
             .withEntry(tierEntry(responseMode))
             .withEntryFacts(entryFacts));
 
-        return requireFastModeAllowed(fastMode).then(tierPlan).flatMap(plan -> {
+        return requireFastModeAllowed(fastMode).then(releasingTheFacts(tierPlan, entryFacts)).flatMap(plan -> {
             if (plan.tiered()) {
                 return servedByTiers(plan, exchange, serveTieredChat(new TieredRequest(
                     plan,
@@ -4147,8 +4490,8 @@ public class ProxyFacade {
      * What differs between the endpoints in the dispatch loop of a tiered request.
      *
      * @param respond makes the response of the answer given by the selection (the account and how it was asked)
-     * @param relays whether the endpoint can be served by a relay: the Chat Completions, Messages and Responses entries
-     *     are, through the pairs of the registry; a plan of the Gemini entry never holds one
+     * @param relays whether the endpoint can be served by a relay: all four entries (Chat Completions, Messages, Responses
+     *     and Gemini) are, through the pairs of the registry, where a gate is open to the key
      * @param admitted the request the in-flight tokens of an attempt are sized from ({@link #sizedForAdmission} for the
      *     Responses entry, the request the endpoint reserves by for the others)
      */

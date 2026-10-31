@@ -41,6 +41,8 @@ import tech.starryapi.platform.openai.OpenAiResponseFactory;
 import tech.starryapi.platform.openai.OpenAiResponseOwnerStore;
 import tech.starryapi.platform.openai.OpenAiResponseStateStore;
 import tech.starryapi.platform.openai.OpenAiUpstreamClient;
+import tech.starryapi.platform.xproto.AnthropicChatWireConverter;
+import tech.starryapi.platform.xproto.GeminiChatConverter;
 import tech.starryapi.platform.xproto.ResponsesChatConverter;
 import tech.starryapi.proxy.tier.DefaultSourceTierPlanner;
 import tech.starryapi.proxy.tier.TierEntry;
@@ -93,6 +95,8 @@ class ProxyFacadeTierWiringTest {
     private final OpenAiResponseOwnerStore responseOwnerStore = mock(OpenAiResponseOwnerStore.class);
     private final XpDispatcher xpDispatcher = mock(XpDispatcher.class);
     private final ResponsesChatConverter responsesChatConverter = new ResponsesChatConverter(new ObjectMapper());
+    private final GeminiChatConverter geminiChatConverter = new GeminiChatConverter(new ObjectMapper());
+    private final AnthropicChatWireConverter anthropicChatWireConverter = new AnthropicChatWireConverter(new ObjectMapper());
 
     @Test
     void springBuildsTheFacadeWithTheTierRuntimeBean() {
@@ -106,9 +110,12 @@ class ProxyFacadeTierWiringTest {
             assertThat(facade.tierRuntime()).isSameAs(configured);
             assertThat(ReflectionTestUtils.getField(facade, "admissionStore")).isSameAs(admissionStore);
             assertThat(ReflectionTestUtils.getField(facade, "openAiResponseOwnerStore")).isSameAs(responseOwnerStore);
-            // The dispatcher of the relays and the converter of the Responses entry come through the same constructor.
+            // The dispatcher of the relays and the converters of the Responses, the Gemini and the Messages entries come
+            // through the same constructor.
             assertThat(ReflectionTestUtils.getField(facade, "xpDispatcher")).isSameAs(xpDispatcher);
             assertThat(ReflectionTestUtils.getField(facade, "responsesChatConverter")).isSameAs(responsesChatConverter);
+            assertThat(ReflectionTestUtils.getField(facade, "geminiChatConverter")).isSameAs(geminiChatConverter);
+            assertThat(ReflectionTestUtils.getField(facade, "anthropicChatWireConverter")).isSameAs(anthropicChatWireConverter);
         }
     }
 
@@ -226,6 +233,8 @@ class ProxyFacadeTierWiringTest {
         assertThat(ReflectionTestUtils.getField(facade, "openAiResponseOwnerStore")).isNull();
         assertThat(ReflectionTestUtils.getField(facade, "xpDispatcher")).isNull();
         assertThat(ReflectionTestUtils.getField(facade, "responsesChatConverter")).isNull();
+        assertThat(ReflectionTestUtils.getField(facade, "geminiChatConverter")).isNull();
+        assertThat(ReflectionTestUtils.getField(facade, "anthropicChatWireConverter")).isNull();
     }
 
     @Test
@@ -244,6 +253,8 @@ class ProxyFacadeTierWiringTest {
         assertThat(ReflectionTestUtils.getField(facade, "openAiResponseOwnerStore")).isSameAs(responseOwnerStore);
         assertThat(ReflectionTestUtils.getField(facade, "xpDispatcher")).isNull();
         assertThat(ReflectionTestUtils.getField(facade, "responsesChatConverter")).isNull();
+        assertThat(ReflectionTestUtils.getField(facade, "geminiChatConverter")).isNull();
+        assertThat(ReflectionTestUtils.getField(facade, "anthropicChatWireConverter")).isNull();
     }
 
     @Test
@@ -261,6 +272,8 @@ class ProxyFacadeTierWiringTest {
         assertThat(facade.tierRuntime()).isSameAs(configured);
         assertThat(ReflectionTestUtils.getField(facade, "xpDispatcher")).isNull();
         assertThat(ReflectionTestUtils.getField(facade, "responsesChatConverter")).isNull();
+        assertThat(ReflectionTestUtils.getField(facade, "geminiChatConverter")).isNull();
+        assertThat(ReflectionTestUtils.getField(facade, "anthropicChatWireConverter")).isNull();
     }
 
     private AnnotationConfigApplicationContext context() {
@@ -292,6 +305,8 @@ class ProxyFacadeTierWiringTest {
         context.getBeanFactory().registerSingleton("openAiResponseOwnerStore", responseOwnerStore);
         context.getBeanFactory().registerSingleton("xpDispatcher", xpDispatcher);
         context.getBeanFactory().registerSingleton("responsesChatConverter", responsesChatConverter);
+        context.getBeanFactory().registerSingleton("geminiChatConverter", geminiChatConverter);
+        context.getBeanFactory().registerSingleton("anthropicChatWireConverter", anthropicChatWireConverter);
         context.getBeanFactory().registerSingleton("proxyProperties", new ProxyProperties());
         context.getBeanFactory().registerSingleton("sourceTierRegistry", mock(SourceTierRegistry.class));
         context.getBeanFactory().registerSingleton("modelPoolKeyResolver", mock(ModelPoolKeyResolver.class));

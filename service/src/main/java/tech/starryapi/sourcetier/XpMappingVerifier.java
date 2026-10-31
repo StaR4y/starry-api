@@ -58,9 +58,14 @@ import tools.jackson.databind.node.ObjectNode;
  *       Each mapping is stored only if its fingerprint is still the one it was probed under, checked inside the lock
  *       of every configuration write ({@link SourceTierAdminService#recordVerification}); a mapping that moved on is
  *       reported as {@code stale} and nothing is stored for it.
- *   <li><b>The cache probe</b>, on request, asks the same prompt of about 1,200 tokens twice and lets {@link
+ *   <li><b>The cache probe</b>, on request, asks the same prompt of about 4,800 tokens twice (over the 4,096 a model's cache starts at, for
+ *       the newest of them) and lets {@link
  *       XpCacheEvidence} say what the relay's prompt count contains. It is advice and never decides {@code verified};
- *       its conclusion is stored as evidence, which is what lets a member be saved with "not contained".
+ *       its conclusion is stored as evidence, which is what lets a member be saved with "not contained". For a member
+ *       that passes {@code cache_control} through the prompt carries the marker, as every request of Claude Code does, so
+ *       that a relay that caches on markers alone can be seen to cache; and the required probes then include the tool
+ *       loop with the markers where Claude Code puts them ({@link XpProbes#CACHE_CONTROL}), which a relay that refuses markers
+ *       fails.
  *   <li><b>Cost and abuse.</b> Every probe is paid for by the operator, so one account is verified once in 30 seconds
  *       (and never twice at the same time), at most eight mappings at a time, and a whole run is held to four minutes:
  *       a relay that answers every probe just before its own limit would otherwise keep one request, and the claim of

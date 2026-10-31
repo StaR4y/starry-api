@@ -19,7 +19,6 @@
     ],
     "max_tokens": 32000,
     "temperature": 0.2,
-    "top_p": 0.9,
     "tools": [
       {
         "type": "function",

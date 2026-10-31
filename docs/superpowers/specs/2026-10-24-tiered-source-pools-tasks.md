@@ -392,6 +392,7 @@
 - 依赖：P5-07
 - 文件：`service/src/main/java/tech/starryapi/platform/xproto/GeminiChatConverter.java`, `service/src/main/java/tech/starryapi/platform/gemini/GeminiResponseFactory.java`, `service/src/main/java/tech/starryapi/platform/openai/OpenAiResponseFactory.java`
 - 内容：设计 7.6、7.10：唯一 id 与先进先出配对、图片、toolConfig、HARD 判定、extra_content 往返与渲染；原生输出不变。
+- 实现记录：GEMINI 的特性表（`RequestFeatureDetector.gemini`、`FeaturePolicy` 的 `CONVERTER_CARRIES`，新增 `SAFETY_SETTINGS`，`cachedContent` 为 HARD，设计 7.9）和转换器放在这个任务里，因为探测器按转换器的所见来判断；签名要经过四处才回得来，所以另改了 `PlatformToolUse.thoughtSignature`、`ChatCompletionAccumulator`、`XpDispatcher.withMintedIds`、`ChatWireSanitizer`（`Settings.carriesThoughtSignatures`，保留 10 参构造器）、`ChatCanonicalizer`、`StrictChatLint`；google 厂商的 `needsToolsForToolHistory` 在这里定为真（设计 7.6）。不含：入口派发、`TierEntryFacts` 接线、对的登记、夹具、API.md（P7-03）。
 - 测试：同名函数配对；签名往返；现有工厂测试不改。
 - 验收：输出通过 lint。
 
@@ -400,14 +401,15 @@
 - 依赖：P7-01
 - 文件：`service/src/main/java/tech/starryapi/proxy/ProxyFacade.java`, `service/src/test/resources/xproto/OPENAI_CHAT_RELAY/GEMINI`, `service/src/test/resources/xproto/OPENAI_CHAT_RELAY/CHAT/google`
 - 内容：(GEMINI, google|anthropic)、(CHAT, google) 全部用例，EXPERIMENTAL；inlineData 上界。
-- 测试：google L1 中转 + L2 Kiro；404 → Kiro；契约。
+- 实现记录：登记 (CHAT, google)、(GEMINI, anthropic)、(GEMINI, google)，都是 EXPERIMENTAL；(GEMINI, openai)、(MESSAGES, google)、(RESPONSES, google) 仍不提供（设计 7.3）。Gemini 入口在鉴权之前读原始体（`ProxyFacade.geminiEntryFacts`）：特性与摘要同 Messages，另外当场用 `GeminiChatConverter` 转成发给中转的 Chat 体，`TierEntryFacts.chatConversion` 把它交出去，输出上限取计划体的（客户端的 `maxOutputTokens`，没写则 4,096，与 Chat 入口给中转的一致）；链里留的是这一份转换后的体，不是原始体和它两份（`ProxyFacadeEntryFactsTest`）。`ProxyFacade` 多一个带 `GeminiChatConverter` 的构造器，`@Autowired` 的那个多一个参数；没有这个转换器的门面不读 Gemini 请求，中转也收不到。inlineData 上界不需要新的计算：中转的体里是 data URI，`RequestBounds.xpInputTokens` 按映射的 `imageTokenCap` 算（不算 base64），只有地址的图片落到 100 万令牌的下限；原生单元的计划体本来就没有图片（`GeminiRequestAdapter` 只读文本）。夹具：`XpPairHarness` 增加 Gemini 入口（路径里的模型与 `path.json`、`contents` 历史、`gen-` 响应 id 的占位）和 google 厂商的映射（窗口 1,000,000）；三个对各有全部必备用例和若干 extra，Gemini 请求是按文档里的 `generateContent` 形状编写的，id 用占位符，不是抓包，也不是 Gemini CLI 某个版本发出的原样（`case.json` 注明；第一轮评审把夹具、脚本和设计 7.14 里「以 Gemini CLI 的写法」的说法去掉了，这里是漏改的一处）；第二轮评审后另有 `extra-last-turn-of-the-user-is-blank`、`extra-old-call-never-answered-then-the-same-function-again`、`extra-temperature-above-one-with-top-p`、`extra-service-tier-and-summaries-of-thoughts`（两个 GEMINI 对各一份），Messages 的 `extra-a-message-keeps-its-text-when-its-breakpoint-moves`、`extra-document-in-a-tool-result`、`extra-screenshot-the-member-cannot-see-carries-the-breakpoint`（两个厂商各一份）；CHAT/google 是 CHAT/anthropic 的 OpenCode 请求改了模型。除了用到请求大小或 `maxOutputTokens` 的三个用例，两个 GEMINI 对与 CHAT/anthropic 每个用例的路由、计费、重试逐项一致。
+- 测试：google L1 中转 + L2 Kiro；404 → Kiro；契约。（`ProxyFacadeTieredXpGeminiTest`、`CrossProtocolContractTest`、`PairRegistryCompletenessTest`）
 - 验收：白名单 Key 可用。
 
 ### P7-04 Gemini 相关对升级
 
-- 依赖：P7-03
+- 依赖：P7-03；Gemini CLI 的对话要等 P9-01（流式的 `:streamGenerateContent`，CLI 0.65.0 的对话循环只调它），在那之前这三个对的证据只能来自 `:generateContent` 的 SDK 客户端（JavaScript、Python），CLI 自己只有摘要、网页抓取的回退这类辅助请求到得了这些对（带 `urlContext` 的网页抓取请求和带 `googleSearch` 的搜索请求是硬特性，由原生源服务，设计 7.15）
 - 文件：`service/src/main/java/tech/starryapi/platform/xproto/PairRegistry.java`
-- 内容：同 P5-09 标准，三个对逐个升级。
+- 内容：同 P5-09 标准，三个对逐个升级；证据说明是哪种客户端产生的。
 - 测试：状态页证据。
 - 验收：D1 的四种入口格式对普通 Key 可用。
 
@@ -418,7 +420,9 @@
 - 依赖：P5-07
 - 文件：`service/src/main/java/tech/starryapi/platform/xproto/AnthropicChatWireConverter.java`, `service/src/main/java/tech/starryapi/platform/anthropic/AnthropicRequestAdapter.java`, `service/src/main/java/tech/starryapi/platform/xproto/FeaturePolicy.java`
 - 内容：共享辅助（messagesToChat 字节不变）；图片 CARRY_IF(vision)、is_error、tool_result 图片、cache_control 透传、精确占位；每个特性夹具通过前保持 SOFT。
-- 测试：新特性夹具；无新特性时线上体与第 5 阶段一致；低余额截图不因 1M 被拒（含 OpenCode 入口，Kiro 单元已按去媒体上界）。
+- 实现记录：`AnthropicChatWireConverter`（`platform/xproto`）从原始 Messages 体做发给中转的 Chat 体；`AnthropicRequestAdapter` 把字段、文字、工具、tool_choice 抽成共用的静态方法，`messagesToChat` 对着第 7 阶段的副本（测试里的 `PhaseFiveAnthropicRequestAdapter`，约 1,000 个请求）逐字节不变。图片是用户轮里的 `image_url` 部件（data URI 或 http / https 地址；转换给不了地址的图片和助手轮里的图片没有位置，策略与无 vision 的成员一样 SOFT，探测器问同一个 `imageUrl`）；工具结果里的图片在文字后写 `[image omitted]`（探测器的 `tool_output_image`，SOFT），不再被写成 `[no output]`；`is_error` 是结果文字开头的 `Error: `；`cache_control` 的位置见设计 7.6，带标记的消息同时有 `content` 和 `cache_parts`（净化器只对转换来的体读它，永不发出），所以不透传的成员收到的与第 5 阶段逐字节相同。`ProxyFacade.messagesEntryFacts` 在原始体被放掉之前转换（`ProxyFacade` 多一个带 `AnthropicChatWireConverter` 的构造器，`@Autowired` 的那个多一个参数；没有转换器的门面照旧把原生的体给中转）。`FeaturePolicy` 的 MESSAGES 现承载 IMAGE、CACHE_CONTROL、TOOL_RESULT_ERROR、THINKING。控制台的缓存成本警告只在成员没打开 cache_control 时出现；OPERATIONS.md、API.md、设计 7.6/7.9/7.15 已改。不含：把对升为 VERIFIED（P5-09），count_tokens（P9-01）。
+- 测试：新特性夹具；无新特性时线上体与第 5 阶段一致；低余额截图不因 1M 被拒（含 OpenCode 入口，路由只有 Kiro 和 Anthropic Key 这类只发文本的单元时按去媒体上界；Chat 入口经「全端点统一」或带 `anthropic/` 前缀的模型走 ANTHROPIC 路由时同样，评审后补）。
+- 评审后补（第 7、8 阶段合并评审）：Gemini 请求的两种字段写法（`GeminiRequestNormalizer`）、标准 base64、`VALIDATED`、读不懂的一轮使转换失败、schema 方言、函数名检查、未签名调用的 `skip_thought_signature_validator`、验证探针里的 `cache_control`（`XpProbes`）、应答里的签名只对 `google` 厂商的对传出、转换后的体在计划做完后放掉（`TierEntryFacts.release`）。未决，需要负责人：D15 是否也覆盖 Gemini 入口（今天只覆盖 Responses，设计 5.2、7.10）；Gemini 只有推理的 `stop` 应答是否像 Messages 那样按中断处理（今天收费，`GEMINI/*/extra-reasoning-only-answer` 钉住）；`MINIMAL` 档和 `thinkingBudget: 0` 怎么发（设计 7.9）；只给了地址的图片是否按 `image_token_cap` 计（设计 5.2）。
 - 验收：Claude Code 在中转级别获得缓存与图片。
 
 ## Phase 9 可选

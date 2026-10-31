@@ -355,7 +355,9 @@
     return `L${level} · ${name}${enabled ? '' : t('（已关闭）')}`;
   }
 
-  const costWarning = computed(() => cacheCostWarning(props.vendor.vendor));
+  const costWarning = computed(() =>
+    cacheCostWarning(props.vendor.vendor, draft.cacheControlPassthrough, draft.reasoningMode),
+  );
   const exclusiveNote = computed(() => exclusiveWarning(draft));
   const limits = computed(() => limitsNote(policy.value));
   const duration = computed(() => durationNote(draft));
@@ -493,7 +495,7 @@
               <p>
                 {{
                   t(
-                    '中转的这些模型能看图。关闭时图片被丢掉（Kiro 也只取文本），而原生账号能看图的 gpt 类请求带了图就不派给中转。',
+                    '中转的这些模型能看图。关闭时图片换成「[image omitted]」的标记（模型知道图片在那里，Kiro 也只取文本），而原生账号能看图的 gpt 类请求带了图就不派给中转。',
                   )
                 }}
               </p>
@@ -676,7 +678,7 @@
         <p class="xp-dialog__note">
           {{
             t(
-              '用请求真正使用的客户端和解析器向中转发探针：基本问答、函数调用、两轮工具循环，以及（按设置）流式和图片。全部通过的映射才会被请求用到；设置、模型名或账号地址变了，验证自动失效。探针要花中转的令牌，由你承担；同一个账号 30 秒只能验证一次，整体最长 4 分钟。',
+              '用请求真正使用的客户端和解析器向中转发探针：基本问答、函数调用、两轮工具循环，以及（按设置）流式、图片和缓存标记。全部通过的映射才会被请求用到；设置、模型名或账号地址变了，验证自动失效。探针要花中转的令牌，由你承担；同一个账号 30 秒只能验证一次，整体最长 4 分钟。',
             )
           }}
         </p>

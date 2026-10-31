@@ -1,0 +1,33 @@
+{
+  "status": 200,
+  "headers": {
+    "X-Starry-Tier": "relay",
+    "X-Starry-Tier-Level": "1",
+    "X-Starry-Tier-Name": "relay",
+    "X-Starry-Tier-Mode": "auto",
+    "X-Starry-Tier-Status": "served"
+  },
+  "body": {
+    "candidates": [
+      {
+        "content": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "I will run it."
+            }
+          ]
+        },
+        "finishReason": "MAX_TOKENS",
+        "index": 0
+      }
+    ],
+    "usageMetadata": {
+      "promptTokenCount": 1300,
+      "candidatesTokenCount": 1024,
+      "totalTokenCount": 2324
+    },
+    "modelVersion": "claude-sonnet-4.5",
+    "responseId": "gen-<id>"
+  }
+}

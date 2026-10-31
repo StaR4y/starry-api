@@ -1,0 +1,67 @@
+{
+  "path": "/v1/chat/completions",
+  "headers": {
+    "accept": "text/event-stream, application/json",
+    "authorization": "Bearer <relay key>",
+    "content-type": "application/json"
+  },
+  "body": {
+    "model": "relay-sonnet",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are a helpful assistant. [shortened]"
+      },
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "What is in this image?"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "data:image/png;base64,iVBORw0KGgo+/w8PHy8/T19vf4+fr7/P3+//Dx8Q"
+            }
+          }
+        ]
+      }
+    ],
+    "max_tokens": 2048,
+    "temperature": 1,
+    "stop": [
+      "END"
+    ],
+    "tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "read_file",
+          "description": "Reads a file. [shortened]",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string",
+                "description": "The path"
+              },
+              "start_line": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": [
+              "file_path"
+            ]
+          }
+        }
+      }
+    ],
+    "reasoning_effort": "medium",
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  }
+}

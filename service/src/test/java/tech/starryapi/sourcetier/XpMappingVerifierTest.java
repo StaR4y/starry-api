@@ -433,10 +433,92 @@ class XpMappingVerifierTest {
         assertThat(model.cache().calls().get(0).cacheWriteTokens()).isPositive();
         assertThat(model.cache().calls().get(1).cacheReadTokens()).isPositive();
         assertThat(stored.getFirst().cache().readInPrompt()).isFalse();
-        // Two prompts of about 1,200 tokens, the same both times, asked after the five probes of the rest.
+        // Two prompts of about 4,800 tokens, the same both times, asked after the five probes of the rest.
         List<String> prompts = relay.chats().stream().skip(5).map(seen -> seen.body().path("messages").get(0).path("content").asString("")).toList();
         assertThat(prompts).hasSize(2);
         assertThat(prompts.get(0)).isEqualTo(prompts.get(1)).hasSizeGreaterThan(4000);
+    }
+
+    /**
+     * A model whose cache starts at 4,096 tokens (the newest Claude models) caches nothing of a prompt of about 1,200, so the probe
+     * saw no cache and "not contained" could never be saved for the relay of such a model; the prompt is larger than the largest
+     * minimum now. The same relay is shown to cache a prompt of the old size not at all.
+     */
+    @Test
+    void aRelayWhoseModelCachesFromFourThousandAndNinetySixTokensIsSeenToCache() {
+        relay.cache = RelaySimulator.Cache.NOT_IN_PROMPT;
+        relay.cacheMinimumTokens = 4096;
+
+        SourceTierDtos.ModelVerification model = ask(new SourceTierDtos.VerifyMember(null, true)).models().getFirst();
+
+        assertThat(model.verified()).isTrue();
+        assertThat(model.cache().readInPrompt()).isFalse();
+        assertThat(model.cache().writeInPrompt()).isFalse();
+        assertThat(model.cache().readEvidence()).contains("cache read").contains("does not contain");
+        assertThat(model.cache().calls().get(0).cacheWriteTokens()).isPositive();
+        assertThat(model.cache().calls().get(1).cacheReadTokens()).isPositive();
+        assertThat(stored.getFirst().cache().readInPrompt()).isFalse();
+    }
+
+    @Test
+    void aPromptBelowTheMinimumOfTheModelIsNotCachedAndSoLeavesNoEvidence() {
+        relay.cache = RelaySimulator.Cache.NOT_IN_PROMPT;
+        relay.cacheMinimumTokens = 8192;
+
+        SourceTierDtos.ModelVerification model = ask(new SourceTierDtos.VerifyMember(null, true)).models().getFirst();
+
+        assertThat(model.verified()).isTrue();
+        assertThat(model.cache().readInPrompt()).isNull();
+        assertThat(model.cache().writeInPrompt()).isNull();
+    }
+
+    private static Member passingCacheControl() {
+        return new Member("anthropic", "relay-1", "relay", "OPENAI_CHAT", true, false, false, false, true, false, "NONE", 540, true, true);
+    }
+
+    /**
+     * A relay that caches where it is told to, with a member that passes the markers of Claude Code through: the probes carry the
+     * marker, so that the relay is seen to cache and a prompt that leaves the cache out of its count can be saved as such.
+     */
+    @Test
+    void aRelayThatCachesOnMarkersAloneIsAdvisedWhenTheMemberPassesTheMarkersThrough() {
+        use(passingCacheControl(), model("claude-sonnet-4.5", "Relay/Claude-Sonnet-4.5", true));
+        relay.cache = RelaySimulator.Cache.NOT_IN_PROMPT;
+        relay.cacheNeedsMarker = true;
+
+        SourceTierDtos.ModelVerification model = ask(new SourceTierDtos.VerifyMember(null, true)).models().getFirst();
+
+        assertThat(model.verified()).isTrue();
+        assertThat(statuses(model)).containsExactly("basic:PASSED", "tool_call:PASSED", "tool_loop:PASSED", "cache_control:PASSED", "cache:PASSED");
+        assertThat(model.cache().readInPrompt()).isFalse();
+        assertThat(model.cache().writeInPrompt()).isFalse();
+        assertThat(relay.chats().stream().filter(seen -> seen.body().toString().contains("cache_control")).count())
+            .as("the marker probe and the two calls of the cache probe").isEqualTo(3);
+    }
+
+    @Test
+    void theSameRelayCachesNothingOfAMemberThatSendsNoMarkerSoNoAdviceIsGiven() {
+        relay.cache = RelaySimulator.Cache.NOT_IN_PROMPT;
+        relay.cacheNeedsMarker = true;
+
+        SourceTierDtos.ModelVerification model = ask(new SourceTierDtos.VerifyMember(null, true)).models().getFirst();
+
+        assertThat(model.cache().readInPrompt()).isNull();
+        assertThat(model.cache().message()).contains("no cached tokens");
+        assertThat(relay.chats()).noneMatch(seen -> seen.body().toString().contains("cache_control"));
+    }
+
+    @Test
+    void aRelayThatRefusesTheMarkerFailsTheVerificationOfAMemberThatPassesItThrough() {
+        use(passingCacheControl(), model("claude-sonnet-4.5", "Relay/Claude-Sonnet-4.5", true));
+        relay.refusesMarkers = true;
+
+        SourceTierDtos.ModelVerification model = ask(null).models().getFirst();
+
+        assertThat(model.verified()).isFalse();
+        assertThat(probe(model, "basic").status()).isEqualTo("PASSED");
+        assertThat(probe(model, "cache_control").status()).isEqualTo("FAILED");
+        assertThat(probe(model, "cache_control").message()).doesNotContain("relay.internal.example.com");
     }
 
     @Test

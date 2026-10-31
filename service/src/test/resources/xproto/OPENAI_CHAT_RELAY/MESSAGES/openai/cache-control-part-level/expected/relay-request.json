@@ -10,11 +10,34 @@
     "messages": [
       {
         "role": "system",
-        "content": "You are a Claude agent, built on Anthropic's Claude Agent SDK.\n\nYou are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF chall [shortened]"
+        "content": [
+          {
+            "type": "text",
+            "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          },
+          {
+            "type": "text",
+            "text": "\nYou are an interactive agent that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.\n\nIMPORTANT: Assist with authorized security testing, defensive security, CTF chall [shortened]",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
       },
       {
         "role": "user",
-        "content": "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n- deep-research: Deep research harness — fan-out web searches, fetch sources, adversarially verify claims, synthesize [shortened]\n<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is 2026-10-26.\n\n      IMPORTANT: this context may or may not be relevant to your tas [shortened]\nReply with the single word ok"
+        "content": [
+          {
+            "type": "text",
+            "text": "<system-reminder>\nThe following skills are available for use with the Skill tool:\n\n- deep-research: Deep research harness — fan-out web searches, fetch sources, adversarially verify claims, synthesize [shortened]\n<system-reminder>\nAs you answer the user's questions, you can use the following context:\n# currentDate\nToday's date is 2026-10-26.\n\n      IMPORTANT: this context may or may not be relevant to your tas [shortened]\nReply with the single word ok",
+            "cache_control": {
+              "type": "ephemeral"
+            }
+          }
+        ]
       }
     ],
     "max_completion_tokens": 32000,

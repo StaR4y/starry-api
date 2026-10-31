@@ -1099,10 +1099,23 @@ test('the advice of the cache probe changes only the switches it is sure about',
 
 test('the warnings say what a relay costs or risks where it does', () => {
   // Not the absolute claim that a relay has no cache: it caches prefixes by itself when it can, and what it reports is billed.
-  assert.match(cacheCostWarning('anthropic'), /不给 Claude Code 发往中转的请求加提示缓存/);
-  assert.match(cacheCostWarning('anthropic'), /除非中转自己按前缀自动缓存/);
-  assert.doesNotMatch(cacheCostWarning('anthropic'), /没有提示缓存/);
-  assert.equal(cacheCostWarning('openai'), null);
+  // The warning is for a member that is not sent the cache marks of Claude Code: once cache_control is on, they are.
+  assert.match(cacheCostWarning('anthropic', false), /没有打开 cache_control，网关不会把 Claude Code 的缓存标记发给它/);
+  assert.match(cacheCostWarning('anthropic', false), /除非中转自己按前缀自动缓存/);
+  assert.doesNotMatch(cacheCostWarning('anthropic', false), /没有提示缓存/);
+  assert.equal(cacheCostWarning('anthropic', true), null);
+  assert.equal(cacheCostWarning('anthropic', true, 'NONE'), null);
+  assert.equal(cacheCostWarning('openai', false), null);
+  assert.equal(cacheCostWarning('openai', true), null);
+  // The markers are sent and the thinking is mapped: the effort is on the turns of a prompt and off after a tool result, and a relay
+  // that turns it into Claude's thinking switch invalidates the message cache with every toggle.
+  assert.match(cacheCostWarning('anthropic', true, 'EFFORT'), /同时打开了 cache_control 和「映射为 reasoning_effort」/);
+  assert.match(cacheCostWarning('anthropic', true, 'EFFORT'), /整段消息缓存失效/);
+  assert.match(cacheCostWarning('anthropic', true, 'EFFORT'), /把「思考映射」设为「不发送」/);
+  assert.equal(cacheCostWarning('openai', true, 'EFFORT'), null);
+  assert.equal(cacheCostWarning('openai', false, 'EFFORT'), null);
+  // Without the markers it is the cost of the cache the relay is not sent that is told.
+  assert.match(cacheCostWarning('anthropic', false, 'EFFORT'), /没有打开 cache_control/);
   assert.equal(exclusiveWarning(filled()), null);
   assert.match(exclusiveWarning(filled({ exclusive: false })), /GLM/);
   assert.equal(limitsNote(null), null);
@@ -1417,7 +1430,7 @@ test('the probes of a verification are found by model and named for what they as
   assert.equal(verificationOf(models, ' CLAUDE-SONNET-4.5').upstreamModel, 'relay/sonnet');
   assert.equal(verificationOf(models, 'other'), undefined);
   assert.equal(verificationOf(null, 'x'), undefined);
-  assert.deepEqual(['basic', 'tool_call', 'tool_loop', 'stream', 'vision', 'cache', 'cache_evidence', 'new'].map(probeLabel),
-    ['基本问答', '函数调用', '两轮工具循环', '流式', '图片', '缓存探针', '缓存口径证据', 'new']);
+  assert.deepEqual(['basic', 'tool_call', 'tool_loop', 'stream', 'vision', 'cache_control', 'cache', 'cache_evidence', 'new'].map(probeLabel),
+    ['基本问答', '函数调用', '两轮工具循环', '流式', '图片', '缓存标记', '缓存探针', '缓存口径证据', 'new']);
   assert.deepEqual(verifyTargets(relayDraftOf(savedRelay)), ['claude-sonnet-4.5']);
 });

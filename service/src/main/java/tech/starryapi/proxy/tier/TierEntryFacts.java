@@ -19,11 +19,19 @@ import tools.jackson.databind.JsonNode;
  * sized from (it counts the reasoning of the history, which a relay is not given) and what names the session. A relay is
  * given a Chat body made from it (design 7.6), which {@code chatConversion} makes when a relay is looked at.
  *
+ * <p>The Gemini entry is planned over the Chat body its own conversion makes, which is text and nothing else (what Kiro and
+ * the Anthropic keys read), and a relay is given the body {@code GeminiChatConverter} makes of the original (design 7.6), as
+ * a Messages relay is the one {@code AnthropicChatWireConverter} makes: the conversion has to be made before the original is
+ * let go, so {@code chatConversion} hands out that body, under the output limit the planned one is held to, and the facts
+ * keep it (the images a relay may be given are in it) until the request is planned. Nothing needs it after: a relay that was
+ * chosen holds the body it is sent.
+ *
  * @param detected the features of the request, with the entry they were found for
  * @param entryDigest what {@link ChatWireSanitizer#sanitize} reads of the original body ({@link
  *     ChatWireSanitizer#entryDigest}); null for the Chat entry, whose Chat body is the client's own
  * @param chatConversion how the body the request is planned over is made into the Chat body a relay is given; null when
- *     that body already is one (the Chat entry, and Messages, whose conversion came before the plan)
+ *     that body already is one (the Chat entry). Messages and Gemini hand out the body their converter made of the original
+ *     at the entry, under the output limit the planned body is held to, until the request is planned ({@link #release})
  * @param gatewayOutput whether the output limit of the planned body is one the gateway chose and not the client: the
  *     default of the model, which a Responses request that names no limit is given (D14, design 7.10). A relay is not
  *     given it: its output is the maximum its mapping states, or 4,096 (D15, {@link XpEligibility}). A limit the client
@@ -50,6 +58,23 @@ public record TierEntryFacts(Detected detected, JsonNode entryDigest, UnaryOpera
         PairRegistry.Entry registryEntry = PairRegistry.Entry.valueOf(entry.name());
         Detected detected = RequestFeatureDetector.detect(registryEntry, clientBody);
         return new TierEntryFacts(detected, registryEntry == PairRegistry.Entry.CHAT ? null : ChatWireSanitizer.entryDigest(clientBody));
+    }
+
+    /** A conversion that holds a body of its own, and lets it go on {@link #release}. */
+    public interface Releasable {
+
+        void release();
+    }
+
+    /**
+     * Lets go of the body the conversion holds, if it holds one: the facts are used by the plan of the request and by nothing
+     * after it, and a request that was planned holds the bodies of the relays it chose in its plan. A conversion asked after
+     * this fails.
+     */
+    public void release() {
+        if (chatConversion instanceof Releasable held) {
+            held.release();
+        }
     }
 
     /** The same facts, with the conversion that makes the planned body into the Chat body of a relay. */

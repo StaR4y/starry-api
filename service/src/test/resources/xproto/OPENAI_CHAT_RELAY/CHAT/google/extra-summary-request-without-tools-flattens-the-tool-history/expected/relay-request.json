@@ -1,0 +1,34 @@
+{
+  "path": "/v1/chat/completions",
+  "headers": {
+    "accept": "text/event-stream, application/json",
+    "authorization": "Bearer <relay key>",
+    "content-type": "application/json"
+  },
+  "body": {
+    "model": "relay-gemini",
+    "messages": [
+      {
+        "role": "system",
+        "content": "You are OpenCode, the best coding agent on the planet.\n\nYou are an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.\n\nIMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user i [shortened]"
+      },
+      {
+        "role": "user",
+        "content": "\"Run echo hello with bash\""
+      },
+      {
+        "role": "assistant",
+        "content": "I will run it.\n\nTool use: bash\nInput: {\"command\":\"echo hello\"}"
+      },
+      {
+        "role": "user",
+        "content": "Tool result:\nhello\n\n\n\"Summarize what we did\""
+      }
+    ],
+    "max_tokens": 32000,
+    "stream": true,
+    "stream_options": {
+      "include_usage": true
+    }
+  }
+}

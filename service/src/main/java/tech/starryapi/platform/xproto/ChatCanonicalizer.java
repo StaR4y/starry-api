@@ -67,6 +67,9 @@ import tools.jackson.databind.node.ObjectNode;
  * native accounts of a gpt request are: the name is a repair of the history, not a feature of the request, and a repair
  * is recorded only where the native path of the same model makes it.
  *
+ * <p>A call keeps its thought signature ({@code extra_content}, see {@link Settings#carriesThoughtSignatures}) wherever the
+ * rules move it; the calls made text by the step above are told without it, for there is no function left to give it to.
+ *
  * <p>The input is not changed; the messages of the result are new, the tool schemas and the other fields are shared with
  * it. Running the canonicalizer on its own output changes nothing.
  */
@@ -155,6 +158,9 @@ public final class ChatCanonicalizer {
                     ObjectNode function = node.putObject("function");
                     function.put("name", call.name);
                     function.put("arguments", call.arguments);
+                    if (call.thoughtSignature != null) {
+                        node.set("extra_content", ChatWireSanitizer.extraContent(call.thoughtSignature));
+                    }
                 }
             }
             if (answers != null) {
@@ -174,14 +180,17 @@ public final class ChatCanonicalizer {
         final String id;
         final String name;
         String arguments;
+        /** The thought signature of the call, which it keeps through every rearrangement; null when it has none. */
+        final String thoughtSignature;
         Message answer;
         String wireId;
 
-        Call(Message owner, String id, String name, String arguments) {
+        Call(Message owner, String id, String name, String arguments, String thoughtSignature) {
             this.owner = owner;
             this.id = id;
             this.name = name;
             this.arguments = arguments;
+            this.thoughtSignature = thoughtSignature;
         }
     }
 
@@ -207,7 +216,8 @@ public final class ChatCanonicalizer {
                         message,
                         call.path("id").stringValue(""),
                         call.path("function").path("name").stringValue(""),
-                        call.path("function").path("arguments").stringValue("")
+                        call.path("function").path("arguments").stringValue(""),
+                        ChatWireSanitizer.thoughtSignatureOf(call)
                     ));
                 }
             }

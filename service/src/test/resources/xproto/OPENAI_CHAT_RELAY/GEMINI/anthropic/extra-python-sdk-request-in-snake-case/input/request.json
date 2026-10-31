@@ -1,0 +1,68 @@
+{
+  "contents": [
+    {
+      "role": "user",
+      "parts": [
+        {
+          "text": "What is in this image?"
+        },
+        {
+          "inline_data": {
+            "mime_type": "image/png",
+            "data": "iVBORw0KGgo-_w8PHy8_T19vf4-fr7_P3-__Dx8Q"
+          }
+        }
+      ]
+    }
+  ],
+  "systemInstruction": {
+    "parts": [
+      {
+        "text": "You are a helpful assistant. [shortened]"
+      }
+    ]
+  },
+  "tools": [
+    {
+      "functionDeclarations": [
+        {
+          "name": "read_file",
+          "description": "Reads a file. [shortened]",
+          "parameters_json_schema": {
+            "type": "object",
+            "properties": {
+              "file_path": {
+                "type": "string",
+                "description": "The path"
+              },
+              "start_line": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": [
+              "file_path"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "toolConfig": {
+    "function_calling_config": {
+      "mode": "VALIDATED"
+    }
+  },
+  "generationConfig": {
+    "temperature": 1,
+    "top_p": 0.95,
+    "max_output_tokens": 2048,
+    "stop_sequences": [
+      "END"
+    ],
+    "thinkingConfig": {
+      "include_thoughts": true,
+      "thinking_budget": 8192
+    }
+  }
+}

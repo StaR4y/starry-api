@@ -34,9 +34,9 @@ import tech.starryapi.platform.xproto.RequestFeatureDetector.Feature;
  *       itself, which carries images, cache control, response schemas and reasoning for members that allow them. The
  *       Responses conversion ({@link ResponsesChatConverter}) hands the sanitizer a Chat body that has the images of the
  *       user's messages, the response schema and the reasoning effort, and none of the rest. The Messages conversion
- *       carries the reasoning request only: images, cache control and {@code tool_result.is_error} stay SOFT until the
- *       task that makes them part of the conversion (P8-01) adds them to that table, one by one, each when its fixtures
- *       pass. Nothing is promised that the converter does not do.
+ *       ({@link AnthropicChatWireConverter}) has the images of the user's turns, the cache controls (the ones on text, on
+ *       tool results and on assistant turns, and the request's own), the failure of a tool result and the reasoning request;
+ *       not the image in the output of a tool, nor a document. Nothing is promised that the converter does not do.
  *   <li><b>The baseline: what the route's native accounts do</b> ({@link Baseline}). A Claude request through Chat
  *       Completions or Responses goes to Kiro or an Anthropic key, which read text only: an image or a schema that the
  *       member cannot carry is no loss, SOFT, and neither is a tool of the Responses API that is not a function (the
@@ -50,9 +50,15 @@ import tech.starryapi.platform.xproto.RequestFeatureDetector.Feature;
  *       web_search} itself and gives the model the tools that its tool search finds) are HARD, so that moving to the
  *       relay does not drop what the client sent and the native path would have kept. The Messages entry has no
  *       baseline: its conversion has flattened the request before any route (the native path already drops images and
- *       documents there), so these are SOFT for every route. A {@code verbosity} is SOFT on every baseline and entry
- *       (D6): it only asks the model to be brief or full, OpenCode sends it with every request of a gpt model, and a
- *       relay that refused the request for it would never be given one. The sanitizer does not send it and the request
+ *       documents there), so these are SOFT for every route. The Gemini entry has none either: a Gemini client's request
+ *       is served by Kiro and the Anthropic keys, which read text only, so what a member cannot carry (an image without
+ *       vision, a response schema without {@code json_schema}, audio, a file, a {@code safetySettings}) is left out and
+ *       recorded, and what no relay can do for the answer (a {@code googleSearch} or {@code codeExecution} tool, a
+ *       {@code cachedContent}, several candidates, more than four stop sequences) is HARD, as is a function name only Gemini's
+ *       upstream takes for a member of any other vendor ({@link Feature#FUNCTION_NAME}: a dot or a colon in it, which the native
+ *       accounts are given as it is). A {@code serviceTier} and the summaries of thoughts ({@code includeThoughts}) are SOFT. A {@code verbosity} is SOFT
+ *       on every baseline and entry (D6): it only asks the model to be brief or full, OpenCode sends it with every
+ *       request of a gpt model, and a relay that refused the request for it would never be given one. The sanitizer does not send it and the request
  *       log records it. Three things of the Responses entry are HARD on every baseline: a custom tool other than {@code
  *       apply_patch} (a relay's model answers with a function, which the client cannot run as its tool), a chain that
  *       this node could not expand (the relay would be given the last turn alone, design 4.8) and the context that is
@@ -139,10 +145,13 @@ public final class FeaturePolicy {
 
     /**
      * The features each entry's conversion can give a relay at all, when the member allows it. The Messages entry
-     * gives the reasoning request through the sanitizer (which reads the original body for it); P8-01 adds images,
-     * cache control and the tool-result error flag to its set as each fixture passes. The Responses conversion gives
+     * gives the images of the user's turns, the cache controls and the tool-result error flag (P8-01), and the reasoning
+     * request through the sanitizer (which reads the original body for it). The Responses conversion gives
      * the images of the user's messages, the response schema and the reasoning effort (not the images in the output of a
-     * tool, nor cache control, which the API does not have). The Gemini converter has not been written.
+     * tool, nor cache control, which the API does not have). The Gemini conversion gives the images of the user's turns
+     * ({@code inlineData}, and the {@code fileData} a relay can fetch), the response schema and, through the sanitizer's
+     * reading of the original body, the thinking request (not the media of the model's turns or of function answers, nor
+     * cache control, which the API does not have).
      */
     private static final Map<Entry, Set<Feature>> CONVERTER_CARRIES = carries();
 
@@ -151,9 +160,9 @@ public final class FeaturePolicy {
         carries.put(Entry.CHAT, EnumSet.of(
             Feature.IMAGE, Feature.CACHE_CONTROL, Feature.JSON_SCHEMA, Feature.THINKING, Feature.REASONING_EFFORT
         ));
-        carries.put(Entry.MESSAGES, EnumSet.of(Feature.THINKING));
+        carries.put(Entry.MESSAGES, EnumSet.of(Feature.IMAGE, Feature.CACHE_CONTROL, Feature.TOOL_RESULT_ERROR, Feature.THINKING));
         carries.put(Entry.RESPONSES, EnumSet.of(Feature.IMAGE, Feature.JSON_SCHEMA, Feature.REASONING_EFFORT));
-        carries.put(Entry.GEMINI, EnumSet.noneOf(Feature.class));
+        carries.put(Entry.GEMINI, EnumSet.of(Feature.IMAGE, Feature.JSON_SCHEMA, Feature.THINKING));
         return carries;
     }
 
@@ -200,6 +209,9 @@ public final class FeaturePolicy {
                  ANTHROPIC_DEFINED_TOOL, MCP_SERVERS, CONTAINER, PREVIOUS_RESPONSE_ID, SERVER_HELD_CONTEXT, CUSTOM_TOOL,
                  UNSUPPORTED_ENTRY -> Treatment.HARD;
             case FAST -> member.priorityTier() ? Treatment.CARRY : Treatment.HARD;
+            // A name with a dot or a colon is Gemini's, and the native accounts of the route (Kiro, an Anthropic key) are given it
+            // as it is: a relay of any other vendor's upstream would refuse the request, a relay in front of Gemini takes it.
+            case FUNCTION_NAME -> member.carriesThoughtSignatures() ? Treatment.CARRY : Treatment.HARD;
             case THINKING, REASONING_EFFORT -> carriedIf(
                 entry, feature, member.reasoningEffort()
                     && !(member.continuationDropsReasoning() && detected.toolContinuation())
@@ -221,7 +233,7 @@ public final class FeaturePolicy {
             case DOCUMENT, TOOL_SEARCH, CONTEXT_MANAGEMENT, HISTORY_THINKING, SERVER_TOOL_HISTORY, OUTPUT_CONFIG,
                  TOP_K, METADATA, SERVICE_TIER, VERBOSITY, INCLUDE, TRUNCATION, MAX_TOOL_CALLS, REASONING_SUMMARY, LOGPROBS,
                  USER, STORE, PREDICTION,
-                 PROMPT_CACHE_KEY, PROMPT_CACHE_RETENTION, SAFETY_IDENTIFIER, MODALITIES -> Treatment.SOFT;
+                 PROMPT_CACHE_KEY, PROMPT_CACHE_RETENTION, SAFETY_IDENTIFIER, SAFETY_SETTINGS, MODALITIES, ENUM_ANSWER -> Treatment.SOFT;
         };
     }
 

@@ -1,0 +1,1 @@
+{"origin": "Claude Code 2.1.168 request: the user sends an image whose block carries a cache_control, to a member that cannot see images and passes cache control through. The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

@@ -4,6 +4,7 @@ import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import tech.starryapi.platform.openai.ApplyPatchEmulation;
@@ -35,11 +36,11 @@ import tools.jackson.databind.node.ObjectNode;
  * features of the Chat entry are kept joined by {@code FeaturePolicySanitizerTest}. Headers are not read, since none
  * reaches a relay.
  *
- * <p>Three entries are known, the ones of design 7.9 that this release can convert: {@link Entry#MESSAGES} (the Anthropic
- * request of Claude Code), {@link Entry#CHAT} and {@link Entry#RESPONSES} (the request of Codex, as the gateway has
- * expanded it, see {@link #detect}). Any other entry is reported as {@link Feature#UNSUPPORTED_ENTRY}, which no member
- * can carry, so that a caller that asks for an entry whose table has not been written cannot send a request to a relay
- * unchecked. The Gemini table joins with the task that writes its converter.
+ * <p>Four entries are known, the ones of design 7.9: {@link Entry#MESSAGES} (the Anthropic request of Claude Code),
+ * {@link Entry#CHAT}, {@link Entry#RESPONSES} (the request of Codex, as the gateway has expanded it, see {@link #detect})
+ * and {@link Entry#GEMINI} (a {@code generateContent} request, read the way {@link GeminiChatConverter} converts it). An
+ * entry added to the registry before its table is written is to be reported as {@link Feature#UNSUPPORTED_ENTRY}, which
+ * no member can carry, so that a caller that asks for it cannot send a request to a relay unchecked.
  *
  * <p>The body is not changed, and the detector keeps no state.
  */
@@ -93,7 +94,13 @@ public final class RequestFeatureDetector {
         CUSTOM_TOOL("custom_tool"),
         /** The request is billed as fast: only a member with a priority tier gives what is paid for. Never detected from the body. */
         FAST("fast"),
-        /** The entry has no table in this release. */
+        /**
+         * A function of a Gemini request whose name is one only Gemini's upstream takes (a dot or a colon in it, which MCP servers
+         * put there, or more than 64 characters): the OpenAI format and Anthropic's refuse the request, and a Kiro or an Anthropic
+         * key is given the name as it is. A vendor whose models are Gemini's carries it.
+         */
+        FUNCTION_NAME("function_name"),
+        /** The entry has no table in this release. Every entry of the registry has one now; the feature is what a new entry is given until it has. */
         UNSUPPORTED_ENTRY("entry"),
 
         // ---- a member's switches decide ----
@@ -110,8 +117,8 @@ public final class RequestFeatureDetector {
          */
         BUILTIN_TOOL("builtin_tool"),
         /**
-         * An image in the output of a tool ({@code view_image} of Codex), which the conversion to Chat has no place for:
-         * the text of the output is all a tool message holds.
+         * An image in the output of a tool ({@code view_image} of Codex, an image block in a {@code tool_result} of Claude
+         * Code), which the conversion to Chat has no place for: the text of the output is all a tool message holds.
          */
         TOOL_OUTPUT_IMAGE("tool_output_image"),
         /** A {@code tool_choice} of a kind the relay's format has no word for ({@code allowed_tools}): the model would be offered every tool. */
@@ -132,7 +139,11 @@ public final class RequestFeatureDetector {
         CONTEXT_MANAGEMENT("context_management"),
         /** {@code thinking} and {@code redacted_thinking} blocks of earlier turns. */
         HISTORY_THINKING("thinking_history"),
-        /** Blocks of earlier turns that record a tool Anthropic ran ({@code server_tool_use}, {@code web_search_tool_result}). */
+        /**
+         * Blocks of earlier turns that record a tool Anthropic ran ({@code server_tool_use}, {@code web_search_tool_result}), or,
+         * on the Gemini entry, a code execution or a tool of the API ({@code executableCode}, {@code codeExecutionResult},
+         * {@code toolCall} and {@code toolResponse} parts).
+         */
         SERVER_TOOL_HISTORY("server_tool_history"),
         /** An {@code output_config.effort} that is not what sets the level of an adaptive thinking. */
         OUTPUT_CONFIG("output_config"),
@@ -152,7 +163,10 @@ public final class RequestFeatureDetector {
         TRUNCATION("truncation"),
         /** The {@code max_tool_calls} of a Responses request: a cap on the calls of the tools OpenAI runs, which no relay is given. */
         MAX_TOOL_CALLS("max_tool_calls"),
-        /** The {@code reasoning.summary} of a Responses request: a relay returns its reasoning as it has it, not as a summary. */
+        /**
+         * The {@code reasoning.summary} of a Responses request, or the {@code thinkingConfig.includeThoughts} of a Gemini one: a relay
+         * returns its reasoning as it has it, not as a summary, and the conversion does not give it back to the client as one.
+         */
         REASONING_SUMMARY("reasoning_summary"),
         LOGPROBS("logprobs"),
         USER("user"),
@@ -163,8 +177,15 @@ public final class RequestFeatureDetector {
         PROMPT_CACHE_RETENTION("prompt_cache_retention"),
         /** The {@code safety_identifier} of a Chat request: the id of the end user, which is never passed on (design 7.12). */
         SAFETY_IDENTIFIER("safety_identifier"),
+        /** The {@code safetySettings} of a Gemini request: the thresholds of the filters of Google's own models, which a relay's model does not have. */
+        SAFETY_SETTINGS("safety_settings"),
         /** A request for output other than text, or the {@code audio} parameter that goes with it. */
-        MODALITIES("modalities");
+        MODALITIES("modalities"),
+        /**
+         * The {@code text/x.enum} answer of a Gemini request, one of a set of values: no relay's format asks for it, so the model
+         * answers in words, which the client may not be able to read as the value.
+         */
+        ENUM_ANSWER("enum_answer");
 
         private final String label;
 
@@ -218,10 +239,10 @@ public final class RequestFeatureDetector {
 
     /**
      * @param entry the endpoint the request came in through
-     * @param body  the request as the client sent it: the Anthropic body for Messages, the Chat body for Chat, and for
-     *              Responses the body after the gateway expanded its {@code previous_response_id} into the input
-     *              ({@code OpenAiResponseStateStore#expand}), so that one that is still there is one this node could not
-     *              expand
+     * @param body  the request as the client sent it: the Anthropic body for Messages, the Chat body for Chat, the
+     *              {@code generateContent} body for Gemini, and for Responses the body after the gateway expanded its
+     *              {@code previous_response_id} into the input ({@code OpenAiResponseStateStore#expand}), so that one that
+     *              is still there is one this node could not expand
      */
     public static Detected detect(Entry entry, JsonNode body) {
         Objects.requireNonNull(entry, "entry");
@@ -232,7 +253,7 @@ public final class RequestFeatureDetector {
             case MESSAGES -> messages(body);
             case CHAT -> chat(body);
             case RESPONSES -> responses(body);
-            case GEMINI -> new Detected(entry, EnumSet.of(Feature.UNSUPPORTED_ENTRY), false, false);
+            case GEMINI -> gemini(body);
         };
     }
 
@@ -274,12 +295,13 @@ public final class RequestFeatureDetector {
         system(body.path("system"), found);
         anthropicTools(body.path("tools"), found);
         JsonNode messages = body.path("messages");
+        boolean[] imageNotCarried = new boolean[1];
         if (messages.isArray()) {
             for (JsonNode message : messages) {
-                anthropicMessage(message, found);
+                anthropicMessage(message, found, imageNotCarried);
             }
         }
-        return new Detected(Entry.MESSAGES, found, anthropicToolContinuation(messages), unmapped);
+        return new Detected(Entry.MESSAGES, found, anthropicToolContinuation(messages), unmapped, imageNotCarried[0]);
     }
 
     private static void system(JsonNode system, Set<Feature> found) {
@@ -344,25 +366,37 @@ public final class RequestFeatureDetector {
         return Feature.ANTHROPIC_DEFINED_TOOL;
     }
 
-    private static void anthropicMessage(JsonNode message, Set<Feature> found) {
+    /**
+     * @param imageNotCarried set when an image of the message is one the conversion has no place for, whatever the member:
+     *                        one the conversion cannot give a relay an address for ({@link AnthropicChatWireConverter#imageUrl}),
+     *                        or in a message that is not the user's, whose images the conversion leaves out
+     */
+    private static void anthropicMessage(JsonNode message, Set<Feature> found, boolean[] imageNotCarried) {
         JsonNode content = message.path("content");
         if (!content.isArray()) {
             return;
         }
+        boolean user = !"assistant".equals(message.path("role").stringValue("user"));
         for (JsonNode block : content) {
             if (block.isObject()) {
-                anthropicBlock(block, found, true);
+                anthropicBlock(block, found, true, user, imageNotCarried);
             }
         }
     }
 
-    /** @param topLevel false for a block inside a {@code tool_result}, which has no further tool results of its own */
-    private static void anthropicBlock(JsonNode block, Set<Feature> found, boolean topLevel) {
+    /**
+     * @param topLevel false for a block inside a {@code tool_result}, which has no further tool results of its own; an image
+     *                 there is the image in the output of a tool, which a tool message of Chat has no place for
+     */
+    private static void anthropicBlock(JsonNode block, Set<Feature> found, boolean topLevel, boolean user, boolean[] imageNotCarried) {
         String type = block.path("type").stringValue("");
         switch (type) {
             case "text", "tool_use" -> cacheControl(block, found);
             case "image" -> {
-                found.add(Feature.IMAGE);
+                found.add(topLevel ? Feature.IMAGE : Feature.TOOL_OUTPUT_IMAGE);
+                if (topLevel && (!user || !AnthropicChatWireConverter.carriesImage(block))) {
+                    imageNotCarried[0] = true;
+                }
                 cacheControl(block, found);
             }
             case "document" -> {
@@ -380,7 +414,7 @@ public final class RequestFeatureDetector {
                 if (block.path("content").isArray()) {
                     for (JsonNode part : block.path("content")) {
                         if (part.isObject()) {
-                            anthropicBlock(part, found, false);
+                            anthropicBlock(part, found, false, user, imageNotCarried);
                         }
                     }
                 }
@@ -837,6 +871,237 @@ public final class RequestFeatureDetector {
                 }
                 default -> {
                     // reasoning, item_reference and the rest make no message.
+                }
+            }
+        }
+        return false;
+    }
+
+    // ---- Gemini ----
+
+    /**
+     * What a {@code generateContent} request asks for, read the way {@link GeminiChatConverter} converts it (design 7.9,
+     * GEMINI): a thing is a feature where the conversion does not carry it, so that the policy never promises a relay what
+     * the Chat body does not hold. The tools that are not functions ({@code googleSearch}, {@code codeExecution}, the rest)
+     * are server-side: a relay's model would answer without them and be paid for it, so they are HARD, and so is a
+     * {@code cachedContent}, which points at context that lives with Google. Gemini has no baseline: its routes are Kiro's
+     * and the Anthropic keys', which read text only, so what a member cannot carry is left out and recorded. The body is read
+     * in camelCase, the spelling {@link GeminiChatConverter} reads: a request in the Python SDK's snake_case is given to
+     * {@link GeminiRequestNormalizer} first.
+     */
+    private static Detected gemini(JsonNode body) {
+        EnumSet<Feature> found = EnumSet.noneOf(Feature.class);
+        JsonNode config = body.path("generationConfig");
+        if (config.path("candidateCount").isIntegralNumber() && config.path("candidateCount").longValue() > 1) {
+            found.add(Feature.N_OVER_ONE);
+        }
+        if (stopSequences(config.path("stopSequences")) > StrictChatLint.MAX_STOP_SEQUENCES) {
+            found.add(Feature.STOP_SEQUENCES_OVER_4);
+        }
+        if (config.hasNonNull("topK")) {
+            found.add(Feature.TOP_K);
+        }
+        if (geminiServiceTier(body.path("serviceTier"))) {
+            found.add(Feature.SERVICE_TIER);
+        }
+        if (asksForThoughts(body)) {
+            found.add(Feature.REASONING_SUMMARY);
+        }
+        if ((config.path("responseLogprobs").isBoolean() && config.path("responseLogprobs").booleanValue()) || config.hasNonNull("logprobs")) {
+            found.add(Feature.LOGPROBS);
+        }
+        if (geminiOutputModalities(config)) {
+            found.add(Feature.MODALITIES);
+        }
+        GeminiChatConverter.Answer answer = GeminiChatConverter.answer(config);
+        if (answer.kind() == GeminiChatConverter.AnswerKind.JSON && answer.schema() != null) {
+            found.add(Feature.JSON_SCHEMA);
+        } else if (answer.kind() == GeminiChatConverter.AnswerKind.OTHER) {
+            found.add(Feature.ENUM_ANSWER);
+        }
+        if (filled(body.path("safetySettings"))) {
+            found.add(Feature.SAFETY_SETTINGS);
+        }
+        // Both point at state that Google holds: the context of a cache, and where an answer that was cut is continued.
+        if (filled(body.path("cachedContent")) || filled(body.path("continuationToken"))) {
+            found.add(Feature.SERVER_HELD_CONTEXT);
+        }
+        // The sanitizer reads the thinkingConfig of the original body, so it is asked the same way.
+        boolean unmapped = reasoning(NO_CHAT_FIELDS, body, found);
+        geminiTools(body, found);
+        JsonNode contents = body.path("contents");
+        boolean[] imageNotCarried = new boolean[1];
+        if (contents.isArray()) {
+            for (JsonNode content : contents) {
+                if (content.isObject()) {
+                    geminiContent(content, found, imageNotCarried);
+                }
+            }
+        }
+        return new Detected(Entry.GEMINI, found, geminiToolContinuation(contents), unmapped, imageNotCarried[0]);
+    }
+
+    /** Output other than text: a {@code responseModalities} that names anything but {@code TEXT}, or a {@code speechConfig}. */
+    private static boolean geminiOutputModalities(JsonNode config) {
+        if (config.hasNonNull("speechConfig")) {
+            return true;
+        }
+        JsonNode modalities = config.path("responseModalities");
+        if (!modalities.isArray()) {
+            return false;
+        }
+        for (JsonNode modality : modalities) {
+            if (!"text".equalsIgnoreCase(modality.stringValue("text"))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** A {@code serviceTier} other than the default one: {@code flex} and {@code priority} are the choices of the API besides it. */
+    private static boolean geminiServiceTier(JsonNode tier) {
+        if (!tier.isString() || tier.stringValue().isBlank()) {
+            return false;
+        }
+        String normalized = tier.stringValue().strip().toLowerCase(Locale.ROOT);
+        return !normalized.equals("standard") && !normalized.equals("unspecified") && !normalized.equals("service_tier_unspecified");
+    }
+
+    /**
+     * Whether the request asks for the summaries of the model's thoughts ({@code thinkingConfig.includeThoughts}). The
+     * sanitizer reads the {@code thinkingConfig} where it is in the digest, so this does too: inside the {@code generationConfig},
+     * else at the top.
+     */
+    private static boolean asksForThoughts(JsonNode body) {
+        JsonNode config = body.path("generationConfig").path("thinkingConfig");
+        if (!config.isObject()) {
+            config = body.path("thinkingConfig");
+        }
+        return config.path("includeThoughts").isBoolean() && config.path("includeThoughts").booleanValue();
+    }
+
+    /**
+     * The functions are carried; every other kind of tool is not a function, and each has the feature of what it does (the
+     * ones of Anthropic's list that are the same thing). The {@code toolConfig} is a feature when it is of a kind a relay
+     * has no word for, or forces a function nobody declared; like the conversion, this reads it only in a request that
+     * declares a function.
+     */
+    private static void geminiTools(JsonNode body, Set<Feature> found) {
+        JsonNode tools = body.path("tools");
+        if (tools.isArray()) {
+            for (JsonNode tool : tools) {
+                if (!tool.isObject()) {
+                    continue;
+                }
+                for (Map.Entry<String, JsonNode> field : tool.properties()) {
+                    if (field.getValue().isNull()) {
+                        continue;
+                    }
+                    switch (field.getKey()) {
+                        case "functionDeclarations" -> {
+                            // Carried.
+                        }
+                        case "googleSearch", "googleSearchRetrieval" -> found.add(Feature.WEB_SEARCH);
+                        case "codeExecution" -> found.add(Feature.CODE_EXECUTION);
+                        case "urlContext" -> found.add(Feature.WEB_FETCH);
+                        case "computerUse" -> found.add(Feature.COMPUTER_TOOL);
+                        default -> found.add(Feature.NON_FUNCTION_TOOL);
+                    }
+                }
+            }
+        }
+        Set<String> declared = GeminiChatConverter.declaredFunctions(tools);
+        for (String name : declared) {
+            if (!StrictChatLint.isUpstreamFunctionName(name)) {
+                found.add(Feature.FUNCTION_NAME);
+            }
+        }
+        JsonNode choice = declared.isEmpty() ? null : GeminiChatConverter.toolChoice(body.path("toolConfig"), declared);
+        if (choice != null && !(ChatWireSanitizer.isRelayToolChoice(choice)
+            && (choice.isString() || declared.contains(choice.path("function").path("name").stringValue(""))))) {
+            found.add(Feature.TOOL_CHOICE);
+        }
+    }
+
+    /**
+     * The parts of a turn the conversion has a place for, the summaries of thoughts, which it has not, and the media it
+     * leaves out: those of the model's turns, which a Chat history has no place for in an assistant message, and the images
+     * of the answers of functions.
+     */
+    private static void geminiContent(JsonNode content, Set<Feature> found, boolean[] imageNotCarried) {
+        JsonNode parts = content.path("parts");
+        if (!parts.isArray()) {
+            return;
+        }
+        boolean user = !"model".equals(content.path("role").stringValue(""));
+        for (JsonNode part : parts) {
+            if (!part.isObject()) {
+                continue;
+            }
+            if (GeminiChatConverter.isThought(part)) {
+                found.add(Feature.HISTORY_THINKING);
+                continue;
+            }
+            GeminiChatConverter.Media media = GeminiChatConverter.media(part);
+            if (media != null) {
+                switch (media.kind()) {
+                    case IMAGE -> {
+                        found.add(Feature.IMAGE);
+                        if (!(user && media.carried())) {
+                            imageNotCarried[0] = true;
+                        }
+                    }
+                    case AUDIO -> found.add(Feature.AUDIO);
+                    case FILE -> found.add(Feature.FILE);
+                }
+                continue;
+            }
+            JsonNode call = part.path("functionCall");
+            if (!user && call.isObject() && !StrictChatLint.isUpstreamFunctionName(call.path("name").stringValue(""))) {
+                found.add(Feature.FUNCTION_NAME);
+            }
+            // What Google ran for the model in an earlier turn: the history of a code execution or of a tool of the API.
+            if (part.hasNonNull("executableCode") || part.hasNonNull("codeExecutionResult") || part.hasNonNull("toolCall")
+                || part.hasNonNull("toolResponse")) {
+                found.add(Feature.SERVER_TOOL_HISTORY);
+                continue;
+            }
+            JsonNode answerParts = part.path("functionResponse").path("parts");
+            if (answerParts.isArray()) {
+                for (JsonNode answerPart : answerParts) {
+                    GeminiChatConverter.Media inAnswer = answerPart.isObject() ? GeminiChatConverter.media(answerPart) : null;
+                    if (inAnswer != null) {
+                        // The conversion tells the model they were there, and no more.
+                        found.add(switch (inAnswer.kind()) {
+                            case IMAGE -> Feature.TOOL_OUTPUT_IMAGE;
+                            case AUDIO -> Feature.AUDIO;
+                            case FILE -> Feature.FILE;
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * The conversion's reading of the end of the conversation, which the sanitizer reads again in the Chat body: going back
+     * from the end, a turn of the user that holds the answer of a function comes before any turn of the model.
+     */
+    private static boolean geminiToolContinuation(JsonNode contents) {
+        if (!contents.isArray()) {
+            return false;
+        }
+        for (int i = contents.size() - 1; i >= 0; i--) {
+            JsonNode content = contents.get(i);
+            if ("model".equals(content.path("role").stringValue(""))) {
+                return false;
+            }
+            JsonNode parts = content.path("parts");
+            if (parts.isArray()) {
+                for (JsonNode part : parts) {
+                    if (part.path("functionResponse").isObject()) {
+                        return true;
+                    }
                 }
             }
         }

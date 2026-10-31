@@ -40,6 +40,7 @@ class FeaturePolicySanitizerTest {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final AnthropicRequestAdapter ADAPTER = new AnthropicRequestAdapter(JSON, new DefaultModelCatalogProvider());
     private static final ResponsesChatConverter CONVERTER = new ResponsesChatConverter(JSON);
+    private static final GeminiChatConverter GEMINI_CONVERTER = new GeminiChatConverter(JSON);
 
     /** The labels the sanitizer records, which the policy has to use for the same things. */
     private static final Set<Feature> SHARED = EnumSet.of(
@@ -54,6 +55,15 @@ class FeaturePolicySanitizerTest {
      */
     private static final Set<Feature> SHARED_RESPONSES = EnumSet.of(
         Feature.IMAGE, Feature.FILE, Feature.JSON_SCHEMA, Feature.REASONING_EFFORT, Feature.TOOL_CHOICE
+    );
+
+    /**
+     * What the sanitizer can see of a Gemini request after the conversion: the images, audio and files of the user's turns,
+     * the response schema, the thinking request (it reads the original body) and the choice of a function. The media of the
+     * turns of the model and of the answers of functions never reach it.
+     */
+    private static final Set<Feature> SHARED_GEMINI = EnumSet.of(
+        Feature.IMAGE, Feature.AUDIO, Feature.FILE, Feature.JSON_SCHEMA, Feature.THINKING, Feature.TOOL_CHOICE
     );
 
     private record Sample(String name, Entry entry, String body) {
@@ -95,6 +105,15 @@ class FeaturePolicySanitizerTest {
     /** The fields of the Chat API that a passthrough route hands to the account whole, and the relay's body has no place for. */
     private static final String NATIVE_ONLY_FIELDS = "\"verbosity\":\"low\",\"logit_bias\":{\"50256\":-100},"
         + "\"prompt_cache_key\":\"sess-1\",\"prompt_cache_retention\":\"24h\",\"safety_identifier\":\"u-hash\"";
+
+    private static final String GEMINI_USER = "{\"role\":\"user\",\"parts\":[{\"text\":\"q\"}]}";
+    private static final String GEMINI_CALL = "{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\",\"args\":{}},\"thoughtSignature\":\"SIG\"}]}";
+    private static final String GEMINI_ANSWER = "{\"role\":\"user\",\"parts\":[{\"functionResponse\":{\"name\":\"f\",\"response\":{\"o\":1}}}]}";
+    private static final String GEMINI_TOOLS = "\"tools\":[{\"functionDeclarations\":[{\"name\":\"f\"},{\"name\":\"g\"}]}]";
+
+    private static String gemini(String extra, String... contents) {
+        return "{\"contents\":[" + String.join(",", contents) + "]" + (extra.isEmpty() ? "" : "," + extra) + "}";
+    }
 
     private static List<Sample> samples() {
         List<Sample> samples = new ArrayList<>();
@@ -194,6 +213,39 @@ class FeaturePolicySanitizerTest {
             "{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"rules\"}]}",
             "{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"look\"},"
                 + "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64,iVBORw0KGgo=\"},{\"type\":\"input_file\",\"file_id\":\"f1\"}]}")));
+        samples.add(new Sample("gemini, plain", Entry.GEMINI, gemini("", GEMINI_USER)));
+        samples.add(new Sample("gemini, an image by data and one by address", Entry.GEMINI, gemini("",
+            "{\"role\":\"user\",\"parts\":[{\"text\":\"look\"},{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}},"
+                + "{\"fileData\":{\"mimeType\":\"image/jpeg\",\"fileUri\":\"https://x.example/a.jpg\"}}]}")));
+        samples.add(new Sample("gemini, an image that is only a file of Google", Entry.GEMINI, gemini("",
+            "{\"role\":\"user\",\"parts\":[{\"fileData\":{\"mimeType\":\"image/png\","
+                + "\"fileUri\":\"https://generativelanguage.googleapis.com/v1beta/files/abc\"}}]}")));
+        samples.add(new Sample("gemini, audio and a file", Entry.GEMINI, gemini("",
+            "{\"role\":\"user\",\"parts\":[{\"inlineData\":{\"mimeType\":\"audio/wav\",\"data\":\"AAAA\"}},"
+                + "{\"inlineData\":{\"mimeType\":\"application/pdf\",\"data\":\"JVBERi0x\"}}]}")));
+        samples.add(new Sample("gemini, a response schema", Entry.GEMINI, gemini(
+            "\"generationConfig\":{\"responseMimeType\":\"application/json\",\"responseSchema\":{\"type\":\"OBJECT\"}}", GEMINI_USER)));
+        samples.add(new Sample("gemini, thinking on a new turn", Entry.GEMINI, gemini(
+            "\"generationConfig\":{\"thinkingConfig\":{\"thinkingBudget\":8000}}", GEMINI_USER)));
+        samples.add(new Sample("gemini, thinking on a tool continuation", Entry.GEMINI, gemini(
+            GEMINI_TOOLS + ",\"generationConfig\":{\"thinkingConfig\":{\"thinkingLevel\":\"HIGH\"}}", GEMINI_USER, GEMINI_CALL, GEMINI_ANSWER)));
+        samples.add(new Sample("gemini, a dynamic thinking budget", Entry.GEMINI, gemini(
+            "\"generationConfig\":{\"thinkingConfig\":{\"thinkingBudget\":-1}}", GEMINI_USER)));
+        samples.add(new Sample("gemini, a choice among functions", Entry.GEMINI, gemini(GEMINI_TOOLS
+            + ",\"toolConfig\":{\"functionCallingConfig\":{\"mode\":\"ANY\",\"allowedFunctionNames\":[\"f\",\"g\"]}}", GEMINI_USER)));
+        samples.add(new Sample("gemini, a choice of one function and of one nobody declared", Entry.GEMINI, gemini(GEMINI_TOOLS
+            + ",\"toolConfig\":{\"functionCallingConfig\":{\"mode\":\"ANY\",\"allowedFunctionNames\":[\"g\"]}}", GEMINI_USER)));
+        samples.add(new Sample("gemini, a choice of a function nobody declared", Entry.GEMINI, gemini(GEMINI_TOOLS
+            + ",\"toolConfig\":{\"functionCallingConfig\":{\"mode\":\"ANY\",\"allowedFunctionNames\":[\"nobody\"]}}", GEMINI_USER)));
+        samples.add(new Sample("gemini, a history of two calls of one function", Entry.GEMINI, gemini(GEMINI_TOOLS,
+            GEMINI_USER, "{\"role\":\"model\",\"parts\":[{\"functionCall\":{\"name\":\"f\"}},{\"functionCall\":{\"name\":\"f\"}}]}",
+            "{\"role\":\"user\",\"parts\":[{\"functionResponse\":{\"name\":\"f\",\"response\":{}}},{\"functionResponse\":{\"name\":\"f\",\"response\":{}}}]}")));
+        samples.add(new Sample("gemini, everything at once", Entry.GEMINI, gemini(GEMINI_TOOLS
+            + ",\"safetySettings\":[{\"category\":\"HARM_CATEGORY_HARASSMENT\",\"threshold\":\"BLOCK_NONE\"}],"
+            + "\"generationConfig\":{\"topK\":3,\"thinkingConfig\":{\"thinkingBudget\":2000},\"responseMimeType\":\"application/json\","
+            + "\"responseJsonSchema\":{\"type\":\"object\"}}",
+            GEMINI_USER, "{\"role\":\"user\",\"parts\":[{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}},"
+                + "{\"inlineData\":{\"mimeType\":\"audio/wav\",\"data\":\"AAAA\"}}]}")));
         samples.add(new Sample("chat, everything at once", Entry.CHAT, chat("\"reasoning_effort\":\"low\"," + SCHEMA,
             "{\"role\":\"developer\",\"content\":[" + CACHED_TEXT + "]}",
             user("[" + CACHED_TEXT + "," + IMAGE_PART + ",{\"type\":\"file\",\"file\":{\"file_id\":\"f1\"}}]"))));
@@ -215,6 +267,7 @@ class FeaturePolicySanitizerTest {
         return switch (sample.entry()) {
             case MESSAGES -> ChatWireSanitizer.sanitize(ADAPTER.messagesToChat(body), body, settings, "relay-model");
             case RESPONSES -> ChatWireSanitizer.sanitize(CONVERTER.toChat(body), null, settings, "relay-model");
+            case GEMINI -> ChatWireSanitizer.sanitize(GEMINI_CONVERTER.toChat("gemini-2.5-pro", body), body, settings, "relay-model");
             default -> ChatWireSanitizer.sanitize(body, null, settings, "relay-model");
         };
     }
@@ -225,7 +278,7 @@ class FeaturePolicySanitizerTest {
      */
     private static final Set<String> REPAIRS = Set.of(
         ChatCanonicalizer.EMPTY_TOOL_RESULT, ChatCanonicalizer.EMPTY_USER_MESSAGE, ChatCanonicalizer.TOOL_HISTORY_FLATTENED,
-        ChatWireSanitizer.BILLING_HEADER_DROPPED);
+        ChatWireSanitizer.BILLING_HEADER_DROPPED, ChatWireSanitizer.TEMPERATURE, ChatWireSanitizer.TOP_P);
 
     private static List<String> withoutRepairs(List<String> degraded) {
         return degraded.stream().filter(name -> !REPAIRS.contains(name)).toList();
@@ -356,6 +409,56 @@ class FeaturePolicySanitizerTest {
         assertThat(noneSeen).isFalse();
     }
 
+    @Test
+    void onGeminiRequestsTheTwoAgreeBothWaysOnTheFeaturesTheyShare() {
+        boolean noneSeen = true;
+        for (Sample sample : samples()) {
+            if (sample.entry() != Entry.GEMINI) {
+                continue;
+            }
+            noneSeen = false;
+            JsonNode body = JSON.readTree(sample.body());
+            Detected detected = RequestFeatureDetector.detect(Entry.GEMINI, body);
+            for (int bits = 0; bits < COMBINATIONS; bits++) {
+                Settings settings = settings(bits);
+                Set<String> degraded = new LinkedHashSet<>(withoutRepairs(wire(sample, body, settings).degraded()));
+                for (Baseline baseline : Baseline.values()) {
+                    Set<String> expected = new LinkedHashSet<>();
+                    for (Feature feature : SHARED_GEMINI) {
+                        if (detected.has(feature) && FeaturePolicy.treatment(feature, detected, baseline, settings) != Treatment.CARRY) {
+                            expected.add(feature.label());
+                        }
+                    }
+                    assertThat(degraded).as("%s, %s, %s", sample.name(), baseline, settings).isEqualTo(expected);
+                }
+            }
+        }
+        assertThat(noneSeen).isFalse();
+    }
+
+    /**
+     * The media of a turn of the model and of the answer of a function have no place in a Chat history a relay takes, so the
+     * sanitizer is never given them and records nothing: the policy alone names the loss, for a member with vision too.
+     */
+    @Test
+    void anImageInATurnOfTheModelIsNamedByThePolicyAlthoughTheSanitizerNeverSeesIt() {
+        JsonNode body = JSON.readTree(gemini("",
+            GEMINI_USER, "{\"role\":\"model\",\"parts\":[{\"text\":\"here\"},{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}}]}",
+            GEMINI_USER));
+        Detected detected = RequestFeatureDetector.detect(Entry.GEMINI, body);
+
+        for (int bits = 0; bits < COMBINATIONS; bits++) {
+            Settings settings = settings(bits);
+            Wire wire = wire(new Sample("model image", Entry.GEMINI, ""), body, settings);
+            assertThat(wire.degraded()).as("%s", settings).doesNotContain(Feature.IMAGE.label());
+            assertThat(wire.body().toString()).doesNotContain("image_url");
+            for (Baseline baseline : Baseline.values()) {
+                assertThat(FeaturePolicy.treatment(Feature.IMAGE, detected, baseline, settings)).as("%s %s", baseline, settings)
+                    .isEqualTo(Treatment.SOFT);
+            }
+        }
+    }
+
     /**
      * The conversion keeps the text of a developer message and nothing else, so the sanitizer is never given the image of one
      * and records nothing: the policy alone names the loss, and does so for a member with vision too.
@@ -440,6 +543,28 @@ class FeaturePolicySanitizerTest {
     }
 
     /**
+     * The sampling rule of Claude's vendor changes two numbers of the body (a temperature above 1, a top_p beside a temperature):
+     * it is a rule of the model and not a feature of the request, so the policy has no word for it, and the two names it records
+     * are told apart from the features' and are recorded only where the member's settings ask for the rule.
+     */
+    @Test
+    void theSamplingRuleOfClaudesVendorRecordsItsTwoLossesAsRepairsAndOnlyForAMemberThatAsksForIt() {
+        String both = chat("\"temperature\":1.4,\"top_p\":0.9", user("\"hi\""));
+        Settings claude = new Settings(false, false, false, false, false, false, false, false, true, true, false, true);
+        Settings other = new Settings(false, false, false, false, false, false, false, false, true, true, false, false);
+
+        Wire changed = ChatWireSanitizer.sanitize(JSON.readTree(both), null, claude, "relay-model");
+        Wire kept = ChatWireSanitizer.sanitize(JSON.readTree(both), null, other, "relay-model");
+
+        assertThat(changed.degraded()).containsExactly(ChatWireSanitizer.TEMPERATURE, ChatWireSanitizer.TOP_P);
+        assertThat(REPAIRS).containsAll(changed.degraded());
+        assertThat(kept.degraded()).isEmpty();
+        for (Feature feature : Feature.values()) {
+            assertThat(changed.degraded()).as("a repair named like %s", feature).doesNotContain(feature.label());
+        }
+    }
+
+    /**
      * The canonicalizer records the repairs it makes in the same list. They are not features of the request, so the
      * policy has no word for them, and they must not be mistaken for ones: the names are disjoint from the features'. A
      * repair is recorded only where the member's settings say the native path of its model makes it, so that a request
@@ -506,6 +631,6 @@ class FeaturePolicySanitizerTest {
             seen.addAll(RequestFeatureDetector.detect(sample.entry(), JSON.readTree(sample.body())).features());
         }
 
-        assertThat(seen).containsAll(SHARED).containsAll(SHARED_RESPONSES);
+        assertThat(seen).containsAll(SHARED).containsAll(SHARED_RESPONSES).containsAll(SHARED_GEMINI);
     }
 }

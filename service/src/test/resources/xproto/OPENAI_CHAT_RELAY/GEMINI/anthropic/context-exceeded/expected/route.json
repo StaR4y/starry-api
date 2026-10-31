@@ -1,0 +1,34 @@
+{
+  "relaysLeftOut": [],
+  "attempts": [
+    {
+      "account": "relay-1",
+      "tier": "anthropic:relay",
+      "dispatch": "OPENAI_CHAT",
+      "wireModel": "relay-sonnet",
+      "success": false,
+      "status": 400,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "usageSource": null,
+      "stopReason": "CONTEXT_EXCEEDED",
+      "degraded": "top_k,reasoning_summary,top_p",
+      "error": "Source error 400 (context_length_exceeded)"
+    },
+    {
+      "account": "kiro-1",
+      "tier": "anthropic:native",
+      "dispatch": "NATIVE",
+      "wireModel": null,
+      "success": true,
+      "status": 200,
+      "inputTokens": 500,
+      "outputTokens": 20,
+      "usageSource": null,
+      "stopReason": null,
+      "degraded": null,
+      "error": null,
+      "nativeToolIds": []
+    }
+  ]
+}

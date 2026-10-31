@@ -10,7 +10,9 @@ import tools.jackson.databind.node.ObjectNode;
 /**
  * How much a request can ask the upstream to read and write, as the upper bound a reservation is sized from. The
  * facade's untiered reservation and the tiered plan use the same formulas, so a vendor without tiers keeps its
- * reservation and a tier is sized the same way for the same request.
+ * reservation and a tier is sized the same way for the same request. The one difference is the plan of a request that
+ * relays take part in, whose route of Kiro and Anthropic keys alone, which read the text of a request, is sized by that text
+ * ({@code DefaultSourceTierPlanner.inputBound}); a request no relay takes part in is sized as it always was.
  */
 public final class RequestBounds {
 

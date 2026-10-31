@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.IntStream;
 import org.junit.jupiter.api.Test;
@@ -127,12 +128,15 @@ class FeaturePolicyTest {
         Detected continuation = RequestFeatureDetector.detect(Entry.MESSAGES,
             tree(RequestFeatureDetectorTest.CLAUDE_CODE_TURN.formatted(RequestFeatureDetectorTest.TOOL_RESULT_LAST)));
         Set<Feature> alwaysLeftOut = EnumSet.of(
-            Feature.CACHE_CONTROL, Feature.TOOL_SEARCH, Feature.CONTEXT_MANAGEMENT, Feature.METADATA, Feature.HISTORY_THINKING
+            Feature.TOOL_SEARCH, Feature.CONTEXT_MANAGEMENT, Feature.METADATA, Feature.HISTORY_THINKING
         );
 
-        // A member without reasoning effort gets no thinking; with it, a new turn does and a tool continuation does not.
-        assertThat(soft(FeaturePolicy.judge(prompt, Baseline.TEXT_ONLY, NONE)))
-            .containsExactlyInAnyOrderElementsOf(withThinking(alwaysLeftOut));
+        // A member without reasoning effort gets no thinking, and one that does not pass cache control through none of the
+        // cache controls (the conversion for relays has them: P8-01); with both, a new turn gets thinking and a tool
+        // continuation does not.
+        Set<Feature> memberTakesNothing = withThinking(alwaysLeftOut);
+        memberTakesNothing.add(Feature.CACHE_CONTROL);
+        assertThat(soft(FeaturePolicy.judge(prompt, Baseline.TEXT_ONLY, NONE))).containsExactlyInAnyOrderElementsOf(memberTakesNothing);
         assertThat(soft(FeaturePolicy.judge(prompt, Baseline.TEXT_ONLY, FULL))).containsExactlyInAnyOrderElementsOf(alwaysLeftOut);
         assertThat(soft(FeaturePolicy.judge(continuation, Baseline.TEXT_ONLY, FULL)))
             .containsExactlyInAnyOrderElementsOf(withThinking(alwaysLeftOut));
@@ -281,7 +285,7 @@ class FeaturePolicyTest {
     }
 
     @Test
-    void imagesAndDocumentsOfMessagesAreSoftForEveryMemberAndRouteLikeTheNativePath() {
+    void imagesOfMessagesAreCarriedToAMemberWithVisionAndDocumentsAreSoftForEveryMemberAndRoute() {
         String content = "[{\"type\":\"image\",\"source\":{\"type\":\"url\",\"url\":\"https://x.example/a.png\"}},"
             + "{\"type\":\"document\",\"source\":{\"type\":\"url\",\"url\":\"https://x.example/a.pdf\"}}]";
 
@@ -289,24 +293,59 @@ class FeaturePolicyTest {
             for (Settings member : List.of(NONE, VISION, FULL)) {
                 Verdict verdict = verdict(Entry.MESSAGES, messagesBody("", content), baseline, member);
                 assertThat(verdict.hard()).isEmpty();
-                assertThat(verdict.soft()).containsExactly(Feature.IMAGE, Feature.DOCUMENT);
+                assertThat(verdict.soft()).containsExactlyElementsOf(member.vision()
+                    ? List.of(Feature.DOCUMENT) : List.of(Feature.IMAGE, Feature.DOCUMENT));
             }
         }
     }
 
     @Test
-    void cacheControlAndTheToolResultErrorStaySoftUntilTheConversionCarriesThem() {
+    void anImageTheConversionHasNoPlaceForIsSoftEvenForAMemberWithVision() {
+        String file = "{\"type\":\"image\",\"source\":{\"type\":\"file\",\"file_id\":\"file_011\"}}";
+        String data = "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}}";
+        String inAnswer = "{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"a\"}," + data + "]}";
+
+        for (Settings member : List.of(VISION, FULL)) {
+            assertThat(messages(messagesBody("", "[" + data + "," + file + "]"), member).soft()).containsExactly(Feature.IMAGE);
+            Detected assistant = RequestFeatureDetector.detect(Entry.MESSAGES, tree(
+                "{\"model\":\"m\",\"max_tokens\":9,\"messages\":[{\"role\":\"user\",\"content\":\"q\"}," + inAnswer + "]}"));
+            assertThat(FeaturePolicy.judge(assistant, Baseline.TEXT_ONLY, member).soft()).containsExactly(Feature.IMAGE);
+        }
+        // Every one of the user's images that the conversion gives an address to is carried.
+        assertThat(messages(messagesBody("", "[" + data + "]"), VISION).soft()).isEmpty();
+    }
+
+    @Test
+    void anImageInTheOutputOfAToolIsSoftForEveryMemberAndRouteAMessagesRequestHasNoBaseline() {
+        String data = "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}}";
+        String content = "[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":[" + data + "]}]";
+
+        for (Baseline baseline : Baseline.values()) {
+            for (Settings member : allMembers()) {
+                Verdict verdict = verdict(Entry.MESSAGES, messagesBody("", content), baseline, member);
+                assertThat(verdict.hard()).isEmpty();
+                assertThat(verdict.soft()).containsExactly(Feature.TOOL_OUTPUT_IMAGE);
+            }
+        }
+    }
+
+    @Test
+    void cacheControlIsCarriedToAMemberThatPassesItThroughAndTheToolResultErrorToEveryMember() {
         String body = """
             {"model":"claude-sonnet-4-5","max_tokens":10,
              "system":[{"type":"text","text":"s","cache_control":{"type":"ephemeral"}}],
              "messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"t","content":"boom","is_error":true}]}]}
             """;
 
-        // Even a member that passes cache control through: the Messages conversion flattens it away (P8-01 changes that).
-        Verdict verdict = messages(body, FULL);
+        // The failure of a tool result is told in the text of the result, which no member can refuse; the cache control is
+        // sent to the members that pass it through and recorded as left out for the others (P8-01).
+        Verdict passes = messages(body, FULL);
+        Verdict doesNot = messages(body, NONE);
 
-        assertThat(verdict.hard()).isEmpty();
-        assertThat(verdict.soft()).containsExactly(Feature.CACHE_CONTROL, Feature.TOOL_RESULT_ERROR);
+        assertThat(passes.hard()).isEmpty();
+        assertThat(passes.soft()).isEmpty();
+        assertThat(doesNot.hard()).isEmpty();
+        assertThat(doesNot.soft()).containsExactly(Feature.CACHE_CONTROL);
     }
 
     @Test
@@ -944,12 +983,12 @@ class FeaturePolicyTest {
     // ---------------------------------------------------------------------------------------- the rest
 
     @ParameterizedTest
-    @EnumSource(value = Entry.class, names = {"GEMINI"})
-    void anEntryWithoutATableIsHardForEveryMember(Entry entry) {
+    @EnumSource(Entry.class)
+    void noEntryOfTheRegistryIsHardForWantingATable(Entry entry) {
         for (Baseline baseline : Baseline.values()) {
             for (Settings member : allMembers()) {
                 Verdict verdict = verdict(entry, "{\"model\":\"m\"}", baseline, member);
-                assertThat(verdict.hard()).contains(Feature.UNSUPPORTED_ENTRY);
+                assertThat(verdict.hard()).doesNotContain(Feature.UNSUPPORTED_ENTRY);
             }
         }
     }
@@ -1005,6 +1044,24 @@ class FeaturePolicyTest {
         }
     }
 
+    /**
+     * A function name with a dot or a colon is the Gemini API's, and the native accounts of a Gemini request take it as it is: a
+     * relay in front of any other upstream is left out for it (HARD, so that a request pinned to such a relay is told why), and
+     * one in front of Gemini carries it.
+     */
+    @Test
+    void aFunctionNameOnlyGeminiTakesIsCarriedByAGeminiVendorAndHardForAnyOther() {
+        Detected detected = new Detected(Entry.GEMINI, EnumSet.of(Feature.FUNCTION_NAME), false, false);
+        Settings other = new Settings(false, false, false, false, true, false, false, false, false, false, false);
+        Settings google = new Settings(false, false, false, false, true, false, false, false, false, true, true);
+
+        for (Baseline baseline : Baseline.values()) {
+            assertThat(FeaturePolicy.judge(detected, baseline, other).hard()).containsExactly(Feature.FUNCTION_NAME);
+            assertThat(FeaturePolicy.judge(detected, baseline, google).hard()).isEmpty();
+            assertThat(FeaturePolicy.judge(detected, baseline, google).soft()).isEmpty();
+        }
+    }
+
     @Test
     void theFeaturesNoRelayCarriesAreHardForEveryMemberRouteAndEntry() {
         EnumSet<Feature> alwaysHard = EnumSet.of(
@@ -1016,6 +1073,7 @@ class FeaturePolicyTest {
         );
         Set<Feature> neverHard = EnumSet.complementOf(alwaysHard);
         neverHard.remove(Feature.FAST);
+        neverHard.remove(Feature.FUNCTION_NAME);
         neverHard.removeAll(EnumSet.of(
             Feature.IMAGE, Feature.JSON_SCHEMA, Feature.AUDIO, Feature.FILE, Feature.TOOL_CHOICE, Feature.LOGIT_BIAS,
             Feature.BUILTIN_TOOL, Feature.TOOL_OUTPUT_IMAGE
@@ -1038,15 +1096,20 @@ class FeaturePolicyTest {
         }
     }
 
+    /** What an entry's conversion carries, by entry: the table the class keeps, read through the only door there is to it. */
     @Test
-    void anEntryWhoseConverterIsNotWrittenCarriesNothingButAPriorityTier() {
-        for (Entry entry : List.of(Entry.GEMINI)) {
+    void theConversionOfEachEntryCarriesOnlyWhatItHas() {
+        Map<Entry, Set<Feature>> carried = Map.of(
+            Entry.CHAT, EnumSet.of(Feature.IMAGE, Feature.CACHE_CONTROL, Feature.JSON_SCHEMA, Feature.THINKING, Feature.REASONING_EFFORT),
+            Entry.MESSAGES, EnumSet.of(Feature.IMAGE, Feature.CACHE_CONTROL, Feature.TOOL_RESULT_ERROR, Feature.THINKING),
+            Entry.RESPONSES, EnumSet.of(Feature.IMAGE, Feature.JSON_SCHEMA, Feature.REASONING_EFFORT),
+            Entry.GEMINI, EnumSet.of(Feature.IMAGE, Feature.JSON_SCHEMA, Feature.THINKING));
+        for (Entry entry : Entry.values()) {
             Detected detected = new Detected(entry, EnumSet.noneOf(Feature.class), false, false);
-            for (Feature feature : Feature.values()) {
-                assertThat(FeaturePolicy.treatment(feature, detected, Baseline.TEXT_ONLY, FULL))
-                    .as("%s %s", entry, feature)
-                    .isEqualTo(feature == Feature.FAST ? Treatment.CARRY : feature.compareTo(Feature.UNSUPPORTED_ENTRY) <= 0
-                        ? Treatment.HARD : Treatment.SOFT);
+            for (Feature feature : EnumSet.of(Feature.IMAGE, Feature.JSON_SCHEMA, Feature.THINKING, Feature.REASONING_EFFORT,
+                Feature.CACHE_CONTROL, Feature.TOOL_RESULT_ERROR)) {
+                assertThat(FeaturePolicy.treatment(feature, detected, Baseline.TEXT_ONLY, FULL) == Treatment.CARRY)
+                    .as("%s %s", entry, feature).isEqualTo(carried.get(entry).contains(feature));
             }
         }
     }

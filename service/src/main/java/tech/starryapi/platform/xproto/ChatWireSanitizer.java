@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
+import tech.starryapi.platform.core.PlatformToolUse;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.JsonNodeFactory;
@@ -31,10 +32,12 @@ import tools.jackson.databind.node.ObjectNode;
  *       and the rest (the feature policy names the ones a native account would have been given: {@link
  *       RequestFeatureDetector}).
  *   <li><b>A message</b>: {@code role} ({@code developer} is {@code system}), {@code content}, {@code tool_calls}
- *       (each with {@code id}, {@code type} and {@code function.name}/{@code arguments}) and {@code tool_call_id}; and
- *       a {@code cache_control}, which design 7.9 carries at message and at part level together, when the member
- *       passes it through. {@code name}, {@code reasoning_content}, {@code refusal}, {@code audio} and the rest are
- *       left out.
+ *       (each with {@code id}, {@code type} and {@code function.name}/{@code arguments}, and, for a model whose vendor
+ *       gives them ({@link Settings#carriesThoughtSignatures}), the thought signature of the call as {@code
+ *       extra_content.google.thought_signature}, built here and nothing else of the {@code extra_content}; the first call of a
+ *       message that has none is given {@link #SKIP_THOUGHT_SIGNATURE}) and {@code tool_call_id}; and a {@code cache_control}, which design 7.9 carries at message and at part level together, when
+ *       the member passes it through. {@code name}, {@code reasoning_content}, {@code refusal}, {@code audio} and the rest
+ *       are left out.
  *   <li><b>A content part</b>: {@code {type:text,text}} (the Responses names {@code input_text} and {@code
  *       output_text}, which the native accounts read as text too, are text), {@code {type:image_url,image_url:{url,
  *       detail}}} for a member with vision, and the {@code cache_control} of a member that passes it through. Any other
@@ -57,6 +60,13 @@ import tools.jackson.databind.node.ObjectNode;
  * (these are the SOFT features of design 7.9, which the feature policy names from the original request in the same
  * words). Fields that are only left out, such as {@code top_k}, are the policy's to name and are not listed here.
  *
+ * <p>The conversion of a Messages request ({@link AnthropicChatWireConverter}) gives a message whose text blocks carry a
+ * {@code cache_control} both its {@code content}, the one string the native conversion makes, and {@link #CACHE_PARTS}, the
+ * same text as parts with their cache controls. A member that passes cache control through is sent the parts, any other the
+ * string (and the cache control is recorded as left out), so that a member that does not take cache control is sent the body
+ * it was sent before the conversion had it. The key is read only when the body was converted ({@code entryBody} is given):
+ * a Chat client's body has no such key, and one that sends it has it ignored like any other.
+ *
  * <p>Reasoning. {@code reasoning_effort} is sent only to a member whose reasoning mode is effort, only when the client
  * asked for reasoning, and, for a model that needs it ({@link Settings#continuationDropsReasoning}), not on a tool
  * continuation turn (the request ends with tool results, possibly followed by more user text of the same client
@@ -71,6 +81,11 @@ import tools.jackson.databind.node.ObjectNode;
  * level not listed is not guessed, and is recorded as left out), which the conversion to Chat does not carry and is why
  * the original body is a parameter; and a Gemini {@code
  * thinkingConfig} with a positive {@code thinkingBudget}, bucketed the same way, or a {@code thinkingLevel}.
+ *
+ * <p>Sampling. {@code temperature} and {@code top_p} go to the relay as the client wrote them, except for a model whose
+ * upstream is Claude's ({@link Settings#claudeSampling}): Anthropic's API refuses a {@code temperature} above 1 and a request
+ * that sets both, and a relay passes the error on, so such a body has the {@code temperature} at 1 at most and no {@code top_p}
+ * next to it. Both losses are recorded, as {@link #TEMPERATURE} and {@link #TOP_P}.
  *
  * <p>The token limit is {@code max_completion_tokens} for the models that only take that one ({@link
  * #usesMaxCompletionTokens}, which is {@code OpenAiUpstreamClient}'s rule applied to the catalog's model) and {@code
@@ -116,6 +131,10 @@ public final class ChatWireSanitizer {
     public static final String REASONING_EFFORT = "reasoning_effort";
     public static final String TOOL_SEARCH = "tool_search_tool";
     public static final String TOOL_CHOICE = "tool_choice";
+    /** A {@code top_p} left out because the request also set a {@code temperature}, which Claude's models refuse (see {@link Settings#claudeSampling}). */
+    public static final String TOP_P = "top_p";
+    /** A {@code temperature} above 1 sent as 1, the most Claude's models take. */
+    public static final String TEMPERATURE = "temperature";
 
     /**
      * The repair of the sanitizer, not a feature of the request: the billing header of Claude Code was left out of the system
@@ -123,8 +142,23 @@ public final class ChatWireSanitizer {
      */
     public static final String BILLING_HEADER_DROPPED = "billing_header_dropped";
 
+    /**
+     * The value Google documents for a call that has no signature of its own: Gemini 3 refuses a history whose first call of a
+     * model's step is unsigned, and this one says the caller knows it (external: the Gemini API reference and its clients,
+     * which put it on the calls they rebuilt). It goes only into the Chat bodies of a vendor that signs.
+     */
+    public static final String SKIP_THOUGHT_SIGNATURE = "skip_thought_signature_validator";
+
     /** How the first block of Claude Code's system prompt starts, as it writes it; matched as it is, case and all. */
     static final String BILLING_HEADER_PREFIX = "x-anthropic-billing-header:";
+
+    /**
+     * The key of a message of the conversion of a Messages request ({@link AnthropicChatWireConverter}) that holds its text as
+     * parts that carry their cache controls, beside the {@code content} that is the same text as one string. It is between
+     * the conversion and this class and is never sent: a member that passes cache control through is sent the parts, any other
+     * the string, which is what it was sent before cache control was carried.
+     */
+    static final String CACHE_PARTS = "cache_parts";
 
     static final String IMAGE_PLACEHOLDER = "[image omitted]";
     static final String AUDIO_PLACEHOLDER = "[audio omitted]";
@@ -139,7 +173,7 @@ public final class ChatWireSanitizer {
     static final Set<String> MESSAGE_KEYS = Set.of("role", "content", "tool_calls", "tool_call_id", "cache_control");
     static final Set<String> PART_KEYS = Set.of("type", "text", "image_url", "cache_control");
     static final Set<String> IMAGE_URL_KEYS = Set.of("url", "detail");
-    static final Set<String> TOOL_CALL_KEYS = Set.of("id", "type", "function");
+    static final Set<String> TOOL_CALL_KEYS = Set.of("id", "type", "function", "extra_content");
     static final Set<String> TOOL_CALL_FUNCTION_KEYS = Set.of("name", "arguments");
     static final Set<String> TOOL_KEYS = Set.of("type", "function");
     static final Set<String> TOOL_FUNCTION_KEYS = Set.of("name", "description", "parameters", "strict");
@@ -182,6 +216,19 @@ public final class ChatWireSanitizer {
      *                               that defines no tools, so {@link ChatCanonicalizer} makes text of them in that case.
      *                               It is a property of the model's vendor ({@link #needsToolsForToolHistory}), the
      *                               same as the flag above, and members that differ in it get different bodies
+     * @param carriesThoughtSignatures the model gives its tool calls a thought signature that the next request has to
+     *                               bring back (Gemini's), so the calls of the history are sent with the one they were
+     *                               given, and the first call of a message that was given none (a call of a native source's
+     *                               answer, one a client rebuilt, a verification probe) with {@link ChatWireSanitizer#SKIP_THOUGHT_SIGNATURE};
+     *                               the Chat bodies of the other vendors never have one sent. Also a property of the
+     *                               model's vendor ({@link #carriesThoughtSignatures(String)})
+     * @param claudeSampling         the model is Claude's, whose upstream refuses a {@code temperature} above 1 and a request that
+     *                               sets {@code temperature} and {@code top_p} together (an error on every Claude 4 model and
+     *                               later), so a relay in front of it fails the attempt each time a client sets both, as the
+     *                               clients of Gemini and of OpenAI's API usually do. The body keeps the {@code temperature}, at 1
+     *                               at most, and not the {@code top_p}, and says so in {@link Wire#degraded()}. A property of the
+     *                               model's vendor ({@link #claudeSampling(String)}), the same whichever entry the request came in
+     *                               through
      */
     public record Settings(
         boolean vision,
@@ -193,8 +240,45 @@ public final class ChatWireSanitizer {
         boolean billedFastMode,
         boolean maxCompletionTokens,
         boolean continuationDropsReasoning,
-        boolean needsToolsForToolHistory
+        boolean needsToolsForToolHistory,
+        boolean carriesThoughtSignatures,
+        boolean claudeSampling
     ) {
+
+        /** The settings of a model that gives its calls no thought signature, which is every model but Gemini's. */
+        public Settings(
+            boolean vision,
+            boolean jsonSchema,
+            boolean priorityTier,
+            boolean cacheControlPassthrough,
+            boolean upstreamStream,
+            boolean reasoningEffort,
+            boolean billedFastMode,
+            boolean maxCompletionTokens,
+            boolean continuationDropsReasoning,
+            boolean needsToolsForToolHistory
+        ) {
+            this(vision, jsonSchema, priorityTier, cacheControlPassthrough, upstreamStream, reasoningEffort, billedFastMode,
+                maxCompletionTokens, continuationDropsReasoning, needsToolsForToolHistory, false, false);
+        }
+
+        /** The settings of a model whose sampling is not limited the way Claude's is, which is every model but Claude's. */
+        public Settings(
+            boolean vision,
+            boolean jsonSchema,
+            boolean priorityTier,
+            boolean cacheControlPassthrough,
+            boolean upstreamStream,
+            boolean reasoningEffort,
+            boolean billedFastMode,
+            boolean maxCompletionTokens,
+            boolean continuationDropsReasoning,
+            boolean needsToolsForToolHistory,
+            boolean carriesThoughtSignatures
+        ) {
+            this(vision, jsonSchema, priorityTier, cacheControlPassthrough, upstreamStream, reasoningEffort, billedFastMode,
+                maxCompletionTokens, continuationDropsReasoning, needsToolsForToolHistory, carriesThoughtSignatures, false);
+        }
     }
 
     /**
@@ -212,9 +296,34 @@ public final class ChatWireSanitizer {
      * tools (design 7.6): Anthropic and Bedrock, which the relays that serve Claude forward to, and which Kiro, the native
      * source of those requests, answers by making text of the history as well. A relay that forwards to OpenAI is given
      * the structured history, as the native OpenAI accounts are, and the policy has no name for a change they do not make.
-     * The vendors that join later (Google, with its own pair and fixtures) decide it with them.
+     * Google is on the side of Anthropic: a relay in front of Gemini turns the history into {@code functionCall} and {@code
+     * functionResponse} parts, and whether the Gemini API takes those in a request that declares no function was not
+     * verified (external behavior); a request like that is the client's summary of its own conversation, which loses
+     * nothing by having the calls told as text, and a relay that refused it would only send the request to Kiro after a
+     * failed attempt.
      */
     public static boolean needsToolsForToolHistory(String vendor) {
+        return "anthropic".equals(vendor) || "google".equals(vendor);
+    }
+
+    /**
+     * Whether the models of a vendor sign their tool calls (design 7.6): Gemini's do, with a thought signature that the
+     * request which answers the call has to bring back, or the model's thinking is lost, and Gemini 3 refuses the request
+     * outright. A relay in front of Gemini passes it in the {@code extra_content} of the call; another vendor's upstream
+     * would refuse the key, which is why only this vendor's bodies have it.
+     */
+    public static boolean carriesThoughtSignatures(String vendor) {
+        return "google".equals(vendor);
+    }
+
+    /**
+     * Whether the sampling of a vendor's models is limited the way Claude's is (design 7.6): a {@code temperature} is 0 to 1, and
+     * {@code temperature} and {@code top_p} are not set together, which Anthropic's API answers with an error on every model of
+     * the 4 generation and later, and a relay in front of one forwards. A client of the OpenAI format or of Gemini sets both
+     * as a matter of course (a temperature of 1 with a {@code topP} of 0.95 is the usual pair of a Gemini client), and a Gemini one
+     * may use a temperature up to 2, which Claude has no use for. Native sources have their own conversion, which is left as it is.
+     */
+    public static boolean claudeSampling(String vendor) {
         return "anthropic".equals(vendor);
     }
 
@@ -337,18 +446,22 @@ public final class ChatWireSanitizer {
             throw new IllegalArgumentException("The chat body must be a JSON object");
         }
         Objects.requireNonNull(settings, "settings");
-        JsonNode entry = entryBody == null || !entryBody.isObject() ? chatBody : entryBody;
+        boolean converted = entryBody != null && entryBody.isObject();
+        JsonNode entry = converted ? entryBody : chatBody;
         Set<String> degraded = new LinkedHashSet<>();
         ObjectNode body = FACTORY.objectNode();
 
         if (wireModel != null && !wireModel.isBlank()) {
             body.put("model", wireModel);
         }
-        ArrayNode messages = messages(withoutBillingHeader(chatBody.path("messages"), entry, degraded), settings, degraded);
+        ArrayNode messages = messages(withoutBillingHeader(chatBody.path("messages"), entry, degraded), settings, converted, degraded);
         body.set("messages", messages);
         tokenLimit(chatBody, settings, body);
         number(chatBody, "temperature", body);
         number(chatBody, "top_p", body);
+        if (settings.claudeSampling()) {
+            claudeSampling(body, degraded);
+        }
         stop(chatBody, body);
         Set<String> sentTools = new LinkedHashSet<>();
         Set<String> searchTools = toolSearchNames(entry);
@@ -447,6 +560,16 @@ public final class ChatWireSanitizer {
             ObjectNode system = FACTORY.objectNode();
             first.properties().forEach(field -> system.set(field.getKey(), field.getValue()));
             system.put("content", String.join("\n", kept));
+            if (first.path(CACHE_PARTS).isArray()) {
+                // The same blocks as parts, with their cache controls: the header is not sent in this form either.
+                ArrayNode keptParts = FACTORY.arrayNode();
+                for (JsonNode part : first.path(CACHE_PARTS)) {
+                    if (!isBillingHeader(part.path("text").stringValue(""))) {
+                        keptParts.add(part);
+                    }
+                }
+                system.set(CACHE_PARTS, keptParts);
+            }
             messages.add(system);
         }
         for (int i = 1; i < input.size(); i++) {
@@ -458,20 +581,20 @@ public final class ChatWireSanitizer {
 
     // ---- messages ----
 
-    private static ArrayNode messages(JsonNode input, Settings settings, Set<String> degraded) {
+    private static ArrayNode messages(JsonNode input, Settings settings, boolean converted, Set<String> degraded) {
         ArrayNode messages = FACTORY.arrayNode();
         if (!input.isArray()) {
             return messages;
         }
         for (JsonNode message : input) {
             if (message.isObject()) {
-                messages.add(message(message, settings, degraded));
+                messages.add(message(message, settings, converted, degraded));
             }
         }
         return messages;
     }
 
-    private static ObjectNode message(JsonNode input, Settings settings, Set<String> degraded) {
+    private static ObjectNode message(JsonNode input, Settings settings, boolean converted, Set<String> degraded) {
         String role = input.path("role").stringValue(null);
         if ("developer".equals(role)) {
             role = "system";
@@ -480,9 +603,17 @@ public final class ChatWireSanitizer {
         if (role != null) {
             message.put("role", role);
         }
-        message.set("content", content(input.path("content"), "user".equals(role), settings, degraded));
+        JsonNode text = input.path("content");
+        if (converted && input.path(CACHE_PARTS).isArray()) {
+            if (settings.cacheControlPassthrough()) {
+                text = input.path(CACHE_PARTS);
+            } else {
+                degraded.add(CACHE_CONTROL);
+            }
+        }
+        message.set("content", content(text, "user".equals(role), settings, degraded));
         if ("assistant".equals(role) && input.path("tool_calls").isArray() && !input.path("tool_calls").isEmpty()) {
-            message.set("tool_calls", toolCalls(input.path("tool_calls")));
+            message.set("tool_calls", toolCalls(input.path("tool_calls"), settings));
         }
         if ("tool".equals(role) && input.path("tool_call_id").isString()) {
             message.set("tool_call_id", input.path("tool_call_id"));
@@ -557,6 +688,9 @@ public final class ChatWireSanitizer {
         String url = image.isObject() ? image.path("url").stringValue(null) : image.stringValue(null);
         if (!carried || url == null || url.isBlank()) {
             placeholder(IMAGE_PLACEHOLDER, IMAGE, parts, degraded);
+            // The breakpoint of the client stays where it was put: on the last block of a turn that ends in a screenshot, it is
+            // the breakpoint of the request, and the text that tells the model the image was there is what carries it now.
+            cacheControl(input, (ObjectNode) parts.get(parts.size() - 1), settings, degraded);
             return;
         }
         ObjectNode part = FACTORY.objectNode();
@@ -596,8 +730,9 @@ public final class ChatWireSanitizer {
         }
     }
 
-    private static ArrayNode toolCalls(JsonNode input) {
+    private static ArrayNode toolCalls(JsonNode input, Settings settings) {
         ArrayNode calls = FACTORY.arrayNode();
+        boolean first = true;
         for (JsonNode call : input) {
             if (!call.isObject()) {
                 continue;
@@ -611,9 +746,36 @@ public final class ChatWireSanitizer {
             JsonNode arguments = function.path("arguments");
             target.set("arguments", arguments.isString() ? arguments
                 : FACTORY.stringNode(arguments.isMissingNode() || arguments.isNull() ? "" : arguments.toString()));
+            String signature = settings.carriesThoughtSignatures() ? thoughtSignatureOf(call) : null;
+            if (signature == null && first && settings.carriesThoughtSignatures()) {
+                // Only the first call of a step needs one (the parallel ones that follow it are covered by it). Every message
+                // of the history has it, not only the last steps, so that the same history is the same bytes at every request.
+                signature = SKIP_THOUGHT_SIGNATURE;
+            }
+            if (signature != null) {
+                converted.set("extra_content", extraContent(signature));
+            }
+            first = false;
             calls.add(converted);
         }
         return calls;
+    }
+
+    /**
+     * The thought signature a call of a Chat body carries, or null: the string at {@code
+     * extra_content.google.thought_signature}, not blank and no longer than a signature can be.
+     */
+    static String thoughtSignatureOf(JsonNode call) {
+        JsonNode signature = call.path("extra_content").path("google").path("thought_signature");
+        return signature.isString() && !signature.stringValue().isBlank()
+            && signature.stringValue().length() <= PlatformToolUse.MAX_THOUGHT_SIGNATURE_LENGTH ? signature.stringValue() : null;
+    }
+
+    /** The {@code extra_content} of a call, built from the signature alone: whatever else a client put there is not passed on. */
+    static ObjectNode extraContent(String signature) {
+        ObjectNode extra = FACTORY.objectNode();
+        extra.putObject("google").put("thought_signature", signature);
+        return extra;
     }
 
     // ---- the rest of the body ----
@@ -631,6 +793,23 @@ public final class ChatWireSanitizer {
     private static void number(JsonNode source, String name, ObjectNode body) {
         if (source.path(name).isNumber()) {
             body.set(name, source.path(name));
+        }
+    }
+
+    /**
+     * The sampling Claude's upstream takes: a {@code temperature} of 1 at most, and one of {@code temperature} and {@code top_p}.
+     * The {@code temperature} is kept, since it is what a client sets to make the answer more or less varied and a {@code top_p}
+     * next to it is the usual default; the loss of either is recorded.
+     */
+    private static void claudeSampling(ObjectNode body, Set<String> degraded) {
+        JsonNode temperature = body.path("temperature");
+        if (temperature.isNumber() && temperature.doubleValue() > 1) {
+            body.put("temperature", 1);
+            degraded.add(TEMPERATURE);
+        }
+        if (body.has("temperature") && body.has("top_p")) {
+            body.remove("top_p");
+            degraded.add(TOP_P);
         }
     }
 

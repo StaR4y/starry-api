@@ -22,7 +22,8 @@ import tools.jackson.databind.node.ObjectNode;
  * switches of a member say it, billing depends on it, and a switch set wrongly to "contained" can only bill too little
  * while one set wrongly to "not contained" bills the cache twice, so "not contained" is stored only on this evidence.
  *
- * <p>The probe sends the same prompt of about 1,200 tokens twice, and each answer reports a prompt count {@code p}, a
+ * <p>The probe sends the same prompt of about 4,800 tokens twice (more than the 4,096 a cache starts at for the newest models, so
+ * that a model with a large minimum caches it too), and each answer reports a prompt count {@code p}, a
  * cache read {@code r} and a cache write {@code w}. The prompt is one prompt, so its size {@code t} is the same in both
  * calls; what each switch says about {@code t} is {@code p} plus the count the prompt does not contain. Of the four
  * combinations of the two switches, one is {@link Verdict#CONSISTENT} when

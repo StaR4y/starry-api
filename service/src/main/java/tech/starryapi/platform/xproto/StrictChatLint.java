@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Pattern;
 import tools.jackson.databind.JsonNode;
 
 /**
@@ -25,7 +26,8 @@ import tools.jackson.databind.JsonNode;
  *   <li>Every call of every assistant message but the last turn is answered. The last turn is an assistant message
  *       that nothing but tool messages follow.
  *   <li>Every tool call id matches {@code ^[A-Za-z0-9_-]{1,64}$} and is used once in the whole history, every tool
- *       is a function, and every function has a name and, for a call, arguments as a string.
+ *       is a function, and every function has a name and, for a call, arguments as a string; the {@code extra_content}
+ *       of a call, if it has one, is a thought signature and nothing else.
  *   <li>{@code stop} is a string or at most four strings.
  *   <li>{@code tool_choice} is {@code auto}, {@code none} or {@code required}, or the function of a tool that the body
  *       has, and the body has tools; a {@code cache_control} is {@code {type:ephemeral}} and at most a {@code ttl}.
@@ -74,6 +76,20 @@ public final class StrictChatLint {
         }
         groups(messages, problems);
         return problems;
+    }
+
+    /** The function names OpenAI-format upstreams take: letters, digits, {@code _} and {@code -}, at most 64 of them. */
+    private static final Pattern UPSTREAM_FUNCTION_NAME = Pattern.compile("[a-zA-Z0-9_-]{1,64}");
+
+    /**
+     * Whether a function name is one the upstreams other than Gemini's take. Gemini takes names with dots and colons up to 128
+     * characters, and a Gemini client uses them (MCP servers add theirs), where the OpenAI format and Anthropic's refuse the
+     * request. Not part of {@link #problems}: a Chat, Messages or Responses client is held to the rule by the API it wrote the
+     * request for, and only a Gemini request can break it. It is a feature of that request ({@link
+     * RequestFeatureDetector.Feature#FUNCTION_NAME}) that the policy judges per vendor, not a defect of the conversion.
+     */
+    public static boolean isUpstreamFunctionName(String name) {
+        return UPSTREAM_FUNCTION_NAME.matcher(name).matches();
     }
 
     // ---- the body ----
@@ -230,6 +246,9 @@ public final class StrictChatLint {
             if (function.path("name").stringValue("").isBlank()) {
                 add(problems, where + " has a tool call without a function name");
             }
+            if (call.has("extra_content") && !isThoughtSignatureAlone(call)) {
+                add(problems, where + " has a tool call whose extra_content is not a thought signature alone");
+            }
             String id = call.path("id").stringValue("");
             if (!ChatCanonicalizer.LEGAL_ID.matcher(id).matches()) {
                 add(problems, where + " has a tool call id that does not match the allowed pattern");
@@ -277,6 +296,14 @@ public final class StrictChatLint {
             }
             i = next;
         }
+    }
+
+    /** The {@code extra_content} of a call is {@code {google:{thought_signature}}} with a signature that can be one, and no more. */
+    private static boolean isThoughtSignatureAlone(JsonNode call) {
+        JsonNode extra = call.path("extra_content");
+        JsonNode google = extra.path("google");
+        return extra.isObject() && extra.size() == 1 && google.isObject() && google.size() == 1
+            && ChatWireSanitizer.thoughtSignatureOf(call) != null;
     }
 
     private static boolean hasUnknownKey(JsonNode object, Set<String> allowed) {

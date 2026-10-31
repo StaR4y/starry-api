@@ -393,6 +393,8 @@ export function probeLabel(name: string): string {
       return t('流式');
     case 'vision':
       return t('图片');
+    case 'cache_control':
+      return t('缓存标记');
     case 'cache':
       return t('缓存探针');
     case 'cache_evidence':
@@ -450,14 +452,29 @@ export function applyCacheSuggestion(draft: RelayDraft, suggestion: CacheSuggest
 /* ---------- 提示 ---------- */
 
 /**
- * Claude Code 的缓存成本警告（设计 7.15）：网关不给中转加提示缓存（system 和内容被压平成字符串，cache_control 在原始体
- * 转换之前是软特性），中转只有自己按前缀自动缓存的本事才用得上缓存，没有的话每轮按全价付输入，而 Kiro 计缓存读；同系数下
- * 中转级可能每轮贵数倍。请求头不再挡住中转自己的前缀缓存（D7），中转报告的缓存命中按缓存读价计费。只对 Anthropic 厂商说。
+ * Claude Code 的缓存成本警告（设计 7.15）：成员没有打开 cache_control 时，网关不把 Claude Code 的缓存标记发给中转（system
+ * 和内容是字符串），中转只有自己按前缀自动缓存的本事才用得上缓存，没有的话每轮按全价付输入，而 Kiro 计缓存读；同系数下
+ * 中转级可能每轮贵数倍。打开 cache_control 后，Claude Code 的标记（system 的块、最近几轮的文本、工具结果）原样发给中转，
+ * 不再警告。请求头不挡中转自己的前缀缓存（D7），中转报告的缓存命中按缓存读价计费。只对 Anthropic 厂商说。
+ *
+ * 但 cache_control 和「映射为 reasoning_effort」一起打开时另有一条（设计 7.6）：reasoning_effort 只在用户提示的轮次发、
+ * 工具结果之后的轮次不发（那一轮没有可回放的签名思考块），中转若把它映射成 Claude 的思考开关，同一场对话里思考来回切换，
+ * 每次切换都让整段消息缓存失效，整个历史按缓存写价而不是读价计费。
  */
-export function cacheCostWarning(vendor: string): string | null {
+export function cacheCostWarning(
+  vendor: string,
+  cacheControlPassthrough: boolean,
+  reasoningMode: 'NONE' | 'EFFORT' = 'NONE',
+): string | null {
   if (vendor !== 'anthropic') return null;
+  if (cacheControlPassthrough && reasoningMode === 'EFFORT') {
+    return t(
+      '这把中转同时打开了 cache_control 和「映射为 reasoning_effort」：reasoning_effort 只在用户提示的轮次发，工具结果之后的轮次不发（那一轮没有可回放的签名思考块）。中转若把它映射成 Claude 的思考开关，同一场对话里思考会来回切换，每次切换都让整段消息缓存失效，整个历史按缓存写价而不是读价计费（Sonnet 上贵 12.5 倍），每个用户提示至少两次。要稳定地用上缓存，请把「思考映射」设为「不发送」。',
+    );
+  }
+  if (cacheControlPassthrough) return null;
   return t(
-    '网关不给 Claude Code 发往中转的请求加提示缓存：system 和历史被压平成文本，cache_control 会被丢弃。除非中转自己按前缀自动缓存，否则每一轮都按全价计输入，而 Kiro 会计缓存读。号池系数相同时，中转所在的级别可能比 Kiro 每轮贵出数倍；请把中转所在号池的系数定得能覆盖这一点。',
+    '这把中转没有打开 cache_control，网关不会把 Claude Code 的缓存标记发给它：Claude Code 每轮重发整个历史，除非中转自己按前缀自动缓存，否则每一轮都按全价计输入，而 Kiro 会计缓存读。号池系数相同时，中转所在的级别可能比 Kiro 每轮贵出数倍；请在中转认得 cache_control 时打开它，或把中转所在号池的系数定得能覆盖这一点。',
   );
 }
 

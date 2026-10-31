@@ -420,6 +420,42 @@ class ChatCanonicalizerTest {
         assertThat(messages(wire).get(3).path("content").stringValue()).isEqualTo("second");
     }
 
+    private static String signedCall(String id, String name, String signature) {
+        return "{\"id\":\"" + id + "\",\"type\":\"function\",\"function\":{\"name\":\"" + name + "\",\"arguments\":\"{}\"},"
+            + "\"extra_content\":{\"google\":{\"thought_signature\":\"" + signature + "\"}}}";
+    }
+
+    /** A call keeps the signature of its model wherever the rules put it: answers moved after it, ids renamed, messages merged. */
+    @Test
+    void aCallKeepsItsThoughtSignatureThroughEveryRearrangement() {
+        Wire wire = canonicalize("[" + user("go") + "," + assistant("thinking") + ","
+            + assistantCalling(signedCall("call_0", "f", "SIG-1"), call("b", "g")) + ","
+            + result("b", "second") + "," + user("interjection") + "," + result("call_0", "first") + ","
+            + assistantCalling(signedCall("call_0", "f", "SIG-2")) + "," + result("call_0", "third") + "]");
+
+        List<String> signatures = new ArrayList<>();
+        for (JsonNode message : messages(wire)) {
+            for (JsonNode call : message.path("tool_calls")) {
+                signatures.add(call.path("extra_content").path("google").path("thought_signature").stringValue(""));
+            }
+        }
+        assertThat(idsOfCalls(messages(wire))).containsExactly("call_0", "b", "call_0_2");
+        assertThat(idsOfResults(messages(wire))).containsExactly("call_0", "b", "call_0_2");
+        assertThat(signatures).containsExactly("SIG-1", "", "SIG-2");
+        assertThat(StrictChatLint.problems(wire.body())).isEmpty();
+        assertThat(ChatCanonicalizer.canonicalize(wire, CLAUDE).body()).isEqualTo(wire.body());
+    }
+
+    /** The calls made text have no function left to give the signature to. */
+    @Test
+    void aFlattenedHistoryHasNoSignature() {
+        Wire wire = canonicalizeWithoutTools("[" + user("go") + "," + assistantCalling(signedCall("a", "f", "SIG-1")) + ","
+            + result("a", "r") + "," + user("again") + "]");
+
+        assertThat(wire.degraded()).contains(ChatCanonicalizer.TOOL_HISTORY_FLATTENED);
+        assertThat(wire.body().toString()).doesNotContain("extra_content", "SIG-1", "tool_calls");
+    }
+
     @Test
     void charactersOutsideTheAllowedSetBecomeUnderscoresAndAnEmptyIdIsCall() {
         Wire wire = canonicalize("[" + user("go") + "," + assistantCalling(call("toolu.01:A b", "f"), call("", "g"), call("é😀", "h")) + ","

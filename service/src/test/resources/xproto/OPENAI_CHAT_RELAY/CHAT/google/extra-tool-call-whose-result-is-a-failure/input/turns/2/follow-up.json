@@ -1,0 +1,10 @@
+[
+  {
+    "role": "tool",
+    "tool_call_id": "${tool.0}",
+    "content": "File not found: /nonexistent/starry-p5-05.txt",
+    "cache_control": {
+      "type": "ephemeral"
+    }
+  }
+]

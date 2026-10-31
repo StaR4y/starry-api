@@ -12,7 +12,7 @@
       "outputTokens": 24,
       "usageSource": "REPORTED",
       "stopReason": "END_TURN",
-      "degraded": "cache_control,thinking,context_management,top_k,metadata,service_tier,billing_header_dropped",
+      "degraded": "cache_control,thinking,context_management,top_k,metadata,service_tier,billing_header_dropped,top_p",
       "error": null
     }
   ]

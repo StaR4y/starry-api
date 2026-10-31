@@ -48,6 +48,15 @@ public final class RelaySimulator implements AutoCloseable {
     public volatile boolean answersAfterTheResult = true;
     public volatile boolean usageInStreams = true;
     public volatile Cache cache = Cache.NONE;
+    /** A strict relay that answers 400 to a request that has a {@code cache_control} anywhere. */
+    public volatile boolean refusesMarkers;
+    /**
+     * The fewest tokens of prompt the relay's model caches, as a model's cache starts at a size: 1,024 for the older models,
+     * 4,096 for the newest Claude ones. A shorter prompt is answered as if the relay did not cache.
+     */
+    public volatile int cacheMinimumTokens = 1024;
+    /** A relay that caches where it is told to: the prompt of the cache probe is cached only if a part of it carries a {@code cache_control}. */
+    public volatile boolean cacheNeedsMarker;
     /** When not 0, every request is answered with this status and an error body. */
     public volatile int errorStatus;
     /** The code of the error the relay answers with when it fails. */
@@ -122,6 +131,10 @@ public final class RelaySimulator implements AutoCloseable {
             json(exchange, 200, modelsBody);
             return;
         }
+        if (refusesMarkers && request.toString().contains("cache_control")) {
+            json(exchange, 400, "{\"error\":{\"code\":\"invalid_request_error\",\"message\":\"cache_control is not allowed at relay.internal.example.com\"}}");
+            return;
+        }
         if (unknownModels.contains(request.path("model").asString(""))) {
             json(exchange, 404, "{\"error\":{\"code\":\"model_not_found\",\"message\":\"no such model at relay.internal.example.com\"}}");
             return;
@@ -155,7 +168,7 @@ public final class RelaySimulator implements AutoCloseable {
             usageNode.put("prompt_tokens", 25).put("completion_tokens", 4);
         } else if (prompt.length() > 4000) {
             content = "ok";
-            cacheUsage(usageNode, prompt);
+            cacheUsage(usageNode, prompt, !cacheNeedsMarker || hasMarker(messages));
         } else {
             content = "ok";
             usageNode.put("prompt_tokens", 12).put("completion_tokens", 2);
@@ -185,8 +198,12 @@ public final class RelaySimulator implements AutoCloseable {
     }
 
     /** What the relay reports for the long prompt: the first time it is seen it is a write, the second a read. */
-    private void cacheUsage(ObjectNode usageNode, String prompt) {
+    private void cacheUsage(ObjectNode usageNode, String prompt, boolean cached) {
         int total = (int) (prompt.length() / 4.5);
+        if (!cached || total < cacheMinimumTokens) {
+            usageNode.put("completion_tokens", 2).put("prompt_tokens", total);
+            return;
+        }
         boolean again;
         synchronized (seenPrompts) {
             again = !seenPrompts.add(prompt.substring(0, 120));
@@ -213,8 +230,30 @@ public final class RelaySimulator implements AutoCloseable {
             if ("user".equals(message.path("role").asString("")) && message.path("content").isString()) {
                 return message.path("content").asString("");
             }
+            if ("user".equals(message.path("role").asString("")) && message.path("content").isArray()) {
+                StringBuilder text = new StringBuilder();
+                for (JsonNode part : message.path("content")) {
+                    text.append(part.path("text").asString(""));
+                }
+                if (!text.isEmpty()) {
+                    return text.toString();
+                }
+            }
         }
         return "";
+    }
+
+    private static boolean hasMarker(JsonNode messages) {
+        for (JsonNode message : messages) {
+            if (message.path("content").isArray()) {
+                for (JsonNode part : message.path("content")) {
+                    if (part.hasNonNull("cache_control")) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
     }
 
     private static boolean hasImage(JsonNode messages) {

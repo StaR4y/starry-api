@@ -267,5 +267,8 @@
       }
     ]
   },
-  "stream": true
+  "stream": true,
+  "cache_control": {
+    "type": "ephemeral"
+  }
 }

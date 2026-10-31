@@ -412,7 +412,7 @@ export interface SourceTierModelVerification {
   cache?: SourceTierCacheAdvice | null;
 }
 
-/** name 取 basic、tool_call、tool_loop、stream、vision、cache、cache_evidence；message 只有网关自己的话 */
+/** name 取 basic、tool_call、tool_loop、stream、vision、cache_control、cache、cache_evidence；message 只有网关自己的话 */
 export interface SourceTierProbeResult {
   name: string;
   status: 'PASSED' | 'FAILED' | 'SKIPPED' | string;

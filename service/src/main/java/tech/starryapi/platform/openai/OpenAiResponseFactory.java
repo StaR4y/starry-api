@@ -60,6 +60,7 @@ public class OpenAiResponseFactory {
                 ObjectNode function = call.putObject("function");
                 function.put("name", toolUse.name());
                 function.put("arguments", toolInputString(toolUse));
+                putThoughtSignature(call, toolUse);
             }
             choice.put("finish_reason", chatFinishReason(result, "tool_calls"));
         }
@@ -564,8 +565,21 @@ public class OpenAiResponseFactory {
         ObjectNode function = call.putObject("function");
         function.put("name", toolUse.name());
         function.put("arguments", toolInputString(toolUse));
+        putThoughtSignature(call, toolUse);
         choice.putNull("finish_reason");
         return root;
+    }
+
+    /**
+     * The thought signature of a call that a Gemini model signed, in the form Google's OpenAI-compatible API writes it
+     * ({@code extra_content.google.thought_signature}), so that a Chat client which gives it back with the call in its
+     * history gives the model what it needs (design 7.10). Only a cross-protocol result has one; a call without it is
+     * written as it always was.
+     */
+    private void putThoughtSignature(ObjectNode call, PlatformToolUse toolUse) {
+        if (toolUse.thoughtSignature() != null) {
+            call.putObject("extra_content").putObject("google").put("thought_signature", toolUse.thoughtSignature());
+        }
     }
 
     private ObjectNode responseToolCallItem(PlatformToolUse toolUse) {

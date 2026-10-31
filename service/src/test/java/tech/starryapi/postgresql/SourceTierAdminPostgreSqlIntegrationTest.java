@@ -7,6 +7,7 @@ import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import org.junit.jupiter.api.AfterEach;
@@ -224,17 +225,21 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
 
     @Test
     void aGateThatOpensAPairNoReleaseOffersIsNotStored() {
-        // The Gemini entry and the google vendor come with the seventh phase; the Chat, Messages and Responses entries of the
-        // anthropic and openai vendors are on trial (P5-05, P6-04).
-        List<SourceTierDtos.ReplaceVendor> notOffered = List.of(
-            replace(0L, false, OWNER_TIERS, List.of(), List.of(new SourceTierDtos.Gate(null, "GEMINI", "KEYS", List.of("key-1")))),
-            replace(0L, false, OWNER_TIERS, List.of(), List.of(new SourceTierDtos.Gate(null, "GEMINI", "ON", null))));
+        // A Gemini client asking for a gpt model and a Messages client asking for a Gemini model have no client to speak of;
+        // the other pairs of the Chat, Messages, Responses and Gemini entries are on trial (P5-05, P6-04, P7-03).
+        Map<String, List<SourceTierDtos.Gate>> notOffered = Map.of(
+            "openai", List.of(new SourceTierDtos.Gate(null, "GEMINI", "KEYS", List.of("key-1"))),
+            "google", List.of(new SourceTierDtos.Gate(null, "MESSAGES", "KEYS", List.of("key-1")),
+                new SourceTierDtos.Gate(null, "RESPONSES", "KEYS", List.of("key-1"))));
 
-        for (SourceTierDtos.ReplaceVendor request : notOffered) {
-            ApiException refused = rejection(thisRelease.replace("anthropic", request));
-            assertThat(refused.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
-            assertThat(refused.getCode()).isEqualTo("SOURCE_PAIR_NOT_OFFERED");
-        }
+        notOffered.forEach((vendor, gates) -> {
+            for (SourceTierDtos.Gate gate : gates) {
+                ApiException refused = rejection(thisRelease.replace(vendor,
+                    replace(0L, false, OWNER_TIERS, List.of(), List.of(gate))));
+                assertThat(refused.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+                assertThat(refused.getCode()).isEqualTo("SOURCE_PAIR_NOT_OFFERED");
+            }
+        });
 
         assertThat(count("SELECT count(*) FROM source_tier_vendors")).isZero();
         assertThat(count("SELECT count(*) FROM source_tiers")).isZero();
@@ -456,15 +461,16 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
 
         assertThat(overview.configVersion()).isZero();
         // Native tiering, the selectors, the all-endpoints switch and the relay rows are complete in this release; of the
-        // pairs, the Chat, Messages and Responses ones of the anthropic and openai vendors are on trial and the others are not
-        // offered.
+        // pairs, nine are on trial (Chat, Messages and Responses for the anthropic and openai vendors, Chat for google, Gemini for
+        // anthropic and google) and the others are not offered.
         assertThat(overview.runtime().nativeTiers()).isTrue();
         assertThat(overview.runtime().selectors()).isTrue();
         assertThat(overview.runtime().unifyEndpoints()).isTrue();
         assertThat(overview.runtime().xpMembers()).isTrue();
+        List<String> onTrial = List.of("anthropic/CHAT", "openai/CHAT", "google/CHAT", "anthropic/MESSAGES", "openai/MESSAGES",
+            "anthropic/RESPONSES", "openai/RESPONSES", "anthropic/GEMINI", "google/GEMINI");
         assertThat(overview.runtime().pairs()).hasSize(12).allSatisfy(pair -> assertThat(pair.status())
-            .as(pair.toString()).isEqualTo(List.of("CHAT", "MESSAGES", "RESPONSES").contains(pair.entryEndpoint())
-                && List.of("anthropic", "openai").contains(pair.vendor()) ? "EXPERIMENTAL" : "NOT_OFFERED"));
+            .as(pair.toString()).isEqualTo(onTrial.contains(pair.vendor() + "/" + pair.entryEndpoint()) ? "EXPERIMENTAL" : "NOT_OFFERED"));
         assertThat(overview.vendors()).extracting(SourceTierDtos.Vendor::vendor).startsWith("anthropic", "openai", "google", "deepseek");
         assertThat(overview.vendors()).allSatisfy(vendor -> {
             assertThat(vendor.configured()).isFalse();

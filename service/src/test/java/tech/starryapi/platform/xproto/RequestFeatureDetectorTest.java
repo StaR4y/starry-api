@@ -278,9 +278,29 @@ class RequestFeatureDetectorTest {
 
         assertThat(messages(messagesBody("", oneUserMessage("[" + image + "]"))).features()).containsExactly(Feature.IMAGE);
         assertThat(messages(messagesBody("", oneUserMessage("[" + document + "]"))).features()).containsExactly(Feature.DOCUMENT);
+        // The image in the output of a tool is the user's image of a different kind: a tool message holds text only.
         assertThat(messages(messagesBody("", oneUserMessage(
             "[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":[" + image + "," + document + "]}]"
-        ))).features()).containsExactlyInAnyOrder(Feature.IMAGE, Feature.DOCUMENT);
+        ))).features()).containsExactlyInAnyOrder(Feature.TOOL_OUTPUT_IMAGE, Feature.DOCUMENT);
+    }
+
+    @Test
+    void anImageThatNoRelayCanBeGivenIsNamedAsOneTheConversionHasNoPlaceFor() {
+        String url = "{\"type\":\"image\",\"source\":{\"type\":\"url\",\"url\":\"https://x.example/a.png\"}}";
+        String data = "{\"type\":\"image\",\"source\":{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"iVBORw0KGgo=\"}}";
+        String file = "{\"type\":\"image\",\"source\":{\"type\":\"file\",\"file_id\":\"file_011\"}}";
+        String nothing = "{\"type\":\"image\"}";
+
+        assertThat(messages(messagesBody("", oneUserMessage("[" + url + "," + data + "]"))).imageNotCarried()).isFalse();
+        assertThat(messages(messagesBody("", oneUserMessage("[" + data + "," + file + "]"))).imageNotCarried()).isTrue();
+        assertThat(messages(messagesBody("", oneUserMessage("[" + nothing + "]"))).imageNotCarried()).isTrue();
+        // The conversion keeps the images of the user's turns and no others.
+        Detected assistant = messages(messagesBody("", """
+            [{"role":"user","content":"q"},
+             {"role":"assistant","content":[{"type":"text","text":"a"},%s]}]
+            """.formatted(data)));
+        assertThat(assistant.features()).containsExactly(Feature.IMAGE);
+        assertThat(assistant.imageNotCarried()).isTrue();
     }
 
     @Test
@@ -979,12 +999,12 @@ class RequestFeatureDetectorTest {
     }
 
     @ParameterizedTest
-    @EnumSource(value = Entry.class, names = {"GEMINI"})
-    void anEntryWithoutATableIsNeverCleared(Entry entry) {
+    @EnumSource(Entry.class)
+    void everyEntryOfTheRegistryHasATableAndNoneIsReportedAsWithout(Entry entry) {
         Detected detected = RequestFeatureDetector.detect(entry, tree("{\"model\":\"m\"}"));
 
         assertThat(detected.entry()).isEqualTo(entry);
-        assertThat(detected.features()).containsExactly(Feature.UNSUPPORTED_ENTRY);
+        assertThat(detected.features()).doesNotContain(Feature.UNSUPPORTED_ENTRY);
     }
 
     @Test

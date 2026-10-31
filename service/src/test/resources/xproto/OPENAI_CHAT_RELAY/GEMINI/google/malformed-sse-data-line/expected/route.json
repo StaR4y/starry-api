@@ -1,0 +1,19 @@
+{
+  "relaysLeftOut": [],
+  "attempts": [
+    {
+      "account": "relay-1",
+      "tier": "google:relay",
+      "dispatch": "OPENAI_CHAT",
+      "wireModel": "relay-gemini",
+      "success": false,
+      "status": 502,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "usageSource": null,
+      "stopReason": "INTERRUPTED",
+      "degraded": "top_k,reasoning_summary",
+      "error": "The source returned data that is not a completion"
+    }
+  ]
+}

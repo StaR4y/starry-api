@@ -18,7 +18,9 @@ import tech.starryapi.platform.xproto.PairRegistry;
  * preference (P3-02) joined; {@link #unifyEndpoints()} by the all-endpoints switch (P3-03); {@link #xpMembers()} by the
  * exclusive-relay task (P4-10), which keeps a registered relay out of the pools of untiered traffic. The status of a
  * pair is what the code's {@link PairRegistry} lists: the Chat, Messages and Responses pairs of the anthropic and openai
- * vendors are on trial (P5-05, P6-04), open to the API keys a gate lists, and the rest are not offered yet.
+ * vendors (P5-05, P6-04), the Chat pair of the google vendor and the Gemini pairs of the anthropic and google vendors
+ * (P7-03) are on trial, open to the API keys a gate lists, and the rest (the Gemini entry for gpt models, the Messages and
+ * Responses entries for Gemini models) are not offered.
  */
 @Component
 public class SourceTierRuntimeInfo {

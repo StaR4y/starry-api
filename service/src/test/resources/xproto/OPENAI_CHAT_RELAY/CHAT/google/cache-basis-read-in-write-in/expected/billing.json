@@ -1,0 +1,12 @@
+{
+  "reserved": "0.502662",
+  "settled": {
+    "credits": "0.003525",
+    "inputTokens": 2000,
+    "outputTokens": 100,
+    "tier": "google:relay",
+    "level": 1,
+    "priceFactor": "1"
+  },
+  "released": null
+}

@@ -1110,13 +1110,59 @@ class XpDispatcherTest {
     }
 
     private static TierDispatch relay(Entry entry, ObjectNode body, Member member, List<String> degraded) {
+        return relay("anthropic", entry, body, member, degraded);
+    }
+
+    private static TierDispatch relay(String vendor, Entry entry, ObjectNode body, Member member, List<String> degraded) {
         return TierDispatch.openAiChat(
-            new PairKey(SourceKind.OPENAI_CHAT_RELAY, entry, "anthropic"), "claude-sonnet-4.5", WIRE_MODEL, member, body, degraded);
+            new PairKey(SourceKind.OPENAI_CHAT_RELAY, entry, vendor), "claude-sonnet-4.5", WIRE_MODEL, member, body, degraded);
     }
 
     private static Member member(boolean cacheReadInPrompt, boolean cacheWriteInPrompt) {
         return new Member("anthropic", "relay-1", "relay", "OPENAI_CHAT", true, false, false, false, false, false, "NONE", 540,
             cacheReadInPrompt, cacheWriteInPrompt);
+    }
+
+    /**
+     * The signature of a call a Gemini model made is the one thing of the relay's call that goes on: the client has to give it
+     * back with the call, and the Chat and Gemini renderers write it. The id is the gateway's and the raw item is not kept,
+     * whatever the call carries. Only a pair of the vendor that signs (google) passes it on.
+     */
+    @Test
+    void theThoughtSignatureOfACallGoesOnWithTheCallUnderTheGatewaysId() {
+        PlatformToolUse signed = new PlatformToolUse("call_0", "Read", JSON.createObjectNode().put("path", "a"), "function_call",
+            "{\"path\":\"a\"}", JSON.createObjectNode().put("id", "call_0"), "sig-AAAA");
+        when(client.complete(any(), any(), any())).thenReturn(Mono.just(withCalls(signed, call("call_1", "Bash"))));
+
+        for (Entry entry : List.of(Entry.CHAT, Entry.MESSAGES, Entry.GEMINI, Entry.RESPONSES)) {
+            PlatformCompletionResult result = dispatcher.dispatch(account, relay("google", entry, body(), member(true, true), List.of()),
+                LIMITS, LIMIT).block(WAIT);
+
+            assertThat(result.toolUses()).extracting(PlatformToolUse::thoughtSignature).as(entry.name()).containsExactly("sig-AAAA", null);
+            assertThat(result.toolUses().get(0).id()).as(entry.name()).isNotEqualTo("call_0");
+            assertThat(result.toolUses()).extracting(PlatformToolUse::rawOutputItem).as(entry.name()).containsOnlyNulls();
+        }
+    }
+
+    /** The relay of another vendor's pair may front a Gemini model; the client of that pair is not shown it, nor can it send it back. */
+    @Test
+    void theThoughtSignatureOfACallIsNotPassedOnByAPairOfAVendorThatDoesNotSign() {
+        PlatformToolUse signed = new PlatformToolUse("call_0", "Read", JSON.createObjectNode().put("path", "a"), "function_call",
+            "{\"path\":\"a\"}", JSON.createObjectNode().put("id", "call_0"), "sig-AAAA");
+        when(client.complete(any(), any(), any())).thenReturn(Mono.just(withCalls(signed, call("call_1", "Bash"))));
+
+        for (String vendor : List.of("anthropic", "openai")) {
+            for (Entry entry : List.of(Entry.CHAT, Entry.MESSAGES, Entry.GEMINI, Entry.RESPONSES)) {
+                if (vendor.equals("openai") && (entry == Entry.MESSAGES || entry == Entry.GEMINI)) {
+                    continue;
+                }
+                PlatformCompletionResult result = dispatcher.dispatch(account, relay(vendor, entry, body(), member(true, true), List.of()),
+                    LIMITS, LIMIT).block(WAIT);
+
+                assertThat(result.toolUses()).extracting(PlatformToolUse::thoughtSignature).as(vendor + "/" + entry.name())
+                    .containsOnlyNulls();
+            }
+        }
     }
 
     private static Completion answer(String text) {

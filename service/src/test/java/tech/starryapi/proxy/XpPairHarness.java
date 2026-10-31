@@ -83,6 +83,8 @@ import tech.starryapi.platform.openai.OpenAiResponseFactory;
 import tech.starryapi.platform.openai.OpenAiResponseOwnerStore;
 import tech.starryapi.platform.openai.OpenAiResponseStateStore;
 import tech.starryapi.platform.openai.OpenAiUpstreamClient;
+import tech.starryapi.platform.xproto.AnthropicChatWireConverter;
+import tech.starryapi.platform.xproto.GeminiChatConverter;
 import tech.starryapi.platform.xproto.PairRegistry;
 import tech.starryapi.platform.xproto.PairRegistry.Entry;
 import tech.starryapi.platform.xproto.PairRegistry.PairKey;
@@ -129,9 +131,12 @@ import tools.jackson.databind.node.ObjectNode;
  *                         cache pass-through, a stream, no reasoning, 540 seconds, both caches counted in the prompt, a window
  *                         of 200,000 tokens (400,000 for a gpt model) and 8192 tokens per image
  * gate.json               the pair's gate, {state, keys}, where it is not KEYS and the key of the requests
+ * path.json               {model}: the model in the path of a Gemini endpoint, where it is not the vendor's own (a Gemini request
+ *                         has no model in its body); the other entries name the model in the request
  * native.json             {accounts: false} where the tier below the relay has no account in service
  * turns/N/follow-up.json  the messages the client adds for turn N (N >= 2) after the answer of turn N-1, with "${tool.I}"
- *                         for the id of the I-th tool call the client was given (the items it adds, for the Responses entry)
+ *                         for the id of the I-th tool call the client was given (the items it adds, for the Responses entry,
+ *                         the contents for the Gemini one)
  * turns/N/request.json    or the whole request of turn N, where a conversation is not the one the answers made; with
  *                         "${response.id}" for the id of the response that answered turn N-1 (a Responses client that
  *                         continues a chain by {@code previous_response_id} and sends only what is new)
@@ -156,14 +161,22 @@ import tools.jackson.databind.node.ObjectNode;
  * turn adding the items of the answer as it replays them (the message and the calls without their ids, the reasoning
  * item without its id) and whatever the follow-up says. The requests carry the headers of Codex that the gateway reads
  * ({@code session-id}, {@code originator}), and a gpt model asked for by Codex is served by Codex accounts, so the native
- * tier of the openai vendor has one.
+ * tier of the openai vendor has one. The Gemini entry is played as a client of a Gemini SDK uses {@code :generateContent}
+ * (the Gemini CLI's own conversation uses {@code :streamGenerateContent}, which the gateway does not route yet): the model is
+ * in the path, the whole history is sent every turn, each turn adding the content the model answered (its parts as they were given, the calls with
+ * the ids the gateway minted) and whatever the follow-up says, and no session header is sent, so that the gateway names the
+ * session by what the conversation starts with.
  *
  * <p><b>Where the inputs come from.</b> The requests are what Claude Code 2.1.168, OpenCode 1.18.16 and Codex 0.142.5
  * send, captured by running the installed clients against a local server that answered what a scenario said (a tool call,
  * then an answer), each in a sandbox that allowed loopback only, with a throwaway home and configuration directory and
  * dummy keys. Every id, key and path in a capture is a placeholder, the system prompts and the long tool descriptions are
  * shortened, and the tool list is cut to the tools a case uses (one case keeps all of Claude Code's); a case that is not
- * a capture says in its {@code case.json} what it was derived from. The relay's answers are authored from the documented Chat
+ * a capture says in its {@code case.json} what it was derived from. The Gemini requests are not captures, and not copies of
+ * what any release of the Gemini CLI sends (its tool arguments and thinking settings differ): they are authored from the
+ * documented {@code generateContent} shapes in the manner of that CLI (tool names, generation settings, the {@code
+ * functionCall} and {@code functionResponse} parts with the ids the gateway gave), with placeholder ids, and the case says so;
+ * the cases of the Python SDK's snake_case are authored from what that SDK writes. The relay's answers are authored from the documented Chat
  * Completions shapes, never recorded from a service. The expected files are what this harness produced when the case was
  * added, read through and accepted; {@code XprotoFixtureRecorder} rewrites them when the behavior is changed on purpose.
  */
@@ -172,7 +185,7 @@ public final class XpPairHarness {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String KEY_ID = "key-1";
     private static final String RELAY_KEY = "sk-relay-0000";
-    private static final Pattern RANDOM_ID = Pattern.compile("(msg_|chatcmpl-)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
+    private static final Pattern RANDOM_ID = Pattern.compile("(msg_|chatcmpl-|gen-)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
     /** The ids of the items and the responses of the Responses API, which the factory makes from a UUID with the dashes left out. */
     private static final Pattern RANDOM_ITEM_ID = Pattern.compile("(resp_|msg_|fc_|ctc_|rs_)[0-9a-f]{32}");
     private static final Pattern CREATED = Pattern.compile("(\"created(?:_at)?\":\\s*)\\d+");
@@ -632,11 +645,17 @@ public final class XpPairHarness {
             Member member = member();
             ProxyAccountEntity account = relayAccount();
             List<MemberModel> models = new ArrayList<>();
-            int window = memberSettings.path("maxContextTokens").asInt(vendor.equals("openai") ? 400_000 : 200_000);
+            int window = memberSettings.path("maxContextTokens").asInt(switch (vendor) {
+                case "openai" -> 400_000;
+                case "google" -> 1_000_000;
+                default -> 200_000;
+            });
             int imageCap = memberSettings.path("imageTokenCap").asInt(8192);
-            Map<String, String> wire = vendor.equals("openai")
-                ? Map.of("gpt-5.5", "relay-gpt")
-                : Map.of("claude-sonnet-4.5", "relay-sonnet", "claude-opus-4.5", "relay-opus", "claude-haiku-4.5", "relay-haiku");
+            Map<String, String> wire = switch (vendor) {
+                case "openai" -> Map.of("gpt-5.5", "relay-gpt");
+                case "google" -> Map.of("gemini-2.5-pro", "relay-gemini", "gemini-2.5-flash", "relay-flash");
+                default -> Map.of("claude-sonnet-4.5", "relay-sonnet", "claude-opus-4.5", "relay-opus", "claude-haiku-4.5", "relay-haiku");
+            };
             wire.forEach((modelId, upstream) -> {
                 MemberModel unverified = new MemberModel(vendor, "relay-1", modelId, upstream, window, imageCap, true, null, null);
                 models.add(new MemberModel(vendor, "relay-1", modelId, upstream, window, imageCap, true,
@@ -693,7 +712,8 @@ public final class XpPairHarness {
                 new OpenAiRequestAdapter(JSON, modelCatalog), new OpenAiResponseFactory(JSON), new OpenAiResponseStateStore(JSON),
                 new AnthropicRequestAdapter(JSON, modelCatalog), new AnthropicResponseFactory(JSON), anthropicClient,
                 new GeminiRequestAdapter(JSON), new GeminiResponseFactory(JSON), payments, pricing, statsService, admissionStore,
-                ownerStore, new TierRuntime(recording, bindings, learnedLimits), dispatcher, new ResponsesChatConverter(JSON));
+                ownerStore, new TierRuntime(recording, bindings, learnedLimits), dispatcher, new ResponsesChatConverter(JSON),
+                new GeminiChatConverter(JSON), new AnthropicChatWireConverter(JSON));
         }
 
         // ---- the conversation ----
@@ -786,8 +806,12 @@ public final class XpPairHarness {
                 throw new IllegalStateException(caseId + ": turn " + (turn - 1) + " was not answered, so turn " + turn + " has no history");
             }
             ObjectNode request = previousRequest.deepCopy();
-            // A Responses client sends its history as the items of the input; the others as messages.
-            ArrayNode messages = request.withArray(pair.entry() == Entry.RESPONSES ? "input" : "messages");
+            // A Responses client sends its history as the items of the input, a Gemini client as contents; the others as messages.
+            ArrayNode messages = request.withArray(switch (pair.entry()) {
+                case RESPONSES -> "input";
+                case GEMINI -> "contents";
+                default -> "messages";
+            });
             List<String> toolIds = new ArrayList<>();
             if (pair.entry() == Entry.RESPONSES) {
                 for (JsonNode item : replayedItems(previous)) {
@@ -808,6 +832,14 @@ public final class XpPairHarness {
                 if (!content.isEmpty()) {
                     messages.addObject().put("role", "assistant").set("content", content);
                 }
+            } else if (pair.entry() == Entry.GEMINI) {
+                ObjectNode content = modelContent(previous);
+                for (JsonNode part : content.path("parts")) {
+                    if (part.path("functionCall").isObject()) {
+                        toolIds.add(part.path("functionCall").path("id").asString(""));
+                    }
+                }
+                messages.add(content);
             } else {
                 ObjectNode message = assistantMessage(previous);
                 for (JsonNode call : message.path("tool_calls")) {
@@ -951,6 +983,14 @@ public final class XpPairHarness {
             return blocks;
         }
 
+        /** The content of the model's answer to a Gemini client, which it puts into its history as it was given. */
+        private static ObjectNode modelContent(Reply reply) {
+            if (reply.body() == null) {
+                throw new IllegalStateException("A Gemini client was answered with a stream, which this release does not give it");
+            }
+            return (ObjectNode) reply.body().path("candidates").path(0).path("content").deepCopy();
+        }
+
         /** The assistant message of a Chat client, as it assembles it from the answer or from the chunks of a stream. */
         private ObjectNode assistantMessage(Reply reply) {
             if (reply.body() != null) {
@@ -975,6 +1015,10 @@ public final class XpPairHarness {
                     });
                     if (call.path("id").isString()) {
                         target.put("id", call.path("id").asString());
+                    }
+                    // What a model signed travels with its call (a Gemini model's thought signature), and a client gives it back.
+                    if (call.path("extra_content").isObject()) {
+                        target.set("extra_content", call.path("extra_content"));
                     }
                     ObjectNode function = (ObjectNode) target.path("function");
                     if (call.path("function").path("name").isString()) {
@@ -1033,9 +1077,11 @@ public final class XpPairHarness {
         // ---- sending ----
 
         private Reply send(ObjectNode request) {
+            String model = geminiModel();
             String path = switch (pair.entry()) {
                 case MESSAGES -> "/v1/messages";
                 case RESPONSES -> "/v1/responses";
+                case GEMINI -> "/v1beta/models/" + model + ":generateContent";
                 default -> "/v1/chat/completions";
             };
             MockServerHttpRequest.BaseBuilder<?> builder = MockServerHttpRequest.post(path);
@@ -1043,12 +1089,14 @@ public final class XpPairHarness {
                 case MESSAGES -> builder.header("x-claude-code-session-id", "11111111-1111-1111-1111-111111111111");
                 case RESPONSES -> builder.header("session-id", "11111111-1111-1111-1111-111111111111")
                     .header("originator", "codex_exec").header("user-agent", "codex_exec/0.142.5 (Mac OS 27.0.0; arm64) dumb");
+                case GEMINI -> builder.header("x-goog-api-client", "gl-node/22.0.0 google-genai-sdk/1.0.0");
                 default -> builder.header("x-session-id", "ses_00000000000000000000000000");
             }
             MockServerWebExchange exchange = MockServerWebExchange.from(builder);
             Mono<ResponseEntity<?>> call = switch (pair.entry()) {
                 case MESSAGES -> facade.messages(request, exchange);
                 case RESPONSES -> facade.responses(request, exchange);
+                case GEMINI -> facade.geminiGenerateContent(model, request, exchange);
                 default -> facade.chat(request, exchange);
             };
             try {
@@ -1063,6 +1111,17 @@ public final class XpPairHarness {
                 }
                 throw failure;
             }
+        }
+
+        /** The model in the path of a Gemini endpoint: the one a case names, else the vendor's own. */
+        private String geminiModel() {
+            if (pair.entry() != Entry.GEMINI) {
+                return null;
+            }
+            if (input.has("path.json")) {
+                return JSON.readTree(input.get("path.json")).path("model").asString();
+            }
+            return vendor.equals("google") ? "gemini-2.5-pro" : "claude-sonnet-4.5";
         }
 
         private Reply reply(ResponseEntity<?> response) {
@@ -1228,7 +1287,7 @@ public final class XpPairHarness {
                     // Scripts that do not parse fail where they are used.
                 }
             }
-            List<String> clientOnly = List.of("127.0.0.1", "relay-sonnet", "relay-opus", "relay-haiku", "relay-gpt");
+            List<String> clientOnly = List.of("127.0.0.1", "relay-sonnet", "relay-opus", "relay-haiku", "relay-gpt", "relay-gemini", "relay-flash");
             String where = prefix.isEmpty() ? "the first turn" : prefix;
             for (String secret : hidden) {
                 if (reply.contains(secret) || route.contains(secret)) {

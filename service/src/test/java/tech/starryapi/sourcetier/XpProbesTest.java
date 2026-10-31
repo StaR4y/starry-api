@@ -149,18 +149,95 @@ class XpProbesTest {
     }
 
     @Test
-    void theCacheProbeIsOnePromptOfAboutTwelveHundredTokensThatStartsWithTheNonceAndIsTheSameBothTimes() {
+    void theCacheProbeIsOnePromptOfAboutFiveThousandTokensThatStartsWithTheNonceAndIsTheSameBothTimes() {
         JsonNode first = XpProbes.cacheRequest(setup(member(false, false, "NONE"), false), "nonce-1");
         JsonNode again = XpProbes.cacheRequest(setup(member(false, false, "NONE"), false), "nonce-1");
         JsonNode other = XpProbes.cacheRequest(setup(member(false, false, "NONE"), false), "nonce-2");
 
         String prompt = first.path("messages").get(0).path("content").asString("");
         assertThat(prompt).startsWith("Marker nonce-1. ");
-        assertThat(prompt.length()).isBetween(5000, 6000);
+        // A model's cache starts at 1,024 tokens, 2,048 or, for the newest Claude models, 4,096; a shorter prompt is silently not
+        // cached, and the probe would see no cache of the model that needs the most. The sentence is ten tokens.
+        assertThat(prompt.length()).isBetween(21_000, 23_000);
+        assertThat(XpProbes.CACHE_SENTENCES * 10).isGreaterThanOrEqualTo(4_096 + 512);
         assertThat(first).isEqualTo(again);
         assertThat(first).isNotEqualTo(other);
         assertThat(StrictChatLint.problems(first)).isEmpty();
         assertThat(first.path("max_tokens").asInt()).isEqualTo(16);
+    }
+
+    private static Member passingCacheControl(String vendor) {
+        return new Member(vendor, "relay-1", "relay", "OPENAI_CHAT", true, false, false, false, true, false, "NONE", 540, true, true);
+    }
+
+    /**
+     * Claude Code puts a cache control on almost every request, in more places than the text of the last message: on a block of
+     * the system prompt, and on the assistant message that has the call and the tool message that answers it (a field of a
+     * message of its own, not of a part). A member that passes cache control through is verified with the same, or a relay
+     * that refuses the marker in one of those places passes verification and then refuses every turn of a tool loop, one failed
+     * attempt after the other.
+     */
+    @Test
+    void aMemberThatPassesCacheControlThroughIsAskedWithTheMarkersOfAToolLoopAndAnyOtherIsNot() {
+        Map<String, Probe> marked = probes(setup(passingCacheControl("anthropic"), false));
+
+        assertThat(marked.keySet()).containsExactly("basic", "tool_call", "tool_loop", "cache_control");
+        JsonNode messages = marked.get("cache_control").body().path("messages");
+        List<String> roles = new java.util.ArrayList<>();
+        messages.forEach(message -> roles.add(message.path("role").asString("")));
+        assertThat(roles).containsExactly("system", "user", "assistant", "tool");
+        JsonNode part = messages.get(0).path("content").get(0);
+        assertThat(part.path("type").asString("")).isEqualTo("text");
+        assertThat(part.path("cache_control")).isEqualTo(tree("{\"type\":\"ephemeral\"}"));
+        assertThat(messages.get(1).has("cache_control")).isFalse();
+        assertThat(messages.get(2).path("cache_control")).as("the assistant message that has the call").isEqualTo(tree("{\"type\":\"ephemeral\"}"));
+        assertThat(messages.get(2).path("tool_calls")).hasSize(1);
+        assertThat(messages.get(3).path("cache_control")).as("the tool message that answers it").isEqualTo(tree("{\"type\":\"ephemeral\"}"));
+        assertThat(marked.get("cache_control").body().path("tools")).hasSize(1);
+        assertThat(StrictChatLint.problems(marked.get("cache_control").body())).isEmpty();
+        assertThat(marked.get("cache_control").judge().apply(answer("ok", List.of(), "stop", USAGE))).isNull();
+        assertThat(marked.get("cache_control").judge().apply(answer("ok", List.of(), null, USAGE))).isNotNull();
+        assertThat(marked.get("cache_control").judge().apply(answer("", List.of(), "stop", USAGE))).as("the loop must end in words").isNotNull();
+        assertThat(probes(setup(member(true, true, "EFFORT"), false)).keySet()).doesNotContain("cache_control");
+        assertThat(probes(setup(member(true, true, "EFFORT"), false)).values())
+            .allSatisfy(probe -> assertThat(probe.body().toString()).doesNotContain("cache_control"));
+    }
+
+    /**
+     * A relay that caches where it is told to caches nothing of a prompt without a marker: the probe then sees no cached
+     * tokens and concludes nothing, and a relay that reports its prompt without the cache could never be saved as such.
+     */
+    @Test
+    void theCacheProbeCarriesTheMarkerForAMemberThatPassesCacheControlThroughAndOnlyThatMember() {
+        JsonNode marked = XpProbes.cacheRequest(setup(passingCacheControl("anthropic"), false), "nonce-1");
+        JsonNode again = XpProbes.cacheRequest(setup(passingCacheControl("anthropic"), false), "nonce-1");
+        JsonNode plain = XpProbes.cacheRequest(setup(member(false, false, "NONE"), false), "nonce-1");
+
+        JsonNode part = marked.path("messages").get(0).path("content").get(0);
+        assertThat(part.path("text").asString("")).startsWith("Marker nonce-1. ");
+        assertThat(part.path("text").asString("").length()).isBetween(21_000, 23_000);
+        assertThat(part.path("cache_control")).isEqualTo(tree("{\"type\":\"ephemeral\"}"));
+        assertThat(marked).isEqualTo(again);
+        assertThat(StrictChatLint.problems(marked)).isEmpty();
+        assertThat(plain.toString()).doesNotContain("cache_control");
+        assertThat(plain.path("messages").get(0).path("content").isString()).isTrue();
+    }
+
+    /**
+     * A Gemini 3 model refuses a history whose first call is not signed, and the call of the loop probe is one the relay never
+     * made: it is given the placeholder that every unsigned call of a body for such a model is given, which is what the history of
+     * traffic has too. No other vendor's probe has one.
+     */
+    @Test
+    void theCallOfTheLoopProbeOfAModelThatSignsHasThePlaceholderSignatureAndNoOtherDoes() {
+        JsonNode google = probes(setup(passingCacheControl("google"), false)).get("tool_loop").body();
+        JsonNode anthropic = probes(setup(passingCacheControl("anthropic"), false)).get("tool_loop").body();
+
+        assertThat(google.path("messages").get(1).path("tool_calls").get(0).path("extra_content")).isEqualTo(
+            tree("{\"google\":{\"thought_signature\":\"skip_thought_signature_validator\"}}"));
+        assertThat(anthropic.toString()).doesNotContain("extra_content", "skip_thought_signature_validator");
+        assertThat(StrictChatLint.problems(google)).isEmpty();
+        assertThat(probes(setup(passingCacheControl("google"), false)).get("tool_call").body().toString()).doesNotContain("extra_content");
     }
 
     @Test

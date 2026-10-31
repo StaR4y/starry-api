@@ -32,7 +32,7 @@
       },
       {
         "role": "tool",
-        "content": "File does not exist. Note: your current working directory is /work/project",
+        "content": "Error: File does not exist. Note: your current working directory is /work/project",
         "tool_call_id": "toolu_jDlvWo7dSQIRaTiADvEXvt8K"
       }
     ],
