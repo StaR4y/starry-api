@@ -5,8 +5,8 @@ import tech.starryapi.platform.core.PlatformUsage;
 /**
  * An OpenAI-format relay answered, and the answer is one the entry cannot tell its client: the gateway holds it back
  * (design 7.10). The relay did nothing wrong. The answer is complete as the relay gave it, or ends at the output limit
- * the gateway itself set (the client named none, so the relay was held to the default the reservation assumes), or its
- * filter stopped it; the Responses entry can say none of that to a client that matters but as {@code incomplete}, which
+ * the gateway itself set (the client named none, so the relay was held to the limit the gateway chose for it, 4,096 or the
+ * maximum output of its mapping, D15), or its filter stopped it; the Responses entry can say none of that to a client that matters but as {@code incomplete}, which
  * Codex takes for the failure of a stream and answers by sending the same request again, five more times, each of which
  * a relay answers and is paid for.
  *

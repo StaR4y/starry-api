@@ -992,6 +992,9 @@ class DefaultSourceTierPlannerSelectorTest {
         // The OAuth tier is cheaper still, but the client may not name it.
         assertThat(hint).contains("claude-sonnet-4.5@kiro").contains("系数 0.6").doesNotContain("oauth")
             .contains(TierSelectorParser.REQUEST_HEADER);
+        // No tier here holds relays alone, so every tier is reserved for the same output and one that reserves less is a cheaper one:
+        // the advice is worded as it was before D15.
+        assertThat(hint).startsWith("；可以改选更便宜的号池（").doesNotContain("预留更少");
         // The setting of the key is called what its form, the docs and the list of keys call it.
         assertThat(hint).contains("在 API Key 的设置里选择号源偏好").doesNotContainPattern("选择号源(?!偏好)");
     }
@@ -1032,6 +1035,8 @@ class DefaultSourceTierPlannerSelectorTest {
         // The key form offers no choice of tiers either, so there is nothing to point at, and the names stay private.
         assertThat(hint).isNotNull().doesNotContain("@").doesNotContain("kiro").doesNotContain("official")
             .doesNotContain("系数").doesNotContain(TierSelectorParser.REQUEST_HEADER).doesNotContain("API Key");
+        // Without a tier of relays alone the dearest tier is the one reserved for, as it always was said.
+        assertThat(hint).isEqualTo("；预估费用按可能服务本次请求的最贵号池计算，实际按服务它的号池计价");
     }
 
     @Test

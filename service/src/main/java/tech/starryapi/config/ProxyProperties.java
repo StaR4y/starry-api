@@ -160,8 +160,10 @@ public class ProxyProperties {
     }
 
     /**
-     * The output limit of a Responses request that names none (Codex never does), for every source that is sent one; the
-     * model's own maximum output is the most it is ever given. A value outside the range is refused at startup.
+     * The output limit of a Responses request that names none (Codex never does): what the reservation and the native sources
+     * (Kiro, official OpenAI keys, Anthropic keys) are held to; the model's own maximum output is the most it is ever given. A
+     * relay is not given it: it is given the maximum output its mapping states, up to this, or 4,096 (D15). A value outside the
+     * range is refused at startup.
      */
     public long getResponsesDefaultOutputTokens() {
         return responsesDefaultOutputTokens;

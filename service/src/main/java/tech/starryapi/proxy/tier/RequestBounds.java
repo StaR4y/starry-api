@@ -56,15 +56,28 @@ public final class RequestBounds {
     }
 
     /**
-     * The relay body as it was before the gateway chose an output limit for a request that named none (D11, D14): the same
-     * body with its {@code max_completion_tokens} and {@code max_tokens} held to {@link #FALLBACK_OUTPUT_TOKENS}, which is the
-     * request a relay was served and refused for then. The body it is given is not changed.
+     * What a relay is given for a request whose output limit the gateway chose (D15): the maximum output its mapping states,
+     * no more than {@code gatewayDefault}, the limit that the reservation and the native sources hold the request to (D14); or
+     * {@link #FALLBACK_OUTPUT_TOKENS} when the mapping states none, since the gateway does not know what the relay's upstream
+     * can write and a relay that is sent more than it can write refuses the request. Never more than {@code gatewayDefault}:
+     * the reservation covers no more, and a model that writes less than the fallback is not asked for it.
+     *
+     * @param mappingMaximum the {@code max_output_tokens} of the relay's mapping of the model; null when it states none
      */
-    public static ObjectNode withTheOutputOfBefore(JsonNode wireBody) {
-        ObjectNode sized = JsonNodes.shallowCopy((ObjectNode) wireBody);
-        for (String field : List.of("max_completion_tokens", "max_tokens")) {
-            if (sized.path(field).asLong(0) > FALLBACK_OUTPUT_TOKENS) {
-                sized.put(field, FALLBACK_OUTPUT_TOKENS);
+    public static long relayOutputTokens(long gatewayDefault, Integer mappingMaximum) {
+        return Math.min(gatewayDefault, mappingMaximum == null ? FALLBACK_OUTPUT_TOKENS : mappingMaximum);
+    }
+
+    /**
+     * The Chat body of a relay with its output limit set to {@code limit}: the limit it names in {@code max_completion_tokens},
+     * {@code max_tokens} or {@code max_output_tokens}, whichever the body has. The body it is given is not changed.
+     */
+    public static JsonNode withOutputLimit(JsonNode chatBody, long limit) {
+        ObjectNode sized = JsonNodes.shallowCopy((ObjectNode) chatBody);
+        for (String field : List.of("max_completion_tokens", "max_tokens", "max_output_tokens")) {
+            JsonNode value = sized.path(field);
+            if (value.isIntegralNumber() && value.canConvertToLong() && value.longValue() > 0) {
+                sized.put(field, limit);
             }
         }
         return sized;

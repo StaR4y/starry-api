@@ -129,8 +129,8 @@ export interface SubscriptionLedgerEntry {
   createdAt: string;
 }
 /**
- * 按号源分级服务的请求的核对行里，一个号池的信息。预留是按请求可能被服务的最贵号池定额的，所以核对要看这里该号池
- * 的报价与估算，而不是预留金额。level 和 factor 对实际服务的号池是结算时用的值，对其他号池是预留时冻结的计划值。
+ * 按号源分级服务的请求的核对行里，一个号池的信息。预留是按请求可能被服务的号池里预留最多的那个定额的，所以核对要看
+ * 这里该号池的报价与估算，而不是预留金额。level 和 factor 对实际服务的号池是结算时用的值，对其他号池是预留时冻结的计划值。
  */
 export interface BillingReviewTier {
   tierRef: string;

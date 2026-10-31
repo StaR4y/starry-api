@@ -40,7 +40,7 @@
         "tool_call_id": "call_jDlvWo7dSQIRaTiADvEXvt8K"
       }
     ],
-    "max_completion_tokens": 16000,
+    "max_completion_tokens": 4096,
     "tools": [
       {
         "type": "function",

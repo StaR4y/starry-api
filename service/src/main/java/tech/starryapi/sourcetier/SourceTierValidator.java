@@ -374,8 +374,12 @@ public class SourceTierValidator {
         if (imageTokenCap < 1 || imageTokenCap > 1_000_000) {
             throw memberInvalid(where + ".imageTokenCap must be between 1 and 1000000");
         }
+        Integer maxOutputTokens = row.maxOutputTokens();
+        if (maxOutputTokens != null && (maxOutputTokens < 1 || maxOutputTokens > 1_000_000)) {
+            throw memberInvalid(where + ".maxOutputTokens must be between 1 and 1000000 when it is given");
+        }
         // A mapping is verified by a probe against the relay, never by the request that saves it.
-        return new MemberModel(vendor, accountId, modelId, upstreamModel, row.maxContextTokens(), imageTokenCap,
+        return new MemberModel(vendor, accountId, modelId, upstreamModel, row.maxContextTokens(), imageTokenCap, maxOutputTokens,
             row.enabled() == null || row.enabled(), null, null);
     }
 

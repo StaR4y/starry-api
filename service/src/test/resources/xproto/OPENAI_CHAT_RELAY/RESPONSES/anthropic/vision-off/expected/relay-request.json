@@ -42,7 +42,7 @@
         ]
       }
     ],
-    "max_tokens": 16000,
+    "max_tokens": 4096,
     "tools": [
       {
         "type": "function",

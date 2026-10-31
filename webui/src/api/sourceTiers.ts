@@ -56,6 +56,11 @@ export interface SourceTierMemberModel {
   upstreamModel: string;
   maxContextTokens: number;
   imageTokenCap?: number | null;
+  /**
+   * 中转的上游给这个模型写的最大输出（令牌，1 到 1000000），可选。写了：客户端没写输出上限的 Responses 请求发给这个中转
+   * 的输出上限取它（不超过该请求的默认输出）；没写：发 4096
+   */
+  maxOutputTokens?: number | null;
   enabled?: boolean | null;
   /** 只读：映射验证通过的时间；设置、账号提供方或 base URL 变化后失效 */
   verifiedAt?: string | null;

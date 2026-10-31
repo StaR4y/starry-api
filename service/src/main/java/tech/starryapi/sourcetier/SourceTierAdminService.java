@@ -167,7 +167,8 @@ public class SourceTierAdminService {
         List<SourceTierDtos.MemberModel> models = snapshot.models(member.vendor(), member.accountId()).stream()
             .sorted(Comparator.comparing(MemberModel::modelId))
             .map(model -> new SourceTierDtos.MemberModel(model.modelId(), model.upstreamModel(), model.maxContextTokens(),
-                model.imageTokenCap(), model.enabled(), model.verifiedAt(), SourceTierValidator.isVerified(member, model, account)))
+                model.imageTokenCap(), model.maxOutputTokens(), model.enabled(), model.verifiedAt(),
+                SourceTierValidator.isVerified(member, model, account)))
             .toList();
         return new SourceTierDtos.Member(member.accountId(), member.tierId(), member.protocol(), member.exclusive(),
             member.vision(), member.jsonSchema(), member.priorityTier(), member.cacheControlPassthrough(),
@@ -502,9 +503,9 @@ public class SourceTierAdminService {
     private Mono<Void> insertModel(MemberModel model, Verification verification) {
         GenericExecuteSpec spec = db.sql("""
                 INSERT INTO source_tier_member_models (vendor, account_id, model_id, upstream_model, max_context_tokens,
-                    image_token_cap, enabled, verified_at, verified_hash, verify_summary)
-                VALUES (:vendor, :accountId, :modelId, :upstreamModel, :maxContext, :imageCap, :enabled, :verifiedAt,
-                    :verifiedHash, CAST(:summary AS JSONB))
+                    image_token_cap, max_output_tokens, enabled, verified_at, verified_hash, verify_summary)
+                VALUES (:vendor, :accountId, :modelId, :upstreamModel, :maxContext, :imageCap, :maxOutput, :enabled,
+                    :verifiedAt, :verifiedHash, CAST(:summary AS JSONB))
                 """)
             .bind("vendor", model.vendor())
             .bind("accountId", model.accountId())
@@ -514,6 +515,7 @@ public class SourceTierAdminService {
             .bind("imageCap", model.imageTokenCap())
             .bind("enabled", model.enabled())
             .bind("summary", verification.summary());
+        spec = nullable(spec, "maxOutput", model.maxOutputTokens(), Integer.class);
         spec = nullable(spec, "verifiedAt", verification.verifiedAt(), Instant.class);
         spec = nullable(spec, "verifiedHash", verification.hash(), String.class);
         return spec.then();

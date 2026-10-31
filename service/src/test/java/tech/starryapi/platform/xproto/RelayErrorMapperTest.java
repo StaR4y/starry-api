@@ -30,6 +30,13 @@ class RelayErrorMapperTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
+    /**
+     * What Anthropic answers when the prompt fits the window but not beside max_tokens (the Claude models before the 4.5 generation:
+     * 3.x, Sonnet 4, Opus 4, Opus 4.1; Bedrock, Vertex, and relays in front of them).
+     */
+    private static final String ANTHROPIC_BESIDE_OUTPUT =
+        "input length and `max_tokens` exceed context limit: 188240 + 21333 > 200000, decrease input length or `max_tokens` and try again";
+
     /** Words a relay could write that must never come back out: a host, a URL, a key and a piece of the prompt. */
     private static final String LEAK = "relay.internal.example.com https://relay.internal.example.com/v1 sk-secret-0123 the user's prompt about taxes";
 
@@ -105,6 +112,12 @@ class RelayErrorMapperTest {
                 "Source error 400 (invalid_request_error)"),
             Arguments.of(500, error("server_error", null, "This model's Maximum Context Length is 4096"), 400, false, true,
                 "Source error 400 (server_error)"),
+            // Anthropic's words for a prompt that fits but not beside max_tokens, as a relay wraps them and as the API sends them: a 400
+            // like any other, marked as another kind (isBesideOutput) and not as a refusal of the length (see the tests below)
+            Arguments.of(400, error("invalid_request_error", null, ANTHROPIC_BESIDE_OUTPUT), 400, false, false,
+                "Source error 400 (invalid_request_error)"),
+            Arguments.of(400, "{\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":" + quote(ANTHROPIC_BESIDE_OUTPUT) + "}}",
+                400, false, false, "Source error 400 (invalid_request_error)"),
             // a model the relay does not serve -> 404, whatever came with it
             Arguments.of(404, error("invalid_request_error", "model_not_found", "The model `claude-x` does not exist"), 404, false, false,
                 "Source error 404 (model_not_found)"),
@@ -459,6 +472,46 @@ class RelayErrorMapperTest {
         // It does not mark other statuses, and it is not the status 400 alone.
         assertThat(map(400, "").isContextExceeded()).isFalse();
         assertThat(map(413, "").isContextExceeded()).isFalse();
+    }
+
+    /**
+     * Anthropic's refusal of a prompt that fits but not beside its output says nothing of the prompt alone, so it is no refusal of the
+     * length by itself: it is a 400 of the converted request with its own marker. A caller that chose the output limit reads it as a
+     * refusal of the length, and gets the same error as one of the words above.
+     */
+    @Test
+    void aPromptThatDoesNotFitBesideItsOutputIsNoRefusalOfTheLengthUntilTheCallerThatChoseTheOutputSaysSo() {
+        RelayErrorException beside = map(400, error("invalid_request_error", null, ANTHROPIC_BESIDE_OUTPUT));
+
+        assertThat(beside.isBesideOutput()).isTrue();
+        assertThat(beside.isContextExceeded()).isFalse();
+        assertThat(RelayErrorException.contextExceeded(beside)).isFalse();
+
+        RelayErrorException asLength = beside.asContextExceeded();
+        assertThat(asLength.isContextExceeded()).isTrue();
+        assertThat(asLength.isBesideOutput()).isFalse();
+        assertThat(RelayErrorException.contextExceeded(asLength)).isTrue();
+        assertThat(asLength.getStatusCode()).isEqualTo(beside.getStatusCode());
+        assertThat(asLength.isRecoverable()).isEqualTo(beside.isRecoverable());
+        assertThat(asLength.getMessage()).isEqualTo(beside.getMessage());
+        assertThat(UpstreamException.retryAfterSeconds(asLength)).isEqualTo(UpstreamException.retryAfterSeconds(beside));
+    }
+
+    @Test
+    void theWordsOfAnthropicMarkOnlyA400AndNeverAKindOfErrorThatAStatusOrAQuotaWordDecided() {
+        // A refusal of the length in the words of vLLM is the refusal of the length, whatever else its text says.
+        RelayErrorException length = map(400, error("invalid_request_error", null, ANTHROPIC_BESIDE_OUTPUT + " prompt is too long"));
+        assertThat(length.isContextExceeded()).isTrue();
+        assertThat(length.isBesideOutput()).isFalse();
+        // The status of the response that says more than the type (a 429, a 402) and the words of an empty balance decide as before.
+        assertThat(map(429, error("invalid_request_error", null, ANTHROPIC_BESIDE_OUTPUT)).isBesideOutput()).isFalse();
+        assertThat(map(429, error("invalid_request_error", null, ANTHROPIC_BESIDE_OUTPUT)).getStatusCode()).isEqualTo(429);
+        assertThat(map(400, error("invalid_request_error", null, "credit balance is too low; " + ANTHROPIC_BESIDE_OUTPUT)).isBesideOutput()).isFalse();
+        assertThat(map(400, error("invalid_request_error", null, "Unsupported parameter: top_k")).isBesideOutput()).isFalse();
+        // In a successful response it is the same.
+        RelayErrorException inBand = mapper.fromInBand(JSON.readTree(error("invalid_request_error", null, ANTHROPIC_BESIDE_OUTPUT)).get("error"), "account 7", null);
+        assertThat(inBand.isBesideOutput()).isTrue();
+        assertThat(inBand.isContextExceeded()).isFalse();
     }
 
     // ---------------------------------------------------------------- the server log

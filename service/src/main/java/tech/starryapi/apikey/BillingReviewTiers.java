@@ -12,8 +12,8 @@ import tools.jackson.databind.json.JsonMapper;
 /**
  * What an administrator needs to settle a reservation held for review when the request was served from source tiers
  * (design 8): the plan it was reserved by, the tier that served it and the tier it was last dispatched to, each with
- * the quote of that tier. The reservation itself is sized for the dearest tier the request could have been served
- * from, so settling by it would charge a user for a tier that did not serve them.
+ * the quote of that tier. The reservation itself is sized for the tier that reserves the most of those the request could
+ * have been served from, so settling by it would charge a user for a tier that did not serve them.
  *
  * <p>A reservation of a request that was not served from tiers has none of this, and its row comes out as it always did.
  */

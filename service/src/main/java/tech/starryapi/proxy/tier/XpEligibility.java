@@ -41,7 +41,6 @@ import tech.starryapi.sourcetier.SourceTierSnapshot.PairGate;
 import tech.starryapi.sourcetier.SourceTierSnapshot.Tier;
 import tech.starryapi.sourcetier.SourceTierValidator;
 import tools.jackson.databind.JsonNode;
-import tools.jackson.databind.node.ObjectNode;
 
 /**
  * Decides which of the relays registered in a vendor's tiers may serve one request, and builds what each is sent (design 3,
@@ -56,10 +55,11 @@ import tools.jackson.databind.node.ObjectNode;
  *   <li>the request has no feature the relay cannot carry and the native accounts of the route can ({@link FeaturePolicy},
  *       the route's baseline being that of its native cells);
  *   <li>the request, made into the relay's Chat body, passes the sanitizer, the canonicalizer and the strict lint;
- *   <li>it fits the window of the mapping (with the output limit the gateway chose, if the client wrote none; where the
- *       relay is the only source the request can be served from, that limit is the 4,096 the request was given before the
- *       gateway chose one instead, {@link #evaluateWithinWindows}), and is smaller than any prompt this node has seen the
- *       relay refuse for its length ({@link XpLearnedLimits});
+ *   <li>it fits the window of the mapping, and is smaller than any prompt this node has seen the relay refuse for its
+ *       length ({@link XpLearnedLimits}); the window is measured on the prompt alone, except that a relay whose mapping states
+ *       a maximum output is sent the output limit that the maximum allows when the client wrote none, if the window holds that
+ *       beside the prompt and this node has not seen the relay refuse a body as large with it (D15, {@link #evaluate}), and
+ *       the 4,096 it is otherwise sent when it does not;
  *   <li>and the relay has not broken off an answer for this session a moment ago ({@link TierSessionBindings#relayExcluded}).
  * </ol>
  *
@@ -104,16 +104,11 @@ final class XpEligibility {
      *     is shut), and when nothing tells the session from others
      * @param entry the entry of the request as the registry names it, which the skips are counted under; null when no relay
      *     was looked at
-     * @param outputBound whether some relay was left out only because the output the gateway chose does not fit beside the
-     *     prompt in its window, or beside the prompt of a request that was refused (the prompt alone would be served): the
-     *     request may then be looked at again with the output it was given before the gateway chose one ({@link
-     *     #evaluateWithinWindows}), if no other source can serve it
      */
-    record Found(Map<String, List<Eligible>> byTier, List<XpSkip> skips, boolean open, String session, String entry,
-                 boolean outputBound) {
+    record Found(Map<String, List<Eligible>> byTier, List<XpSkip> skips, boolean open, String session, String entry) {
 
         /** A request no relay takes part in. */
-        static final Found NONE = new Found(Map.of(), List.of(), false, null, null, false);
+        static final Found NONE = new Found(Map.of(), List.of(), false, null, null);
 
         List<Relay> relays(String tierId) {
             return byTier.getOrDefault(tierId, List.of()).stream().map(Eligible::relay).toList();
@@ -174,26 +169,42 @@ final class XpEligibility {
         }
     }
 
-    /**
-     * The body of one set of settings, and whether it can be sent.
-     *
-     * @param gatewayOutput the output limit the body names when the gateway chose it and not the client ({@link
-     *     TierEntryFacts#gatewayOutput}); 0 otherwise
-     */
-    private record Built(Wire wire, List<String> problems, long estimatedInput, long gatewayOutput) {
+    /** The body of one set of settings, and whether it can be sent. */
+    private record Built(Wire wire, List<String> problems, long estimatedInput) {
 
-        /**
-         * The same body with the output limit it had before the gateway chose one, {@link
-         * RequestBounds#FALLBACK_OUTPUT_TOKENS}, and the prompt measured on that body: the request the relay was given then,
-         * which it is served and refused for as it was, and what a refusal teaches about is what that one taught. A body whose
-         * limit is not the gateway's is returned as it is.
-         */
-        Built withTheOutputOfBefore() {
-            if (gatewayOutput == 0 || !problems.isEmpty()) {
-                return this;
+        /** The output the body asks the relay for; 0 for a body that names none and for one that could not be made. */
+        long outputLimit() {
+            return wire == null ? 0 : TierDispatch.outputLimitOf(wire.body());
+        }
+    }
+
+    /** What a body is built under: the settings, and the output limit it names instead of the planned one (0 for the planned). */
+    private record BodyKey(Settings settings, long output) {
+    }
+
+    /**
+     * The output limits a relay may be sent for a request whose limit the gateway chose (D15, {@link
+     * TierEntryFacts#gatewayOutput}), as its mapping decides them.
+     *
+     * @param narrow the limit the prompt is judged with, the most that a relay was sent before D11 (4,096, or the maximum
+     *     output of the mapping if that is less); 0 for a request whose limit is the client's or the entry's own, which
+     *     has one body, the planned one
+     * @param wide the limit the relay is sent when the window holds it beside the prompt and this node has not seen the
+     *     relay refuse a body as large with it (the maximum output of the mapping, as far as the gateway's own default
+     *     for the request goes); the same as {@code narrow} when there is no such limit
+     */
+    private record Outputs(long narrow, long wide) {
+
+        static Outputs of(TierPlanRequest request, TierEntryFacts facts, MemberModel mapping) {
+            if (!facts.gatewayOutput()) {
+                return new Outputs(0, 0);
             }
-            ObjectNode sized = RequestBounds.withTheOutputOfBefore(wire.body());
-            return new Built(new Wire(sized, wire.degraded()), problems, RelayUsageNormalizer.estimateInputTokens(sized), 0);
+            long wide = RequestBounds.relayOutputTokens(RequestBounds.outputTokens(request.upstreamRequest()), mapping.maxOutputTokens());
+            return new Outputs(Math.min(wide, RequestBounds.FALLBACK_OUTPUT_TOKENS), wide);
+        }
+
+        boolean widerThanBefore() {
+            return wide > narrow;
         }
     }
 
@@ -207,6 +218,7 @@ final class XpEligibility {
 
         private final TierPlanRequest request;
         private final TierEntryFacts facts;
+        private final Map<Long, JsonNode> sized = new HashMap<>();
         private JsonNode body;
         private RuntimeException failure;
 
@@ -215,7 +227,13 @@ final class XpEligibility {
             this.facts = facts;
         }
 
-        JsonNode get() {
+        /** The Chat body with the output limit {@code output} where that is more than 0, and as planned otherwise. */
+        JsonNode get(long output) {
+            JsonNode planned = planned();
+            return output > 0 ? sized.computeIfAbsent(output, limit -> RequestBounds.withOutputLimit(planned, limit)) : planned;
+        }
+
+        private JsonNode planned() {
             if (failure != null) {
                 throw failure;
             }
@@ -264,38 +282,6 @@ final class XpEligibility {
         List<PoolCell> units,
         List<Tier> enabled
     ) {
-        return evaluate(request, snapshot, vendor, modelKey, units, enabled, false);
-    }
-
-    /**
-     * The relays of the request once more, for a request that nothing else can serve while the output the gateway chose is
-     * on it ({@link Found#outputBound}): a relay is then not left out for that output, and is given the request it was given
-     * before the gateway chose a default output ({@link Built#withTheOutputOfBefore}), of which only the prompt is judged.
-     * The output is not cut to the room the window appears to leave: the prompt is only estimated, and a relay that counts
-     * more than the estimate refuses a request that was made to fill the window, and teaches this node a limit that turns
-     * smaller prompts away too. Where another source can serve the request this is not asked for, and the relay stays out
-     * of a request it cannot give the output it was meant to.
-     */
-    Found evaluateWithinWindows(
-        TierPlanRequest request,
-        SourceTierSnapshot snapshot,
-        String vendor,
-        String modelKey,
-        List<PoolCell> units,
-        List<Tier> enabled
-    ) {
-        return evaluate(request, snapshot, vendor, modelKey, units, enabled, true);
-    }
-
-    private Found evaluate(
-        TierPlanRequest request,
-        SourceTierSnapshot snapshot,
-        String vendor,
-        String modelKey,
-        List<PoolCell> units,
-        List<Tier> enabled,
-        boolean withinWindows
-    ) {
         TierEntryFacts facts = request.entryFacts();
         if (facts == null || !snapshot.hasCrossProtocolMembers() || !PairRegistry.VENDORS.contains(vendor)) {
             return Found.NONE;
@@ -323,7 +309,7 @@ final class XpEligibility {
         String model = DefaultSourceTierPlanner.normalize(request.upstreamModel());
         FeaturePolicy.Baseline baseline = FeaturePolicy.Baseline.of(units);
         Map<Settings, Verdict> verdicts = new HashMap<>();
-        Map<Settings, Built> built = new HashMap<>();
+        Map<BodyKey, Built> built = new HashMap<>();
         ChatSource chat = new ChatSource(request, facts);
         Map<String, List<Eligible>> eligible = new LinkedHashMap<>();
         List<XpSkip> skips = new ArrayList<>();
@@ -331,7 +317,6 @@ final class XpEligibility {
         String session = TierSessionKeys.resolve(request.keyId(), modelKey, request.sessionName(), request.upstreamRequest())
             .orElse(null);
         boolean open = false;
-        boolean outputBound = false;
         for (Member member : members) {
             Optional<SourceKind> kind = SourceKind.ofProtocol(member.protocol());
             if (kind.isEmpty()) {
@@ -377,18 +362,28 @@ final class XpEligibility {
                     verdict.hard().stream().map(Feature::label).distinct().collect(Collectors.joining(","))));
                 continue;
             }
-            Built body = built.computeIfAbsent(settings, ignored -> build(chat, facts, settings));
-            if (withinWindows && unfit(member, mapping, body) != null) {
-                body = body.withTheOutputOfBefore();
-            }
-            XpSkip unfit = unfitForPrompt(member, mapping, body);
-            if (unfit == null) {
-                unfit = unfitForOutput(member, mapping, body);
-                outputBound |= unfit != null;
-            }
+            // The prompt is judged on the body the relay was sent before D11 (the 4,096 that was never counted besides it, as
+            // far as its mapping allows no more); a relay is left out for what that body is left out for, as it was.
+            Outputs outputs = Outputs.of(request, facts, mapping);
+            Built body = built.computeIfAbsent(new BodyKey(settings, outputs.narrow()),
+                ignored -> build(chat, facts, settings, outputs.narrow()));
+            XpSkip unfit = unfit(member, mapping, body, 0);
             if (unfit != null) {
                 skips.add(unfit);
                 continue;
+            }
+            long beyondFallback = 0;
+            if (outputs.widerThanBefore()) {
+                // D15: the maximum its mapping states, if the window holds it beside the prompt and this node has not seen the
+                // relay refuse a body as large with it; if not, the relay is sent the request it was sent before D11, which
+                // its prompt fits.
+                long extra = outputs.wide() - outputs.narrow();
+                Built wide = built.computeIfAbsent(new BodyKey(settings, outputs.wide()),
+                    ignored -> build(chat, facts, settings, outputs.wide()));
+                if (unfit(member, mapping, wide, extra) == null && wide.estimatedInput() + outputs.wide() <= mapping.maxContextTokens()) {
+                    body = wide;
+                    beyondFallback = extra;
+                }
             }
             // Last, so that the relay is out for a moment only for a request it would be given: the tier it sits in is then
             // one that can serve this request again shortly, and not one the request has nothing in.
@@ -401,11 +396,11 @@ final class XpEligibility {
             TierDispatch dispatch = TierDispatch.openAiChat(pair, mapping.modelId(), mapping.upstreamModel(), member,
                 body.wire().body(), List.copyOf(degraded));
             eligible.computeIfAbsent(tierId, ignored -> new ArrayList<>())
-                .add(new Eligible(new Relay(dispatch, mapping, body.estimatedInput(), body.gatewayOutput()), account));
+                .add(new Eligible(new Relay(dispatch, mapping, body.estimatedInput(), beyondFallback), account));
         }
         // Whatever the relays did this turn, or were left out for: the session is the one a relay is kept from, and what the
         // next turn of a response chain is the session of. A relay that is not open to the key is nothing of the session's.
-        return new Found(eligible, List.copyOf(skips), open, open ? session : null, detected.entry().name(), outputBound);
+        return new Found(eligible, List.copyOf(skips), open, open ? session : null, detected.entry().name());
     }
 
     /**
@@ -445,26 +440,22 @@ final class XpEligibility {
         }
         Settings settings = settings(member, mapping, vendor, request.fastMode());
         return FeaturePolicy.judge(detected, FeaturePolicy.Baseline.of(units), settings).allowed()
-            && unfit(member, mapping, build(new ChatSource(request, facts), facts, settings)) == null;
+            && unfit(member, mapping, build(new ChatSource(request, facts), facts, settings,
+                Outputs.of(request, facts, mapping).narrow()), 0) == null;
     }
 
     /**
      * Why the body made for the relay cannot be sent to it, if it cannot: the lint failed, the request is over the window of
-     * the mapping, or a relay that refused a prompt of this size for its length is not asked the same again (design 7.8).
-     * The one place these are decided, for a relay in service and for one that is out of it.
+     * the mapping, or a relay that refused a prompt of this size for its length is not asked the same again (design 7.8),
+     * nor a body that asks for as much output as one it refused with a prompt as large (the client's own included, {@link
+     * XpLearnedLimits#learnWide}). The one place these are decided, for a relay in service and for one that is out of it.
      *
-     * <p>The window is measured on the prompt, as it always was, and also on the output limit of a request whose limit the
-     * gateway chose (D11, D14): the default is some thousands of tokens (16,000 unless the operator raised it, as far as the
-     * model writes), and a relay that refuses what the prompt and the output come to over its window would be asked, and
-     * refuse, every Codex turn longer than the window less that limit. A limit the client wrote is the client's to size and is not counted, as it never was.
+     * @param beyondFallback how many tokens of output the body asks for beyond the fallback, which is added to its prompt
+     *     where it is compared with what the relay refused, since a refusal is learned in the terms of the body with the
+     *     fallback output ({@link Relay#taughtByRefusal}); 0 for the body that is judged beside the fallback, and for a body
+     *     with a limit the client wrote, whatever output it asks for: it is compared on its prompt alone
      */
-    private XpSkip unfit(Member member, MemberModel mapping, Built body) {
-        XpSkip unfit = unfitForPrompt(member, mapping, body);
-        return unfit != null ? unfit : unfitForOutput(member, mapping, body);
-    }
-
-    /** The reasons {@link #unfit} gives that hold of the prompt alone, whatever output the request asks for. */
-    private XpSkip unfitForPrompt(Member member, MemberModel mapping, Built body) {
+    private XpSkip unfit(Member member, MemberModel mapping, Built body, long beyondFallback) {
         if (!body.problems().isEmpty()) {
             return new XpSkip(member.tierId(), member.accountId(), XpSkip.Reason.CONVERSION, body.problems().getFirst());
         }
@@ -473,34 +464,17 @@ final class XpEligibility {
                 "about " + body.estimatedInput() + " tokens, the window is " + mapping.maxContextTokens());
         }
         OptionalLong refused = learnedLimits.refusedFrom(mapping);
-        if (refused.isPresent() && body.estimatedInput() >= refused.getAsLong()) {
+        if (refused.isPresent() && body.estimatedInput() + beyondFallback >= refused.getAsLong()) {
             return new XpSkip(member.tierId(), member.accountId(), XpSkip.Reason.CONTEXT,
                 "about " + body.estimatedInput() + " tokens, a prompt of " + refused.getAsLong() + " was refused for its length");
         }
-        return null;
-    }
-
-    /**
-     * The reasons {@link #unfit} gives that hold of the output the gateway chose besides the prompt, for a prompt that
-     * {@link #unfitForPrompt} lets through: a relay left out for these alone is one the request fits when its output is the
-     * one it had before the gateway chose it ({@link Built#withTheOutputOfBefore}).
-     */
-    private XpSkip unfitForOutput(Member member, MemberModel mapping, Built body) {
-        long output = body.gatewayOutput();
-        if (output <= 0) {
-            return null;
-        }
-        long total = body.estimatedInput() + output;
-        if (total > mapping.maxContextTokens()) {
+        // A body that asks for as much output as one that was refused, with a prompt as large, is refused again: the value above
+        // is in the terms of the body with the 4,096 output, in which a limit the client wrote (which has no extra to add) is
+        // not told from the body that was refused.
+        if (learnedLimits.refusedAsMuch(mapping, body.estimatedInput(), body.outputLimit())) {
             return new XpSkip(member.tierId(), member.accountId(), XpSkip.Reason.CONTEXT,
-                "about " + body.estimatedInput() + " tokens and an output of up to " + output + ", the window is "
-                    + mapping.maxContextTokens());
-        }
-        OptionalLong refusedWith = learnedLimits.refusedFromWithGatewayOutput(mapping);
-        if (refusedWith.isPresent() && total >= refusedWith.getAsLong()) {
-            return new XpSkip(member.tierId(), member.accountId(), XpSkip.Reason.CONTEXT,
-                "about " + body.estimatedInput() + " tokens and an output of up to " + output + ", a request of "
-                    + refusedWith.getAsLong() + " was refused for its length");
+                "about " + body.estimatedInput() + " tokens and an output of " + body.outputLimit()
+                    + ", a body with as much of both was refused for its length");
         }
         return null;
     }
@@ -548,21 +522,21 @@ final class XpEligibility {
     }
 
     /**
-     * The body for one set of settings, made from the request as it is reserved (so the output limit the reservation
-     * assumes is the one the relay is given; the Responses entry's body is converted from that one) and from what the
-     * original body says about reasoning and tool search. A body that cannot be made, or does not pass the lint, is a
-     * conversion this member cannot serve; a defect in the conversion costs the request its relays, not the request.
+     * The body for one set of settings, made from the request as it is reserved (the Responses entry's body is converted
+     * from that one) and from what the original body says about reasoning and tool search. The output limit is the one of the
+     * request, unless {@code output} says what a relay is given for a limit the gateway chose (D15, {@link Outputs}). A body
+     * that cannot be made, or does not pass the lint, is a conversion this member cannot serve; a defect in the conversion
+     * costs the request its relays, not the request.
      */
-    private static Built build(ChatSource chat, TierEntryFacts facts, Settings settings) {
+    private static Built build(ChatSource chat, TierEntryFacts facts, Settings settings, long output) {
         try {
             Wire wire = ChatCanonicalizer.canonicalize(
-                ChatWireSanitizer.sanitize(chat.get(), facts.entryDigest(), settings, null), settings);
+                ChatWireSanitizer.sanitize(chat.get(output), facts.entryDigest(), settings, null), settings);
             List<String> problems = StrictChatLint.problems(wire.body());
-            return new Built(wire, problems, problems.isEmpty() ? RelayUsageNormalizer.estimateInputTokens(wire.body()) : 0,
-                facts.gatewayOutput() ? TierDispatch.outputLimitOf(wire.body()) : 0);
+            return new Built(wire, problems, problems.isEmpty() ? RelayUsageNormalizer.estimateInputTokens(wire.body()) : 0);
         } catch (RuntimeException failure) {
             log.warn("The conversion of a request for a relay failed: {}", failure.toString());
-            return new Built(null, List.of("the conversion failed: " + failure.getClass().getSimpleName()), 0, 0);
+            return new Built(null, List.of("the conversion failed: " + failure.getClass().getSimpleName()), 0);
         }
     }
 }

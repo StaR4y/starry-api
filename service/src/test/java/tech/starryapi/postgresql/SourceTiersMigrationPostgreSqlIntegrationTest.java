@@ -105,7 +105,7 @@ class SourceTiersMigrationPostgreSqlIntegrationTest extends PostgreSqlIntegratio
                 + " VALUES (?, ?, 'claude-sonnet-4.5', 'relay/sonnet', 200000)", vendor, account);
             Map<String, Object> model = rows(db, "SELECT * FROM source_tier_member_models WHERE vendor = ?", vendor).getFirst();
             assertThat(model).containsEntry("image_token_cap", 8192).containsEntry("enabled", true)
-                .containsEntry("verified_at", null).containsEntry("verified_hash", null);
+                .containsEntry("verified_at", null).containsEntry("verified_hash", null).containsEntry("max_output_tokens", null);
             assertThat(scalar(db, "SELECT verify_summary::text FROM source_tier_member_models WHERE vendor = ?", vendor))
                 .isEqualTo("{}");
 
@@ -255,6 +255,14 @@ class SourceTiersMigrationPostgreSqlIntegrationTest extends PostgreSqlIntegratio
             }
             update(db, model.formatted(", image_token_cap", ", ?"), vendor, relay, "cap-low", "wire", 1000, 1);
             update(db, model.formatted(", image_token_cap", ", ?"), vendor, relay, "cap-high", "wire", 1000, 1000000);
+            // The maximum output the mapping states is optional (V32); when it is given it is a positive limit a client could ask for.
+            for (int maximum : List.of(0, -1, 1000001)) {
+                assertRejected(db, model.formatted(", max_output_tokens", ", ?"), "23514", "ck_source_tier_member_models_max_output",
+                    vendor, relay, "m-" + suffix(), "wire", 1000, maximum);
+            }
+            update(db, model.formatted(", max_output_tokens", ", ?"), vendor, relay, "out-low", "wire", 1000, 1);
+            update(db, model.formatted(", max_output_tokens", ", ?"), vendor, relay, "out-high", "wire", 1000, 1000000);
+            update(db, model.formatted(", max_output_tokens", ", ?"), vendor, relay, "out-none", "wire", 1000, null);
             assertRejected(db, model.formatted("", ""), "23514", "ck_source_tier_member_models_model_id", vendor, relay, "  ", "wire", 1000);
             for (String hash : List.of("xyz", "A".repeat(64), "a".repeat(63))) {
                 assertRejected(db, model.formatted(", verified_hash", ", ?"), "23514", "ck_source_tier_member_models_verified_hash",
@@ -774,6 +782,35 @@ class SourceTiersMigrationPostgreSqlIntegrationTest extends PostgreSqlIntegratio
     }
 
     // ---- upgrading ----
+
+    /** The mappings stored before V32 keep their rows and state no maximum output, so that a relay is sent the 4,096 it was sent. */
+    @Test
+    void aV31DatabaseWithMappingsMovesToV32WithTheMappingsKeptAndNoMaximumOutput() throws Exception {
+        String name = "tiers_v31";
+        createDatabase(name);
+        String url = jdbcUrl(name);
+        migrate(url, "31");
+        String vendor = "up-" + suffix();
+        String relay;
+        try (Connection db = owner(url)) {
+            assertThat(columns(db, "source_tier_member_models")).doesNotContain("max_output_tokens");
+            update(db, "INSERT INTO source_tier_vendors(vendor, enabled) VALUES (?, TRUE)", vendor);
+            tier(db, vendor, "relay", 1, "relay");
+            relay = account(db);
+            relayMember(db, vendor, "relay", relay);
+            model(db, vendor, relay, "claude-sonnet-4.5");
+        }
+
+        migrate(url, null);
+
+        try (Connection db = owner(url)) {
+            assertThat(scalar(db, "SELECT success FROM flyway_schema_history WHERE version = '32'")).isEqualTo(true);
+            assertThat(rows(db, "SELECT * FROM source_tier_member_models WHERE vendor = ?", vendor)).singleElement().satisfies(model -> {
+                assertThat(model).containsEntry("account_id", relay).containsEntry("model_id", "claude-sonnet-4.5")
+                    .containsEntry("max_context_tokens", 100000).containsEntry("max_output_tokens", null);
+            });
+        }
+    }
 
     @Test
     void aV28DatabaseWithDataMovesToV29WithoutLosingOrChangingAnything() throws Exception {

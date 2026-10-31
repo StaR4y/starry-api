@@ -13,7 +13,7 @@ import tools.jackson.databind.JsonNode;
 /**
  * What the billing review list tells about the tier of a request (design 8): the plan the reservation was made by, the
  * tier that served and the tier that was last dispatched to, each with its own quote, so that an administrator settles
- * by what the user was charged for and not by the reservation, which covers the dearest tier.
+ * by what the user was charged for and not by the reservation, which is that of the tier reserving the most.
  */
 class BillingReviewTiersTest {
 

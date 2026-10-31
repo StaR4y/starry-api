@@ -60,11 +60,12 @@ import tools.jackson.databind.node.ObjectNode;
  *   <li><b>An answer the Responses entry cannot be told</b> is held back (see {@link #cannotBeTold}): the clients of that
  *       entry that matter take {@code response.incomplete} for a failure of the stream and send the request again, and a
  *       relay that is asked again answers again and is paid for it. So an answer that the relay's filter stopped, and one
- *       that the gateway's own bound cut off (the client named no limit, so the relay was held to the default the
- *       reservation assumes) when it lost a call or has nothing to show, are not told as {@code incomplete}: nothing is
- *       charged for them, the relay is kept from the session for a couple of minutes, and the client's retry reaches
- *       another source. That source is held to the same bound unless it is a Codex account (the other native sources are
- *       sent the default as well, see {@link #cannotBeTold}), so the retry is no promise that the answer fits. It is a
+ *       that the gateway's own bound cut off (the client named no limit, so the relay was held to the limit the gateway
+ *       chose for it: 4,096, or the maximum output of its mapping, D15) when it lost a call or has nothing to show, are not
+ *       told as {@code incomplete}: nothing is charged for them, the relay is kept from the session for a couple of minutes,
+ *       and the client's retry reaches another source. That source is held to the default of the model unless it is a Codex
+ *       account (the other native sources are sent it, see {@link #cannotBeTold}), so the retry is no promise that the
+ *       answer fits. It is a
  *       {@link RelayAnswerWithheldException}, which is an interruption to the request and none to the relay's health: the
  *       relay did what it was asked. It carries what the relay reported of the answer, read as a served answer's usage is,
  *       for the request log to show the operator what it cost (D11); the user is still charged nothing.
@@ -135,8 +136,9 @@ class XpDispatcher {
      * {@link #dispatch(ProxyAccountEntity, TierDispatch, Limits, Duration)} for a request whose output limit may be the
      * gateway's own.
      *
-     * @param defaultOutputLimit whether the limit the relay was told it may write is the default the reservation assumes
-     *     and not one the client wrote: the Responses entry's answers that this bound cut off are judged by it
+     * @param defaultOutputLimit whether the limit the relay was told it may write is one the gateway chose (the client wrote
+     *     none: 4,096 or the maximum output of the mapping, D15) and not one the client wrote: the Responses entry's answers
+     *     that this bound cut off are judged by it
      */
     Mono<PlatformCompletionResult> dispatch(
         ProxyAccountEntity account,
@@ -260,11 +262,11 @@ class XpDispatcher {
      *   <li>One that the relay's filter stopped. Another source may answer the request, and the same relay is likely to
      *       stop the retry in the same place.
      *   <li>One that the gateway's own bound cut off ({@code defaultOutputLimit}: the client wrote none, so the relay was
-     *       held to the default the reservation assumes, D14) and that lost a call to it, or that has
-     *       nothing the client can show: no text and no whole call, only reasoning. The bound is the gateway's for every
-     *       source: Codex accounts drop the field, but Kiro, official OpenAI keys and Anthropic keys are sent the same one
-     *       when the client names none, and Kiro's answer has no stop reason, so a native source renders what it was cut at
-     *       as a finished answer. An answer that is text alone, or has the calls it came to, is told as {@code completed}
+     *       held to the limit the gateway chose for it, 4,096 or the maximum output of its mapping, D15) and that lost a call
+     *       to it, or that has nothing the client can show: no text and no whole call, only reasoning. The bound is the
+     *       gateway's for every source: Codex accounts drop the field, but Kiro, official OpenAI keys and Anthropic keys are
+     *       sent the default of the model (D14) when the client names none, and Kiro's answer has no stop reason, so a native
+     *       source renders what it was cut at as a finished answer. An answer that is text alone, or has the calls it came to, is told as {@code completed}
      *       by the facade ({@code ProxyFacade#responsesAnswerOfRelay}) as a native source's is; one that lost a call would
      *       end the turn without the step the model was taking, or run the calls it kept without the one it cut.
      * </ul>

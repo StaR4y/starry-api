@@ -13,7 +13,6 @@ import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Predicate;
@@ -645,7 +644,7 @@ public class ProxyFacade {
      * a facade that was built without the converter.
      *
      * @param gatewayOutput whether the output limit of the planned body is the default the gateway gave a request that named
-     *     none (D11, D14), which a relay's window is then measured against besides the prompt
+     *     none (D14), which a relay is not sent: its own is chosen from its mapping (D15)
      */
     private TierEntryFacts responsesEntryFacts(JsonNode expandedRequest, boolean gatewayOutput) {
         if (responsesChatConverter == null) {
@@ -953,9 +952,9 @@ public class ProxyFacade {
         JsonNode upstreamRequest = boundedBillingRequest(preferDeepSeekAccounts
             ? deepSeekRequest(expandedRequest)
             : fastMode ? openAiFastRequest(expandedRequest) : expandedRequest, true, defaultLimit);
-        // A relay's window holds the output besides the prompt when the gateway chose that limit and it is more than the
-        // 4,096 that was never counted (a limit the client wrote is the client's to size).
-        boolean gatewayOutput = defaultLimit > RequestBounds.FALLBACK_OUTPUT_TOKENS && !namesAnOutputLimit(request);
+        // The limit is the gateway's own when the client wrote none: a relay is then given the output of its own mapping
+        // (D15) and not this one.
+        boolean gatewayOutput = !namesAnOutputLimit(request);
         AccountPoolRequestContext poolContext = poolContext(
             requestId,
             requestedModel,
@@ -1282,8 +1281,8 @@ public class ProxyFacade {
 
     /**
      * The request with the output limit it is reserved and sent upstream by: the largest the client wrote in any of the
-     * fields, or {@code defaultLimit} when it wrote none. The reservation, the body every source is sent, and the bound the
-     * usage of a relay is held to are all read from this one number.
+     * fields, or {@code defaultLimit} when it wrote none. The reservation and the body the native sources are sent are read
+     * from this one number; a relay is sent the number of its own mapping instead (D15, {@code XpEligibility}).
      */
     private JsonNode boundedBillingRequest(JsonNode request, boolean responses, long defaultLimit) {
         // Only top-level token limits change here, so share the (possibly multi-MB) children instead of deep-copying them.
@@ -1305,16 +1304,18 @@ public class ProxyFacade {
     /**
      * What a Responses request that names no output limit is held to (Codex never names one): the default the operator
      * configured ({@code starry.proxy.responses-default-output-tokens}, 16,000), no more than the model it is served as writes
-     * ({@link RequestBounds#modelMaximumOutput}). The same number goes into the reservation, into the body every source is sent
-     * and into the bound a relay's usage is held to. The model is the one the upstream is asked for, after the key's mapping,
+     * ({@link RequestBounds#modelMaximumOutput}). The same number goes into the reservation and into the body the native sources
+     * are sent (a relay is given the output of its own mapping, D15). The model is the one the upstream is asked for, after the key's mapping,
      * and no other: a mapping rule that sends a built-in name to a model the catalog does not list, or that the administrator
      * added, says where the request goes, and the name the client wrote says nothing of that backend.
      *
      * <p>The model writes the smaller of what the model list shows as its {@code max_output_tokens} and what the official price
      * catalog lists for it, when both give a figure: the model list gives most aliases one figure (64,000), above what several
-     * of the models it names are held to by their own upstream (gpt-4o 16,384, gpt-4.1 32,768, gpt-4 4,096; the price catalog
-     * lists 8,192 for the DeepSeek models whose model list figure is 384,000), and an upstream refuses a request over its own
-     * limit. A figure only one of them gives is that one's.
+     * of the models it names are held to by their own upstream (gpt-4o 16,384, gpt-4.1 32,768, gpt-4 4,096), and an upstream
+     * refuses a request over its own limit. A figure only one of them gives is that one's. The price catalog is the one in use:
+     * the snapshot bundled with the gateway lists 8,192 for the DeepSeek models whose model list figure is 384,000, but the
+     * catalog the gateway refreshes from (on by default) lists 393,216 for them, so a default deployment gives them the
+     * configured default and only one that does not refresh holds them to 8,192.
      *
      * <p>A model the catalog does not list gives neither, and nor does one that is served by the operator's own backend, which
      * is every model {@link #isOpenAiCompatibleModel} takes for one: the same test that sends the request to the OpenAI-compatible
@@ -1380,8 +1381,8 @@ public class ProxyFacade {
 
     /**
      * The refusal of the reservation of an automatic tiered request for too little balance, with the tiers that would
-     * have reserved less added to what the client is told (design 5.6): the reservation covers the dearest tier the
-     * request may be served from, which a user who could pay for a cheaper one may avoid by naming it.
+     * have reserved less added to what the client is told (design 5.6): the reservation is the largest of the estimates of
+     * the tiers the request may be served from, which a user who could pay for one that reserves less may avoid by naming it.
      */
     private static Throwable lowBalanceAdvice(TierPlan plan, Throwable error) {
         if (plan.lowBalanceHint() != null && error instanceof ApiException api && "INSUFFICIENT_BALANCE".equals(api.getCode())) {
@@ -1394,9 +1395,8 @@ public class ProxyFacade {
      * Holds a reservation of {@code credits} for as long as {@code operation} runs and releases it unless the usage was
      * settled.
      *
-     * <p>A relay is asked once (twice within the one dispatch, for a request it refused with the output the gateway chose
-     * where it is the only source, {@link #askAgain}), and what becomes of that attempt is the operator's whenever it does not
-     * end in a settlement (design 7.8, invariant I7): while {@link #XP_IN_FLIGHT} stands, a client that gives up and any failure
+     * <p>A relay is asked once, and what becomes of that attempt is the operator's whenever it does not end in a
+     * settlement (design 7.8, invariant I7): while {@link #XP_IN_FLIGHT} stands, a client that gives up and any failure
      * release the reservation for good, where an upstream account that was asked and did not answer leaves it for review.
      * An earlier native attempt that may have been billed keeps the reservation in review all the same: the attempt at
      * the relay does not prove that one free.
@@ -2437,15 +2437,12 @@ public class ProxyFacade {
                 // An upstream client that retries on its own says here that one of its attempts produced output, which the
                 // error it finally throws may not (a retry that cannot connect after a stream was cut off).
                 AtomicBoolean generationStarted = new AtomicBoolean();
-                // The relay whose body was refused last, when it is not the one the plan holds: the same relay asked again.
-                AtomicReference<TierPlan.Relay> reasked = new AtomicReference<>();
                 TierSelection selection = attempt.selection();
                 return inFlight(plan, selection.level(), handedToRelay(selection)
                     .then(markDispatched(attempt))
                     .then(markDispatchedTiered(run, selection, retry))
                     .flatMap(lease -> captureUpstreamCall(
-                        Mono.defer(() -> holdingLease(run, selection, lease,
-                                callTiered(run, endpoint, selection, lease, walk, retry, generationStarted, reasked)))
+                        Mono.defer(() -> holdingLease(run, selection, lease, callTiered(run, endpoint, selection, lease)))
                             .contextWrite(context -> context.put(UpstreamException.GENERATION_STARTED_CONTEXT_KEY, generationStarted)))))
                     .flatMap(outcome -> {
                         if (outcome.failure() == null) {
@@ -2472,7 +2469,7 @@ public class ProxyFacade {
                         // A native dispatch is classified as it always was; a relay's answer by what a relay may say (design 7.8).
                         UpstreamFailureClassifier.Classification classification =
                             UpstreamFailureClassifier.classify(error, account, selection.dispatch());
-                        rememberRelayFailure(plan, selection, classification, reasked.get());
+                        rememberRelayFailure(plan, selection, classification);
                         Mono<Void> failureRecord = recordFailure(
                             run.requestId(),
                             run.principal(),
@@ -2504,9 +2501,8 @@ public class ProxyFacade {
                                 generationStarted.get(),
                                 tierHasAccountsLeft
                             );
-                            // A relay that refused the request itself is not asked again (but for the one request more that its
-                            // dispatch may have made, askAgain); the request may cross once to a native account. An interruption
-                            // is not retried at all, and nothing is rechecked or climbed back to after it.
+                            // A relay that refused the request itself is not asked again; the request may cross once to a native
+                            // account. An interruption is not retried at all, and nothing is rechecked or climbed back to after it.
                             TierRetryPolicy.Outcome next = classification.crossTierOnly()
                                 ? retry.onRelayRefusal(failed)
                                 : retry.onFailure(failed);
@@ -2514,10 +2510,14 @@ public class ProxyFacade {
                             // go: where accounts exist for it that are busy or out of quota for now, the client is told to try
                             // again, as its next request is, and is not made to shorten what an account would take as it is. That
                             // holds whether the request has no tier to cross to or may not cross now (it is too old, its lease
-                            // is spent, its budget is): what the identical request is told does not depend on that. A stop for
-                            // a failure that may have started a generation or been billed is the failure's, and is returned.
+                            // is spent, its budget is): what the identical request is told does not depend on that. So does a
+                            // refusal of a body that asked for the maximum output of the mapping, which the identical request is
+                            // not sent again (D15): the relay has learned it, and the client is told to try again whatever is
+                            // below. A stop for a failure that may have started a generation or been billed is the failure's,
+                            // and is returned.
                             boolean tryAgain = classification.crossTierOnly()
-                                && plan.retriesAfterRelayRefusal(classification.contextExceeded());
+                                && (plan.retriesAfterRelayRefusal(classification.contextExceeded())
+                                    || refusedTheMaximumOutput(selection, classification));
                             // A relay that turned its own key down is a failure of that account, which the operator mends (D5): it
                             // goes on to the next account or tier like a busy one, and the client is never told the relay's 401 or
                             // 403. Where it cannot go on (the budget is spent, the lease is) or nothing is left, it is told what
@@ -2552,22 +2552,25 @@ public class ProxyFacade {
     }
 
     /**
+     * Whether the relay refused the length of a body that asked for more output than the 4,096 the plans judge a prompt beside
+     * (the maximum output of its mapping, D15). The refusal is learned in the terms of the smaller body ({@link
+     * TierPlan.Relay#taughtByRefusal}), so the identical request is sent that one and the relay may serve it: the client is not
+     * told its prompt does not fit, which the next identical request would contradict.
+     */
+    private static boolean refusedTheMaximumOutput(TierSelection selection, UpstreamFailureClassifier.Classification classification) {
+        return classification.contextExceeded()
+            && selection.level().relay(selection.account().getAccountId()).filter(relay -> relay.outputBeyondFallback() > 0).isPresent();
+    }
+
+    /**
      * What this node keeps of a relay's failure beyond the request (design 7.8). A relay that broke off an answer is kept
      * from the plans of the same session for a couple of minutes, so that the client's own retry of the 502 is not given to
      * the relay that may still be generating the first answer; a relay that refused a prompt for its length is not sent a
      * prompt that large again. Both only shape the plans of later requests, as the other structural reasons do; neither
      * writes the tier binding of the session, since the tier below that then serves it is not one the session was pushed
      * down to (design 4.7).
-     *
-     * @param reasked the relay as it was asked the second time, when the attempt asked it again ({@link #askAgain}): the
-     *     refusal that ended the attempt is of that body, and not of the one the plan holds; null otherwise
      */
-    private void rememberRelayFailure(
-        TierPlan plan,
-        TierSelection selection,
-        UpstreamFailureClassifier.Classification classification,
-        TierPlan.Relay reasked
-    ) {
+    private void rememberRelayFailure(TierPlan plan, TierSelection selection, UpstreamFailureClassifier.Classification classification) {
         if (selection.dispatch().kind() == TierDispatch.Kind.NATIVE) {
             return;
         }
@@ -2575,17 +2578,9 @@ public class ProxyFacade {
         if (classification.interrupted()) {
             tierRuntime.bindings().excludeRelay(plan.vendor(), plan.relaySession(), accountId);
         } else if (classification.contextExceeded()) {
-            if (reasked != null) {
-                learnRefusedLength(reasked);
-            } else {
-                selection.level().relay(accountId).ifPresent(this::learnRefusedLength);
-            }
+            selection.level().relay(accountId)
+                .ifPresent(relay -> tierRuntime.learnedLimits().learn(relay));
         }
-    }
-
-    /** What a relay's refusal of the length of {@code relay}'s body teaches this node (design 7.8): the size of that body, with its gateway output. */
-    private void learnRefusedLength(TierPlan.Relay relay) {
-        tierRuntime.learnedLimits().learn(relay.mapping(), relay.estimatedInput(), relay.gatewayOutput());
     }
 
     /**
@@ -2717,20 +2712,13 @@ public class ProxyFacade {
      * The call that sends the request to the account a tier selected: the upstream client of the route for every account
      * but a relay, whose dispatcher is given the limits the tier reserved for it (design 5.8, 7.5) and the time its lease
      * can still cover (design 4.6). Whatever the dispatcher fails with is already a failure the rest of the request can
-     * reason about; this adds none, except that a relay that is the only source of a request it refused for its length may be
-     * asked once more ({@link #askAgain}).
-     *
-     * @param reasked set to the relay as it was asked the second time, if the attempt asks it again
+     * reason about; this adds none.
      */
     private Mono<PlatformCompletionResult> callTiered(
         TieredRequest run,
         TieredEndpoint endpoint,
         TierSelection selection,
-        Optional<ApiKeyService.DispatchLease> lease,
-        TierWalk walk,
-        TierRetryPolicy retry,
-        AtomicBoolean generationStarted,
-        AtomicReference<TierPlan.Relay> reasked
+        Optional<ApiKeyService.DispatchLease> lease
     ) {
         TierDispatch dispatch = selection.dispatch();
         if (dispatch.kind() == TierDispatch.Kind.NATIVE) {
@@ -2753,118 +2741,28 @@ public class ProxyFacade {
             // The reservation cannot be leased for much longer: nothing was sent, and another source may answer.
             return Mono.error(new UpstreamException(502, "The source was not asked: too little time is left for the request", true));
         }
-        Mono<PlatformCompletionResult> first = askRelay(run, selection.account(), relay, timeLimit);
-        Optional<TierPlan.Relay> before = relay.withTheOutputOfBefore();
-        if (before.isEmpty()) {
-            return first;
-        }
-        // The relay was given the output the gateway chose. If it refuses the request for that, and it is the only source the
-        // request has, it is asked once more for the request it had before.
-        return Mono.defer(() -> {
-            long started = System.nanoTime();
-            return first.onErrorResume(refusal -> askAgain(
-                run, walk, selection, relay, before.get(), refusal, retry, generationStarted, reasked,
-                timeLimit.minus(Duration.ofNanos(System.nanoTime() - started))));
-        });
-    }
-
-    /**
-     * One request to a relay: the limits the tier reserved, bounded by what the relay is told it may write, and the time
-     * {@code timeLimit} allows.
-     */
-    private Mono<PlatformCompletionResult> askRelay(TieredRequest run, ProxyAccountEntity account, TierPlan.Relay relay, Duration timeLimit) {
-        TierDispatch dispatch = relay.dispatch();
         // The relay is charged for no more than it was told it may write, which can be less than the bound the tier reserved
-        // for (a request that names a small limit is still reserved for the default one).
+        // for (a request that names a small limit is still reserved for the default one, and so is a Responses request that
+        // names none, which a relay is sent the limit of its own mapping for, D15).
         long forwarded = dispatch.forwardedOutputLimit();
         long outputLimit = forwarded > 0 ? Math.min(run.plan().outputBound(), forwarded) : run.plan().outputBound();
-        // A Responses request that names no limit of its own (Codex never does) has the default one forced onto it.
+        // A Responses request that names no limit of its own (Codex never does) has one chosen for it: the default of the
+        // gateway, and for a relay what its mapping allows.
         boolean defaultOutputLimit = dispatch.pair().entry() == PairRegistry.Entry.RESPONSES && !namesAnOutputLimit(run.responseRequest());
         return xpDispatcher.dispatch(
-            account,
+            selection.account(),
             dispatch,
             new RelayUsageNormalizer.Limits(relay.inputBound(), outputLimit),
             timeLimit,
             defaultOutputLimit
-        );
-    }
-
-    /**
-     * A relay refused the request it was given with the output limit the gateway chose (D11, D14), for its length or for a
-     * conversion it would not take. Where the relay is the only source the request has, it was served this request with the
-     * 4,096 before D11, and Codex has no way to name a limit that would make it fit: so the relay is asked once more with that
-     * request. The estimate of the prompt that let the output into the window is only an estimate, and a relay that counts more
-     * refuses what the estimate let through.
-     *
-     * <p>The second request is part of the dispatch that was refused and not a dispatch of its own. The refusal is a definite
-     * answer of the relay to the request itself, given before anything was generated (the conditions of a crossing, {@link
-     * TierRetryPolicy#onRelayRefusal}), so a second request cannot be a second generation; it has the account, the admission and
-     * the lease of the first, and the time of the dispatch that is left. Where the request may cross to the native accounts of a
-     * tier below ({@link TierRetryPolicy#mayAskRelayAgain}) it is not made: those serve the output the gateway chose, and a relay
-     * that cannot give it is left for them, whatever the refusal was about (a relay whose upstream writes less than the default
-     * refuses every turn that names no limit, and is left to them for each one: design O15). Natives count when selection could pick
-     * one now. An account of the tier below that is cooling down or quarantined (a 429 or a 5xx a minute ago) is counted by the
-     * plan and found by no selection, so the crossing would find nothing and the client would be told to try again for a turn that
-     * was served before D11: it does not count, as one whose quota is spent does not. One that is only busy at admission
-     * cannot be known before the request is dispatched, and does (O15). What the first refusal taught this node is kept (a length
-     * refused with the gateway's output is a size this relay is not sent that output for), and so is what the second one teaches,
-     * if that is refused too ({@code reasked}).
-     *
-     * @param refused the relay as the plan holds it, whose body was refused
-     * @param again the relay as it was given the request before the gateway chose an output
-     * @param refusal what the first request failed with
-     * @param reasked set to {@code again} when the relay is asked the second time
-     * @param left how much of the dispatch's time is left
-     * @return the answer to the second request; the first refusal where the relay is not asked again
-     */
-    private Mono<PlatformCompletionResult> askAgain(
-        TieredRequest run,
-        TierWalk walk,
-        TierSelection selection,
-        TierPlan.Relay refused,
-        TierPlan.Relay again,
-        Throwable refusal,
-        TierRetryPolicy retry,
-        AtomicBoolean generationStarted,
-        AtomicReference<TierPlan.Relay> reasked,
-        Duration left
-    ) {
-        UpstreamFailureClassifier.Classification classification = UpstreamFailureClassifier.classify(refusal, selection.account(), selection.dispatch());
-        if (!classification.crossTierOnly() || !tierDefinitive(refusal) || generationStarted.get() || !TierRetryPolicy.notStarted(refusal)
-            || left.compareTo(RELAY_LEAST_TIME_LIMIT) < 0) {
-            return Mono.error(refusal);
-        }
-        // The natives the plan counts below the relay, and of them those that selection could pick now.
-        Mono<Boolean> nativesInReach = run.plan().retriesAfterRelayRefusal(classification.contextExceeded())
-            ? hasSelectableNativeBelow(walk, selection.level(), selection.account().getAccountId())
-            : Mono.just(false);
-        return nativesInReach.flatMap(reach -> {
-            if (!retry.mayAskRelayAgain(selection.level(), reach)) {
-                return Mono.<PlatformCompletionResult>error(refusal);
-            }
-            if (classification.contextExceeded()) {
-                learnRefusedLength(refused);
-            }
-            log.info("Relay {} refused a request with the output limit the gateway chose; it is asked again with the {} it had before",
-                selection.account().getAccountId(), RequestBounds.FALLBACK_OUTPUT_TOKENS);
-            reasked.set(again);
-            return askRelay(run, selection.account(), again, left);
-        });
-    }
-
-    /**
-     * Whether a native account of a tier below {@code level} is one selection could pick right now, which is what a request
-     * that crossed to the tiers below after a relay's refusal would find: cached and enabled, available, and let through by the
-     * allocation lifecycle (not disabled, not cooling down or quarantined), and not one the request has tried already.
-     */
-    private Mono<Boolean> hasSelectableNativeBelow(TierWalk walk, Level level, String refusedAccountId) {
-        TierPlan plan = walk.plan();
-        Set<String> excluded = new HashSet<>(walk.excluded());
-        excluded.add(refusedAccountId);
-        List<Level> below = walk.tiersBelow(level);
-        return accountPoolService.hasSelectableAccount(account -> !excluded.contains(account.getAccountId())
-            && below.stream().anyMatch(lower -> lower.cells().stream()
-                .anyMatch(cell -> cell != PoolCell.XP_OPENAI_CHAT && plan.permits(lower, cell, account))));
+        )
+            // A relay that says the prompt fits but not beside the output it was asked for (Anthropic's words) has refused the
+            // length only for a body whose output this node chose: the limit is then a number it knows, and the refusal is learned
+            // in the terms of the 4,096 body. A limit the client wrote is no such number, and learning the prompt alone from a
+            // refusal that included it would keep the relay from prompts it takes beside less output: it stays any other 400 the
+            // relay gave to the converted request, as it was before D15.
+            .onErrorMap(RelayErrorException.class,
+                refusal -> defaultOutputLimit && refusal.isBesideOutput() ? refusal.asContextExceeded() : refusal);
     }
 
     /**

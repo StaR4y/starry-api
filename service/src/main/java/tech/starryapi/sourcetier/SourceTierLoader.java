@@ -48,7 +48,7 @@ final class SourceTierLoader {
         FROM source_tier_members
         """;
     private static final String MODELS = """
-        SELECT vendor, account_id, model_id, upstream_model, max_context_tokens, image_token_cap, enabled,
+        SELECT vendor, account_id, model_id, upstream_model, max_context_tokens, image_token_cap, max_output_tokens, enabled,
                verified_at, verified_hash
         FROM source_tier_member_models
         """;
@@ -180,6 +180,7 @@ final class SourceTierLoader {
             row.get("upstream_model", String.class),
             integer(row, "max_context_tokens"),
             integer(row, "image_token_cap"),
+            row.get("max_output_tokens", Integer.class),
             flag(row, "enabled"),
             row.get("verified_at", Instant.class),
             row.get("verified_hash", String.class)

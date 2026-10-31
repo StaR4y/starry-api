@@ -113,19 +113,37 @@ public final class SourceTierDtos {
 
     /**
      * Maps a catalog model ({@code modelId}) to the name the relay knows it by ({@code upstreamModel}, sent as is).
-     * {@code maxContextTokens} is required; {@code imageTokenCap} defaults to 8192. {@code verifiedAt} and
-     * {@code verified} are only read: a mapping counts as verified while its settings, account provider and base URL are
-     * what they were when it was verified, and changing any of them clears the verification.
+     * {@code maxContextTokens} is required; {@code imageTokenCap} defaults to 8192. {@code maxOutputTokens} (1 to 1000000)
+     * is the most the relay's upstream writes for the model: when it is given, a Responses request that names no output
+     * limit is sent the relay with that limit, as far as the default for the request goes and the window holds it beside
+     * the prompt, and when it is not, with 4096. {@code verifiedAt} and {@code verified} are only read: a mapping counts as
+     * verified while its settings, account provider and base URL are what they were when it was verified, and changing any
+     * of them clears the verification.
      */
     public record MemberModel(
         @NotBlank @Size(max = 1024) String modelId,
         @NotBlank @Size(max = 1024) String upstreamModel,
         @NotNull Integer maxContextTokens,
         Integer imageTokenCap,
+        Integer maxOutputTokens,
         Boolean enabled,
         Instant verifiedAt,
         Boolean verified
-    ) {}
+    ) {
+
+        /** A mapping that states no maximum output. */
+        public MemberModel(
+            String modelId,
+            String upstreamModel,
+            Integer maxContextTokens,
+            Integer imageTokenCap,
+            Boolean enabled,
+            Instant verifiedAt,
+            Boolean verified
+        ) {
+            this(modelId, upstreamModel, maxContextTokens, imageTokenCap, null, enabled, verifiedAt, verified);
+        }
+    }
 
     /**
      * Whether a source protocol may serve an entry endpoint (CHAT, MESSAGES, RESPONSES, GEMINI) of a vendor: state OFF,

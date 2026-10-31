@@ -50,6 +50,9 @@ export const MAX_DURATION_SECONDS = 900;
 export const DEFAULT_DURATION_SECONDS = 540;
 export const DEFAULT_IMAGE_TOKEN_CAP = 8192;
 export const MAX_IMAGE_TOKEN_CAP = 1_000_000;
+export const MAX_OUTPUT_TOKENS = 1_000_000;
+/** 映射没写最大输出时，客户端没写输出上限的 Responses 请求发给中转的输出上限 */
+export const FALLBACK_OUTPUT_TOKENS = 4096;
 export const MAX_GATE_KEYS = 50;
 /** 一次验证最多探测的映射数 */
 export const MAX_VERIFIED_MAPPINGS = 8;
@@ -76,6 +79,8 @@ export interface MappingDraft {
   /** 必填；还没有填时为 null */
   maxContextTokens: number | null;
   imageTokenCap: number;
+  /** 可选：中转的上游给这个模型写的最大输出；没填为 null */
+  maxOutputTokens: number | null;
   enabled: boolean;
   /** 保存的配置里这一行现在是否算已验证（只读，来自后端） */
   verified: boolean;
@@ -106,6 +111,7 @@ export function newMapping(modelId = '', upstreamModel = ''): MappingDraft {
     upstreamModel,
     maxContextTokens: null,
     imageTokenCap: DEFAULT_IMAGE_TOKEN_CAP,
+    maxOutputTokens: null,
     enabled: true,
     verified: false,
     verifiedAt: null,
@@ -138,6 +144,7 @@ function mappingDraft(model: SourceTierMemberModel): MappingDraft {
     upstreamModel: model.upstreamModel,
     maxContextTokens: model.maxContextTokens,
     imageTokenCap: model.imageTokenCap ?? DEFAULT_IMAGE_TOKEN_CAP,
+    maxOutputTokens: model.maxOutputTokens ?? null,
     enabled: model.enabled !== false,
     verified: !!model.verified,
     verifiedAt: model.verifiedAt ?? null,
@@ -188,6 +195,7 @@ export function relayMemberOf(draft: RelayDraft): SourceTierMember {
       upstreamModel: mapping.upstreamModel,
       maxContextTokens: mapping.maxContextTokens ?? 0,
       imageTokenCap: mapping.imageTokenCap,
+      maxOutputTokens: mapping.maxOutputTokens,
       enabled: mapping.enabled,
     })),
   };
@@ -205,6 +213,7 @@ export interface MappingProblems {
   upstream?: string;
   context?: string;
   image?: string;
+  output?: string;
 }
 
 /** 每一行映射（按 key）当前的问题，与后端 SourceTierValidator.model 的规则一致 */
@@ -242,7 +251,21 @@ export function mappingProblems(mappings: MappingDraft[]): Record<string, Mappin
     ) {
       problems.image = t('图片上限要在 1 到 {p0} 之间', { p0: MAX_IMAGE_TOKEN_CAP });
     }
-    if (problems.model || problems.upstream || problems.context || problems.image) {
+    if (
+      mapping.maxOutputTokens !== null &&
+      (!Number.isInteger(mapping.maxOutputTokens) ||
+        mapping.maxOutputTokens < 1 ||
+        mapping.maxOutputTokens > MAX_OUTPUT_TOKENS)
+    ) {
+      problems.output = t('最大输出要在 1 到 {p0} 之间，或者不填', { p0: MAX_OUTPUT_TOKENS });
+    }
+    if (
+      problems.model ||
+      problems.upstream ||
+      problems.context ||
+      problems.image ||
+      problems.output
+    ) {
       result[mapping.key] = problems;
     }
   }
@@ -267,7 +290,8 @@ export function relayProblem(draft: RelayDraft): string | null {
   const problems = mappingProblems(draft.mappings);
   for (const [index, mapping] of draft.mappings.entries()) {
     const found = problems[mapping.key];
-    const message = found?.model ?? found?.upstream ?? found?.context ?? found?.image;
+    const message =
+      found?.model ?? found?.upstream ?? found?.context ?? found?.image ?? found?.output;
     if (message) return t('第 {p0} 条映射：{p1}', { p0: index + 1, p1: message });
   }
   return null;

@@ -14,7 +14,7 @@
       "stopReason": "WITHHELD",
       "degraded": "reasoning_effort,verbosity,include,prompt_cache_key",
       "withheldInputTokens": 1200,
-      "withheldOutputTokens": 16000,
+      "withheldOutputTokens": 4096,
       "error": "The source's answer was cut off before it could be used"
     }
   ]

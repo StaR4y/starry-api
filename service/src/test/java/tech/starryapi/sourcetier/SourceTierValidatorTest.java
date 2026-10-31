@@ -482,6 +482,7 @@ class SourceTierValidatorTest {
         assertThat(model.upstreamModel()).isEqualTo("relay/sonnet");
         assertThat(model.maxContextTokens()).isEqualTo(200_000);
         assertThat(model.imageTokenCap()).isEqualTo(8192);
+        assertThat(model.maxOutputTokens()).as("none stated: the relay is sent 4,096 for a request that names no limit").isNull();
         assertThat(model.enabled()).isTrue();
         assertThat(model.verifiedAt()).isNull();
         assertThat(model.verifiedHash()).isNull();
@@ -658,6 +659,34 @@ class SourceTierValidatorTest {
         assertThat(validator.normalize("anthropic", replace(false, RELAY_TIERS, List.of(relay("relay-1", "relay",
             new SourceTierDtos.MemberModel("claude-sonnet-4.5", "x", 1, 1, null, null, null))), List.of()))
             .models().getFirst().imageTokenCap()).isEqualTo(1);
+    }
+
+    /** D15: the most the relay's upstream writes is optional, and when it is given it is a limit a client could ask for. */
+    @Test
+    void theMaximumOutputIsOptionalAndWhenGivenBetweenOneAndAMillion() {
+        assertRejected(mappingRejected("anthropic", new SourceTierDtos.MemberModel("claude-sonnet-4.5", "x", 1000, null, 0, null, null, null)),
+            HttpStatus.BAD_REQUEST, "SOURCE_TIER_MEMBER_INVALID", "maxOutputTokens must be between 1 and 1000000");
+        assertRejected(mappingRejected("anthropic", new SourceTierDtos.MemberModel("claude-sonnet-4.5", "x", 1000, null, -5, null, null, null)),
+            HttpStatus.BAD_REQUEST, "SOURCE_TIER_MEMBER_INVALID", "maxOutputTokens must be between 1 and 1000000");
+        assertRejected(mappingRejected("anthropic", new SourceTierDtos.MemberModel("claude-sonnet-4.5", "x", 1000, null, 1_000_001, null, null, null)),
+            HttpStatus.BAD_REQUEST, "SOURCE_TIER_MEMBER_INVALID", "maxOutputTokens must be between 1 and 1000000");
+        for (int maximum : new int[] {1, 8192, 1_000_000}) {
+            assertThat(validator.normalize("anthropic", replace(false, RELAY_TIERS, List.of(relay("relay-1", "relay",
+                new SourceTierDtos.MemberModel("claude-sonnet-4.5", "x", 1000, null, maximum, null, null, null))), List.of()))
+                .models().getFirst().maxOutputTokens()).isEqualTo(maximum);
+        }
+        assertThat(validator.normalize("anthropic", replace(false, RELAY_TIERS, List.of(relay("relay-1", "relay",
+            new SourceTierDtos.MemberModel("claude-sonnet-4.5", "x", 1000, null, null, null, null, null))), List.of()))
+            .models().getFirst().maxOutputTokens()).isNull();
+    }
+
+    /** The verification vouches for the relay and the model's name, not for the limits: changing the maximum output keeps it. */
+    @Test
+    void theMaximumOutputIsNoPartOfWhatAVerificationVouchesFor() {
+        MemberModel stated = new MemberModel("anthropic", "relay-1", "claude-sonnet-4.5", "relay/sonnet", 200_000, 8192, 8192, true, null, null);
+        MemberModel none = new MemberModel("anthropic", "relay-1", "claude-sonnet-4.5", "relay/sonnet", 200_000, 8192, null, true, null, null);
+
+        assertThat(SourceTierValidator.mappingFingerprint(RELAY, stated, null)).isEqualTo(SourceTierValidator.mappingFingerprint(RELAY, none, null));
     }
 
     @Test

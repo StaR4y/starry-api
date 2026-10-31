@@ -97,13 +97,13 @@ public record TierDispatch(
         return outputLimitOf(wireBody);
     }
 
-    /** The output limit a relay body names, {@code max_completion_tokens} before {@code max_tokens}; 0 for a body that names none. */
-    public static long outputLimitOf(JsonNode wireBody) {
-        if (wireBody == null) {
+    /** {@link #forwardedOutputLimit} of a Chat body that has not been made into a dispatch yet; 0 for none. */
+    static long outputLimitOf(JsonNode chatBody) {
+        if (chatBody == null) {
             return 0;
         }
-        long limit = wireBody.path("max_completion_tokens").asLong(0);
-        return limit > 0 ? limit : Math.max(0, wireBody.path("max_tokens").asLong(0));
+        long limit = chatBody.path("max_completion_tokens").asLong(0);
+        return limit > 0 ? limit : Math.max(0, chatBody.path("max_tokens").asLong(0));
     }
 
     /**

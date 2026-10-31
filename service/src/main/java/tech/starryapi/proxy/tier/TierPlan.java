@@ -11,12 +11,10 @@ import tech.starryapi.account.AccountPoolRequestContext;
 import tech.starryapi.account.PoolCell;
 import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.model.BillingQuote;
-import tech.starryapi.platform.xproto.RelayUsageNormalizer;
 import tech.starryapi.sourcetier.SourceTierSnapshot;
 import tech.starryapi.sourcetier.SourceTierSnapshot.MemberModel;
 import tech.starryapi.sourcetier.SourceTierSnapshot.Tier;
 import tech.starryapi.sourcetier.SourceTierSnapshot.VendorConfig;
-import tools.jackson.databind.node.ObjectNode;
 
 /**
  * What the planner decides about one request before anything is reserved, and what the request then goes by to the end
@@ -134,37 +132,15 @@ public final class TierPlan {
      * @param dispatch how the request is sent to the relay: the mapping's wire name, the body built for the member's
      *     settings and shared with the other members of the same settings, and the soft features it leaves out
      * @param mapping the row of the relay that serves the model, with the window and the image cap the bounds use
-     * @param estimatedInput what the body weighs, as it was measured against the window of the mapping; what a relay that
-     *     refuses the prompt for its length is taught about its window (design 7.8)
-     * @param gatewayOutput the output limit the body is sent with when the gateway chose it and not the client (D11, D14,
-     *     design 7.10), which the window was measured against besides the prompt; 0 for a limit the client wrote, the entry's
-     *     usual 4,096, and the 4,096 a relay that nothing else can stand in for is given in place of the gateway's. A relay
-     *     that refuses such a request for its length is taught about requests like it only.
+     * @param estimatedInput what the body weighs, as it was measured against the window of the mapping
+     * @param outputBeyondFallback how many tokens of output the body asks for beyond the {@link
+     *     RequestBounds#FALLBACK_OUTPUT_TOKENS} the prompt of every relay is judged beside: the maximum output of the mapping
+     *     where the gateway chose the limit and the window holds it (D15, design 7.10); 0 for any other body
      */
-    public record Relay(TierDispatch dispatch, MemberModel mapping, long estimatedInput, long gatewayOutput) {
-
-        public Relay(TierDispatch dispatch, MemberModel mapping, long estimatedInput) {
-            this(dispatch, mapping, estimatedInput, 0);
-        }
+    public record Relay(TierDispatch dispatch, MemberModel mapping, long estimatedInput, long outputBeyondFallback) {
 
         public String accountId() {
             return dispatch.member().accountId();
-        }
-
-        /**
-         * The relay as the request was given to it before the gateway chose an output limit: the same body with the limit held
-         * to {@link RequestBounds#FALLBACK_OUTPUT_TOKENS}, the prompt measured again on it, and no gateway output. What a relay
-         * that is the only source of a request, and that refused it with the gateway's output, is asked once more (design
-         * 7.10). Empty for a relay whose limit is the client's, or that was given this one already.
-         */
-        public Optional<Relay> withTheOutputOfBefore() {
-            if (gatewayOutput <= 0) {
-                return Optional.empty();
-            }
-            ObjectNode sized = RequestBounds.withTheOutputOfBefore(dispatch.wireBody());
-            TierDispatch before = new TierDispatch(dispatch.kind(), dispatch.pair(), dispatch.modelId(), dispatch.wireModel(),
-                dispatch.member(), sized, dispatch.outgoingEndpoint(), dispatch.degraded());
-            return Optional.of(new Relay(before, mapping, RelayUsageNormalizer.estimateInputTokens(sized), 0));
         }
 
         /**
@@ -173,6 +149,17 @@ public final class TierPlan {
          */
         public long inputBound() {
             return RequestBounds.xpInputTokens(dispatch.wireBody(), mapping.imageTokenCap());
+        }
+
+        /**
+         * What a relay that refuses the length of this body is taught about its window (design 7.8), in the terms the plans
+         * judge a prompt in: beside the fallback output. A body that asked for more output than that was refused for the prompt
+         * and the output together, so what it shows is the size the prompt of a fallback body would have to be to weigh as
+         * much, which is the estimate and the output beyond the fallback. Teaching the estimate alone would shut the relay out
+         * of every prompt that its window holds beside the fallback output and not beside the larger one.
+         */
+        public long taughtByRefusal() {
+            return estimatedInput + outputBeyondFallback;
         }
     }
 
@@ -540,9 +527,9 @@ public final class TierPlan {
     }
 
     /**
-     * What to add to the "balance is insufficient" answer of an automatic request, which reserves for the dearest tier it
-     * may be served from: the tiers a client may name that would reserve less, with how to name them. Null when there is
-     * none, and for a request that named its tier.
+     * What to add to the "balance is insufficient" answer of an automatic request, which reserves the largest of the
+     * estimates of the tiers it may be served from: the tiers a client may name that would reserve less, with how to name
+     * them. Null when there is none, and for a request that named its tier.
      */
     public String lowBalanceHint() {
         return lowBalanceHint;
@@ -624,8 +611,10 @@ public final class TierPlan {
     /**
      * The tiers the reservation has to cover, and the only ones the request may be served from: all of them for a
      * request that starts from the best tier. A session that was pushed down starts from its tier and holds that and
-     * the tiers below it, plus the tiers above that would not cost more, so that a user who has only enough for the
-     * cheaper tier is not refused for the dearer one the session is no longer in.
+     * the tiers below it, plus the tiers above that are not dearer at the output the request is limited to, so that a
+     * user who has only enough for the tier the session is in is not refused for a dearer one it is no longer in. A tier
+     * above that is held can still reserve more than those at or below the start, when the session's tier holds relays alone
+     * and is reserved for the few tokens they are sent (D15): that user is refused for it, and told to pin the tier he can pay.
      */
     public List<Level> holdLevels() {
         return holdLevels;
@@ -708,6 +697,11 @@ public final class TierPlan {
         return Optional.ofNullable(owner);
     }
 
+    /**
+     * The most output the request may ask of a source, as the limit it is held to says (the default of the gateway when the
+     * client named none), which the usage of every source is bounded by. A tier that holds relays alone is reserved for less
+     * where the gateway chose the limit: a relay is not given that default (D15, {@link Level#estimate}).
+     */
     public long outputBound() {
         return outputBound;
     }
@@ -737,6 +731,11 @@ public final class TierPlan {
      * tiers the pin names, and is served by the accounts of those tiers if there are any. A hint to {@code relay+} has
      * Kiro's accounts below the relays, and the client is told to try again; one to {@code relay}, a tier of relays alone, has none,
      * and the client is told the refusal. A pin by the suffix counts the tiers it names in both cases.
+     *
+     * <p>The plan does not know one thing the answer depends on: a relay that refused the length of the body with the maximum
+     * output of its mapping (D15) is answered with a retry whatever the plan's accounts are, since the identical request is
+     * sent the smaller body its refusal taught and may be served by the relay itself ({@code ProxyFacade}, which knows what
+     * the relay was sent).
      *
      * @param contextRefusal whether the relay said the prompt is longer than it takes, which this node learns
      */

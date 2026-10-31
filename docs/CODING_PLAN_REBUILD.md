@@ -52,10 +52,14 @@ the `max_output_tokens` the model list shows for the model and the one the offic
 whichever of the two exists. The model is the one the request is served as (after the key's model mapping, never the
 name the client wrote), so most Claude and GPT aliases get 16,000 (a model whose price-catalog figure is below the setting gets
 that figure: `gpt-4`, `claude-3-haiku-20240307` and `gpt-4o-2024-05-13` 4,096, `gemini-2.0-flash` 8,192; `gpt-4o` and `gpt-4o-mini` are held to 16,384
-only when the setting is raised above that) and `deepseek-v4-*` gets 8,192. A model
+only when the setting is raised above that) and `deepseek-v4-*` gets the setting in a default deployment: the price catalog lists 8,192 for it in the
+snapshot bundled with the gateway and 393,216 in the catalog the gateway refreshes from (on by default), so only a deployment that
+turns the refresh off gets 8,192 (the price-catalog figures follow the catalog in use). A model
 the model list does not list gets 4096, and so does a model served by the operator's own backend: one the administrator
 added, one written with the `openai-compatible/` prefix (even when a built-in has the same name after it), or a built-in one
-the administrator pointed at their own vendor (each is listed with a placeholder and counts as listing none). The in-flight output tokens that account admission holds stay at 4096. Invalid limits are rejected. Remote
+the administrator pointed at their own vendor (each is listed with a placeholder and counts as listing none). The in-flight output tokens that account admission holds stay at 4096. A cross-protocol relay is not sent that default (D15): it is
+sent the maximum output its mapping states, no more than the default, or 4096 when the mapping states none, so for a relay the
+reservation is an upper bound and the settlement is of what it served. Invalid limits are rejected. Remote
 media and server-side response chains use a conservative input bound. Some upstream
 transports, notably Codex, discard unsupported output limits; this is an estimate,
 not a guaranteed upstream spending ceiling. When actual cost exceeds a reservation,

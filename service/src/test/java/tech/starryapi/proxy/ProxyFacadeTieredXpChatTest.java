@@ -987,6 +987,34 @@ class ProxyFacadeTieredXpChatTest {
         assertThat(dispatched).containsExactly("relay-1");
     }
 
+    /**
+     * Anthropic says a prompt does not fit beside max_tokens in words of its own, which a relay in front of it passes on. The Chat
+     * entry has no output limit that the gateway chose (D15), so the refusal teaches this node nothing and is any other 400 of the
+     * converted request: a request whose header named the tier is told the relay's error and not invited to try again, and a
+     * request with nowhere native to go is not told the prompt is too long.
+     */
+    @Test
+    void aPromptTheRelayRefusedBesideTheClientsOutputInTheWordsOfAnthropicIsAConversionItWillNotTakeAndTeachesNothing() {
+        configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1")));
+        add(relay, kiro("kiro-1"));
+        fails(relayAnswers, "relay-1", relayErrors.fromResponse(400, error(null, "input length and `max_tokens` exceed context limit: "
+            + "188240 + 21333 > 200000, decrease input length or `max_tokens` and try again"), null, "relay-1", "sk-secret"));
+        MockServerWebExchange named = MockServerWebExchange.from(
+            MockServerHttpRequest.post(CHAT_PATH).header(TierSelectorParser.REQUEST_HEADER, "relay"));
+
+        ApiException refused = refusedWith(chatBody(), named);
+        ApiException again = refusedWith(chatBody(), MockServerWebExchange.from(
+            MockServerHttpRequest.post(CHAT_PATH).header(TierSelectorParser.REQUEST_HEADER, "relay")));
+
+        assertThat(refused.getStatus()).isEqualTo(HttpStatus.BAD_REQUEST);
+        assertThat(refused.getCode()).isEqualTo("UPSTREAM_ERROR");
+        assertThat(refused.getMessage()).startsWith("Source error 400").doesNotContain("prompt is too long");
+        assertThat(named.getResponse().getHeaders().getFirst("Retry-After")).isNull();
+        assertThat(again.getMessage()).isEqualTo(refused.getMessage());
+        // Nothing was learned, so the relay is asked again and gives the same answer.
+        assertThat(dispatched).containsExactly("relay-1", "relay-1");
+    }
+
     @Test
     void aRelayThatCouldNotBeReachedIsLeftForKiroAndNothingIsLeftForReview() {
         configure(owner(relayMember("relay-1"), gate("CHAT", "KEYS", "key-1")));

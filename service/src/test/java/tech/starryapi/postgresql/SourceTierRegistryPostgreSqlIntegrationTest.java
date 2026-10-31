@@ -116,8 +116,8 @@ class SourceTierRegistryPostgreSqlIntegrationTest extends PostgreSqlIntegrationT
                 + " VALUES ('anthropic', ?, 'relay', 'OPENAI_CHAT', FALSE, TRUE, TRUE, TRUE, TRUE, FALSE, 'EFFORT', 120, TRUE, FALSE)", relay);
             update(db, "INSERT INTO source_tier_members(vendor, account_id, tier_id) VALUES ('anthropic', ?, 'kiro')", pinned);
             update(db, "INSERT INTO source_tier_member_models(vendor, account_id, model_id, upstream_model, max_context_tokens,"
-                + " image_token_cap, enabled, verified_at, verified_hash, verify_summary)"
-                + " VALUES ('anthropic', ?, 'claude-sonnet-4.5', 'relay/sonnet', 200000, 4096, TRUE,"
+                + " image_token_cap, max_output_tokens, enabled, verified_at, verified_hash, verify_summary)"
+                + " VALUES ('anthropic', ?, 'claude-sonnet-4.5', 'relay/sonnet', 200000, 4096, 8192, TRUE,"
                 + " TIMESTAMPTZ '2026-10-24 08:30:00+00', ?, '{\"stream\":{\"ok\":true}}')", relay, "0123456789abcdef".repeat(4));
             update(db, "INSERT INTO source_tier_member_models(vendor, account_id, model_id, upstream_model, max_context_tokens, enabled)"
                 + " VALUES ('anthropic', ?, 'claude-haiku-4.5', 'relay/haiku', 100000, FALSE)", relay);
@@ -188,12 +188,14 @@ class SourceTierRegistryPostgreSqlIntegrationTest extends PostgreSqlIntegrationT
         assertThat(sonnet.upstreamModel()).isEqualTo("relay/sonnet");
         assertThat(sonnet.maxContextTokens()).isEqualTo(200_000);
         assertThat(sonnet.imageTokenCap()).isEqualTo(4096);
+        assertThat(sonnet.maxOutputTokens()).isEqualTo(8192);
         assertThat(sonnet.enabled()).isTrue();
         assertThat(sonnet.verifiedAt()).isEqualTo(Instant.parse("2026-10-24T08:30:00Z"));
         assertThat(sonnet.verifiedHash()).isEqualTo("0123456789abcdef".repeat(4));
         SourceTierSnapshot.MemberModel haiku = snapshot.models("anthropic", relay).stream()
             .filter(model -> model.modelId().equals("claude-haiku-4.5")).findFirst().orElseThrow();
         assertThat(haiku.imageTokenCap()).isEqualTo(8192);
+        assertThat(haiku.maxOutputTokens()).as("a mapping that states none").isNull();
         assertThat(haiku.enabled()).isFalse();
         assertThat(haiku.verifiedAt()).isNull();
         assertThat(haiku.verifiedHash()).isNull();

@@ -19,9 +19,9 @@ public class BillingReviewController {
     private final AdminAuth auth;
     public BillingReviewController(DatabaseClient db, AdminAuth auth) { this.db=db; this.auth=auth; }
 
-    // A request served from source tiers is reserved for the dearest tier it could have been served from. Its tier columns
-    // and the plan in its pricing snapshot (selected only for such a request) tell which tier to settle it by; a request
-    // that was not served from tiers has none of them and comes out as before.
+    // A request served from source tiers is reserved for the tier that reserves the most of those it could have been served
+    // from. Its tier columns and the plan in its pricing snapshot (selected only for such a request) tell which tier to settle
+    // it by; a request that was not served from tiers has none of them and comes out as before.
     @GetMapping("/admin/billing/reviews")
     public Mono<ApiResponse<List<Map<String,Object>>>> reviews(ServerWebExchange exchange) {
         auth.verifyAdmin(exchange);

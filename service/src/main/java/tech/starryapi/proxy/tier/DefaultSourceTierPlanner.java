@@ -311,65 +311,12 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
             List<PoolCell> units = nativeUnits(routed);
             String modelKey = modelKey(vendor, routed.upstreamModel());
             XpEligibility.Found xp = relays.evaluate(routed, snapshot, vendor, modelKey, units, tiers);
-            Mono<Resolved> resolved = resolve(routed, snapshot, config, vendor, modelKey, units, xp, chosen, tiers);
-            if (xp.outputBound()) {
-                // A relay was left out only because the output the gateway chose does not fit beside the prompt in its window.
-                // Where the plan has nothing to serve the request with, that relay is its only source, and the request it was
-                // given before D11 is still its own: the same prompt, with the 4,096 it had. Nothing to serve with is a refusal
-                // of any kind (the prompt is too long for the one relay, or a feature that the other relays lack and this one
-                // carries), which gives way to whatever the relays alone are planned to do; it is also a plan in which no tier
-                // has an account or a relay that can serve now (the other relays out for a moment or switched off, no native
-                // account on the route, native accounts of which none can serve, the owner of a chain among them), which gives
-                // way if the relays alone can serve; and it is a plan whose accounts none can be selected now, being in the
-                // cooldown or the quarantine of the allocation lifecycle (design 4.1, layer 3): the plan counts them, selection
-                // finds none for as long as that lasts, and the relays alone are not to wait for it if one of them can be
-                // selected. Anywhere else a native source serves, as is; and if the relays alone cannot serve it either, the
-                // request stays what it was. What is only busy at admission (layer 4) is not known before the request is
-                // dispatched, and is waited for (O15).
-                Mono<Resolved> relaysAlone = Mono.defer(() -> resolve(routed, snapshot, config, vendor, modelKey, units,
-                    relays.evaluateWithinWindows(routed, snapshot, vendor, modelKey, units, tiers), chosen, tiers));
-                resolved = resolved
-                    .flatMap(plan -> plan.availability().servesNothing()
-                        ? relaysAlone.filter(again -> !again.availability().servesNothing())
-                            .onErrorResume(ApiException.class, ignored -> Mono.empty())
-                            .defaultIfEmpty(plan)
-                        : selectableNow(plan, snapshot, vendor, units).flatMap(selectable -> selectable
-                            ? Mono.just(plan)
-                            : relaysAlone.filterWhen(again -> selectableNow(again, snapshot, vendor, units))
-                                .onErrorResume(ApiException.class, ignored -> Mono.empty())
-                                .defaultIfEmpty(plan)))
-                    .onErrorResume(ApiException.class, refusal -> relaysAlone.onErrorMap(ApiException.class, ignored -> refusal));
-            }
-            // A chain no tier can continue is refused here, before the price of the model is even looked up. The relays that
-            // were left out of the plan that is made are the ones counted: those of the plan that was refused when none is.
-            return resolved
-                .doOnNext(plan -> skipCounts.add(vendor, plan.xp().entry(), plan.xp().skips()))
-                .doOnError(ignored -> skipCounts.add(vendor, xp.entry(), xp.skips()))
-                .flatMap(plan -> standardPrice(routed)
-                    .map(price -> build(routed, snapshot, config, vendor, modelKey, units, plan, price.orElse(null), unified)));
+            skipCounts.add(vendor, xp.entry(), xp.skips());
+            // A chain no tier can continue is refused here, before the price of the model is even looked up.
+            return resolve(routed, snapshot, config, vendor, modelKey, units, xp, chosen, tiers)
+                .flatMap(resolved -> standardPrice(routed)
+                    .map(price -> build(routed, snapshot, config, vendor, modelKey, units, xp, resolved, price.orElse(null), unified)));
         });
-    }
-
-    /**
-     * Whether selection could pick an account for the plan right now: one of the native accounts of the route in a tier that
-     * serves, or one of the relays that were found eligible in such a tier, that is cached, available and let through by the
-     * allocation lifecycle (not cooling down or quarantined), the layers 1 to 3 of design 4.1. {@link #availability} stops at
-     * the second: an account in the cooldown of a 429 or a 5xx, for a minute or more, still counts there. What only a request
-     * meets (admission) is not counted. False for a plan that has nothing to serve the request with.
-     */
-    private Mono<Boolean> selectableNow(Resolved resolved, SourceTierSnapshot snapshot, String vendor, List<PoolCell> units) {
-        if (resolved.availability().servesNothing()) {
-            return Mono.just(false);
-        }
-        Set<String> serving = resolved.availability().serving().stream().map(Tier::tierId).collect(Collectors.toSet());
-        Set<String> relayIds = serving.stream()
-            .flatMap(tierId -> resolved.xp().byTier().getOrDefault(tierId, List.of()).stream())
-            .map(eligible -> eligible.account().getAccountId())
-            .collect(Collectors.toSet());
-        Predicate<ProxyAccountEntity> onRoute = account -> units.stream().anyMatch(cell -> cell.predicate().test(account));
-        return accountPool.hasSelectableAccount(account -> relayIds.contains(account.getAccountId())
-            || (onRoute.test(account)
-                && TierMembership.nativeTierOf(snapshot, vendor, account).map(tier -> serving.contains(tier.tierId())).orElse(false)));
     }
 
     /**
@@ -399,8 +346,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         TierPlan.Session session,
         TierSessionBindings.Binding bound,
         Tier ownerTier,
-        Availability availability,
-        XpEligibility.Found xp
+        Availability availability
     ) {
     }
 
@@ -542,11 +488,6 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
             Availability walked = availability(choice.candidates(), null, false, units, xp, snapshot, vendor);
             if (ownerTier.tierId().equals(startTier(walked.serving(), snapshot, vendor, bound).tierId())) {
                 availability = availability(choice.candidates(), ownerTier, false, units, xp, snapshot, vendor);
-                // The owner's tier is always among the tiers that serve, whether its accounts can or not; the walk that had no
-                // owner is the one that tells whether anything can serve the request now.
-                if (walked.stalled()) {
-                    availability = availability.asStalled();
-                }
             } else {
                 ownerTier = null;
                 availability = walked;
@@ -554,7 +495,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         } else {
             availability = availability(choice.candidates(), ownerTier, !request.responseMovable(), units, xp, snapshot, vendor);
         }
-        return new Resolved(choice, session, bound, ownerTier, availability, xp);
+        return new Resolved(choice, session, bound, ownerTier, availability);
     }
 
     /** The place of the tier a session is bound to in the order the tiers have now; the place it was bound at if it is gone. */
@@ -731,11 +672,11 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         String vendor,
         String modelKey,
         List<PoolCell> units,
+        XpEligibility.Found xp,
         Resolved resolved,
         BillingQuote standardPrice,
         boolean unified
     ) {
-        XpEligibility.Found xp = resolved.xp();
         Choice choice = resolved.choice();
         Availability availability = resolved.availability();
         Tier ownerTier = resolved.ownerTier();
@@ -743,10 +684,15 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         TierSessionBindings.Binding bound = resolved.bound();
         long nativeInputBound = inputBound(request.upstreamRequest(), units);
         long outputBound = RequestBounds.outputTokens(request.upstreamRequest());
+        boolean gatewayOutput = request.entryFacts() != null && request.entryFacts().gatewayOutput();
         TierPlan.Mode mode = choice.pinned() ? TierPlan.Mode.PINNED : TierPlan.Mode.AUTO;
         NativeReach reach = nativesInReach(snapshot, vendor, units, xp, choice);
 
         List<Level> levels = new ArrayList<>();
+        // What every level would be reserved at under the limit of the request, which is what the levels are compared by when the
+        // tiers a session may climb back to are chosen (holdLevels): the output a tier of relays alone is sent (levelOutput) is
+        // less than that, and the reservation and the advice of a 402 follow it, but it is no reason to move a session.
+        List<BigDecimal> compared = new ArrayList<>();
         for (Tier tier : availability.serving()) {
             // One multiplication per tier, exact and rounded only when a cost or an estimate is taken from it.
             BillingQuote quote = standardPrice == null ? null : standardPrice.scaled(tier.priceFactor());
@@ -767,13 +713,18 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
             for (TierPlan.Relay relay : relays) {
                 inputBound = Math.max(inputBound, relay.inputBound());
             }
+            // The output is bounded the same way: a tier that can hold native accounts is reserved for the limit of the request,
+            // which they are sent, and a tier of relays alone for the most its relays are sent where the gateway chose the limit
+            // (D15), since the default it chose for the native sources is not one a relay is ever given.
+            long levelOutput = natives || !gatewayOutput ? outputBound : relayOutputBound(relays, outputBound);
+            compared.add(quote == null ? null : quote.estimate(inputBound, outputBound));
             levels.add(new Level(
                 tier,
                 vendor + ":" + tier.tierId(),
                 relays.isEmpty() ? units : withRelayCell(units),
                 inputBound,
                 quote,
-                quote == null ? null : quote.estimate(inputBound, outputBound),
+                quote == null ? null : quote.estimate(inputBound, levelOutput),
                 TierResponseHeaders.served(tier, mode, choice.ignored()),
                 relays
             ));
@@ -789,7 +740,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         // from that has nothing available is only one it can be pushed out of from there down.
         int origin = bound == null ? 0 : levelOf(snapshot, vendor, bound);
         int start = startIndex(availability.serving(), bound, origin);
-        List<Level> hold = holdLevels(levels, start);
+        List<Level> hold = holdLevels(levels, compared, start);
         // The tiers where a relay sat this request out for its own sake: whatever the rest of the tier did, serving it from
         // below is not a fall of the session (design 4.7). Those above the tier the session is bound to are not its concern.
         List<Tier> requestBound = xp.requestBoundTiers().stream()
@@ -822,7 +773,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
                 null
             ),
             choice.pinned() ? choice.candidates().stream().map(Tier::tierId).collect(Collectors.toSet()) : Set.of(),
-            choice.pinned() ? null : lowBalanceHint(config, request, levels, hold),
+            choice.pinned() ? null : lowBalanceHint(config, request, levels, compared, hold),
             unified,
             xp.skips(),
             xp.open(),
@@ -831,6 +782,25 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
             reach.afterLengthRefusal(),
             reach.afterOtherRefusal()
         );
+    }
+
+    /**
+     * What a tier that holds relays alone is reserved to write, for a request whose output limit the gateway chose (D15): the
+     * most any of its relays is sent, as far as the limit of the request goes, which is what the usage of a relay is bounded
+     * by when it serves. A tier none of whose relays can serve this request is kept for a request pinned to it, which is
+     * answered with a retry and never dispatched, and is reserved for the fallback output a relay is given when its mapping
+     * states no maximum.
+     */
+    private static long relayOutputBound(List<TierPlan.Relay> relays, long outputBound) {
+        if (relays.isEmpty()) {
+            return Math.min(outputBound, RequestBounds.FALLBACK_OUTPUT_TOKENS);
+        }
+        long bound = 0;
+        for (TierPlan.Relay relay : relays) {
+            long sent = relay.dispatch().forwardedOutputLimit();
+            bound = Math.max(bound, sent > 0 ? Math.min(outputBound, sent) : outputBound);
+        }
+        return bound;
     }
 
     /**
@@ -876,12 +846,19 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
     }
 
     /**
-     * What to tell a user who cannot pay the reservation of an automatic request, which is the dearest of the tiers it
-     * may be served from: the tiers a client may name that would have reserved less, and how to name them. The user can
-     * then pin one of them, which reserves for that tier alone. A vendor that keeps its pool names to itself
+     * What to tell a user who cannot pay the reservation of an automatic request, which is the largest of the estimates of
+     * the tiers it may be served from: the tiers a client may name that would have reserved less, and how to name them. The
+     * user can then pin one of them, which reserves for that tier alone. A vendor that keeps its pool names to itself
      * ({@code publicListing} off) gets a sentence that names none, and no pointer to the key's settings, where the
      * choice is not offered either. Nor does a key that cannot hold a preference (an old key not tied to one provider),
      * whose settings have no such choice and whose preference is never read.
+     *
+     * <p>The words are those the advice always had (the dearest tier, cheaper tiers) for as long as every tier is reserved
+     * for the output the request is limited to, when the tier that reserves the most is the dearest and the ones that
+     * reserve less are the cheaper. Once a tier is reserved for less than that (a tier of relays alone, for a request whose
+     * limit the gateway chose, D15) that is no longer so: a tier of a higher factor can reserve less than one of a lower, and
+     * the words are about what is reserved, with the factors given for the user to read the prices by. Only a plan with such
+     * a tier gets the new words, so that a vendor whose tiers have no relays says what it said before.
      *
      * <p>The {@code model@tier} spelling is the one the suffix is taken off for (see {@link #takesSuffix}): the model as
      * the request wrote it, on the vendor that serves it, which is the vendor of this plan. It is not for an id that a
@@ -890,7 +867,13 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
      *
      * @return null when no such tier exists, when the request is not billed, or when the release cannot select tiers
      */
-    private String lowBalanceHint(VendorConfig config, TierPlanRequest request, List<Level> levels, List<Level> hold) {
+    private String lowBalanceHint(
+        VendorConfig config,
+        TierPlanRequest request,
+        List<Level> levels,
+        List<BigDecimal> compared,
+        List<Level> hold
+    ) {
         BigDecimal reserved = hold.stream()
             .map(Level::estimate)
             .filter(Objects::nonNull)
@@ -899,18 +882,21 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
         if (reserved == null || !selectors) {
             return null;
         }
-        List<Level> cheaper = levels.stream()
+        List<Level> reservingLess = levels.stream()
             .filter(level -> level.tier().userSelectable() && level.estimate() != null && level.estimate().compareTo(reserved) < 0)
             .toList();
-        if (cheaper.isEmpty()) {
+        if (reservingLess.isEmpty()) {
             return null;
         }
+        boolean byAmount = reservedBelowTheLimit(levels, compared);
         if (!config.publicListing()) {
-            return "；预估费用按可能服务本次请求的最贵号池计算，实际按服务它的号池计价";
+            return byAmount
+                ? "；预估费用按可能服务本次请求的号池里预留最多的那个计算，实际按服务它的号池计价"
+                : "；预估费用按可能服务本次请求的最贵号池计算，实际按服务它的号池计价";
         }
         // The suffix is advised only when every spelling of it would be read as one: a user who follows the advice must
         // get a request that is pinned, not the same automatic one again.
-        boolean suffix = cheaper.stream().allMatch(level -> request.takesSuffix(request.requestedModel() + "@" + level.tierId()));
+        boolean suffix = reservingLess.stream().allMatch(level -> request.takesSuffix(request.requestedModel() + "@" + level.tierId()));
         String header = "设置请求头 " + TierSelectorParser.REQUEST_HEADER;
         String ways = suffix
             ? request.keyHoldsPreference()
@@ -919,11 +905,29 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
             : request.keyHoldsPreference()
                 ? header + "，或在 API Key 的设置里选择号源偏好"
                 : header;
-        return "；可以改选更便宜的号池（" + ways + "）："
-            + cheaper.stream()
+        // Pools that reserve less, not cheaper ones, where a tier of relays alone is reserved for the few tokens its relays are sent
+        // (D15): it may reserve less than a tier of a lower factor whose accounts are sent the default output; the factors are given.
+        return "；可以改选" + (byAmount ? "预留更少" : "更便宜") + "的号池（" + ways + "）："
+            + reservingLess.stream()
                 .map(level -> (suffix ? request.requestedModel() + "@" + level.tierId() : level.tierId()) + "（系数 "
                     + level.factor().stripTrailingZeros().toPlainString() + "）")
                 .collect(Collectors.joining("、"));
+    }
+
+    /**
+     * Whether a tier is reserved for less than the limit of the request, which is the output every tier was reserved for
+     * before a tier of relays alone was reserved for what its relays are sent (D15).
+     *
+     * @param compared what each level would be reserved at under the limit of the request, parallel to the levels
+     */
+    private static boolean reservedBelowTheLimit(List<Level> levels, List<BigDecimal> compared) {
+        for (int i = 0; i < levels.size(); i++) {
+            BigDecimal estimate = levels.get(i).estimate();
+            if (estimate != null && compared.get(i) != null && estimate.compareTo(compared.get(i)) < 0) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -980,26 +984,39 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
 
     /**
      * The tiers the reservation covers (design 5.2): all of them for a request that starts from the best. From a lower
-     * start, that tier and the ones below it, and of the tiers above, those that would not reserve more. The owner of a
+     * start, that tier and the ones below it, and of the tiers above, those that are not dearer at the output the request is
+     * limited to (see below). The owner of a
      * response chain needs no cover of its own: one that can be replayed elsewhere is tried first only when it sits in
      * the tier the walk starts from (an owner anywhere else is left out of the plan, see {@link #meet}), and one that
      * cannot be left is the only tier.
+     *
+     * <p>The tiers are compared at the output the request is limited to in every one of them ({@code compared}, parallel to
+     * the levels), not at what each is reserved to write: a tier of relays alone is reserved for the few tokens its relays are
+     * sent (D15), which makes its estimate smaller than that of the tier of Kiro below it, and it would then be a tier that a
+     * session pushed down to Kiro climbs back to as a last resort, moving its binding there, for the turns of small prompts
+     * and not for large ones. The reservation is the largest estimate of the tiers that are held, whichever way they are chosen.
+     *
+     * <p>So a tier above the start that is held can reserve more than every tier at or below it: where the session's own tier
+     * holds relays alone and is reserved for the few tokens they are sent, and the tier above it, which is not dearer at the
+     * limit of the request, is reserved for the default output (kiro at 0.6 above relays alone at 1.0). A user who can pay
+     * only the reservation of the session's own tier is then refused for the tier above it; the advice of the 402 ({@link
+     * #lowBalanceHint}) tells him to pin the tier he can pay for. That is the price of comparing the tiers at the limit of the
+     * request: comparing them at what each is reserved for would make a tier the session was pushed out of one it climbs back to.
      */
-    private static List<Level> holdLevels(List<Level> levels, int start) {
+    private static List<Level> holdLevels(List<Level> levels, List<BigDecimal> compared, int start) {
         if (start == 0) {
             return levels;
         }
-        BigDecimal ceiling = levels.subList(start, levels.size()).stream()
-            .map(Level::estimate)
+        BigDecimal ceiling = compared.subList(start, levels.size()).stream()
             .filter(Objects::nonNull)
             .max(Comparator.naturalOrder())
             .orElse(null);
         List<Level> held = new ArrayList<>();
         for (int i = 0; i < levels.size(); i++) {
-            Level level = levels.get(i);
-            boolean notDearer = level.estimate() == null || ceiling == null || level.estimate().compareTo(ceiling) <= 0;
+            BigDecimal estimate = compared.get(i);
+            boolean notDearer = estimate == null || ceiling == null || estimate.compareTo(ceiling) <= 0;
             if (i >= start || notDearer) {
-                held.add(level);
+                held.add(levels.get(i));
             }
         }
         return held;
@@ -1029,7 +1046,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
      *
      * <p>A response chain that cannot leave its owner ({@code ownerOnly}) is served by the owner's tier and by no other:
      * the owner is tried first, nothing else may serve the chain, and the retries stop, so no other tier is planned, held
-     * for, or offered as a cheaper way. The tiers it does not use are not ones the session was pushed out of either.
+     * for, or offered as a way to reserve less. The tiers it does not use are not ones the session was pushed out of either.
      *
      * <p>The relays that may serve the request count with the native accounts: a tier with such a relay has an account of
      * the route (cached and enabled), and is available when one of them is.
@@ -1072,7 +1089,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
             List<Tier> withAccounts = tiers.stream().filter(tier -> placed.contains(tier.tierId())).toList();
             return withAccounts.isEmpty()
                 ? new Availability(tiers, List.of(), tiers)
-                : new Availability(withAccounts, List.of(), List.of(), true);
+                : new Availability(withAccounts, List.of(), List.of());
         }
         // A tier that has a relay sat out for this request is not one the request found with nothing to offer, even when
         // the members that did take part cannot serve now (design 4.2: only the layers 1 to 4 count; 4.7).
@@ -1088,26 +1105,9 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
 
     /**
      * The tiers that stay in the plan, those left out for having accounts of the route that are all unavailable, and
-     * those that stay although none has an account of the route at all; and whether the tiers that stay are there only
-     * because they have accounts, none of which can serve now ({@code stalled}), or because one of them owns the chain the
-     * request continues, which none of the accounts of the route can serve either: there is nothing the plan can serve the
-     * request with.
+     * those that stay although none has an account of the route at all.
      */
-    private record Availability(List<Tier> serving, List<Tier> unavailable, List<Tier> memberless, boolean stalled) {
-
-        Availability(List<Tier> serving, List<Tier> unavailable, List<Tier> memberless) {
-            this(serving, unavailable, memberless, false);
-        }
-
-        /** Whether no tier of the plan has an account or a relay that can serve the request now. */
-        boolean servesNothing() {
-            return stalled || !memberless.isEmpty();
-        }
-
-        /** The same tiers, for a plan that keeps the tier of the chain's owner although no account of the route can serve now. */
-        Availability asStalled() {
-            return new Availability(serving, unavailable, memberless, true);
-        }
+    private record Availability(List<Tier> serving, List<Tier> unavailable, List<Tier> memberless) {
     }
 
     /**

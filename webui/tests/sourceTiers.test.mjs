@@ -953,7 +953,7 @@ const savedRelay = {
   accountId: 'relay-1', tierId: 'relay', protocol: 'OPENAI_CHAT', usageCacheReadInPrompt: true, usageCacheWriteInPrompt: false,
   models: [
     { modelId: 'claude-sonnet-4.5', upstreamModel: 'relay/sonnet', maxContextTokens: 200000, imageTokenCap: 8192, enabled: true, verifiedAt: '2026-10-26T08:00:00Z', verified: true },
-    { modelId: 'claude-haiku-4.5', upstreamModel: 'relay/haiku', maxContextTokens: 100000, imageTokenCap: 4096, enabled: false, verified: false },
+    { modelId: 'claude-haiku-4.5', upstreamModel: 'relay/haiku', maxContextTokens: 100000, imageTokenCap: 4096, maxOutputTokens: 8192, enabled: false, verified: false },
   ],
 };
 
@@ -980,7 +980,10 @@ test('a relay the server sent reads with the same defaults the server applies an
   assert.deepEqual(draft.mappings.map((row) => [row.modelId, row.verified, row.enabled]), [['claude-haiku-4.5', false, false], ['claude-sonnet-4.5', true, true]]);
   const member = relayMemberOf(draft);
   assert.equal(member.protocol, 'OPENAI_CHAT');
-  assert.deepEqual(member.models[1], { modelId: 'claude-sonnet-4.5', upstreamModel: 'relay/sonnet', maxContextTokens: 200000, imageTokenCap: 8192, enabled: true });
+  assert.deepEqual(member.models[1], { modelId: 'claude-sonnet-4.5', upstreamModel: 'relay/sonnet', maxContextTokens: 200000, imageTokenCap: 8192, maxOutputTokens: null, enabled: true });
+  // The maximum output a mapping states is read, and written back as it was; a mapping that states none writes null.
+  assert.deepEqual(draft.mappings.map((row) => row.maxOutputTokens), [8192, null]);
+  assert.equal(member.models[0].maxOutputTokens, 8192);
   assert.equal('verified' in member.models[1], false);
   // A verification that came or went is no edit of the relay.
   const verifiedLater = relayDraftOf({ ...savedRelay, models: savedRelay.models.map((model) => ({ ...model, verified: !model.verified })) });
@@ -995,6 +998,8 @@ test('a new relay is dedicated, streams upstream and takes the safe reading of t
   assert.deepEqual([draft.exclusive, draft.upstreamStream, draft.vision, draft.jsonSchema, draft.priorityTier, draft.cacheControlPassthrough], [true, true, false, false, false, false]);
   assert.deepEqual([draft.usageCacheReadInPrompt, draft.usageCacheWriteInPrompt, draft.reasoningMode, draft.maxDurationSeconds], [true, true, 'NONE', 540]);
   assert.deepEqual(draft.mappings, []);
+  // A new mapping states no maximum output, so that a relay is held to 4,096 when the client names no limit.
+  assert.equal(newMapping('claude-sonnet-4.5', 'relay/sonnet').maxOutputTokens, null);
 });
 
 test('a relay is checked against the rules the server enforces before it is sent', () => {
@@ -1013,6 +1018,13 @@ test('a relay is checked against the rules the server enforces before it is sent
   assert.match(relayProblem(filled({ mappings: [row({ upstreamModel: '' })] })), /填写中转给这个模型起的名字/);
   assert.match(relayProblem(filled({ mappings: [row({ upstreamModel: 'relay/*' })] })), /不能有通配/);
   assert.match(relayProblem(filled({ mappings: [row({ imageTokenCap: 1_000_001 })] })), /1 到 1000000/);
+  // The maximum output is optional; when it is given it is between 1 and 1000000, as the server checks.
+  assert.equal(relayProblem(filled({ mappings: [row({ maxOutputTokens: null })] })), null);
+  assert.equal(relayProblem(filled({ mappings: [row({ maxOutputTokens: 1 })] })), null);
+  assert.equal(relayProblem(filled({ mappings: [row({ maxOutputTokens: 1_000_000 })] })), null);
+  for (const bad of [0, -1, 1_000_001, 1.5]) {
+    assert.match(relayProblem(filled({ mappings: [row({ maxOutputTokens: bad })] })), /第 1 条映射：最大输出要在 1 到 1000000 之间，或者不填/);
+  }
   assert.equal(only({ upstreamModel: 'a'.repeat(255) }), undefined);
   assert.ok(only({ upstreamModel: 'a'.repeat(256) }).upstream);
   // A model mapped twice, whatever its case, is a problem of both rows.
@@ -1040,6 +1052,7 @@ test('saving a change that a verification depends on makes the mappings unverifi
   limits.maxDurationSeconds = 120;
   limits.mappings[0].maxContextTokens = 50;
   limits.mappings[0].imageTokenCap = 1;
+  limits.mappings[0].maxOutputTokens = 4096;
   limits.mappings[0].enabled = true;
   assert.deepEqual(invalidatedMappings(saved, limits), []);
   // A new row has nothing to lose.

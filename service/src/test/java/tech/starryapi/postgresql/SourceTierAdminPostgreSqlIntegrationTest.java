@@ -531,6 +531,7 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
             assertThat(model.verifiedAt()).isNull();
             assertThat(model.verified()).isFalse();
             assertThat(model.imageTokenCap()).isEqualTo(8192);
+            assertThat(model.maxOutputTokens()).isNull();
         });
         assertThat(registry.snapshot().exclusiveXpAccountIds()).containsExactly(relay);
 
@@ -541,11 +542,12 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
 
         // Saving the same mapping again keeps the verification, summary included; limits and tier do not count.
         SourceTierDtos.Member resaved = new SourceTierDtos.Member(relay, "kiro", "OPENAI_CHAT", false, false, null, null, null, null, null, 300,
-            true, true, List.of(mapping("claude-sonnet-4.5", "relay/sonnet", 50_000)));
+            true, true, List.of(new SourceTierDtos.MemberModel("claude-sonnet-4.5", "relay/sonnet", 50_000, null, 8_192, null, null, null)));
         capable.replace("anthropic", replace(1L, true, tiers, List.of(resaved), List.of())).block();
         SourceTierDtos.MemberModel kept = model(capable.overview().block(), relay, "claude-sonnet-4.5");
         assertThat(kept.verified()).isTrue();
         assertThat(kept.maxContextTokens()).isEqualTo(50_000);
+        assertThat(kept.maxOutputTokens()).as("the maximum output the relay writes is a limit, like the window").isEqualTo(8_192);
         assertThat(summary(relay, "claude-sonnet-4.5")).contains("\"ok\"").contains("true");
 
         // A setting that changes what the verification vouches for clears it.

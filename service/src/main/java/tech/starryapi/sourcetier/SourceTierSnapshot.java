@@ -91,6 +91,10 @@ public final class SourceTierSnapshot {
         }
     }
 
+    /**
+     * @param maxOutputTokens the most output tokens the relay's upstream writes for the model, which the gateway cannot know;
+     *     null when the mapping states none (D15: a request that names no limit is then sent the relay as 4,096)
+     */
     public record MemberModel(
         String vendor,
         String accountId,
@@ -98,10 +102,26 @@ public final class SourceTierSnapshot {
         String upstreamModel,
         int maxContextTokens,
         int imageTokenCap,
+        Integer maxOutputTokens,
         boolean enabled,
         Instant verifiedAt,
         String verifiedHash
     ) {
+
+        /** A mapping that states no maximum output. */
+        public MemberModel(
+            String vendor,
+            String accountId,
+            String modelId,
+            String upstreamModel,
+            int maxContextTokens,
+            int imageTokenCap,
+            boolean enabled,
+            Instant verifiedAt,
+            String verifiedHash
+        ) {
+            this(vendor, accountId, modelId, upstreamModel, maxContextTokens, imageTokenCap, null, enabled, verifiedAt, verifiedHash);
+        }
     }
 
     /** Whether a source protocol may serve an entry endpoint of a vendor; no row means off. */

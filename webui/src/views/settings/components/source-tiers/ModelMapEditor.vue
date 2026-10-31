@@ -3,7 +3,8 @@
    * 模型映射：把这个厂商的目录模型映射到中转自己给它起的名字（wire 名，原样发给中转）。
    *
    * 每一行：目录模型、中转的模型名、上下文上限（必填：请求超过它就不派给这个中转）、图片上限（每张内联图片按多少令牌
-   * 估算，用来给预留定上界）、是否启用，和验证状态。映射只有验证通过才会被请求用到；验证、「从上游拉取」由上层的
+   * 估算，用来给预留定上界）、最大输出（可选：中转的上游能写多少；客户端没写输出上限的 Responses 请求发给这个中转的
+   * 输出上限取它，不填则是 4096）、是否启用，和验证状态。映射只有验证通过才会被请求用到；验证、「从上游拉取」由上层的
    * 成员对话框执行，本组件只编辑这张表，每次编辑都通过 update:models 交回新的数组。
    *
    * 「别名」是指向同一个目录模型、自己没有映射行的目录模型（`sonnet` 与 `claude-sonnet-4.5`）：它们共用这一行。
@@ -15,7 +16,9 @@
   import type { SourceTierModelVerification, SourceTierUpstreamModel } from '@/api/sourceTiers';
   import {
     DEFAULT_IMAGE_TOKEN_CAP,
+    FALLBACK_OUTPUT_TOKENS,
     MAX_IMAGE_TOKEN_CAP,
+    MAX_OUTPUT_TOKENS,
     coveredAliases,
     mappingProblems,
     mappingStatus,
@@ -105,6 +108,10 @@
     });
   }
 
+  function setMaxOutput(mapping: MappingDraft, value: number | null | undefined) {
+    patch(mapping.key, { maxOutputTokens: typeof value === 'number' ? value : null });
+  }
+
   function add() {
     emit('update:models', [...props.models, newMapping()]);
   }
@@ -173,6 +180,15 @@
         <el-button :icon="Plus" :disabled="disabled" @click="add">{{ t('添加映射') }}</el-button>
       </div>
     </header>
+
+    <p class="map-editor__note">
+      {{
+        t(
+          '最大输出是中转的上游给这个模型写的最大输出，可选：客户端没写输出上限的 Responses 请求（Codex 不写）发给这个中转的输出上限取它，不超过该请求的默认输出；不填的中转只给 {p0}。客户端自己写了上限的请求不受影响。',
+          { p0: formatNumber(FALLBACK_OUTPUT_TOKENS) },
+        )
+      }}
+    </p>
 
     <p v-if="upstreamState === 'ready'" class="map-editor__note">{{ upstreamNote }}</p>
     <p v-else-if="upstreamState === 'error'" class="map-editor__note is-warning">
@@ -285,6 +301,27 @@
             />
             <small v-if="problems[mapping.key]?.image" class="map-row__problem">
               {{ problems[mapping.key].image }}
+            </small>
+          </div>
+
+          <div class="map-row__field map-row__field--number">
+            <label>{{ t('最大输出（令牌）') }}</label>
+            <el-input-number
+              :model-value="mapping.maxOutputTokens ?? undefined"
+              :min="1"
+              :max="MAX_OUTPUT_TOKENS"
+              :step="1024"
+              :disabled="disabled"
+              :controls="false"
+              :placeholder="t('不填')"
+              :aria-label="t('最大输出')"
+              @update:model-value="setMaxOutput(mapping, $event)"
+            />
+            <small v-if="problems[mapping.key]?.output" class="map-row__problem">
+              {{ problems[mapping.key].output }}
+            </small>
+            <small v-else-if="mapping.maxOutputTokens === null" class="map-row__hint">
+              {{ t('不填时按 {p0} 发给中转', { p0: formatNumber(FALLBACK_OUTPUT_TOKENS) }) }}
             </small>
           </div>
 

@@ -2,6 +2,7 @@ package tech.starryapi.postgresql;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.within;
 import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -108,6 +109,8 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
      * writes (the model list shows 64,000 for it) and the application settings leave as they are.
      */
     private static final int DEFAULT_OUTPUT = 16_000;
+    /** What a relay whose mapping states no maximum output is given for such a request (D15): what it was given before D11. */
+    private static final int RELAY_OUTPUT = 4_096;
     /** What a small request (a few hundred bytes of input) is reserved for as its input. */
     private static final int SMALL_INPUT = 5_000;
     /** What Kiro reports: 8,000 tokens in and 1,000 out. */
@@ -298,12 +301,12 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
         JsonNode answer = (JsonNode) response.getBody();
         assertThat(answer.path("status").asString()).isEqualTo("completed");
         assertThat(answer.path("output_text").asString()).isEqualTo("cut off in the mi");
-        assertThat(relayBodies.getFirst().path("max_tokens").asInt()).isEqualTo(DEFAULT_OUTPUT);
+        assertThat(relayBodies.getFirst().path("max_tokens").asInt()).isEqualTo(RELAY_OUTPUT);
         Map<String, Object> reservation = reservations(client).getLast();
         assertThat(reservation).containsEntry("status", "SETTLED").containsEntry("served_tier_ref", "anthropic:relay");
         BigDecimal charged = (BigDecimal) reservation.get("actual_credits");
-        // What the relay says it wrote is held to the maximum output it was told it may write.
-        assertThat(charged).isEqualByComparingTo(standard.cost(new PlatformUsage(500, DEFAULT_OUTPUT, BigDecimal.ZERO, 0, 0, 0)));
+        // What the relay says it wrote is held to the 4,096 tokens it was told it may write (D15); the tier reserved for the default.
+        assertThat(charged).isEqualByComparingTo(standard.cost(new PlatformUsage(500, RELAY_OUTPUT, BigDecimal.ZERO, 0, 0, 0)));
         assertThat(charged).isLessThanOrEqualTo((BigDecimal) reservation.get("reserved_credits"));
         assertThat(balance(client)).isEqualByComparingTo(new BigDecimal("10").subtract(charged));
         assertThat(keyReserved(client)).isEqualByComparingTo("0");
@@ -312,14 +315,16 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     }
 
     /**
-     * A request that names no limit is reserved for the output of the default, which is what it is held to (D11, D14), and one
-     * that names its own limit for that: a user pays for the room the request may use, and the rest goes back with the settlement.
+     * A request that names no limit is reserved for the output of the default, which the native sources are held to (D11, D14), at
+     * the price of the tier that is sent that (Kiro's, at 0.6; the relay's tier is reserved for the 4,096 its relay is given, D15),
+     * which is the tier that reserves the most, and one that names its own limit for that: a user pays for the room the request may
+     * use, and the rest goes back with the settlement.
      */
     @Test
     void aResponsesRequestThatNamesNoLimitIsReservedForTheDefaultOutputAndOneThatNamesItsOwnForThat() {
         Client client = client("10");
         ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
-        BigDecimal defaultOutput = standard.output().multiply(BigDecimal.valueOf(DEFAULT_OUTPUT));
+        BigDecimal defaultOutput = standard.scaled(new BigDecimal("0.6")).output().multiply(BigDecimal.valueOf(DEFAULT_OUTPUT));
         BigDecimal named = standard.output().multiply(BigDecimal.valueOf(2000));
         BigDecimal anyInput = standard.estimate(SMALL_INPUT, 0);
 
@@ -332,7 +337,8 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
         BigDecimal limited = (BigDecimal) reservations.get(1).get("reserved_credits");
         assertThat(unlimited).isGreaterThan(defaultOutput).isLessThan(defaultOutput.add(anyInput));
         assertThat(limited).isGreaterThan(named).isLessThan(named.add(anyInput));
-        assertThat(relayBodies.get(0).path("max_tokens").asInt()).isEqualTo(DEFAULT_OUTPUT);
+        // The relay is not sent what the reservation holds: its mapping states no maximum output, so it is given 4,096 (D15).
+        assertThat(relayBodies.get(0).path("max_tokens").asInt()).isEqualTo(RELAY_OUTPUT);
         assertThat(relayBodies.get(1).path("max_tokens").asInt()).isEqualTo(2000);
         // Only what the relay wrote is charged, whatever was reserved.
         assertThat(balance(client)).isEqualByComparingTo(new BigDecimal("10").subtract(standard.cost(RELAY_USAGE).multiply(BigDecimal.valueOf(2))));
@@ -348,9 +354,10 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     void aUserWhoCannotPayForTheDefaultOutputIsToldSoBeforeAnythingIsDispatchedAndCanNameALimitInstead() {
         BigDecimal defaultReservation = standard.output().multiply(BigDecimal.valueOf(DEFAULT_OUTPUT));
         BigDecimal oldReservation = standard.output().multiply(BigDecimal.valueOf(4096)).add(standard.estimate(SMALL_INPUT, 0));
-        // Enough for what the request was reserved for before the default, and not for the output of the default.
+        // Enough for what the request was reserved for before the default, and not for the output of the default at the price of
+        // Kiro's tier (0.6), the one that reserves the most now that the relay's tier is reserved for the 4,096 it is given.
         BigDecimal balance = defaultReservation.divide(BigDecimal.valueOf(2), 6, java.math.RoundingMode.HALF_UP);
-        assertThat(balance).isGreaterThan(oldReservation).isLessThan(defaultReservation);
+        assertThat(balance).isGreaterThan(oldReservation).isLessThan(defaultReservation.multiply(new BigDecimal("0.6")));
         Client client = client(balance.toPlainString());
         ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
 
@@ -390,11 +397,16 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
             return Mono.just(new Completion("", "", List.of(), PlatformCompletionResult.StopReason.MAX_TOKENS, reported, "length", true));
         });
         kiroAnswers(() -> Mono.just(KIRO_ANSWER));
+        List<JsonNode> kiroBodies = new CopyOnWriteArrayList<>();
+        doAnswer(invocation -> {
+            kiroBodies.add(invocation.getArgument(1));
+            return Mono.just(KIRO_ANSWER);
+        }).when(kiroClient).complete(any(), any(), anyString());
 
         assertThatThrownBy(() -> responses(client, responsesBody("hello")))
             .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_GATEWAY));
 
-        assertThat(relayBodies.getFirst().path("max_tokens").asInt()).isEqualTo(DEFAULT_OUTPUT);
+        assertThat(relayBodies.getFirst().path("max_tokens").asInt()).isEqualTo(RELAY_OUTPUT);
         verify(kiroClient, never()).complete(any(), any(), anyString());
         assertThat(reservations(client).getLast()).containsEntry("status", "RELEASED").containsEntry("actual_credits", null)
             .containsEntry("last_dispatched_tier_ref", "anthropic:relay");
@@ -408,18 +420,21 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
             // The relay was paid for the answer, and the row says what it reported of it (held to what it was told it may write):
             // the operator's cost, in columns of its own. The user's tokens and credits are nothing, because nothing is charged.
             assertThat(row.get("withheld_input_tokens")).isEqualTo(500L);
-            assertThat(row.get("withheld_output_tokens")).isEqualTo((long) DEFAULT_OUTPUT);
+            assertThat(row.get("withheld_output_tokens")).isEqualTo((long) RELAY_OUTPUT);
             assertThat(row.get("input_tokens")).isEqualTo(0L);
             assertThat(row.get("output_tokens")).isEqualTo(0L);
             assertThat((BigDecimal) row.get("credits")).isEqualByComparingTo("0");
         });
 
-        // The retry is Kiro's, once, at the price of Kiro's tier; the relay is not asked again.
+        // The retry is Kiro's, once, at the price of Kiro's tier; the relay is not asked again. The owner's example: the relay was
+        // held to 4,096 and lost a long call to it, and Kiro is given the default output (D14), which the call fits.
         for (int retry = 0; retry < 2; retry++) {
             ResponseEntity<?> response = responses(client, responsesBody("hello"));
             assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
         }
         assertThat(relayBodies).hasSize(1);
+        assertThat(kiroBodies).hasSize(2).allSatisfy(body ->
+            assertThat(body.path("inferenceConfig").path("maxTokens").asInt()).isEqualTo(DEFAULT_OUTPUT));
         assertThat(balance(client)).isEqualByComparingTo(
             new BigDecimal("10").subtract(standard.scaled(new BigDecimal("0.6")).cost(KIRO_USAGE).multiply(BigDecimal.valueOf(2))));
     }
@@ -886,80 +901,159 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
         assertThat(balance(client)).isEqualByComparingTo(new BigDecimal("10").subtract(standard.scaled(new BigDecimal("0.6")).cost(KIRO_USAGE)));
     }
 
-    // ---- the relay is asked again with the output it had before D11 ----
+    // ---- the output a relay is given when the client names none (D15) ----
 
     /**
-     * A relay that counts the prompt as {@code counts} times what the gateway estimates and refuses what that and the output limit
-     * it is told come to over its window of 200,000.
-     */
-    private void relayCounts(double counts) {
-        doAnswer(invocation -> {
-            JsonNode body = invocation.getArgument(1);
-            relayBodies.add(body);
-            long counted = Math.round(tech.starryapi.platform.xproto.RelayUsageNormalizer.estimateInputTokens(body) * counts);
-            long output = body.path("max_tokens").asLong();
-            if (counted + output > 200_000) {
-                return Mono.error(relayErrors.fromResponse(400, error("context_length_exceeded", "maximum context length is 200000 tokens"
-                    + " ... (" + counted + " in the messages, " + output + " in the completion)"), null, relayId, "token"));
-            }
-            return Mono.just(relayAnswer(RELAY_USAGE));
-        }).when(relayClient).complete(any(), any(), any());
-    }
-
-    /** A Codex turn of about 180,000 tokens, pinned to the relay: the only source, whose count of the prompt is more than the estimate. */
-    private ObjectNode longTurnPinnedToTheRelay() {
-        return responsesBody("a".repeat(180_000 * 4)).put("model", MODEL + "@relay");
-    }
-
-    /**
-     * The relay counts the turn at 5% more than the estimate and refuses the 16,000 of the default, then serves the 4,096 it had
-     * before D11: one reservation, one settlement at the price of its tier for what it reported, nothing left for review.
+     * The mapping of the relay states a maximum output: the relay is given it, held to it (what it says it wrote is cut to it), and
+     * charged at the price of its tier for what it wrote; the tier reserved for the default output, which is more.
      */
     @Test
-    void aRelayAskedAgainWithTheOutputItHadBeforeD11IsChargedOnceAtThePriceOfItsTierAndNothingIsLeftForReview() {
+    void aRelayWhoseMappingStatesAMaximumOutputIsGivenAndHeldToItAndChargedForWhatItWrote() {
         Client client = client("10");
-        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
-        relayCounts(1.05);
+        ownersExample(client, "RESPONSES", client.keyId(), false, 8192, 8_192);
+        relayAnswers(() -> {
+            ObjectNode reported = objectMapper.createObjectNode();
+            reported.put("prompt_tokens", 500).put("completion_tokens", 900_000);
+            return Mono.just(new Completion("cut off in the mi", "", List.of(), PlatformCompletionResult.StopReason.MAX_TOKENS, reported,
+                "length"));
+        });
+
+        ResponseEntity<?> response = responses(client, responsesBody("hello"));
+
+        assertThat(((JsonNode) response.getBody()).path("status").asString()).isEqualTo("completed");
+        assertThat(relayBodies).extracting(body -> body.path("max_tokens").asInt()).containsExactly(8_192);
+        Map<String, Object> reservation = reservations(client).getLast();
+        assertThat(reservation).containsEntry("status", "SETTLED").containsEntry("served_tier_ref", "anthropic:relay");
+        BigDecimal charged = (BigDecimal) reservation.get("actual_credits");
+        assertThat(charged).isEqualByComparingTo(standard.cost(new PlatformUsage(500, 8_192, BigDecimal.ZERO, 0, 0, 0)));
+        assertThat((BigDecimal) reservation.get("reserved_credits")).as("the upper bound over the tiers it holds, Kiro's default included")
+            .isGreaterThan(standard.scaled(new BigDecimal("0.6")).output().multiply(BigDecimal.valueOf(DEFAULT_OUTPUT))).isGreaterThan(charged);
+        assertThat(balance(client)).isEqualByComparingTo(new BigDecimal("10").subtract(charged));
+        assertThat(keyReserved(client)).isEqualByComparingTo("0");
+        assertThat(logs(client)).singleElement().satisfies(row -> assertThat(row.get("usage_source")).isEqualTo("CLAMPED"));
+        assertThat(reviews(client)).isEmpty();
+    }
+
+    /** A maximum above the default of the request is capped by it: the reservation covers no more. */
+    @Test
+    void aMaximumOutputAboveTheDefaultIsCappedByItAndTheRelayIsChargedForNoMoreThanTheReservationHolds() {
+        Client client = client("10");
+        ownersExample(client, "RESPONSES", client.keyId(), false, 8192, 64_000);
+        relayAnswers(() -> Mono.just(new Completion("cut off in the mi", "", List.of(), PlatformCompletionResult.StopReason.MAX_TOKENS,
+            reported(500, 900_000), "length")));
+
+        responses(client, responsesBody("hello"));
+
+        assertThat(relayBodies).extracting(body -> body.path("max_tokens").asInt()).containsExactly(DEFAULT_OUTPUT);
+        Map<String, Object> reservation = reservations(client).getLast();
+        assertThat((BigDecimal) reservation.get("actual_credits"))
+            .isEqualByComparingTo(standard.cost(new PlatformUsage(500, DEFAULT_OUTPUT, BigDecimal.ZERO, 0, 0, 0)))
+            .isLessThanOrEqualTo((BigDecimal) reservation.get("reserved_credits"));
+        assertThat(reviews(client)).isEmpty();
+    }
+
+    /**
+     * The window of the relay (200,000) does not hold the prompt and the maximum output of its mapping together: it is given the
+     * 4,096 it was given before D11, which its window holds, and served once. One reservation, one settlement at the price of its
+     * tier, nothing left for review.
+     */
+    @Test
+    void aRelayWhoseWindowCannotHoldItsMaximumOutputBesideThePromptIsServedWithFourThousandNinetySixAndChargedOnce() {
+        Client client = client("10");
+        ownersExample(client, "RESPONSES", client.keyId(), false, 8192, 16_000);
 
         ResponseEntity<?> response = responses(client, longTurnPinnedToTheRelay());
 
         assertThat(response.getStatusCode().value()).isEqualTo(200);
         assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
-        assertThat(relayBodies).extracting(body -> body.path("max_tokens").asInt()).containsExactly(DEFAULT_OUTPUT, 4096);
+        assertThat(relayBodies).extracting(body -> body.path("max_tokens").asInt()).containsExactly(RELAY_OUTPUT);
         verify(kiroClient, never()).complete(any(), any(), anyString());
         assertThat(reservations(client)).singleElement().satisfies(reservation -> {
             assertThat(reservation).containsEntry("status", "SETTLED").containsEntry("served_tier_ref", "anthropic:relay");
             assertThat((BigDecimal) reservation.get("actual_credits")).isEqualByComparingTo(standard.cost(RELAY_USAGE));
             assertThat((BigDecimal) reservation.get("reserved_credits"))
-                .as("the default output is what is reserved").isGreaterThan(standard.output().multiply(BigDecimal.valueOf(DEFAULT_OUTPUT)));
+                .as("the 4,096 the relay was given is what the request pinned to it is reserved for")
+                .isGreaterThan(standard.output().multiply(BigDecimal.valueOf(RELAY_OUTPUT)));
         });
         assertThat(balance(client)).isEqualByComparingTo(new BigDecimal("10").subtract(standard.cost(RELAY_USAGE)));
         assertThat(keyReserved(client)).isEqualByComparingTo("0");
-        assertThat(events(client)).singleElement().satisfies(event -> assertThat(event.get("source_tier_ref")).isEqualTo("anthropic:relay"));
-        assertThat(logs(client)).singleElement().satisfies(row -> {
-            assertThat(row.get("success")).isEqualTo(true);
-            assertThat(row.get("source_dispatch")).isEqualTo("OPENAI_CHAT");
-        });
         assertThat(reviews(client)).isEmpty();
     }
 
-    /** The relay refuses the 4,096 too: the reservation is released for good, nothing is charged and nothing is left for review. */
+    // ---- what each tier is reserved for (D15) ----
+
+    /**
+     * The reservation is the most the request may cost over the tiers it may be served from, each as far as it can be sent: the
+     * relay's tier for the 4,096 its relay is given when the mapping states no maximum, Kiro's for the default output at its price.
+     * A request pinned to the relay is reserved for the relay alone and for no more than a request that wrote the 4,096 itself, as
+     * it was before D11; one pinned to Kiro for the default at Kiro's price.
+     */
     @Test
-    void aRelayThatRefusesTheOutputItHadBeforeD11TooReleasesTheReservationAndTheUserIsNotCharged() {
+    void eachTierIsReservedForTheOutputItCanBeSentAndAPinnedRequestForItsTierAlone() {
         Client client = client("10");
         ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
-        relayCounts(1.2);
+        BigDecimal kiroOutput = standard.scaled(new BigDecimal("0.6")).output().multiply(BigDecimal.valueOf(DEFAULT_OUTPUT));
+        BigDecimal relayOutput = standard.output().multiply(BigDecimal.valueOf(RELAY_OUTPUT));
+        BigDecimal anyInput = standard.estimate(SMALL_INPUT, 0);
 
-        assertThatThrownBy(() -> responses(client, longTurnPinnedToTheRelay())).isInstanceOfSatisfying(ApiException.class,
-            error -> assertThat(error.getMessage()).contains("prompt is too long"));
+        responses(client, responsesBody("hello"));
+        responses(client, responsesBody("hello").put("model", MODEL + "@relay"));
+        responses(client, responsesBody("hello").put("model", MODEL + "@relay").put("max_output_tokens", RELAY_OUTPUT));
+        responses(client, responsesBody("hello").put("model", MODEL + "@kiro"));
 
-        assertThat(relayBodies).extracting(body -> body.path("max_tokens").asInt()).containsExactly(DEFAULT_OUTPUT, 4096);
+        List<Map<String, Object>> reservations = reservations(client);
+        assertThat(reservations).hasSize(4).allSatisfy(reservation -> assertThat(reservation).containsEntry("status", "SETTLED"));
+        BigDecimal automatic = (BigDecimal) reservations.get(0).get("reserved_credits");
+        BigDecimal pinnedToTheRelay = (BigDecimal) reservations.get(1).get("reserved_credits");
+        BigDecimal pinnedWithTheLimitWritten = (BigDecimal) reservations.get(2).get("reserved_credits");
+        BigDecimal pinnedToKiro = (BigDecimal) reservations.get(3).get("reserved_credits");
+        assertThat(pinnedToTheRelay).isGreaterThan(relayOutput).isLessThan(relayOutput.add(anyInput));
+        assertThat(pinnedToTheRelay).as("the request that wrote the 4,096 itself").isCloseTo(pinnedWithTheLimitWritten, within(new BigDecimal("0.0001")));
+        assertThat(pinnedToKiro).isGreaterThan(kiroOutput).isLessThan(kiroOutput.add(anyInput));
+        assertThat(automatic).as("the larger of the two, which is Kiro's").isCloseTo(pinnedToKiro, within(new BigDecimal("0.0001")))
+            .isGreaterThan(pinnedToTheRelay);
+        assertThat(relayBodies).extracting(body -> body.path("max_tokens").asInt()).containsExactly(RELAY_OUTPUT, RELAY_OUTPUT, RELAY_OUTPUT);
+    }
+
+    /**
+     * A user whose balance covers the relay and not Kiro's default output is served by the relay when the request is pinned to it,
+     * and told so, before anything is reserved or dispatched, when it is not: the estimate of an automatic request is that of the
+     * pool that reserves the most, which is Kiro's at 0.6 and not the relay's at 1.0 (the relay's tier is not reserved for an output
+     * its relay is never given), so the words of the 402 say the estimate is of the pool that reserves the most, and not of the
+     * dearest one, which the relay's pool is.
+     */
+    @Test
+    void aUserWhoCanPayForTheRelayAndNotForKirosDefaultOutputIsServedWhenPinnedToTheRelayAndRefusedOtherwise() {
+        BigDecimal kiroReservation = standard.scaled(new BigDecimal("0.6")).output().multiply(BigDecimal.valueOf(DEFAULT_OUTPUT));
+        BigDecimal relayReservation = standard.output().multiply(BigDecimal.valueOf(RELAY_OUTPUT)).add(standard.estimate(SMALL_INPUT, 0));
+        BigDecimal balance = relayReservation.add(kiroReservation).divide(BigDecimal.valueOf(2), 6, java.math.RoundingMode.HALF_UP);
+        assertThat(balance).isGreaterThan(relayReservation).isLessThan(kiroReservation);
+        Client client = client(balance.toPlainString());
+        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+
+        assertThatThrownBy(() -> responses(client, responsesBody("hello"))).isInstanceOfSatisfying(ApiException.class, error -> {
+            assertThat(error.getStatus()).isEqualTo(HttpStatus.PAYMENT_REQUIRED);
+            assertThat(error.getCode()).isEqualTo("INSUFFICIENT_BALANCE");
+            assertThat(error.getMessage()).contains("预留最多的那个").doesNotContain("最贵");
+        });
+        assertThatThrownBy(() -> responses(client, responsesBody("hello").put("model", MODEL + "@kiro")))
+            .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.PAYMENT_REQUIRED));
+        assertThat(relayBodies).isEmpty();
         verify(kiroClient, never()).complete(any(), any(), anyString());
-        assertThat(reservations(client).getLast()).containsEntry("status", "RELEASED").containsEntry("actual_credits", null)
-            .containsEntry("last_dispatched_tier_ref", "anthropic:relay");
-        assertThat(balance(client)).isEqualByComparingTo("10");
+        assertThat(reservations(client)).isEmpty();
+
+        ResponseEntity<?> served = responses(client, responsesBody("hello").put("model", MODEL + "@relay"));
+
+        assertThat(served.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
+        assertThat(relayBodies).extracting(body -> body.path("max_tokens").asInt()).containsExactly(RELAY_OUTPUT);
+        assertThat(reservations(client)).singleElement().satisfies(reservation -> assertThat(reservation).containsEntry("status", "SETTLED"));
+        assertThat(balance(client)).isEqualByComparingTo(balance.subtract(standard.cost(RELAY_USAGE)));
         assertThat(keyReserved(client)).isEqualByComparingTo("0");
-        assertThat(reviews(client)).isEmpty();
+    }
+
+    /** A Codex turn of about 190,000 tokens, pinned to the relay: the window of 200,000 holds it, and not 16,000 more. */
+    private ObjectNode longTurnPinnedToTheRelay() {
+        return responsesBody("a".repeat(190_000 * 4)).put("model", MODEL + "@relay");
     }
 
     // ---- fixtures ----
@@ -974,6 +1068,11 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     }
 
     private void ownersExample(Client client, String entry, String gatedKey, boolean vision, int imageTokenCap) {
+        ownersExample(client, entry, gatedKey, vision, imageTokenCap, null);
+    }
+
+    /** {@link #ownersExample} for a relay whose mapping of the model states {@code maxOutputTokens} as its maximum output (null: none). */
+    private void ownersExample(Client client, String entry, String gatedKey, boolean vision, int imageTokenCap, Integer maxOutputTokens) {
         relayId = account("OpenAI-compatible", "api-key", "https://relay.example/v1");
         kiroId = account("BuilderId", "idc", null);
         accountPool.refreshCache().block();
@@ -984,7 +1083,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
                 new SourceTierDtos.Tier("relay", 1, "relay", null, List.of(), null, null, null),
                 new SourceTierDtos.Tier("kiro", 2, "kiro", new BigDecimal("0.6"), List.of("KIRO", "CLAUDE_OAUTH"), null, null, null)),
                 List.of(new SourceTierDtos.Member(relayId, "relay", "OPENAI_CHAT", null, vision, null, null, null, null, "NONE", null,
-                    true, true, List.of(new SourceTierDtos.MemberModel(MODEL, "relay-sonnet", 200_000, imageTokenCap, null, null, null)))),
+                    true, true, List.of(new SourceTierDtos.MemberModel(MODEL, "relay-sonnet", 200_000, imageTokenCap, maxOutputTokens, null, null, null)))),
                 List.of(new SourceTierDtos.Gate(null, entry, "KEYS", List.of(gatedKey)))))
             .block();
         // A mapping is verified by a probe of the relay: what a probe that passed leaves in the table.

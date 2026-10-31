@@ -546,8 +546,10 @@ class ProxyFacadeAdmissionLifecycleTest {
     }
 
     /**
-     * The model list shows 384,000 for the DeepSeek models and the price catalog 8,192, which is what DeepSeek accepts: the
-     * model writes the smaller of the two, and Claude, for which both catalogs list 64,000, is given the default.
+     * The model list shows 384,000 for the DeepSeek models and the price catalog that ships with the release 8,192: the model is held
+     * to the smaller of the two, and Claude, for which both catalogs list 64,000, is given the default. The figure is the catalog's as
+     * it is now, and the catalog is refreshed from the remote repository by default: the refreshed one lists 393,216 for the DeepSeek
+     * v4 models, which holds nothing back, so a deployment that refreshes gives them the default.
      */
     @Test
     void deepSeekV4IsHeldToTheSmallerOfTheTwoCatalogsAndClaudeGetsTheDefault() throws Exception {
@@ -562,6 +564,13 @@ class ProxyFacadeAdmissionLifecycleTest {
         assertThat(fixture.facade().defaultResponsesOutputLimit("deepseek-v4-pro")).isEqualTo(8_192L);
         assertThat(fixture.facade().defaultResponsesOutputLimit("claude-sonnet-4.5")).isEqualTo(64_000L);
         assertThat(fixture().facade().defaultResponsesOutputLimit("claude-sonnet-4.5")).isEqualTo(16_000L);
+
+        // The catalog after a refresh lists what the model writes, which the default is below.
+        Fixture refreshed = fixture();
+        when(refreshed.modelPricingService().maxOutputTokens("deepseek-v4-flash")).thenReturn(java.util.OptionalInt.of(393_216));
+        when(refreshed.modelPricingService().maxOutputTokens("deepseek-v4-pro")).thenReturn(java.util.OptionalInt.of(393_216));
+        assertThat(refreshed.facade().defaultResponsesOutputLimit("deepseek-v4-flash")).isEqualTo(16_000L);
+        assertThat(refreshed.facade().defaultResponsesOutputLimit("deepseek-v4-pro")).isEqualTo(16_000L);
     }
 
     private JsonNode responsesRequest(Integer limit) throws Exception {

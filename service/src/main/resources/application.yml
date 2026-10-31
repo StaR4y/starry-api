@@ -175,7 +175,9 @@ starry:
     quota-reset: ${STARRY_QUOTA_RESET:${KIRO_QUOTA_RESET:1h}}
     probabilistic-retry-chance: ${STARRY_PROBABILISTIC_RETRY:${KIRO_PROBABILISTIC_RETRY:0.1}}
     max-request-body-bytes: ${STARRY_MAX_REQUEST_BODY_BYTES:${KIRO_MAX_REQUEST_BODY_BYTES:10485760}}
-    # The output limit of a Responses request that states none (Codex never does), no more than the model's own maximum.
+    # The output limit of a Responses request that states none (Codex never does), no more than the model's own maximum. It is
+    # what the reservation and the native sources are held to; a relay is given the maximum output its mapping states (up to this),
+    # or 4096.
     responses-default-output-tokens: ${STARRY_RESPONSES_DEFAULT_OUTPUT_TOKENS:16000}
     token-refresh-interval-ms: ${STARRY_TOKEN_REFRESH_INTERVAL_MS:${KIRO_TOKEN_REFRESH_INTERVAL_MS:3600000}}
     token-refresh-initial-delay-ms: ${STARRY_TOKEN_REFRESH_INITIAL_DELAY_MS:${KIRO_TOKEN_REFRESH_INITIAL_DELAY_MS:60000}}

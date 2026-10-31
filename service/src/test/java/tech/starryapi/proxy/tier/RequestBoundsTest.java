@@ -29,23 +29,35 @@ class RequestBoundsTest {
         assertThat(RequestBounds.outputTokens(json("{}"))).isEqualTo(4096);
     }
 
-    // ---- the body a relay had before the gateway chose an output ----
+    // ---- what a relay is given for a request whose output the gateway chose ----
+
+    /** D15: the maximum the mapping states, as far as the default of the request goes; 4,096 when it states none. */
+    @Test
+    void aRelayIsGivenTheMaximumOfItsMappingUpToTheDefaultAndFourThousandNinetySixWhenTheMappingStatesNone() {
+        assertThat(RequestBounds.relayOutputTokens(16_000, null)).isEqualTo(4096);
+        assertThat(RequestBounds.relayOutputTokens(16_000, 8_192)).isEqualTo(8_192);
+        assertThat(RequestBounds.relayOutputTokens(16_000, 64_000)).as("never more than the default of the request").isEqualTo(16_000);
+        assertThat(RequestBounds.relayOutputTokens(16_000, 2_048)).as("a relay that writes less is asked for less").isEqualTo(2_048);
+        assertThat(RequestBounds.relayOutputTokens(16_000, 4_096)).isEqualTo(4096);
+        // The default of a model that writes less than 4,096 is what the reservation covers, so it is what a relay is given.
+        assertThat(RequestBounds.relayOutputTokens(2_048, null)).isEqualTo(2_048);
+        assertThat(RequestBounds.relayOutputTokens(2_048, 8_192)).isEqualTo(2_048);
+    }
 
     @Test
-    void theBodyOfBeforeHoldsTheOutputLimitsToTheFallbackAndLeavesTheRestAndTheBodyItWasGiven() {
+    void anOutputLimitIsSetInWhicheverFieldsTheBodyNamesAndNotInTheBodyItWasGiven() {
         ObjectNode body = (ObjectNode) json("{\"model\": \"m\", \"max_tokens\": 16000, \"messages\": [{\"role\": \"user\", \"content\": \"hi\"}]}");
 
-        ObjectNode before = RequestBounds.withTheOutputOfBefore(body);
+        JsonNode sized = RequestBounds.withOutputLimit(body, 4096);
 
-        assertThat(before.path("max_tokens").asLong()).isEqualTo(RequestBounds.FALLBACK_OUTPUT_TOKENS);
-        assertThat(before.path("messages")).isEqualTo(body.path("messages"));
+        assertThat(sized.path("max_tokens").asLong()).isEqualTo(4096);
+        assertThat(sized.path("messages")).isEqualTo(body.path("messages"));
         assertThat(body.path("max_tokens").asLong()).as("the body it was given is not changed").isEqualTo(16000);
         ObjectNode completion = (ObjectNode) json("{\"max_completion_tokens\": 32000, \"max_tokens\": 32000}");
-        assertThat(RequestBounds.withTheOutputOfBefore(completion).path("max_completion_tokens").asLong()).isEqualTo(4096);
-        assertThat(RequestBounds.withTheOutputOfBefore(completion).path("max_tokens").asLong()).isEqualTo(4096);
-        // A limit below it is not raised, and a body that names none is not given one.
-        assertThat(RequestBounds.withTheOutputOfBefore(json("{\"max_tokens\": 100}")).path("max_tokens").asLong()).isEqualTo(100);
-        assertThat(RequestBounds.withTheOutputOfBefore(json("{\"stream\": true}")).has("max_tokens")).isFalse();
+        assertThat(RequestBounds.withOutputLimit(completion, 4096).path("max_completion_tokens").asLong()).isEqualTo(4096);
+        assertThat(RequestBounds.withOutputLimit(completion, 4096).path("max_tokens").asLong()).isEqualTo(4096);
+        // A body that names none is not given one.
+        assertThat(RequestBounds.withOutputLimit(json("{\"stream\": true}"), 4096).has("max_tokens")).isFalse();
     }
 
     // ---- the default of a request that names no output ----

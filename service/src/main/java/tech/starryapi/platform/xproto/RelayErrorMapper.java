@@ -23,7 +23,9 @@ import tools.jackson.databind.ObjectMapper;
  *       402. OpenAI itself sends this with a 429, which would be taken for a busy account that is back in a minute.
  *   <li>The request does not fit the model's context window ({@code context_length_exceeded}, "maximum context
  *       length", "prompt is too long", "input is too long"): 400, marked {@link
- *       RelayErrorException#isContextExceeded()}.
+ *       RelayErrorException#isContextExceeded()}. Anthropic's "input length and `max_tokens` exceed context limit",
+ *       for a prompt that fits but not beside its output, is a 400 of its own kind, marked {@link
+ *       RelayErrorException#isBesideOutput()}: whether it teaches anything is for the caller to say.
  *   <li>It does not serve the model ({@code model_not_found}, "no available channel", the other phrases relays use):
  *       404, whatever status it came with, because the classification of a model that is not served looks at the
  *       status and no longer has the relay's text to look at.
@@ -119,6 +121,12 @@ public final class RelayErrorMapper {
     private static final List<String> CONTEXT_IN_TEXT = List.of(
         "context length exceeded", "maximum context length", "prompt is too long", "input is too long"
     );
+    // Anthropic's words for a prompt that fits but not beside max_tokens, which the Claude models before the 4.5 generation (3.x,
+    // Sonnet 4, Opus 4, Opus 4.1) answer and a relay in front of them passes on: "input length and `max_tokens` exceed context
+    // limit: 188240 + 21333 > 200000, decrease input length or `max_tokens` and try again". It is no refusal of the prompt, whose
+    // length is not said to be over the window, so it is no CONTEXT_IN_TEXT; the caller that chose the output limit may read it as
+    // one (RelayErrorException#asContextExceeded), which the refusal of a body of D15 needs to be learned and not sent again.
+    private static final List<String> CONTEXT_BESIDE_OUTPUT_IN_TEXT = List.of("exceed context limit");
     // The union of what the OpenAI client retries on (OpenAiUpstreamClient.isModelNotFound) and what the failure
     // classifier reads as a model the account may not use (UpstreamFailureClassifier.forbiddenFailure).
     private static final List<String> MODEL_NOT_SERVED = List.of(
@@ -174,7 +182,12 @@ public final class RelayErrorMapper {
     private static RelayErrorException exception(Verdict verdict, Fields fields, String retryAfter) {
         String token = fields.safeToken();
         String message = "Source error " + verdict.status() + (token == null ? "" : " (" + token + ")");
-        return new RelayErrorException(verdict.status(), message, verdict.recoverable(), retryAfter, verdict.contextExceeded());
+        // Only a refusal that is taken for a 400 of the converted request otherwise: what a status or a quota word in the same
+        // text decides stays decided.
+        boolean besideOutput = verdict.status() == 400 && !verdict.contextExceeded()
+            && containsAny(flatten(fields.message()), CONTEXT_BESIDE_OUTPUT_IN_TEXT);
+        return new RelayErrorException(
+            verdict.status(), message, verdict.recoverable(), retryAfter, verdict.contextExceeded(), besideOutput);
     }
 
     // --- what the relay said ---

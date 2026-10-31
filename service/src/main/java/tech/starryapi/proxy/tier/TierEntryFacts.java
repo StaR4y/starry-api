@@ -25,9 +25,9 @@ import tools.jackson.databind.JsonNode;
  * @param chatConversion how the body the request is planned over is made into the Chat body a relay is given; null when
  *     that body already is one (the Chat entry, and Messages, whose conversion came before the plan)
  * @param gatewayOutput whether the output limit of the planned body is one the gateway chose and not the client: the
- *     default, which a Responses request that names no limit is given (D11, D14, design 7.10). A relay's window has to
- *     hold that output besides the prompt then, which it is not asked of a limit the client wrote (the client's to size)
- *     or of the 4,096 the other entries give
+ *     default of the model, which a Responses request that names no limit is given (D14, design 7.10). A relay is not
+ *     given it: its output is the maximum its mapping states, or 4,096 (D15, {@link XpEligibility}). A limit the client
+ *     wrote, and the 4,096 the other entries give, are sent to a relay as they are
  */
 public record TierEntryFacts(Detected detected, JsonNode entryDigest, UnaryOperator<JsonNode> chatConversion, boolean gatewayOutput) {
 
@@ -57,7 +57,7 @@ public record TierEntryFacts(Detected detected, JsonNode entryDigest, UnaryOpera
         return new TierEntryFacts(detected, entryDigest, conversion, gatewayOutput);
     }
 
-    /** The same facts, saying whether the output limit of the planned body is the gateway's own. */
+    /** The same facts, saying whether the output limit of the planned body is the gateway's own (D14). */
     public TierEntryFacts withGatewayOutput(boolean gatewayOutput) {
         return new TierEntryFacts(detected, entryDigest, chatConversion, gatewayOutput);
     }
