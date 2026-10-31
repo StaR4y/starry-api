@@ -2440,7 +2440,69 @@ class ProxyFacadeRoutingTest {
         );
     }
 
-    /** One OpenAI chat request whose first account fails with the given egress error. */
+    // ---- upstream payment refusals (HTTP 402) ----
+
+    @Test
+    void aPaymentRefusalFollowedByARateLimitOnTheNextAccountReleasesTheReservationAsUnbilled() throws Exception {
+        // An exhausted quota or a relay without balance generates nothing, so the 402 must not leave the request
+        // billing-uncertain once a later account answers too.
+        EgressScenario scenario = new EgressScenario(new UpstreamException(402, "monthly quota exhausted", true));
+        scenario.recordsRequestFailures();
+        when(scenario.accountPoolService.selectOpenAiAccountForPool(
+            eq("key-1"), eq(List.of("openai-main")), any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.just(scenario.backup));
+        when(scenario.openAiUpstreamClient.complete(eq(scenario.backup), any(), eq("gpt-5")))
+            .thenReturn(Mono.error(new UpstreamException(429, "rate limited", true)));
+        when(scenario.accountPoolService.selectOpenAiAccountForPool(
+            eq("key-1"), eq(List.of("openai-main", "openai-backup")), any(AccountPoolRequestContext.class)
+        )).thenReturn(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "none")));
+
+        assertThatThrownBy(() -> scenario.facade().chat(scenario.request, scenario.exchange).block())
+            .isInstanceOfSatisfying(ApiException.class, error ->
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS));
+        // The 402 still moves the request to another account and cools the first one down.
+        verify(scenario.openAiUpstreamClient).complete(eq(scenario.backup), any(), eq("gpt-5"));
+        verify(scenario.accountPoolService).recordRequestFailure(
+            eq("openai-main"), eq(AccountPoolService.UpstreamErrorType.RECOVERABLE), eq(402), anyString(),
+            any(AccountPoolRequestContext.class)
+        );
+        verify(scenario.apiKeyService).releaseUsage(any(), anyString(), eq(true), anyString());
+        verify(scenario.apiKeyService, never()).releaseUsage(any(), anyString(), eq(false), anyString());
+    }
+
+    @Test
+    void aPaymentRefusalWithNoOtherAccountReleasesTheReservationAsUnbilled() throws Exception {
+        EgressScenario scenario = new EgressScenario(new UpstreamException(402, "monthly quota exhausted", true));
+        scenario.recordsRequestFailures();
+        scenario.noBackupAccount();
+
+        assertThatThrownBy(() -> scenario.facade().chat(scenario.request, scenario.exchange).block())
+            .isInstanceOfSatisfying(ApiException.class, error ->
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS));
+        verify(scenario.apiKeyService).releaseUsage(any(), anyString(), eq(true), anyString());
+        verify(scenario.apiKeyService, never()).releaseUsage(any(), anyString(), eq(false), anyString());
+    }
+
+    @Test
+    void aPaymentRefusalWithoutARetryReleasesTheReservationAsUnbilled() throws Exception {
+        EgressScenario scenario = new EgressScenario(new UpstreamException(402, "monthly quota exhausted", true));
+        scenario.recordsRequestFailures();
+        // A retry budget of one account: the 402 is the last attempt and goes straight back to the client.
+        AccountSettingsService accountSettings = stubbedAccountSettings(
+            new AccountDtos.RoutingPolicySettings(false, false, true, true, 2, 1, 3, 2, 2)
+        );
+
+        assertThatThrownBy(() -> scenario.facade(accountSettings).chat(scenario.request, scenario.exchange).block())
+            .isInstanceOfSatisfying(ApiException.class, error ->
+                assertThat(error.getStatus()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS));
+        verify(scenario.accountPoolService, never()).selectOpenAiAccountForPool(
+            eq("key-1"), eq(List.of("openai-main")), any(AccountPoolRequestContext.class)
+        );
+        verify(scenario.apiKeyService).releaseUsage(any(), anyString(), eq(true), anyString());
+        verify(scenario.apiKeyService, never()).releaseUsage(any(), anyString(), eq(false), anyString());
+    }
+
+    /** One OpenAI chat request whose first account fails with the given error (an egress failure or an upstream status). */
     private final class EgressScenario {
         final ApiKeyService apiKeyService = mock(ApiKeyService.class);
         final AccountPoolService accountPoolService = mock(AccountPoolService.class);
@@ -2484,10 +2546,25 @@ class ProxyFacadeRoutingTest {
             )).thenReturn(Mono.error(new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "none")));
         }
 
+        void recordsRequestFailures() {
+            when(accountPoolService.recordRequestFailure(
+                anyString(), any(AccountPoolService.UpstreamErrorType.class), any(), anyString(),
+                any(AccountPoolRequestContext.class)
+            )).thenReturn(Mono.empty());
+        }
+
         ProxyFacade facade() {
             return proxyFacade(
                 apiKeyService, accountPoolService, accountAutoSuspendService, new DefaultModelCatalogProvider(),
                 modelMappingService, rateLimiterService, mock(KiroUpstreamClient.class), openAiUpstreamClient, statsService
+            );
+        }
+
+        ProxyFacade facade(AccountSettingsService accountSettingsService) {
+            return proxyFacade(
+                apiKeyService, accountPoolService, accountAutoSuspendService, new DefaultModelCatalogProvider(),
+                modelMappingService, rateLimiterService, mock(KiroUpstreamClient.class), openAiUpstreamClient, statsService,
+                accountSettingsService
             );
         }
     }
