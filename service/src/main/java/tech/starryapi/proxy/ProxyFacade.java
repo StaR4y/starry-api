@@ -1698,8 +1698,7 @@ public class ProxyFacade {
 
     // A tiered plan brings its own reservation and prices (TierBilling): it reserves the most any tier it may be served
     // from would need and is charged the price of the tier that served. What it shares with an untiered request is how the
-    // reservation is held and released; the release counts a failure as unbilled by tierDefinitive, which also takes the
-    // 402 of a source that has no quota left.
+    // reservation is held and released.
     private <T> Mono<T> withBilling(ApiKeyPrincipal principal, String requestId, String model, JsonNode request,
                                     boolean fastMode, TierPlan plan, Mono<T> operation) {
         if ("anonymous".equals(principal.keyId())) return operation;
@@ -1707,7 +1706,7 @@ public class ProxyFacade {
             return Mono.defer(() -> {
                 TierBilling billing = TierBilling.of(plan, model);
                 return reservedFor(principal, requestId, billing.reservation(), billing.pricing(), operation,
-                    context -> context.put(TierBilling.class, billing), this::tierDefinitive, error -> lowBalanceAdvice(plan, error));
+                    context -> context.put(TierBilling.class, billing), this::definitiveBillingFailure, error -> lowBalanceAdvice(plan, error));
             });
         }
         long estimatedInput = RequestBounds.nativeInputTokens(request);
@@ -1788,7 +1787,7 @@ public class ProxyFacade {
      * released. Anything uncertain (a response timeout after the request was sent, a reset mid-request) stays
      * flagged for manual review, because the upstream may still have generated and charged for it.
      */
-    private boolean definitiveBillingFailure(Throwable error) {
+    boolean definitiveBillingFailure(Throwable error) {
         Throwable root = rootFailure(error);
         if (root instanceof ApiException api) {
             return java.util.Set.of(400, 401, 402, 403, 404, 422, 429).contains(api.getStatus().value());
@@ -1805,19 +1804,6 @@ public class ProxyFacade {
             return upstream.isRecoverable() && java.util.Set.of(500, 502, 503, 529).contains(status);
         }
         return UpstreamFailureClassifier.neverReachedUpstream(error);
-    }
-
-    /**
-     * {@link #definitiveBillingFailure} for a tiered request, which also counts the 402 of a source that has no quota
-     * left: it is a refusal to serve, never a generation. Untiered, the same 402 stays billing-uncertain as it always
-     * was, and the first of them locks the key's user into review; correcting that for every request is its own change.
-     */
-    boolean tierDefinitive(Throwable error) {
-        if (definitiveBillingFailure(error)) {
-            return true;
-        }
-        UpstreamException upstream = findUpstreamException(error);
-        return upstream != null && upstream.getStatusCode() == 402;
     }
 
     private static UpstreamException findUpstreamException(Throwable error) {
@@ -2838,7 +2824,7 @@ public class ProxyFacade {
                                 selection.level(),
                                 account.getAccountId(),
                                 error,
-                                tierDefinitive(error),
+                                definitiveBillingFailure(error),
                                 retryable,
                                 maxDistinctAccounts(
                                     classification, run.route(), run.preferCodexAccounts(), run.preferDeepSeekAccounts(), run.routingPolicy()),
@@ -4016,7 +4002,7 @@ public class ProxyFacade {
         )));
         return Mono.deferContextual(context -> {
             // A later request rejection cannot prove that an earlier timed-out retry was free.
-            boolean definitive = attempt.selection() != null ? tierDefinitive(error) : definitiveBillingFailure(error);
+            boolean definitive = definitiveBillingFailure(error);
             if (context.hasKey(BILLING_UNCERTAINTY) && !definitive) {
                 context.<AtomicBoolean>get(BILLING_UNCERTAINTY).set(true);
             }

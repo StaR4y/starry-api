@@ -87,7 +87,7 @@ public final class TierRetryPolicy {
      *
      * @param level the tier the account was selected from
      * @param error the failure as the upstream client raised it
-     * @param definitive whether the failure is known not to have been billed ({@code tierDefinitive})
+     * @param definitive whether the failure is known not to have been billed ({@code definitiveBillingFailure})
      * @param retryable whether the failure may be retried on another account at all, as for an untiered request
      * @param accountLimit how many different accounts a request may be dispatched to for this kind of failure
      * @param generationStarted whether the upstream client reported output of the dispatch, which its error may not

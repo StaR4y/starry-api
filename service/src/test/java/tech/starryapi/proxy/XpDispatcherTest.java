@@ -110,7 +110,7 @@ class XpDispatcherTest {
     private final ProxyAccountEntity account = relayAccount("http://127.0.0.1:1");
     private final List<AutoCloseable> open = new ArrayList<>();
 
-    /** Only for the question what a tiered request's reservation does with a failure: {@code tierDefinitive}. */
+    /** Only for the question what a tiered request's reservation does with a failure: {@code definitiveBillingFailure}. */
     private final ProxyFacade facade = new ProxyFacade(
         mock(ApiKeyService.class),
         mock(AccountPoolService.class),
@@ -262,7 +262,7 @@ class XpDispatcherTest {
         Throwable thrown = failureOf(dispatcher.dispatch(account, relay(Entry.MESSAGES, body()), LIMITS, LIMIT));
 
         assertThat(thrown).isInstanceOf(RelayAbortedAfterDispatchException.class);
-        assertThat(facade.tierDefinitive(thrown)).isTrue();
+        assertThat(facade.definitiveBillingFailure(thrown)).isTrue();
         assertThat(UpstreamFailureClassifier.classify(thrown, account, relay(Entry.MESSAGES, body())).interrupted()).isTrue();
         // Chat has a place for it, and an answer that stopped for length says so.
         PlatformCompletionResult chat = dispatcher.dispatch(account, relay(Entry.CHAT, body()), LIMITS, LIMIT).block(WAIT);
@@ -293,7 +293,7 @@ class XpDispatcherTest {
      */
     private void assertInterruptedAndNotBilled(Throwable thrown) {
         assertThat(thrown).isInstanceOf(RelayAnswerWithheldException.class).isInstanceOf(RelayAbortedAfterDispatchException.class);
-        assertThat(facade.tierDefinitive(thrown)).isTrue();
+        assertThat(facade.definitiveBillingFailure(thrown)).isTrue();
         UpstreamFailureClassifier.Classification classification =
             UpstreamFailureClassifier.classify(thrown, account, relay(Entry.RESPONSES, body()));
         assertThat(classification.interrupted()).isTrue();
@@ -586,7 +586,7 @@ class XpDispatcherTest {
             UpstreamException relayError = new UpstreamException(status, "Source error " + status, status == 402 || status == 429, "7");
             Throwable thrown = failureOf(dispatching(Mono.error(relayError)));
             assertThat(thrown).as("status %s", status).isSameAs(relayError);
-            assertThat(facade.tierDefinitive(thrown)).as("status %s", status).isTrue();
+            assertThat(facade.definitiveBillingFailure(thrown)).as("status %s", status).isTrue();
         }
         for (int status : List.of(500, 502, 503, 529)) {
             UpstreamException relayError = new UpstreamException(status, "Source error " + status, true);
@@ -603,7 +603,7 @@ class XpDispatcherTest {
                 Throwable thrown = failureOf(dispatching(Mono.error(relayError)));
 
                 String what = "status " + status + " recoverable=" + recoverable;
-                assertThat(facade.tierDefinitive(thrown)).as(what).isTrue();
+                assertThat(facade.definitiveBillingFailure(thrown)).as(what).isTrue();
                 assertThat(thrown).isInstanceOf(UpstreamException.class);
                 if (RelayErrorMapper.isTimeoutStatus(status) || (status >= 500 && !recoverable)) {
                     // Not an answer of a provider (or a timeout, which the relay goes on from): whether it generated is not known.
@@ -658,7 +658,7 @@ class XpDispatcherTest {
                 assertThat(((UpstreamException) thrown).isGenerationStarted()).isTrue();
                 assertThat(TierRetryPolicy.notStarted(thrown)).as(what).isFalse();
                 // Released without a review, and never sent to another account or tier.
-                assertThat(facade.tierDefinitive(thrown)).as(what).isTrue();
+                assertThat(facade.definitiveBillingFailure(thrown)).as(what).isTrue();
                 Classification classification = UpstreamFailureClassifier.classify(thrown, account, relay(Entry.CHAT, body()));
                 assertThat(classification.interrupted()).as(what).isTrue();
                 assertThat(classification.retryable()).as(what).isFalse();
@@ -687,7 +687,7 @@ class XpDispatcherTest {
         assertThat(thrown.getCause()).isNull();
         assertThat(((UpstreamException) thrown).getStatusCode()).isEqualTo(502);
         assertThat(((UpstreamException) thrown).isRecoverable()).isTrue();
-        assertThat(facade.tierDefinitive(thrown)).isTrue();
+        assertThat(facade.definitiveBillingFailure(thrown)).isTrue();
         assertThat(TierRetryPolicy.notStarted(thrown)).isFalse();
         // One that has no cause to lose is passed on as it is.
         RelayAbortedAfterDispatchException plain = new RelayAbortedAfterDispatchException("The relay stopped");
@@ -719,10 +719,10 @@ class XpDispatcherTest {
             assertThat(thrown).as(error.toString()).isInstanceOf(RelayAbortedAfterDispatchException.class);
             assertThat(thrown.getCause()).isNull();
             assertThat(thrown.getMessage()).doesNotContain("relay.internal", "sk-secret", "reset", "decoder");
-            assertThat(facade.tierDefinitive(thrown)).isTrue();
+            assertThat(facade.definitiveBillingFailure(thrown)).isTrue();
             assertThat(TierRetryPolicy.notStarted(thrown)).isFalse();
             // The same errors, as they are, are what the reservation would be left for review for.
-            assertThat(facade.tierDefinitive(error)).as(error.toString()).isFalse();
+            assertThat(facade.definitiveBillingFailure(error)).as(error.toString()).isFalse();
         }
     }
 
@@ -739,7 +739,7 @@ class XpDispatcherTest {
             if (error == noRoute) {
                 assertThat(thrown).isSameAs(error);
             }
-            assertThat(facade.tierDefinitive(thrown)).isTrue();
+            assertThat(facade.definitiveBillingFailure(thrown)).isTrue();
             assertThat(UpstreamFailureClassifier.neverReachedUpstream(thrown)).isTrue();
             Classification classification = UpstreamFailureClassifier.classify(thrown, account, relay(Entry.CHAT, body()));
             assertThat(classification.retryable()).isTrue();
@@ -778,7 +778,7 @@ class XpDispatcherTest {
             assertThat(thrown.getSuppressed()).as(what).isEmpty();
             // And what the failure is to the rest of the request is what it was.
             assertThat(UpstreamFailureClassifier.neverReachedUpstream(thrown)).as(what).isTrue();
-            assertThat(facade.tierDefinitive(thrown)).as(what).isTrue();
+            assertThat(facade.definitiveBillingFailure(thrown)).as(what).isTrue();
             assertThat(TierRetryPolicy.notStarted(thrown)).as(what).isTrue();
             Classification classification = UpstreamFailureClassifier.classify(thrown, account, relay(Entry.CHAT, body()));
             assertSameVerdict(classification, UpstreamFailureClassifier.classify(error, account));
@@ -813,7 +813,7 @@ class XpDispatcherTest {
             assertThat(thrown.getMessage()).as(what).doesNotContain(host, "10.0.0.5");
             assertThat(thrown.getCause()).as(what).isNull();
             assertThat(UpstreamFailureClassifier.neverReachedUpstream(thrown)).as(what).isTrue();
-            assertThat(facade.tierDefinitive(thrown)).as(what).isTrue();
+            assertThat(facade.definitiveBillingFailure(thrown)).as(what).isTrue();
             assertThat(TierRetryPolicy.notStarted(thrown)).as(what).isTrue();
             Classification classification = UpstreamFailureClassifier.classify(thrown, account, relay(Entry.CHAT, body()));
             assertSameVerdict(classification, UpstreamFailureClassifier.classify(error, account));
@@ -847,7 +847,7 @@ class XpDispatcherTest {
 
         assertThat(thrown).isInstanceOf(RelayAbortedAfterDispatchException.class);
         assertThat(thrown.getCause()).isNull();
-        assertThat(facade.tierDefinitive(thrown)).isTrue();
+        assertThat(facade.definitiveBillingFailure(thrown)).isTrue();
         assertThat(UpstreamFailureClassifier.classify(thrown, account, relay(Entry.CHAT, body())).interrupted()).isTrue();
     }
 
@@ -858,7 +858,7 @@ class XpDispatcherTest {
         Throwable thrown = failureOf(dispatcher.dispatch(account, relay(Entry.CHAT, body()), LIMITS, LIMIT));
 
         assertThat(thrown).isInstanceOf(RelayAbortedAfterDispatchException.class);
-        assertThat(facade.tierDefinitive(thrown)).isTrue();
+        assertThat(facade.definitiveBillingFailure(thrown)).isTrue();
     }
 
     @Test
@@ -878,7 +878,7 @@ class XpDispatcherTest {
             assertThat(thrown).isInstanceOf(UpstreamException.class).isNotInstanceOf(RelayAbortedAfterDispatchException.class);
             assertThat(((UpstreamException) thrown).getStatusCode()).isEqualTo(502);
             assertThat(((UpstreamException) thrown).isRecoverable()).isTrue();
-            assertThat(facade.tierDefinitive(thrown)).isTrue();
+            assertThat(facade.definitiveBillingFailure(thrown)).isTrue();
             assertThat(TierRetryPolicy.notStarted(thrown)).isTrue();
         }
         verify(client, never()).complete(any(), any(), any());
@@ -897,7 +897,7 @@ class XpDispatcherTest {
         assertThat(((UpstreamException) thrown).getStatusCode()).isEqualTo(502);
         assertThat(((UpstreamException) thrown).isRecoverable()).isTrue();
         assertThat(thrown.getMessage()).doesNotContain("relay.internal", "Welcome");
-        assertThat(facade.tierDefinitive(thrown)).isTrue();
+        assertThat(facade.definitiveBillingFailure(thrown)).isTrue();
         assertThat(TierRetryPolicy.notStarted(thrown)).isTrue();
         Classification classification = UpstreamFailureClassifier.classify(thrown, account, relay(Entry.MESSAGES, body()));
         assertThat(classification.retryable()).isTrue();
@@ -924,7 +924,7 @@ class XpDispatcherTest {
         assertThat(relay.requests()).isEqualTo(1);
         assertThat(thrown).isInstanceOf(RelayAbortedAfterDispatchException.class);
         assertThat(TierRetryPolicy.notStarted(thrown)).isFalse();
-        assertThat(facade.tierDefinitive(thrown)).isTrue();
+        assertThat(facade.definitiveBillingFailure(thrown)).isTrue();
         Classification classification = UpstreamFailureClassifier.classify(thrown, account, relay(Entry.CHAT, body()));
         assertThat(classification.interrupted()).isTrue();
         assertThat(classification.retryable()).isFalse();
@@ -956,7 +956,7 @@ class XpDispatcherTest {
         assertThat(relay.requests()).isEqualTo(1);
         assertThat(thrown).isInstanceOf(RelayAbortedAfterDispatchException.class);
         assertThat(thrown.getMessage()).doesNotContain("oops", "relay.internal");
-        assertThat(facade.tierDefinitive(thrown)).isTrue();
+        assertThat(facade.definitiveBillingFailure(thrown)).isTrue();
         assertThat(UpstreamFailureClassifier.classify(thrown, account, relay(Entry.CHAT, body())).interrupted()).isTrue();
     }
 
@@ -972,7 +972,7 @@ class XpDispatcherTest {
 
         assertThat(thrown).isNotInstanceOf(UpstreamException.class);
         assertThat(UpstreamFailureClassifier.neverReachedUpstream(thrown)).isTrue();
-        assertThat(facade.tierDefinitive(thrown)).isTrue();
+        assertThat(facade.definitiveBillingFailure(thrown)).isTrue();
         Classification classification = UpstreamFailureClassifier.classify(thrown, account, relay(Entry.CHAT, body()));
         assertThat(classification.retryable()).isTrue();
         assertThat(classification.crossAccountRetryAllowed()).isTrue();
@@ -992,7 +992,7 @@ class XpDispatcherTest {
             String what = reset ? "reset" : "closed";
             assertThat(thrown).as(what).isNotInstanceOf(RelayAbortedAfterDispatchException.class);
             assertThat(UpstreamFailureClassifier.neverReachedUpstream(thrown)).as(what).isTrue();
-            assertThat(facade.tierDefinitive(thrown)).as(what).isTrue();
+            assertThat(facade.definitiveBillingFailure(thrown)).as(what).isTrue();
             assertThat(TierRetryPolicy.notStarted(thrown)).as(what).isTrue();
             assertThat(EgressException.rootCause(thrown).getMessage()).as(what).isEqualTo("The source could not be reached");
             Classification classification = UpstreamFailureClassifier.classify(thrown, account, relay(Entry.CHAT, body()));
@@ -1027,7 +1027,7 @@ class XpDispatcherTest {
         assertThat(thrown).isInstanceOf(RelayAbortedAfterDispatchException.class);
         assertThat(thrown.getCause()).isNull();
         assertThat(thrown.getMessage()).doesNotContain("127.0.0.1", String.valueOf(relay.port()), "sk-test");
-        assertThat(facade.tierDefinitive(thrown)).isTrue();
+        assertThat(facade.definitiveBillingFailure(thrown)).isTrue();
         assertThat(UpstreamFailureClassifier.classify(thrown, account, relay(Entry.CHAT, body())).interrupted()).isTrue();
     }
 
@@ -1040,7 +1040,7 @@ class XpDispatcherTest {
 
         assertThat(relay.requests()).isEqualTo(1);
         assertThat(thrown.getMessage()).doesNotContain("relay.internal", "sk-secret");
-        assertThat(facade.tierDefinitive(thrown)).isTrue();
+        assertThat(facade.definitiveBillingFailure(thrown)).isTrue();
         Classification classification = UpstreamFailureClassifier.classify(thrown, account, relay(Entry.CHAT, body()));
         assertThat(classification.relayFailure()).isEqualTo(RelayFailure.MODEL_NOT_SERVED);
         assertThat(classification.retryable()).isTrue();
@@ -1080,7 +1080,7 @@ class XpDispatcherTest {
 
     private int statusOf(int status, boolean recoverable) {
         Throwable thrown = failureOf(dispatching(Mono.error(new UpstreamException(status, "Source error " + status, recoverable))));
-        assertThat(facade.tierDefinitive(thrown)).as("status %s", status).isTrue();
+        assertThat(facade.definitiveBillingFailure(thrown)).as("status %s", status).isTrue();
         return ((UpstreamException) thrown).getStatusCode();
     }
 

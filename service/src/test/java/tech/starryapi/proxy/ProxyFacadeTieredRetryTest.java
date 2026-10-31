@@ -812,24 +812,24 @@ class ProxyFacadeTieredRetryTest {
     // ---- what counts as unbilled ----
 
     @Test
-    void tierDefinitiveCountsA402AsUnbilledAndKeepsWhatMayHaveBeenGeneratedUncertain() {
+    void aTieredRequestCountsA402AsUnbilledAndKeepsWhatMayHaveBeenGeneratedUncertain() {
         UpstreamException noQuota = new UpstreamException(402, "insufficient_quota", true);
         ApiException mapped = (ApiException) new ApiException(HttpStatus.TOO_MANY_REQUESTS, "UPSTREAM_ERROR", "insufficient_quota")
             .initCause(noQuota);
 
-        assertThat(facade.tierDefinitive(noQuota)).isTrue();
-        assertThat(facade.tierDefinitive(mapped)).isTrue();
-        assertThat(facade.tierDefinitive(new UpstreamException(429, "slow down", true))).isTrue();
-        assertThat(facade.tierDefinitive(new UpstreamException(503, "overloaded", true))).isTrue();
-        assertThat(facade.tierDefinitive(new ConnectException("refused"))).isTrue();
+        assertThat(facade.definitiveBillingFailure(noQuota)).isTrue();
+        assertThat(facade.definitiveBillingFailure(mapped)).isTrue();
+        assertThat(facade.definitiveBillingFailure(new UpstreamException(429, "slow down", true))).isTrue();
+        assertThat(facade.definitiveBillingFailure(new UpstreamException(503, "overloaded", true))).isTrue();
+        assertThat(facade.definitiveBillingFailure(new ConnectException("refused"))).isTrue();
         // Whatever may have been generated stays uncertain.
-        assertThat(facade.tierDefinitive(new TimeoutException("no answer"))).isFalse();
-        assertThat(facade.tierDefinitive(new IOException("connection reset"))).isFalse();
-        assertThat(facade.tierDefinitive(new UpstreamException(500, "broken", false))).isFalse();
+        assertThat(facade.definitiveBillingFailure(new TimeoutException("no answer"))).isFalse();
+        assertThat(facade.definitiveBillingFailure(new IOException("connection reset"))).isFalse();
+        assertThat(facade.definitiveBillingFailure(new UpstreamException(500, "broken", false))).isFalse();
     }
 
     @Test
-    void anUntieredRequestRejectedWith402IsStillLeftForReview() {
+    void anUntieredRequestRejectedWith402IsReleasedAsUnbilledToo() {
         when(accountPool.selectKiroAccountForPool(anyString(), any(AccountPoolRequestContext.class)))
             .thenReturn(Mono.just(kiro("kiro-1")));
         fails("kiro-1", new UpstreamException(402, "insufficient_quota", true));
@@ -837,9 +837,9 @@ class ProxyFacadeTieredRetryTest {
         assertThatThrownBy(() -> facade.chat(chatBody(), MockServerWebExchange.from(MockServerHttpRequest.post(ENDPOINT))).block())
             .isInstanceOf(ApiException.class);
 
-        // Unchanged for a vendor without tiers (O7 corrects it for everyone, separately).
-        verify(apiKeyService).releaseUsage(any(), anyString(), eq(false), anyString());
-        verify(apiKeyService, never()).releaseUsage(any(), anyString(), eq(true), anyString());
+        // A 402 is a refusal and not a generation, with or without tiers (O7).
+        verify(apiKeyService).releaseUsage(any(), anyString(), eq(true), anyString());
+        verify(apiKeyService, never()).releaseUsage(any(), anyString(), eq(false), anyString());
         verify(apiKeyService, times(1)).reserveUsage(any(), anyString(), any(), anyString());
     }
 

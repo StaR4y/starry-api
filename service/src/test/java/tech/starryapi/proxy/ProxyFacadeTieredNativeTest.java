@@ -365,7 +365,7 @@ class ProxyFacadeTieredNativeTest {
 
         assertThat(dispatched).containsExactly("official-1", "kiro-1");
         assertThat(ledger.settled).isEmpty();
-        // Untiered, the same 402 is left for review (O7); a tiered request knows it was a refusal and not a generation.
+        // A 402 is a refusal and not a generation, tiered or not.
         assertThat(ledger.released).containsExactly(true);
     }
 

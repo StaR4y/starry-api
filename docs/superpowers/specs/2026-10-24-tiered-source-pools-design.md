@@ -146,7 +146,7 @@ selectTiered(plan, walk, excluded, refusals, ctx):   # walk = {startIndex, narro
 
 `shouldRetryWithAnotherAccount`（1815-1836）与按路由的不同账号数上限（AccountDtos.java:333-350，默认 Codex 1、Anthropic/Kiro 2、OpenAI/DeepSeek 3；TRANSPORT 等范围上限 2）不变。分级请求另用两个判定：
 
-- `tierDefinitive(e)` = `definitiveBillingFailure(e)`（623-639）∨ 上游 402。402 是付费/额度拒绝、不生成；今天不在状态集合（626、631、636）里，`recordFailure` 置粘滞的 BILLING_UNCERTAINTY（1786-1792），之后任何失败都非确定释放（611-612）→ REVIEW_REQUIRED（V14:244-247）→ 用户被封（V15:29-30）。分级请求在 `recordFailure` 与 `withBilling` 失败释放中都用 `tierDefinitive`；未分级保持今天（I4），全局修正另立任务（O7）。
+- 确定失败用 `definitiveBillingFailure(e)`，分级和未分级请求同一条规则。402 是付费/额度拒绝、不生成，算确定（独立修复 388f862，O7，合并时取消了分级专用的 `tierDefinitive`）：否则 `recordFailure` 置粘滞的 BILLING_UNCERTAINTY，之后任何失败都非确定释放 → REVIEW_REQUIRED → 用户被封。
 - `notStarted(e)`：`UpstreamException` 新增 `generationStarted`（默认 false）。Kiro 解析器在截断（AwsEventStreamParser.java:50-54，可恢复 502）或异常帧（88-96，可恢复 500/503/429）之前已解析出内容、工具或用量帧时置真；`RelayAbortedAfterDispatchException` 恒为真。`definitiveBillingFailure` 把这些可恢复状态当"不计费"，但内容其实已生成。
 
 规则：
@@ -318,7 +318,7 @@ selectTiered(plan, walk, excluded, refusals, ctx):   # walk = {startIndex, narro
 | 模型未服务：404，或 400/403/422/503 且命中 model-not-found 模式（OpenAiUpstreamClient.java:865-882；UpstreamFailureClassifier.java:169-181） | CAPACITY_MODEL，10 分钟，按（账号, 映射 model_id） | 跨账号、跨级 | 确定 |
 | 上下文超长（未开始生成） | REQUEST + crossTierOnly(native) | 一次跨级，只去首单元为原生的级别；没有原生账号可去（计划能用的级别里一个原生账号都没有）才返回 `prompt is too long …`；例外是被拒的是带着映射最大输出的宽体（D15）：中转已经按 4096 的体学到了，这时返回可重试的 503（`NO_AVAILABLE_ACCOUNT`，固定的号池是 `SOURCE_TIER_UNAVAILABLE`，`ProxyFacade.refusedTheMaximumOutput`），重试发 4096 的体。有原生账号而它们只是暂时用不了（忙、额度耗尽），或这个请求已不能跨级（超过 240 秒、预留租期不够再派一次、预算用完且没有预留槽）时，返回可重试的 503（`NO_AVAILABLE_ACCOUNT`，固定的号池是 `SOURCE_TIER_UNAVAILABLE`）：接着重试的同一个请求，计划已按学到的上限把中转剪掉，由原生账号服务，不让客户端为一个原生账号照样能接的提示去有损压缩（被拒的是宽体时除外：中转没有被剪掉，只学到这个宽体放不下，重试发给它的是 4096 的体，按中转所在级的系数计价（拥有者的例子里是 1.0，不是 Kiro 的 0.6），输出至多 4096，窗口放得下就由它服务；4096 的体或客户端自己写了上限的体被拒之后，重试才由原生账号服务）。这个答案不论预留槽开着还是关着都一样，也不会被同一请求里更早失败的中转的错误顶替（1 级中转甲 503、中转乙超长、Kiro 忙：仍是这个 503，不是甲的 502）。但同一请求里更早的原生尝试可能已经生成或计费（超时之类）时，不论请求多老，都照实返回中转的拒绝、不邀请重试：重试会再预留、再收一次费。请求头/Key 偏好固定到只有中转的号池也是 503（重试时提示被丢掉，按级别顺序服务；被拒的是宽体时提示不丢，重试把 4096 的体发给中转）；后缀固定的是对这个号池的要求，被拒的是 4096 的体或客户端自己写了上限的体时仍返回 `prompt is too long …`，被拒的是宽体时是上面那个 503（`SOURCE_TIER_UNAVAILABLE`） | 确定 |
 | 其他 400/413/422（转换被拒） | REQUEST + crossTierOnly(native)，计"转换被拒" | 同上；但请求头/Key 偏好固定的范围里没有原生账号时（只含中转的号池，如 `relay`）照实返回中转的拒绝（转换被拒不会被学到，重试还是被拒，不邀请重试）；范围里有原生账号（`relay+`、`1+`、混合号池）则与后缀、自动一样是可重试的 503，重试会跨到它们 | 确定 |
-| 402 | CAPACITY_ACCOUNT（同今天） | 今天的规则 | 分级请求按 `tierDefinitive` 确定 |
+| 402 | CAPACITY_ACCOUNT（同今天） | 今天的规则 | 确定（`definitiveBillingFailure`） |
 | 408、504、524（超时：中转或它前面的网关等不及了，中转还在生成） | 同第一行：中断（`RelayErrorMapper` 保住这三个状态，不论正文怎么称呼；`error.code` 或类型是 `timeout` 的带内错误也是 504） | 不重试 | 确定释放，UNBILLED |
 | 请求写出 30 秒之后到达的其他 5xx（可能已经生成；映射成 400/404 等拒绝的除外） | 同第一行：中断 | 不重试 | 确定释放，UNBILLED |
 | 401/403：中转拒绝了账号自己的 Key（HTTP 401/403，或 200 里的认证 / 权限错误；D5） | CREDENTIAL，10 分钟冷却（同原生账号凭据失效的隔离，但从不永久：不据中转的话禁用账号），`stop_reason` 记 `KEY_REFUSED`；这是这个中转账号的故障。连续两次失败会启动的自动健康测试（和账号页的测试）同样不据中转的原文禁用它：测试失败记录对跨协议成员不采信「token_invalidated」「account disabled」一类字样（`AccountTestService`、`AccountPoolService.recordTestFailure`），失败仍照常计数 | 跨账号、跨级（同繁忙 / 不可用的账号），拒绝是在生成之前给出的；没有别的号源时客户端得到 503 `NO_AVAILABLE_ACCOUNT`（固定的号池是 `SOURCE_TIER_UNAVAILABLE` + Retry-After），**绝不是**中转的 401/403 | 确定 |
@@ -420,7 +420,7 @@ selectTiered(plan, walk, excluded, refusals, ctx):   # walk = {startIndex, narro
 - **O4** 错误保持 Starry 信封，协议原生信封放第 9 阶段。
 - **O5** 中转 SSE 先缓冲、客户端 SSE 由网关合成（长生成期间客户端收不到字节，风险 16）。
 - **O6** 内容指纹会话键：开头相同的会话共享 D4 级别。
-- **O7** 未分级请求上 402 的全局修正作为独立缺陷修复（今天单个 402 就会把用户锁进核对）。
+- **O7** 已解决：未分级请求上 402 的全局修正是独立缺陷修复（388f862），收尾时合入；`definitiveBillingFailure` 现在把 402 算作确定失败，分级专用的 `tierDefinitive` 已删除。
 - **O8** 原生 ANTHROPIC_KEY 的 thinking 安全规则（风险 22）留在第 9 阶段，不改分级计划里的原生单元。
 - **O9** 已决定（D6，2026-10-26）：RESPONSES 入口上 `text.verbosity` 为 `low`/`high` 对中转成员是 SOFT（与 CHAT 一致，不再是透传基线下的 HARD）；第 6 阶段 P6-02 按此实施。
 - **O10** 已决定（D9，2026-10-27）：RESPONSES 入口的内置工具和工具输出里的图片按 P3 的基线规则（透传型 HARD，Kiro 类 SOFT），不改成一律 HARD；初稿写的是一律 HARD，那样 Codex 对 Claude 模型的每个请求（都带 `web_search`）都会跳过中转，这个对就永远用不上（7.9、7.15、P6-02）。
@@ -470,7 +470,7 @@ selectTiered(plan, walk, excluded, refusals, ctx):   # walk = {startIndex, narro
 | stripAnthropicPrefix 在 1230/1249 | 驳回 | 1231、1250 是调用它的两行，方法定义在 1288；原文指调用处，正确 |
 | fastMode 在 ProxyFacade.java:325 | 部分采纳 | 结论正确，行号是 330（325 是 sessionHint） |
 | 分级亲和丢失 ARCHITECTURE.md:307 承诺的按模型族隔离 | 部分驳回 | 今天只有旧熔断策略打开时 affinityKey 才加模型池键（AccountPoolPolicyService.java:232-238 要求 matchesCurrentEpoch），默认部署本来就不隔离，不是分级造成的回归；仍在分级键里加 modelKey |
-| 全局把 402 判为确定 | 部分采纳 | 分级请求用 tierDefinitive；未分级改动违反 I4，另立独立修复（O7） |
+| 全局把 402 判为确定 | 采纳（独立修复 388f862，O7） | 一开始分级请求单独用 tierDefinitive；独立修复合入后全局规则相同，已删除 |
 | 配置先存为 armed、首个可用版本重新确认 | 驳回 | 校验器在能力位为假时拒绝保存即可；配置只能由管理 API 写入。由有能力的版本保存后恢复到旧版本再升级而生效，是管理员在有能力版本上的决定 |
 | D4 增加"仅当不更贵才停留"选项 | 部分驳回 | 只在控制台写明；新选项超出 D4，关闭粘滞即可 |
 | 中断后发送 `x-should-retry: false` | 驳回 | 会让客户端直接显示错误；改为会话-成员短期排除，让自动重试去别的成员 |

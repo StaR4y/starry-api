@@ -102,7 +102,7 @@
 
 - 依赖：P2-02, P0-05
 - 文件：`service/src/main/java/tech/starryapi/proxy/tier/TierRetryPolicy.java`, `service/src/main/java/tech/starryapi/proxy/ProxyFacade.java`, `service/src/test/java/tech/starryapi/proxy/tier/TierRetryPolicyTest.java`
-- 内容：设计 4.5：tierDefinitive（含 402，用于 recordFailure 与 withBilling 失败释放）、notStarted、跨级只限确定且未开始否则收窄、级内优先、跨级保留槽（cross_tier_reserved_slot）、准入耗尽返回原始错误、240 秒时间守卫、收窄后禁用回升/保留槽/crossTierOnly。预算规则本身不改。
+- 内容：设计 4.5：确定失败的判定（含 402，用于 recordFailure 与 withBilling 失败释放；原为 tierDefinitive，402 的独立修复合入后已并回 definitiveBillingFailure）、notStarted、跨级只限确定且未开始否则收窄、级内优先、跨级保留槽（cross_tier_reserved_slot）、准入耗尽返回原始错误、240 秒时间守卫、收窄后禁用回升/保留槽/crossTierOnly。预算规则本身不改。
 - 测试：L1 402 → L2 429 → 预留 RELEASED；L1 Kiro 先内容后截断 → 不到 L2；L1 TimeoutException → 收窄；预算 2 + 两个 L1：第二个 L1 → 保留槽到 L2；保留槽关闭 → 原始错误；超过 240 秒不跨级。
 - 验收：派发数至多比今天多 1（且仅在全部未生成时）。
 
