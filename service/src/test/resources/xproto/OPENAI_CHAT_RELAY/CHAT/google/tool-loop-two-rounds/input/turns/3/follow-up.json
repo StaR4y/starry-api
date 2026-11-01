@@ -1,0 +1,10 @@
+[
+  {
+    "role": "tool",
+    "tool_call_id": "${tool.0}",
+    "content": "hello\n",
+    "cache_control": {
+      "type": "ephemeral"
+    }
+  }
+]

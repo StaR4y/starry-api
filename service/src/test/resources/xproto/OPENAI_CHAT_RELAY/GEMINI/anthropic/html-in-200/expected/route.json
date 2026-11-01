@@ -1,0 +1,34 @@
+{
+  "relaysLeftOut": [],
+  "attempts": [
+    {
+      "account": "relay-1",
+      "tier": "anthropic:relay",
+      "dispatch": "OPENAI_CHAT",
+      "wireModel": "relay-sonnet",
+      "success": false,
+      "status": 502,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "usageSource": null,
+      "stopReason": null,
+      "degraded": "top_k,reasoning_summary,top_p",
+      "error": "The source returned data that is not a completion"
+    },
+    {
+      "account": "kiro-1",
+      "tier": "anthropic:native",
+      "dispatch": "NATIVE",
+      "wireModel": null,
+      "success": true,
+      "status": 200,
+      "inputTokens": 500,
+      "outputTokens": 20,
+      "usageSource": null,
+      "stopReason": null,
+      "degraded": null,
+      "error": null,
+      "nativeToolIds": []
+    }
+  ]
+}

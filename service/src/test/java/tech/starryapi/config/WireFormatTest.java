@@ -20,6 +20,7 @@ import tech.starryapi.documentation.DocumentationDtos;
 import tech.starryapi.model.ModelDtos;
 import tech.starryapi.payment.PaymentDtos;
 import tech.starryapi.plugin.PluginDtos;
+import tech.starryapi.sourcetier.SourceTierDtos;
 import tech.starryapi.stats.StatsDtos;
 import tech.starryapi.ticket.TicketDtos;
 
@@ -147,6 +148,190 @@ class WireFormatTest {
         });
     }
 
+    /**
+     * The source columns of a request log (design 5.7) come after the columns a row always had and are left out of a row
+     * that has none, so the list of a vendor without tiers is the JSON it was. A user sees the name, level and factor of
+     * the tier that served a request; the administrator sees the rest.
+     */
+    @Test
+    void requestLogsAddSourceColumnsOnlyToRowsOfRequestsServedFromTiers() {
+        ProductionJson.run(json -> {
+            StatsDtos.RequestLogResponse untiered = new StatsDtos.RequestLogResponse("req-1", "key-1", "acc-1", "/v1/messages",
+                "claude-sonnet-4.5", 200, true, 8_000L, 1_000L, new BigDecimal("0.039000"), 120L, null, T1);
+            check(json, "requestLogWithoutTiers", ok(List.of(untiered)),
+                """
+                {"success":true,"data":[{"requestId":"req-1","apiKeyId":"key-1","accountId":"acc-1","path":"/v1/messages","model":"claude-sonnet-4.5","statusCode":200,"success":true,"inputTokens":8000,"outputTokens":1000,"credits":0.039000,"latencyMs":120,"createdAt":"2026-10-23T06:24:25Z"}],"timestamp":"2026-10-23T06:24:25Z"}""");
+            StatsDtos.RequestLogResponse served = new StatsDtos.RequestLogResponse("req-2", "key-1", "acc-2", "/v1/messages",
+                "claude-sonnet-4.5", 200, true, 8_000L, 1_000L, new BigDecimal("0.023400"), 130L, null, T1,
+                "anthropic:kiro", 2, "kiro", new BigDecimal("0.600000"), "AUTO", "OPENAI_CHAT", "wire-model", "ESTIMATED",
+                "MAX_TOKENS", "images", null, null);
+            check(json, "requestLogOfAdministrator", ok(List.of(served)),
+                """
+                {"success":true,"data":[{"requestId":"req-2","apiKeyId":"key-1","accountId":"acc-2","path":"/v1/messages","model":"claude-sonnet-4.5","statusCode":200,"success":true,"inputTokens":8000,"outputTokens":1000,"credits":0.023400,"latencyMs":130,"createdAt":"2026-10-23T06:24:25Z","sourceTierRef":"anthropic:kiro","sourceTierLevel":2,"sourceTierName":"kiro","priceFactor":0.600000,"tierSelection":"AUTO","sourceDispatch":"OPENAI_CHAT","wireModel":"wire-model","usageSource":"ESTIMATED","stopReason":"MAX_TOKENS","degradedFeatures":"images"}],"timestamp":"2026-10-23T06:24:25Z"}""");
+            // An answer the gateway held back: the user's tokens and credits are 0, and what the relay reported is the operator's.
+            StatsDtos.RequestLogResponse withheld = new StatsDtos.RequestLogResponse("req-3", "key-1", "acc-2", "/v1/responses",
+                "claude-sonnet-4.5", 502, false, 0L, 0L, new BigDecimal("0.000000"), 130L, "The source stopped its answer", T1,
+                "anthropic:relay", 1, "relay", new BigDecimal("1.000000"), "AUTO", "OPENAI_CHAT", "wire-model", null,
+                "WITHHELD", "builtin_tool", 60_000L, 4_096L);
+            check(json, "requestLogOfAdministratorWithAWithheldAnswer", ok(List.of(withheld)),
+                """
+                {"success":true,"data":[{"requestId":"req-3","apiKeyId":"key-1","accountId":"acc-2","path":"/v1/responses","model":"claude-sonnet-4.5","statusCode":502,"success":false,"inputTokens":0,"outputTokens":0,"credits":0.000000,"latencyMs":130,"errorMessage":"The source stopped its answer","createdAt":"2026-10-23T06:24:25Z","sourceTierRef":"anthropic:relay","sourceTierLevel":1,"sourceTierName":"relay","priceFactor":1.000000,"tierSelection":"AUTO","sourceDispatch":"OPENAI_CHAT","wireModel":"wire-model","stopReason":"WITHHELD","degradedFeatures":"builtin_tool","withheldInputTokens":60000,"withheldOutputTokens":4096}],"timestamp":"2026-10-23T06:24:25Z"}""");
+            StatsDtos.RequestLogResponse seenByUser = new StatsDtos.RequestLogResponse("req-2", "key-1", "acc-2", "/v1/messages",
+                "claude-sonnet-4.5", 200, true, 8_000L, 1_000L, new BigDecimal("0.023400"), 130L, null, T1,
+                null, 2, "kiro", new BigDecimal("0.600000"), null, null, null, null, null, null, null, null);
+            check(json, "requestLogOfUser", ok(new StatsDtos.RequestLogPageResponse(List.of(seenByUser), false, T1)),
+                """
+                {"success":true,"data":{"items":[{"requestId":"req-2","apiKeyId":"key-1","accountId":"acc-2","path":"/v1/messages","model":"claude-sonnet-4.5","statusCode":200,"success":true,"inputTokens":8000,"outputTokens":1000,"credits":0.023400,"latencyMs":130,"createdAt":"2026-10-23T06:24:25Z","sourceTierLevel":2,"sourceTierName":"kiro","priceFactor":0.600000}],"hasMore":false,"nextBefore":"2026-10-23T06:24:25Z"},"timestamp":"2026-10-23T06:24:25Z"}""");
+        });
+    }
+
+    /**
+     * A model listed under source tiers (design 5.7) gains one field, and only then: the list of a vendor without tiers is
+     * the JSON it was. The tiers carry the scaled price and nothing of the accounts or the protocol behind them.
+     */
+    @Test
+    void theModelListNamesSourceTiersOnlyForAModelThatIsListedUnderThem() {
+        ProductionJson.run(json -> {
+            ModelDtos.ModelListItem plain = new ModelDtos.ModelListItem("m", "model", 1L, "openai", null, null, null, null, null,
+                null, List.of("text"), 0, 0, 8192, 1024, null, null, null, null, null, null, null, null, null, null, null,
+                null, null, null);
+            ModelDtos.ModelListItem tiered = plain.withSourceTiers(List.of(new ModelDtos.ModelSourceTier("kiro", 2, "kiro反向代理",
+                new BigDecimal("0.600000"), true, new ModelDtos.ModelPublicPricing("input_output", null,
+                    new BigDecimal("555.5"), new BigDecimal("111.1"), null, null, null, new BigDecimal("1.8"),
+                    new BigDecimal("9"), null, null))));
+            check(json, "modelListWithoutTiers", new ModelDtos.ModelListResponse("list", List.of(plain), null),
+                """
+                {"object":"list","data":[{"id":"m","object":"model","created":1,"owned_by":"openai","supportedInputTypes":["text"],"maxInputTokens":0,"maxOutputTokens":0,"context_length":8192,"max_output_tokens":1024}],"models":[{"id":"m","object":"model","created":1,"owned_by":"openai","supportedInputTypes":["text"],"maxInputTokens":0,"maxOutputTokens":0,"context_length":8192,"max_output_tokens":1024}]}""");
+            check(json, "modelListWithTiers", new ModelDtos.ModelListResponse("list", List.of(tiered), null),
+                """
+                {"object":"list","data":[{"id":"m","object":"model","created":1,"owned_by":"openai","supportedInputTypes":["text"],"maxInputTokens":0,"maxOutputTokens":0,"context_length":8192,"max_output_tokens":1024,"sourceTiers":[{"id":"kiro","level":2,"name":"kiro反向代理","priceFactor":0.600000,"selectable":true,"pricing":{"billingMode":"input_output","inputTokensPer100Balance":555.5,"outputTokensPer100Balance":111.1,"inputPricePerMillionTokens":1.8,"outputPricePerMillionTokens":9}}]}],"models":[{"id":"m","object":"model","created":1,"owned_by":"openai","supportedInputTypes":["text"],"maxInputTokens":0,"maxOutputTokens":0,"context_length":8192,"max_output_tokens":1024,"sourceTiers":[{"id":"kiro","level":2,"name":"kiro反向代理","priceFactor":0.600000,"selectable":true,"pricing":{"billingMode":"input_output","inputTokensPer100Balance":555.5,"outputTokensPer100Balance":111.1,"inputPricePerMillionTokens":1.8,"outputPricePerMillionTokens":9}}]}]}""");
+            // A listing keeps its tiers when the price is applied afterwards, and gains none from an empty list.
+            assertThat(tiered.withPricing(new ModelDtos.ModelPublicPricing("total", new BigDecimal("1"), null, null)).sourceTiers())
+                .hasSize(1);
+            assertThat(plain.withSourceTiers(List.of()).sourceTiers()).isNull();
+        });
+    }
+
+    /** The pricing preview takes optional tier factors and answers them in the same order; without them it is unchanged. */
+    @Test
+    void thePricingPreviewAnswersTheFactorsItWasAskedFor() {
+        ProductionJson.run(json -> {
+            ModelDtos.ModelPublicPricing base = new ModelDtos.ModelPublicPricing("total", new BigDecimal("1000"), null, null);
+            check(json, "previewWithoutFactors", ok(new ModelDtos.ModelPricingPreview("m", "m", "official", "m",
+                    BigDecimal.ONE, List.of(), base, base)),
+                """
+                {"success":true,"data":{"model":"m","pricingModel":"m","source":"official","matchedPriceModel":"m","multiplier":1,"matchedRuleIds":[],"basePricing":{"billingMode":"total","tokensPer100Balance":1000},"pricing":{"billingMode":"total","tokensPer100Balance":1000}},"timestamp":"2026-10-23T06:24:25Z"}""");
+            check(json, "previewWithFactors", ok(new ModelDtos.ModelPricingPreview("m", "m", "official", "m",
+                    BigDecimal.ONE, List.of(), base, base, List.of(new ModelDtos.FactorPricing(new BigDecimal("0.6"), base)))),
+                """
+                {"success":true,"data":{"model":"m","pricingModel":"m","source":"official","matchedPriceModel":"m","multiplier":1,"matchedRuleIds":[],"basePricing":{"billingMode":"total","tokensPer100Balance":1000},"pricing":{"billingMode":"total","tokensPer100Balance":1000},"factorPricing":[{"factor":0.6,"pricing":{"billingMode":"total","tokensPer100Balance":1000}}]},"timestamp":"2026-10-23T06:24:25Z"}""");
+            read(json, "previewRequestWithFactors",
+                """
+                {"model":"m","factors":[0.6,"1.25"]}""",
+                ModelDtos.ModelPricingPreviewRequest.class, "ModelPricingPreviewRequest[model=m, rules=[], factors=[0.6, 1.25]]");
+            read(json, "previewRequestWithoutFactors",
+                """
+                {"model":"m","rules":[]}""",
+                ModelDtos.ModelPricingPreviewRequest.class, "ModelPricingPreviewRequest[model=m, rules=[], factors=[]]");
+        });
+    }
+
+    /** The status page and the account list read these; the JSON follows the records, with nothing renamed. */
+    @Test
+    void theTierStatusAndPlacementsCarryTheirFigures() {
+        ProductionJson.run(json -> {
+            check(json, "tierStatus", ok(new SourceTierDtos.Status(T1, 7L, 15, List.of(new SourceTierDtos.VendorStatus(
+                "anthropic", "Anthropic", true, true, 100, 30, List.of(new SourceTierDtos.TierStatus("kiro", 2, "kiro", true, true,
+                    new SourceTierDtos.TierAccounts(1, 2, 3, 4, 5), 30, 5, 2)))))),
+                """
+                {"success":true,"data":{"at":"2026-10-23T06:24:25Z","configVersion":7,"windowMinutes":15,"vendors":[{"vendor":"anthropic","label":"Anthropic","enabled":true,"serving":true,"autoServed":100,"degraded":30,"tiers":[{"tierId":"kiro","level":2,"name":"kiro","enabled":true,"serves":true,"accounts":{"disabled":1,"unavailable":2,"resting":3,"busy":4,"ready":5},"served":30,"servedPinned":5,"failed":2}]}]},"timestamp":"2026-10-23T06:24:25Z"}""");
+            check(json, "tierPlacements", ok(new SourceTierDtos.Placements(7L, List.of(new SourceTierDtos.AccountPlacement("acc-1",
+                List.of(new SourceTierDtos.Placed("anthropic", "Anthropic", "kiro", 2, "kiro", "CATEGORY", false, true)))))),
+                """
+                {"success":true,"data":{"configVersion":7,"accounts":[{"accountId":"acc-1","tiers":[{"vendor":"anthropic","vendorLabel":"Anthropic","tierId":"kiro","level":2,"name":"kiro","rule":"CATEGORY","relay":false,"active":true}]}]},"timestamp":"2026-10-23T06:24:25Z"}""");
+        });
+    }
+
+    /**
+     * The relays' part of the status and the evidence of the upgrade of a pair are fields at the end of the records they
+     * join: a tier without a relay shows the status it always did ({@code unopened} and {@code xp} are left out), and a
+     * figure that was not measured is absent and not zero.
+     */
+    @Test
+    void theRelaysOfTheStatusAndTheEvidenceAreAddedAtTheEndAndAreAbsentWhereTheyDoNotApply() {
+        ProductionJson.run(json -> {
+            SourceTierDtos.XpFigures figures = new SourceTierDtos.XpFigures(40, 36, 4, 2, 1, 0, 1, 0, 0, 0, 0, 3, 0, 5, 1800L);
+            SourceTierDtos.XpFigures unmeasured = new SourceTierDtos.XpFigures(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, null);
+            check(json, "tierStatusWithRelays", ok(new SourceTierDtos.Status(T1, 7L, 15, List.of(new SourceTierDtos.VendorStatus(
+                "anthropic", "Anthropic", true, true, 100, 30,
+                List.of(new SourceTierDtos.TierStatus("relay", 1, "relay", true, true, new SourceTierDtos.TierAccounts(0, 0, 0, 0, 1, 0), 36, 0, 4)),
+                new SourceTierDtos.XpStatus(T2, List.of(new SourceTierDtos.XpRelay("relay", "relay-1", "ready", 2, 1, figures)),
+                    List.of(new SourceTierDtos.XpPair("OPENAI_CHAT", "MESSAGES", "EXPERIMENTAL", "KEYS", 2, unmeasured,
+                        List.of(new SourceTierDtos.FeatureCount("image", 5)))),
+                    List.of(new SourceTierDtos.XpSkipCount("relay", "GATE", 12))))))),
+                """
+                {"success":true,"data":{"at":"2026-10-23T06:24:25Z","configVersion":7,"windowMinutes":15,"vendors":[{"vendor":"anthropic","label":"Anthropic","enabled":true,"serving":true,"autoServed":100,"degraded":30,"tiers":[{"tierId":"relay","level":1,"name":"relay","enabled":true,"serves":true,"accounts":{"disabled":0,"unavailable":0,"resting":0,"busy":0,"ready":1,"unopened":0},"served":36,"servedPinned":0,"failed":4}],"xp":{"skipsSince":"2026-01-02T03:04:05.100Z","relays":[{"tierId":"relay","accountId":"relay-1","layer":"ready","mappings":2,"verified":1,"figures":{"attempts":40,"served":36,"failed":4,"interrupted":2,"conversionRejected":1,"contextExceeded":0,"modelNotServed":1,"keyRefused":0,"withheld":0,"withheldInputTokens":0,"withheldOutputTokens":0,"estimated":3,"clamped":0,"degraded":5,"p95Ms":1800}}],"pairs":[{"sourceProtocol":"OPENAI_CHAT","entryEndpoint":"MESSAGES","status":"EXPERIMENTAL","gate":"KEYS","allowedKeys":2,"figures":{"attempts":0,"served":0,"failed":0,"interrupted":0,"conversionRejected":0,"contextExceeded":0,"modelNotServed":0,"keyRefused":0,"withheld":0,"withheldInputTokens":0,"withheldOutputTokens":0,"estimated":0,"clamped":0,"degraded":0},"degradedFeatures":[{"feature":"image","count":5}]}],"skips":[{"tierId":"relay","reason":"GATE","count":12}]}}]},"timestamp":"2026-10-23T06:24:25Z"}""");
+            check(json, "tierEvidence", ok(new SourceTierDtos.Evidence(T1, T2, 30, 7L, T2, List.of(new SourceTierDtos.PairEvidence(
+                "anthropic", "Anthropic", "OPENAI_CHAT", "MESSAGES", "EXPERIMENTAL", "KEYS", 1, unmeasured, 0,
+                List.of(new SourceTierDtos.Criterion("requests", ">= 200", 0.0, false), new SourceTierDtos.Criterion("estimated", "< 5%", null, false)),
+                false, List.of(), List.of(new SourceTierDtos.MemberEvidence("relay", "relay-1", unmeasured)))))),
+                """
+                {"success":true,"data":{"at":"2026-10-23T06:24:25Z","since":"2026-01-02T03:04:05.100Z","days":30,"configVersion":7,"skipsSince":"2026-01-02T03:04:05.100Z","pairs":[{"vendor":"anthropic","label":"Anthropic","sourceProtocol":"OPENAI_CHAT","entryEndpoint":"MESSAGES","status":"EXPERIMENTAL","gate":"KEYS","allowedKeys":1,"figures":{"attempts":0,"served":0,"failed":0,"interrupted":0,"conversionRejected":0,"contextExceeded":0,"modelNotServed":0,"keyRefused":0,"withheld":0,"withheldInputTokens":0,"withheldOutputTokens":0,"estimated":0,"clamped":0,"degraded":0},"lintSkips":0,"criteria":[{"name":"requests","rule":">= 200","value":0.0,"met":false},{"name":"estimated","rule":"< 5%","met":false}],"meetsStandard":false,"degradedFeatures":[],"members":[{"tierId":"relay","accountId":"relay-1","figures":{"attempts":0,"served":0,"failed":0,"interrupted":0,"conversionRejected":0,"contextExceeded":0,"modelNotServed":0,"keyRefused":0,"withheld":0,"withheldInputTokens":0,"withheldOutputTokens":0,"estimated":0,"clamped":0,"degraded":0}}]}]},"timestamp":"2026-10-23T06:24:25Z"}""");
+        });
+    }
+
+    /**
+     * The source pool preference of a key (design 6.1) is one more field at the end of the key records, and only for a key
+     * that has one: the key list of a deployment that never used it is the JSON it was. A request may carry it or leave
+     * it out; left out, it means "no change" when a key is updated.
+     */
+    @Test
+    void aKeyShowsItsPoolPreferenceOnlyWhenItHasOneAndTheRequestsMayCarryIt() {
+        ProductionJson.run(json -> {
+            check(json, "apiKeyWithPreference", ok(new ApiKeyDtos.ApiKeyResponse("key-1", "user-1", "CI key", "sk-starry-abcdef",
+                "sk-star", true, new BigDecimal("25.50"), "Anthropic", "BALANCE", 12L, new BigDecimal("1234.567890"), 4_000_000_000L,
+                0L, T0, T1, null, "kiro+")),
+                """
+                {"success":true,"data":{"keyId":"key-1","userId":"user-1","name":"CI key","key":"sk-starry-abcdef","keyPrefix":"sk-star","enabled":true,"creditsLimit":25.50,"modelProvider":"Anthropic","billingSource":"BALANCE","totalRequests":12,"totalCredits":1234.567890,"totalInputTokens":4000000000,"totalOutputTokens":0,"lastUsedAt":"2026-10-23T06:24:25.123456Z","createdAt":"2026-10-23T06:24:25Z","tierPreference":"kiro+"},"timestamp":"2026-10-23T06:24:25Z"}""");
+            check(json, "createdApiKeyWithPreference", ok(new ApiKeyDtos.CreatedApiKeyResponse("key-3", "user-1", "new",
+                "sk-starry-secret", "sk-star", true, new BigDecimal("100"), "ANTHROPIC", "BALANCE", T1, "kiro+")),
+                """
+                {"success":true,"data":{"keyId":"key-3","userId":"user-1","name":"new","key":"sk-starry-secret","keyPrefix":"sk-star","enabled":true,"creditsLimit":100,"modelProvider":"ANTHROPIC","billingSource":"BALANCE","createdAt":"2026-10-23T06:24:25Z","tierPreference":"kiro+"},"timestamp":"2026-10-23T06:24:25Z"}""");
+            read(json, "createWithPreference",
+                """
+                {"name":"k","modelProvider":"Anthropic","tierPreference":"L2"}""",
+                ApiKeyDtos.CreateApiKeyRequest.class,
+                "CreateApiKeyRequest[name=k, creditsLimit=null, modelProvider=Anthropic, billingSource=null, tierPreference=L2]");
+            read(json, "updateWithPreference",
+                """
+                {"tierPreference":"kiro+","clearCreditsLimit":false}""",
+                ApiKeyDtos.UpdateApiKeyRequest.class,
+                "UpdateApiKeyRequest[name=null, enabled=null, creditsLimit=null, modelProvider=null, billingSource=null, clearCreditsLimit=false, tierPreference=kiro+]");
+            read(json, "updateWithoutPreference",
+                """
+                {"name":"renamed","enabled":false}""",
+                ApiKeyDtos.UpdateApiKeyRequest.class,
+                "UpdateApiKeyRequest[name=renamed, enabled=false, creditsLimit=null, modelProvider=null, billingSource=null, clearCreditsLimit=null, tierPreference=null]");
+        });
+    }
+
+    /** What the key form offers: name, level, factor and price of the pools, and nothing of the accounts behind them. */
+    @Test
+    void thePoolsOfAProviderCarryOnlyWhatTheKeyFormShows() {
+        ProductionJson.run(json -> {
+            ModelDtos.ModelPublicPricing price = new ModelDtos.ModelPublicPricing("input_output", null, new BigDecimal("555.5"),
+                new BigDecimal("111.1"), null, null, null, new BigDecimal("1.8"), new BigDecimal("9"), null, null);
+            check(json, "poolsOfAProvider", ok(new SourceTierDtos.MyTiers("Anthropic", "claude-sonnet-4.5", List.of(
+                new SourceTierDtos.MyTier("official", 1, "官方", new BigDecimal("1.000000"), null),
+                new SourceTierDtos.MyTier("kiro", 2, "kiro反向代理", new BigDecimal("0.600000"), price)))),
+                """
+                {"success":true,"data":{"provider":"Anthropic","referenceModel":"claude-sonnet-4.5","tiers":[{"id":"official","level":1,"name":"官方","priceFactor":1.000000},{"id":"kiro","level":2,"name":"kiro反向代理","priceFactor":0.600000,"pricing":{"billingMode":"input_output","inputTokensPer100Balance":555.5,"outputTokensPer100Balance":111.1,"inputPricePerMillionTokens":1.8,"outputPricePerMillionTokens":9}}]},"timestamp":"2026-10-23T06:24:25Z"}""");
+            check(json, "noPoolsOfAProvider", ok(new SourceTierDtos.MyTiers("OpenAI", null, List.of())),
+                """
+                {"success":true,"data":{"provider":"OpenAI","tiers":[]},"timestamp":"2026-10-23T06:24:25Z"}""");
+        });
+    }
+
     @Test
     void requestBodiesAreReadLeniently() {
         ProductionJson.run(json -> {
@@ -164,11 +349,11 @@ class WireFormatTest {
             read(json, "unknownPropertiesAreIgnored",
                 """
                 {"name":"k","creditsLimit":10.50,"modelProvider":"OPENAI","surprise":{"a":[1,2]},"another":1}""",
-                ApiKeyDtos.CreateApiKeyRequest.class, "CreateApiKeyRequest[name=k, creditsLimit=10.50, modelProvider=OPENAI, billingSource=null]");
+                ApiKeyDtos.CreateApiKeyRequest.class, "CreateApiKeyRequest[name=k, creditsLimit=10.50, modelProvider=OPENAI, billingSource=null, tierPreference=null]");
             read(json, "decimalsKeepTheirScale",
                 """
                 {"name":"k","creditsLimit":10.500,"modelProvider":"OPENAI","billingSource":"BALANCE"}""",
-                ApiKeyDtos.CreateApiKeyRequest.class, "CreateApiKeyRequest[name=k, creditsLimit=10.500, modelProvider=OPENAI, billingSource=BALANCE]");
+                ApiKeyDtos.CreateApiKeyRequest.class, "CreateApiKeyRequest[name=k, creditsLimit=10.500, modelProvider=OPENAI, billingSource=BALANCE, tierPreference=null]");
             read(json, "decimalsFromStringsAndExponents",
                 """
                 {"amount":"10.10","paymentType":"alipay","mobile":false}""",
@@ -192,7 +377,7 @@ class WireFormatTest {
             read(json, "renamedProperties",
                 """
                 {"id":"m","object":"model","created":1,"owned_by":"openai","context_length":8192,"max_output_tokens":1024,"supportedInputTypes":["text"]}""",
-                ModelDtos.ModelListItem.class, "ModelListItem[id=m, object=model, created=1, ownedBy=openai, provider=null, family=null, targetModelId=null, name=null, modelName=null, description=null, supportedInputTypes=[text], maxInputTokens=0, maxOutputTokens=0, contextLength=8192, maxOutputTokensCompatible=1024, billingMode=null, tokensPer100Balance=null, inputTokensPer100Balance=null, outputTokensPer100Balance=null, cacheWriteTokensPer100Balance=null, cacheReadTokensPer100Balance=null, totalPricePerMillionTokens=null, inputPricePerMillionTokens=null, outputPricePerMillionTokens=null, cacheWritePricePerMillionTokens=null, cacheReadPricePerMillionTokens=null, icon=null, requestFormat=null, endpoint=null]");
+                ModelDtos.ModelListItem.class, "ModelListItem[id=m, object=model, created=1, ownedBy=openai, provider=null, family=null, targetModelId=null, name=null, modelName=null, description=null, supportedInputTypes=[text], maxInputTokens=0, maxOutputTokens=0, contextLength=8192, maxOutputTokensCompatible=1024, billingMode=null, tokensPer100Balance=null, inputTokensPer100Balance=null, outputTokensPer100Balance=null, cacheWriteTokensPer100Balance=null, cacheReadTokensPer100Balance=null, totalPricePerMillionTokens=null, inputPricePerMillionTokens=null, outputPricePerMillionTokens=null, cacheWritePricePerMillionTokens=null, cacheReadPricePerMillionTokens=null, icon=null, requestFormat=null, endpoint=null, sourceTiers=null]");
             read(json, "chromeSurvivesPartialPatch",
                 """
                 {"siteName":"Starry API","chrome":"editorial","sidebarOpacity":0.62,"blurPx":18}""",

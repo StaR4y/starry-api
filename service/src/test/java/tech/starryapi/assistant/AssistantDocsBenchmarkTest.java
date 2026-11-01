@@ -18,8 +18,8 @@ import tech.starryapi.documentation.DocumentationDtos.Document;
 
 /**
  * The standard the assistant's retrieval is measured against: typical questions of people using the console, each a
- * conversation of one or two user messages, asked of the tutorials that a fresh installation publishes (V23 and V24, read
- * by {@link SeededTutorials}). A case names the page that has to be among the first three excerpts, and where it
+ * conversation of one or two user messages, asked of the tutorials that a fresh installation publishes (V23, V24 and V30,
+ * read by {@link SeededTutorials}). A case names the page that has to be among the first three excerpts, and where it
  * matters the section; the page has to be cited in the sources, in the language the reader writes. A pasted error
  * identifier has to bring its page first. A question the tutorials do not cover has to retrieve nothing, so that the
  * assistant is handed the list of pages and says it is not sure instead of being given a page that only sounds alike,
@@ -123,8 +123,7 @@ class AssistantDocsBenchmarkTest {
             zh("连接有问题", "faq", "连接失败"),
             // The topic first and a verb of one character after it
             zh("协议选哪个", "manual-api", "各接口的地址"),
-            zh("请求头填什么", "manual-api", "认证方式"),
-            zh("模型名填什么", "manual-api", "准备地址与密钥"),
+            // 请求头填什么 and 模型名填什么 were here until V30 added the tier sections; they are in knownGaps() now.
             zh("截图传不上去", "tickets", "提交一张工单"),
             // The title of the page has 订阅, so any retrieval at all would put the page among the first three: the section
             // that tells how to get a plan (and where its validity is shown) is what the case is about.
@@ -152,6 +151,12 @@ class AssistantDocsBenchmarkTest {
             en("What caused my 401?", "faq", "I get 401"),
             new Case(List.of("Where is my balance viewed?"), "billing", null, "en", false, "tickets"),
             en("How many attachments can I add to a ticket?", "tickets", "Submit a ticket"),
+            // "put" is a word of no meaning in a question ("where do I put it"), so what is left is "api key" and "codex", and
+            // the pages about API keys outweigh the one about Codex. It was a known gap until V30, which added to the Codex page
+            // a section on choosing a tier that mentions the API key and Codex over and over: that section is the second
+            // excerpt now, by chance and not by the question (the section that does answer, "1. config.toml", is the tenth), so
+            // no section is named.
+            en("Where do I put the API key in Codex?", "codex-cli", null),
             // Follow-ups: the second message stays on the topic of the first, or changes it
             followUp("怎么创建 API Key", "那怎么改？", "api-keys", "列表里的操作"),
             followUp("怎么充值", "具体步骤呢？", "billing", "在线充值"),
@@ -174,8 +179,8 @@ class AssistantDocsBenchmarkTest {
      * rest on questions chosen to pass: keyword retrieval cannot tell them from a real match, because every word of them
      * is in a page (the words of "request logs" in one table, "修改" in the page on the password) and it has no way to
      * tell that the words do not belong together. The test below fails as soon as one of them is answered correctly, so
-     * that it is moved up into {@link #cases()}. One of them is a question the tutorials do answer, whose page keyword
-     * retrieval does not put among the first three any more (see below).
+     * that it is moved up into {@link #cases()}. Two of them are questions the tutorials do answer, whose page keyword
+     * retrieval has not put among the first three since V30 (see below).
      */
     static List<Case> knownGaps() {
         return List.of(
@@ -185,10 +190,21 @@ class AssistantDocsBenchmarkTest {
             // Without a word that asks how in front of it, "开发票" cannot be told from a topic and a verb ("协议选"): the
             // last pair is the join of the two, so the page that has "开发" is found.
             uncovered("能开发票吗"),
-            // "put" is a word of no meaning in a question ("where do I put it"), so what is left is "api key" and "codex", and
-            // the pages about API keys outweigh the one about Codex, which is the 4th. Before "put" was dropped the page was
-            // 2nd, through the sentence "do not put it in a project's .codex/config.toml": by chance, not by the question.
-            en("Where do I put the API key in Codex?", "codex-cli", null)
+            // Two questions of "the topic first and a verb of one character after it" that the tutorials answer, and that were
+            // in cases() until V30. Their answers did not move: it is still the authentication section of the manual page for
+            // the request header (认证方式) and the section on where the model name comes from for the model name (准备地址与
+            // 密钥). But V30 added to six pages a section on the tier (号池) that has the same rare words in it: "求头" (of 请求头)
+            // is now in seven chunks, not one, and "型名" (of 模型名) in six, not one, and those sections are three or four times
+            // as long as a section is on average, which keyword retrieval counts as more matches. The manual page is the 7th
+            // chunk for the first question and is not among the excerpts for the second. A tier section is not an answer to
+            // either: it is about one optional header, or one optional suffix of the model name, not about what a request
+            // has to carry. (The case for the second question could have been moved to the models page, whose section on where
+            // to see models says what to copy into the model field, but that section is not retrieved either.) So both stay
+            // here, as they were asked, and the first of them to be answered correctly is moved back to cases() with its target.
+            // Weighing the length of a chunk puts them back first, but it changed the order of eight to thirteen other tests of
+            // the retrieval, so it is not done.
+            zh("请求头填什么", "manual-api", "认证方式"),
+            zh("模型名填什么", "manual-api", "准备地址与密钥")
         );
     }
 

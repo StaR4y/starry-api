@@ -1,0 +1,19 @@
+{
+  "relaysLeftOut": [],
+  "attempts": [
+    {
+      "account": "relay-1",
+      "tier": "anthropic:relay",
+      "dispatch": "OPENAI_CHAT",
+      "wireModel": "relay-sonnet",
+      "success": false,
+      "status": 503,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "usageSource": null,
+      "stopReason": null,
+      "degraded": "cache_control",
+      "error": "Source error 503 (server_error)"
+    }
+  ]
+}

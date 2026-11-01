@@ -153,7 +153,7 @@ public class DefaultModelCatalogProvider implements ModelCatalogProvider {
             value(customization.name(), customization.id()),
             value(canonicalProvider(customization.provider()), "Custom"),
             value(customization.family(), "Custom"),
-            "admin",
+            ADMIN_OWNER,
             value(customization.description(), "Administrator-managed model"),
             TEXT_ONLY,
             positive(customization.contextWindow(), DEFAULT_INPUT_TOKENS),

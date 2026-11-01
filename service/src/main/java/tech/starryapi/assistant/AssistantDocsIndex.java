@@ -212,6 +212,19 @@ public class AssistantDocsIndex {
      * chunks, so by rarity alone they would outweigh the topic.
      */
     private static final double GENERIC_WEIGHT = 0.2;
+    /**
+     * The most that the soft terms of a question (the verb, the wording) add to a chunk, as a multiple of what its other
+     * terms are worth. A verb orders the chunks of a topic, and for that it may outweigh a few mentions of the topic ("密钥怎么删"
+     * is answered by the section that has "删除", not by the one that has "密钥" most often), but a chunk that happens to use
+     * the verb in every sentence must not lead over the chunk that is about the topic: "报" in "调用的时候报 400" is in
+     * "不会报错" twice in a section about choosing a tier, which then outscored the error reference that lists the 400. Up to
+     * this limit the verb counts as it did; beyond it the topic decides. A question with no topic the documents know
+     * ("怎么验证", "规则", "Common problems") has nothing for its wording to outweigh: there the wording alone orders the
+     * chunks, as it did before the limit, instead of being capped at nothing.
+     */
+    private static final double SOFT_SHARE = 2.0;
+    /** A heading longer than this does not just name a kind of section ({@link Entry#kindOfSection}). */
+    private static final int MAX_KIND_HEADING_CHARS = 40;
     /** A term this heavy is part of what the question is about: a chunk has to contain one of them to be an answer. */
     private static final double ANCHOR_WEIGHT = 0.5;
     /** A message of at most this many characters that no page has a word of, after a question, is about that question. */
@@ -591,14 +604,18 @@ public class AssistantDocsIndex {
     // ---------------------------------------------------------------------------------------------------------
 
     /**
-     * @param twins       for each entry the index of the same place in the other language version of its page, or -1
-     * @param fingerprint what the published pages looked like when they were read; null when unknown or not read
+     * @param twins        for each entry the index of the same text in the other language version of its page, or -1:
+     *                     the n-th piece of a section, where both versions cut the section into as many pieces
+     * @param headingTwins for each entry the index of a chunk under the same heading in the other language version of
+     *                     its page, or -1: the twin where there is one, otherwise the first piece of the section in the
+     *                     other version, whose heading is the same and whose text is not
+     * @param fingerprint  what the published pages looked like when they were read; null when unknown or not read
      */
-    private record Snapshot(List<Entry> entries, int[] twins, List<String> pageTitles, String fingerprint,
-        long generation, long expiresAt, Vocabulary vocabulary) {
+    private record Snapshot(List<Entry> entries, int[] twins, int[] headingTwins, List<String> pageTitles,
+        String fingerprint, long generation, long expiresAt, Vocabulary vocabulary) {
 
         Snapshot renewed(long until) {
-            return new Snapshot(entries, twins, pageTitles, fingerprint, generation, until, vocabulary);
+            return new Snapshot(entries, twins, headingTwins, pageTitles, fingerprint, generation, until, vocabulary);
         }
     }
 
@@ -728,7 +745,7 @@ public class AssistantDocsIndex {
         List<Entry> entries = List.copyOf(fileEntries);
         int[] twins = new int[entries.size()];
         Arrays.fill(twins, -1);
-        return new Snapshot(entries, twins, List.of(), fingerprint, wanted, until, Vocabulary.of(entries));
+        return new Snapshot(entries, twins, twins, List.of(), fingerprint, wanted, until, Vocabulary.of(entries));
     }
 
     /** The pages, all of them at once from a supplier that limits its own read; they are turned into a snapshot on a worker thread. */
@@ -907,14 +924,18 @@ public class AssistantDocsIndex {
             }
             entries.addAll(fileEntries);
             int[] twins = new int[entries.size()];
+            int[] headingTwins = new int[entries.size()];
             Arrays.fill(twins, -1);
+            Arrays.fill(headingTwins, -1);
             for (int[] pair : twinPairs) {
-                twins[pair[0]] = pair[1];
-                twins[pair[1]] = pair[0];
+                headingTwins[pair[0]] = pair[1];
+                if (pair[2] == TWIN_TEXT) {
+                    twins[pair[0]] = pair[1];
+                }
             }
             List<Entry> all = List.copyOf(entries);
-            return new Snapshot(all, twins, List.copyOf(titles), fingerprint, wanted, clock.millis() + CACHE_TTL,
-                Vocabulary.of(all));
+            return new Snapshot(all, twins, headingTwins, List.copyOf(titles), fingerprint, wanted,
+                clock.millis() + CACHE_TTL, Vocabulary.of(all));
         }
     }
 
@@ -971,18 +992,36 @@ public class AssistantDocsIndex {
         return byOrdinal;
     }
 
+    /** A pair of chunks that say the same: the text of one is the translation of the text of the other. */
+    private static final int TWIN_TEXT = 1;
+    /** A pair of chunks under the same heading whose texts are not the same: they are cut into pieces differently. */
+    private static final int TWIN_HEADING = 0;
+
     /**
-     * The two language versions of a page with the same number of headings say the same thing in the same order:
-     * the n-th chunk under a heading of one version is the twin of the n-th under that heading of the other.
+     * The two language versions of a page with the same number of headings say the same thing in the same order. Under
+     * a heading that both cut into the same number of pieces, the n-th piece of one version is the twin of the n-th of
+     * the other: they are scored together, each by whichever has more of a word ({@link Matches#better}).
+     *
+     * <p>Where the two versions cut a section into a different number of pieces (a table of the same rows is longer in
+     * English, so it is cut in three where the Chinese is cut in one), nothing says which piece is the translation of
+     * which. Pairing them anyway, the last piece with all the rest, would give every English piece the words of the
+     * whole Chinese section, and a question about the 401 row would quote the pieces that hold the rows of 429 and 502.
+     * The pieces of such a section are paired with the first piece of the other version for the heading only, which is
+     * the same under all of them, and each is scored on its own text.
      */
     private static void pairTwins(Map<Integer, List<Integer>> chinese, Map<Integer, List<Integer>> english,
         List<int[]> pairs) {
         chinese.forEach((ordinal, mine) -> {
             List<Integer> theirs = english.get(ordinal);
-            if (theirs != null) {
-                for (int at = 0; at < Math.max(mine.size(), theirs.size()); at++) {
-                    pairs.add(new int[] {mine.get(Math.min(at, mine.size() - 1)), theirs.get(Math.min(at, theirs.size() - 1))});
-                }
+            if (theirs == null) {
+                return;
+            }
+            int kind = mine.size() == theirs.size() ? TWIN_TEXT : TWIN_HEADING;
+            for (int at = 0; at < mine.size(); at++) {
+                pairs.add(new int[] {mine.get(at), theirs.get(kind == TWIN_TEXT ? at : 0), kind});
+            }
+            for (int at = 0; at < theirs.size(); at++) {
+                pairs.add(new int[] {theirs.get(at), mine.get(kind == TWIN_TEXT ? at : 0), kind});
             }
         });
     }
@@ -1243,19 +1282,32 @@ public class AssistantDocsIndex {
      * A chunk with its searchable text folded once, so that a question costs no more than substring scans.
      *
      * @param languages which language versions its page has (a bit each for Chinese and English); 0 for a file
+     * @param kindOfSection whether its own heading says nothing but what kind of section it is ("Verify", "Common
+     *                     problems", "验证", "常见问题"), every word of the heading being wording
      */
     private record Entry(Chunk chunk, String title, String section, String leaf, String category, String summary,
-        String body, BitSet bodyWords, int languages) {
+        String body, BitSet bodyWords, int languages, boolean kindOfSection) {
 
         /** @param page what the page says about itself, folded; {@link PageFold#NONE} for a file chunk */
         static Entry of(Chunk chunk, int languages, PageFold page) {
             String path = chunk.section();
             int at = path.lastIndexOf(AssistantDocsChunker.PATH_SEPARATOR);
             String body = foldedWithin(chunk.body(), FOLDED_BODY_MAX);
-            return new Entry(chunk, page.title(),
-                foldedWithin(path, FOLDED_SECTION_MAX),
-                foldedWithin(at < 0 ? path : path.substring(at + AssistantDocsChunker.PATH_SEPARATOR.length()), FOLDED_LEAF_MAX),
-                page.category(), page.summary(), body, wordMask(body), languages);
+            String leaf = foldedWithin(at < 0 ? path : path.substring(at + AssistantDocsChunker.PATH_SEPARATOR.length()), FOLDED_LEAF_MAX);
+            return new Entry(chunk, page.title(), foldedWithin(path, FOLDED_SECTION_MAX), leaf,
+                page.category(), page.summary(), body, wordMask(body), languages, namesAKind(leaf));
+        }
+
+        /**
+         * Whether a heading says nothing but what kind of section it is ("Verify", "Common problems", "验证"): every word of
+         * it is wording. A question that asks for that kind of section ("verifying Claude Code") is answered by it.
+         */
+        private static boolean namesAKind(String leaf) {
+            if (leaf.isEmpty() || leaf.length() > MAX_KIND_HEADING_CHARS) {
+                return false;
+            }
+            Map<String, Candidate> words = scanMessage(leaf).terms();
+            return !words.isEmpty() && words.values().stream().allMatch(Candidate::soft);
         }
 
         /** The characters that are kept to search in, each distinct string counted once. */
@@ -1447,6 +1499,11 @@ public class AssistantDocsIndex {
         int better(int row, int twin, int column) {
             return twin >= 0 && heading(twin, column) + body(twin, column) > heading(row, column) + body(row, column)
                 ? twin : row;
+        }
+
+        /** Like {@link #better}, but for a twin that shares the heading and not the text: the heading says more, or not. */
+        int betterHeading(int row, int twin, int column) {
+            return twin >= 0 && heading(twin, column) > heading(row, column) ? twin : row;
         }
 
         /** Points of a term in the headings a chunk sits under, its own included: 5. */
@@ -1675,6 +1732,7 @@ public class AssistantDocsIndex {
         boolean followUp = query.mode() != Mode.ASKED;
         double[] value = worth.value();
         int[] twins = current.twins();
+        int[] headingTwins = current.headingTwins();
         List<Scored> ranked = new ArrayList<>();
         // A follow-up's chunks are those that answer the earlier question about as well as its best answer does.
         double bestTopic = 0;
@@ -1685,10 +1743,15 @@ public class AssistantDocsIndex {
             if (!entry.quotedTo(reader)) {
                 continue;
             }
-            // The version in the reader's language is scored together with its twin in the other language.
+            // The version in the reader's language is scored together with its twin in the other language: the text with
+            // the text it translates, the heading and the page with those of the other version.
             int twin = twins[row];
+            int near = headingTwins[row];
             double nowText = 0;
             double nowPage = 0;
+            double softText = 0;
+            double softPage = 0;
+            double kindText = 0;
             double beforeText = 0;
             double beforePage = 0;
             double matched = 0;
@@ -1698,9 +1761,10 @@ public class AssistantDocsIndex {
             double ownHeading = 0;
             for (int column = 0; column < terms.size(); column++) {
                 int source = matches.better(row, twin, column);
-                int heading = matches.heading(source, column);
+                int headingSource = twin >= 0 ? source : matches.betterHeading(row, near, column);
+                int heading = matches.heading(headingSource, column);
                 int body = matches.body(source, column);
-                int page = matches.page(row, twin, column);
+                int page = matches.page(row, near, column);
                 Term term = terms.get(column);
                 if (term.previous()) {
                     // In an ordinary search this is the earlier question: what it found in a heading says what that
@@ -1712,9 +1776,21 @@ public class AssistantDocsIndex {
                     // The same the other way round: when the one word of a follow-up is what the chunk has to contain,
                     // a heading that merely repeats the earlier question is not an answer to it.
                     int counted = query.mode() == Mode.FOLLOW_UP_WORD ? body : heading + body;
-                    nowText += value[column] * counted;
-                    nowPage += value[column] * page;
-                    if (!term.phrase() && query.mode() != Mode.FOLLOW_UP_WORD && matches.ownHeading(source, column)) {
+                    // The terms that are the topic and the soft ones (a verb, a word of wording) are added up apart: see SOFT_SHARE.
+                    if (term.soft() && !term.phrase()) {
+                        if (query.mode() != Mode.FOLLOW_UP_WORD && heading > 0 && matches.ownHeading(headingSource, column)
+                            && entries.get(headingSource).kindOfSection()) {
+                            kindText += value[column] * heading;
+                            softText += value[column] * body;
+                        } else {
+                            softText += value[column] * counted;
+                        }
+                        softPage += value[column] * page;
+                    } else {
+                        nowText += value[column] * counted;
+                        nowPage += value[column] * page;
+                    }
+                    if (!term.phrase() && query.mode() != Mode.FOLLOW_UP_WORD && matches.ownHeading(headingSource, column)) {
                         ownHeading += value[column];
                     }
                     if (!term.phrase() && counted + page > 0) {
@@ -1727,7 +1803,21 @@ public class AssistantDocsIndex {
             }
             // A chunk whose own text has only wording words ("下一步" in a heading) is on a page that is about the topic,
             // not an answer about it: it counts as a match of the page only.
-            double now = nowText + (anchorInText ? nowPage : nowPage * PAGE_ONLY_MATCH);
+            double pageShare = anchorInText ? 1.0 : PAGE_ONLY_MATCH;
+            // A heading that says only what kind of section it is ("Verify", "Common problems") and is the kind that the
+            // question asked for ("verifying Claude Code") answers it as surely as a topic word in the heading would. The
+            // wording word counts GENERIC_WEIGHT because it is in a heading of every page and would outweigh the topic; here
+            // the topic is in the chunk too, so what the chunk is a section of decides among the sections of the page, which
+            // otherwise differ by how often they mention it. Without the topic in its own text ("Next steps" of a page that
+            // mentions it once in the summary) the heading is no more than wording.
+            if (anchorInText) {
+                nowText += kindText * (WORD_WEIGHT / GENERIC_WEIGHT);
+            } else {
+                softText += kindText;
+            }
+            double now = nowText + nowPage * pageShare;
+            double soft = softText + softPage * pageShare;
+            now += worth.topical() ? Math.min(soft, SOFT_SHARE * now) : soft;
             double before = beforeText + (beforeText > 0 ? beforePage : beforePage * PAGE_ONLY_MATCH);
             // The question has to match on its own words, and on one that says what it is about, not only on words like
             // "操作" or "steps" that sit in a heading of every page. Where the documents know the topic but nothing heavy
@@ -1821,8 +1911,14 @@ public class AssistantDocsIndex {
         List<Scored> picked = new ArrayList<>();
         Set<Integer> taken = new HashSet<>();
         Map<String, Integer> perSource = new HashMap<>();
+        Set<String> sectionsTaken = new HashSet<>();
         int budget = EXCERPT_BUDGET;
-        for (int allowed = PREFERRED_PER_SOURCE; allowed <= MAX_PER_SOURCE && picked.size() < MAX_RESULTS; allowed++) {
+        // Two chunks of a page, then a third; in each of them a section that has none yet before a second piece of one that has:
+        // the pieces of a long section are one answer cut for size, and the second piece of it is not another answer. The last
+        // pass fills what is left of the pages' three with second pieces.
+        for (int pass = 0; pass <= MAX_PER_SOURCE - PREFERRED_PER_SOURCE + 1 && picked.size() < MAX_RESULTS; pass++) {
+            int allowed = Math.min(PREFERRED_PER_SOURCE + pass, MAX_PER_SOURCE);
+            boolean furtherPieces = pass > MAX_PER_SOURCE - PREFERRED_PER_SOURCE;
             long skipped = 0;
             for (Scored candidate : ranked) {
                 if (picked.size() >= MAX_RESULTS) {
@@ -1841,6 +1937,11 @@ public class AssistantDocsIndex {
                 if (taken.contains(candidate.row())) {
                     continue;
                 }
+                String section = source + '\u0000' + chunk.language() + '\u0000' + chunk.section();
+                if (!furtherPieces && sectionsTaken.contains(section)) {
+                    skipped = Math.max(skipped, candidate.score());
+                    continue;
+                }
                 if (perSource.getOrDefault(source, 0) >= allowed) {
                     skipped = Math.max(skipped, candidate.score());
                     continue;
@@ -1850,6 +1951,7 @@ public class AssistantDocsIndex {
                 }
                 taken.add(candidate.row());
                 picked.add(candidate);
+                sectionsTaken.add(section);
                 perSource.merge(source, 1, Integer::sum);
                 budget -= chunk.cost();
             }

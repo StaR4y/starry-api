@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.OptionalInt;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.concurrent.atomic.AtomicLong;
@@ -37,6 +38,8 @@ public class ModelPricingService {
     static final String MODEL_PRICING_RULES = "MODEL_PRICING_RULES";
     static final int MAX_RULES = 200;
     static final int MAX_MODEL_PATTERN_LENGTH = 256;
+    /** As many factors as a vendor has tiers. */
+    static final int MAX_PREVIEW_FACTORS = 9;
 
     private static final Logger log = LoggerFactory.getLogger(ModelPricingService.class);
     private static final TypeReference<List<ModelPricingRule>> RULE_LIST = new TypeReference<>() {};
@@ -143,6 +146,22 @@ public class ModelPricingService {
         return rulesSnapshot().map(rules -> applyPublicPricing(safeResponse, rules, billingMultiplier));
     }
 
+    /**
+     * The public list priced under source tiers: a model whose vendor is tiered shows the price of the tier it is first
+     * served from, and the tiers themselves when the vendor lists them. A model that is not under tiers is priced as the
+     * two-argument form prices it.
+     */
+    public Mono<ModelDtos.ModelListResponse> applyPublicPricing(
+        ModelDtos.ModelListResponse response,
+        BigDecimal billingMultiplier,
+        ModelTierListing tiers
+    ) {
+        ModelDtos.ModelListResponse safeResponse = response == null
+            ? new ModelDtos.ModelListResponse("list", List.of(), List.of())
+            : response;
+        return rulesSnapshot().map(rules -> applyPublicPricing(safeResponse, rules, billingMultiplier, tiers));
+    }
+
     public Mono<List<ModelDtos.ManagedModelResponse>> applyManagedPricing(
         List<ModelDtos.ManagedModelResponse> models,
         BigDecimal billingMultiplier
@@ -179,6 +198,14 @@ public class ModelPricingService {
         return rulesSnapshot().map(rules -> quote(resolvePricing(rules, model, null, multiplier), fastMode));
     }
 
+    /**
+     * The most output tokens the official price catalog lists for the model, which is what the upstream of that model
+     * itself holds a request to; empty when the catalog does not list the model or lists it with none.
+     */
+    public OptionalInt maxOutputTokens(String model) {
+        return officialModelPricingService.maxOutputTokens(model);
+    }
+
     BigDecimal cost(List<ModelPricingRule> rules, String model, PlatformUsage usage,
                     boolean fastMode, BigDecimal multiplier) {
         return quote(resolvePricing(rules, model, null, multiplier), fastMode)
@@ -198,7 +225,36 @@ public class ModelPricingService {
         var baseline = resolvePricing(List.of(), request.model(), null, BigDecimal.ONE);
         return new ModelDtos.ModelPricingPreview(request.model(), price.model(), price.source(), price.matchedPriceModel(),
             price.multiplier(), price.matches().stream().map(ModelPricingRule::ruleId).toList(),
-            displayPricing(baseline), displayPricing(price));
+            displayPricing(baseline), displayPricing(price), factorPricing(price, request.factors()));
+    }
+
+    /** The preview priced at each source-tier factor, or null when none was asked for. */
+    private List<ModelDtos.FactorPricing> factorPricing(ResolvedPricing price, List<BigDecimal> factors) {
+        if (factors.isEmpty()) {
+            return null;
+        }
+        if (factors.size() > MAX_PREVIEW_FACTORS) {
+            throw invalidFactor("At most " + MAX_PREVIEW_FACTORS + " price factors can be previewed at once");
+        }
+        return factors.stream().map(factor -> {
+            if (factor == null || factor.signum() <= 0 || factor.compareTo(MAX_PRICE_MULTIPLIER) > 0) {
+                throw invalidFactor("A price factor must be greater than 0 and at most " + MAX_PRICE_MULTIPLIER);
+            }
+            return new ModelDtos.FactorPricing(factor, displayPricing(scaled(price, factor)));
+        }).toList();
+    }
+
+    private static ApiException invalidFactor(String message) {
+        return new ApiException(HttpStatus.BAD_REQUEST, "MODEL_PRICE_FACTOR_INVALID", message);
+    }
+
+    /** The resolved price multiplied by a source-tier factor; a price that is unavailable stays so. */
+    private static ResolvedPricing scaled(ResolvedPricing price, BigDecimal factor) {
+        if (price.rates() == null) {
+            return price;
+        }
+        return new ResolvedPricing(price.model(), price.source(), price.matchedPriceModel(), price.multiplier(),
+            price.matches(), price.rates().scaled(factor), price.total());
     }
 
     private ModelDtos.ModelListResponse applyPublicPricing(
@@ -206,6 +262,23 @@ public class ModelPricingService {
     ) {
         var items = response.data().stream()
             .map(item -> item.withPricing(publicPricing(rules, item.id(), multiplier))).toList();
+        return new ModelDtos.ModelListResponse(response.object(), items, items);
+    }
+
+    private ModelDtos.ModelListResponse applyPublicPricing(
+        ModelDtos.ModelListResponse response, List<ModelPricingRule> rules, BigDecimal multiplier, ModelTierListing tiers
+    ) {
+        var items = response.data().stream().map(item -> tiers.of(item)
+            .map(listing -> {
+                // The rule is found once; the factors multiply what it resolves to, the way a tiered request is charged.
+                var resolved = resolvePricing(rules, item.id(), null, multiplier);
+                return item
+                    .withPricing(displayPricing(scaled(resolved, listing.headlineFactor())))
+                    .withSourceTiers(listing.tiers().stream().map(tier -> new ModelDtos.ModelSourceTier(
+                        tier.id(), tier.level(), tier.name(), tier.factor(), tier.selectable(),
+                        displayPricing(scaled(resolved, tier.factor())))).toList());
+            })
+            .orElseGet(() -> item.withPricing(publicPricing(rules, item.id(), multiplier)))).toList();
         return new ModelDtos.ModelListResponse(response.object(), items, items);
     }
 

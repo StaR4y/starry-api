@@ -10,6 +10,8 @@ public interface ModelCatalogProvider {
     String FAST_TARGET_MODEL_ID = "claude-haiku-4.5";
     String STARRY_OWNER = "starryapi";
     String ANTHROPIC_OWNER = "anthropic";
+    /** The owner a model the administrator added is listed under: its maximum output is a placeholder, not a figure of the model. */
+    String ADMIN_OWNER = "admin";
     int DEFAULT_INPUT_TOKENS = 200_000;
     int DEFAULT_OUTPUT_TOKENS = 64_000;
     List<String> TEXT_AND_IMAGE = List.of("TEXT", "IMAGE");

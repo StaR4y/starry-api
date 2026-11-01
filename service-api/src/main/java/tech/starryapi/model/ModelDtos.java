@@ -109,10 +109,65 @@ public final class ModelDtos {
         BigDecimal cacheReadPricePerMillionTokens,
         String icon,
         String requestFormat,
-        String endpoint
+        String endpoint,
+        List<ModelSourceTier> sourceTiers
     ) {
         public ModelListItem {
             supportedInputTypes = supportedInputTypes == null ? List.of() : List.copyOf(supportedInputTypes);
+            sourceTiers = sourceTiers == null || sourceTiers.isEmpty() ? null : List.copyOf(sourceTiers);
+        }
+
+        /** A model that is not listed under source tiers: the field is left out of the JSON. */
+        public ModelListItem(
+            String id,
+            String object,
+            long created,
+            String ownedBy,
+            String provider,
+            String family,
+            String targetModelId,
+            String name,
+            String modelName,
+            String description,
+            List<String> supportedInputTypes,
+            int maxInputTokens,
+            int maxOutputTokens,
+            int contextLength,
+            int maxOutputTokensCompatible,
+            String billingMode,
+            BigDecimal tokensPer100Balance,
+            BigDecimal inputTokensPer100Balance,
+            BigDecimal outputTokensPer100Balance,
+            BigDecimal cacheWriteTokensPer100Balance,
+            BigDecimal cacheReadTokensPer100Balance,
+            BigDecimal totalPricePerMillionTokens,
+            BigDecimal inputPricePerMillionTokens,
+            BigDecimal outputPricePerMillionTokens,
+            BigDecimal cacheWritePricePerMillionTokens,
+            BigDecimal cacheReadPricePerMillionTokens,
+            String icon,
+            String requestFormat,
+            String endpoint
+        ) {
+            this(id, object, created, ownedBy, provider, family, targetModelId, name, modelName, description,
+                supportedInputTypes, maxInputTokens, maxOutputTokens, contextLength, maxOutputTokensCompatible,
+                billingMode, tokensPer100Balance, inputTokensPer100Balance, outputTokensPer100Balance,
+                cacheWriteTokensPer100Balance, cacheReadTokensPer100Balance, totalPricePerMillionTokens,
+                inputPricePerMillionTokens, outputPricePerMillionTokens, cacheWritePricePerMillionTokens,
+                cacheReadPricePerMillionTokens, icon, requestFormat, endpoint, null);
+        }
+
+        /** This model with the tiers its price is listed under (design 5.7); null or empty leaves it as it is. */
+        public ModelListItem withSourceTiers(List<ModelSourceTier> tiers) {
+            if (tiers == null || tiers.isEmpty()) {
+                return this;
+            }
+            return new ModelListItem(id, object, created, ownedBy, provider, family, targetModelId, name, modelName,
+                description, supportedInputTypes, maxInputTokens, maxOutputTokens, contextLength,
+                maxOutputTokensCompatible, billingMode, tokensPer100Balance, inputTokensPer100Balance,
+                outputTokensPer100Balance, cacheWriteTokensPer100Balance, cacheReadTokensPer100Balance,
+                totalPricePerMillionTokens, inputPricePerMillionTokens, outputPricePerMillionTokens,
+                cacheWritePricePerMillionTokens, cacheReadPricePerMillionTokens, icon, requestFormat, endpoint, tiers);
         }
 
         public ModelListItem withPricing(ModelPublicPricing pricing) {
@@ -148,10 +203,26 @@ public final class ModelDtos {
                 pricing.cacheReadPricePerMillionTokens(),
                 icon,
                 requestFormat,
-                endpoint
+                endpoint,
+                sourceTiers
             );
         }
     }
+
+    /**
+     * One source tier a model is served from, as the model list shows it when the vendor lists its tiers publicly:
+     * {@code id} is the tier's identifier (what a client puts after {@code @} to ask for it), {@code priceFactor} what
+     * the standard price is multiplied by, {@code pricing} that price with the factor applied, and {@code selectable}
+     * whether a client may ask for the tier. Nothing is said of the accounts or the protocol behind it.
+     */
+    public record ModelSourceTier(
+        String id,
+        int level,
+        String name,
+        BigDecimal priceFactor,
+        boolean selectable,
+        ModelPublicPricing pricing
+    ) {}
 
     public record UpsertManagedModelRequest(
         @NotBlank @Size(max = 255) String id,
@@ -517,15 +588,43 @@ public final class ModelDtos {
         }
     }
 
-    public record ModelPricingPreviewRequest(@NotBlank String model, List<UpdateModelPricingRuleRequest> rules) {
-        public ModelPricingPreviewRequest { rules = rules == null ? List.of() : List.copyOf(rules); }
+    /**
+     * {@code factors} are source-tier price factors (each above 0 and at most 1000, at most 9) to price the model at as
+     * well: the rule that applies is found once, and the factors multiply its result (design 5.1).
+     */
+    public record ModelPricingPreviewRequest(
+        @NotBlank String model,
+        List<UpdateModelPricingRuleRequest> rules,
+        List<BigDecimal> factors
+    ) {
+        public ModelPricingPreviewRequest {
+            rules = rules == null ? List.of() : List.copyOf(rules);
+            factors = factors == null ? List.of() : List.copyOf(factors);
+        }
+
+        public ModelPricingPreviewRequest(String model, List<UpdateModelPricingRuleRequest> rules) {
+            this(model, rules, null);
+        }
     }
 
+    /** {@code factorPricing} answers {@code factors}, in the same order, and is left out when none was asked for. */
     public record ModelPricingPreview(
         String model, String pricingModel, String source, String matchedPriceModel,
         BigDecimal multiplier, List<String> matchedRuleIds,
-        ModelPublicPricing basePricing, ModelPublicPricing pricing
-    ) {}
+        ModelPublicPricing basePricing, ModelPublicPricing pricing,
+        List<FactorPricing> factorPricing
+    ) {
+        public ModelPricingPreview(
+            String model, String pricingModel, String source, String matchedPriceModel,
+            BigDecimal multiplier, List<String> matchedRuleIds,
+            ModelPublicPricing basePricing, ModelPublicPricing pricing
+        ) {
+            this(model, pricingModel, source, matchedPriceModel, multiplier, matchedRuleIds, basePricing, pricing, null);
+        }
+    }
+
+    /** The price a preview gives when a source-tier {@code factor} is applied to it. */
+    public record FactorPricing(BigDecimal factor, ModelPublicPricing pricing) {}
 
     public record ModelPricingSourceStatus(
         Boolean remoteRefreshEnabled,

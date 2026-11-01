@@ -60,7 +60,7 @@ function effectivePrice(exact: number | null | undefined, capacity: number | nul
   return exactPrice === null ? priceFromCapacity(capacity) : exactPrice;
 }
 
-function formatTokenPrice(value: number) {
+export function formatTokenPrice(value: number) {
   return value > 0 && value < 0.000001
     ? value.toExponential(2)
     : value.toLocaleString(locale.value, { maximumFractionDigits: 6 });

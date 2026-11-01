@@ -128,6 +128,32 @@ export interface SubscriptionLedgerEntry {
   reason: string | null;
   createdAt: string;
 }
+/**
+ * 按号源分级服务的请求的核对行里，一个号池的信息。预留是按请求可能被服务的号池里预留最多的那个定额的，所以核对要看
+ * 这里该号池的报价与估算，而不是预留金额。level 和 factor 对实际服务的号池是结算时用的值，对其他号池是预留时冻结的计划值。
+ */
+export interface BillingReviewTier {
+  tierRef: string;
+  level?: number | null;
+  name?: string | null;
+  /** 价格系数，十进制字符串 */
+  factor?: string | null;
+  /** 该号池在预留时的预留估算（credits，十进制字符串）：按它的报价和请求上界算出的上限 */
+  estimate?: string | null;
+  /** 最后派发到该号池的时间（只有 last_dispatched 有） */
+  at?: string | null;
+  /** 该号池的每 token 报价，十进制字符串：标准价乘系数 */
+  quote?: BillingReviewQuote | null;
+}
+
+export interface BillingReviewQuote {
+  input: string;
+  output: string;
+  cacheRead: string;
+  cacheWrite: string;
+  fallback: string;
+}
+
 export interface BillingReview {
   request_hash: string;
   request_id: string;
@@ -137,4 +163,26 @@ export interface BillingReview {
   actual_credits: number | null;
   reason: string;
   created_at: string;
+  /** 以下只在请求按号源分级服务时才有 */
+  tier_plan?: BillingReviewPlan | null;
+  /** 实际服务（已按它结算过）的号池 */
+  served?: BillingReviewTier | null;
+  /** 最后派发到的号池：还没有结算时，用户最可能被哪个号池服务 */
+  last_dispatched?: BillingReviewTier | null;
+}
+
+/** 预留时冻结的号池计划；levels 是请求可能服务的号池，按级别从好到坏 */
+export interface BillingReviewPlan {
+  vendor?: string | null;
+  /** auto 网关选号池；pinned 客户端指定 */
+  mode?: string | null;
+  levels?: BillingReviewPlanLevel[] | null;
+}
+
+export interface BillingReviewPlanLevel {
+  tierRef: string;
+  level: number;
+  name: string;
+  factor: number;
+  estimate: number | null;
 }

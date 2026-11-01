@@ -3,20 +3,29 @@ package tech.starryapi.platform.openai;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
+import tech.starryapi.common.JsonNodes;
 import tech.starryapi.platform.core.PlatformCompletionResult;
 import tech.starryapi.platform.core.PlatformToolUse;
 import tech.starryapi.platform.core.PlatformUsage;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ArrayNode;
+import tools.jackson.databind.node.JsonNodeFactory;
 import tools.jackson.databind.node.ObjectNode;
 
 @Component
 public class OpenAiResponseFactory {
+
+    /** The argument a replayed call of a custom tool is written with when no function of the client says another. */
+    private static final String CUSTOM_CALL_ARGUMENT = "input";
+
+    /** What the static helpers below write of the editing tool; it keeps nothing, and its mapper only makes nodes. */
+    private static final ApplyPatchEmulation EDITING_TOOL = new ApplyPatchEmulation(new ObjectMapper());
 
     private final ObjectMapper objectMapper;
 
@@ -40,7 +49,7 @@ public class OpenAiResponseFactory {
         }
         if (result.toolUses().isEmpty()) {
             message.put("content", result.content());
-            choice.put("finish_reason", "stop");
+            choice.put("finish_reason", chatFinishReason(result, "stop"));
         } else {
             message.put("content", result.content().isBlank() ? null : result.content());
             ArrayNode toolCalls = message.putArray("tool_calls");
@@ -51,8 +60,9 @@ public class OpenAiResponseFactory {
                 ObjectNode function = call.putObject("function");
                 function.put("name", toolUse.name());
                 function.put("arguments", toolInputString(toolUse));
+                putThoughtSignature(call, toolUse);
             }
-            choice.put("finish_reason", "tool_calls");
+            choice.put("finish_reason", chatFinishReason(result, "tool_calls"));
         }
         appendUsage(root, result.usage(), "prompt_tokens", "completion_tokens");
         return root;
@@ -63,9 +73,14 @@ public class OpenAiResponseFactory {
         root.put("id", generatedId("resp_"));
         root.put("object", "response");
         root.put("created_at", Instant.now().getEpochSecond());
-        root.put("status", "completed");
+        String incompleteReason = responsesIncompleteReason(result);
+        root.put("status", incompleteReason == null ? "completed" : "incomplete");
         root.putNull("error");
-        root.putNull("incomplete_details");
+        if (incompleteReason == null) {
+            root.putNull("incomplete_details");
+        } else {
+            root.putObject("incomplete_details").put("reason", incompleteReason);
+        }
         root.put("model", model);
         if (previousResponseId != null) {
             root.put("previous_response_id", previousResponseId);
@@ -118,7 +133,7 @@ public class OpenAiResponseFactory {
             ? chatToolStreamEvents(model, result)
             : Flux.just(
             ServerSentEvent.builder(chatStreamChunkBody(model, result.content()).toString()).build(),
-            ServerSentEvent.builder(chatStreamStopBody(model).toString()).build(),
+            ServerSentEvent.builder(chatStreamStopBody(model, chatFinishReason(result, "stop")).toString()).build(),
             ServerSentEvent.builder("[DONE]").build()
         );
         if (result.reasoningContent().isBlank()) {
@@ -149,6 +164,10 @@ public class OpenAiResponseFactory {
         ObjectNode created = responseEvent("response.created", sequence++);
         ObjectNode inProgress = response.deepCopy();
         inProgress.put("status", "in_progress");
+        boolean incomplete = "incomplete".equals(response.path("status").asString(""));
+        if (incomplete) {
+            inProgress.putNull("incomplete_details");
+        }
         inProgress.set("output", objectMapper.createArrayNode());
         created.set("response", inProgress);
         events.add(responseSse(created));
@@ -178,11 +197,33 @@ public class OpenAiResponseFactory {
             events.add(responseSse(outputItemEvent("response.output_item.done", responseId, item, outputIndex, sequence++)));
         }
 
-        ObjectNode completed = responseEvent("response.completed", sequence);
+        ObjectNode completed = responseEvent(incomplete ? "response.incomplete" : "response.completed", sequence);
         completed.set("response", response);
         events.add(responseSse(completed));
         events.add(ServerSentEvent.builder("[DONE]").build());
         return Flux.fromIterable(events);
+    }
+
+    /** Only a non-null MAX_TOKENS or CONTENT_FILTER changes the answer; every other result keeps {@code derived}. */
+    private String chatFinishReason(PlatformCompletionResult result, String derived) {
+        if (result.stopReason() == PlatformCompletionResult.StopReason.MAX_TOKENS) {
+            return "length";
+        }
+        if (result.stopReason() == PlatformCompletionResult.StopReason.CONTENT_FILTER) {
+            return "content_filter";
+        }
+        return derived;
+    }
+
+    /** The {@code incomplete_details.reason} for a truncated or filtered result, or null when the response completes. */
+    private String responsesIncompleteReason(PlatformCompletionResult result) {
+        if (result.stopReason() == PlatformCompletionResult.StopReason.MAX_TOKENS) {
+            return "max_output_tokens";
+        }
+        if (result.stopReason() == PlatformCompletionResult.StopReason.CONTENT_FILTER) {
+            return "content_filter";
+        }
+        return null;
     }
 
     private ObjectNode chatStreamChunkBody(String model, String content) {
@@ -501,7 +542,7 @@ public class OpenAiResponseFactory {
         for (int i = 0; i < result.toolUses().size(); i++) {
             events.add(ServerSentEvent.builder(chatToolCallChunkBody(model, i, result.toolUses().get(i)).toString()).build());
         }
-        events.add(ServerSentEvent.builder(chatStreamStopBody(model, "tool_calls").toString()).build());
+        events.add(ServerSentEvent.builder(chatStreamStopBody(model, chatFinishReason(result, "tool_calls")).toString()).build());
         events.add(ServerSentEvent.builder("[DONE]").build());
         return Flux.fromIterable(events);
     }
@@ -524,8 +565,21 @@ public class OpenAiResponseFactory {
         ObjectNode function = call.putObject("function");
         function.put("name", toolUse.name());
         function.put("arguments", toolInputString(toolUse));
+        putThoughtSignature(call, toolUse);
         choice.putNull("finish_reason");
         return root;
+    }
+
+    /**
+     * The thought signature of a call that a Gemini model signed, in the form Google's OpenAI-compatible API writes it
+     * ({@code extra_content.google.thought_signature}), so that a Chat client which gives it back with the call in its
+     * history gives the model what it needs (design 7.10). Only a cross-protocol result has one; a call without it is
+     * written as it always was.
+     */
+    private void putThoughtSignature(ObjectNode call, PlatformToolUse toolUse) {
+        if (toolUse.thoughtSignature() != null) {
+            call.putObject("extra_content").putObject("google").put("thought_signature", toolUse.thoughtSignature());
+        }
     }
 
     private ObjectNode responseToolCallItem(PlatformToolUse toolUse) {
@@ -556,6 +610,230 @@ public class OpenAiResponseFactory {
         text.put("type", "reasoning_text");
         text.put("text", reasoningContent);
         return item;
+    }
+
+    /**
+     * Whether an item of a request's input is a reasoning item as {@link #responseReasoningItem} writes it for an answer
+     * whose source gave its reasoning as text and no more (a relay's {@code reasoning_content}): no summary, no encrypted
+     * content, and the text as {@code reasoning_text}. It is the gateway's own rendering, which no OpenAI model gave and
+     * none can read back: OpenAI's reasoning items have an encrypted content or a summary, and a request that carries one
+     * of these to an OpenAI account with {@code store: false} is a request that account may refuse.
+     */
+    public static boolean isRenderedReasoning(JsonNode item) {
+        if (!item.isObject() || !"reasoning".equals(item.path("type").asString(""))) {
+            return false;
+        }
+        JsonNode encrypted = item.path("encrypted_content");
+        JsonNode summary = item.path("summary");
+        JsonNode content = item.path("content");
+        if (!(encrypted.isMissingNode() || encrypted.isNull() || encrypted.asString("").isBlank())
+            || !(summary.isMissingNode() || summary.isNull() || (summary.isArray() && summary.isEmpty()))
+            || !content.isArray() || content.isEmpty()) {
+            return false;
+        }
+        for (JsonNode part : content) {
+            if (!"reasoning_text".equals(part.path("type").asString(""))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * The request without the reasoning items {@link #isRenderedReasoning} names, or the request itself when it holds none.
+     * The input is rebuilt; everything else is shared with the request, which is not changed.
+     */
+    public static JsonNode withoutRenderedReasoning(JsonNode request) {
+        JsonNode input = request.path("input");
+        if (!request.isObject() || !input.isArray()) {
+            return request;
+        }
+        ArrayNode kept = null;
+        for (int i = 0; i < input.size(); i++) {
+            if (isRenderedReasoning(input.get(i))) {
+                if (kept == null) {
+                    kept = JsonNodeFactory.instance.arrayNode();
+                    for (int before = 0; before < i; before++) {
+                        kept.add(input.get(before));
+                    }
+                }
+            } else if (kept != null) {
+                kept.add(input.get(i));
+            }
+        }
+        if (kept == null) {
+            return request;
+        }
+        ObjectNode copy = JsonNodes.shallowCopy((ObjectNode) request);
+        copy.set("input", kept);
+        return copy;
+    }
+
+    /**
+     * The request with the calls of custom tools in its input written as the calls of functions, or the request itself when it
+     * holds none: {@code custom_tool_call} is a {@code function_call} and {@code custom_tool_call_output} a {@code
+     * function_call_output}, which is all the conversion of the Kiro and Anthropic routes ({@code
+     * OpenAiRequestAdapter#responsesToChat}) knows how to replay. The text of a call is its one string argument, in the
+     * shape those routes declare the tool, which this reads from the tools of the request it is given: the string property
+     * that the client's function declares ({@code input} for the JSON tool Codex has), and {@code input} for a tool the client
+     * declared as a custom tool, which those routes are given with no properties. For a vendor that has relays the facade
+     * declares such a custom tool to them as the gateway's {@code patch} function first ({@link
+     * #withEditingToolAsPatchFunction}), and the argument read here is then {@code patch}. The input is rebuilt; everything
+     * else is shared with the request, which is not changed.
+     *
+     * <p>A relay serves the editing tool as a custom tool call whatever the client declared it as (it is what Codex expects),
+     * and the chain keeps that call. Replayed to a source of those routes it was a blank user message, and the patch with
+     * its result were gone from what the model was asked (the model then answered without knowing the patch was applied).
+     */
+    public static JsonNode withCustomCallsAsFunctionCalls(JsonNode request) {
+        JsonNode input = request.path("input");
+        if (!request.isObject() || !input.isArray()) {
+            return request;
+        }
+        ArrayNode converted = null;
+        for (int i = 0; i < input.size(); i++) {
+            JsonNode item = input.get(i);
+            String type = item.path("type").asString("");
+            boolean call = "custom_tool_call".equals(type);
+            boolean output = "custom_tool_call_output".equals(type);
+            if ((call || output) && item.isObject()) {
+                if (converted == null) {
+                    converted = JsonNodeFactory.instance.arrayNode();
+                    for (int before = 0; before < i; before++) {
+                        converted.add(input.get(before));
+                    }
+                }
+                converted.add(call ? customCallAsFunctionCall(item, request.path("tools")) : customOutputAsFunctionOutput(item));
+            } else if (converted != null) {
+                converted.add(item);
+            }
+        }
+        if (converted == null) {
+            return request;
+        }
+        ObjectNode copy = JsonNodes.shallowCopy((ObjectNode) request);
+        copy.set("input", converted);
+        return copy;
+    }
+
+    /** Whether the client declared the editing tool, {@code apply_patch}, as a custom tool (as Codex does), and not as a function. */
+    public static boolean declaresEditingToolAsCustom(JsonNode request) {
+        JsonNode tools = request.path("tools");
+        if (!tools.isArray()) {
+            return false;
+        }
+        for (JsonNode tool : tools) {
+            if (isCustomEditingTool(tool)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isCustomEditingTool(JsonNode tool) {
+        return "custom".equals(tool.path("type").asString("")) && ApplyPatchEmulation.TOOL_NAME.equals(tool.path("name").asString(""));
+    }
+
+    /**
+     * The request with the editing tool, when the client declared it as a custom tool, declared as the gateway's function for
+     * it (the function the relays are given, {@link ApplyPatchEmulation#chatFunctionTool}: the {@code patch} argument and the
+     * gateway's own description of it; the OpenAI route is given the same argument in the Responses shape with the client's
+     * description, {@link ApplyPatchEmulation#functionTool}), or the request itself when it holds none. A {@code tool_choice}
+     * that forces the tool follows it. This is for the Kiro and Anthropic routes of a vendor that has relays: they are told
+     * the same function a relay is, so that the call of a history that a relay made, replayed with the {@code patch} argument
+     * ({@link #withCustomCallsAsFunctionCalls} reads the argument from this declaration), is the call of the function they
+     * were declared, and so that their own calls can be told as the custom tool calls Codex applies ({@link
+     * #withEditingCallsAsCustomCalls}). Everything else is shared with the request, which is not changed.
+     */
+    public static JsonNode withEditingToolAsPatchFunction(JsonNode request) {
+        if (!request.isObject() || !declaresEditingToolAsCustom(request)) {
+            return request;
+        }
+        ArrayNode tools = JsonNodeFactory.instance.arrayNode();
+        for (JsonNode tool : request.path("tools")) {
+            tools.add(isCustomEditingTool(tool) ? EDITING_TOOL.chatFunctionTool(tool) : tool);
+        }
+        ObjectNode copy = JsonNodes.shallowCopy((ObjectNode) request);
+        copy.set("tools", tools);
+        if (request.has("tool_choice")) {
+            copy.set("tool_choice", EDITING_TOOL.chatToolChoice(request.path("tool_choice")));
+        }
+        return copy;
+    }
+
+    /**
+     * The answer of an account that speaks no custom tools (Kiro, an Anthropic key) with its calls of the editing tool told as
+     * the custom tool calls the client declared it as, the patch for their input; or the answer itself when it has none. It is
+     * what the relays and the OpenAI route answer with already ({@link ApplyPatchEmulation#editingToolCall}); Codex 0.142.5
+     * applies a custom tool call and reports a {@code function_call} for the editing tool as an incompatible payload.
+     */
+    public static PlatformCompletionResult withEditingCallsAsCustomCalls(PlatformCompletionResult result) {
+        if (result.toolUses().stream().noneMatch(call -> ApplyPatchEmulation.TOOL_NAME.equals(call.name()))) {
+            return result;
+        }
+        List<PlatformToolUse> calls = result.toolUses().stream()
+            .map(call -> ApplyPatchEmulation.TOOL_NAME.equals(call.name()) ? EDITING_TOOL.editingToolCall(call.id(), call) : call)
+            .toList();
+        return new PlatformCompletionResult(result.content(), result.reasoningContent(), calls, result.usage(), result.stopReason(),
+            result.usageSource(), result.degraded());
+    }
+
+    private static ObjectNode customCallAsFunctionCall(JsonNode item, JsonNode tools) {
+        ObjectNode call = JsonNodes.shallowCopy((ObjectNode) item);
+        call.put("type", "function_call");
+        call.remove("input");
+        JsonNode input = item.path("input");
+        String text = input.isString() ? input.asString("") : input.isMissingNode() || input.isNull() ? "" : input.toString();
+        String argument = ApplyPatchEmulation.TOOL_NAME.equals(item.path("name").asString(""))
+            ? editingToolArgument(tools)
+            : CUSTOM_CALL_ARGUMENT;
+        call.put("arguments", JsonNodeFactory.instance.objectNode().put(argument, text).toString());
+        return call;
+    }
+
+    /**
+     * The argument of the editing tool as the Kiro and Anthropic routes declare it: the string property of the function it is
+     * declared as (the one that is required, else the first), or {@code input} when the tool is declared as a custom tool,
+     * which those routes give an empty schema, or not at all.
+     */
+    private static String editingToolArgument(JsonNode tools) {
+        if (!tools.isArray()) {
+            return CUSTOM_CALL_ARGUMENT;
+        }
+        for (JsonNode tool : tools) {
+            JsonNode source = tool.path("function").isObject() ? tool.path("function") : tool;
+            if (!ApplyPatchEmulation.TOOL_NAME.equals(source.path("name").asString("")) || "custom".equals(tool.path("type").asString(""))) {
+                continue;
+            }
+            JsonNode parameters = source.path("parameters");
+            String first = null;
+            for (Map.Entry<String, JsonNode> property : parameters.path("properties").properties()) {
+                if (!"string".equals(property.getValue().path("type").asString(""))) {
+                    continue;
+                }
+                if (containsText(parameters.path("required"), property.getKey())) {
+                    return property.getKey();
+                }
+                first = first != null ? first : property.getKey();
+            }
+            return first != null ? first : CUSTOM_CALL_ARGUMENT;
+        }
+        return CUSTOM_CALL_ARGUMENT;
+    }
+
+    private static boolean containsText(JsonNode array, String text) {
+        for (JsonNode element : array) {
+            if (text.equals(element.asString(""))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static ObjectNode customOutputAsFunctionOutput(JsonNode item) {
+        ObjectNode output = JsonNodes.shallowCopy((ObjectNode) item);
+        output.put("type", "function_call_output");
+        return output;
     }
 
     private String responseReasoningItemText(JsonNode item) {

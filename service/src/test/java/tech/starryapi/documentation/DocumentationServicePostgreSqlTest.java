@@ -448,6 +448,17 @@ class DocumentationServicePostgreSqlTest {
         assertThat(service.read("cc-switch", true).block(TIMEOUT).content().body()).doesNotContain("127.0.0.1");
     }
 
+    @Test void defaultTutorialsExplainSourceTiersAndTheirErrors() {
+        for (boolean english : new boolean[] {false, true}) {
+            assertThat(service.read("errors", english).block(TIMEOUT).content().body())
+                .contains("SOURCE_TIER_NOT_SELECTABLE", "SOURCE_TIER_UNAVAILABLE", "RESPONSE_OWNER_TIER_MISMATCH");
+            for (String id : List.of("api-keys", "models-and-pricing", "claude-code", "codex-cli", "opencode")) {
+                assertThat(service.read(id, english).block(TIMEOUT).content().body())
+                    .as("%s (%s)", id, english ? "English" : "Chinese").contains("X-Starry-Tier");
+            }
+        }
+    }
+
     @Test void concurrentEditorsCannotOverwriteEachOther() {
         var page = service.create(content("Concurrent", "start"), "test").block(TIMEOUT);
         var results = Flux.range(0, 2).flatMap(index -> service.save(page.id(),

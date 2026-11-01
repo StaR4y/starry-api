@@ -88,6 +88,20 @@ public class OpenAiResponseStateStore {
     }
 
     public void remember(ObjectNode response, JsonNode request, String accountId) {
+        remember(response, request, accountId, false);
+    }
+
+    /**
+     * {@link #remember(ObjectNode, JsonNode, String)} for an answer no OpenAI account gave (a relay's, which has no owner):
+     * the reasoning items the gateway wrote for it ({@link OpenAiResponseFactory#isRenderedReasoning}) are left out of the
+     * history. The client is given them, but they say nothing the next source can use, and an OpenAI account that is sent
+     * one back with {@code store: false} may refuse the request, which is a failure no other tier is asked about.
+     */
+    public void rememberRelayed(ObjectNode response, JsonNode request) {
+        remember(response, request, null, true);
+    }
+
+    private void remember(ObjectNode response, JsonNode request, String accountId, boolean withoutRenderedReasoning) {
         String responseId = clean(response.path("id").asString(null));
         if (responseId == null) {
             return;
@@ -95,6 +109,13 @@ public class OpenAiResponseStateStore {
         ArrayNode history = objectMapper.createArrayNode();
         appendInput(history, request.path("input"));
         appendAll(history, response.path("output"));
+        if (withoutRenderedReasoning) {
+            for (int i = history.size() - 1; i >= 0; i--) {
+                if (OpenAiResponseFactory.isRenderedReasoning(history.get(i))) {
+                    history.remove(i);
+                }
+            }
+        }
         byte[] packed = deflate(history);
         if (packed == null) {
             return;

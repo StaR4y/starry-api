@@ -1,0 +1,1 @@
+{"origin": "Claude Code 2.1.168: two tool calls in one answer, and the two results the client sends back in one turn (Claude Code writes them in the reverse order). The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

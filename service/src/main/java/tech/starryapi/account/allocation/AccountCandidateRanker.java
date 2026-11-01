@@ -6,6 +6,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
@@ -14,6 +15,7 @@ import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import org.springframework.r2dbc.core.DatabaseClient;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import tech.starryapi.account.AccountPlatforms;
 import tech.starryapi.account.ProxyAccountEntity;
@@ -22,6 +24,7 @@ import tech.starryapi.account.ProxyAccountEntity;
 public class AccountCandidateRanker {
 
     private static final int OPENAI_TOP_K = 3;
+    private static final int LOAD_PAGE = 500;
 
     private final DatabaseClient databaseClient;
     private final Cache<String, AllocationSnapshot> snapshots = Caffeine.newBuilder()
@@ -40,7 +43,7 @@ public class AccountCandidateRanker {
         return snapshots(candidates).flatMap(snapshotMap -> {
             List<RankedCandidate> ranked = candidates.stream()
                 .map(account -> ranked(account, snapshotMap.get(account.getAccountId())))
-                .filter(candidate -> candidate.snapshot() == null || candidate.snapshot().schedulable())
+                .filter(candidate -> isSchedulable(candidate.snapshot()))
                 .toList();
             if (ranked.isEmpty()) {
                 return Mono.empty();
@@ -53,6 +56,57 @@ public class AccountCandidateRanker {
             }
             return Mono.just(selectGeneral(ranked).account());
         });
+    }
+
+    /**
+     * The candidates {@link #select} may pick right now: those whose lifecycle lets them be scheduled (not disabled, and
+     * not cooling down or quarantined before the cooldown has ended), by the rule {@link #select} applies. An account
+     * without an allocation row counts as schedulable, as it does there. Nothing is selected, reserved or changed.
+     */
+    public Mono<List<ProxyAccountEntity>> schedulable(List<ProxyAccountEntity> candidates) {
+        if (candidates == null || candidates.isEmpty()) {
+            return Mono.just(List.of());
+        }
+        return snapshots(candidates).map(snapshotMap -> candidates.stream()
+            .filter(account -> isSchedulable(snapshotMap.get(account.getAccountId())))
+            .toList());
+    }
+
+    private static boolean isSchedulable(AllocationSnapshot snapshot) {
+        return snapshot == null || snapshot.schedulable();
+    }
+
+    /**
+     * What the allocation tables say about the accounts right now, as the selection reads it (the snapshots are cached
+     * for two seconds): whether the lifecycle lets them be scheduled and whether they are at their concurrency or
+     * in-flight token limit. An account without a row is absent from the result, and selection treats it as free. This
+     * is a read for the status page and never selects, reserves or changes anything.
+     */
+    public Mono<Map<String, AccountLoad>> loads(Collection<ProxyAccountEntity> accounts) {
+        if (accounts == null || accounts.isEmpty()) {
+            return Mono.just(Map.of());
+        }
+        List<ProxyAccountEntity> all = List.copyOf(accounts);
+        // The lookup lists the accounts as bind parameters; a page of them stays far below the protocol's limit.
+        List<List<ProxyAccountEntity>> pages = new ArrayList<>();
+        for (int from = 0; from < all.size(); from += LOAD_PAGE) {
+            pages.add(all.subList(from, Math.min(all.size(), from + LOAD_PAGE)));
+        }
+        return Flux.fromIterable(pages)
+            .concatMap(this::snapshots)
+            .collect(HashMap<String, AccountLoad>::new, (loads, snapshots) -> snapshots.forEach(
+                (accountId, snapshot) -> loads.put(accountId, snapshot.load())))
+            .map(Map::copyOf);
+    }
+
+    /**
+     * @param lifecycleState HEALTHY, DEGRADED, WARMING, COOLDOWN, QUARANTINED or DISABLED
+     * @param schedulable whether selection may pick the account (the lifecycle, and a cooldown that has ended)
+     * @param saturated whether it is at its concurrency limit or has no in-flight token budget left, so that admission
+     *     would refuse it; the limits that need the buckets (requests per minute, burst) or the session table are only
+     *     known when a request asks, and not counted here
+     */
+    public record AccountLoad(String lifecycleState, boolean schedulable, boolean saturated) {
     }
 
     static double openAiScore(ProxyAccountEntity account, AllocationSnapshot snapshot) {
@@ -274,6 +328,12 @@ public class AccountCandidateRanker {
         long reservedInputTokens,
         long reservedOutputTokens
     ) {
+        AccountLoad load() {
+            boolean full = safeConcurrency > 0 && activeConcurrency >= safeConcurrency
+                || maxInflightTokens > 0 && reservedInputTokens + reservedOutputTokens >= maxInflightTokens;
+            return new AccountLoad(lifecycleState, schedulable(), full);
+        }
+
         boolean schedulable() {
             if ("HEALTHY".equals(lifecycleState) || "DEGRADED".equals(lifecycleState) || "WARMING".equals(lifecycleState)) {
                 return true;

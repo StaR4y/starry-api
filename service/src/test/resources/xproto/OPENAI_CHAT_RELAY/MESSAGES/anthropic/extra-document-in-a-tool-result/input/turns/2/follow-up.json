@@ -1,0 +1,24 @@
+[
+  {
+    "role": "user",
+    "content": [
+      {
+        "tool_use_id": "${tool.0}",
+        "type": "tool_result",
+        "content": [
+          {
+            "type": "document",
+            "source": {
+              "type": "base64",
+              "media_type": "application/pdf",
+              "data": "JVBERi0xLjQK"
+            }
+          }
+        ],
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      }
+    ]
+  }
+]

@@ -13,6 +13,7 @@ import tech.starryapi.account.AccountPlatforms;
 import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.config.ProductionWebClients;
 import tech.starryapi.platform.core.PlatformCompletionResult;
+import tech.starryapi.platform.upstream.UpstreamException;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -275,7 +276,108 @@ class AnthropicUpstreamClientTest {
                 .isInstanceOfSatisfying(tech.starryapi.platform.upstream.UpstreamException.class, error -> {
                     assertThat(error.getStatusCode()).isEqualTo(529);
                     assertThat(error.isRecoverable()).isTrue();
+                    // The partial text was generated: the answer must not be generated again by another source.
+                    assertThat(error.isGenerationStarted()).isTrue();
                 });
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void anErrorEventAfterAToolCallBeganSaysTheGenerationStarted() throws Exception {
+        UpstreamException failure = failureOf("""
+            event: message_start
+            data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}
+
+            event: content_block_start
+            data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file","input":{}}}
+
+            event: error
+            data: {"type":"error","error":{"type":"api_error","message":"Internal server error"}}
+
+            """);
+
+        assertThat(failure.getStatusCode()).isEqualTo(500);
+        assertThat(failure.isRecoverable()).isTrue();
+        assertThat(failure.isGenerationStarted()).isTrue();
+    }
+
+    @Test
+    void anErrorEventAfterAThinkingDeltaSaysTheGenerationStarted() throws Exception {
+        UpstreamException failure = failureOf("""
+            event: message_start
+            data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}
+
+            event: content_block_delta
+            data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"Let me think"}}
+
+            event: error
+            data: {"type":"error","error":{"type":"timeout_error","message":"Request timed out"}}
+
+            """);
+
+        assertThat(failure.getStatusCode()).isEqualTo(504);
+        assertThat(failure.isGenerationStarted()).isTrue();
+    }
+
+    @Test
+    void anErrorEventAfterTheMessageReportedAnOutputTokenSaysTheGenerationStarted() throws Exception {
+        UpstreamException failure = failureOf("""
+            event: message_start
+            data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":1}}}
+
+            event: error
+            data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}
+
+            """);
+
+        assertThat(failure.getStatusCode()).isEqualTo(529);
+        assertThat(failure.isGenerationStarted()).isTrue();
+    }
+
+    @Test
+    void anErrorEventBeforeAnyOutputLeavesTheGenerationNotStarted() throws Exception {
+        UpstreamException failure = failureOf("""
+            event: ping
+            data: {"type":"ping"}
+
+            event: message_start
+            data: {"type":"message_start","message":{"usage":{"input_tokens":10,"output_tokens":0}}}
+
+            event: error
+            data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}
+
+            """);
+
+        // Nothing was generated, so another source may still serve the request once.
+        assertThat(failure.getStatusCode()).isEqualTo(529);
+        assertThat(failure.isRecoverable()).isTrue();
+        assertThat(failure.isGenerationStarted()).isFalse();
+    }
+
+    @Test
+    void anErrorEventAsTheVeryFirstEventLeavesTheGenerationNotStarted() throws Exception {
+        UpstreamException failure = failureOf("""
+            event: error
+            data: {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}
+
+            """);
+
+        assertThat(failure.isGenerationStarted()).isFalse();
+    }
+
+    private UpstreamException failureOf(String sse) throws Exception {
+        HttpServer server = streamServer(sse);
+        try {
+            AnthropicUpstreamClient client = new AnthropicUpstreamClient(objectMapper, ProductionWebClients.builder().build());
+            Throwable failure = org.assertj.core.api.Assertions.catchThrowable(() -> client.complete(
+                anthropicAccount("http://127.0.0.1:" + server.getAddress().getPort()),
+                objectMapper.readTree("{\"model\":\"anthropic/claude-sonnet-4.5\",\"max_tokens\":64,\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}"),
+                "anthropic/claude-sonnet-4.5"
+            ).block());
+            assertThat(failure).isInstanceOf(UpstreamException.class);
+            return (UpstreamException) failure;
         } finally {
             server.stop(0);
         }

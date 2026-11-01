@@ -1,0 +1,1 @@
+{"origin": "Codex 0.142.5: the relay reasons before a tool call; the client puts the reasoning item back into its history (as it has it) and the next request carries it, where it is left out. The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

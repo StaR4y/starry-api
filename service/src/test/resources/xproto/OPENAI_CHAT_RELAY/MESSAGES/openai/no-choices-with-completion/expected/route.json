@@ -1,0 +1,19 @@
+{
+  "relaysLeftOut": [],
+  "attempts": [
+    {
+      "account": "relay-1",
+      "tier": "openai:relay",
+      "dispatch": "OPENAI_CHAT",
+      "wireModel": "relay-gpt",
+      "success": false,
+      "status": 502,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "usageSource": null,
+      "stopReason": "INTERRUPTED",
+      "degraded": "cache_control,thinking,context_management,metadata,billing_header_dropped",
+      "error": "The source returned no answer"
+    }
+  ]
+}

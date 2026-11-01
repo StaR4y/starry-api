@@ -19,7 +19,19 @@ final class RequestLogMapper {
             entity.getCredits(),
             entity.getLatencyMs(),
             entity.getErrorMessage(),
-            entity.getCreatedAt()
+            entity.getCreatedAt(),
+            entity.getSourceTierRef(),
+            entity.getSourceTierLevel(),
+            entity.getSourceTierName(),
+            entity.getPriceFactor(),
+            entity.getTierSelection(),
+            entity.getSourceDispatch(),
+            entity.getWireModel(),
+            entity.getUsageSource(),
+            entity.getStopReason(),
+            entity.getDegradedFeatures(),
+            entity.getWithheldInputTokens(),
+            entity.getWithheldOutputTokens()
         );
     }
 }

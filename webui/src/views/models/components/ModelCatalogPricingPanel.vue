@@ -4,6 +4,12 @@
   import { ElMessage, ElMessageBox } from 'element-plus';
   import { Check, Delete, Edit, Plus, Refresh, RefreshLeft, Search } from '@element-plus/icons-vue';
   import { adminPaymentApi, modelPricingApi, modelsApi } from '@/api';
+  import { sourceTiersApi, type SourceTierOverview } from '@/api/sourceTiers';
+  import {
+    previewTiers,
+    vendorOfProvider,
+    type PreviewTier,
+  } from '@/views/settings/components/source-tiers/tierStatusMeta';
   import { formatDateTime } from '@/utils/format';
   import ProviderLogo from '@/components/ProviderLogo.vue';
   import { canonicalCatalogProvider } from '@/platforms/models';
@@ -41,6 +47,9 @@
   const preview = ref<ModelPricingPreview | null>(null);
   const previewing = ref(false);
   let previewSequence = 0;
+  // 号源分级：预览的模型所在厂商如果启用了分级，预览一并算出每个号池的价格
+  const tierOverview = ref<SourceTierOverview | null>(null);
+  const previewedTiers = ref<PreviewTier[]>([]);
   const source = ref<ModelPricingSourceStatus>({
     remoteRefreshEnabled: true,
     syncCatalogIds: false,
@@ -127,6 +136,15 @@
       .map((id) => rules.value.find((rule) => rule.ruleId === id))
       .filter((rule): rule is EditableRule => Boolean(rule)),
   );
+  const tierPrices = computed(() =>
+    (preview.value?.factorPricing ?? []).flatMap((entry, index) => {
+      const tier = previewedTiers.value[index];
+      return tier ? [{ tier, pricing: entry.pricing }] : [];
+    }),
+  );
+  const tierPriceColumns = computed(() => ({
+    gridTemplateColumns: `minmax(90px, 1fr) repeat(${tierPrices.value.length}, minmax(80px, 1fr))`,
+  }));
   const priceFields: { label: string; key: keyof ModelPublicPricing }[] = [
     {
       get label() {
@@ -358,6 +376,8 @@
       ]);
       acceptRules(settings.rules);
       if (settings.source) source.value = settings.source;
+      // 号源分级只是附加信息：读不到就不显示号池价格
+      tierOverview.value = await sourceTiersApi.overview().catch(() => null);
       catalog.value = models;
       modelIds.value = models.map((model) => model.id);
       if (!providers.value.includes(selectedProvider.value)) {
@@ -412,8 +432,21 @@
     preview.value = null;
     previewing.value = true;
     try {
-      const result = await modelPricingApi.preview(previewModel.value.trim(), rules.value);
-      if (sequence === previewSequence) preview.value = result;
+      const id = previewModel.value.trim();
+      const entry = catalog.value.find((model) => model.id.toLowerCase() === id.toLowerCase());
+      const vendor = tierOverview.value?.vendors.find(
+        (candidate) => candidate.vendor === vendorOfProvider(entry?.provider),
+      );
+      const tiers = previewTiers(vendor, !!tierOverview.value?.runtime.nativeTiers);
+      const result = await modelPricingApi.preview(
+        id,
+        rules.value,
+        tiers.map((tier) => tier.factor),
+      );
+      if (sequence === previewSequence) {
+        previewedTiers.value = tiers;
+        preview.value = result;
+      }
     } catch {
       // Failed previews must not retain an older price.
     } finally {
@@ -775,6 +808,34 @@
             <strong>{{ number(preview.pricing[field.key]) }}</strong>
           </div>
         </div>
+        <template v-if="tierPrices.length">
+          <div class="section-head tier-price-head">
+            <h3>{{ t('号池价格') }}</h3>
+            <span class="unit">USD / MTok</span>
+          </div>
+          <p class="tier-price-note">
+            {{ t('规则只命中一条，号池系数在它之后再乘：号池价格 = 上面的当前价格 × 号池系数。') }}
+          </p>
+          <div class="price-table" role="table" :aria-label="t('号池价格')">
+            <div class="price-line price-table-head" :style="tierPriceColumns">
+              <span>{{ t('计费项') }}</span>
+              <span v-for="entry in tierPrices" :key="entry.tier.tierId">
+                L{{ entry.tier.level }} {{ entry.tier.name }} × {{ number(entry.tier.factor) }}
+              </span>
+            </div>
+            <div
+              v-for="field in priceFields"
+              :key="field.key"
+              class="price-line"
+              :style="tierPriceColumns"
+            >
+              <span>{{ field.label }}</span>
+              <strong v-for="entry in tierPrices" :key="entry.tier.tierId">
+                {{ number(entry.pricing[field.key]) }}
+              </strong>
+            </div>
+          </div>
+        </template>
         <div v-if="preview.matchedPriceModel" class="price-source">
           {{ t('官方价格模型') }} <code>{{ preview.matchedPriceModel }}</code>
         </div>
@@ -1171,6 +1232,15 @@
   }
   .price-table-head {
     font-size: 12px;
+  }
+  .tier-price-head {
+    margin-top: 22px;
+  }
+  .tier-price-note {
+    margin: 4px 0 0;
+    font-size: 12px;
+    line-height: 1.55;
+    color: var(--kp-text-secondary);
   }
   .price-source {
     padding-top: 12px;

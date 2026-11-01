@@ -1,0 +1,1 @@
+{"origin": "Codex 0.142.5 request with reasoning effort high: derived from the capture by setting the field (the client sends none for a model it has no metadata for); the member maps reasoning to an effort. The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

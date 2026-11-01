@@ -1,0 +1,1 @@
+{"origin": "Claude Code 2.1.168: the gate of the pair lists other keys than the one of the request, so the relay is left out. The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

@@ -1,6 +1,7 @@
 package tech.starryapi.apikey;
 
 import java.math.BigDecimal;
+import java.time.Duration;
 import java.util.Optional;
 import org.springframework.data.r2dbc.core.R2dbcEntityTemplate;
 import org.springframework.http.HttpHeaders;
@@ -15,6 +16,7 @@ import tech.starryapi.common.Hashing;
 import tech.starryapi.config.ProxyProperties;
 import tech.starryapi.model.ModelCatalogProvider;
 import tech.starryapi.platform.catalog.PlatformModelCatalogSupport;
+import tech.starryapi.proxy.tier.TierSelectorParser;
 
 @Service
 public class ApiKeyService {
@@ -22,6 +24,9 @@ public class ApiKeyService {
     private static final java.util.regex.Pattern PROVIDER_NAME = java.util.regex.Pattern.compile("[A-Za-z0-9._ -]+");
     private static final String KEY_PREFIX = "sk-";
     private static final String ADMIN_ROLE = "ADMIN";
+    /** What a reservation is leased for when it is made (reserve_api_usage), and the least a dispatch renews it to. */
+    private static final Duration BASE_LEASE = Duration.ofMinutes(15);
+    private static final Duration LEASE_SLACK = Duration.ofSeconds(60);
 
     private final ApiKeyRepository repository;
     private final R2dbcEntityTemplate template;
@@ -53,6 +58,7 @@ public class ApiKeyService {
         entity.setCreditsLimit(request.creditsLimit());
         entity.setModelProvider(normalizeModelProvider(request.modelProvider()));
         entity.setBillingSource(normalizeBillingSource(request.billingSource()));
+        entity.setTierPreference(normalizeTierPreference(request.tierPreference()));
         entity.setBillingMinimumCredits(BigDecimal.ZERO);
         entity.setTotalRequests(0L);
         entity.setTotalCredits(BigDecimal.ZERO);
@@ -69,7 +75,8 @@ public class ApiKeyService {
                 saved.getCreditsLimit(),
                 saved.getModelProvider(),
                 saved.getBillingSource(),
-                saved.getCreatedAt()
+                saved.getCreatedAt(),
+                ApiKeyMapper.tierPreference(saved.getTierPreference())
             ));
     }
 
@@ -81,11 +88,24 @@ public class ApiKeyService {
                 credits_limit = CASE WHEN :clearCreditsLimit THEN NULL WHEN :setCreditsLimit THEN :creditsLimit ELSE credits_limit END,
                 model_provider = CASE WHEN :setModelProvider THEN :modelProvider ELSE model_provider END,
                 billing_source = CASE WHEN :setBillingSource THEN :billingSource ELSE billing_source END,
+                tier_preference = CASE
+                    WHEN :setTierPreference THEN :tierPreference
+                    WHEN :setModelProvider AND lower(model_provider) IS DISTINCT FROM lower(:modelProvider) THEN 'auto'
+                    ELSE tier_preference
+                END,
                 updated_at = clock_timestamp()
             WHERE key_id = :keyId
               AND (:isAdmin OR user_id = :userId)
+              AND (NOT :requireProvider OR model_provider <> '*')
             RETURNING *
             """;
+        // A preference names a pool of one vendor, so the key has to be tied to one provider (design 6.1): the request
+        // gives the provider, or the key already has it. The provider the request gives is never "*", which is refused.
+        // And it stays with that vendor: a request that moves the key to another provider without giving a preference
+        // clears it (the right-hand sides of an UPDATE read the old row), since a name or a level that meant a pool of the
+        // one vendor would otherwise start to pin the key to whatever the other happens to have under it.
+        String tierPreference = normalizeTierPreference(request.tierPreference());
+        boolean requireProvider = request.tierPreference() != null && !"auto".equals(tierPreference) && request.modelProvider() == null;
         GenericExecuteSpec spec = template.getDatabaseClient().sql(sql)
             .bind("setName", request.name() != null)
             .bind("setEnabled", request.enabled() != null)
@@ -94,6 +114,9 @@ public class ApiKeyService {
             .bind("setModelProvider", request.modelProvider() != null)
             .bind("setBillingSource", request.billingSource() != null)
             .bind("billingSource", normalizeBillingSource(request.billingSource()))
+            .bind("setTierPreference", request.tierPreference() != null)
+            .bind("tierPreference", tierPreference)
+            .bind("requireProvider", requireProvider)
             .bind("keyId", keyId)
             .bind("isAdmin", isAdmin(principal))
             .bind("userId", principal.userId());
@@ -109,8 +132,29 @@ public class ApiKeyService {
         return spec
             .map((row, metadata) -> template.getConverter().read(ApiKeyEntity.class, row, metadata))
             .one()
-            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "API_KEY_NOT_FOUND", "API key not found")))
+            .switchIfEmpty(Mono.defer(() -> requireProvider ? notUpdatedForWantOfProvider(principal, keyId) : keyNotFound()))
             .onErrorMap(ApiKeyService::mapBillingConstraint);
+    }
+
+    private static Mono<ApiKeyEntity> keyNotFound() {
+        return Mono.error(() -> new ApiException(HttpStatus.NOT_FOUND, "API_KEY_NOT_FOUND", "API key not found"));
+    }
+
+    /**
+     * Why an update that wanted a preference for a key of the request's own provider changed nothing: there is no such
+     * key of the caller's (404), or there is, and it is a legacy key that any provider may call, which no pool of one
+     * vendor can be preferred by.
+     */
+    private Mono<ApiKeyEntity> notUpdatedForWantOfProvider(AdminPrincipal principal, String keyId) {
+        Mono<ApiKeyEntity> own = isAdmin(principal)
+            ? repository.findByKeyId(keyId)
+            : repository.findByKeyIdAndUserId(keyId, principal.userId());
+        return own.flatMap(found -> Mono.<ApiKeyEntity>error(new ApiException(
+                HttpStatus.BAD_REQUEST,
+                "API_KEY_TIER_PREFERENCE_INVALID",
+                "A tier preference needs a key tied to one model provider; choose the provider first"
+            )))
+            .switchIfEmpty(keyNotFound());
     }
 
     public Mono<Void> delete(AdminPrincipal principal, String keyId) {
@@ -171,7 +215,8 @@ public class ApiKeyService {
                             user.balance(),
                             entity.getModelProvider(),
                             user.hasActiveSubscription(),
-                            entity.getBillingSource()
+                            entity.getBillingSource(),
+                            entity.getTierPreference()
                         ));
                     });
             });
@@ -211,6 +256,128 @@ public class ApiKeyService {
                 HttpStatus.CONFLICT, "BILLING_RESERVATION_EXPIRED", "Billing reservation expired before dispatch")));
     }
 
+    /**
+     * {@link #markUsageDispatched} for a request served from source tiers (design 4.6): it also records the tier the
+     * attempt went to, so a reservation that is settled later by an administrator, or whose lease ran out, can still be
+     * attributed, and it renews the lease. Each dispatch may take as long as the upstream client retries
+     * ({@link #leaseWindow}); the lease is renewed to cover it and never shortened, and never runs past an hour after the
+     * reservation was made, which no request is allowed to outlive. A dispatch that may take longer renews it again while
+     * it runs ({@link #renewDispatchLease}). The sweeper turns an expired lease into a review.
+     *
+     * @return the lease; empty for the anonymous caller, who has no reservation
+     */
+    public Mono<DispatchLease> markUsageDispatchedTiered(ApiKeyPrincipal principal, String requestId, String tierRef) {
+        return markUsageDispatchedTiered(principal, requestId, tierRef, null);
+    }
+
+    /**
+     * {@link #markUsageDispatchedTiered(ApiKeyPrincipal, String, String)} for a dispatch to an OpenAI-format relay, which
+     * is bounded by a time limit of its own (design 4.6): the window also covers that limit and a minute over, so that a
+     * relay allowed more time than the upstream clients are is never dispatched under a lease that ends first.
+     *
+     * @param crossProtocolLimit how long the dispatch may take, or null for a dispatch of a native upstream client
+     */
+    public Mono<DispatchLease> markUsageDispatchedTiered(
+        ApiKeyPrincipal principal,
+        String requestId,
+        String tierRef,
+        Duration crossProtocolLimit
+    ) {
+        if (principal == null || "anonymous".equals(principal.keyId())) return Mono.empty();
+        Duration window = leaseWindow(crossProtocolLimit);
+        return template.getDatabaseClient().sql("""
+            UPDATE billing_reservations
+            SET status = 'DISPATCHED',
+                last_dispatched_tier_ref = :tierRef,
+                last_dispatched_at = clock_timestamp(),
+                expires_at = LEAST(created_at + INTERVAL '60 minutes',
+                                   GREATEST(expires_at, clock_timestamp() + make_interval(secs => CAST(:windowSeconds AS double precision)))),
+                updated_at = clock_timestamp()
+            WHERE request_hash = :hash AND status IN ('RESERVED', 'DISPATCHED') AND expires_at > clock_timestamp()
+            RETURNING CAST(FLOOR(EXTRACT(EPOCH FROM (created_at + INTERVAL '60 minutes' - clock_timestamp()))) AS BIGINT) AS seconds_to_cap
+            """).bind("hash", usageHash(principal, requestId)).bind("tierRef", tierRef).bind("windowSeconds", window.toSeconds())
+            .map((row, metadata) -> row.get("seconds_to_cap", Long.class)).one()
+            .map(secondsToCap -> new DispatchLease(window, Duration.ofSeconds(Math.max(0, secondsToCap))))
+            .switchIfEmpty(Mono.error(() -> new ApiException(
+                HttpStatus.CONFLICT, "BILLING_RESERVATION_EXPIRED", "Billing reservation expired before dispatch")));
+    }
+
+    /**
+     * How long a lease on a dispatch of a tiered request lasts from the time it is made or renewed: the upstream client's
+     * request timeout for each of its tries, and a minute over, but at least what a reservation is leased for to begin
+     * with. A cross-protocol dispatch adds its own time limit to this ({@link #leaseWindow(Duration)}).
+     */
+    Duration leaseWindow() {
+        Duration longestDispatch = properties.getRequestTimeout()
+            .multipliedBy(Math.max(0, properties.getMaxRetries()) + 1L)
+            .plus(LEASE_SLACK);
+        return longestDispatch.compareTo(BASE_LEASE) > 0 ? longestDispatch : BASE_LEASE;
+    }
+
+    /** {@link #leaseWindow()}, or what a cross-protocol dispatch bounded by {@code crossProtocolLimit} needs when that is longer. */
+    Duration leaseWindow(Duration crossProtocolLimit) {
+        Duration window = leaseWindow();
+        if (crossProtocolLimit == null) {
+            return window;
+        }
+        Duration crossProtocol = crossProtocolLimit.plus(LEASE_SLACK);
+        return crossProtocol.compareTo(window) > 0 ? crossProtocol : window;
+    }
+
+    /**
+     * Renews the lease of a reservation whose dispatch is still running (design 4.6), to the window from now: never
+     * shortened, and never past an hour after the reservation was made, as {@link #markUsageDispatchedTiered} does. Only
+     * a reservation that is still dispatched is renewed. One that the sweeper already turned into a review, or that was
+     * settled or released, is left as it is. A lease that has run out is renewed all the same while the sweeper has not
+     * got to it, which is best effort: the sweeper selects the expired reservations and releases them in a second
+     * statement that does not look at the expiry again, so one it has already picked up can still become a review. The
+     * settlement at the end of the stream clears that review.
+     *
+     * @return whether the lease was renewed; false when the reservation is no longer dispatched, or for the anonymous
+     *     caller, who has none
+     */
+    public Mono<Boolean> renewDispatchLease(ApiKeyPrincipal principal, String requestId) {
+        if (principal == null || "anonymous".equals(principal.keyId())) return Mono.just(false);
+        return template.getDatabaseClient().sql("""
+            UPDATE billing_reservations
+            SET expires_at = LEAST(created_at + INTERVAL '60 minutes',
+                                   GREATEST(expires_at, clock_timestamp() + make_interval(secs => CAST(:windowSeconds AS double precision)))),
+                updated_at = clock_timestamp()
+            WHERE request_hash = :hash AND status = 'DISPATCHED'
+            """).bind("hash", usageHash(principal, requestId)).bind("windowSeconds", leaseWindow().toSeconds())
+            .fetch().rowsUpdated().map(count -> count == 1);
+    }
+
+    /**
+     * The lease a dispatch holds.
+     *
+     * @param window how long the dispatch may run, which the lease was renewed to cover
+     * @param untilCap how long remains until the hour past which a reservation can no longer be leased
+     */
+    public record DispatchLease(Duration window, Duration untilCap) {
+
+        private static final Duration LEAST_PERIOD = Duration.ofSeconds(1);
+        private static final int RENEWALS_PER_WINDOW = 4;
+
+        /**
+         * How often the lease of a running dispatch is renewed: a quarter of the window. A renewal that succeeds leaves the
+         * lease a window from then, so two renewals in a row can fail and the third still comes a quarter of the window
+         * before the lease runs out (at a third of the window it would come at the moment it runs out).
+         */
+        public Duration renewalPeriod() {
+            Duration period = window.dividedBy(RENEWALS_PER_WINDOW);
+            return period.compareTo(LEAST_PERIOD) < 0 ? LEAST_PERIOD : period;
+        }
+
+        /**
+         * How many renewals can still extend the lease: those that fall within the time left until the hour past which a
+         * reservation cannot be leased. The last of them takes the lease to that hour.
+         */
+        public long renewalsUntilCap() {
+            return untilCap.dividedBy(renewalPeriod());
+        }
+    }
+
     public Mono<Void> releaseUsage(ApiKeyPrincipal principal, String requestId, boolean definitive, String reason) {
         if (principal == null || "anonymous".equals(principal.keyId())) return Mono.empty();
         return template.getDatabaseClient().sql("""
@@ -229,6 +396,37 @@ public class ApiKeyService {
             """).bind("requestHash", usageHash(principal, requestId))
             .bind("credits", nonNegative(credits)).bind("inputTokens", Math.max(0, inputTokens))
             .bind("outputTokens", Math.max(0, outputTokens)).fetch().one()
+            .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "USAGE_ACCOUNTING_FAILED", "Usage accounting did not return an outcome")))
+            .flatMap(row -> billingOutcome(String.valueOf(row.get("accounting_status"))));
+    }
+
+    /**
+     * {@link #accountUsage} for a request served from source tiers (design 5.3): the tier that served, its level and its
+     * price factor are written to the reservation in the same transaction as the charge. Settling again with the same
+     * tier is the same outcome; with another it is a conflict.
+     */
+    public Mono<Void> accountUsageServed(
+        ApiKeyPrincipal principal,
+        String requestId,
+        BigDecimal credits,
+        long inputTokens,
+        long outputTokens,
+        String tierRef,
+        int level,
+        BigDecimal priceFactor
+    ) {
+        if (principal == null || "anonymous".equals(principal.keyId())) return Mono.empty();
+        if (requestId == null || requestId.isBlank()) {
+            return Mono.error(new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "REQUEST_ID_REQUIRED", "Request ID is required for usage accounting"));
+        }
+        // The level is a Java int on purpose: R2DBC binds it as int4, which the function takes (INTEGER) and a SMALLINT
+        // parameter would not resolve.
+        return template.getDatabaseClient().sql("""
+            SELECT starry_api.settle_api_usage_served(:requestHash, :credits, :inputTokens, :outputTokens, :tierRef, :level, :priceFactor) AS accounting_status
+            """).bind("requestHash", usageHash(principal, requestId))
+            .bind("credits", nonNegative(credits)).bind("inputTokens", Math.max(0, inputTokens))
+            .bind("outputTokens", Math.max(0, outputTokens)).bind("tierRef", tierRef).bind("level", level)
+            .bind("priceFactor", priceFactor).fetch().one()
             .switchIfEmpty(Mono.error(() -> new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "USAGE_ACCOUNTING_FAILED", "Usage accounting did not return an outcome")))
             .flatMap(row -> billingOutcome(String.valueOf(row.get("accounting_status"))));
     }
@@ -281,6 +479,15 @@ public class ApiKeyService {
             throw new ApiException(HttpStatus.BAD_REQUEST, "BILLING_SOURCE_INVALID", "Choose BALANCE or CODING_PLAN");
         }
         return value;
+    }
+
+    /** The preference as it is stored; omitted or blank is {@code auto}. */
+    private static String normalizeTierPreference(String preference) {
+        return TierSelectorParser.storedPreference(preference).orElseThrow(() -> new ApiException(
+            HttpStatus.BAD_REQUEST,
+            "API_KEY_TIER_PREFERENCE_INVALID",
+            "Choose auto, a tier identifier, L<level> or <level> (1 to 9), optionally followed by +"
+        ));
     }
 
     private static BigDecimal nonNegative(BigDecimal value) {

@@ -113,6 +113,25 @@ public class ModelMappingService {
         return sourceModel;
     }
 
+    /**
+     * Whether a rule that applies to the key has this model as a source whose own spelling contains an {@code @}: the
+     * exact id ({@code claude-sonnet-4@20250514}) or a pattern that is written around the {@code @} and takes the id
+     * ({@code claude-sonnet-4@*}, {@code *@cheap}). Such a rule was written for ids that carry an {@code @} before tier
+     * selectors existed, so the id is a mapping source as it stands and not a model with a selector on its end. A
+     * pattern with no {@code @} of its own ({@code claude-*}, {@code *}) says nothing about one: it takes the base of a
+     * suffixed id as it takes any other.
+     */
+    public boolean hasAtSource(String sourceModel, String apiKeyId) {
+        for (ModelMappingEntity rule : cachedRules) {
+            String pattern = rule.getSourceModel();
+            if (pattern != null && pattern.indexOf('@') >= 0 && matchesApiKey(rule, apiKeyId) && matchesModel(pattern, sourceModel)
+                && !parseStringList(rule.getTargetModels()).isEmpty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public Mono<Void> refresh() {
         return Mono.defer(() -> {
             long generation = cacheGeneration.get();

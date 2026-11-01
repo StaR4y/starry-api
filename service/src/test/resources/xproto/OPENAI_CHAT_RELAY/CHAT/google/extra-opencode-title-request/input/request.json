@@ -1,0 +1,32 @@
+{
+  "model": "gemini-2.5-pro",
+  "max_tokens": 32000,
+  "reasoning_effort": "low",
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a title generator. You output ONLY a thread title. Nothing else.\n\n<task>\nGenerate a brief title that would help the user find this conversation later.\n\nFollow all rules in <rules>\nUse the <examples> so you know what a good title looks like.\nYour output must be:\n- A single line\n- ≤50 characters\n- No explanations\n</task>\n\n<rules>\n- you MUST use the same language as the user message you are s [shortened]",
+      "cache_control": {
+        "type": "ephemeral"
+      }
+    },
+    {
+      "role": "user",
+      "content": "Generate a title for this conversation:\n",
+      "cache_control": {
+        "type": "ephemeral"
+      }
+    },
+    {
+      "role": "user",
+      "content": "\"Reply with the single word ok\"",
+      "cache_control": {
+        "type": "ephemeral"
+      }
+    }
+  ],
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  }
+}

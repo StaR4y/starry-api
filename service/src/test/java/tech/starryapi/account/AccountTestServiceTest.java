@@ -2,6 +2,8 @@ package tech.starryapi.account;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -23,6 +25,8 @@ import tech.starryapi.platform.kiro.KiroPayloadFactory;
 import tech.starryapi.platform.kiro.KiroUpstreamClient;
 import tech.starryapi.platform.core.PlatformUsage;
 import tech.starryapi.platform.upstream.UpstreamException;
+import tech.starryapi.sourcetier.SourceTierRegistry;
+import tech.starryapi.sourcetier.SourceTierSnapshot;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
@@ -812,6 +816,158 @@ class AccountTestServiceTest {
             assertThat(item.detail()).isEqualTo(tech.starryapi.egress.EgressFailure.PROXY_CONNECT_FAILED.message());
         });
         verifyNoInteractions(accountPoolService);
+    }
+
+    // ---- a relay for another vendor's models is tested with the name it serves them under (design 7.4) ----
+
+    private ProxyAccountEntity relayAccount() {
+        ProxyAccountEntity account = openAiAccount("relay-1", "sk-relay");
+        account.setProvider(AccountPlatforms.OPENAI_COMPATIBLE_PROVIDER);
+        account.setBaseUrl("https://relay.example/v1");
+        return account;
+    }
+
+    private static SourceTierSnapshot relayConfiguration(boolean exclusive) {
+        return SourceTierSnapshot.of(3L,
+            List.of(new SourceTierSnapshot.VendorConfig("anthropic", true, false, false, true, 16, true, 1L)),
+            List.of(new SourceTierSnapshot.Tier("anthropic", "relay", 1, "Relay", java.math.BigDecimal.ONE, java.util.Set.of(), true, true, null)),
+            List.of(new SourceTierSnapshot.Member("anthropic", "relay-1", "relay", "OPENAI_CHAT", exclusive, false, false, false, false, true,
+                "NONE", 540, true, true)),
+            List.of(new SourceTierSnapshot.MemberModel("anthropic", "relay-1", "claude-sonnet-4.5", "Relay/Claude-Sonnet-4.5", 200_000, 8192, true, null, null),
+                new SourceTierSnapshot.MemberModel("anthropic", "relay-1", "claude-haiku-4.5", "Relay/Claude-Haiku-4.5", 200_000, 8192, true, null, null)),
+            List.of());
+    }
+
+    private AccountTestService serviceFor(ProxyAccountEntity account, OpenAiAccountTestClient client, SourceTierRegistry registry) {
+        return serviceFor(account, client, registry, mock(AccountPoolService.class));
+    }
+
+    private AccountTestService serviceFor(
+        ProxyAccountEntity account,
+        OpenAiAccountTestClient client,
+        SourceTierRegistry registry,
+        AccountPoolService accountPoolService
+    ) {
+        ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
+        when(repository.findAll()).thenReturn(Flux.just(account));
+        when(client.test(any(), any(), any())).thenReturn(Mono.just(new PlatformCompletionResult("OK", PlatformUsage.zero())));
+        when(accountPoolService.recordTestSuccess(any(), eq(0L), eq(false))).thenReturn(Mono.empty());
+        return new AccountTestService(objectMapper, repository, accountPoolService, new KiroPayloadFactory(objectMapper, modelCatalog),
+            mock(KiroUpstreamClient.class), client, mock(AnthropicUpstreamClient.class), modelCatalog, registry);
+    }
+
+    private static SourceTierRegistry registryOf(SourceTierSnapshot snapshot) {
+        SourceTierRegistry registry = mock(SourceTierRegistry.class);
+        when(registry.loaded()).thenReturn(true);
+        when(registry.snapshot()).thenReturn(snapshot);
+        return registry;
+    }
+
+    private String testedWith(AccountTestService service, OpenAiAccountTestClient client, ProxyAccountEntity account, String model) {
+        AccountDtos.TestAccountsResponse response = service.test(new AccountDtos.TestAccountsRequest(null, true, model, "ping", 1, false)).block();
+        assertThat(response.success()).isEqualTo(1);
+        ArgumentCaptor<String> tested = ArgumentCaptor.forClass(String.class);
+        verify(client).test(eq(account), tested.capture(), eq("ping"));
+        assertThat(response.items().getFirst().model()).isEqualTo(tested.getValue());
+        return tested.getValue();
+    }
+
+    @Test
+    void aRelayIsTestedWithTheWireNameOfItsFirstMappingNotWithTheDefaultModelOfACompatibleKey() {
+        ProxyAccountEntity account = relayAccount();
+        OpenAiAccountTestClient client = mock(OpenAiAccountTestClient.class);
+        AccountTestService service = serviceFor(account, client, registryOf(relayConfiguration(true)));
+
+        // The scheduled and automatic tests ask for auto (a Claude model is no better: the compatible key's default would replace it).
+        assertThat(testedWith(service, client, account, "auto")).isEqualTo("Relay/Claude-Haiku-4.5");
+    }
+
+    @Test
+    void aModelTheRelayMapsIsTestedUnderItsOwnWireName() {
+        ProxyAccountEntity account = relayAccount();
+        OpenAiAccountTestClient client = mock(OpenAiAccountTestClient.class);
+        AccountTestService service = serviceFor(account, client, registryOf(relayConfiguration(true)));
+
+        assertThat(testedWith(service, client, account, "claude-sonnet-4.5")).isEqualTo("Relay/Claude-Sonnet-4.5");
+    }
+
+    @Test
+    void aRelayThatAlsoServesOtherModelsIsStillTestedWithTheModelAskedFor() {
+        ProxyAccountEntity account = relayAccount();
+        OpenAiAccountTestClient client = mock(OpenAiAccountTestClient.class);
+        AccountTestService service = serviceFor(account, client, registryOf(relayConfiguration(false)));
+
+        assertThat(testedWith(service, client, account, "glm-4.6")).isEqualTo("glm-4.6");
+    }
+
+    @Test
+    void anAccountThatIsNoRelayOrATestBeforeTheTiersAreLoadedIsTestedAsBefore() {
+        ProxyAccountEntity account = relayAccount();
+        String before;
+        OpenAiAccountTestClient plain = mock(OpenAiAccountTestClient.class);
+        before = testedWith(serviceFor(account, plain, null), plain, account, "auto");
+
+        // No registry at all.
+        assertThat(before).isNotEqualTo("Relay/Claude-Haiku-4.5");
+        // A registry that has not loaded.
+        SourceTierRegistry unloaded = mock(SourceTierRegistry.class);
+        when(unloaded.loaded()).thenReturn(false);
+        OpenAiAccountTestClient waiting = mock(OpenAiAccountTestClient.class);
+        assertThat(testedWith(serviceFor(account, waiting, unloaded), waiting, account, "auto")).isEqualTo(before);
+        verify(unloaded, org.mockito.Mockito.never()).snapshot();
+        // A registry in which this account is nobody's relay.
+        OpenAiAccountTestClient other = mock(OpenAiAccountTestClient.class);
+        ProxyAccountEntity stranger = relayAccount();
+        stranger.setAccountId("another-account");
+        assertThat(testedWith(serviceFor(stranger, other, registryOf(relayConfiguration(true))), other, stranger, "auto")).isEqualTo(before);
+        // A registry with nothing configured.
+        OpenAiAccountTestClient nothing = mock(OpenAiAccountTestClient.class);
+        assertThat(testedWith(serviceFor(account, nothing, registryOf(SourceTierSnapshot.EMPTY)), nothing, account, "auto")).isEqualTo(before);
+    }
+
+    /** The raw answer of a relay, as the OpenAI test client puts it into its error: the words the health test reads. */
+    private static final String REVOKED_BY_THE_RELAY =
+        "OpenAI account test error 401: {\"error\":{\"code\":\"token_invalidated\",\"message\":\"account disabled\"}}";
+
+    private AccountDtos.TestAccountsResponse testFailing(AccountTestService service) {
+        return service.test(new AccountDtos.TestAccountsRequest(null, true, "auto", "ping", 1, true)).block();
+    }
+
+    @Test
+    void whatARelayCallsItsOwnKeyDoesNotDisableTheAccountTheTestFailedOnButIsRecordedAsAnyOtherFailureIs() {
+        ProxyAccountEntity account = relayAccount();
+        OpenAiAccountTestClient client = mock(OpenAiAccountTestClient.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        AccountTestService service = serviceFor(account, client, registryOf(relayConfiguration(true)), accountPoolService);
+        when(client.test(any(), any(), any())).thenReturn(Mono.error(new UpstreamException(401, REVOKED_BY_THE_RELAY, false)));
+        when(accountPoolService.recordTestFailure(eq("relay-1"), any(), eq(401), anyString(), eq(true), eq(false), eq(false)))
+            .thenReturn(Mono.empty());
+
+        AccountDtos.TestAccountsResponse response = testFailing(service);
+
+        assertThat(response.failed()).isEqualTo(1);
+        // The status is recorded all the same; only the relay's words are kept from counting as proof that the key is gone for good.
+        verify(accountPoolService).recordTestFailure(
+            eq("relay-1"), eq(AccountPoolService.UpstreamErrorType.FATAL), eq(401), eq(REVOKED_BY_THE_RELAY), eq(true), eq(false), eq(false));
+        verify(accountPoolService, org.mockito.Mockito.never()).recordTestFailure(anyString(), any(), any(), anyString(), anyBoolean());
+    }
+
+    @Test
+    void theSameWordsOfAnAccountThatIsNoRelayAreRecordedAsTheyAlwaysWere() {
+        ProxyAccountEntity account = relayAccount();
+        account.setAccountId("another-account");
+        OpenAiAccountTestClient client = mock(OpenAiAccountTestClient.class);
+        AccountPoolService accountPoolService = mock(AccountPoolService.class);
+        AccountTestService service = serviceFor(account, client, registryOf(relayConfiguration(true)), accountPoolService);
+        when(client.test(any(), any(), any())).thenReturn(Mono.error(new UpstreamException(401, REVOKED_BY_THE_RELAY, false)));
+        when(accountPoolService.recordTestFailure(eq("another-account"), any(), eq(401), anyString(), eq(true))).thenReturn(Mono.empty());
+
+        testFailing(service);
+
+        verify(accountPoolService).recordTestFailure(
+            eq("another-account"), eq(AccountPoolService.UpstreamErrorType.FATAL), eq(401), eq(REVOKED_BY_THE_RELAY), eq(true));
+        verify(accountPoolService, org.mockito.Mockito.never()).recordTestFailure(
+            anyString(), any(), any(), anyString(), anyBoolean(), anyBoolean(), eq(false));
     }
 
     private ProxyAccountEntity account(String accountId, String accessToken) {

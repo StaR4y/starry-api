@@ -1,0 +1,12 @@
+{
+  "reserved": "0.505425",
+  "settled": {
+    "credits": "0.0045",
+    "inputTokens": 1300,
+    "outputTokens": 40,
+    "tier": "anthropic:relay",
+    "level": 1,
+    "priceFactor": "1"
+  },
+  "released": null
+}

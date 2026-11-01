@@ -239,6 +239,17 @@
                 )
               "
             />
+            <el-alert
+              class="policy-alert"
+              type="info"
+              :closable="false"
+              show-icon
+              :title="
+                t(
+                  '这个策略只作用于没有配置「号源分级」的厂商；已启用号源分级的厂商不进入熔断。两套分级互相独立。',
+                )
+              "
+            />
             <PoolPolicyPanel
               v-if="poolPolicyEnabled"
               :settings="accountSettings"

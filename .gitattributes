@@ -1,2 +1,5 @@
 artifacts/*.jar binary
 artifacts/*.tar.gz binary
+
+# Cross-protocol fixtures are compared byte for byte; no line-ending or whitespace rewriting.
+service/src/test/resources/xproto/** -text

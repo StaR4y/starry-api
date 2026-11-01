@@ -49,7 +49,8 @@ test('switching updates computed UI labels without changing entered data', () =>
 
 test('client protocol, credentials, config files, and import links are language independent', () => {
   const context = { apiOrigin: 'https://example.com', apiBaseUrl: 'https://example.com/v1', apiKey: 'sk-test-user-key', apiPort: '443' };
-  const snapshot = () => JSON.stringify({ connection: createConnectionText(context), links: createCcSwitchLinks(context).map(l => l.url), configs: ['codex', 'claude', 'opencode'].flatMap(c => ['unix', 'cmd', 'powershell'].map(p => createSetupScriptBlock(c, p, context).script)) });
+  // With and without a source pool chosen: the pool is written as data (a header, a model suffix), never as a translated text.
+  const snapshot = () => JSON.stringify([context, { ...context, tier: 'kiro+' }].map(context => ({ connection: createConnectionText(context), links: createCcSwitchLinks(context).map(l => l.url), configs: ['codex', 'claude', 'opencode'].flatMap(c => ['unix', 'cmd', 'powershell'].map(p => createSetupScriptBlock(c, p, context).script)) })));
   setLocale('zh-CN');
   const chinese = snapshot();
   setLocale('en-US');
@@ -77,12 +78,14 @@ test('every translation preserves all parameter placeholders', () => {
 
 test('all explicit UI messages have English translations and no raw template text is missed', () => {
   const missing = [];
+  // Chinese text, or the full-width punctuation of one (a key can be only a name and a path joined by a full-width comma).
+  const sourceText = /[\p{Script=Han}\u3000-\u303F\uFF00-\uFFEF]/u;
   function script(source, file) {
     const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
     function visit(node) {
       if (ts.isCallExpression(node) && node.expression.getText(ast) === 't') {
         const key = node.arguments[0];
-        if (key && ts.isStringLiteral(key) && /\p{Script=Han}/u.test(key.text) && !Object.hasOwn(english, key.text.trim())) missing.push(`${file}: ${key.text}`);
+        if (key && ts.isStringLiteral(key) && sourceText.test(key.text) && !Object.hasOwn(english, key.text.trim())) missing.push(`${file}: ${key.text}`);
       }
       ts.forEachChild(node, visit);
     }

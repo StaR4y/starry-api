@@ -1,0 +1,7 @@
+[
+  {
+    "type": "function_call_output",
+    "call_id": "${tool.0}",
+    "output": ""
+  }
+]

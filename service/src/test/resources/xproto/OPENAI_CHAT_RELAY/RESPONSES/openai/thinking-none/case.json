@@ -1,0 +1,1 @@
+{"origin": "Codex 0.142.5 request without reasoning: derived from the capture by setting reasoning to null and include to [], as it sends them for a model without reasoning. The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

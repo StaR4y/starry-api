@@ -1,0 +1,12 @@
+[
+  {
+    "type": "message",
+    "role": "user",
+    "content": [
+      {
+        "type": "input_text",
+        "text": "What color is it?"
+      }
+    ]
+  }
+]

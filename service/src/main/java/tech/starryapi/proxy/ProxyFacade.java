@@ -4,13 +4,20 @@ import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiFunction;
 import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -20,15 +27,20 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Service;
 import org.springframework.web.server.ServerWebExchange;
+import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.util.context.Context;
+import reactor.util.context.ContextView;
 import tech.starryapi.account.AccountAutoSuspendService;
 import tech.starryapi.account.AccountDtos;
 import tech.starryapi.account.AccountPoolService;
 import tech.starryapi.account.AccountPoolRequestContext;
 import tech.starryapi.account.AccountPlatforms;
 import tech.starryapi.account.AccountSettingsService;
+import tech.starryapi.account.CodexOnlyModels;
 import tech.starryapi.account.DisabledAccountScheduledTestService;
+import tech.starryapi.account.PoolCell;
 import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.account.allocation.AccountAdmissionStore;
 import tech.starryapi.account.allocation.AccountFailureScope;
@@ -37,6 +49,7 @@ import tech.starryapi.apikey.ApiKeyService;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.common.JsonNodes;
 import tech.starryapi.common.Hashing;
+import tech.starryapi.config.ProxyProperties;
 import tech.starryapi.model.ModelCatalogProvider;
 import tech.starryapi.model.ModelDtos;
 import tech.starryapi.model.ModelMappingService;
@@ -57,7 +70,32 @@ import tech.starryapi.platform.openai.OpenAiResponseOwnerStore;
 import tech.starryapi.platform.openai.OpenAiResponseStateStore;
 import tech.starryapi.platform.openai.OpenAiUpstreamClient;
 import tech.starryapi.platform.upstream.UpstreamException;
+import tech.starryapi.platform.xproto.AnthropicChatWireConverter;
+import tech.starryapi.platform.xproto.GeminiChatConverter;
+import tech.starryapi.platform.xproto.GeminiRequestNormalizer;
+import tech.starryapi.platform.xproto.PairRegistry;
+import tech.starryapi.platform.xproto.RelayErrorException;
+import tech.starryapi.platform.xproto.RelayUsageNormalizer;
+import tech.starryapi.platform.xproto.ResponsesChatConverter;
 import tech.starryapi.payment.PaymentSettingsService;
+import tech.starryapi.proxy.tier.RequestBounds;
+import tech.starryapi.proxy.tier.TierBilling;
+import tech.starryapi.proxy.tier.TierDispatch;
+import tech.starryapi.proxy.tier.TierEntry;
+import tech.starryapi.proxy.tier.TierEntryFacts;
+import tech.starryapi.proxy.tier.TierPlan;
+import tech.starryapi.proxy.tier.TierPlan.Level;
+import tech.starryapi.proxy.tier.TierPlanRequest;
+import tech.starryapi.proxy.tier.TierResponseHeaders;
+import tech.starryapi.proxy.tier.TierRetryPolicy;
+import tech.starryapi.proxy.tier.TierRoute;
+import tech.starryapi.proxy.tier.TierRuntime;
+import tech.starryapi.proxy.tier.TierSelection;
+import tech.starryapi.proxy.tier.TierSelectorParser;
+import tech.starryapi.proxy.tier.TierSessionBindings;
+import tech.starryapi.proxy.tier.TierSessionKeys;
+import tech.starryapi.proxy.tier.TierWalk;
+import tech.starryapi.sourcetier.SourceTierSnapshot;
 import tech.starryapi.stats.StatsService;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.node.ObjectNode;
@@ -66,16 +104,39 @@ import tools.jackson.databind.node.ObjectNode;
 public class ProxyFacade {
 
     static final int MAX_MODEL_ID_LENGTH = 256;
+    /** How many accounts may refuse admission before a request stops looking: per dispatch untiered, per request tiered. */
+    private static final int MAX_ADMISSION_REFUSALS = 64;
+    /** What a client is told to wait when the tier it chose has no account to offer: about the age of the account cache. */
+    private static final String TIER_UNAVAILABLE_RETRY_AFTER_SECONDS = "5";
+    /** What a dispatch to a relay leaves of the lease of its reservation for what follows the answer (design 4.6). */
+    private static final Duration RELAY_LEASE_MARGIN = Duration.ofSeconds(60);
+    /** A relay is not asked when less than this is left of the time it may take: it could not answer in it. */
+    private static final Duration RELAY_LEAST_TIME_LIMIT = Duration.ofSeconds(30);
+    /** The reasons admission refuses an account that a session's own parallel requests can also cause. */
+    private static final java.util.Set<String> SESSION_CONCURRENCY_REFUSALS =
+        java.util.Set.of("CONCURRENCY_LIMIT", "INFLIGHT_TOKEN_LIMIT", "SESSION_LIMIT");
     private static final Logger log = LoggerFactory.getLogger(ProxyFacade.class);
 
-    private enum ResponseMode {
+    /**
+     * What a Responses chain that cannot leave its owner is told when the owner cannot serve it: the 503
+     * NO_AVAILABLE_ACCOUNT of an untiered request, with the same text. It is told apart from a pool that has nothing to
+     * offer by its type, not by its text, because a request that named its pool is answered differently for the two
+     * ({@link #servedByTiers}): it is not the pool's fault, and waiting a few seconds does not help.
+     */
+    static final class ResponseOwnerUnavailableException extends ApiException {
+        ResponseOwnerUnavailableException() {
+            super(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "The account that owns the OpenAI response is unavailable");
+        }
+    }
+
+    enum ResponseMode {
         OPENAI_CHAT,
         OPENAI_RESPONSES,
         ANTHROPIC_MESSAGES,
         GEMINI_GENERATE_CONTENT
     }
 
-    private enum UpstreamRoute {
+    enum UpstreamRoute {
         KIRO,
         OPENAI,
         ANTHROPIC
@@ -105,6 +166,13 @@ public class ProxyFacade {
     private final StatsService statsService;
     private AccountAdmissionStore admissionStore;
     private OpenAiResponseOwnerStore openAiResponseOwnerStore;
+    private TierRuntime tierRuntime;
+    private XpDispatcher xpDispatcher;
+    private ResponsesChatConverter responsesChatConverter;
+    private GeminiChatConverter geminiChatConverter;
+    private AnthropicChatWireConverter anthropicChatWireConverter;
+    /** The limit of a Responses request that names none, before the model's own maximum is applied (D14). */
+    private long responsesDefaultOutputTokens = ProxyProperties.DEFAULT_RESPONSES_OUTPUT_TOKENS;
 
     public ProxyFacade(
         ApiKeyService apiKeyService,
@@ -154,9 +222,9 @@ public class ProxyFacade {
         this.statsService = statsService;
         this.admissionStore = AccountAdmissionStore.permissive();
         this.openAiResponseOwnerStore = null;
+        this.tierRuntime = TierRuntime.disabled();
     }
 
-    @Autowired
     public ProxyFacade(
         ApiKeyService apiKeyService,
         AccountPoolService accountPoolService,
@@ -211,6 +279,444 @@ public class ProxyFacade {
         this.openAiResponseOwnerStore = openAiResponseOwnerStore;
     }
 
+    public ProxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        AccountAutoSuspendService accountAutoSuspendService,
+        AccountSettingsService accountSettingsService,
+        DisabledAccountScheduledTestService disabledAccountScheduledTestService,
+        ModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroPayloadFactory payloadFactory,
+        KiroUpstreamClient upstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        OpenAiRequestAdapter openAiRequestAdapter,
+        OpenAiResponseFactory openAiResponseFactory,
+        OpenAiResponseStateStore openAiResponseStateStore,
+        AnthropicRequestAdapter anthropicRequestAdapter,
+        AnthropicResponseFactory anthropicResponseFactory,
+        AnthropicUpstreamClient anthropicUpstreamClient,
+        GeminiRequestAdapter geminiRequestAdapter,
+        GeminiResponseFactory geminiResponseFactory,
+        PaymentSettingsService paymentSettingsService,
+        ModelPricingService modelPricingService,
+        StatsService statsService,
+        AccountAdmissionStore admissionStore,
+        OpenAiResponseOwnerStore openAiResponseOwnerStore,
+        TierRuntime tierRuntime
+    ) {
+        this(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            accountSettingsService,
+            disabledAccountScheduledTestService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            payloadFactory,
+            upstreamClient,
+            openAiUpstreamClient,
+            openAiRequestAdapter,
+            openAiResponseFactory,
+            openAiResponseStateStore,
+            anthropicRequestAdapter,
+            anthropicResponseFactory,
+            anthropicUpstreamClient,
+            geminiRequestAdapter,
+            geminiResponseFactory,
+            paymentSettingsService,
+            modelPricingService,
+            statsService,
+            admissionStore,
+            openAiResponseOwnerStore
+        );
+        this.tierRuntime = tierRuntime;
+    }
+
+    ProxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        AccountAutoSuspendService accountAutoSuspendService,
+        AccountSettingsService accountSettingsService,
+        DisabledAccountScheduledTestService disabledAccountScheduledTestService,
+        ModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroPayloadFactory payloadFactory,
+        KiroUpstreamClient upstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        OpenAiRequestAdapter openAiRequestAdapter,
+        OpenAiResponseFactory openAiResponseFactory,
+        OpenAiResponseStateStore openAiResponseStateStore,
+        AnthropicRequestAdapter anthropicRequestAdapter,
+        AnthropicResponseFactory anthropicResponseFactory,
+        AnthropicUpstreamClient anthropicUpstreamClient,
+        GeminiRequestAdapter geminiRequestAdapter,
+        GeminiResponseFactory geminiResponseFactory,
+        PaymentSettingsService paymentSettingsService,
+        ModelPricingService modelPricingService,
+        StatsService statsService,
+        AccountAdmissionStore admissionStore,
+        OpenAiResponseOwnerStore openAiResponseOwnerStore,
+        TierRuntime tierRuntime,
+        XpDispatcher xpDispatcher
+    ) {
+        this(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            accountSettingsService,
+            disabledAccountScheduledTestService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            payloadFactory,
+            upstreamClient,
+            openAiUpstreamClient,
+            openAiRequestAdapter,
+            openAiResponseFactory,
+            openAiResponseStateStore,
+            anthropicRequestAdapter,
+            anthropicResponseFactory,
+            anthropicUpstreamClient,
+            geminiRequestAdapter,
+            geminiResponseFactory,
+            paymentSettingsService,
+            modelPricingService,
+            statsService,
+            admissionStore,
+            openAiResponseOwnerStore,
+            tierRuntime
+        );
+        this.xpDispatcher = xpDispatcher;
+    }
+
+    ProxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        AccountAutoSuspendService accountAutoSuspendService,
+        AccountSettingsService accountSettingsService,
+        DisabledAccountScheduledTestService disabledAccountScheduledTestService,
+        ModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroPayloadFactory payloadFactory,
+        KiroUpstreamClient upstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        OpenAiRequestAdapter openAiRequestAdapter,
+        OpenAiResponseFactory openAiResponseFactory,
+        OpenAiResponseStateStore openAiResponseStateStore,
+        AnthropicRequestAdapter anthropicRequestAdapter,
+        AnthropicResponseFactory anthropicResponseFactory,
+        AnthropicUpstreamClient anthropicUpstreamClient,
+        GeminiRequestAdapter geminiRequestAdapter,
+        GeminiResponseFactory geminiResponseFactory,
+        PaymentSettingsService paymentSettingsService,
+        ModelPricingService modelPricingService,
+        StatsService statsService,
+        AccountAdmissionStore admissionStore,
+        OpenAiResponseOwnerStore openAiResponseOwnerStore,
+        TierRuntime tierRuntime,
+        XpDispatcher xpDispatcher,
+        ResponsesChatConverter responsesChatConverter
+    ) {
+        this(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            accountSettingsService,
+            disabledAccountScheduledTestService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            payloadFactory,
+            upstreamClient,
+            openAiUpstreamClient,
+            openAiRequestAdapter,
+            openAiResponseFactory,
+            openAiResponseStateStore,
+            anthropicRequestAdapter,
+            anthropicResponseFactory,
+            anthropicUpstreamClient,
+            geminiRequestAdapter,
+            geminiResponseFactory,
+            paymentSettingsService,
+            modelPricingService,
+            statsService,
+            admissionStore,
+            openAiResponseOwnerStore,
+            tierRuntime,
+            xpDispatcher
+        );
+        this.responsesChatConverter = responsesChatConverter;
+    }
+
+    ProxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        AccountAutoSuspendService accountAutoSuspendService,
+        AccountSettingsService accountSettingsService,
+        DisabledAccountScheduledTestService disabledAccountScheduledTestService,
+        ModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroPayloadFactory payloadFactory,
+        KiroUpstreamClient upstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        OpenAiRequestAdapter openAiRequestAdapter,
+        OpenAiResponseFactory openAiResponseFactory,
+        OpenAiResponseStateStore openAiResponseStateStore,
+        AnthropicRequestAdapter anthropicRequestAdapter,
+        AnthropicResponseFactory anthropicResponseFactory,
+        AnthropicUpstreamClient anthropicUpstreamClient,
+        GeminiRequestAdapter geminiRequestAdapter,
+        GeminiResponseFactory geminiResponseFactory,
+        PaymentSettingsService paymentSettingsService,
+        ModelPricingService modelPricingService,
+        StatsService statsService,
+        AccountAdmissionStore admissionStore,
+        OpenAiResponseOwnerStore openAiResponseOwnerStore,
+        TierRuntime tierRuntime,
+        XpDispatcher xpDispatcher,
+        ResponsesChatConverter responsesChatConverter,
+        GeminiChatConverter geminiChatConverter
+    ) {
+        this(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            accountSettingsService,
+            disabledAccountScheduledTestService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            payloadFactory,
+            upstreamClient,
+            openAiUpstreamClient,
+            openAiRequestAdapter,
+            openAiResponseFactory,
+            openAiResponseStateStore,
+            anthropicRequestAdapter,
+            anthropicResponseFactory,
+            anthropicUpstreamClient,
+            geminiRequestAdapter,
+            geminiResponseFactory,
+            paymentSettingsService,
+            modelPricingService,
+            statsService,
+            admissionStore,
+            openAiResponseOwnerStore,
+            tierRuntime,
+            xpDispatcher,
+            responsesChatConverter
+        );
+        this.geminiChatConverter = geminiChatConverter;
+    }
+
+    ProxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        AccountAutoSuspendService accountAutoSuspendService,
+        AccountSettingsService accountSettingsService,
+        DisabledAccountScheduledTestService disabledAccountScheduledTestService,
+        ModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroPayloadFactory payloadFactory,
+        KiroUpstreamClient upstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        OpenAiRequestAdapter openAiRequestAdapter,
+        OpenAiResponseFactory openAiResponseFactory,
+        OpenAiResponseStateStore openAiResponseStateStore,
+        AnthropicRequestAdapter anthropicRequestAdapter,
+        AnthropicResponseFactory anthropicResponseFactory,
+        AnthropicUpstreamClient anthropicUpstreamClient,
+        GeminiRequestAdapter geminiRequestAdapter,
+        GeminiResponseFactory geminiResponseFactory,
+        PaymentSettingsService paymentSettingsService,
+        ModelPricingService modelPricingService,
+        StatsService statsService,
+        AccountAdmissionStore admissionStore,
+        OpenAiResponseOwnerStore openAiResponseOwnerStore,
+        TierRuntime tierRuntime,
+        XpDispatcher xpDispatcher,
+        ResponsesChatConverter responsesChatConverter,
+        GeminiChatConverter geminiChatConverter,
+        AnthropicChatWireConverter anthropicChatWireConverter
+    ) {
+        this(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            accountSettingsService,
+            disabledAccountScheduledTestService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            payloadFactory,
+            upstreamClient,
+            openAiUpstreamClient,
+            openAiRequestAdapter,
+            openAiResponseFactory,
+            openAiResponseStateStore,
+            anthropicRequestAdapter,
+            anthropicResponseFactory,
+            anthropicUpstreamClient,
+            geminiRequestAdapter,
+            geminiResponseFactory,
+            paymentSettingsService,
+            modelPricingService,
+            statsService,
+            admissionStore,
+            openAiResponseOwnerStore,
+            tierRuntime,
+            xpDispatcher,
+            responsesChatConverter,
+            geminiChatConverter
+        );
+        this.anthropicChatWireConverter = anthropicChatWireConverter;
+    }
+
+    ProxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        AccountAutoSuspendService accountAutoSuspendService,
+        AccountSettingsService accountSettingsService,
+        DisabledAccountScheduledTestService disabledAccountScheduledTestService,
+        ModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroPayloadFactory payloadFactory,
+        KiroUpstreamClient upstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        OpenAiRequestAdapter openAiRequestAdapter,
+        OpenAiResponseFactory openAiResponseFactory,
+        OpenAiResponseStateStore openAiResponseStateStore,
+        AnthropicRequestAdapter anthropicRequestAdapter,
+        AnthropicResponseFactory anthropicResponseFactory,
+        AnthropicUpstreamClient anthropicUpstreamClient,
+        GeminiRequestAdapter geminiRequestAdapter,
+        GeminiResponseFactory geminiResponseFactory,
+        PaymentSettingsService paymentSettingsService,
+        ModelPricingService modelPricingService,
+        StatsService statsService,
+        AccountAdmissionStore admissionStore,
+        OpenAiResponseOwnerStore openAiResponseOwnerStore,
+        TierRuntime tierRuntime,
+        XpDispatcher xpDispatcher,
+        ResponsesChatConverter responsesChatConverter,
+        ProxyProperties properties
+    ) {
+        this(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            accountSettingsService,
+            disabledAccountScheduledTestService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            payloadFactory,
+            upstreamClient,
+            openAiUpstreamClient,
+            openAiRequestAdapter,
+            openAiResponseFactory,
+            openAiResponseStateStore,
+            anthropicRequestAdapter,
+            anthropicResponseFactory,
+            anthropicUpstreamClient,
+            geminiRequestAdapter,
+            geminiResponseFactory,
+            paymentSettingsService,
+            modelPricingService,
+            statsService,
+            admissionStore,
+            openAiResponseOwnerStore,
+            tierRuntime,
+            xpDispatcher,
+            responsesChatConverter
+        );
+        this.responsesDefaultOutputTokens = properties.getResponsesDefaultOutputTokens();
+    }
+
+    // Spring builds the facade with this one; a second constructor marked for injection fails startup. The dispatcher
+    // of the relays is only used by a tiered request whose plan holds a relay, and the converters only by a Responses, a
+    // Gemini or a Messages request that a relay may serve; a facade built without the first two has none, and no relay
+    // serves their requests, and one built without the Messages converter gives its relays the Chat body the native accounts
+    // are sent. A facade built without the settings is given the default ones.
+    @Autowired
+    ProxyFacade(
+        ApiKeyService apiKeyService,
+        AccountPoolService accountPoolService,
+        AccountAutoSuspendService accountAutoSuspendService,
+        AccountSettingsService accountSettingsService,
+        DisabledAccountScheduledTestService disabledAccountScheduledTestService,
+        ModelCatalogProvider modelCatalog,
+        ModelMappingService modelMappingService,
+        RateLimiterService rateLimiterService,
+        KiroPayloadFactory payloadFactory,
+        KiroUpstreamClient upstreamClient,
+        OpenAiUpstreamClient openAiUpstreamClient,
+        OpenAiRequestAdapter openAiRequestAdapter,
+        OpenAiResponseFactory openAiResponseFactory,
+        OpenAiResponseStateStore openAiResponseStateStore,
+        AnthropicRequestAdapter anthropicRequestAdapter,
+        AnthropicResponseFactory anthropicResponseFactory,
+        AnthropicUpstreamClient anthropicUpstreamClient,
+        GeminiRequestAdapter geminiRequestAdapter,
+        GeminiResponseFactory geminiResponseFactory,
+        PaymentSettingsService paymentSettingsService,
+        ModelPricingService modelPricingService,
+        StatsService statsService,
+        AccountAdmissionStore admissionStore,
+        OpenAiResponseOwnerStore openAiResponseOwnerStore,
+        TierRuntime tierRuntime,
+        XpDispatcher xpDispatcher,
+        ResponsesChatConverter responsesChatConverter,
+        GeminiChatConverter geminiChatConverter,
+        AnthropicChatWireConverter anthropicChatWireConverter,
+        ProxyProperties properties
+    ) {
+        this(
+            apiKeyService,
+            accountPoolService,
+            accountAutoSuspendService,
+            accountSettingsService,
+            disabledAccountScheduledTestService,
+            modelCatalog,
+            modelMappingService,
+            rateLimiterService,
+            payloadFactory,
+            upstreamClient,
+            openAiUpstreamClient,
+            openAiRequestAdapter,
+            openAiResponseFactory,
+            openAiResponseStateStore,
+            anthropicRequestAdapter,
+            anthropicResponseFactory,
+            anthropicUpstreamClient,
+            geminiRequestAdapter,
+            geminiResponseFactory,
+            paymentSettingsService,
+            modelPricingService,
+            statsService,
+            admissionStore,
+            openAiResponseOwnerStore,
+            tierRuntime,
+            xpDispatcher,
+            responsesChatConverter,
+            geminiChatConverter,
+            anthropicChatWireConverter
+        );
+        this.responsesDefaultOutputTokens = properties.getResponsesDefaultOutputTokens();
+    }
+
+    TierRuntime tierRuntime() {
+        return tierRuntime;
+    }
+
     public Mono<ResponseEntity<?>> chat(JsonNode request, ServerWebExchange exchange) {
         return authenticateAndLimit(exchange)
             .zipWith(routingPolicy())
@@ -220,7 +726,10 @@ public class ProxyFacade {
                 tuple.getT1(),
                 "/v1/chat/completions",
                 ResponseMode.OPENAI_CHAT,
-                tuple.getT2()
+                tuple.getT2(),
+                // The chain holds this body anyway, so what the relays need of it is read once the caller is known and not
+                // for a request that is turned away at the door.
+                entryFacts(TierEntry.CHAT, request)
             ));
     }
 
@@ -240,6 +749,7 @@ public class ProxyFacade {
             BigDecimal.ZERO,
             "*"
         );
+        TierEntryFacts entryFacts = entryFacts(TierEntry.CHAT, copy);
         return routingPolicy()
             .flatMap(policy -> invokeChat(
                 copy,
@@ -247,7 +757,8 @@ public class ProxyFacade {
                 principal,
                 "/v1/chat/completions",
                 ResponseMode.OPENAI_CHAT,
-                policy
+                policy,
+                entryFacts
             ))
             .map(ProxyFacade::assistantText);
     }
@@ -270,6 +781,8 @@ public class ProxyFacade {
     }
 
     public Mono<ResponseEntity<?>> messages(JsonNode request, ServerWebExchange exchange) {
+        // The conversion drops what a relay has to be judged by and is given; both are taken from the original, which is then let go.
+        TierEntryFacts entryFacts = messagesEntryFacts(request);
         ObjectNode chat = anthropicRequestAdapter.messagesToChat(request);
         return authenticateAndLimit(exchange)
             .zipWith(routingPolicy())
@@ -279,13 +792,17 @@ public class ProxyFacade {
                 tuple.getT1(),
                 "/v1/messages",
                 ResponseMode.ANTHROPIC_MESSAGES,
-                tuple.getT2()
+                tuple.getT2(),
+                entryFacts
             ));
     }
 
     public Mono<ResponseEntity<?>> geminiGenerateContent(String model, JsonNode request, ServerWebExchange exchange) {
+        // As Messages: the conversion drops what a relay has to be judged by (images, tools that are not functions), so the
+        // original is read before it, and then let go.
+        TierEntryFacts entryFacts = geminiEntryFacts(model, request);
         ObjectNode chat = geminiRequestAdapter.generateContentToChat(model, request);
-        String path = "/v1beta/models/" + model + ":generateContent";
+        String path = geminiPath(model);
         return authenticateAndLimit(exchange)
             .zipWith(routingPolicy())
             .flatMap(tuple -> invokeChat(
@@ -294,8 +811,212 @@ public class ProxyFacade {
                 tuple.getT1(),
                 path,
                 ResponseMode.GEMINI_GENERATE_CONTENT,
-                tuple.getT2()
+                tuple.getT2(),
+                entryFacts
             ));
+    }
+
+    /**
+     * What the relays that may serve a request need to know of the body as the client sent it; null when the planner has
+     * no use for it (no relay could be given a request of the entry: none is registered in a tier that is switched on, or
+     * this release offers no pair for the entry, or no gate of the entry is open to anyone), which is every request of a
+     * deployment without relays. Messages and Gemini take it before the body is converted and the reactive chain built (the
+     * chain must not keep a body with large images alive), Chat once the caller is authenticated, since its chain holds the body
+     * all along, and Responses once the chain it continues is expanded ({@link #responsesEntryFacts}). A body that cannot be
+     * read is no reason to fail the request: it goes on without relays.
+     */
+    private TierEntryFacts entryFacts(TierEntry entry, JsonNode body) {
+        return wantsEntryFacts(entry, body) ? factsOf(entry, body) : null;
+    }
+
+    private TierEntryFacts factsOf(TierEntry entry, JsonNode body) {
+        try {
+            return TierEntryFacts.of(entry, body);
+        } catch (RuntimeException failure) {
+            log.warn("The {} request could not be read for relays and goes on without them: {}", entry, failure.toString());
+            return null;
+        }
+    }
+
+    private boolean wantsEntryFacts(TierEntry entry, JsonNode body) {
+        return body != null && body.isObject() && tierRuntime.planner().wantsEntryFacts(entry);
+    }
+
+    /**
+     * What the relays that may serve a Messages request need to know of it (design 7.6, MESSAGES): the features, read from the
+     * original, and the Chat body a relay is given, which {@link AnthropicChatWireConverter} makes of the original: the entry's
+     * own conversion to Chat (the one the native accounts are sent, and the plan is sized and named over) is text alone, and
+     * a relay is given the images of the user's turns, the cache controls and the failure of a tool result as well. It is made
+     * here, as the Gemini one is, so that the original is let go and what the request keeps for the minutes the upstream call
+     * can take is the converted body (it holds the images a relay may be given). A request the converter cannot read is no
+     * reason to fail it: it costs the request its relays. A facade built without the converter gives its relays the Chat
+     * body the native accounts are sent, as it always did.
+     */
+    private TierEntryFacts messagesEntryFacts(JsonNode request) {
+        TierEntryFacts facts = entryFacts(TierEntry.MESSAGES, request);
+        if (facts == null || anthropicChatWireConverter == null) {
+            return facts;
+        }
+        return withConvertedChat(facts, () -> anthropicChatWireConverter.toChat(request));
+    }
+
+    /**
+     * What the relays that may serve a Responses request need to know of it: the features, read from the request as the
+     * gateway expanded it (a {@code previous_response_id} still in it names a chain this node holds no history of), and the
+     * conversion that makes the body the plan is sized over, which is the Responses one the native accounts are sent, into
+     * the Chat body a relay is given (design 7.6). The conversion is only made when a relay is looked at. Null when the
+     * planner has no use for the facts, which is every request of a deployment without a relay open to the entry, and for
+     * a facade that was built without the converter.
+     *
+     * @param gatewayOutput whether the output limit of the planned body is the default the gateway gave a request that named
+     *     none (D14), which a relay is not sent: its own is chosen from its mapping (D15)
+     */
+    private TierEntryFacts responsesEntryFacts(JsonNode expandedRequest, boolean gatewayOutput) {
+        if (responsesChatConverter == null) {
+            return null;
+        }
+        TierEntryFacts facts = entryFacts(TierEntry.RESPONSES, expandedRequest);
+        return facts == null ? null : facts.withChatConversion(responsesChatConverter::toChat).withGatewayOutput(gatewayOutput);
+    }
+
+    /**
+     * What the relays that may serve a Gemini request need to know of it (design 7.6, GEMINI): the features, read from the
+     * original, and the Chat body a relay is given, which {@link GeminiChatConverter} makes of the original and the entry's
+     * own conversion to Chat (the one the native accounts are sent, and the plan is sized and named over) cannot be: it
+     * pairs a call and its answer by name, and has no place for images or thought signatures. Made here and not when a relay
+     * is looked at, so that the original is let go as the Messages one is: what the request keeps for the minutes the
+     * upstream call can take is the one converted body (it holds the images a relay may be given, as the Chat entry keeps its
+     * own body), not that and the original. A request the converter cannot read is no reason to fail it: it costs the request
+     * its relays, as a body that does not pass the lint does. Null when the planner has no use for the facts, which is every
+     * request of a deployment without a relay open to the entry, and for a facade that was built without the converter.
+     * The facts and the converted body are made of the request with its field names written in camelCase
+     * ({@link GeminiRequestNormalizer}); the native tiers are given the request as the client sent it.
+     */
+    private TierEntryFacts geminiEntryFacts(String model, JsonNode request) {
+        if (geminiChatConverter == null || !wantsEntryFacts(TierEntry.GEMINI, request)) {
+            return null;
+        }
+        // The API takes the names of its fields in camelCase and in snake_case, and the Python SDK and the REST reference write
+        // the second in the messages: the detector, the digest and the converter read one spelling, so the relays are judged
+        // and sent the same request whichever the client used. The native tiers get the request as the client sent it (I4).
+        JsonNode relayView;
+        try {
+            relayView = GeminiRequestNormalizer.normalize(request);
+        } catch (RuntimeException failure) {
+            log.warn("The Gemini request could not be read for relays and goes on without them: {}", failure.toString());
+            return null;
+        }
+        TierEntryFacts facts = factsOf(TierEntry.GEMINI, relayView);
+        if (facts == null) {
+            return null;
+        }
+        return withConvertedChat(facts, () -> geminiChatConverter.toChat(model, relayView));
+    }
+
+    /**
+     * The facts with the Chat body a relay is given, made now by {@code conversion} from the original and kept as the one
+     * body of the request (the conversion that is applied later makes nothing and holds nothing of the original). A
+     * conversion that fails fails when a relay is looked at, and only costs the request its relays. The body is kept only
+     * until the request is planned ({@link TierEntryFacts#release}): the plan holds the bodies of the relays it chose, and a
+     * request that no relay serves would otherwise hold a copy of its images for as long as the upstream call takes.
+     */
+    private static TierEntryFacts withConvertedChat(TierEntryFacts facts, Supplier<ObjectNode> conversion) {
+        ObjectNode relayChat = null;
+        RuntimeException failure = null;
+        try {
+            relayChat = conversion.get();
+        } catch (RuntimeException broken) {
+            failure = broken;
+        }
+        return facts.withChatConversion(new ConvertedChat(relayChat, failure));
+    }
+
+    /** The Chat body the entry converted for the relays, until the plan is made. */
+    private static final class ConvertedChat implements UnaryOperator<JsonNode>, TierEntryFacts.Releasable {
+
+        private volatile ObjectNode converted;
+        private final RuntimeException failure;
+
+        ConvertedChat(ObjectNode converted, RuntimeException failure) {
+            this.converted = converted;
+            this.failure = failure;
+        }
+
+        @Override
+        public JsonNode apply(JsonNode planned) {
+            if (failure != null) {
+                throw failure;
+            }
+            ObjectNode held = converted;
+            if (held == null) {
+                throw new IllegalStateException("The converted body was let go when the request was planned");
+            }
+            return withTheOutputLimitOf(held, planned);
+        }
+
+        @Override
+        public void release() {
+            converted = null;
+        }
+    }
+
+    /** The plan of a request, and then the facts it was made from are let go. */
+    private static Mono<TierPlan> releasingTheFacts(Mono<TierPlan> plan, TierEntryFacts facts) {
+        return facts == null ? plan : plan
+            .doOnEach(signal -> {
+                if (signal.isOnNext() || signal.isOnError()) {
+                    facts.release();
+                }
+            })
+            .doOnCancel(facts::release);
+    }
+
+    /**
+     * The Chat body of a relay with the output limit the request is reserved and sent by: the largest the client wrote or
+     * the {@link RequestBounds#FALLBACK_OUTPUT_TOKENS} the planned body was given, as the Chat entry's relays are sent the
+     * planned body whole. The conversion has the client's {@code maxOutputTokens} and nothing for a request that names none.
+     * Where the conversion has one that the planned body does not (a limit written in snake_case, which the entry's own
+     * conversion does not read), the relay is sent the smaller of the two: the reservation covers the planned limit, and the
+     * client asked for no more than its own.
+     */
+    private static JsonNode withTheOutputLimitOf(ObjectNode relayChat, JsonNode planned) {
+        long limit = 0;
+        for (String field : java.util.List.of("max_tokens", "max_completion_tokens", "max_output_tokens")) {
+            JsonNode value = planned.path(field);
+            if (value.isIntegralNumber() && value.canConvertToLong()) {
+                limit = Math.max(limit, value.longValue());
+            }
+        }
+        JsonNode own = relayChat.path("max_tokens");
+        if (own.isIntegralNumber() && own.canConvertToLong() && own.longValue() > 0) {
+            limit = limit > 0 ? Math.min(limit, own.longValue()) : own.longValue();
+        }
+        ObjectNode sized = JsonNodes.shallowCopy(relayChat);
+        sized.put("max_tokens", limit > 0 ? limit : RequestBounds.FALLBACK_OUTPUT_TOKENS);
+        return sized;
+    }
+
+    private static final String GEMINI_PATH_PREFIX = "/v1beta/models/";
+    private static final String GEMINI_PATH_SUFFIX = ":generateContent";
+
+    private static String geminiPath(String model) {
+        return GEMINI_PATH_PREFIX + model + GEMINI_PATH_SUFFIX;
+    }
+
+    /**
+     * The Gemini endpoint of a request whose model had a tier suffix, without it: the path carries the model as the client
+     * wrote it, and everything after the entry (the endpoint scope of the admission, the failure evidence, the request log)
+     * sees the plain id only, like the model, the price and the reservation do. A path that is not one {@link #geminiPath}
+     * built is returned as it is.
+     */
+    private static String withoutTierSuffix(String path) {
+        if (!path.startsWith(GEMINI_PATH_PREFIX) || !path.endsWith(GEMINI_PATH_SUFFIX)
+            || path.length() < GEMINI_PATH_PREFIX.length() + GEMINI_PATH_SUFFIX.length()) {
+            return path;
+        }
+        String model = path.substring(GEMINI_PATH_PREFIX.length(), path.length() - GEMINI_PATH_SUFFIX.length());
+        int at = model.lastIndexOf('@');
+        return at < 0 ? path : geminiPath(model.substring(0, at));
     }
 
     private Mono<AccountDtos.RoutingPolicySettings> routingPolicy() {
@@ -306,27 +1027,41 @@ public class ProxyFacade {
         return loaded.defaultIfEmpty(AccountDtos.RoutingPolicySettings.defaults());
     }
 
+    // entryFacts is what the relays of the tiers need to know of the body as the client sent it (TierEntryFacts), or null
+    // when none is needed. Messages and Gemini convert the body before this point, and capturing it in the reactive chain
+    // would keep a body with large base64 images alive for the whole upstream call, so the entry derives what is needed from
+    // the original before the chain is built, and only that is captured. What it captures includes the body the converter
+    // made for the relays (it has the images), which is let go when the request is planned (TierEntryFacts#release): from
+    // then on the images are held by the plan, for the relays it chose, and by nothing else.
     private Mono<ResponseEntity<?>> invokeChat(
-        JsonNode request,
+        JsonNode clientRequest,
         ServerWebExchange exchange,
         ApiKeyPrincipal principal,
-        String path,
+        String entryPath,
         ResponseMode responseMode,
-        AccountDtos.RoutingPolicySettings routingPolicy
+        AccountDtos.RoutingPolicySettings routingPolicy,
+        TierEntryFacts entryFacts
     ) {
-        validateChatRequest(request);
+        validateChatRequest(clientRequest);
         Instant start = Instant.now();
         String requestId = UUID.randomUUID().toString();
+        ClientTierChoice tierChoice = clientTierChoice(clientRequest, exchange, principal, responseMode, routingPolicy);
+        // Only the Gemini path has the model in it. A request that had no suffix taken off keeps the path it came with.
+        String path = tierChoice.suffixTaken() && responseMode == ResponseMode.GEMINI_GENERATE_CONTENT
+            ? withoutTierSuffix(entryPath)
+            : entryPath;
+        JsonNode request = tierChoice.request();
         String requestedModel = request.path("model").asString(modelCatalog.defaultTargetModelId());
-        String mappedModel = modelMappingService.apply(requestedModel, principal.keyId());
+        String mappedModel = tierChoice.mappedModel();
         ModelProviderAccessPolicy.verify(modelCatalog, principal, requestedModel, mappedModel);
-        boolean requestedFastMode = isFastRequested(request, requestedModel, mappedModel);
-        String upstreamModel = upstreamModelFor(mappedModel, requestedFastMode);
+        RouteFacts routeFacts = routeFacts(request, requestedModel, mappedModel, responseMode, exchange, routingPolicy);
+        boolean requestedFastMode = routeFacts.requestedFastMode();
+        String upstreamModel = routeFacts.upstreamModel();
         String sessionHint = sessionHint(exchange, request, principal.keyId(), responseMode, null);
         boolean stream = responseMode != ResponseMode.GEMINI_GENERATE_CONTENT && request.path("stream").asBoolean(false);
-        UpstreamRoute route = routeFor(upstreamModel, responseMode);
-        boolean preferDeepSeekAccounts = isDeepSeekRouteModel(route, upstreamModel);
-        boolean preferCodexAccounts = preferCodexAccounts(route, preferDeepSeekAccounts, upstreamModel, exchange, routingPolicy);
+        UpstreamRoute route = routeFacts.route();
+        boolean preferDeepSeekAccounts = routeFacts.preferDeepSeekAccounts();
+        boolean preferCodexAccounts = routeFacts.preferCodexAccounts();
         boolean fastMode = requestedFastMode && route == UpstreamRoute.OPENAI && !preferDeepSeekAccounts;
         JsonNode upstreamRequest = boundedBillingRequest(preferDeepSeekAccounts
             ? deepSeekRequest(request)
@@ -338,28 +1073,68 @@ public class ProxyFacade {
             route,
             preferDeepSeekAccounts
         );
-
-        return requireFastModeAllowed(fastMode).then(withBilling(principal, requestId, requestedModel, upstreamRequest, fastMode, Mono.defer(() -> attemptChat(
-            upstreamRequest,
-            request,
+        Mono<TierPlan> tierPlan = tierRuntime.planner().plan(tierPlanRequest(
             principal,
-            path,
-            responseMode,
-            requestedModel,
-            upstreamModel,
-            sessionHint,
-            stream,
-            route,
-            fastMode,
-            preferCodexAccounts,
-            preferDeepSeekAccounts,
             poolContext,
+            requestedModel,
+            route,
+            preferDeepSeekAccounts,
+            preferCodexAccounts,
+            fastMode,
             routingPolicy,
-            requestId,
-            start,
-            List.of(),
-            new AtomicBoolean(false)
-        ))));
+            upstreamRequest,
+            null,
+            false
+        ).withSessionName(TierSessionKeys.named(sessionHint, codexSessionName(exchange, principal.keyId())))
+            .withSelector(tierChoice.selector())
+            .withEntry(tierEntry(responseMode))
+            .withEntryFacts(entryFacts));
+
+        return requireFastModeAllowed(fastMode).then(releasingTheFacts(tierPlan, entryFacts)).flatMap(plan -> {
+            if (plan.tiered()) {
+                return servedByTiers(plan, exchange, serveTieredChat(new TieredRequest(
+                    plan,
+                    principal,
+                    requestId,
+                    path,
+                    requestedModel,
+                    upstreamModel,
+                    sessionHint,
+                    stream,
+                    servedRoute(plan, route),
+                    fastMode,
+                    preferCodexAccounts,
+                    preferDeepSeekAccounts,
+                    routingPolicy,
+                    upstreamRequest,
+                    request,
+                    start,
+                    true,
+                    true
+                ), responseMode));
+            }
+            return withSelectorStatus(plan, withBilling(principal, requestId, requestedModel, upstreamRequest, fastMode, Mono.defer(() -> attemptChat(
+                upstreamRequest,
+                request,
+                principal,
+                path,
+                responseMode,
+                requestedModel,
+                upstreamModel,
+                sessionHint,
+                stream,
+                route,
+                fastMode,
+                preferCodexAccounts,
+                preferDeepSeekAccounts,
+                poolContext,
+                routingPolicy,
+                requestId,
+                start,
+                List.of(),
+                new AtomicBoolean(false)
+            ))));
+        });
     }
 
     private Mono<ResponseEntity<?>> attemptChat(
@@ -484,20 +1259,23 @@ public class ProxyFacade {
     }
 
     private Mono<ResponseEntity<?>> invokeResponses(
-        JsonNode request,
+        JsonNode clientRequest,
         ServerWebExchange exchange,
         ApiKeyPrincipal principal,
         AccountDtos.RoutingPolicySettings routingPolicy
     ) {
-        validateResponsesRequest(request);
+        validateResponsesRequest(clientRequest);
         Instant start = Instant.now();
         String requestId = UUID.randomUUID().toString();
+        ClientTierChoice tierChoice = clientTierChoice(clientRequest, exchange, principal, ResponseMode.OPENAI_RESPONSES, routingPolicy);
+        JsonNode request = tierChoice.request();
         String path = "/v1/responses";
         String requestedModel = request.path("model").asString(modelCatalog.defaultTargetModelId());
-        String mappedModel = modelMappingService.apply(requestedModel, principal.keyId());
+        String mappedModel = tierChoice.mappedModel();
         ModelProviderAccessPolicy.verify(modelCatalog, principal, requestedModel, mappedModel);
-        boolean requestedFastMode = isFastRequested(request, requestedModel, mappedModel);
-        String upstreamModel = upstreamModelFor(mappedModel, requestedFastMode);
+        RouteFacts routeFacts = routeFacts(request, requestedModel, mappedModel, ResponseMode.OPENAI_RESPONSES, exchange, routingPolicy);
+        boolean requestedFastMode = routeFacts.requestedFastMode();
+        String upstreamModel = routeFacts.upstreamModel();
         String previousResponseId = firstNonBlank(request.path("previous_response_id").asString(null));
         String sessionHint = sessionHint(
             exchange,
@@ -507,21 +1285,19 @@ public class ProxyFacade {
             previousResponseId
         );
         boolean stream = request.path("stream").asBoolean(false);
-        UpstreamRoute route = routeFor(upstreamModel, ResponseMode.OPENAI_RESPONSES);
-        boolean preferDeepSeekAccounts = isDeepSeekRouteModel(route, upstreamModel);
+        UpstreamRoute route = routeFacts.route();
+        boolean preferDeepSeekAccounts = routeFacts.preferDeepSeekAccounts();
         boolean fastMode = requestedFastMode && route == UpstreamRoute.OPENAI && !preferDeepSeekAccounts;
-        boolean preferCodexAccounts = preferCodexAccounts(
-            route,
-            preferDeepSeekAccounts,
-            upstreamModel,
-            exchange,
-            routingPolicy
-        ) || isCodexOnlyResponsesModel(requestedModel)
-            || isCodexOnlyResponsesModel(mappedModel);
+        boolean preferCodexAccounts = routeFacts.preferCodexAccounts();
         JsonNode expandedRequest = openAiResponseStateStore.expand(request);
+        // The one entry that gives a request with no limit more than the fallback of the gateway: the others keep it.
+        long defaultLimit = defaultResponsesOutputLimit(upstreamModel);
         JsonNode upstreamRequest = boundedBillingRequest(preferDeepSeekAccounts
             ? deepSeekRequest(expandedRequest)
-            : fastMode ? openAiFastRequest(expandedRequest) : expandedRequest, true);
+            : fastMode ? openAiFastRequest(expandedRequest) : expandedRequest, true, defaultLimit);
+        // The limit is the gateway's own when the client wrote none: a relay is then given the output of its own mapping
+        // (D15) and not this one.
+        boolean gatewayOutput = !namesAnOutputLimit(request);
         AccountPoolRequestContext poolContext = poolContext(
             requestId,
             requestedModel,
@@ -529,11 +1305,59 @@ public class ProxyFacade {
             route,
             preferDeepSeekAccounts
         );
+        // A response chain is told apart by the response it continues, not by the session hint, which falls back to that
+        // id and so changes with every turn; a chain with neither is told by what its turns begin with. Every turn of a
+        // chain is the session of its first, whatever model it asks for: the node knows which session a response was
+        // made under (followTierToNextTurn).
+        String tierSessionName = tierRuntime.bindings().sessionOf(TierSessionKeys.ofResponses(
+            principal.keyId(),
+            sessionHint(exchange, request, principal.keyId(), ResponseMode.OPENAI_RESPONSES, null),
+            codexSessionName(exchange, principal.keyId()),
+            previousResponseId
+        ));
 
         return requireDeepSeekResponsesSupported(preferDeepSeekAccounts, upstreamModel)
             .then(requireFastModeAllowed(fastMode))
             .then(responseAffinity(previousResponseId, route))
-            .flatMap(responseAffinity -> withBilling(principal, requestId, requestedModel, upstreamRequest, fastMode, Mono.defer(() -> attemptResponses(
+            .flatMap(responseAffinity -> tierRuntime.planner().plan(tierPlanRequest(
+                principal,
+                poolContext,
+                requestedModel,
+                route,
+                preferDeepSeekAccounts,
+                preferCodexAccounts,
+                fastMode,
+                routingPolicy,
+                upstreamRequest,
+                responseAffinity.accountId(),
+                responseAffinity.movable()
+            ).withSessionName(tierSessionName).withSelector(tierChoice.selector()).withEntry(TierEntry.RESPONSES)
+                // The chain holds the body all along, so it is read here, once the chain the request continues is expanded.
+                .withEntryFacts(responsesEntryFacts(expandedRequest, gatewayOutput))).flatMap(plan -> {
+                if (plan.tiered()) {
+                    return servedByTiers(plan, exchange, serveTieredResponses(new TieredRequest(
+                        plan,
+                        principal,
+                        requestId,
+                        path,
+                        requestedModel,
+                        upstreamModel,
+                        sessionHint,
+                        stream,
+                        servedRoute(plan, route),
+                        fastMode,
+                        preferCodexAccounts,
+                        preferDeepSeekAccounts,
+                        routingPolicy,
+                        upstreamRequest,
+                        request,
+                        start,
+                        !responseAffinity.responseChain() || responseAffinity.movable(),
+                        responseAffinity.movable(),
+                        tierSessionName
+                    )));
+                }
+                return withSelectorStatus(plan, withBilling(principal, requestId, requestedModel, upstreamRequest, fastMode, Mono.defer(() -> attemptResponses(
                     upstreamRequest,
                     request,
                     principal,
@@ -552,67 +1376,410 @@ public class ProxyFacade {
                     requestId,
                     start,
                     List.of(),
-                    new AtomicBoolean(false)
+                    new AtomicBoolean(false),
+                    tierSessionName
                 ))));
+            }));
+    }
+
+    /** The session the Codex CLI names in its own header, as the tier sessions call it; null when the request has none. */
+    private static String codexSessionName(ServerWebExchange exchange, String keyId) {
+        return TierSessionKeys.ofCodexSession(
+            keyId,
+            exchange.getRequest().getHeaders().getFirst(TierSessionKeys.CODEX_SESSION_HEADER)
+        );
+    }
+
+    private static TierEntry tierEntry(ResponseMode responseMode) {
+        return switch (responseMode) {
+            case OPENAI_CHAT -> TierEntry.CHAT;
+            case OPENAI_RESPONSES -> TierEntry.RESPONSES;
+            case ANTHROPIC_MESSAGES -> TierEntry.MESSAGES;
+            case GEMINI_GENERATE_CONTENT -> TierEntry.GEMINI;
+        };
+    }
+
+    /**
+     * The route a tiered request is dispatched on. It is the route the facade chose, unless the all-endpoints switch of
+     * its vendor moved it onto the Anthropic route (design 4.9): everything the request does from selection to
+     * settlement, and the retries it is allowed, then follow that route, as a request of the Messages endpoint's do.
+     */
+    private static UpstreamRoute servedRoute(TierPlan plan, UpstreamRoute route) {
+        return plan.unified() ? UpstreamRoute.ANTHROPIC : route;
+    }
+
+    private TierPlanRequest tierPlanRequest(
+        ApiKeyPrincipal principal,
+        AccountPoolRequestContext poolContext,
+        String requestedModel,
+        UpstreamRoute route,
+        boolean preferDeepSeekAccounts,
+        boolean preferCodexAccounts,
+        boolean fastMode,
+        AccountDtos.RoutingPolicySettings routingPolicy,
+        JsonNode upstreamRequest,
+        String responseOwnerAccountId,
+        boolean responseMovable
+    ) {
+        return new TierPlanRequest(
+            poolContext.requestToken(),
+            requestedModel,
+            poolContext.upstreamModel(),
+            tierProviderHint(route, poolContext.upstreamModel(), preferDeepSeekAccounts, preferCodexAccounts),
+            TierRoute.valueOf(route.name()),
+            preferDeepSeekAccounts,
+            route == UpstreamRoute.OPENAI && isOpenAiCompatibleModel(poolContext.upstreamModel()),
+            preferCodexAccounts,
+            routingPolicy.isolateCodexPoolEnabled(),
+            fastMode,
+            !"anonymous".equals(principal.keyId()),
+            upstreamRequest,
+            responseOwnerAccountId,
+            responseMovable,
+            principal.keyId(),
+            null
+        ).withKeyHoldsPreference(tiedToOneProvider(principal))
+            .withSuffixTakenOff(spelling -> !modelMappingService.hasAtSource(spelling, principal.keyId()));
+    }
+
+    /**
+     * The request without the tier selector that was on the end of its model, the tier the client named by the channel
+     * that wins (design 6.1), and the model the key's mapping makes of the model the request is left with. {@code
+     * suffixTaken} says that a suffix was taken off the model, which the Gemini endpoint (it carries the model in its
+     * path) must follow.
+     */
+    private record ClientTierChoice(JsonNode request, TierSelectorParser.Selector selector, String mappedModel, boolean suffixTaken) {
+    }
+
+    /**
+     * Reads what the client said about the tier it wants, before anything else looks at the request: the suffix is taken
+     * off the model id here, once, so that model mapping, the access check, the price and the logs only ever see the
+     * plain id. Whether an {@code @} is a suffix is decided by the vendor that will serve the model, after the key's model
+     * mapping and the route have had their say, and an id that a mapping rule of the key is written around (a Vertex-style
+     * "claude-sonnet-4@20250514", or a pattern such as {@code claude-sonnet-4@*}) is left whole. The suffix wins over the
+     * {@value TierSelectorParser#REQUEST_HEADER} header, and the header over the preference of the key. A key that is not
+     * tied to one provider (an old key, {@code *}) has no preference to follow: the tiers are named per vendor, and such a
+     * key may call any of them. The anonymous caller (the console's own assistant, or a deployment that allows
+     * unauthenticated proxying) may not choose a tier at all: what it names is read like anyone's, so that a suffix never
+     * reaches the upstream as part of the model, and then dropped as a hint that cannot be followed.
+     *
+     * <p>The key's mapping is applied here, once, and its answer is the model the request goes on with: a rule that picks
+     * among several targets at random (a {@code loadbalance} rule) must not be asked again, or the vendor that decided
+     * whether the {@code @} is a suffix could be another one than the vendor that serves the request.
+     */
+    private ClientTierChoice clientTierChoice(
+        JsonNode request,
+        ServerWebExchange exchange,
+        ApiKeyPrincipal principal,
+        ResponseMode responseMode,
+        AccountDtos.RoutingPolicySettings routingPolicy
+    ) {
+        String keyId = principal.keyId();
+        String model = request.path("model").asString(modelCatalog.defaultTargetModelId());
+        // The suffix is decided by the vendor the model goes to, which the mapping may change.
+        TierSelectorParser.Stripped stripped = model.indexOf('@') < 0 || modelMappingService.hasAtSource(model, keyId)
+            ? TierSelectorParser.Stripped.plain(model)
+            : tierRuntime.planner().stripSelector(model, base -> {
+                String mapped = modelMappingService.apply(base, keyId);
+                return tierDestination(request, base, mapped, responseMode, exchange, routingPolicy);
+            });
+        JsonNode plain = request;
+        String mappedModel;
+        if (stripped.selector() != null) {
+            ObjectNode copy = JsonNodes.shallowCopy((ObjectNode) request);
+            copy.put("model", stripped.model());
+            plain = copy;
+            mappedModel = stripped.destination().mappedModel();
+        } else {
+            mappedModel = modelMappingService.apply(model, keyId);
+        }
+        TierSelectorParser.Selector header = TierSelectorParser.fromHeader(
+            exchange.getRequest().getHeaders().getFirst(TierSelectorParser.REQUEST_HEADER));
+        TierSelectorParser.Selector preference = tiedToOneProvider(principal)
+            ? TierSelectorParser.fromPreference(principal.tierPreference())
+            : null;
+        TierSelectorParser.Selector chosen = TierSelectorParser.choose(stripped.selector(), header, preference);
+        return new ClientTierChoice(plain, "anonymous".equals(keyId) ? TierSelectorParser.unchoosable(chosen) : chosen, mappedModel,
+            stripped.selector() != null);
+    }
+
+    /**
+     * Where a request goes: the model as the upstream is asked for it, the route that takes it, and which kinds of
+     * account that route prefers. Worked out once for a request, from its model after the key's mapping, and the same
+     * way for the model in front of a tier suffix before the rest of the request is read ({@link #tierDestination}).
+     */
+    private record RouteFacts(
+        boolean requestedFastMode,
+        String upstreamModel,
+        UpstreamRoute route,
+        boolean preferDeepSeekAccounts,
+        boolean preferCodexAccounts
+    ) {
+    }
+
+    private RouteFacts routeFacts(
+        JsonNode request,
+        String requestedModel,
+        String mappedModel,
+        ResponseMode responseMode,
+        ServerWebExchange exchange,
+        AccountDtos.RoutingPolicySettings routingPolicy
+    ) {
+        boolean requestedFastMode = isFastRequested(request, requestedModel, mappedModel);
+        String upstreamModel = upstreamModelFor(mappedModel, requestedFastMode);
+        UpstreamRoute route = routeFor(upstreamModel, responseMode);
+        boolean preferDeepSeekAccounts = isDeepSeekRouteModel(route, upstreamModel);
+        // GPT Responses also go to Codex seats for the models only Codex accounts serve.
+        boolean preferCodexAccounts = responseMode == ResponseMode.OPENAI_RESPONSES
+            ? preferCodexAccountsForResponses(route, preferDeepSeekAccounts, requestedModel, mappedModel, upstreamModel, exchange, routingPolicy)
+            : preferCodexAccounts(route, preferDeepSeekAccounts, upstreamModel, exchange, routingPolicy);
+        return new RouteFacts(requestedFastMode, upstreamModel, route, preferDeepSeekAccounts, preferCodexAccounts);
+    }
+
+    /**
+     * Where a request for {@code requestedModel}, which the key's mapping made {@code mappedModel}, goes: the route
+     * takes it, and the plan names its vendor by the provider hint of the accounts that serve it.
+     */
+    private TierRuntime.Destination tierDestination(
+        JsonNode request,
+        String requestedModel,
+        String mappedModel,
+        ResponseMode responseMode,
+        ServerWebExchange exchange,
+        AccountDtos.RoutingPolicySettings routingPolicy
+    ) {
+        RouteFacts facts = routeFacts(request, requestedModel, mappedModel, responseMode, exchange, routingPolicy);
+        return new TierRuntime.Destination(mappedModel, facts.upstreamModel(), tierProviderHint(
+            facts.route(), facts.upstreamModel(), facts.preferDeepSeekAccounts(), facts.preferCodexAccounts()));
+    }
+
+    /**
+     * The provider hint the tier plan names its vendor by, for a model the catalog does not list: the vendor of the
+     * accounts that will serve the request. It is the pool context's hint ({@link #providerHint}), except where the
+     * route's name for itself is not the vendor of the accounts: the Kiro route is also what a model of Codex only
+     * (such as {@code codex-mini-latest}, which does not start with {@code gpt}) is sent by, to Codex seats, and what a
+     * Claude model newer than the catalog is served by Kiro accounts on, which sit in the tiers of the anthropic vendor.
+     * The pool context keeps the hint of the route; its pool keys are frozen for requests of vendors without tiers.
+     */
+    private String tierProviderHint(UpstreamRoute route, String upstreamModel, boolean deepSeekRoute, boolean preferCodexAccounts) {
+        if (route != UpstreamRoute.OPENAI && preferCodexAccounts) {
+            return AccountPlatforms.OPENAI_PROVIDER;
+        }
+        if (route == UpstreamRoute.KIRO && routeModel(upstreamModel).startsWith("claude")) {
+            return AccountPlatforms.ANTHROPIC_PROVIDER;
+        }
+        return providerHint(route, upstreamModel, deepSeekRoute);
+    }
+
+    /** Whether the key is limited to the models of one provider, as the access policy reads the provider of a key. */
+    private static boolean tiedToOneProvider(ApiKeyPrincipal principal) {
+        String provider = principal.modelProvider();
+        return provider != null && !provider.isBlank() && !"*".equals(provider);
+    }
+
+    /**
+     * The response of an untiered request, which says that the tier the client named was not used when its vendor
+     * keeps a tier configuration that is switched off (design 6.3). Any other untiered response is returned as it is.
+     */
+    private Mono<ResponseEntity<?>> withSelectorStatus(TierPlan plan, Mono<ResponseEntity<?>> served) {
+        if (!plan.selectorIgnored()) {
+            return served;
+        }
+        return served.map(response -> ResponseEntity.status(response.getStatusCode())
+            .headers(response.getHeaders())
+            .header(TierResponseHeaders.STATUS, TierResponseHeaders.IGNORED)
+            .body(response.getBody()));
+    }
+
+    /**
+     * What the client is answered when a tiered request fails. A request that named its tier gets 503
+     * SOURCE_TIER_UNAVAILABLE with a Retry-After when that tier has no account to offer, where an automatic one has the
+     * "no available account" of an untiered request. The conversion is outside the billing scope on purpose: the release
+     * of the reservation has already judged the original error, which is not one of the definitive failures. A Responses
+     * chain that cannot leave its owner is answered with what is wrong with the owner, as an automatic request is: it is
+     * not the pool that has nothing to offer, and retrying soon does not help when the owner is out of quota.
+     */
+    private Mono<ResponseEntity<?>> servedByTiers(TierPlan plan, ServerWebExchange exchange, Mono<ResponseEntity<?>> served) {
+        if (!plan.pinned()) {
+            return served;
+        }
+        return served.onErrorResume(error -> isNoAvailableAccount(error) && !isResponseOwnerUnavailable(error), error -> {
+            exchange.getResponse().getHeaders().set("Retry-After", TIER_UNAVAILABLE_RETRY_AFTER_SECONDS);
+            return Mono.error(new ApiException(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "SOURCE_TIER_UNAVAILABLE",
+                "The tier you chose has no account available right now"
+            ));
+        });
     }
 
     private Mono<Void> requireFastModeAllowed(boolean fastMode) {
         return fastMode ? accountSettingsService.ensureGptFastModeAllowed() : Mono.empty();
     }
 
+    /** The Chat, Messages and Gemini entries: a request that names no output limit is held to {@link RequestBounds#FALLBACK_OUTPUT_TOKENS}. */
     private JsonNode boundedBillingRequest(JsonNode request, boolean responses) {
+        return boundedBillingRequest(request, responses, RequestBounds.FALLBACK_OUTPUT_TOKENS);
+    }
+
+    /**
+     * The request with the output limit it is reserved and sent upstream by: the largest the client wrote in any of the
+     * fields, or {@code defaultLimit} when it wrote none. The reservation and the body the native sources are sent are read
+     * from this one number; a relay is sent the number of its own mapping instead (D15, {@code XpEligibility}).
+     */
+    private JsonNode boundedBillingRequest(JsonNode request, boolean responses, long defaultLimit) {
         // Only top-level token limits change here, so share the (possibly multi-MB) children instead of deep-copying them.
         ObjectNode bounded = JsonNodes.shallowCopy((ObjectNode) request);
         long limit = 0;
         for (String field : java.util.List.of("max_tokens", "max_completion_tokens", "max_output_tokens")) {
             JsonNode value = request.get(field);
             if (value == null) continue;
-            if (!value.isIntegralNumber() || !value.canConvertToLong() || value.longValue() <= 0 || value.longValue() > 1_000_000) {
+            if (!value.isIntegralNumber() || !value.canConvertToLong() || value.longValue() <= 0 || value.longValue() > RequestBounds.MAX_OUTPUT_TOKENS) {
                 throw new ApiException(HttpStatus.BAD_REQUEST, "MAX_OUTPUT_TOKENS_INVALID", "Maximum output tokens must be an integer between 1 and 1000000");
             }
             limit = Math.max(limit, value.longValue());
         }
-        if (limit == 0) limit = 4096;
+        if (limit == 0) limit = defaultLimit;
         bounded.put(responses ? "max_output_tokens" : bounded.has("max_completion_tokens") ? "max_completion_tokens" : "max_tokens", limit);
         return bounded;
     }
 
+    /**
+     * What a Responses request that names no output limit is held to (Codex never names one): the default the operator
+     * configured ({@code starry.proxy.responses-default-output-tokens}, 16,000), no more than the model it is served as writes
+     * ({@link RequestBounds#modelMaximumOutput}). The same number goes into the reservation and into the body the native sources
+     * are sent (a relay is given the output of its own mapping, D15). The model is the one the upstream is asked for, after the key's mapping,
+     * and no other: a mapping rule that sends a built-in name to a model the catalog does not list, or that the administrator
+     * added, says where the request goes, and the name the client wrote says nothing of that backend.
+     *
+     * <p>The model writes the smaller of what the model list shows as its {@code max_output_tokens} and what the official price
+     * catalog lists for it, when both give a figure: the model list gives most aliases one figure (64,000), above what several
+     * of the models it names are held to by their own upstream (gpt-4o 16,384, gpt-4.1 32,768, gpt-4 4,096), and an upstream
+     * refuses a request over its own limit. A figure only one of them gives is that one's. The price catalog is the one in use:
+     * the snapshot bundled with the gateway lists 8,192 for the DeepSeek models whose model list figure is 384,000, but the
+     * catalog the gateway refreshes from (on by default) lists 393,216 for them, so a default deployment gives them the
+     * configured default and only one that does not refresh holds them to 8,192.
+     *
+     * <p>A model the catalog does not list gives neither, and nor does one that is served by the operator's own backend, which
+     * is every model {@link #isOpenAiCompatibleModel} takes for one: the same test that sends the request to the OpenAI-compatible
+     * keys, so the model that is asked for and the backend that is asked are never told apart. That is a model named with the
+     * documented {@code openai-compatible/} prefix, even when a built-in has the same name after it (the model list finds a model
+     * by its compact local id, built-ins first, and so finds the built-in's spec for it and not the administrator's), a model the
+     * administrator added, which is listed with the placeholder every model without a figure of its own gets (64,000), and a
+     * built-in model the administrator edited to point at their own vendor (the console lets the provider of a built-in be
+     * changed), which keeps the placeholder and the owner of the built-in but is served from the OpenAI-compatible keys all the same
+     * ({@link #isCustomOpenAiCompatibleSpec}; no built-in model is, as shipped). The placeholder says nothing of what such a backend
+     * holds a request to (the window the administrator wrote can be much smaller), and the price catalog is not asked about a model
+     * the model list does not take for one of the gateway's own. Such a model has no maximum the gateway knows, so it is held to
+     * {@link RequestBounds#FALLBACK_OUTPUT_TOKENS}, as it was.
+     */
+    long defaultResponsesOutputLimit(String upstreamModel) {
+        Optional<ModelDtos.ModelSpec> listed = isOpenAiCompatibleModel(upstreamModel)
+            ? Optional.empty()
+            : catalogSpec(upstreamModel).filter(spec -> !ModelCatalogProvider.ADMIN_OWNER.equals(spec.ownedBy()));
+        return RequestBounds.defaultOutputTokens(
+            responsesDefaultOutputTokens,
+            listed.map(spec -> OptionalInt.of(spec.maxOutputTokens())).orElseGet(OptionalInt::empty),
+            listed.isPresent() ? modelPricingService.maxOutputTokens(upstreamModel) : OptionalInt.empty());
+    }
+
     private static final Object BILLING_UNCERTAINTY = new Object();
     private static final Object BILLING_SETTLED = new Object();
+    /**
+     * Whether the request is in the hands of a relay (design 7.8, invariant I7): from the moment a cross-protocol attempt
+     * is dispatched until the settlement of its answer has returned, and not while a native account has the request.
+     */
+    private static final Object XP_IN_FLIGHT = new Object();
 
     private <T> Mono<T> withBilling(ApiKeyPrincipal principal, String requestId, String model, JsonNode request,
                                     boolean fastMode, Mono<T> operation) {
+        return withBilling(principal, requestId, model, request, fastMode, TierPlan.UNTIERED, operation);
+    }
+
+    // A tiered plan brings its own reservation and prices (TierBilling): it reserves the most any tier it may be served
+    // from would need and is charged the price of the tier that served. What it shares with an untiered request is how the
+    // reservation is held and released.
+    private <T> Mono<T> withBilling(ApiKeyPrincipal principal, String requestId, String model, JsonNode request,
+                                    boolean fastMode, TierPlan plan, Mono<T> operation) {
         if ("anonymous".equals(principal.keyId())) return operation;
-        long inputBound = JsonNodes.utf8Length(request) + 1024L;
-        // Server-side response chains and remote media can hide input tokens from the local request.
-        if (request.hasNonNull("previous_response_id") || containsRemoteBillingInput(request)) {
-            inputBound = Math.max(inputBound, 1_000_000L);
+        if (plan.tiered()) {
+            return Mono.defer(() -> {
+                TierBilling billing = TierBilling.of(plan, model);
+                return reservedFor(principal, requestId, billing.reservation(), billing.pricing(), operation,
+                    context -> context.put(TierBilling.class, billing), this::definitiveBillingFailure, error -> lowBalanceAdvice(plan, error));
+            });
         }
-        long outputBound = Math.max(request.path("max_completion_tokens").asLong(0),
-            Math.max(request.path("max_tokens").asLong(0), request.path("max_output_tokens").asLong(4096)));
-        long estimatedInput = inputBound;
+        long estimatedInput = RequestBounds.nativeInputTokens(request);
+        long outputBound = RequestBounds.outputTokens(request);
         return paymentSettingsService.config().flatMap(config -> modelPricingService.billingQuote(model, fastMode, config.apiBillingMultiplier()))
             .flatMap(quote -> {
-                AtomicBoolean uncertainFailure = new AtomicBoolean();
-                AtomicBoolean settled = new AtomicBoolean();
                 ObjectNode pricing = tools.jackson.databind.node.JsonNodeFactory.instance.objectNode();
                 pricing.put("model", model).put("input", quote.input()).put("output", quote.output())
                     .put("cacheRead", quote.cacheRead()).put("cacheWrite", quote.cacheWrite()).put("fallback", quote.fallback());
-                return Mono.usingWhen(
-                    apiKeyService.reserveUsage(principal, requestId, quote.estimate(estimatedInput, outputBound), pricing.toString()).thenReturn(requestId),
-                    ignored -> operation.contextWrite(context -> context.put(tech.starryapi.model.BillingQuote.class, quote)
-                        .put(BILLING_UNCERTAINTY, uncertainFailure)
-                        .put(BILLING_SETTLED, settled)),
-                    // Once the usage has been settled the reservation is closed; releasing it again would only take the
-                    // user and key row locks to find that out. Release only when nothing was charged.
-                    ignored -> settled.get()
-                        ? Mono.empty()
-                        : apiKeyService.releaseUsage(principal, requestId, true, "Completed without charge"),
-                    (ignored, error) -> apiKeyService.releaseUsage(principal, requestId,
-                        !uncertainFailure.get() && definitiveBillingFailure(error), "Request failed"),
-                    ignored -> apiKeyService.releaseUsage(principal, requestId, false, "Client disconnected after dispatch")
-                );
+                return reservedFor(principal, requestId, quote.estimate(estimatedInput, outputBound), pricing.toString(), operation,
+                    context -> context.put(tech.starryapi.model.BillingQuote.class, quote), this::definitiveBillingFailure, null);
             });
+    }
+
+    /**
+     * The refusal of the reservation of an automatic tiered request for too little balance, with the tiers that would
+     * have reserved less added to what the client is told (design 5.6): the reservation is the largest of the estimates of
+     * the tiers the request may be served from, which a user who could pay for one that reserves less may avoid by naming it.
+     */
+    private static Throwable lowBalanceAdvice(TierPlan plan, Throwable error) {
+        if (plan.lowBalanceHint() != null && error instanceof ApiException api && "INSUFFICIENT_BALANCE".equals(api.getCode())) {
+            return new ApiException(api.getStatus(), api.getCode(), api.getMessage() + plan.lowBalanceHint(), api.getDetails());
+        }
+        return error;
+    }
+
+    /**
+     * Holds a reservation of {@code credits} for as long as {@code operation} runs and releases it unless the usage was
+     * settled.
+     *
+     * <p>A relay is asked once, and what becomes of that attempt is the operator's whenever it does not end in a
+     * settlement (design 7.8, invariant I7): while {@link #XP_IN_FLIGHT} stands, a client that gives up and any failure
+     * release the reservation for good, where an upstream account that was asked and did not answer leaves it for review.
+     * An earlier native attempt that may have been billed keeps the reservation in review all the same: the attempt at
+     * the relay does not prove that one free.
+     *
+     * @param billing puts what the settlement needs to price the usage into the operation's context
+     * @param definitiveFailure whether a failure is known not to have been billed, so that the reservation is released
+     *     rather than left for review
+     * @param reservationFailure what the client is told when the reservation itself is refused; null to tell it as it is
+     */
+    private <T> Mono<T> reservedFor(
+        ApiKeyPrincipal principal,
+        String requestId,
+        BigDecimal credits,
+        String pricing,
+        Mono<T> operation,
+        UnaryOperator<Context> billing,
+        Predicate<Throwable> definitiveFailure,
+        UnaryOperator<Throwable> reservationFailure
+    ) {
+        AtomicBoolean uncertainFailure = new AtomicBoolean();
+        AtomicBoolean settled = new AtomicBoolean();
+        AtomicBoolean relayHasRequest = new AtomicBoolean();
+        Mono<Void> reservation = apiKeyService.reserveUsage(principal, requestId, credits, pricing);
+        return Mono.usingWhen(
+            (reservationFailure == null ? reservation : reservation.onErrorMap(reservationFailure)).thenReturn(requestId),
+            ignored -> operation.contextWrite(context -> billing.apply(context)
+                .put(BILLING_UNCERTAINTY, uncertainFailure)
+                .put(BILLING_SETTLED, settled)
+                .put(XP_IN_FLIGHT, relayHasRequest)),
+            // Once the usage has been settled the reservation is closed; releasing it again would only take the
+            // user and key row locks to find that out. Release only when nothing was charged.
+            ignored -> settled.get()
+                ? Mono.empty()
+                : apiKeyService.releaseUsage(principal, requestId, true, "Completed without charge"),
+            (ignored, error) -> apiKeyService.releaseUsage(principal, requestId,
+                !uncertainFailure.get() && (relayHasRequest.get() || definitiveFailure.test(error)), "Request failed"),
+            // Settled already, the release finds the reservation closed and changes nothing.
+            ignored -> relayHasRequest.get() && !uncertainFailure.get()
+                ? apiKeyService.releaseUsage(principal, requestId, true, "Client disconnected; cross-protocol attempt released")
+                : apiKeyService.releaseUsage(principal, requestId, false, "Client disconnected after dispatch")
+        );
     }
 
     /**
@@ -620,15 +1787,16 @@ public class ProxyFacade {
      * released. Anything uncertain (a response timeout after the request was sent, a reset mid-request) stays
      * flagged for manual review, because the upstream may still have generated and charged for it.
      */
-    private boolean definitiveBillingFailure(Throwable error) {
+    boolean definitiveBillingFailure(Throwable error) {
         Throwable root = rootFailure(error);
         if (root instanceof ApiException api) {
-            return java.util.Set.of(400, 401, 403, 404, 422, 429).contains(api.getStatus().value());
+            return java.util.Set.of(400, 401, 402, 403, 404, 422, 429).contains(api.getStatus().value());
         }
         UpstreamException upstream = findUpstreamException(error);
         if (upstream != null) {
             int status = upstream.getStatusCode();
-            if (java.util.Set.of(400, 401, 403, 404, 422, 429).contains(status)) {
+            // 402 is a payment or quota refusal (an exhausted Kiro quota, a relay without balance): nothing was generated.
+            if (java.util.Set.of(400, 401, 402, 403, 404, 422, 429).contains(status)) {
                 return true;
             }
             // A genuine provider error response (overloaded, unavailable, internal error) is not billed. A 502 that
@@ -651,16 +1819,6 @@ public class ProxyFacade {
             current = cause;
         }
         return null;
-    }
-
-    private boolean containsRemoteBillingInput(JsonNode node) {
-        if (node.isObject() && (node.hasNonNull("image_url") || node.hasNonNull("file_id")
-            || node.hasNonNull("file_url") || java.util.Set.of("input_image", "input_file", "input_audio", "image", "document")
-                .contains(node.path("type").asString("")))) return true;
-        if (node.isContainer()) {
-            for (JsonNode child : node) if (containsRemoteBillingInput(child)) return true;
-        }
-        return false;
     }
 
     private Mono<Void> requireDeepSeekResponsesSupported(boolean deepSeekRoute, String model) {
@@ -693,7 +1851,8 @@ public class ProxyFacade {
         String requestId,
         Instant start,
         List<String> attemptedAccountIds,
-        AtomicBoolean autoRetestAttempted
+        AtomicBoolean autoRetestAttempted,
+        String chainSession
     ) {
         String responseOwner = attemptedAccountIds.isEmpty() ? responseAffinity.accountId() : null;
         return selectAccountWithAdmission(
@@ -708,7 +1867,7 @@ public class ProxyFacade {
             responseOwner,
             responseAffinity.movable(),
             requestId,
-            upstreamRequest,
+            sizedForAdmission(upstreamRequest, responseRequest),
             path
         )
             .flatMap(attempt -> withAdmissionLease(attempt, guardedAttempt -> {
@@ -736,6 +1895,12 @@ public class ProxyFacade {
                             PreparedResponse response = stream
                                 ? prepareResponsesStreamResponse(responseRequest, upstreamRequest, mappedModel, result, account)
                                 : prepareResponsesJsonResponse(responseRequest, upstreamRequest, mappedModel, result, account);
+                            // A turn of a chain that no tier planned is the chain's all the same: a model of a vendor without tiers
+                            // must not cut the chain's session (and what it holds) in two for the turns after it. Where no vendor has
+                            // tiers there is no session to keep whole, and nothing is written.
+                            if (tierRuntime.planner().tiersInUse()) {
+                                followChain(principal, response.responseId(), chainSession);
+                            }
                             return rememberResponseOwner(response, account).thenReturn(response.response());
                         }));
                     }
@@ -787,7 +1952,8 @@ public class ProxyFacade {
                         requestId,
                         start,
                         nextAttempted,
-                        autoRetestAttempted
+                        autoRetestAttempted,
+                        chainSession
                     ).onErrorResume(retryError -> isNoAvailableAccount(retryError)
                         ? Mono.<ResponseEntity<?>>error(mapError(error))
                         : Mono.<ResponseEntity<?>>error(retryError)));
@@ -1018,12 +2184,8 @@ public class ProxyFacade {
         List<String> admissionRejectedAccountIds,
         long estimatedInput
     ) {
-        if (admissionRejectedAccountIds.size() >= 64) {
-            return Mono.error(new ApiException(
-                HttpStatus.SERVICE_UNAVAILABLE,
-                "ACCOUNT_ADMISSION_EXHAUSTED",
-                "No upstream account has admission capacity"
-            ));
+        if (admissionRejectedAccountIds.size() >= MAX_ADMISSION_REFUSALS) {
+            return Mono.error(admissionExhausted());
         }
         List<String> excluded = mergedAccountIds(attemptedAccountIds, admissionRejectedAccountIds);
         Mono<ProxyAccountEntity> selection;
@@ -1056,18 +2218,8 @@ public class ProxyFacade {
             );
         }
 
-        return selection.flatMap(account -> admissionStore.acquire(new AccountAdmissionStore.AdmissionRequest(
-                account.getAccountId(),
-                requestId,
-                null,
-                Hashing.sha256(reliableSessionHint(sessionHint) ? sessionHint : "request:" + requestId),
-                AccountPlatforms.isAnthropicApiKey(account),
-                estimatedInput,
-                estimatedOutputTokens(request),
-                Duration.ofMinutes(10),
-                poolContext == null ? null : poolContext.upstreamModel(),
-                endpointScope
-            ))
+        return selection.flatMap(account -> admissionStore.acquire(
+                admissionRequest(account, requestId, sessionHint, request, estimatedInput, poolContext, endpointScope))
             .flatMap(decision -> {
                 if (decision.accepted() && decision.leaseId() != null) {
                     // Bind after admission so later requests in the same session keep this account
@@ -1104,6 +2256,1041 @@ public class ProxyFacade {
                     estimatedInput
                 );
             }));
+    }
+
+    private AccountAdmissionStore.AdmissionRequest admissionRequest(
+        ProxyAccountEntity account,
+        String requestId,
+        String sessionHint,
+        JsonNode request,
+        long estimatedInput,
+        AccountPoolRequestContext poolContext,
+        String endpointScope
+    ) {
+        return admissionRequest(
+            account, requestId, sessionHint, request, estimatedInput, poolContext, TierDispatch.nativeDispatch(), endpointScope);
+    }
+
+    /**
+     * The admission of an attempt. A relay's cooldowns and limits are kept by the model of the mapping that serves it and
+     * by an endpoint scope of its own, not by the model of the pool context or the path of the client's request (design
+     * 4.4, 7.5): every alias of a model then shares the relay's "model not served" answer, and a relay's endpoint is not
+     * taken for a native one of the same name.
+     */
+    private AccountAdmissionStore.AdmissionRequest admissionRequest(
+        ProxyAccountEntity account,
+        String requestId,
+        String sessionHint,
+        JsonNode request,
+        long estimatedInput,
+        AccountPoolRequestContext poolContext,
+        TierDispatch dispatch,
+        String endpointScope
+    ) {
+        return new AccountAdmissionStore.AdmissionRequest(
+            account.getAccountId(),
+            requestId,
+            null,
+            Hashing.sha256(reliableSessionHint(sessionHint) ? sessionHint : "request:" + requestId),
+            AccountPlatforms.isAnthropicApiKey(account),
+            estimatedInput,
+            estimatedOutputTokens(request),
+            Duration.ofMinutes(10),
+            dispatch.modelScope() != null ? dispatch.modelScope() : poolContext == null ? null : poolContext.upstreamModel(),
+            dispatch.endpointScope() != null ? dispatch.endpointScope() : endpointScope
+        );
+    }
+
+    private ApiException admissionExhausted() {
+        return new ApiException(
+            HttpStatus.SERVICE_UNAVAILABLE,
+            "ACCOUNT_ADMISSION_EXHAUSTED",
+            "No upstream account has admission capacity"
+        );
+    }
+
+    /**
+     * The tiered counterpart of {@link #selectAccountWithAdmission}: selects an account of the plan's tiers and takes
+     * its admission lease (design 4.3 and 4.4). An account that admission refuses stays out of the rest of the request
+     * and counts against its tier, so that a tier which keeps refusing is left to the next one; and the request as a
+     * whole stops looking after as many refusals as one untiered dispatch puts up with.
+     *
+     * @param allowResponseOwnerFallback whether the request may leave the owner of its response chain when that owner
+     *     cannot serve it
+     */
+    Mono<AccountAttempt> selectTieredAccountWithAdmission(
+        TierWalk walk,
+        String sessionHint,
+        AccountDtos.RoutingPolicySettings routingPolicy,
+        boolean allowResponseOwnerFallback,
+        String requestId,
+        JsonNode request,
+        String endpointScope
+    ) {
+        return selectTieredAccountWithAdmission(
+            walk,
+            sessionHint,
+            routingPolicy,
+            allowResponseOwnerFallback,
+            requestId,
+            request,
+            endpointScope,
+            estimatedInputTokens(request)
+        );
+    }
+
+    private Mono<AccountAttempt> selectTieredAccountWithAdmission(
+        TierWalk walk,
+        String sessionHint,
+        AccountDtos.RoutingPolicySettings routingPolicy,
+        boolean allowResponseOwnerFallback,
+        String requestId,
+        JsonNode request,
+        String endpointScope,
+        long estimatedInput
+    ) {
+        return Mono.defer(() -> {
+            if (walk.refusals() >= MAX_ADMISSION_REFUSALS) {
+                return Mono.error(admissionExhausted());
+            }
+            TierPlan plan = walk.plan();
+            String ownerAccountId = plan.owner().map(TierPlan.Owner::accountId).orElse(null);
+            return selectTiered(walk, sessionHint, allowResponseOwnerFallback)
+                .flatMap(selection -> {
+                    ProxyAccountEntity account = selection.account();
+                    TierDispatch dispatch = selection.dispatch();
+                    // A relay is sent the body made for it, which is what its in-flight tokens are counted from.
+                    long admittedInput = dispatch.kind() == TierDispatch.Kind.NATIVE
+                        ? estimatedInput
+                        : estimatedInputTokens(dispatch.wireBody());
+                    return admissionStore.acquire(admissionRequest(
+                            account, requestId, sessionHint, request, admittedInput, plan.poolContext(), dispatch, endpointScope))
+                        .flatMap(decision -> {
+                            if (decision.accepted() && decision.leaseId() != null) {
+                                // Bind after admission, as an untiered request does, but within the tier: later requests of
+                                // the session find this account again only while it is still offered from this tier.
+                                if (routingPolicy.bindSessionOnAdmissionEnabled()) {
+                                    bindTieredSession(plan, selection.level(), sessionHint, account.getAccountId(), routingPolicy);
+                                }
+                                return Mono.just(new AccountAttempt(selection, decision.leaseId()));
+                            }
+                            if (!allowResponseOwnerFallback && account.getAccountId().equals(ownerAccountId)) {
+                                return Mono.error(new ApiException(
+                                    HttpStatus.SERVICE_UNAVAILABLE,
+                                    "RESPONSE_OWNER_UNAVAILABLE",
+                                    "The account that owns the OpenAI response has no admission capacity"
+                                ));
+                            }
+                            walk.refused(selection.level(), account.getAccountId(),
+                                refusedByOwnSession(plan, selection.level(), decision.rejectionReason()));
+                            return selectTieredAccountWithAdmission(
+                                walk,
+                                sessionHint,
+                                routingPolicy,
+                                allowResponseOwnerFallback,
+                                requestId,
+                                request,
+                                endpointScope,
+                                estimatedInput
+                            );
+                        });
+                });
+        });
+    }
+
+    /**
+     * Selects the account of the next dispatch of a tiered request (design 4.3). The owner of the response chain the
+     * request continues comes first, if it is available. Then the tiers in order, and in each the cells in the order
+     * the route tries them, take the first account that is available and that the request has not tried: a tier or a
+     * cell with nothing to offer costs a look at the account cache and nothing more. Only when no tier has anything is
+     * the cache reloaded, once, and the tiers walked again; and a request whose session was pushed down to a lower tier
+     * then climbs back to a tier above it, as a last resort, rather than fail. If that finds nothing either, the accounts
+     * of the tiers the request can still be served from that are out of service are tested once (design 4.10), and the
+     * tiers are walked a last time when any of them came back.
+     */
+    Mono<TierSelection> selectTiered(TierWalk walk, String sessionHint, boolean allowResponseOwnerFallback) {
+        return Mono.defer(() -> selectResponseOwner(walk, allowResponseOwnerFallback)
+            .switchIfEmpty(Mono.defer(() -> walkTiers(walk, sessionHint)))
+            .switchIfEmpty(Mono.defer(() -> accountPoolService.refreshCacheIfStale()
+                .then(Mono.defer(() -> walkTiers(walk, sessionHint)))))
+            .switchIfEmpty(Mono.defer(() -> climbTiers(walk, sessionHint)))
+            .switchIfEmpty(Mono.defer(() -> retestTiers(walk, sessionHint)))
+            .switchIfEmpty(Mono.error(() -> new ApiException(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "NO_AVAILABLE_ACCOUNT",
+                "No available upstream account"
+            ))));
+    }
+
+    /**
+     * The owner of the response chain, from the cells of its tier, when the request still has one to prefer. A chain
+     * that can be replayed elsewhere goes on without its owner; one that cannot is left unserved, as an untiered request
+     * does.
+     */
+    private Mono<TierSelection> selectResponseOwner(TierWalk walk, boolean allowResponseOwnerFallback) {
+        return walk.takeOwner().map(owner -> {
+            TierPlan plan = walk.plan();
+            Level level = owner.level();
+            List<String> excluded = walk.excluded();
+            Mono<TierSelection> selected = Flux.fromIterable(walk.cells(level))
+                .concatMap(cell -> selectInCell(plan, level, cell, null, cell.predicate(excluded)
+                    .and(account -> owner.accountId().equals(account.getAccountId()))
+                    .and(account -> plan.holds(level, cell, account))))
+                .next();
+            return allowResponseOwnerFallback
+                ? selected
+                : selected.switchIfEmpty(Mono.error(ResponseOwnerUnavailableException::new));
+        }).orElseGet(Mono::empty);
+    }
+
+    private Mono<TierSelection> walkTiers(TierWalk walk, String sessionHint) {
+        TierPlan plan = walk.plan();
+        List<String> excluded = walk.excluded();
+        return Flux.fromIterable(walk.openLevels())
+            .concatMap(level -> Flux.fromIterable(walk.cells(level))
+                .concatMap(cell -> selectInCell(plan, level, cell, sessionHint,
+                    cell.predicate(excluded).and(account -> plan.holds(level, cell, account))))
+                // A tier that has nothing to offer is one the request went through; if a lower tier then serves it, whether
+                // that is a downgrade of its session depends on having been through every tier above.
+                .switchIfEmpty(Mono.fromRunnable(() -> walk.passed(level))))
+            .next()
+            .doOnNext(selection -> walk.selected(selection.level()));
+    }
+
+    /**
+     * The last resort of a request whose session was pushed down to a lower tier: the tiers above its start that the
+     * reservation covers, in order, for an account to serve it. Nothing is climbed to by a request that was restricted
+     * to one tier, and a tier the reservation does not cover could cost more than was reserved.
+     */
+    private Mono<TierSelection> climbTiers(TierWalk walk, String sessionHint) {
+        TierPlan plan = walk.plan();
+        List<String> excluded = walk.excluded();
+        return Flux.fromIterable(walk.climbLevels())
+            .concatMap(level -> Flux.fromIterable(walk.cells(level))
+                .concatMap(cell -> selectInCell(plan, level, cell, sessionHint,
+                    cell.predicate(excluded).and(account -> plan.holds(level, cell, account)), true)))
+            .next();
+    }
+
+    /**
+     * The auto retest of a request that found no account (design 4.10), the tiered counterpart of what
+     * {@link #selectAccountWithAutoRetest} does for the untiered route: once per request, when a whole round of the tiers
+     * is empty, the accounts that were disabled, suspended or out of quota are tested again, as the setting allows, and
+     * when one of them is back the tiers are walked once more. Only the accounts the request could be served from are
+     * tested ({@link #retestFilter}), not the whole pool of a route.
+     */
+    private Mono<TierSelection> retestTiers(TierWalk walk, String sessionHint) {
+        if (!walk.takeRetest()) {
+            return Mono.empty();
+        }
+        var retest = disabledAccountScheduledTestService.runWhenNoAvailableAccounts(retestFilter(walk));
+        if (retest == null) {
+            return Mono.empty();
+        }
+        return retest.doOnNext(response -> log.info(
+                "Auto disabled account retest after no available account completed: vendor={}, total={}, success={}, failed={}, skipped={}",
+                walk.plan().vendor(),
+                response.total(),
+                response.success(),
+                response.failed(),
+                response.skipped()
+            ))
+            .onErrorResume(retestError -> {
+                log.warn("Auto disabled account retest failed after no available account", retestError);
+                return Mono.empty();
+            })
+            .filter(response -> response.success() != null && response.success() > 0)
+            .flatMap(response -> walkTiers(walk, sessionHint)
+                .switchIfEmpty(Mono.defer(() -> climbTiers(walk, sessionHint))));
+    }
+
+    /**
+     * The accounts a retest is worth its upstream calls for: those of the cells of the tiers the request can still be
+     * served from (the ones its walk offers and the ones it may climb back to) that the tier holds, which is what
+     * {@link TierPlan#permits} says about an account the walk selects. A tier the request has left, was restricted
+     * away from or has been refused by too often is not tested for it. The accounts of the tiers the plan left out
+     * are tested too ({@link TierPlan#leftOut}): this request cannot be served by them, but the tier would never come
+     * back if the only retest there is left them out. This replaces {@link #accountFilterFor}, which knows the pool of
+     * the untiered route, not its tiers.
+     */
+    private Predicate<ProxyAccountEntity> retestFilter(TierWalk walk) {
+        TierPlan plan = walk.plan();
+        List<Level> levels = new ArrayList<>(walk.openLevels());
+        levels.addAll(walk.climbLevels());
+        // The tiers the plan left out (nothing in them could serve, or every account is disabled) are the ones that most
+        // need their accounts tested: without it they never come back. A request restricted to one tier is not tested for
+        // the others, and one that left the relays behind has none of theirs tested.
+        boolean leftOutToo = !walk.narrowed();
+        boolean relaysToo = leftOutToo && !walk.nativeOnly();
+        return account -> levels.stream()
+            .anyMatch(level -> walk.cells(level).stream().anyMatch(cell -> plan.permits(level, cell, account)))
+            || (leftOutToo && plan.leftOut(account))
+            || (relaysToo && plan.leftOutRelay(account));
+    }
+
+    /**
+     * Whether the tier still has an account the request could be sent to: one of the tier's cells that selection can
+     * pick right now, which is what the walk would find (cached and enabled, available, and let through by the
+     * allocation lifecycle: not disabled, not cooling down or quarantined), that the request has neither tried nor been
+     * refused by. {@code failedAccountId} is the account that has just failed and is not yet among the ones tried.
+     */
+    private Mono<Boolean> hasUntriedAccount(TierWalk walk, Level level, String failedAccountId) {
+        TierPlan plan = walk.plan();
+        Set<String> excluded = new HashSet<>(walk.excluded());
+        excluded.add(failedAccountId);
+        return accountPoolService.hasSelectableAccount(account -> !excluded.contains(account.getAccountId())
+            && walk.cells(level).stream().anyMatch(cell -> plan.permits(level, cell, account)));
+    }
+
+    /** One cell of one tier; empty when it has no account to offer. */
+    private Mono<TierSelection> selectInCell(
+        TierPlan plan,
+        Level level,
+        PoolCell cell,
+        String sessionHint,
+        Predicate<ProxyAccountEntity> filter
+    ) {
+        return selectInCell(plan, level, cell, sessionHint, filter, false);
+    }
+
+    private Mono<TierSelection> selectInCell(
+        TierPlan plan,
+        Level level,
+        PoolCell cell,
+        String sessionHint,
+        Predicate<ProxyAccountEntity> filter,
+        boolean climbed
+    ) {
+        return accountPoolService.selectInScope(
+                sessionHint,
+                filter,
+                "No available upstream account",
+                plan.poolContext(),
+                plan.affinityScope(level),
+                false
+            )
+            .map(account -> tierSelection(plan, level, cell, account, climbed))
+            .onErrorResume(this::isNoAvailableAccount, error -> Mono.empty());
+    }
+
+    /**
+     * Writes where in the plan the account was found and checks it against the plan. The check can only fail through a
+     * mistake in selection; it fails before the account is dispatched, with the reservation untouched and refunded in
+     * full when it is released.
+     */
+    private TierSelection tierSelection(TierPlan plan, Level level, PoolCell cell, ProxyAccountEntity account, boolean climbed) {
+        if (!plan.permits(level, cell, account)) {
+            log.error("Tiered selection returned account {} for tier {} cell {}, which the plan does not allow",
+                account.getAccountId(), level.tierRef(), cell);
+            throw new ApiException(
+                HttpStatus.INTERNAL_SERVER_ERROR,
+                "SOURCE_TIER_SELECTION_INVALID",
+                "The selected account does not belong to the source tier that was chosen for it"
+            );
+        }
+        // A relay is sent what the plan built for it; every other account is sent the request as its route sends it.
+        TierDispatch dispatch = cell == PoolCell.XP_OPENAI_CHAT
+            ? level.relay(account.getAccountId()).orElseThrow().dispatch()
+            : TierDispatch.nativeDispatch();
+        return new TierSelection(account, level, cell, dispatch, plan.mode(), climbed);
+    }
+
+    private void bindTieredSession(
+        TierPlan plan,
+        Level level,
+        String sessionHint,
+        String accountId,
+        AccountDtos.RoutingPolicySettings routingPolicy
+    ) {
+        accountPoolService.commitSessionAffinity(
+            plan.poolContext(),
+            plan.affinityScope(level),
+            sessionHint,
+            accountId,
+            routingPolicy.bindSessionByApiKeyEnabled()
+        );
+    }
+
+    /**
+     * Serves a request whose plan is tiered, chat-shaped: reserves the most any of the plan's tiers would need, then
+     * dispatches over the tiers until an account answers or the retry rules end the request, and charges the price of the
+     * tier that answered.
+     */
+    Mono<ResponseEntity<?>> serveTieredChat(TieredRequest run, ResponseMode responseMode) {
+        TierWalk walk = new TierWalk(run.plan());
+        TierRetryPolicy retry = new TierRetryPolicy(walk, run.start(), run.requestMovable());
+        TieredEndpoint endpoint = new TieredEndpoint(
+            account -> callWithAccount(run.route(), account, run.upstreamRequest(), run.upstreamModel(), run.sessionHint()),
+            (result, selection) -> Mono.<ResponseEntity<?>>fromSupplier(() -> run.stream()
+                ? streamResponse(responseMode, run.responseRequest(), run.upstreamModel(), result)
+                : jsonResponse(responseMode, run.responseRequest(), run.upstreamModel(), result)),
+            true,
+            run.upstreamRequest()
+        );
+        return withBilling(run.principal(), run.requestId(), run.requestedModel(), run.upstreamRequest(), run.fastMode(),
+            run.plan(), Mono.defer(() -> attemptTiered(run, walk, retry, endpoint)));
+    }
+
+    /**
+     * {@link #serveTieredChat} for the Responses endpoint, whose answer is remembered with the account that gave it. The
+     * answer of a relay is remembered with no owner (design 4.8): the relay holds none of the chain and speaks no Responses
+     * API, and a relay recorded as the owner would have the chain sent to it by a route that knows no tiers, which asks the
+     * owner of a chain for it. The next turn is replayed from the history this node holds, on whichever source the tiers
+     * choose.
+     */
+    Mono<ResponseEntity<?>> serveTieredResponses(TieredRequest run) {
+        TierWalk walk = new TierWalk(run.plan());
+        TierRetryPolicy retry = new TierRetryPolicy(walk, run.start(), run.requestMovable());
+        // The history a client replays can hold what a relay answered a turn before. An OpenAI account is not sent the
+        // reasoning (it is the gateway's own rendering, which no OpenAI model can read back); the accounts of the other routes
+        // (Kiro, Anthropic keys) are sent the custom tool calls as the function calls their conversion can replay (the editing
+        // tool is a custom tool call from a relay, and was lost from what they were asked). A client that declared the editing
+        // tool as a custom tool (Codex does) has it declared to those accounts as the function the relays are given, with the
+        // patch for its one argument, which is the argument of the calls replayed to them; and what they call it with is told
+        // as the custom tool call Codex applies, as a relay's is (D13). A vendor without relays, and a client that declared the
+        // tool as a function, are sent their request as it always was.
+        boolean patchAsFunction = run.plan().vendorHasRelays() && run.route() != UpstreamRoute.OPENAI
+            && OpenAiResponseFactory.declaresEditingToolAsCustom(run.upstreamRequest());
+        JsonNode nativeRequest = !run.plan().vendorHasRelays()
+            ? run.upstreamRequest()
+            : run.route() == UpstreamRoute.OPENAI
+                ? OpenAiResponseFactory.withoutRenderedReasoning(run.upstreamRequest())
+                : OpenAiResponseFactory.withCustomCallsAsFunctionCalls(patchAsFunction
+                    ? OpenAiResponseFactory.withEditingToolAsPatchFunction(run.upstreamRequest())
+                    : run.upstreamRequest());
+        TieredEndpoint endpoint = new TieredEndpoint(
+            account -> patchAsFunction
+                ? callResponsesWithAccount(run.route(), account, nativeRequest, run.upstreamModel(), run.sessionHint())
+                    .map(OpenAiResponseFactory::withEditingCallsAsCustomCalls)
+                : callResponsesWithAccount(run.route(), account, nativeRequest, run.upstreamModel(), run.sessionHint()),
+            (result, selection) -> Mono.defer(() -> {
+                ProxyAccountEntity account = selection.account();
+                boolean byRelay = selection.dispatch().kind() != TierDispatch.Kind.NATIVE;
+                ProxyAccountEntity owner = byRelay ? null : account;
+                PlatformCompletionResult answer = byRelay ? responsesAnswerOfRelay(result, run.responseRequest()) : result;
+                PreparedResponse response = run.stream()
+                    ? prepareResponsesStreamResponse(run.responseRequest(), run.upstreamRequest(), run.upstreamModel(), answer, owner)
+                    : prepareResponsesJsonResponse(run.responseRequest(), run.upstreamRequest(), run.upstreamModel(), answer, owner);
+                followTierToNextTurn(run, response.responseId());
+                return byRelay
+                    ? Mono.just(response.response())
+                    : rememberResponseOwner(response, account).thenReturn(response.response());
+            }),
+            true,
+            sizedForAdmission(run.upstreamRequest(), run.responseRequest())
+        );
+        return withBilling(run.principal(), run.requestId(), run.requestedModel(), run.upstreamRequest(), run.fastMode(),
+            run.plan(), Mono.defer(() -> attemptTiered(run, walk, retry, endpoint)));
+    }
+
+    /**
+     * What an answer of a relay is rendered as on the Responses endpoint, where {@code incomplete} is an error to the
+     * clients that matter: Codex takes {@code response.incomplete} for a failure of the stream and sends the same request
+     * again, five more times, each of which a relay answers and is paid for, and it has run the calls of the answer by then,
+     * as it runs a call when the call arrives. What reaches this method is an answer that can be told at all: one that the
+     * relay's filter stopped, or that the gateway's own bound cut off when it lost a call or has nothing to show, was held
+     * back already ({@code XpDispatcher}), and nothing was charged for it.
+     *
+     * <ul>
+     *   <li>An answer the relay broke off at the limit of a client that named none was broken off at the gateway's default
+     *       (the bound the reservation is sized from, which the relay is told it may write). That is no limit of the
+     *       client's to report, and the native answers, which carry no stop reason (Kiro's), are finished ones: it is
+     *       rendered as one, with the text and the calls it came to. An answer that was cut inside a call is no finished
+     *       one and is not among these. (Kiro is held to the same bound, and a cut inside a call comes out of it as a finished
+     *       answer whose call has the arguments as they stood; the gateway does not make that of a relay's answer.)
+     *   <li>An answer that is reported as {@code incomplete} (the limit the client wrote was reached) carries no tool call:
+     *       the client may retry it, and a call that was run once must not be run again.
+     * </ul>
+     *
+     * The request log and the metrics keep the stop reason of the relay; this is only how the answer is told.
+     */
+    static PlatformCompletionResult responsesAnswerOfRelay(PlatformCompletionResult answer, JsonNode clientRequest) {
+        PlatformCompletionResult.StopReason stop = answer.stopReason();
+        if (stop == PlatformCompletionResult.StopReason.MAX_TOKENS && !namesAnOutputLimit(clientRequest)) {
+            return new PlatformCompletionResult(answer.content(), answer.reasoningContent(), answer.toolUses(), answer.usage(),
+                null, answer.usageSource(), answer.degraded());
+        }
+        if ((stop == PlatformCompletionResult.StopReason.MAX_TOKENS || stop == PlatformCompletionResult.StopReason.CONTENT_FILTER)
+            && !answer.toolUses().isEmpty()) {
+            return new PlatformCompletionResult(answer.content(), answer.reasoningContent(), List.of(), answer.usage(),
+                stop, answer.usageSource(), answer.degraded());
+        }
+        return answer;
+    }
+
+    /** Whether the client asked for an output limit of its own, in any of the fields {@link #boundedBillingRequest} reads. */
+    private static boolean namesAnOutputLimit(JsonNode request) {
+        return request != null && (request.has("max_output_tokens") || request.has("max_completion_tokens") || request.has("max_tokens"));
+    }
+
+    /**
+     * The Responses request as the in-flight tokens of an account are sized from it. The default output that a request
+     * naming no limit is reserved and sent by (D11, D14) is the limit of the request, not what admission is asked to hold
+     * the account for: that stays the {@link RequestBounds#FALLBACK_OUTPUT_TOKENS} it always was, so that the cap of the
+     * account ({@code maxInflightTokens}) admits as many requests as it did, and a request whose input fits it is not
+     * refused for a limit the client never wrote. A request that names a limit is held for that limit.
+     *
+     * @param upstreamRequest the request with its limit forced, as it is reserved and sent
+     * @param clientRequest the request as the client sent it
+     */
+    private static JsonNode sizedForAdmission(JsonNode upstreamRequest, JsonNode clientRequest) {
+        if (namesAnOutputLimit(clientRequest) || !(upstreamRequest instanceof ObjectNode body)
+            || body.path("max_output_tokens").asLong(0) == RequestBounds.FALLBACK_OUTPUT_TOKENS) {
+            return upstreamRequest;
+        }
+        ObjectNode sized = JsonNodes.shallowCopy(body);
+        sized.put("max_output_tokens", RequestBounds.FALLBACK_OUTPUT_TOKENS);
+        return sized;
+    }
+
+    /**
+     * One dispatch of a tiered request and, when it fails and {@link TierRetryPolicy} allows, the ones after it: what
+     * {@link #attemptChat} and {@link #attemptResponses} do for the untiered route, over the tiers of the plan. The
+     * account comes from the plan and through admission. A failure is recorded, and the retry policy (not the untiered
+     * count of accounts) decides where the request goes next; when it has nowhere to go, the error of the failed
+     * attempt is returned, except for a relay's refusal of its own key, which is never told to the client. No circuit
+     * probe is taken or cancelled, since a tiered request has no circuit epoch.
+     */
+    private Mono<ResponseEntity<?>> attemptTiered(TieredRequest run, TierWalk walk, TierRetryPolicy retry, TieredEndpoint endpoint) {
+        TierPlan plan = run.plan();
+        return selectTieredAccountWithAdmission(
+                walk,
+                run.sessionHint(),
+                run.routingPolicy(),
+                run.ownerMayBeLeft(),
+                run.requestId(),
+                endpoint.admitted(),
+                run.path()
+            )
+            .flatMap(attempt -> withAdmissionLease(attempt, guardedAttempt -> {
+                ProxyAccountEntity account = attempt.account();
+                // An upstream client that retries on its own says here that one of its attempts produced output, which the
+                // error it finally throws may not (a retry that cannot connect after a stream was cut off).
+                AtomicBoolean generationStarted = new AtomicBoolean();
+                TierSelection selection = attempt.selection();
+                return inFlight(plan, selection.level(), handedToRelay(selection)
+                    .then(markDispatched(attempt))
+                    .then(markDispatchedTiered(run, selection, retry))
+                    .flatMap(lease -> captureUpstreamCall(
+                        Mono.defer(() -> holdingLease(run, selection, lease, callTiered(run, endpoint, selection, lease)))
+                            .contextWrite(context -> context.put(UpstreamException.GENERATION_STARTED_CONTEXT_KEY, generationStarted)))))
+                    .flatMap(outcome -> {
+                        if (outcome.failure() == null) {
+                            PlatformCompletionResult result = outcome.result();
+                            bindTieredSession(plan, attempt.selection().level(), run.sessionHint(), account.getAccountId(), run.routingPolicy());
+                            bindTierLevel(plan, walk, attempt.selection());
+                            return recordSuccess(
+                                run.requestId(),
+                                run.principal(),
+                                account,
+                                run.path(),
+                                run.requestedModel(),
+                                result,
+                                run.route(),
+                                run.fastMode(),
+                                guardedAttempt,
+                                plan.poolContext(),
+                                run.start()
+                            ).then(Mono.defer(() -> endpoint.respond().apply(result, selection))
+                                .map(response -> withTierHeaders(response, attempt.selection().level())));
+                        }
+
+                        Throwable error = outcome.failure();
+                        // A native dispatch is classified as it always was; a relay's answer by what a relay may say (design 7.8).
+                        UpstreamFailureClassifier.Classification classification =
+                            UpstreamFailureClassifier.classify(error, account, selection.dispatch());
+                        rememberRelayFailure(plan, selection, classification);
+                        Mono<Void> failureRecord = recordFailure(
+                            run.requestId(),
+                            run.principal(),
+                            account,
+                            run.path(),
+                            run.requestedModel(),
+                            error,
+                            classification,
+                            guardedAttempt,
+                            plan.poolContext(),
+                            run.start()
+                        );
+                        // A relay that was interrupted may be generating the answer: no other source is asked, whatever else is said.
+                        boolean retryable = !classification.interrupted() && classification.retryable()
+                            && classification.crossAccountRetryAllowed();
+                        // Whether the tier has another account to offer is only of use to a request that goes on at all.
+                        Mono<Boolean> accountsLeft = retryable && run.requestMovable()
+                            ? hasUntriedAccount(walk, selection.level(), account.getAccountId())
+                            : Mono.just(false);
+                        return accountsLeft.<ResponseEntity<?>>flatMap(tierHasAccountsLeft -> {
+                            TierRetryPolicy.FailedAttempt failed = new TierRetryPolicy.FailedAttempt(
+                                selection.level(),
+                                account.getAccountId(),
+                                error,
+                                definitiveBillingFailure(error),
+                                retryable,
+                                maxDistinctAccounts(
+                                    classification, run.route(), run.preferCodexAccounts(), run.preferDeepSeekAccounts(), run.routingPolicy()),
+                                generationStarted.get(),
+                                tierHasAccountsLeft
+                            );
+                            // A relay that refused the request itself is not asked again; the request may cross once to a native
+                            // account. An interruption is not retried at all, and nothing is rechecked or climbed back to after it.
+                            TierRetryPolicy.Outcome next = classification.crossTierOnly()
+                                ? retry.onRelayRefusal(failed)
+                                : retry.onFailure(failed);
+                            // A relay's refusal is told to the client as it is only when the request has nowhere native left to
+                            // go: where accounts exist for it that are busy or out of quota for now, the client is told to try
+                            // again, as its next request is, and is not made to shorten what an account would take as it is. That
+                            // holds whether the request has no tier to cross to or may not cross now (it is too old, its lease
+                            // is spent, its budget is): what the identical request is told does not depend on that. So does a
+                            // refusal of a body that asked for the maximum output of the mapping, which the identical request is
+                            // not sent again (D15): the relay has learned it, and the client is told to try again whatever is
+                            // below. A stop for a failure that may have started a generation or been billed is the failure's,
+                            // and is returned.
+                            boolean tryAgain = classification.crossTierOnly()
+                                && (plan.retriesAfterRelayRefusal(classification.contextExceeded())
+                                    || refusedTheMaximumOutput(selection, classification));
+                            // A relay that turned its own key down is a failure of that account, which the operator mends (D5): it
+                            // goes on to the next account or tier like a busy one, and the client is never told the relay's 401 or
+                            // 403. Where it cannot go on (the budget is spent, the lease is) or nothing is left, it is told what
+                            // a request nothing can serve is told; an earlier failure of the request keeps its own answer.
+                            boolean keyRefused = classification.keyRefused();
+                            if (next == TierRetryPolicy.Outcome.STOP) {
+                                return failureRecord.then(Mono.<ResponseEntity<?>>error(keyRefused ? noAvailableAccount() : mapError(error)));
+                            }
+                            if (next == TierRetryPolicy.Outcome.NOWHERE_TO_CROSS || next == TierRetryPolicy.Outcome.MAY_NOT_CROSS) {
+                                return failureRecord.then(Mono.<ResponseEntity<?>>error(tryAgain ? new TryAgainAfterRefusal() : mapError(error)));
+                            }
+                            // A retry that finds no account, or no admission capacity, returns the error that sent it there.
+                            // The 503 of exhausted admission is not a definitive failure: it would send the reservation of a
+                            // request that was already dispatched to review. After the refusal of a relay the reservation is
+                            // released for good all the same (the relay has the request until a native account is asked, and
+                            // none was), so the retry's own error can be returned for a client that is to try again. That
+                            // answer is given on purpose, whether the refusal crossed to a native account that was busy or
+                            // stopped short of it, and is marked as such so that the attempts before this one keep it.
+                            return failureRecord.then(attemptTiered(run, walk, retry, endpoint)
+                                .onErrorResume(retryError -> {
+                                    if (isTryAgainAfterRefusal(retryError) || !(isNoAvailableAccount(retryError) || isAdmissionExhausted(retryError))) {
+                                        return Mono.<ResponseEntity<?>>error(retryError);
+                                    }
+                                    if (tryAgain) {
+                                        return Mono.<ResponseEntity<?>>error(new TryAgainAfterRefusal((ApiException) rootFailure(retryError)));
+                                    }
+                                    return Mono.<ResponseEntity<?>>error(keyRefused ? retryError : mapError(error));
+                                }));
+                        });
+                    });
+            }));
+    }
+
+    /**
+     * Whether the relay refused the length of a body that asked for more output than the 4,096 the plans judge a prompt beside
+     * (the maximum output of its mapping, D15). The refusal is learned in the terms of the smaller body ({@link
+     * TierPlan.Relay#taughtByRefusal}), so the identical request is sent that one and the relay may serve it: the client is not
+     * told its prompt does not fit, which the next identical request would contradict.
+     */
+    private static boolean refusedTheMaximumOutput(TierSelection selection, UpstreamFailureClassifier.Classification classification) {
+        return classification.contextExceeded()
+            && selection.level().relay(selection.account().getAccountId()).filter(relay -> relay.outputBeyondFallback() > 0).isPresent();
+    }
+
+    /**
+     * What this node keeps of a relay's failure beyond the request (design 7.8). A relay that broke off an answer is kept
+     * from the plans of the same session for a couple of minutes, so that the client's own retry of the 502 is not given to
+     * the relay that may still be generating the first answer; a relay that refused a prompt for its length is not sent a
+     * prompt that large again. Both only shape the plans of later requests, as the other structural reasons do; neither
+     * writes the tier binding of the session, since the tier below that then serves it is not one the session was pushed
+     * down to (design 4.7).
+     */
+    private void rememberRelayFailure(TierPlan plan, TierSelection selection, UpstreamFailureClassifier.Classification classification) {
+        if (selection.dispatch().kind() == TierDispatch.Kind.NATIVE) {
+            return;
+        }
+        String accountId = selection.account().getAccountId();
+        if (classification.interrupted()) {
+            tierRuntime.bindings().excludeRelay(plan.vendor(), plan.relaySession(), accountId);
+        } else if (classification.contextExceeded()) {
+            selection.level().relay(accountId)
+                .ifPresent(relay -> tierRuntime.learnedLimits().learn(relay));
+        }
+    }
+
+    /**
+     * The response with the headers that name the tier that served it (design 6.4). They were worked out with the plan
+     * and are only put in here, after the settlement: building a response must not fail for a request that was charged.
+     */
+    private static ResponseEntity<?> withTierHeaders(ResponseEntity<?> response, Level served) {
+        return ResponseEntity.status(response.getStatusCode())
+            .headers(response.getHeaders())
+            .headers(headers -> served.responseHeaders().forEach(headers::set))
+            .body(response.getBody());
+    }
+
+    /**
+     * What the request log keeps of the source of an attempt (design 5.7), or null for an attempt of an untiered request,
+     * whose row stays what it always was. A native dispatch has nothing to add to the tier, the factor and how the tier
+     * was chosen; the other columns describe a source that is reached through a conversion: how it was dispatched, the
+     * name the relay was asked for, and, for an attempt that was answered, where its usage came from, why it stopped and
+     * what of the request it could not carry. What the body left out is known when it fails too.
+     *
+     * @param result what the attempt was answered with; null for an attempt that failed
+     */
+    private static StatsService.SourceColumns sourceColumns(TierSelection tier, PlatformCompletionResult result) {
+        return sourceColumns(tier, result, null);
+    }
+
+    /**
+     * As above, and a relay's failure that the gateway knows the kind of (it may have generated: INTERRUPTED; it refused
+     * the converted request: CONVERSION_REJECTED; and the others of {@link UpstreamFailureClassifier.RelayFailure}) is
+     * written where an answer writes why it stopped. The status page counts those kinds for the upgrade of a pair
+     * (design 7.3, 7.14); a failure of any other kind leaves the column empty.
+     *
+     * @param failure how the attempt failed; null for an attempt that was answered
+     */
+    private static StatsService.SourceColumns sourceColumns(
+        TierSelection tier,
+        PlatformCompletionResult result,
+        UpstreamFailureClassifier.Classification failure
+    ) {
+        if (tier == null) {
+            return null;
+        }
+        Level level = tier.level();
+        TierDispatch dispatch = tier.dispatch();
+        boolean relay = dispatch.kind() != TierDispatch.Kind.NATIVE;
+        // An answer that was held back was paid for by the operator: the row says what it cost, apart from the tokens of the
+        // user's usage, which stay 0 because nothing is charged (D11).
+        PlatformUsage held = relay && failure != null ? failure.withheldUsage() : null;
+        return new StatsService.SourceColumns(
+            level.tierRef(),
+            level.level(),
+            level.name(),
+            level.factor(),
+            tier.mode().name(),
+            relay ? dispatch.kind().name() : null,
+            relay ? dispatch.wireModel() : null,
+            relay && result != null && result.usageSource() != null ? result.usageSource().name() : null,
+            relay ? stopped(result, failure) : null,
+            relay ? joined(result != null && result.degraded() != null ? result.degraded() : dispatch.degraded()) : null,
+            held == null ? null : held.inputTokens(),
+            held == null ? null : held.outputTokens()
+        );
+    }
+
+    private static String stopped(PlatformCompletionResult result, UpstreamFailureClassifier.Classification failure) {
+        if (result != null && result.stopReason() != null) {
+            return result.stopReason().name();
+        }
+        return failure != null && failure.relayFailure() != null ? failure.relayFailure().name() : null;
+    }
+
+    private static String joined(List<String> names) {
+        return names.isEmpty() ? null : String.join(",", names);
+    }
+
+    /** The name an attempt goes by in the metadata of its admission: the route, or the kind of relay it was sent to. */
+    private static String routeName(UpstreamRoute route, TierSelection tier) {
+        return tier != null && tier.dispatch().kind() != TierDispatch.Kind.NATIVE ? tier.dispatch().kind().name() : route.name();
+    }
+
+    /**
+     * Marks the reservation dispatched to the tier of the attempt and renews its lease for the time the dispatch may
+     * take (design 4.6). The retry policy is told what the lease leaves, so that no dispatch is made which could outlive
+     * the reservation.
+     *
+     * @return the lease the dispatch holds; empty for a request without a reservation
+     */
+    private Mono<Optional<ApiKeyService.DispatchLease>> markDispatchedTiered(
+        TieredRequest run,
+        TierSelection selection,
+        TierRetryPolicy retry
+    ) {
+        String tierRef = selection.level().tierRef();
+        TierDispatch dispatch = selection.dispatch();
+        // A relay's dispatch is bounded by a time limit of its own, which its lease has to outlast.
+        Mono<ApiKeyService.DispatchLease> marked = dispatch.kind() == TierDispatch.Kind.NATIVE
+            ? apiKeyService.markUsageDispatchedTiered(run.principal(), run.requestId(), tierRef)
+            : apiKeyService.markUsageDispatchedTiered(run.principal(), run.requestId(), tierRef,
+                Duration.ofSeconds(dispatch.member().maxDurationSeconds()));
+        return marked
+            .doOnNext(lease -> retry.leaseGranted(lease.window(), lease.untilCap()))
+            .map(Optional::of)
+            .defaultIfEmpty(Optional.empty());
+    }
+
+    /**
+     * Notes that the request is handed to a relay, when the selected account is one, before anything is marked dispatched
+     * for it: a request that is given up or fails from then on is released for good (design 7.8, invariant I7). The note
+     * stands until the settlement of the answer has returned or a native account is asked ({@link #callTiered}); nothing
+     * is noted for a request without a reservation, which has nothing to release.
+     */
+    private static Mono<Void> handedToRelay(TierSelection selection) {
+        if (selection.dispatch().kind() == TierDispatch.Kind.NATIVE) {
+            return Mono.empty();
+        }
+        return Mono.deferContextual(context -> {
+            noteRelayHasRequest(context, true);
+            return Mono.empty();
+        });
+    }
+
+    private static void noteRelayHasRequest(ContextView context, boolean inFlight) {
+        if (context.hasKey(XP_IN_FLIGHT)) {
+            context.<AtomicBoolean>get(XP_IN_FLIGHT).set(inFlight);
+        }
+    }
+
+    /**
+     * The call that sends the request to the account a tier selected: the upstream client of the route for every account
+     * but a relay, whose dispatcher is given the limits the tier reserved for it (design 5.8, 7.5) and the time its lease
+     * can still cover (design 4.6). Whatever the dispatcher fails with is already a failure the rest of the request can
+     * reason about; this adds none.
+     */
+    private Mono<PlatformCompletionResult> callTiered(
+        TieredRequest run,
+        TieredEndpoint endpoint,
+        TierSelection selection,
+        Optional<ApiKeyService.DispatchLease> lease
+    ) {
+        TierDispatch dispatch = selection.dispatch();
+        if (dispatch.kind() == TierDispatch.Kind.NATIVE) {
+            // From here an upstream account has the request, whose billing is not known until it answers: a client that
+            // gives up leaves the reservation for review, as it always did, even after a relay was asked before it.
+            return Mono.deferContextual(context -> {
+                noteRelayHasRequest(context, false);
+                return endpoint.call().apply(selection.account());
+            });
+        }
+        TierPlan.Relay relay = selection.level().relay(selection.account().getAccountId()).orElse(null);
+        if (!endpoint.relays() || xpDispatcher == null || relay == null) {
+            // Not reachable: a plan holds relays only for the entries that have a pair, and only a facade built by Spring
+            // meets one. Nothing was sent, so it is a failure of the kind that another source may answer and that is released.
+            log.error("A relay was selected for tier {} where no relay can serve the request", selection.level().tierRef());
+            return Mono.error(new UpstreamException(502, "The source cannot be asked for this request", true));
+        }
+        Duration timeLimit = relayTimeLimit(dispatch.member(), lease);
+        if (timeLimit == null) {
+            // The reservation cannot be leased for much longer: nothing was sent, and another source may answer.
+            return Mono.error(new UpstreamException(502, "The source was not asked: too little time is left for the request", true));
+        }
+        // The relay is charged for no more than it was told it may write, which can be less than the bound the tier reserved
+        // for (a request that names a small limit is still reserved for the default one, and so is a Responses request that
+        // names none, which a relay is sent the limit of its own mapping for, D15).
+        long forwarded = dispatch.forwardedOutputLimit();
+        long outputLimit = forwarded > 0 ? Math.min(run.plan().outputBound(), forwarded) : run.plan().outputBound();
+        // A Responses request that names no limit of its own (Codex never does) has one chosen for it: the default of the
+        // gateway, and for a relay what its mapping allows.
+        boolean defaultOutputLimit = dispatch.pair().entry() == PairRegistry.Entry.RESPONSES && !namesAnOutputLimit(run.responseRequest());
+        return xpDispatcher.dispatch(
+            selection.account(),
+            dispatch,
+            new RelayUsageNormalizer.Limits(relay.inputBound(), outputLimit),
+            timeLimit,
+            defaultOutputLimit
+        )
+            // A relay that says the prompt fits but not beside the output it was asked for (Anthropic's words) has refused the
+            // length only for a body whose output this node chose: the limit is then a number it knows, and the refusal is learned
+            // in the terms of the 4,096 body. A limit the client wrote is no such number, and learning the prompt alone from a
+            // refusal that included it would keep the relay from prompts it takes beside less output: it stays any other 400 the
+            // relay gave to the converted request, as it was before D15.
+            .onErrorMap(RelayErrorException.class,
+                refusal -> defaultOutputLimit && refusal.isBesideOutput() ? refusal.asContextExceeded() : refusal);
+    }
+
+    /**
+     * How long one dispatch to a relay may take (design 4.6): what the member is set to, and no more than the lease of
+     * the reservation can still be extended by, less a minute for what follows the answer. Null when that is under 30
+     * seconds, which is too little to be worth asking.
+     *
+     * @param lease the lease the dispatch holds; empty for a request without a reservation, which has no cap
+     */
+    static Duration relayTimeLimit(SourceTierSnapshot.Member member, Optional<ApiKeyService.DispatchLease> lease) {
+        Duration limit = Duration.ofSeconds(member.maxDurationSeconds());
+        if (lease.isPresent()) {
+            Duration left = lease.get().untilCap().minus(RELAY_LEASE_MARGIN);
+            limit = left.compareTo(limit) < 0 ? left : limit;
+        }
+        return limit.compareTo(RELAY_LEAST_TIME_LIMIT) < 0 ? null : limit;
+    }
+
+    /**
+     * Keeps the lease on the reservation renewed while a dispatch runs (design 4.6). The lease covers what Kiro allows
+     * itself, each of its tries bounded by the request timeout, and what a relay is given, a time limit that its lease was
+     * made for; the other upstream clients are only bounded by the time
+     * between two reads of the response, so a stream that keeps trickling in can run for longer than any lease. It is
+     * not cut off for that: the answer would be thrown away and the reservation left for review for good. Its lease is
+     * renewed instead, a quarter of the window at a time, until the hour past which a reservation cannot be leased. A
+     * dispatch that goes on beyond that, or whose node stops renewing (a failed renewal is tried again at the next
+     * tick, and two in a row still leave a quarter of the window to spare), has its reservation turned into a review by
+     * the sweeper; the settlement at the end of the stream clears that review, as it does for an untiered request that
+     * runs past its lease. The renewal ends with the dispatch, however it ends.
+     */
+    private <T> Mono<T> holdingLease(
+        TieredRequest run,
+        TierSelection selection,
+        Optional<ApiKeyService.DispatchLease> lease,
+        Mono<T> call
+    ) {
+        if (lease.isEmpty() || selection.cell() == PoolCell.KIRO_COMPATIBLE
+            || selection.dispatch().kind() != TierDispatch.Kind.NATIVE) {
+            return call;
+        }
+        Duration period = lease.get().renewalPeriod();
+        long renewals = lease.get().renewalsUntilCap();
+        if (renewals <= 0) {
+            return call;
+        }
+        return Mono.defer(() -> {
+            Disposable renewing = Flux.interval(period)
+                .onBackpressureDrop()
+                .take(renewals)
+                .concatMap(tick -> Mono.defer(() -> apiKeyService.renewDispatchLease(run.principal(), run.requestId()))
+                    .onErrorResume(error -> {
+                        log.warn("The billing lease of request {} could not be renewed; it is tried again at the next tick", run.requestId(), error);
+                        return Mono.just(true);
+                    }))
+                // A reservation that is no longer dispatched (a review, a settlement, a release) has nothing to renew.
+                .takeWhile(renewed -> renewed)
+                .subscribe(renewed -> {}, error -> log.warn("Renewing the billing lease of request {} stopped", run.requestId(), error));
+            return call.doFinally(signal -> renewing.dispose());
+        });
+    }
+
+    /**
+     * Counts the dispatch in the session's tier while it runs, so that the refusal of a parallel request of the same
+     * session (see {@link #refusedByOwnSession}) can be told from a tier that is busy with other users.
+     */
+    private <T> Mono<T> inFlight(TierPlan plan, Level level, Mono<T> dispatch) {
+        TierPlan.Session session = plan.session().orElse(null);
+        if (session == null) {
+            return dispatch;
+        }
+        TierSessionBindings bindings = tierRuntime.bindings();
+        return Mono.defer(() -> {
+            AtomicBoolean ended = new AtomicBoolean();
+            // Ended when the outcome is known, before the rest of the request goes on: a retry of this request is not
+            // refused by the attempt it follows.
+            Runnable end = () -> {
+                if (ended.compareAndSet(false, true)) {
+                    bindings.dispatchEnded(session.key(), level.tierRef());
+                }
+            };
+            bindings.dispatchStarted(session.key(), level.tierRef());
+            return dispatch.doOnNext(outcome -> end.run()).doOnTerminate(end).doOnCancel(end);
+        });
+    }
+
+    /**
+     * Whether the account refused because of requests of the session itself: it is at its limit of concurrent requests,
+     * tokens or sessions and the session has a request being served by this tier. A session that runs requests in
+     * parallel fills a small tier by itself, which does not mean the tier is busy with others.
+     */
+    private boolean refusedByOwnSession(TierPlan plan, Level level, String rejectionReason) {
+        TierPlan.Session session = plan.session().orElse(null);
+        return session != null
+            && rejectionReason != null
+            && SESSION_CONCURRENCY_REFUSALS.contains(rejectionReason)
+            && tierRuntime.bindings().hasInFlight(session.key(), level.tierRef());
+    }
+
+    /**
+     * Keeps the session to the tier that served it, when that tier is one it was pushed down to (design 4.7, invariant
+     * I8): only a request that went through every tier above its start and found them all without an account, for
+     * reasons other than its own budget and its own session's parallel requests, writes anything. A request that
+     * climbed back to a better tier as a last resort moves the session up with it, unless what left it nowhere else
+     * was the session's own parallel requests. Anything else leaves the session where it is, and only notes that it is
+     * still being served.
+     *
+     * <p>A request that named its tier is a request of the session all the same (design 4.7): it leaves the tier the
+     * session is bound to as it is, and notes that the session is being served, so that a session which keeps working
+     * with pinned requests is not idle and does not go back to the best tier in the middle of its work. That holds on
+     * every endpoint, as does the response chain's own hand-over of the binding ({@link #followTierToNextTurn}).
+     */
+    private void bindTierLevel(TierPlan plan, TierWalk walk, TierSelection served) {
+        TierPlan.Session session = plan.session().orElse(null);
+        if (session == null) {
+            return;
+        }
+        TierSessionBindings bindings = tierRuntime.bindings();
+        if (!session.keepsTier()) {
+            bindings.serve(session.bindingKey());
+            return;
+        }
+        Level level = served.level();
+        TierSessionBindings.Binding binding = new TierSessionBindings.Binding(level.tierId(), level.level());
+        if (served.climbed() && walk.realClimb()) {
+            log.debug("A session of vendor {} climbed back to tier {}", plan.vendor(), level.tierRef());
+            bindings.climb(session.bindingKey(), binding);
+        } else if (!served.climbed() && walk.realDowngradeTo(level)) {
+            log.debug("A session of vendor {} was pushed down to tier {}", plan.vendor(), level.tierRef());
+            bindings.downgrade(session.bindingKey(), binding, plan::levelOf);
+        } else {
+            bindings.serve(session.bindingKey());
+        }
+    }
+
+    /**
+     * The next turn of a response chain names its session by the response it continues, so the node keeps that the response
+     * this turn produced belongs to the session of this turn. The next turn is then the same session, and so the same tier
+     * (design 4.7) for every model the chain has asked for, and the relays that broke off an answer of it a moment ago
+     * (design 7.8) stay out of the plans of its turns, whatever those turns were: it is the retry of this one, and the turns
+     * after it, that must not be given to a relay that may still be generating. The untiered path hands the chain on as well
+     * ({@link #followChain}) where some vendor has tiers in use, and a turn that was planned in tiers without a session of its
+     * own is recorded under the name the request was given before planning.
+     */
+    private void followTierToNextTurn(TieredRequest run, String responseId) {
+        TierPlan plan = run.plan();
+        TierPlan.Session session = plan.session().orElse(null);
+        // A plan that names no session (the vendor keeps none in a tier and no relay is open to the key) still has the name the
+        // chain gave the request: the turn is the chain's all the same.
+        String name = session != null ? session.key() : plan.relaySession() != null ? plan.relaySession() : run.chainSession();
+        followChain(run.principal(), responseId, name);
+    }
+
+    /**
+     * Records that the response a turn of a chain produced belongs to the session {@code name}, which is the chain's.
+     * Every turn does this, whichever source served it and whether or not any tier planned it: a turn of a vendor without
+     * tiers, or of one that keeps no sessions, would otherwise end the chain's name at its response id, and the turn after it
+     * would be a new session (a session that fell to a lower tier would go back to the better one without having been idle,
+     * and a relay that broke off an answer would be asked again while it may still be generating). Only the node's chain map
+     * is written; routing, prices, logs and the bytes sent are the request's own. A deployment where no vendor has tiers in
+     * use ({@link TierRuntime.Planner#tiersInUse}) has no session to keep whole, and the untiered path does not call this.
+     *
+     * @param name the session of this turn; null when it has none (no chain, no name, nothing to tell it by)
+     */
+    private void followChain(ApiKeyPrincipal principal, String responseId, String name) {
+        if (responseId != null && !responseId.isBlank() && name != null) {
+            tierRuntime.bindings().follow(TierSessionKeys.ofResponse(principal.keyId(), responseId), name);
+        }
+    }
+
+    /**
+     * What a client is answered when a relay refused its request and the accounts that would take it are only unavailable for
+     * now (design 7.8): the answer of a selection that found no account, which is what clients retry and what a pinned request
+     * is told as SOURCE_TIER_UNAVAILABLE. It is a type of its own so that an earlier attempt, to whose error a retry that finds
+     * no account gives way, does not take the place of an answer that was given on purpose.
+     */
+    private static final class TryAgainAfterRefusal extends ApiException {
+        TryAgainAfterRefusal() {
+            super(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "No available upstream account");
+        }
+
+        /** The answer of a retry that found no account, which is told as that retry told it. */
+        TryAgainAfterRefusal(ApiException retry) {
+            super(retry.getStatus(), retry.getCode(), retry.getMessage(), retry.getDetails());
+        }
+    }
+
+    private boolean isTryAgainAfterRefusal(Throwable error) {
+        return rootFailure(error) instanceof TryAgainAfterRefusal;
+    }
+
+    /** What a request is answered when no account can be asked for it: the selection's own error, as a failure of a request puts it. */
+    private static ApiException noAvailableAccount() {
+        return new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "NO_AVAILABLE_ACCOUNT", "No available upstream account");
+    }
+
+    private boolean isAdmissionExhausted(Throwable error) {
+        Throwable failure = rootFailure(error);
+        return failure instanceof ApiException api && "ACCOUNT_ADMISSION_EXHAUSTED".equals(api.getCode());
     }
 
     private Mono<Void> markDispatched(AccountAttempt attempt) {
@@ -1200,7 +3387,8 @@ public class ProxyFacade {
         if (route == UpstreamRoute.OPENAI
             && poolContext != null
             && isOpenAiCompatibleModel(poolContext.upstreamModel())) {
-            return AccountPlatforms::isOpenAiCompatibleApiKey;
+            // The exclusive relay of another protocol is not part of this pool (design 7.5), so it is not tested for it either.
+            return account -> AccountPlatforms.isOpenAiCompatibleApiKey(account) && !accountPoolService.isExclusiveRelay(account);
         }
         if (preferCodexAccounts) {
             return AccountPlatforms::isCodex;
@@ -1327,16 +3515,7 @@ public class ProxyFacade {
     }
 
     private boolean isCodexOnlyResponsesModel(String model) {
-        String normalized = routeModel(model);
-        if (normalized.startsWith("openai/")) {
-            normalized = normalized.substring("openai/".length());
-        } else if (normalized.startsWith("openai-compatible/")) {
-            normalized = normalized.substring("openai-compatible/".length());
-        }
-        normalized = normalized.toLowerCase(Locale.ROOT);
-        return normalized.contains("codex")
-            || "codex-mini-latest".equals(normalized)
-            || normalized.matches("gpt-5\\.5.*");
+        return CodexOnlyModels.isCodexOnly(model);
     }
 
     private boolean isFastRequested(JsonNode request, String requestedModel, String mappedModel) {
@@ -1406,14 +3585,8 @@ public class ProxyFacade {
         return request;
     }
 
-    private AccountPoolRequestContext poolContext(
-        String requestId,
-        String requestedModel,
-        String upstreamModel,
-        UpstreamRoute route,
-        boolean deepSeekRoute
-    ) {
-        String providerHint = deepSeekRoute
+    private String providerHint(UpstreamRoute route, String upstreamModel, boolean deepSeekRoute) {
+        return deepSeekRoute
             ? AccountPlatforms.DEEPSEEK_PROVIDER
             : route == UpstreamRoute.OPENAI && isOpenAiCompatibleModel(upstreamModel)
                 ? AccountPlatforms.OPENAI_COMPATIBLE_PROVIDER
@@ -1422,6 +3595,16 @@ public class ProxyFacade {
                 case ANTHROPIC -> AccountPlatforms.ANTHROPIC_PROVIDER;
                 case KIRO -> "Kiro";
             };
+    }
+
+    private AccountPoolRequestContext poolContext(
+        String requestId,
+        String requestedModel,
+        String upstreamModel,
+        UpstreamRoute route,
+        boolean deepSeekRoute
+    ) {
+        String providerHint = providerHint(route, upstreamModel, deepSeekRoute);
         UUID circuitEpoch = accountPoolService.captureCircuitEpoch();
         return new AccountPoolRequestContext(
             requestId,
@@ -1481,28 +3664,53 @@ public class ProxyFacade {
                 AccountFailureScope.UNKNOWN,
                 Duration.ZERO,
                 false,
-                Map.of("model", model, "route", route.name())
+                Map.of("model", model, "route", routeName(route, attempt.selection()))
             )
         );
         long circuitOutcomeId = accountPoolService.recordCircuitSuccess(poolContext, account);
         AtomicBoolean circuitOutcomeResolved = new AtomicBoolean(circuitOutcomeId <= 0);
+        // A tiered attempt is charged the price of the tier it was selected from and settled under that tier; there is no
+        // other price to fall back to, so a context without the plan's billing fails the settlement.
+        TierSelection tier = attempt.selection();
         Mono<BigDecimal> billedCredits = "anonymous".equals(principal.keyId())
             ? Mono.just(BigDecimal.ZERO)
-            : Mono.deferContextual(context -> context.hasKey(tech.starryapi.model.BillingQuote.class)
-                ? Mono.just(context.get(tech.starryapi.model.BillingQuote.class).cost(usage))
-                : paymentSettingsService.config().flatMap(config -> modelPricingService.cost(model, usage, fastMode, config.apiBillingMultiplier())));
+            : tier != null
+                ? Mono.deferContextual(context -> {
+                    TierBilling billing = context.<TierBilling>get(TierBilling.class);
+                    // A relay's usage is what the relay said, and is never charged above what its tier reserved.
+                    return Mono.just(tier.dispatch().kind() == TierDispatch.Kind.NATIVE
+                        ? billing.cost(tier.level(), usage)
+                        : billing.relayCost(tier.level(), usage));
+                })
+                : Mono.deferContextual(context -> context.hasKey(tech.starryapi.model.BillingQuote.class)
+                    ? Mono.just(context.get(tech.starryapi.model.BillingQuote.class).cost(usage))
+                    : paymentSettingsService.config().flatMap(config -> modelPricingService.cost(model, usage, fastMode, config.apiBillingMultiplier())));
         Mono<Void> completion = billedCredits
             .flatMap(credits -> {
-                Mono<Void> keyAccounting = apiKeyService.accountUsage(
-                    principal,
-                    requestId,
-                    credits,
-                    usage.inputTokens(),
-                    usage.outputTokens()
-                ).then(Mono.deferContextual(context -> {
+                Mono<Void> settlement = tier == null
+                    ? apiKeyService.accountUsage(
+                        principal,
+                        requestId,
+                        credits,
+                        usage.inputTokens(),
+                        usage.outputTokens()
+                    )
+                    : apiKeyService.accountUsageServed(
+                        principal,
+                        requestId,
+                        credits,
+                        usage.inputTokens(),
+                        usage.outputTokens(),
+                        tier.level().tierRef(),
+                        tier.level().level(),
+                        tier.level().factor()
+                    );
+                Mono<Void> keyAccounting = settlement.then(Mono.deferContextual(context -> {
                     if (context.hasKey(BILLING_SETTLED)) {
                         context.<AtomicBoolean>get(BILLING_SETTLED).set(true);
                     }
+                    // The settlement has returned: nothing is left of a relay's attempt to release.
+                    noteRelayHasRequest(context, false);
                     return Mono.<Void>empty();
                 }));
                 return keyAccounting
@@ -1518,7 +3726,8 @@ public class ProxyFacade {
                         circuitOutcomeId,
                         circuitOutcomeResolved,
                         poolContext,
-                        start
+                        start,
+                        tier
                     )
                         .then(bestEffort("record upstream account success", Mono.defer(
                             () -> accountPoolService.recordSuccess(
@@ -1556,7 +3765,7 @@ public class ProxyFacade {
                                 poolContext.upstreamModel(),
                                 true,
                                 accountPoolService.circuitEpoch(poolContext)
-                            )),
+                            ).withSource(sourceColumns(tier, result))),
                             poolContext,
                             circuitOutcomeId,
                             circuitOutcomeResolved
@@ -1589,7 +3798,8 @@ public class ProxyFacade {
         long circuitOutcomeId,
         AtomicBoolean circuitOutcomeResolved,
         AccountPoolRequestContext poolContext,
-        Instant start
+        Instant start,
+        TierSelection tier
     ) {
         Throwable failure = rootFailure(error);
         int statusCode = failure instanceof ApiException api
@@ -1615,7 +3825,7 @@ public class ProxyFacade {
                 poolContext.upstreamModel(),
                 true,
                 accountPoolService.circuitEpoch(poolContext)
-            )),
+            ).withSource(sourceColumns(tier, null))),
             poolContext,
             circuitOutcomeId,
             circuitOutcomeResolved
@@ -1733,24 +3943,31 @@ public class ProxyFacade {
         Mono<Void> accountStats = bestEffort("record upstream account failure", failureUpdate
             .doOnNext(accountAutoSuspendService::scheduleIfNeeded)
             .then());
+        // The cooldown of a model or an endpoint is kept under the keys the attempt was admitted by: a relay's are the
+        // mapping's model and the relay's own endpoint, not the model of the pool context and the path of the client.
+        TierDispatch dispatch = attempt.selection() == null ? TierDispatch.nativeDispatch() : attempt.selection().dispatch();
+        // A relay whose answer the gateway held back did what it was asked: the admission store is told of an answer, which
+        // lets its error rate decay, and not of a failure of the account, which would raise it and could cool the relay down
+        // for every session (the request itself is the failure, and is logged as one below).
+        boolean answered = classification.withheld();
         Mono<Void> admissionReconciliation = reconcileAttempt(
             "reconcile failed account admission",
             attempt,
             new AccountAdmissionStore.AdmissionResult(
                 attempt.leaseId(),
-                false,
+                answered,
                 0,
                 0,
                 Duration.between(attempt.startedAt(), Instant.now()).toMillis(),
-                statusCode,
-                classification.scope(),
+                answered ? Integer.valueOf(200) : statusCode,
+                answered ? AccountFailureScope.UNKNOWN : classification.scope(),
                 classification.cooldown(),
                 classification.permanentCredentialFailure(),
                 Map.of(
                     "message", failureMessage,
                     "model", model,
-                    "upstreamModel", poolContext.upstreamModel(),
-                    "endpoint", path,
+                    "upstreamModel", dispatch.modelScope() != null ? dispatch.modelScope() : poolContext.upstreamModel(),
+                    "endpoint", dispatch.endpointScope() != null ? dispatch.endpointScope() : path,
                     "provider", String.valueOf(account.getProvider()),
                     "cooldownSeconds", classification.cooldown().toSeconds(),
                     "retryAfterSeconds", UpstreamException.retryAfterSeconds(classification.failure())
@@ -1778,14 +3995,15 @@ public class ProxyFacade {
                 poolContext.upstreamModel(),
                 classification.circuitFailure() ? false : null,
                 accountPoolService.circuitEpoch(poolContext)
-            )),
+            ).withSource(sourceColumns(attempt.selection(), null, classification))),
             poolContext,
             circuitOutcomeId,
             circuitOutcomeResolved
         )));
         return Mono.deferContextual(context -> {
             // A later request rejection cannot prove that an earlier timed-out retry was free.
-            if (context.hasKey(BILLING_UNCERTAINTY) && !definitiveBillingFailure(error)) {
+            boolean definitive = definitiveBillingFailure(error);
+            if (context.hasKey(BILLING_UNCERTAINTY) && !definitive) {
                 context.<AtomicBoolean>get(BILLING_UNCERTAINTY).set(true);
             }
             return Mono.whenDelayError(admissionReconciliation, accountStats, log).then();
@@ -1822,17 +4040,34 @@ public class ProxyFacade {
         boolean preferDeepSeekAccounts,
         AccountDtos.RoutingPolicySettings routingPolicy
     ) {
-        int scopeLimit = switch (classification.scope()) {
-            case TRANSPORT, PROXY_EDGE, REGIONAL_POLICY, UNKNOWN, CREDENTIAL -> 2;
-            default -> Integer.valueOf(529).equals(classification.statusCode()) ? 2 : 3;
-        };
-        int routeLimit = routingPolicy.maxRetryAccounts(preferDeepSeekAccounts, preferCodexAccounts, route.name());
-        int maxDistinctAccounts = Math.min(scopeLimit, routeLimit);
+        int maxDistinctAccounts = maxDistinctAccounts(
+            classification, route, preferCodexAccounts, preferDeepSeekAccounts, routingPolicy);
         return nextAttemptedAccountIds.size() > attemptedAccountIds.size()
             && nextAttemptedAccountIds.size() < maxDistinctAccounts
             && requestMovable
             && classification.retryable()
             && classification.crossAccountRetryAllowed();
+    }
+
+    /** How many different accounts a request may be dispatched to after a failure of this kind on this route. */
+    private int maxDistinctAccounts(
+        UpstreamFailureClassifier.Classification classification,
+        UpstreamRoute route,
+        boolean preferCodexAccounts,
+        boolean preferDeepSeekAccounts,
+        AccountDtos.RoutingPolicySettings routingPolicy
+    ) {
+        int scopeLimit = switch (classification.scope()) {
+            case TRANSPORT, PROXY_EDGE, REGIONAL_POLICY, UNKNOWN, CREDENTIAL -> 2;
+            default -> Integer.valueOf(529).equals(classification.statusCode()) ? 2 : 3;
+        };
+        int routeLimit = routingPolicy.maxRetryAccounts(preferDeepSeekAccounts, preferCodexAccounts, route.name());
+        return Math.min(scopeLimit, routeLimit);
+    }
+
+    private boolean isResponseOwnerUnavailable(Throwable error) {
+        Throwable failure = rootFailure(error);
+        return failure instanceof ResponseOwnerUnavailableException;
     }
 
     private boolean isNoAvailableAccount(Throwable error) {
@@ -1853,7 +4088,11 @@ public class ProxyFacade {
             case ApiException api -> api;
             case UpstreamException upstream -> {
                 HttpStatus status = mapUpstreamStatusCode(upstream.getStatusCode());
-                yield new ApiException(status, "UPSTREAM_ERROR", safeFailureMessage(upstream)).initCause(upstream);
+                // The words clients look for to shorten what they send; the relay's own are not passed on (design 7.8, 7.11).
+                String message = RelayErrorException.contextExceeded(upstream)
+                    ? RelayErrorException.PROMPT_TOO_LONG
+                    : safeFailureMessage(upstream);
+                yield new ApiException(status, "UPSTREAM_ERROR", message).initCause(upstream);
             }
             // Keep the egress failure as the cause: whether the request was sent decides how it is billed.
             case tech.starryapi.egress.EgressException egress ->
@@ -1905,39 +4144,50 @@ public class ProxyFacade {
         return ResponseEntity.ok(body);
     }
 
+    /** @param owner the account that gave the answer and owns the chain it starts; null when no account does (a relay) */
     private PreparedResponse prepareResponsesJsonResponse(
         JsonNode request,
         JsonNode stateRequest,
         String mappedModel,
         PlatformCompletionResult result,
-        ProxyAccountEntity account
+        ProxyAccountEntity owner
     ) {
         ObjectNode body = openAiResponseFactory.responses(
             mappedModel,
             result,
             request.path("previous_response_id").asString(null)
         );
-        openAiResponseStateStore.remember(body, stateRequest, account.getAccountId());
+        rememberResponse(body, stateRequest, owner);
         return new PreparedResponse(ResponseEntity.ok(body), body.path("id").asString(null));
     }
 
+    /** @param owner as for {@link #prepareResponsesJsonResponse} */
     private PreparedResponse prepareResponsesStreamResponse(
         JsonNode request,
         JsonNode stateRequest,
         String mappedModel,
         PlatformCompletionResult result,
-        ProxyAccountEntity account
+        ProxyAccountEntity owner
     ) {
         ObjectNode body = openAiResponseFactory.responses(
             mappedModel,
             result,
             request.path("previous_response_id").asString(null)
         );
-        openAiResponseStateStore.remember(body, stateRequest, account.getAccountId());
+        rememberResponse(body, stateRequest, owner);
         ResponseEntity<Flux<ServerSentEvent<String>>> response = ResponseEntity.ok()
             .contentType(MediaType.TEXT_EVENT_STREAM)
             .body(openAiResponseFactory.responsesStreamEvents(body));
         return new PreparedResponse(response, body.path("id").asString(null));
+    }
+
+    /** An answer no account gave (a relay's) is kept without the reasoning the gateway wrote for it, see {@link OpenAiResponseStateStore#rememberRelayed}. */
+    private void rememberResponse(ObjectNode body, JsonNode stateRequest, ProxyAccountEntity owner) {
+        if (owner == null) {
+            openAiResponseStateStore.rememberRelayed(body, stateRequest);
+        } else {
+            openAiResponseStateStore.remember(body, stateRequest, owner.getAccountId());
+        }
     }
 
     private Mono<Void> rememberResponseOwner(PreparedResponse response, ProxyAccountEntity account) {
@@ -2067,6 +4317,21 @@ public class ProxyFacade {
             || isCodexResponsesClient(exchange);
     }
 
+    /** Whether a Responses request goes to Codex seats: as above, and for the models only Codex accounts serve. */
+    private boolean preferCodexAccountsForResponses(
+        UpstreamRoute route,
+        boolean preferDeepSeekAccounts,
+        String requestedModel,
+        String mappedModel,
+        String upstreamModel,
+        ServerWebExchange exchange,
+        AccountDtos.RoutingPolicySettings routingPolicy
+    ) {
+        return preferCodexAccounts(route, preferDeepSeekAccounts, upstreamModel, exchange, routingPolicy)
+            || isCodexOnlyResponsesModel(requestedModel)
+            || isCodexOnlyResponsesModel(mappedModel);
+    }
+
     private boolean isOpenAiCompatibleModel(String model) {
         String normalized = routeModel(model);
         if (normalized.startsWith("openai-compatible/")) {
@@ -2145,25 +4410,120 @@ public class ProxyFacade {
     private record UpstreamCallOutcome(PlatformCompletionResult result, Throwable failure) {
     }
 
-    private static final class AccountAttempt {
+    /**
+     * What a tiered request keeps the same from its first dispatch to its last: the values the endpoint has settled by
+     * the time an untiered request starts its attempts, and the plan.
+     *
+     * @param upstreamModel the model after mapping, which the upstream client and the response are given
+     * @param upstreamRequest the body that is dispatched, with its output limit forced
+     * @param responseRequest the client's request, which the response is shaped by
+     * @param requestMovable whether the request may be sent to another account after a failure
+     * @param ownerMayBeLeft whether the request may leave the account that owns its response chain
+     * @param chainSession the session a Responses request belongs to by the name its chain gives it, which the facade has
+     *     worked out before planning ({@code TierSessionBindings#sessionOf}); null on the other endpoints, and for a request
+     *     that continues no chain and names no session. The response that is produced is recorded under it when the plan names
+     *     no session of its own ({@link #followTierToNextTurn}).
+     */
+    record TieredRequest(
+        TierPlan plan,
+        ApiKeyPrincipal principal,
+        String requestId,
+        String path,
+        String requestedModel,
+        String upstreamModel,
+        String sessionHint,
+        boolean stream,
+        UpstreamRoute route,
+        boolean fastMode,
+        boolean preferCodexAccounts,
+        boolean preferDeepSeekAccounts,
+        AccountDtos.RoutingPolicySettings routingPolicy,
+        JsonNode upstreamRequest,
+        JsonNode responseRequest,
+        Instant start,
+        boolean requestMovable,
+        boolean ownerMayBeLeft,
+        String chainSession
+    ) {
+
+        /** A request that belongs to no response chain: the endpoints without one, and a request that continues none. */
+        TieredRequest(
+            TierPlan plan,
+            ApiKeyPrincipal principal,
+            String requestId,
+            String path,
+            String requestedModel,
+            String upstreamModel,
+            String sessionHint,
+            boolean stream,
+            UpstreamRoute route,
+            boolean fastMode,
+            boolean preferCodexAccounts,
+            boolean preferDeepSeekAccounts,
+            AccountDtos.RoutingPolicySettings routingPolicy,
+            JsonNode upstreamRequest,
+            JsonNode responseRequest,
+            Instant start,
+            boolean requestMovable,
+            boolean ownerMayBeLeft
+        ) {
+            this(plan, principal, requestId, path, requestedModel, upstreamModel, sessionHint, stream, route, fastMode,
+                preferCodexAccounts, preferDeepSeekAccounts, routingPolicy, upstreamRequest, responseRequest, start,
+                requestMovable, ownerMayBeLeft, null);
+        }
+    }
+
+    /**
+     * What differs between the endpoints in the dispatch loop of a tiered request.
+     *
+     * @param respond makes the response of the answer given by the selection (the account and how it was asked)
+     * @param relays whether the endpoint can be served by a relay: all four entries (Chat Completions, Messages, Responses
+     *     and Gemini) are, through the pairs of the registry, where a gate is open to the key
+     * @param admitted the request the in-flight tokens of an attempt are sized from ({@link #sizedForAdmission} for the
+     *     Responses entry, the request the endpoint reserves by for the others)
+     */
+    private record TieredEndpoint(
+        Function<ProxyAccountEntity, Mono<PlatformCompletionResult>> call,
+        BiFunction<PlatformCompletionResult, TierSelection, Mono<ResponseEntity<?>>> respond,
+        boolean relays,
+        JsonNode admitted
+    ) {
+    }
+
+    static final class AccountAttempt {
 
         private final ProxyAccountEntity account;
         private final UUID leaseId;
+        private final TierSelection selection;
         private final Instant startedAt;
         private final AtomicBoolean leaseFinalized = new AtomicBoolean();
 
         private AccountAttempt(ProxyAccountEntity account, UUID leaseId) {
+            this(account, leaseId, null);
+        }
+
+        private AccountAttempt(TierSelection selection, UUID leaseId) {
+            this(selection.account(), leaseId, selection);
+        }
+
+        private AccountAttempt(ProxyAccountEntity account, UUID leaseId, TierSelection selection) {
             this.account = account;
             this.leaseId = leaseId;
+            this.selection = selection;
             this.startedAt = Instant.now();
         }
 
-        private ProxyAccountEntity account() {
+        ProxyAccountEntity account() {
             return account;
         }
 
-        private UUID leaseId() {
+        UUID leaseId() {
             return leaseId;
+        }
+
+        /** Where in the plan the account was selected, fixed from then on; null for an untiered request. */
+        TierSelection selection() {
+            return selection;
         }
 
         private Instant startedAt() {

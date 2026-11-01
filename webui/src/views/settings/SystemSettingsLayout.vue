@@ -17,6 +17,7 @@
     Odometer,
     Postcard,
     SetUp,
+    Sort,
     Trophy,
     Service,
     Operation,
@@ -113,6 +114,13 @@
             return t('路由与限制');
           },
           icon: Odometer,
+        },
+        {
+          name: 'settings-source-tiers',
+          get label() {
+            return t('号源分级');
+          },
+          icon: Sort,
         },
         {
           name: 'settings-proxy-channels',

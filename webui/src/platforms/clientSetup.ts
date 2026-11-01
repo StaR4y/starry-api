@@ -1,5 +1,5 @@
 import { t } from '@/i18n';
-import { normalizedApiKey, psQuote, shQuote } from './setupShared';
+import { TIER_HEADER, normalizedApiKey, psQuote, shQuote, tierReference } from './setupShared';
 import type {
   CcSwitchLink,
   SetupClient,
@@ -108,6 +108,7 @@ export function createSetupScriptBlock(
 
 export function createCcSwitchLinks(context: SetupContext): CcSwitchLink[] {
   const apiKey = normalizedApiKey(context.apiKey);
+  const tier = tierReference(context.tier);
   return [
     {
       client: 'claude',
@@ -121,11 +122,11 @@ export function createCcSwitchLinks(context: SetupContext): CcSwitchLink[] {
         homepage: context.apiOrigin,
         endpoint: context.apiOrigin,
         apiKey,
-        model: CLAUDE_MODEL,
+        model: withTierSuffix(CLAUDE_MODEL, tier),
         icon: 'claude',
-        haikuModel: CLAUDE_FAST_MODEL,
-        sonnetModel: CLAUDE_MODEL,
-        opusModel: CLAUDE_OPUS_MODEL,
+        haikuModel: withTierSuffix(CLAUDE_FAST_MODEL, tier),
+        sonnetModel: withTierSuffix(CLAUDE_MODEL, tier),
+        opusModel: withTierSuffix(CLAUDE_OPUS_MODEL, tier),
         notes: 'Starry API Anthropic-compatible provider for Claude Code.',
       }),
     },
@@ -211,15 +212,20 @@ function codexFiles(platform: SetupPlatform, context: SetupContext): SetupFileBl
 }
 
 function claudeFiles(platform: SetupPlatform, context: SetupContext): SetupFileBlock[] {
-  const vars = [
+  const tier = tierReference(context.tier);
+  const tierVars: Array<[string, string]> = tier
+    ? [['ANTHROPIC_CUSTOM_HEADERS', `${TIER_HEADER}: ${tier}`]]
+    : [];
+  const vars: Array<[string, string]> = [
     ['ANTHROPIC_BASE_URL', context.apiOrigin],
     ['ANTHROPIC_API_KEY', normalizedApiKey(context.apiKey)],
     ['ANTHROPIC_AUTH_TOKEN', normalizedApiKey(context.apiKey)],
     ['ANTHROPIC_MODEL', CLAUDE_MODEL],
     ['ANTHROPIC_SMALL_FAST_MODEL', CLAUDE_FAST_MODEL],
+    ...tierVars,
     ['CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC', '1'],
     ['CLAUDE_CODE_ATTRIBUTION_HEADER', '0'],
-  ] satisfies Array<[string, string]>;
+  ];
 
   return [
     {
@@ -257,6 +263,7 @@ function joinConfigPath(dir: string, file: string, platform: SetupPlatform) {
 }
 
 function codexConfigToml(context: SetupContext) {
+  const tier = tierReference(context.tier);
   return [
     `model = "${CODEX_MODEL}"`,
     `review_model = "${CODEX_REVIEW_MODEL}"`,
@@ -272,6 +279,9 @@ function codexConfigToml(context: SetupContext) {
     `wire_api = "responses"`,
     `experimental_bearer_token = ${JSON.stringify(normalizedApiKey(context.apiKey))}`,
     `supports_websockets = false`,
+    ...(tier
+      ? [`http_headers = { ${JSON.stringify(TIER_HEADER)} = ${JSON.stringify(tier)} }`]
+      : []),
   ].join('\n');
 }
 
@@ -303,6 +313,7 @@ function cmdValue(value: string) {
 }
 
 function openCodeJson(context: SetupContext) {
+  const tier = tierReference(context.tier);
   return JSON.stringify(
     {
       $schema: 'https://opencode.ai/config.json',
@@ -315,6 +326,7 @@ function openCodeJson(context: SetupContext) {
           options: {
             baseURL: context.apiBaseUrl,
             apiKey: normalizedApiKey(context.apiKey),
+            ...(tier ? { headers: { [TIER_HEADER]: tier } } : {}),
           },
           models: {
             'gpt-6': openCodeModel('GPT-6', 200000, 64000),
@@ -333,6 +345,11 @@ function openCodeJson(context: SetupContext) {
     null,
     2,
   );
+}
+
+/** `模型@号池`：CC Switch 的链接只能写模型名，号池跟在后面（请求头放不进链接） */
+function withTierSuffix(model: string, tier: string | null) {
+  return tier ? `${model}@${tier}` : model;
 }
 
 function openCodeModel(name: string, context: number, output: number) {

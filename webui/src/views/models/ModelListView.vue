@@ -20,6 +20,7 @@
     orderOf,
   } from '@/platforms/models';
   import type { ManagedModel, ModelCatalogDisplaySettings, ModelInfo } from '@/types/api';
+  import { modelTierChips } from './modelTiers';
 
   interface ProviderGroup {
     provider: string;
@@ -59,6 +60,7 @@
       enabled: true,
       builtIn: (model.owned_by || '').toLowerCase() !== 'admin',
       pricing: pricingFromPublicModel(model),
+      sourceTiers: model.sourceTiers,
     };
   }
 
@@ -381,6 +383,31 @@
                 <p v-if="display.showDescription && model.description" class="model-card__desc">
                   {{ model.description }}
                 </p>
+                <ul
+                  v-if="modelTierChips(model.id, model.sourceTiers).length"
+                  class="model-card__tiers"
+                  :aria-label="t('号池')"
+                >
+                  <li v-for="tier in modelTierChips(model.id, model.sourceTiers)" :key="tier.id">
+                    <button
+                      v-if="tier.suffix"
+                      type="button"
+                      class="tier-pill"
+                      :title="tier.title"
+                      @click="copyText(tier.suffix, t('已复制 {p0}', { p0: tier.suffix }))"
+                    >
+                      <strong>{{ tier.name }}</strong>
+                      <span>{{ tier.factor }}</span>
+                      <span v-if="tier.price">{{ tier.price }}</span>
+                      <el-icon><CopyDocument /></el-icon>
+                    </button>
+                    <span v-else class="tier-pill is-static" :title="tier.title">
+                      <strong>{{ tier.name }}</strong>
+                      <span>{{ tier.factor }}</span>
+                      <span v-if="tier.price">{{ tier.price }}</span>
+                    </span>
+                  </li>
+                </ul>
               </div>
             </header>
             <footer class="model-card__foot">
@@ -684,6 +711,68 @@
       gap: 7px;
       padding-top: 12px;
       border-top: 1px dashed var(--kp-divider);
+    }
+
+    &__tiers {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin: 6px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+  }
+
+  .tier-pill {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    min-width: 0;
+    gap: 5px;
+    padding: 2px 8px;
+    border: 1px solid var(--kp-divider);
+    border-radius: 6px;
+    background: rgba(246, 248, 251, 0.8);
+    color: var(--kp-text-secondary);
+    font: inherit;
+    font-size: 11px;
+    line-height: 18px;
+    white-space: nowrap;
+
+    strong {
+      overflow: hidden;
+      color: var(--kp-text);
+      font-weight: 600;
+      text-overflow: ellipsis;
+    }
+
+    span {
+      font-variant-numeric: tabular-nums;
+    }
+
+    .el-icon {
+      flex: 0 0 auto;
+      font-size: 11px;
+      opacity: 0;
+      transition: opacity 0.16s ease;
+    }
+
+    &:is(button) {
+      cursor: copy;
+
+      &:hover {
+        border-color: rgba(91, 141, 239, 0.4);
+        color: var(--el-color-primary);
+
+        .el-icon {
+          opacity: 1;
+        }
+      }
+    }
+
+    &.is-static {
+      border-style: dashed;
+      color: var(--kp-text-muted);
     }
   }
 

@@ -1,0 +1,34 @@
+{
+  "status": 200,
+  "headers": {
+    "X-Starry-Tier": "relay",
+    "X-Starry-Tier-Level": "1",
+    "X-Starry-Tier-Name": "relay",
+    "X-Starry-Tier-Mode": "auto",
+    "X-Starry-Tier-Status": "served"
+  },
+  "body": {
+    "candidates": [
+      {
+        "content": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "Hello from the relay."
+            }
+          ]
+        },
+        "finishReason": "STOP",
+        "index": 0
+      }
+    ],
+    "usageMetadata": {
+      "promptTokenCount": 2000,
+      "candidatesTokenCount": 100,
+      "totalTokenCount": 2100,
+      "cachedContentTokenCount": 1500
+    },
+    "modelVersion": "gemini-2.5-pro",
+    "responseId": "gen-<id>"
+  }
+}

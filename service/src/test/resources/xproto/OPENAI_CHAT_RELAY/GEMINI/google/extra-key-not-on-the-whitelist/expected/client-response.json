@@ -1,0 +1,33 @@
+{
+  "status": 200,
+  "headers": {
+    "X-Starry-Tier": "native",
+    "X-Starry-Tier-Level": "2",
+    "X-Starry-Tier-Name": "native",
+    "X-Starry-Tier-Mode": "auto",
+    "X-Starry-Tier-Status": "served"
+  },
+  "body": {
+    "candidates": [
+      {
+        "content": {
+          "role": "model",
+          "parts": [
+            {
+              "text": "from the native tier"
+            }
+          ]
+        },
+        "finishReason": "STOP",
+        "index": 0
+      }
+    ],
+    "usageMetadata": {
+      "promptTokenCount": 500,
+      "candidatesTokenCount": 20,
+      "totalTokenCount": 520
+    },
+    "modelVersion": "gemini-2.5-pro",
+    "responseId": "gen-<id>"
+  }
+}

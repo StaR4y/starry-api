@@ -5,6 +5,8 @@
    *
    * 后端目前只返回最新 100 条 (/admin/logs 无分页参数)。
    * 这里提供：客户端关键字过滤、状态过滤、错误详情查看。
+   * 按号源分级服务的请求另有「号源」列（服务这次尝试的号池、级别和系数），详情里还有派发方式、
+   * 上游模型名、用量来源、停止原因和降级特性；没有任何分级请求时不显示这一列。
    */
   import { computed, onMounted, ref } from 'vue';
   import { Document, Refresh, Search } from '@element-plus/icons-vue';
@@ -12,11 +14,14 @@
   import { logsApi } from '@/api';
   import type { RequestLog } from '@/types/api';
   import { formatDateTime, formatNumber, shorten } from '@/utils/format';
+  import { hasSourceTiers, priceFactorLabel, sourceTierLabel } from './logSource';
 
   const loading = ref(false);
   const logs = ref<RequestLog[]>([]);
   const keyword = ref('');
   const statusFilter = ref<'all' | 'success' | 'failed'>('all');
+
+  const showSource = computed(() => hasSourceTiers(logs.value));
 
   const filtered = computed(() => {
     const q = keyword.value.trim().toLowerCase();
@@ -28,7 +33,8 @@
         log.path.toLowerCase().includes(q) ||
         (log.model ?? '').toLowerCase().includes(q) ||
         (log.requestId ?? '').toLowerCase().includes(q) ||
-        (log.errorMessage ?? '').toLowerCase().includes(q)
+        (log.errorMessage ?? '').toLowerCase().includes(q) ||
+        sourceTierLabel(log).toLowerCase().includes(q)
       );
     });
   });
@@ -59,7 +65,7 @@
         <el-input
           v-model="keyword"
           :prefix-icon="Search"
-          :placeholder="t('搜索路径 / 模型 / 请求 ID / 错误信息')"
+          :placeholder="t('搜索路径 / 模型 / 请求 ID / 错误信息 / 号源')"
           clearable
           style="max-width: 320px"
         />
@@ -82,6 +88,20 @@
             <el-tag :type="row.success ? 'success' : 'danger'" effect="light" round>
               {{ row.statusCode || '—' }}
             </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column v-if="showSource" :label="t('号源')" min-width="150">
+          <template #default="{ row }">
+            <template v-if="sourceTierLabel(row)">
+              <span>{{ sourceTierLabel(row) }}</span>
+              <span v-if="priceFactorLabel(row)" class="text-secondary tier-factor">
+                {{ priceFactorLabel(row) }}
+              </span>
+              <el-tag v-if="row.tierSelection === 'PINNED'" size="small" effect="plain" type="info">
+                {{ t('指定') }}
+              </el-tag>
+            </template>
+            <span v-else class="text-secondary">—</span>
           </template>
         </el-table-column>
         <el-table-column label="Tokens (in/out)" width="160">
@@ -140,6 +160,42 @@
           <el-descriptions-item label="API Key">
             <span class="mono">{{ detail.apiKeyId || '—' }}</span>
           </el-descriptions-item>
+          <template v-if="sourceTierLabel(detail)">
+            <el-descriptions-item :label="t('号源')">
+              {{ sourceTierLabel(detail) }}
+              <span v-if="priceFactorLabel(detail)" class="text-secondary tier-factor">
+                {{ priceFactorLabel(detail) }}
+              </span>
+              <span v-if="detail.sourceTierRef" class="mono text-secondary tier-factor">
+                {{ detail.sourceTierRef }}
+              </span>
+            </el-descriptions-item>
+            <el-descriptions-item v-if="detail.tierSelection" :label="t('选号方式')">
+              {{ detail.tierSelection === 'PINNED' ? t('客户端指定号池') : t('网关自动选号') }}
+            </el-descriptions-item>
+            <el-descriptions-item v-if="detail.sourceDispatch" :label="t('派发方式')">
+              <span class="mono">{{ detail.sourceDispatch }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item v-if="detail.wireModel" :label="t('上游模型名')">
+              <span class="mono">{{ detail.wireModel }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item v-if="detail.usageSource" :label="t('用量来源')">
+              <span class="mono">{{ detail.usageSource }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item v-if="detail.stopReason" :label="t('停止原因')">
+              <span class="mono">{{ detail.stopReason }}</span>
+            </el-descriptions-item>
+            <el-descriptions-item v-if="detail.degradedFeatures" :label="t('降级特性')">
+              {{ detail.degradedFeatures }}
+            </el-descriptions-item>
+            <el-descriptions-item
+              v-if="detail.withheldInputTokens != null || detail.withheldOutputTokens != null"
+              :label="t('被扣下应答的用量（运营者承担）')"
+            >
+              {{ formatNumber(detail.withheldInputTokens) }} /
+              {{ formatNumber(detail.withheldOutputTokens) }}
+            </el-descriptions-item>
+          </template>
           <el-descriptions-item v-if="detail.errorMessage" :label="t('错误')">
             <pre class="error-block">{{ detail.errorMessage }}</pre>
           </el-descriptions-item>
@@ -150,6 +206,11 @@
 </template>
 
 <style scoped lang="scss">
+  .tier-factor {
+    margin-left: 6px;
+    font-size: 12px;
+  }
+
   .error-block {
     white-space: pre-wrap;
     word-break: break-word;

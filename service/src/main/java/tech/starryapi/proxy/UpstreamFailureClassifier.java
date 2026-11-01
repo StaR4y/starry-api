@@ -2,7 +2,9 @@ package tech.starryapi.proxy;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.concurrent.TimeoutException;
 import javax.net.ssl.SSLException;
 import org.springframework.web.reactive.function.client.WebClientRequestException;
@@ -11,11 +13,31 @@ import tech.starryapi.account.AccountPoolService;
 import tech.starryapi.account.ProxyAccountEntity;
 import tech.starryapi.account.allocation.AccountFailureScope;
 import tech.starryapi.egress.EgressException;
+import tech.starryapi.platform.core.PlatformUsage;
 import tech.starryapi.platform.upstream.UpstreamException;
+import tech.starryapi.platform.xproto.RelayAbortedAfterDispatchException;
+import tech.starryapi.platform.xproto.RelayAnswerWithheldException;
+import tech.starryapi.platform.xproto.RelayErrorException;
+import tech.starryapi.proxy.tier.TierDispatch;
 
 final class UpstreamFailureClassifier {
 
     private static final Duration DEFAULT_RATE_LIMIT_COOLDOWN = Duration.ofSeconds(45);
+
+    /** The statuses besides 404 with which a relay says it does not serve the model, when its words say so. */
+    private static final Set<Integer> RELAY_MODEL_STATUSES = Set.of(400, 403, 422, 503);
+
+    /**
+     * What a relay says when it does not serve a model: the union of what the OpenAI client retries on and what
+     * {@link #forbiddenFailure} reads as a model the account may not use. Matched after '_' and '-' are taken for spaces,
+     * so the one token the relay error mapper leaves ({@code model_not_found}) is found.
+     */
+    private static final List<String> MODEL_NOT_SERVED = List.of(
+        "model not found", "no available channel", "model does not exist", "does not support model",
+        "does not exist or you do not have access", "do not have access to the model",
+        "does not have access to model", "not allowed to use this model", "not allowed to use model",
+        "access to this model", "unsupported model", "model is not supported"
+    );
 
     private UpstreamFailureClassifier() {
     }
@@ -24,7 +46,98 @@ final class UpstreamFailureClassifier {
         return classify(error, null);
     }
 
+    /**
+     * What the answer of an OpenAI-format relay to a cross-protocol attempt (design 7.8) means, which the rules for the
+     * upstreams of the platform do not say: a relay is a stranger that may be generating when it stops answering, that
+     * serves the models its administrator mapped and not the ones the account's platform serves, and that is asked
+     * with a request converted from another protocol, which it may refuse for reasons no native upstream has. The
+     * dispatch of a native attempt, and no dispatch at all, are classified by the other overload, unchanged.
+     *
+     * <ul>
+     *   <li>An interruption ({@link RelayAbortedAfterDispatchException}: the exchange broke or ran out of time after the
+     *       request was written, or the relay stopped after its first output) is a transport failure with its
+     *       one-minute cooldown that is not retried anywhere, whatever else its cause says: the relay may be generating
+     *       the answer, and a second attempt would pay for it twice.
+     *   <li>An answer the gateway holds back ({@link RelayAnswerWithheldException}: the relay's filter stopped it, or the
+     *       gateway's own output bound cut it, which the Responses entry cannot tell its client) ends the request as an
+     *       interruption does, and is nothing of the relay's: the request scope, no cooldown, nothing counted against the
+     *       account, and the admission store is told of a relay that answered ({@link Classification#withheld()}).
+     *   <li>A model the relay does not serve (a 404, or a 400, 403, 422 or 503 that says so) is the model's problem on
+     *       that account: ten minutes of cooldown, keyed by the mapping's model id ({@link TierDispatch#modelScope}),
+     *       and the request goes on to another account or tier.
+     *   <li>A prompt that does not fit the relay's context window, and any other 400, 413 or 422 (the converted request
+     *       was refused), are the request's problem with this source, not the account's: no cooldown, no retry on
+     *       another source of the same kind, but one crossing to a tier whose first source is a native one is allowed
+     *       ({@link Classification#crossTierOnly()}). Such a refusal says the relay did not generate.
+     *   <li>A relay that rejects the key of its account (a 401 or 403, or an authentication or permission error inside a
+     *       successful response; D5) has failed as that account and as nothing else: the key is the administrator's, and the
+     *       client's request has done nothing wrong. The account rests for ten minutes, as a native account does for
+     *       credentials that are bad, and the request goes on to the next account or tier like it does after one that is out
+     *       of money or busy, since a rejection is given before anything is generated. It is never a permanent failure (a
+     *       relay's word does not disable an account: not here, and not in the health test that two failures in a row start,
+     *       which does not take the words of a relay's raw answer for proof that its credential is gone), and what the client
+     *       is told when nothing is left is what it is told when nothing can serve, never the relay's 401 or 403 ({@link
+     *       Classification#keyRefused()}). A native account keeps the rules of the other overload, unchanged.
+     *   <li>Everything else (402, 408, 409, 429, a 5xx) is judged as it is for any other upstream, because the relay's
+     *       status is all there is to go by. A 402 in particular is the relay's account out of money: the same capacity
+     *       failure it is today, which a tiered request counts as unbilled.
+     * </ul>
+     *
+     * <p>A failure that proves the request never left (the route could not be built, the connection was refused) is
+     * the transport's to classify as well: it cost nothing and says nothing about what the relay does.
+     */
+    static Classification classify(Throwable error, ProxyAccountEntity account, TierDispatch dispatch) {
+        if (dispatch == null || dispatch.kind() != TierDispatch.Kind.OPENAI_CHAT) {
+            return classify(error, account);
+        }
+        RelayAbortedAfterDispatchException aborted = findCause(error, RelayAbortedAfterDispatchException.class);
+        if (aborted instanceof RelayAnswerWithheldException) {
+            // The relay answered and the gateway held the answer back: the request ends here like an interruption, and nothing
+            // of it is the relay's failure (no scope that counts against the account, no cooldown).
+            return relayClassification(
+                aborted, aborted.getStatusCode(), AccountFailureScope.REQUEST, false, false, Duration.ZERO, RelayFailure.WITHHELD
+            );
+        }
+        if (aborted != null) {
+            // The exception's own words, not the transport error under it: that one can name the relay.
+            return relayClassification(
+                aborted, aborted.getStatusCode(), AccountFailureScope.TRANSPORT, false, false, Duration.ofMinutes(1),
+                RelayFailure.INTERRUPTED
+            );
+        }
+        UpstreamException upstream = EgressException.find(error) == null ? findCause(error, UpstreamException.class) : null;
+        if (upstream == null) {
+            return classify(error, account);
+        }
+        int status = upstream.getStatusCode();
+        if (RelayErrorException.contextExceeded(error)) {
+            return relayClassification(
+                upstream, status, AccountFailureScope.REQUEST, false, false, Duration.ZERO, RelayFailure.CONTEXT_EXCEEDED
+            );
+        }
+        if (status == 404 || (RELAY_MODEL_STATUSES.contains(status) && isModelNotServed(upstream))) {
+            return relayClassification(
+                upstream, status, AccountFailureScope.CAPACITY_MODEL, true, true, Duration.ofMinutes(10), RelayFailure.MODEL_NOT_SERVED
+            );
+        }
+        if (status == 400 || status == 413 || status == 422) {
+            return relayClassification(
+                upstream, status, AccountFailureScope.REQUEST, false, false, Duration.ZERO, RelayFailure.CONVERSION_REJECTED
+            );
+        }
+        if (status == 401 || status == 403) {
+            return relayClassification(
+                upstream, status, AccountFailureScope.CREDENTIAL, true, true, Duration.ofMinutes(10), RelayFailure.KEY_REFUSED
+            );
+        }
+        return classify(error, account);
+    }
+
     static Classification classify(Throwable error, ProxyAccountEntity account) {
+        RelayUnreachedException unreached = findCause(error, RelayUnreachedException.class);
+        if (unreached != null) {
+            return unreached.classification();
+        }
         EgressException egress = EgressException.find(error);
         if (egress != null) {
             // A broken outbound route says nothing about the account itself, so it never counts as an account
@@ -109,6 +222,35 @@ final class UpstreamFailureClassifier {
             );
         };
         return policy;
+    }
+
+    private static boolean isModelNotServed(UpstreamException error) {
+        String message = normalizedMessage(error).replace('_', ' ').replace('-', ' ');
+        return MODEL_NOT_SERVED.stream().anyMatch(message::contains);
+    }
+
+    /** A failure of a relay: never counted by the old circuit breaker, which tiered requests are not subject to. */
+    private static Classification relayClassification(
+        Throwable failure,
+        int statusCode,
+        AccountFailureScope scope,
+        boolean retryable,
+        boolean crossAccountRetryAllowed,
+        Duration cooldown,
+        RelayFailure relayFailure
+    ) {
+        return new Classification(
+            failure,
+            statusCode,
+            retryable ? AccountPoolService.UpstreamErrorType.RECOVERABLE : AccountPoolService.UpstreamErrorType.FATAL,
+            retryable,
+            crossAccountRetryAllowed,
+            false,
+            scope,
+            cooldown,
+            false,
+            relayFailure
+        );
     }
 
     private static Classification credentialFailure(Throwable failure, int status, String message) {
@@ -297,6 +439,9 @@ final class UpstreamFailureClassifier {
     static boolean neverReachedUpstream(Throwable error) {
         Throwable current = error;
         while (current != null) {
+            if (current instanceof RelayUnreachedException) {
+                return true;
+            }
             if (current instanceof EgressException egress) {
                 // The route knows whether the request was written; what its transport reported underneath does not matter.
                 return !egress.requestMayHaveBeenSent();
@@ -364,6 +509,64 @@ final class UpstreamFailureClassifier {
         return EgressException.rootCause(error);
     }
 
+    /**
+     * The failure of a transport that proves the request never left, handed on without the transport's words (design
+     * 7.11): the message of netty's connect timeout holds the host and the address of the relay, a certificate error the
+     * host, and the facade shows the innermost cause of an error to the client and writes it to the request log. The text
+     * is fixed and there is no cause. What the original came to is kept: the failure classification gives this the
+     * verdict it gave the original, and it still proves that nothing was sent.
+     */
+    static final class RelayUnreachedException extends RuntimeException {
+
+        private final Classification original;
+
+        private RelayUnreachedException(Classification original) {
+            super("The source could not be reached");
+            this.original = original;
+        }
+
+        Classification classification() {
+            return new Classification(
+                this, original.statusCode(), original.type(), original.retryable(), original.crossAccountRetryAllowed(),
+                original.circuitFailure(), original.scope(), original.cooldown(), original.permanentCredentialFailure(),
+                original.relayFailure()
+            );
+        }
+    }
+
+    /** {@code error}, a failure that proves the request never left, as one with a fixed text that is classified as it was. */
+    static Throwable unreached(Throwable error, ProxyAccountEntity account) {
+        Classification original = classify(error, account);
+        // The original is kept without its failure, which is the error that holds the words.
+        return new RelayUnreachedException(new Classification(
+            null, original.statusCode(), original.type(), original.retryable(), original.crossAccountRetryAllowed(),
+            original.circuitFailure(), original.scope(), original.cooldown(), original.permanentCredentialFailure(),
+            original.relayFailure()
+        ));
+    }
+
+    /** The failures that only a cross-protocol attempt has (design 7.8). */
+    enum RelayFailure {
+        /** The relay may have generated the answer: the exchange broke or ran out of time once the request was written. */
+        INTERRUPTED,
+        /** The relay does not serve the mapped model. */
+        MODEL_NOT_SERVED,
+        /** The prompt is longer than the relay's context window. */
+        CONTEXT_EXCEEDED,
+        /** The relay refused the converted request. */
+        CONVERSION_REJECTED,
+        /** The relay rejected the key of its account (401, 403): a failure of that account, which the request does not end with. */
+        KEY_REFUSED,
+        /**
+         * The relay answered and the gateway held the answer back (design 7.10): it is the request's end like an interruption,
+         * and no failure of the relay, so the status page counts it apart from the interruptions the evidence is measured on.
+         */
+        WITHHELD
+    }
+
+    /**
+     * @param relayFailure what a cross-protocol attempt failed with, or null for every other failure
+     */
     record Classification(
         Throwable failure,
         Integer statusCode,
@@ -373,7 +576,71 @@ final class UpstreamFailureClassifier {
         boolean circuitFailure,
         AccountFailureScope scope,
         Duration cooldown,
-        boolean permanentCredentialFailure
+        boolean permanentCredentialFailure,
+        RelayFailure relayFailure
     ) {
+
+        Classification(
+            Throwable failure,
+            Integer statusCode,
+            AccountPoolService.UpstreamErrorType type,
+            boolean retryable,
+            boolean crossAccountRetryAllowed,
+            boolean circuitFailure,
+            AccountFailureScope scope,
+            Duration cooldown,
+            boolean permanentCredentialFailure
+        ) {
+            this(failure, statusCode, type, retryable, crossAccountRetryAllowed, circuitFailure, scope, cooldown,
+                permanentCredentialFailure, null);
+        }
+
+        /**
+         * The relay may be generating the answer: not retried, not rechecked, and the tier is not climbed back from it, and
+         * the relay is kept from the session for a while. An answer the gateway holds back is the same to the request.
+         */
+        boolean interrupted() {
+            return relayFailure == RelayFailure.INTERRUPTED || withheld();
+        }
+
+        /**
+         * The relay answered and the gateway did not pass the answer on: the relay is healthy, which the admission store is
+         * told (an answer, not a failure), though the request is not served.
+         */
+        boolean withheld() {
+            return relayFailure == RelayFailure.WITHHELD;
+        }
+
+        /**
+         * What the relay reported of the answer the gateway held back, as the usage of a served answer is read (D11), or null
+         * when this is not such a failure or the usage could not be read. It is the operator's cost: the request log keeps it
+         * apart from the tokens of the user's usage, which stay 0 because nothing is charged.
+         */
+        PlatformUsage withheldUsage() {
+            return withheld() && failure instanceof RelayAnswerWithheldException held ? held.usage() : null;
+        }
+
+        /** The relay refused the prompt for its length, which this node keeps (design 7.8) so as not to ask for the same again. */
+        boolean contextExceeded() {
+            return relayFailure == RelayFailure.CONTEXT_EXCEEDED;
+        }
+
+        /**
+         * The request cannot be answered by another source of the kind that failed, but may by a native one: a relay
+         * that could not take the converted request or its length says nothing about a tier whose first source is an
+         * ordinary account, which gets the request in its own form. Only the tiers that start with a native source are
+         * a way out, and only one crossing is made.
+         */
+        boolean crossTierOnly() {
+            return contextExceeded() || relayFailure == RelayFailure.CONVERSION_REJECTED;
+        }
+
+        /**
+         * The relay turned the key of its account down. The account rests and the request goes on to another account or tier,
+         * as it does for one that is busy; the relay's 401 or 403 is not an answer for the client, whatever is left to try.
+         */
+        boolean keyRefused() {
+            return relayFailure == RelayFailure.KEY_REFUSED;
+        }
     }
 }

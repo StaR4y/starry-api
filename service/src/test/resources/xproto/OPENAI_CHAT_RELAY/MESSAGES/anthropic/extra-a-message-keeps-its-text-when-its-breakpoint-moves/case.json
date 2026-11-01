@@ -1,0 +1,1 @@
+{"origin": "Claude Code 2.1.168 request: the first message has three text blocks with the cache_control on the last, and in the second request the client has moved the breakpoint on to its new message; the member passes cache control through. The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

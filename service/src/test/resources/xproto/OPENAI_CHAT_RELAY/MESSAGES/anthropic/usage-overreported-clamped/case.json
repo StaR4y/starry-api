@@ -1,0 +1,1 @@
+{"origin": "Claude Code 2.1.168: a relay that reports more tokens than the request can have used: 50000 in and 90000 out for a request that allows 32000 out. The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

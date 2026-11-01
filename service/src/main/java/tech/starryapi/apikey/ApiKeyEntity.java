@@ -20,6 +20,8 @@ public class ApiKeyEntity {
     private BigDecimal creditsLimit;
     private String modelProvider;
     private String billingSource = "BALANCE";
+    /** The source pool the owner prefers when a request names none; {@code auto} leaves the choice to the gateway. */
+    private String tierPreference = "auto";
     private BigDecimal reservedCredits = BigDecimal.ZERO;
     private BigDecimal billingMinimumCredits;
     private Long totalRequests;
@@ -108,6 +110,8 @@ public class ApiKeyEntity {
 
     public String getBillingSource() { return billingSource; }
     public void setBillingSource(String billingSource) { this.billingSource = billingSource; }
+    public String getTierPreference() { return tierPreference; }
+    public void setTierPreference(String tierPreference) { this.tierPreference = tierPreference; }
     public BigDecimal getReservedCredits() { return reservedCredits; }
     public void setReservedCredits(BigDecimal reservedCredits) { this.reservedCredits = reservedCredits; }
 

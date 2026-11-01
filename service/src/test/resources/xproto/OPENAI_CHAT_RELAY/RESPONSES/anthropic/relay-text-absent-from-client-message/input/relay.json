@@ -1,0 +1,10 @@
+{
+  "status": 200,
+  "body": "relay-body.sse",
+  "mustNotReach": [
+    "relay.internal.example.com",
+    "https://relay.internal.example.com/v1",
+    "sk-relay-secret",
+    "the user's prompt about taxes"
+  ]
+}

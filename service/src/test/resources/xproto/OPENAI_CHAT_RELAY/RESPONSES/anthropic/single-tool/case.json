@@ -1,0 +1,1 @@
+{"origin": "Codex 0.142.5: a request with tools, the tool call the relay answers with, and the result the client sends back (its second request of the flow). The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

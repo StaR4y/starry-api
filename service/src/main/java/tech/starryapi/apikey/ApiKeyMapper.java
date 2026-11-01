@@ -28,7 +28,14 @@ final class ApiKeyMapper {
             entity.getTotalOutputTokens(),
             entity.getLastUsedAt(),
             entity.getCreatedAt(),
-            entity.getUpdatedAt()
+            entity.getUpdatedAt(),
+            // Left out for the key that has none, so a deployment that never used the preference lists its keys as before.
+            tierPreference(entity.getTierPreference())
         );
+    }
+
+    /** The preference as the responses give it: left out for a key that has none. */
+    static String tierPreference(String stored) {
+        return stored == null || stored.isBlank() || "auto".equals(stored) ? null : stored;
     }
 }

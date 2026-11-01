@@ -69,6 +69,62 @@ class AnthropicResponseFactoryTest {
         assertThat(messageDelta.path("delta").path("stop_reason").asString("")).isEqualTo("tool_use");
     }
 
+    @Test
+    void endTurnAndToolUseKeepTheStopReasonDerivedFromTheToolUses() throws Exception {
+        PlatformCompletionResult text = withStopReason(new PlatformCompletionResult("Hello", usage()), PlatformCompletionResult.StopReason.END_TURN);
+        PlatformCompletionResult tools = withStopReason(toolUseResult(), PlatformCompletionResult.StopReason.TOOL_USE);
+        PlatformCompletionResult inconsistent = withStopReason(toolUseResult(), PlatformCompletionResult.StopReason.END_TURN);
+
+        assertThat(factory.message("m", text).path("stop_reason").asString("")).isEqualTo("end_turn");
+        assertThat(factory.message("m", tools).path("stop_reason").asString("")).isEqualTo("tool_use");
+        assertThat(factory.message("m", inconsistent).path("stop_reason").asString("")).isEqualTo("tool_use");
+        assertThat(streamStopReason(text)).isEqualTo("end_turn");
+        assertThat(streamStopReason(tools)).isEqualTo("tool_use");
+    }
+
+    @Test
+    void maxTokensIsRenderedAsMaxTokens() throws Exception {
+        PlatformCompletionResult text = withStopReason(new PlatformCompletionResult("cut off", usage()), PlatformCompletionResult.StopReason.MAX_TOKENS);
+        PlatformCompletionResult withTool = withStopReason(toolUseResult(), PlatformCompletionResult.StopReason.MAX_TOKENS);
+
+        JsonNode message = factory.message("m", text);
+        assertThat(message.path("stop_reason").asString("")).isEqualTo("max_tokens");
+        assertThat(message.path("content").path(0).path("text").asString("")).isEqualTo("cut off");
+        assertThat(streamStopReason(text)).isEqualTo("max_tokens");
+
+        JsonNode toolMessage = factory.message("m", withTool);
+        assertThat(toolMessage.path("stop_reason").asString("")).isEqualTo("max_tokens");
+        assertThat(toolMessage.path("content").path(0).path("type").asString("")).isEqualTo("tool_use");
+        assertThat(streamStopReason(withTool)).isEqualTo("max_tokens");
+    }
+
+    @Test
+    void contentFilterIsRenderedAsRefusal() throws Exception {
+        PlatformCompletionResult result = withStopReason(new PlatformCompletionResult("", usage()), PlatformCompletionResult.StopReason.CONTENT_FILTER);
+
+        assertThat(factory.message("m", result).path("stop_reason").asString("")).isEqualTo("refusal");
+        assertThat(streamStopReason(result)).isEqualTo("refusal");
+    }
+
+    private PlatformUsage usage() {
+        return new PlatformUsage(10, 2, BigDecimal.ZERO, 0, 0, 0);
+    }
+
+    private PlatformCompletionResult withStopReason(PlatformCompletionResult plain, PlatformCompletionResult.StopReason stopReason) {
+        return new PlatformCompletionResult(
+            plain.content(), plain.reasoningContent(), plain.toolUses(), plain.usage(), stopReason, null, null
+        );
+    }
+
+    private String streamStopReason(PlatformCompletionResult result) {
+        return factory.messageStream("m", result)
+            .map(ServerSentEvent::data)
+            .map(this::readJson)
+            .filter(event -> "message_delta".equals(event.path("type").asString("")))
+            .blockFirst()
+            .path("delta").path("stop_reason").asString("");
+    }
+
     private PlatformCompletionResult toolUseResult() throws Exception {
         return new PlatformCompletionResult(
             "",

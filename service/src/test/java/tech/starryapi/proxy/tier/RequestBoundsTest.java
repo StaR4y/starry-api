@@ -1,0 +1,333 @@
+package tech.starryapi.proxy.tier;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.util.OptionalInt;
+import org.junit.jupiter.api.Test;
+import tech.starryapi.account.ProxyAccountEntity;
+import tech.starryapi.model.DefaultModelCatalogProvider;
+import tech.starryapi.platform.kiro.KiroPayloadFactory;
+import tech.starryapi.platform.openai.OpenAiRequestAdapter;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.node.ObjectNode;
+
+class RequestBoundsTest {
+
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    // ---- output ----
+
+    @Test
+    void theOutputBoundIsTheLargestLimitAndAtLeastTheDefault() {
+        assertThat(RequestBounds.outputTokens(json("{\"max_tokens\": 8000}"))).isEqualTo(8000);
+        assertThat(RequestBounds.outputTokens(json("{\"max_completion_tokens\": 12000}"))).isEqualTo(12000);
+        assertThat(RequestBounds.outputTokens(json("{\"max_output_tokens\": 9000}"))).isEqualTo(9000);
+        assertThat(RequestBounds.outputTokens(json("{\"max_tokens\": 100, \"max_output_tokens\": 50}"))).isEqualTo(100);
+        // The default stands in for a missing max_output_tokens, so a small max_tokens still reserves for 4096.
+        assertThat(RequestBounds.outputTokens(json("{\"max_tokens\": 100}"))).isEqualTo(4096);
+        assertThat(RequestBounds.outputTokens(json("{}"))).isEqualTo(4096);
+    }
+
+    // ---- what a relay is given for a request whose output the gateway chose ----
+
+    /** D15: the maximum the mapping states, as far as the default of the request goes; 4,096 when it states none. */
+    @Test
+    void aRelayIsGivenTheMaximumOfItsMappingUpToTheDefaultAndFourThousandNinetySixWhenTheMappingStatesNone() {
+        assertThat(RequestBounds.relayOutputTokens(16_000, null)).isEqualTo(4096);
+        assertThat(RequestBounds.relayOutputTokens(16_000, 8_192)).isEqualTo(8_192);
+        assertThat(RequestBounds.relayOutputTokens(16_000, 64_000)).as("never more than the default of the request").isEqualTo(16_000);
+        assertThat(RequestBounds.relayOutputTokens(16_000, 2_048)).as("a relay that writes less is asked for less").isEqualTo(2_048);
+        assertThat(RequestBounds.relayOutputTokens(16_000, 4_096)).isEqualTo(4096);
+        // The default of a model that writes less than 4,096 is what the reservation covers, so it is what a relay is given.
+        assertThat(RequestBounds.relayOutputTokens(2_048, null)).isEqualTo(2_048);
+        assertThat(RequestBounds.relayOutputTokens(2_048, 8_192)).isEqualTo(2_048);
+    }
+
+    @Test
+    void anOutputLimitIsSetInWhicheverFieldsTheBodyNamesAndNotInTheBodyItWasGiven() {
+        ObjectNode body = (ObjectNode) json("{\"model\": \"m\", \"max_tokens\": 16000, \"messages\": [{\"role\": \"user\", \"content\": \"hi\"}]}");
+
+        JsonNode sized = RequestBounds.withOutputLimit(body, 4096);
+
+        assertThat(sized.path("max_tokens").asLong()).isEqualTo(4096);
+        assertThat(sized.path("messages")).isEqualTo(body.path("messages"));
+        assertThat(body.path("max_tokens").asLong()).as("the body it was given is not changed").isEqualTo(16000);
+        ObjectNode completion = (ObjectNode) json("{\"max_completion_tokens\": 32000, \"max_tokens\": 32000}");
+        assertThat(RequestBounds.withOutputLimit(completion, 4096).path("max_completion_tokens").asLong()).isEqualTo(4096);
+        assertThat(RequestBounds.withOutputLimit(completion, 4096).path("max_tokens").asLong()).isEqualTo(4096);
+        // A body that names none is not given one.
+        assertThat(RequestBounds.withOutputLimit(json("{\"stream\": true}"), 4096).has("max_tokens")).isFalse();
+    }
+
+    // ---- the default of a request that names no output ----
+
+    /** The model writes the smaller of what the two catalogs list when both do, what one lists when only one does, else 4,096. */
+    @Test
+    void theModelWritesTheSmallerOfTheTwoCatalogsAndWhicheverListsWhenOnlyOneDoes() {
+        assertThat(RequestBounds.modelMaximumOutput(OptionalInt.of(384_000), OptionalInt.of(8_192))).isEqualTo(8_192);
+        assertThat(RequestBounds.modelMaximumOutput(OptionalInt.of(64_000), OptionalInt.of(128_000))).isEqualTo(64_000);
+        assertThat(RequestBounds.modelMaximumOutput(OptionalInt.of(64_000), OptionalInt.empty())).isEqualTo(64_000);
+        assertThat(RequestBounds.modelMaximumOutput(OptionalInt.empty(), OptionalInt.of(16_384))).isEqualTo(16_384);
+        assertThat(RequestBounds.modelMaximumOutput(OptionalInt.empty(), OptionalInt.empty())).isEqualTo(4096);
+        // A figure that is no figure (0) does not lower it to nothing.
+        assertThat(RequestBounds.modelMaximumOutput(OptionalInt.of(0), OptionalInt.of(16_384))).isEqualTo(16_384);
+        assertThat(RequestBounds.modelMaximumOutput(OptionalInt.of(64_000), OptionalInt.of(0))).isEqualTo(64_000);
+        assertThat(RequestBounds.modelMaximumOutput(OptionalInt.of(-5), OptionalInt.of(0))).isEqualTo(4096);
+    }
+
+    @Test
+    void theDefaultOutputIsTheSettingUnlessTheModelWritesLess() {
+        // Claude and GPT: both catalogs list 64,000, so the setting stands.
+        assertThat(RequestBounds.defaultOutputTokens(16_000, OptionalInt.of(64_000), OptionalInt.of(64_000))).isEqualTo(16_000);
+        // DeepSeek v4: 384,000 in the model list and 8,192 in the price catalog.
+        assertThat(RequestBounds.defaultOutputTokens(16_000, OptionalInt.of(384_000), OptionalInt.of(8_192))).isEqualTo(8_192);
+        // A raised setting is held to what the model writes, and a lowered one is not raised to it.
+        assertThat(RequestBounds.defaultOutputTokens(100_000, OptionalInt.of(64_000), OptionalInt.of(64_000))).isEqualTo(64_000);
+        assertThat(RequestBounds.defaultOutputTokens(2_048, OptionalInt.of(64_000), OptionalInt.of(64_000))).isEqualTo(2_048);
+        // A model that writes less than the old 4,096 is held to that.
+        assertThat(RequestBounds.defaultOutputTokens(16_000, OptionalInt.of(2_048), OptionalInt.empty())).isEqualTo(2_048);
+        // A model nobody gives a figure for gets the fallback, whatever the setting is.
+        assertThat(RequestBounds.defaultOutputTokens(100_000, OptionalInt.empty(), OptionalInt.empty())).isEqualTo(4096);
+        // And nothing above what a client may ask for.
+        assertThat(RequestBounds.defaultOutputTokens(5_000_000, OptionalInt.of(2_000_000), OptionalInt.empty())).isEqualTo(1_000_000);
+    }
+
+    // ---- a route that takes the whole request ----
+
+    @Test
+    void aPlainRequestIsBoundedByItsSizeAndTheEnvelope() {
+        JsonNode body = json("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
+
+        assertThat(RequestBounds.nativeInputTokens(body)).isEqualTo(body.toString().length() + 1024L);
+    }
+
+    @Test
+    void aSizeIsCountedInUtf8Bytes() {
+        JsonNode body = json("{\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}]}");
+
+        assertThat(RequestBounds.nativeInputTokens(body))
+            .isEqualTo(body.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length + 1024L);
+    }
+
+    @Test
+    void aResponseChainThatWasNotExpandedRaisesTheBoundToTheFloor() {
+        JsonNode body = json("{\"model\":\"m\",\"previous_response_id\":\"resp_1\",\"input\":\"hi\"}");
+
+        assertThat(RequestBounds.nativeInputTokens(body)).isEqualTo(1_000_000L);
+    }
+
+    @Test
+    void anyMediaRaisesTheBoundToTheFloor() {
+        assertThat(RequestBounds.nativeInputTokens(chatWithImage("data:image/png;base64,AAAA"))).isEqualTo(1_000_000L);
+        assertThat(RequestBounds.nativeInputTokens(chatWithImage("https://example.com/cat.png"))).isEqualTo(1_000_000L);
+        assertThat(RequestBounds.nativeInputTokens(json("{\"input\":[{\"type\":\"input_image\",\"image_url\":\"x\"}]}")))
+            .isEqualTo(1_000_000L);
+        assertThat(RequestBounds.nativeInputTokens(json("{\"input\":[{\"type\":\"input_file\",\"file_id\":\"f\"}]}")))
+            .isEqualTo(1_000_000L);
+        assertThat(RequestBounds.nativeInputTokens(json("{\"messages\":[{\"content\":[{\"type\":\"document\"}]}]}")))
+            .isEqualTo(1_000_000L);
+    }
+
+    @Test
+    void aRequestLargerThanTheFloorKeepsItsOwnSize() {
+        ObjectNode body = chatWithImage("data:image/png;base64," + "A".repeat(1_500_000));
+
+        assertThat(RequestBounds.nativeInputTokens(body)).isEqualTo(body.toString().length() + 1024L);
+    }
+
+    // ---- a route that is sent text only ----
+
+    @Test
+    void anInlineImageDoesNotCountForKiro() {
+        ObjectNode body = chatWithImage("data:image/png;base64," + "A".repeat(900_000));
+
+        long bound = RequestBounds.kiroInputTokens(body);
+
+        // What is left is the JSON around the payload and the header of the data URI.
+        assertThat(bound).isGreaterThan(1024L).isLessThan(2_000L);
+    }
+
+    @Test
+    void aRemoteImageDoesNotRaiseTheKiroBoundEither() {
+        ObjectNode body = chatWithImage("https://example.com/cat.png");
+
+        assertThat(RequestBounds.kiroInputTokens(body)).isEqualTo(body.toString().length() + 1024L);
+    }
+
+    @Test
+    void textIsCountedInFullForKiro() {
+        JsonNode body = json("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"" + "x".repeat(10_000) + "\"}]}");
+
+        assertThat(RequestBounds.kiroInputTokens(body)).isEqualTo(RequestBounds.nativeInputTokens(body));
+    }
+
+    @Test
+    void aResponseChainThatWasNotExpandedStillRaisesTheKiroBoundToTheFloor() {
+        JsonNode body = json("{\"model\":\"m\",\"previous_response_id\":\"resp_1\",\"messages\":[]}");
+
+        assertThat(RequestBounds.kiroInputTokens(body)).isEqualTo(1_000_000L);
+    }
+
+    @Test
+    void aMessageWhoseContentIsASingleObjectIsSentToKiroAsItsJsonSoItCountsInFull() {
+        // KiroPayloadFactory turns any content that is neither a string nor a list of parts into its JSON text.
+        ObjectNode body = json("{\"messages\":[{\"role\":\"user\",\"content\":"
+            + "{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64," + "A".repeat(50_000) + "\"}}}]}").deepCopy();
+
+        assertThat(RequestBounds.kiroInputTokens(body)).isEqualTo(body.toString().length() + 1024L);
+    }
+
+    @Test
+    void aResponsesInputItemWhoseContentIsASingleObjectCountsInFullToo() {
+        ObjectNode body = json("{\"input\":[{\"role\":\"user\",\"content\":"
+            + "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64," + "A".repeat(50_000) + "\"}}]}");
+
+        assertThat(RequestBounds.kiroInputTokens(body)).isEqualTo(body.toString().length() + 1024L);
+    }
+
+    @Test
+    void aResponsesInputWithPartListsIsStrippedLikeAChat() {
+        ObjectNode body = json("{\"input\":[{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"look\"},"
+            + "{\"type\":\"input_image\",\"image_url\":\"data:image/png;base64," + "A".repeat(50_000) + "\"}]}]}");
+
+        assertThat(RequestBounds.kiroInputTokens(body)).isLessThan(2_000L);
+    }
+
+    @Test
+    void aMessageWithoutContentOrWithNullContentIsNotAnObjectContent() {
+        JsonNode body = json("{\"messages\":[{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[]},{\"role\":\"user\"}]}");
+
+        assertThat(RequestBounds.kiroInputTokens(body)).isEqualTo(RequestBounds.nativeInputTokens(body));
+    }
+
+    @Test
+    void aKiroBoundIsNeverAboveTheBoundOfARouteThatTakesTheWholeRequest() {
+        for (JsonNode body : new JsonNode[] {
+            chatWithImage("data:image/png;base64," + "A".repeat(30_000)),
+            chatWithImage("https://example.com/cat.png"),
+            json("{\"messages\":[{\"content\":\"plain\"}]}"),
+            json("{\"previous_response_id\":\"resp_1\"}"),
+            json("{\"messages\":[{\"content\":{\"type\":\"text\",\"text\":\"object\"}}]}")
+        }) {
+            assertThat(RequestBounds.kiroInputTokens(body)).isLessThanOrEqualTo(RequestBounds.nativeInputTokens(body));
+        }
+    }
+
+    // ---- what Kiro is sent beyond the text parts of the messages ----
+    //
+    // Each shape below is built into the payload KiroPayloadFactory sends, to show that the base64 really reaches Kiro, and
+    // is then bounded by what it costs there: only the media of the dropped content parts is left out.
+
+    private static final String IMAGE = "data:image/png;base64," + "A".repeat(400_000);
+
+    @Test
+    void aToolSchemaIsSentToKiroWhateverItHolds() {
+        ObjectNode body = json("{\"model\":\"claude-sonnet-4.5\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+            + "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"look\",\"description\":\"d\",\"parameters\":"
+            + "{\"type\":\"object\",\"properties\":{\"x\":{\"enum\":[{\"image_url\":\"" + IMAGE + "\"}]}}}}}]}");
+
+        assertThat(kiroPayload(body)).contains(IMAGE);
+        assertThat(RequestBounds.kiroInputTokens(body)).isGreaterThan(400_000L);
+    }
+
+    @Test
+    void theThinkingFieldIsSentToKiroWhateverItHolds() {
+        ObjectNode body = json("{\"model\":\"claude-sonnet-4.5\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],"
+            + "\"thinking\":{\"type\":\"enabled\",\"extra\":{\"image_url\":{\"url\":\"" + IMAGE + "\"}}}}");
+
+        assertThat(kiroPayload(body)).contains(IMAGE);
+        assertThat(RequestBounds.kiroInputTokens(body)).isGreaterThan(400_000L);
+    }
+
+    @Test
+    void aFunctionCallOutputThatIsAnObjectIsSentToKiroAsItsJson() {
+        ObjectNode body = json("{\"model\":\"claude-sonnet-4.5\",\"input\":[{\"type\":\"function_call_output\",\"call_id\":\"c1\","
+            + "\"output\":{\"type\":\"input_image\",\"image_url\":\"" + IMAGE + "\"}}]}");
+
+        assertThat(kiroPayload(new OpenAiRequestAdapter(mapper, new DefaultModelCatalogProvider()).responsesToChat(body)))
+            .contains(IMAGE);
+        assertThat(RequestBounds.kiroInputTokens(body)).isGreaterThan(400_000L);
+    }
+
+    @Test
+    void aFunctionCallOutputThatIsAListOfPartsLosesItsImagesBeforeKiro() {
+        ObjectNode body = json("{\"model\":\"claude-sonnet-4.5\",\"input\":[{\"type\":\"function_call_output\",\"call_id\":\"c1\","
+            + "\"output\":[{\"type\":\"input_text\",\"text\":\"screenshot\"},"
+            + "{\"type\":\"input_image\",\"image_url\":\"" + IMAGE + "\"}]}]}");
+
+        assertThat(kiroPayload(new OpenAiRequestAdapter(mapper, new DefaultModelCatalogProvider()).responsesToChat(body)))
+            .doesNotContain("AAAAAAAA");
+        assertThat(RequestBounds.kiroInputTokens(body)).isLessThan(2_000L);
+    }
+
+    @Test
+    void mediaInDroppedPartsIsLeftOutWhileTheSameMediaElsewhereInTheRequestIsCounted() {
+        ObjectNode body = json("{\"model\":\"claude-sonnet-4.5\",\"messages\":[{\"role\":\"user\",\"content\":["
+            + "{\"type\":\"text\",\"text\":\"look\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"" + IMAGE + "\"}}]}],"
+            + "\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"look\",\"parameters\":{\"type\":\"object\","
+            + "\"properties\":{\"x\":{\"default\":{\"image_url\":\"" + IMAGE + "\"}}}}}}]}");
+
+        long bound = RequestBounds.kiroInputTokens(body);
+
+        // One image of two is dropped; the one in the tool schema stays.
+        assertThat(bound).isGreaterThan(400_000L).isLessThan(401_500L);
+    }
+
+    @Test
+    void aKiroBoundCoversTheTextOfEveryPartKiroKeeps() {
+        ObjectNode body = json("{\"messages\":[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"" + "t".repeat(5_000) + "\"},"
+            + "{\"type\":\"input_text\",\"text\":\"" + "u".repeat(5_000) + "\"}]}]}");
+
+        assertThat(RequestBounds.kiroInputTokens(body)).isEqualTo(RequestBounds.nativeInputTokens(body));
+    }
+
+    // ---- a relay ----
+
+    @Test
+    void aRelayIsBoundedByTheSizeOfItsBodyWithoutTheBase64AndTheCapOfEachInlineImage() {
+        ObjectNode body = chatWithImage("data:image/png;base64," + "A".repeat(500_000));
+        long text = tech.starryapi.common.JsonNodes.mediaStats(body).bytesWithoutBase64();
+
+        // One image: the text of the body, the envelope and the cap of the mapping, whatever the image weighs.
+        assertThat(RequestBounds.xpInputTokens(body, 8192)).isEqualTo(text + 1024L + 8192L);
+        assertThat(RequestBounds.xpInputTokens(body, 1)).isEqualTo(text + 1024L + 1L);
+        assertThat(RequestBounds.nativeInputTokens(body)).isEqualTo(1_000_000L);
+    }
+
+    @Test
+    void everyInlineImageCountsItsOwnCap() {
+        ObjectNode body = chatWithImage("data:image/png;base64,AAAA");
+        body.withArray("messages").get(0).withArray("content").addObject().put("type", "image_url")
+            .putObject("image_url").put("url", "data:image/png;base64,BBBB");
+        long text = tech.starryapi.common.JsonNodes.mediaStats(body).bytesWithoutBase64();
+
+        assertThat(RequestBounds.xpInputTokens(body, 5000)).isEqualTo(text + 1024L + 2 * 5000L);
+    }
+
+    @Test
+    void mediaARelayOnlyPointsAtRaisesTheBoundToTheFloorAsItDoesForTheNativeAccounts() {
+        assertThat(RequestBounds.xpInputTokens(chatWithImage("https://example.com/cat.png"), 100)).isEqualTo(1_000_000L);
+        // A body of text is bounded by its size, as the native accounts' is.
+        JsonNode plain = json("{\"model\":\"m\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
+        assertThat(RequestBounds.xpInputTokens(plain, 100)).isEqualTo(RequestBounds.nativeInputTokens(plain));
+    }
+
+    private String kiroPayload(JsonNode chat) {
+        KiroPayloadFactory factory = new KiroPayloadFactory(mapper, new DefaultModelCatalogProvider());
+        return factory.fromOpenAiChat(chat, new ProxyAccountEntity(), "claude-sonnet-4.5", "AI_EDITOR", "session-1").toString();
+    }
+
+    private ObjectNode chatWithImage(String url) {
+        ObjectNode body = mapper.createObjectNode();
+        body.put("model", "m");
+        var parts = body.putArray("messages").addObject().put("role", "user").putArray("content");
+        parts.addObject().put("type", "text").put("text", "describe it");
+        parts.addObject().put("type", "image_url").putObject("image_url").put("url", url);
+        return body;
+    }
+
+    private ObjectNode json(String value) {
+        return (ObjectNode) mapper.readTree(value);
+    }
+}

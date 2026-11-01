@@ -1,0 +1,14 @@
+[
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "text",
+        "text": "And again?",
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      }
+    ]
+  }
+]

@@ -8,12 +8,14 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
@@ -21,6 +23,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,12 +42,14 @@ import tech.starryapi.account.allocation.AccountCandidateRanker;
 import tech.starryapi.common.ApiException;
 import tech.starryapi.common.Hashing;
 import tech.starryapi.config.ProxyProperties;
+import tech.starryapi.sourcetier.SourceTierRegistry;
 
 @Service
 public class AccountPoolService {
 
     private static final Logger log = LoggerFactory.getLogger(AccountPoolService.class);
     private static final Duration CACHE_MISS_REFRESH_INTERVAL = Duration.ofSeconds(5);
+    private static final Duration SWITCHED_OFF_ACCOUNTS_TTL = Duration.ofSeconds(30);
     private static final int CACHE_UPDATE_SKIPPED = -1;
     private static final int CACHE_CONTENT_CHANGED = 0;
     private static final int CACHE_TOPOLOGY_CHANGED = 1;
@@ -58,6 +63,7 @@ public class AccountPoolService {
     private final AccountPoolPolicyService poolPolicyService;
     private final SystemMaintenanceTaskGate maintenanceTaskGate;
     private final AccountCandidateRanker candidateRanker;
+    private final Supplier<Set<String>> exclusiveRelayAccountIds;
     private final AtomicInteger nextIndex = new AtomicInteger();
     private final AtomicLong cacheVersion = new AtomicLong();
     private final AtomicLong refreshGeneration = new AtomicLong();
@@ -68,6 +74,7 @@ public class AccountPoolService {
     private volatile long lastCacheClearVersion;
     private volatile Mono<Void> inFlightCacheRefresh;
     private long inFlightCacheRefreshGeneration;
+    private volatile SwitchedOffAccounts switchedOffRead = SwitchedOffAccounts.STALE;
 
     public AccountPoolService(
         ProxyAccountRepository repository,
@@ -110,7 +117,6 @@ public class AccountPoolService {
         this(repository, template, properties, poolPolicyService, maintenanceTaskGate, null);
     }
 
-    @Autowired
     public AccountPoolService(
         ProxyAccountRepository repository,
         R2dbcEntityTemplate template,
@@ -119,12 +125,50 @@ public class AccountPoolService {
         SystemMaintenanceTaskGate maintenanceTaskGate,
         AccountCandidateRanker candidateRanker
     ) {
+        this(repository, template, properties, poolPolicyService, maintenanceTaskGate, candidateRanker, Set::of);
+    }
+
+    @Autowired
+    public AccountPoolService(
+        ProxyAccountRepository repository,
+        R2dbcEntityTemplate template,
+        ProxyProperties properties,
+        AccountPoolPolicyService poolPolicyService,
+        SystemMaintenanceTaskGate maintenanceTaskGate,
+        AccountCandidateRanker candidateRanker,
+        SourceTierRegistry sourceTiers
+    ) {
+        this(
+            repository,
+            template,
+            properties,
+            poolPolicyService,
+            maintenanceTaskGate,
+            candidateRanker,
+            Objects.requireNonNull(sourceTiers, "sourceTiers")::exclusiveXpAccountIds
+        );
+    }
+
+    /**
+     * @param exclusiveRelayAccountIds the ids of the accounts registered as the exclusive relay of another protocol
+     *     (design 7.5), read whenever a pool that serves untiered traffic is asked; empty when none is configured
+     */
+    public AccountPoolService(
+        ProxyAccountRepository repository,
+        R2dbcEntityTemplate template,
+        ProxyProperties properties,
+        AccountPoolPolicyService poolPolicyService,
+        SystemMaintenanceTaskGate maintenanceTaskGate,
+        AccountCandidateRanker candidateRanker,
+        Supplier<Set<String>> exclusiveRelayAccountIds
+    ) {
         this.repository = repository;
         this.template = template;
         this.properties = properties;
         this.poolPolicyService = poolPolicyService;
         this.maintenanceTaskGate = maintenanceTaskGate;
         this.candidateRanker = candidateRanker;
+        this.exclusiveRelayAccountIds = Objects.requireNonNull(exclusiveRelayAccountIds, "exclusiveRelayAccountIds");
         this.affinity = Caffeine.newBuilder()
             .maximumSize(Math.max(1, properties.getSessionAffinityMaximumSize()))
             .expireAfterAccess(positiveAffinityTtl(properties.getSessionAffinityTtl()))
@@ -353,6 +397,76 @@ public class AccountPoolService {
         return !cachedAccountsSnapshot(account -> matcher.test(account) && isAvailable(account)).isEmpty();
     }
 
+    /** The enabled accounts of the cache, whatever their state: what the status page of the source tiers classifies. */
+    public List<ProxyAccountEntity> cachedAccounts() {
+        return cachedAccountsSnapshot(account -> true);
+    }
+
+    /** The enabled accounts of the cache that {@code filter} takes, whatever their state: what a plan classifies by tier. */
+    public List<ProxyAccountEntity> cachedAccounts(Predicate<ProxyAccountEntity> filter) {
+        return cachedAccountsSnapshot(filter == null ? account -> true : filter);
+    }
+
+    /** Whether the account is neither suspended nor out of quota, the layer of design 4.1 that {@link #hasUsableAccount} tests. */
+    public boolean isUsable(ProxyAccountEntity account) {
+        return account != null && isAvailable(account);
+    }
+
+    /**
+     * Whether selection could pick an account that satisfies {@code filter} right now: one in the cache of enabled
+     * accounts, available (not suspended, not out of quota) and that the allocation lifecycle lets be scheduled (not
+     * disabled, not cooling down or quarantined before the cooldown ends). These are the layers {@code selectFromPool}
+     * passes an account through; what only a request meets (admission: concurrency, rate, cooldown per model) is not
+     * counted. Nothing is selected, reserved or changed.
+     */
+    public Mono<Boolean> hasSelectableAccount(Predicate<ProxyAccountEntity> filter) {
+        return Mono.defer(() -> {
+            List<ProxyAccountEntity> available = cachedAccountsSnapshot(filter == null ? account -> true : filter).stream()
+                .filter(this::isAvailable)
+                .toList();
+            if (available.isEmpty()) {
+                return Mono.just(false);
+            }
+            if (candidateRanker == null) {
+                return Mono.just(true);
+            }
+            return candidateRanker.schedulable(available).map(schedulable -> !schedulable.isEmpty());
+        });
+    }
+
+    /** An enabled account from the cache, whatever its state; empty for an account that is disabled, deleted or unknown. */
+    public Optional<ProxyAccountEntity> cachedAccount(String accountId) {
+        CachedAccountEntry entry = accountId == null ? null : accountCache.get(accountId);
+        return entry != null && entry.active() ? Optional.of(entry.account()) : Optional.empty();
+    }
+
+    /**
+     * The accounts that are switched off, which the cache leaves out: disabled ones and suspended ones alike, since
+     * suspending an account disables it. Only what tells the kind of account is read, so they are good for the account
+     * predicates and the tier rules and nothing else. A tier uses them to tell a pool whose accounts are all out of
+     * service from a pool the route has no account in at all. What was read stays valid until the account cache is
+     * reloaded or this node changes an account, and for 30 seconds at most. Empty when the table cannot be read, so
+     * that the caller knows no more than the cache does.
+     */
+    public Mono<List<ProxyAccountEntity>> switchedOffAccounts() {
+        return Mono.defer(() -> {
+            SwitchedOffAccounts known = switchedOffRead;
+            if (known.readAt().isAfter(Instant.now().minus(SWITCHED_OFF_ACCOUNTS_TTL))) {
+                return Mono.just(known.accounts());
+            }
+            Flux<ProxyAccountEntity> read = repository.findSwitchedOffByKind();
+            if (read == null) {
+                return Mono.just(List.<ProxyAccountEntity>of());
+            }
+            return read.collectList()
+                .doOnNext(accounts -> switchedOffRead = new SwitchedOffAccounts(Instant.now(), List.copyOf(accounts)))
+                .onErrorResume(error -> {
+                    log.warn("Failed to read the switched-off accounts", error);
+                    return Mono.just(List.<ProxyAccountEntity>of());
+                });
+        });
+    }
+
     public Mono<ProxyAccountEntity> selectAccount(String sessionHint) {
         return selectAccount(sessionHint, account -> true, "No available upstream account");
     }
@@ -365,7 +479,7 @@ public class AccountPoolService {
         String sessionHint,
         AccountPoolRequestContext context
     ) {
-        return selectAccount(sessionHint, AccountPlatforms::isKiroCompatible, "No available Kiro upstream account", context);
+        return selectAccount(sessionHint, PoolCell.KIRO_COMPATIBLE.predicate(), "No available Kiro upstream account", context);
     }
 
     public Mono<ProxyAccountEntity> selectKiroAccount(String sessionHint, Collection<String> excludedAccountIds) {
@@ -379,7 +493,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            account -> AccountPlatforms.isKiroCompatible(account) && !isExcluded(account, excludedAccountIds),
+            PoolCell.KIRO_COMPATIBLE.predicate(excludedAccountIds),
             "No available Kiro upstream account",
             context
         );
@@ -395,7 +509,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            account -> AccountPlatforms.isOfficialOpenAiApiKey(account) || AccountPlatforms.isCodex(account),
+            PoolCell.OFFICIAL_OR_CODEX.predicate(),
             "No available OpenAI upstream account",
             context
         );
@@ -412,8 +526,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            account -> (AccountPlatforms.isOfficialOpenAiApiKey(account) || AccountPlatforms.isCodex(account))
-                && !isExcluded(account, excludedAccountIds),
+            PoolCell.OFFICIAL_OR_CODEX.predicate(excludedAccountIds),
             "No available OpenAI upstream account",
             context
         );
@@ -425,7 +538,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            AccountPlatforms::isOfficialOpenAiApiKey,
+            PoolCell.OFFICIAL_OPENAI.predicate(),
             "No available OpenAI upstream account",
             context
         );
@@ -438,22 +551,21 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            account -> AccountPlatforms.isOfficialOpenAiApiKey(account) && !isExcluded(account, excludedAccountIds),
+            PoolCell.OFFICIAL_OPENAI.predicate(excludedAccountIds),
             "No available OpenAI upstream account",
             context
         );
     }
 
+    /**
+     * The OpenAI-compatible pool of untiered traffic. An account registered as the exclusive relay of another protocol
+     * is not in it (design 7.5); without such a relay it is every compatible key, as it always was.
+     */
     public Mono<ProxyAccountEntity> selectOpenAiCompatibleAccountForPool(
         String sessionHint,
         AccountPoolRequestContext context
     ) {
-        return selectAccount(
-            sessionHint,
-            AccountPlatforms::isOpenAiCompatibleApiKey,
-            "No available OpenAI-compatible upstream account",
-            context
-        );
+        return selectOpenAiCompatible(sessionHint, null, context);
     }
 
     public Mono<ProxyAccountEntity> selectOpenAiCompatibleAccountForPool(
@@ -461,26 +573,75 @@ public class AccountPoolService {
         Collection<String> excludedAccountIds,
         AccountPoolRequestContext context
     ) {
+        return selectOpenAiCompatible(sessionHint, excludedAccountIds, context);
+    }
+
+    private Mono<ProxyAccountEntity> selectOpenAiCompatible(
+        String sessionHint,
+        Collection<String> excludedAccountIds,
+        AccountPoolRequestContext context
+    ) {
+        Collection<String> excluded;
+        try {
+            excluded = withExclusiveRelays(excludedAccountIds);
+        } catch (RuntimeException unknown) {
+            return Mono.error(unknown);
+        }
         return selectAccount(
             sessionHint,
-            account -> AccountPlatforms.isOpenAiCompatibleApiKey(account)
-                && !isExcluded(account, excludedAccountIds),
+            PoolCell.OPENAI_COMPATIBLE.predicate(excluded),
             "No available OpenAI-compatible upstream account",
             context
         );
     }
 
+    /** The owner of an OpenAI response chain, unless it is the exclusive relay of another protocol. */
     public Mono<ProxyAccountEntity> selectOpenAiAccountByIdForPool(
         String accountId,
         AccountPoolRequestContext context
     ) {
+        boolean exclusiveRelay;
+        try {
+            exclusiveRelay = accountId != null && exclusiveRelayAccountIds().contains(accountId);
+        } catch (RuntimeException unknown) {
+            return Mono.error(unknown);
+        }
         return selectAccount(
             null,
-            account -> (AccountPlatforms.isOpenAi(account) || AccountPlatforms.isDeepSeek(account))
+            account -> !exclusiveRelay
+                && (AccountPlatforms.isOpenAi(account) || AccountPlatforms.isDeepSeek(account))
                 && Objects.equals(accountId, account.getAccountId()),
             "The account that owns the OpenAI response is unavailable",
             context
         );
+    }
+
+    /**
+     * The accounts registered as the exclusive relay of another protocol (design 7.5): they serve that protocol's
+     * requests only, and none of the untiered traffic that the pools of this class serve. Empty unless such a relay is
+     * configured. Fails like the tier configuration does while that has never been loaded, since nothing is known then.
+     */
+    public Set<String> exclusiveRelayAccountIds() {
+        Set<String> ids = exclusiveRelayAccountIds.get();
+        return ids == null ? Set.of() : ids;
+    }
+
+    /** Whether {@code account} is the exclusive relay of another protocol, which the pools of untiered traffic leave out. */
+    public boolean isExclusiveRelay(ProxyAccountEntity account) {
+        return account != null && account.getAccountId() != null && exclusiveRelayAccountIds().contains(account.getAccountId());
+    }
+
+    /** {@code excluded} and the exclusive relays; {@code excluded} itself, as it was passed, when there are none. */
+    private Collection<String> withExclusiveRelays(Collection<String> excluded) {
+        Set<String> relays = exclusiveRelayAccountIds();
+        if (relays.isEmpty()) {
+            return excluded;
+        }
+        Set<String> merged = new HashSet<>(relays);
+        if (excluded != null) {
+            merged.addAll(excluded);
+        }
+        return merged;
     }
 
     public Mono<ProxyAccountEntity> selectAnthropicAccount(String sessionHint) {
@@ -491,7 +652,7 @@ public class AccountPoolService {
         String sessionHint,
         AccountPoolRequestContext context
     ) {
-        return selectAccount(sessionHint, AccountPlatforms::isAnthropicApiKey, "No available Anthropic upstream account", context);
+        return selectAccount(sessionHint, PoolCell.ANTHROPIC_KEY.predicate(), "No available Anthropic upstream account", context);
     }
 
     public Mono<ProxyAccountEntity> selectAnthropicAccount(String sessionHint, Collection<String> excludedAccountIds) {
@@ -505,7 +666,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            account -> AccountPlatforms.isAnthropicApiKey(account) && !isExcluded(account, excludedAccountIds),
+            PoolCell.ANTHROPIC_KEY.predicate(excludedAccountIds),
             "No available Anthropic upstream account",
             context
         );
@@ -519,7 +680,7 @@ public class AccountPoolService {
         String sessionHint,
         AccountPoolRequestContext context
     ) {
-        return selectAccount(sessionHint, AccountPlatforms::isCodex, "No available Codex upstream account", context);
+        return selectAccount(sessionHint, PoolCell.CODEX.predicate(), "No available Codex upstream account", context);
     }
 
     public Mono<ProxyAccountEntity> selectCodexOpenAiAccount(String sessionHint, Collection<String> excludedAccountIds) {
@@ -533,7 +694,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            account -> AccountPlatforms.isCodex(account) && !isExcluded(account, excludedAccountIds),
+            PoolCell.CODEX.predicate(excludedAccountIds),
             "No available Codex upstream account",
             context
         );
@@ -549,7 +710,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            AccountPlatforms::isDeepSeek,
+            PoolCell.DEEPSEEK.predicate(),
             "No available DeepSeek upstream account",
             context
         );
@@ -566,7 +727,7 @@ public class AccountPoolService {
     ) {
         return selectAccount(
             sessionHint,
-            account -> AccountPlatforms.isDeepSeek(account) && !isExcluded(account, excludedAccountIds),
+            PoolCell.DEEPSEEK.predicate(excludedAccountIds),
             "No available DeepSeek upstream account",
             context
         );
@@ -586,12 +747,46 @@ public class AccountPoolService {
         String unavailableMessage,
         AccountPoolRequestContext context
     ) {
-        String affinityKey = poolPolicyService == null
+        return selectAccount(sessionHint, filter, unavailableMessage, context, null, true);
+    }
+
+    /**
+     * Selects among the accounts that satisfy {@code filter} exactly as the select*ForPool methods do: the account the
+     * session is bound to if it is still available, otherwise the ranker's choice. This is the selection of one cell of
+     * one tier of a tiered request, whose filter is the cell's accounts that the tier holds and the request has not yet
+     * tried.
+     *
+     * @param scope what the session's binding is kept under besides the session itself, so that a session bound to an
+     *     account of one tier, or for one model, does not steer the selection in another; null for none
+     * @param refreshOnEmpty whether to reload the account cache, when it is stale, if no account in it satisfies the
+     *     filter. A cell that no account can belong to is empty on every request, and the caller that walks all the
+     *     cells of a tiered request reloads once for the whole round instead of once per empty cell.
+     */
+    public Mono<ProxyAccountEntity> selectInScope(
+        String sessionHint,
+        Predicate<ProxyAccountEntity> filter,
+        String unavailableMessage,
+        AccountPoolRequestContext context,
+        String scope,
+        boolean refreshOnEmpty
+    ) {
+        return selectAccount(sessionHint, filter, unavailableMessage, context, scope, refreshOnEmpty);
+    }
+
+    private Mono<ProxyAccountEntity> selectAccount(
+        String sessionHint,
+        Predicate<ProxyAccountEntity> filter,
+        String unavailableMessage,
+        AccountPoolRequestContext context,
+        String scope,
+        boolean refreshOnEmpty
+    ) {
+        String affinityKey = scopedAffinityKey(scope, poolPolicyService == null
             ? sessionHint
-            : poolPolicyService.affinityKey(context, sessionHint);
+            : poolPolicyService.affinityKey(context, sessionHint));
         List<ProxyAccountEntity> accounts = applyTierPolicy(cachedAccountsSnapshot(filter), context);
         if (accounts.isEmpty()) {
-            return refreshCacheIfStale()
+            return (refreshOnEmpty ? refreshCacheIfStale() : Mono.<Void>empty())
                 .then(Mono.defer(() -> {
                     List<ProxyAccountEntity> refreshed = cachedAccountsSnapshot(filter);
                     List<ProxyAccountEntity> routed = applyTierPolicy(refreshed, context);
@@ -639,13 +834,6 @@ public class AccountPoolService {
                 }
                 return Mono.empty();
             }));
-    }
-
-    private boolean isExcluded(ProxyAccountEntity account, Collection<String> excludedAccountIds) {
-        return account != null
-            && account.getAccountId() != null
-            && excludedAccountIds != null
-            && excludedAccountIds.contains(account.getAccountId());
     }
 
     public String circuitKey(AccountPoolRequestContext context) {
@@ -987,12 +1175,29 @@ public class AccountPoolService {
         boolean updateStatus,
         boolean rateLimitIsQuota
     ) {
+        return recordTestFailure(accountId, type, statusCode, message, updateStatus, rateLimitIsQuota, true);
+    }
+
+    /**
+     * @param credentialWordsDisable whether an authentication failure whose text says the credential was revoked disables the
+     *     account. False for a relay of another protocol (D5): the text is the relay's own, taken from its raw answer, and the
+     *     key it turns down is the administrator's to mend, so the account only rests, and serves again when the key is good.
+     */
+    public Mono<Void> recordTestFailure(
+        String accountId,
+        UpstreamErrorType type,
+        Integer statusCode,
+        String message,
+        boolean updateStatus,
+        boolean rateLimitIsQuota,
+        boolean credentialWordsDisable
+    ) {
         if (!updateStatus || (Integer.valueOf(429).equals(statusCode) && !rateLimitIsQuota)) {
             return recordError(accountId, type, statusCode, rateLimitIsQuota);
         }
         Instant now = Instant.now();
         boolean quotaFailure = isQuotaStatus(statusCode, rateLimitIsQuota);
-        boolean permanentCredentialFailure = isAuthStatus(statusCode)
+        boolean permanentCredentialFailure = credentialWordsDisable && isAuthStatus(statusCode)
             && hasPermanentCredentialEvidence(message);
         String sql = """
             UPDATE proxy_accounts
@@ -1098,7 +1303,8 @@ public class AccountPoolService {
         return created;
     }
 
-    private Mono<Void> refreshCacheIfStale() {
+    /** Reloads the account cache unless it was reloaded in the last few seconds. */
+    public Mono<Void> refreshCacheIfStale() {
         return Mono.defer(() -> {
             if (lastCacheRefreshAt.isAfter(Instant.now().minus(CACHE_MISS_REFRESH_INTERVAL))) {
                 return Mono.empty();
@@ -1126,6 +1332,7 @@ public class AccountPoolService {
             snapshot.merge(account.getAccountId(), account, AccountPoolService::newerAccount);
         }
 
+        switchedOffRead = SwitchedOffAccounts.STALE;
         snapshot.forEach((accountId, account) -> accountCache.compute(accountId, (ignored, current) -> {
             if (current != null && current.version() > refreshVersion) {
                 return current;
@@ -1149,6 +1356,7 @@ public class AccountPoolService {
         }
         String accountId = updated.getAccountId();
         long version = cacheVersion.incrementAndGet();
+        switchedOffRead = SwitchedOffAccounts.STALE;
         boolean enabled = Boolean.TRUE.equals(updated.getEnabled());
         int cacheChange = replaceCachedEntry(
             accountId,
@@ -1167,6 +1375,7 @@ public class AccountPoolService {
             return;
         }
         long version = cacheVersion.incrementAndGet();
+        switchedOffRead = SwitchedOffAccounts.STALE;
         int cacheChange = replaceCachedEntry(accountId, CachedAccountEntry.tombstone(version));
         if (cacheChange == CACHE_TOPOLOGY_CHANGED) {
             rebuildAccountTopology();
@@ -1266,6 +1475,17 @@ public class AccountPoolService {
         String accountId,
         boolean bindByApiKey
     ) {
+        commitSessionAffinity(context, null, sessionHint, accountId, bindByApiKey);
+    }
+
+    /** {@link #commitSessionAffinity(AccountPoolRequestContext, String, String, boolean)} under the {@code scope} of {@link #selectInScope}. */
+    public void commitSessionAffinity(
+        AccountPoolRequestContext context,
+        String scope,
+        String sessionHint,
+        String accountId,
+        boolean bindByApiKey
+    ) {
         if (!properties.isSessionAffinityEnabled()
             || sessionHint == null
             || sessionHint.isBlank()
@@ -1276,10 +1496,15 @@ public class AccountPoolService {
         if (!bindByApiKey && sessionHint.indexOf(':') <= 0) {
             return;
         }
-        String affinityKey = poolPolicyService == null
+        String affinityKey = scopedAffinityKey(scope, poolPolicyService == null
             ? sessionHint
-            : poolPolicyService.affinityKey(context, sessionHint);
+            : poolPolicyService.affinityKey(context, sessionHint));
         affinity.asMap().putIfAbsent(affinityKey, accountId);
+    }
+
+    /** The key a binding is kept under: the session's own key, behind the scope of the tier and model it was made for. */
+    private static String scopedAffinityKey(String scope, String affinityKey) {
+        return scope == null || affinityKey == null || affinityKey.isBlank() ? affinityKey : scope + '|' + affinityKey;
     }
 
     private boolean shouldUseWeights(List<ProxyAccountEntity> accounts) {
@@ -1853,6 +2078,11 @@ public class AccountPoolService {
     }
 
     private record SqlValue(Object value, Class<?> type) {
+    }
+
+    /** The switched-off accounts as of {@code readAt}. */
+    private record SwitchedOffAccounts(Instant readAt, List<ProxyAccountEntity> accounts) {
+        static final SwitchedOffAccounts STALE = new SwitchedOffAccounts(Instant.EPOCH, List.of());
     }
 
     private record CachedAccountEntry(ProxyAccountEntity account, long version) {

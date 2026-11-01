@@ -17,6 +17,7 @@ import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.WebFilter;
 import org.springframework.web.server.WebFilterChain;
 import reactor.core.publisher.Mono;
+import tech.starryapi.proxy.tier.TierResponseHeaders;
 
 @Configuration
 public class WebFluxConfig implements WebFluxConfigurer, WebFilter {
@@ -78,7 +79,16 @@ public class WebFluxConfig implements WebFluxConfigurer, WebFilter {
             .allowedOriginPatterns("*")
             .allowedMethods("GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS")
             .allowedHeaders("*")
-            .exposedHeaders("Retry-After", "X-Request-Id");
+            .exposedHeaders(
+                "Retry-After",
+                "X-Request-Id",
+                // The headers that name the source tier that served a request (design 6.4), so that browser clients can read them.
+                TierResponseHeaders.TIER,
+                TierResponseHeaders.LEVEL,
+                TierResponseHeaders.NAME,
+                TierResponseHeaders.MODE,
+                TierResponseHeaders.STATUS
+            );
     }
 
     @Override

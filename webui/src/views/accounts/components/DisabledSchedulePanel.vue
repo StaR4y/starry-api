@@ -377,7 +377,9 @@
                     <div class="check-info">
                       <span class="check-title text-primary">{{ t('账号不可用时自动复查') }}</span>
                       <span class="check-desc">{{
-                        t('当前请求没有可用账号时，自动复查一次对应平台账号并重新选择')
+                        t(
+                          '当前请求没有可用账号时，自动复查一次可能服务它的账号（分级厂商为本请求还能用到的号池里的账号）并重新选择',
+                        )
                       }}</span>
                     </div>
                   </el-checkbox>

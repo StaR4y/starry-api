@@ -1,0 +1,19 @@
+{
+  "relaysLeftOut": [],
+  "attempts": [
+    {
+      "account": "relay-1",
+      "tier": "anthropic:relay",
+      "dispatch": "OPENAI_CHAT",
+      "wireModel": "relay-sonnet",
+      "success": true,
+      "status": 200,
+      "inputTokens": 1550,
+      "outputTokens": 6,
+      "usageSource": "REPORTED",
+      "stopReason": "END_TURN",
+      "degraded": "tool_output_image,cache_control,thinking,context_management,metadata,billing_header_dropped",
+      "error": null
+    }
+  ]
+}

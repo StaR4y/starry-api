@@ -1,0 +1,33 @@
+{
+  "status": 200,
+  "headers": {
+    "X-Starry-Tier": "relay",
+    "X-Starry-Tier-Level": "1",
+    "X-Starry-Tier-Name": "relay",
+    "X-Starry-Tier-Mode": "auto",
+    "X-Starry-Tier-Status": "served"
+  },
+  "body": {
+    "candidates": [
+      {
+        "content": {
+          "role": "model",
+          "parts": [
+            {
+              "text": ""
+            }
+          ]
+        },
+        "finishReason": "STOP",
+        "index": 0
+      }
+    ],
+    "usageMetadata": {
+      "promptTokenCount": 1200,
+      "candidatesTokenCount": 12,
+      "totalTokenCount": 1212
+    },
+    "modelVersion": "gemini-2.5-pro",
+    "responseId": "gen-<id>"
+  }
+}

@@ -29,6 +29,19 @@ class WebFluxConfigTest {
     }
 
     @Test
+    void letsBrowserClientsReadTheHeadersThatNameTheSourceTier() {
+        ProxyProperties properties = new ProxyProperties();
+        WebFluxConfig config = new WebFluxConfig(properties, 100, "build/test-model-icons", 20);
+        InspectableCorsRegistry registry = new InspectableCorsRegistry();
+
+        config.addCorsMappings(registry);
+
+        assertThat(registry.exposedHeaders("/**")).contains(
+            "Retry-After", "X-Request-Id", "X-Starry-Tier", "X-Starry-Tier-Level", "X-Starry-Tier-Name", "X-Starry-Tier-Mode",
+            "X-Starry-Tier-Status");
+    }
+
+    @Test
     void appliesTheProxyLimitToRegularRequests() {
         ProxyProperties properties = new ProxyProperties();
         properties.setMaxRequestBodyBytes(10);
@@ -144,6 +157,10 @@ class WebFluxConfigTest {
 
         private List<String> allowedMethods(String pathPattern) {
             return getCorsConfigurations().get(pathPattern).getAllowedMethods();
+        }
+
+        private List<String> exposedHeaders(String pathPattern) {
+            return getCorsConfigurations().get(pathPattern).getExposedHeaders();
         }
     }
 }

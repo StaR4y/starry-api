@@ -1,0 +1,1 @@
+{"origin": "OpenCode 1.18.16: the relay refuses its own key (401) and the tier below has no account in service, so the client is told that no account is available (a relay's 401 is never what the client is told: D5). The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

@@ -1,0 +1,1 @@
+{"origin": "Codex 0.142.5 request whose prompt is in Chinese, Japanese, Arabic, with emoji and combining marks; the relay answers in the same, with the multi-byte characters split across the pieces of the stream. The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

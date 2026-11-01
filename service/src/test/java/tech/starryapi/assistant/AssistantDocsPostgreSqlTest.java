@@ -332,7 +332,7 @@ class AssistantDocsPostgreSqlTest {
         }
     }
 
-    // ---- the seeded tutorials (V21 to V24) ---------------------------------------------------------------------
+    // ---- the seeded tutorials (V23, V24 and V30) ---------------------------------------------------------------
 
     @Test
     void seededTutorialsAnswerWhatNewUsersAsk() {

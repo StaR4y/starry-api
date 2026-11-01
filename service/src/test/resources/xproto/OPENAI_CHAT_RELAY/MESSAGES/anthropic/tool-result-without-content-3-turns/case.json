@@ -1,0 +1,1 @@
+{"origin": "Claude Code 2.1.168: a tool_result block without a content field, as an SDK client may write it (derived from the result of a Bash call), then two more turns. The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

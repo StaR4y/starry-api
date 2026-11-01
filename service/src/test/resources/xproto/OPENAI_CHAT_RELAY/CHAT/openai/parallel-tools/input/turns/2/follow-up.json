@@ -1,0 +1,15 @@
+[
+  {
+    "role": "tool",
+    "tool_call_id": "${tool.0}",
+    "content": "first\n"
+  },
+  {
+    "role": "tool",
+    "tool_call_id": "${tool.1}",
+    "content": "second\n",
+    "cache_control": {
+      "type": "ephemeral"
+    }
+  }
+]

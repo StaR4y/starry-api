@@ -1,0 +1,1 @@
+{"origin": "Codex 0.142.5: a relay that gives every tool call the id call_0; on the third turn it stops serving the model and the native tier takes over the conversation. The relay answers are authored from the documented Chat Completions shapes; the expected files are what the gateway does with them."}

@@ -33,9 +33,9 @@ public class OpenAiUpstreamClient {
 
     private static final String CODEX_USER_AGENT = "codex_cli_rs/0.139.0";
     private static final String CODEX_ORIGINATOR = "codex_cli_rs";
-    private static final String APPLY_PATCH_TOOL_NAME = "apply_patch";
 
     private final ObjectMapper objectMapper;
+    private final ApplyPatchEmulation applyPatch;
     private final WebClient webClient;
     private final AccountTokenRefreshService tokenRefreshService;
 
@@ -45,6 +45,7 @@ public class OpenAiUpstreamClient {
         AccountTokenRefreshService tokenRefreshService
     ) {
         this.objectMapper = objectMapper;
+        this.applyPatch = new ApplyPatchEmulation(objectMapper);
         this.webClient = upstreamWebClient;
         this.tokenRefreshService = tokenRefreshService;
     }
@@ -399,8 +400,8 @@ public class OpenAiUpstreamClient {
     private ArrayNode codexTools(JsonNode tools) {
         ArrayNode converted = objectMapper.createArrayNode();
         for (JsonNode tool : tools) {
-            if (isApplyPatchTool(tool)) {
-                converted.add(applyPatchFunctionTool(tool));
+            if (applyPatch.isApplyPatchTool(tool)) {
+                converted.add(applyPatch.functionTool(tool));
                 continue;
             }
             if (!"function".equals(tool.path("type").asString(""))) {
@@ -409,8 +410,8 @@ public class OpenAiUpstreamClient {
             }
             JsonNode function = tool.path("function");
             JsonNode source = function.isObject() ? function : tool;
-            if (isApplyPatchTool(source)) {
-                converted.add(applyPatchFunctionTool(source));
+            if (applyPatch.isApplyPatchTool(source)) {
+                converted.add(applyPatch.functionTool(source));
                 continue;
             }
             ObjectNode codexTool = converted.addObject();
@@ -435,7 +436,7 @@ public class OpenAiUpstreamClient {
             ArrayNode converted = objectMapper.createArrayNode();
             boolean changed = false;
             for (JsonNode tool : tools) {
-                JsonNode normalized = applyPatchCustomTool(tool);
+                JsonNode normalized = applyPatch.customToolAsFunction(tool);
                 changed = changed || normalized != tool;
                 converted.add(normalized);
             }
@@ -444,58 +445,22 @@ public class OpenAiUpstreamClient {
             }
         }
         if (body.has("tool_choice")) {
-            JsonNode normalizedToolChoice = applyPatchToolChoice(body.path("tool_choice"));
+            JsonNode normalizedToolChoice = applyPatch.toolChoice(body.path("tool_choice"));
             if (normalizedToolChoice != body.path("tool_choice")) {
                 body.set("tool_choice", normalizedToolChoice);
             }
         }
     }
 
-    private JsonNode applyPatchCustomTool(JsonNode tool) {
-        JsonNode function = tool.path("function");
-        JsonNode source = function.isObject() ? function : tool;
-        if (!isApplyPatchTool(source)) {
-            return tool;
-        }
-        return applyPatchFunctionTool(source);
-    }
-
-    private ObjectNode applyPatchFunctionTool(JsonNode source) {
-        ObjectNode tool = objectMapper.createObjectNode();
-        tool.put("type", "function");
-        tool.put("name", APPLY_PATCH_TOOL_NAME);
-        String description = firstNonBlank(
-            source.path("description").asString(null),
-            "Apply a raw patch. The patch string must start with *** Begin Patch and end with *** End Patch."
-        );
-        tool.put("description", description);
-        ObjectNode parameters = tool.putObject("parameters");
-        parameters.put("type", "object");
-        ObjectNode properties = parameters.putObject("properties");
-        ObjectNode patch = properties.putObject("patch");
-        patch.put("type", "string");
-        patch.put("description", "Raw apply_patch payload, including the *** Begin Patch and *** End Patch lines.");
-        ArrayNode required = parameters.putArray("required");
-        required.add("patch");
-        if (source.has("strict")) {
-            tool.set("strict", source.get("strict"));
-        }
-        return tool;
-    }
-
-    private boolean isApplyPatchTool(JsonNode source) {
-        return APPLY_PATCH_TOOL_NAME.equals(source.path("name").asString(null));
-    }
-
     private JsonNode codexToolChoice(JsonNode toolChoice) {
-        JsonNode applyPatchChoice = applyPatchToolChoice(toolChoice);
+        JsonNode applyPatchChoice = applyPatch.toolChoice(toolChoice);
         if (applyPatchChoice != toolChoice) {
             return applyPatchChoice;
         }
         if (!toolChoice.isObject() || !"function".equals(toolChoice.path("type").asString(""))) {
             return toolChoice;
         }
-        String name = toolChoiceName(toolChoice);
+        String name = ApplyPatchEmulation.toolChoiceName(toolChoice);
         if (name.isBlank()) {
             return toolChoice;
         }
@@ -503,25 +468,6 @@ public class OpenAiUpstreamClient {
         converted.put("type", "function");
         converted.put("name", name);
         return converted;
-    }
-
-    private JsonNode applyPatchToolChoice(JsonNode toolChoice) {
-        if (!toolChoice.isObject()) {
-            return toolChoice;
-        }
-        String name = toolChoiceName(toolChoice);
-        if (!APPLY_PATCH_TOOL_NAME.equals(name)) {
-            return toolChoice;
-        }
-        ObjectNode converted = objectMapper.createObjectNode();
-        converted.put("type", "function");
-        converted.put("name", name);
-        return converted;
-    }
-
-    private String toolChoiceName(JsonNode toolChoice) {
-        JsonNode function = toolChoice.path("function");
-        return firstNonBlank(function.path("name").asString(null), toolChoice.path("name").asString(null));
     }
 
     private ArrayNode codexInput(JsonNode request) {
@@ -981,8 +927,8 @@ public class OpenAiUpstreamClient {
         if (toolUses.stream().anyMatch(toolUse -> callId.equals(toolUse.id()))) {
             return;
         }
-        String effectiveType = responseToolUseType(type, name);
-        String rawInput = responseToolUseRawInput(effectiveType, name, responseToolInput(item));
+        String effectiveType = applyPatch.toolUseType(type, name);
+        String rawInput = applyPatch.toolUseRawInput(effectiveType, name, responseToolInput(item));
         JsonNode rawItem = responseToolOutputItem(item, effectiveType, rawInput);
         toolUses.add(new PlatformToolUse(
             callId,
@@ -1009,11 +955,11 @@ public class OpenAiUpstreamClient {
         pending.itemId = firstNonBlank(pending.itemId, itemId);
         pending.callId = firstNonBlank(pending.callId, callId);
         pending.name = firstNonBlank(pending.name, item.path("name").asString(null));
-        pending.type = firstNonBlank(pending.type, responseToolUseType(type, pending.name));
+        pending.type = firstNonBlank(pending.type, applyPatch.toolUseType(type, pending.name));
         if (item.isObject()) {
             pending.item = item.deepCopy();
         }
-        String input = responseToolUseRawInput(pending.type, pending.name, responseToolInput(item));
+        String input = applyPatch.toolUseRawInput(pending.type, pending.name, responseToolInput(item));
         if (input != null
             && !input.isBlank()
             && shouldReplacePendingToolInput(pending.type, pending.name, pending.arguments, input)) {
@@ -1039,8 +985,8 @@ public class OpenAiUpstreamClient {
             return;
         }
         String arguments = firstNonBlank(event.path("arguments").asString(null), event.path("input").asString(null));
-        String type = responseToolUseType(firstNonBlank(pending.type, "function_call"), pending.name);
-        String input = responseToolUseRawInput(type, pending.name, arguments);
+        String type = applyPatch.toolUseType(firstNonBlank(pending.type, "function_call"), pending.name);
+        String input = applyPatch.toolUseRawInput(type, pending.name, arguments);
         if (!input.isBlank() && shouldReplacePendingToolInput(type, pending.name, pending.arguments, input)) {
             pending.arguments.setLength(0);
             pending.arguments.append(input);
@@ -1048,14 +994,14 @@ public class OpenAiUpstreamClient {
     }
 
     private boolean shouldReplacePendingToolInput(String type, String name, StringBuilder current, String replacement) {
-        if (!"custom_tool_call".equals(type) || !APPLY_PATCH_TOOL_NAME.equals(name)) {
+        if (!ApplyPatchEmulation.isCustomApplyPatchCall(type, name)) {
             return true;
         }
         if (current == null || current.isEmpty()) {
             return true;
         }
         String currentInput = current.toString();
-        if (looksLikeCompletePatch(currentInput) && !looksLikeCompletePatch(replacement)) {
+        if (ApplyPatchEmulation.looksLikeCompletePatch(currentInput) && !ApplyPatchEmulation.looksLikeCompletePatch(replacement)) {
             return false;
         }
         return replacement.length() >= currentInput.length();
@@ -1087,8 +1033,8 @@ public class OpenAiUpstreamClient {
             if (toolUses.stream().anyMatch(toolUse -> callId.equals(toolUse.id()))) {
                 continue;
             }
-            String effectiveType = responseToolUseType(firstNonBlank(pending.type, "function_call"), pending.name);
-            String rawInput = responseToolUseRawInput(effectiveType, pending.name, pending.arguments.toString());
+            String effectiveType = applyPatch.toolUseType(firstNonBlank(pending.type, "function_call"), pending.name);
+            String rawInput = applyPatch.toolUseRawInput(effectiveType, pending.name, pending.arguments.toString());
             JsonNode rawItem = pendingItemWithInput(pending, rawInput);
             toolUses.add(new PlatformToolUse(
                 callId,
@@ -1128,7 +1074,7 @@ public class OpenAiUpstreamClient {
             return null;
         }
         ObjectNode item = (ObjectNode) pending.item.deepCopy();
-        String type = responseToolUseType(firstNonBlank(pending.type, item.path("type").asString(null), "function_call"), pending.name);
+        String type = applyPatch.toolUseType(firstNonBlank(pending.type, item.path("type").asString(null), "function_call"), pending.name);
         item.put("type", type);
         if ("custom_tool_call".equals(type)) {
             item.remove(List.of("arguments", "status"));
@@ -1153,73 +1099,6 @@ public class OpenAiUpstreamClient {
             copy.put("arguments", rawInput == null || rawInput.isBlank() ? "{}" : rawInput);
         }
         return copy;
-    }
-
-    private String responseToolUseType(String type, String name) {
-        if (APPLY_PATCH_TOOL_NAME.equals(name) && "function_call".equals(type)) {
-            return "custom_tool_call";
-        }
-        return type;
-    }
-
-    private String responseToolUseRawInput(String type, String name, String rawInput) {
-        if (!"custom_tool_call".equals(type) || !APPLY_PATCH_TOOL_NAME.equals(name)) {
-            return rawInput;
-        }
-        return normalizeApplyPatchInput(extractCustomToolInput(rawInput));
-    }
-
-    private String extractCustomToolInput(String rawInput) {
-        if (rawInput == null || rawInput.isBlank()) {
-            return "";
-        }
-        try {
-            JsonNode parsed = objectMapper.readTree(rawInput);
-            if (parsed.isString()) {
-                return parsed.asString("");
-            }
-            if (parsed.isObject()) {
-                String text = firstNonBlank(
-                    parsed.path("patch").asString(null),
-                    parsed.path("input").asString(null),
-                    parsed.path("text").asString(null)
-                );
-                if (!text.isBlank()) {
-                    return text;
-                }
-                if (parsed.isEmpty()) {
-                    return "";
-                }
-            }
-        } catch (Exception ignored) {
-            // The normal custom-tool path is already raw text.
-        }
-        return rawInput;
-    }
-
-    private boolean looksLikeCompletePatch(String value) {
-        if (value == null || value.isBlank()) {
-            return false;
-        }
-        String normalized = value.replace("\r\n", "\n").replace('\r', '\n').stripTrailing();
-        return normalized.endsWith("*** End Patch");
-    }
-
-    private String normalizeApplyPatchInput(String value) {
-        if (value == null || value.isBlank()) {
-            return "";
-        }
-        String normalized = value.replace("\r\n", "\n").replace('\r', '\n');
-        int begin = normalized.indexOf("*** Begin Patch");
-        if (begin > 0) {
-            normalized = normalized.substring(begin);
-        }
-        int end = normalized.lastIndexOf("*** End Patch");
-        if (end >= 0) {
-            normalized = normalized.substring(0, end + "*** End Patch".length());
-            return normalized + "\n";
-        }
-        return normalized;
     }
 
     private JsonNode parseToolArguments(String arguments) {

@@ -1,0 +1,19 @@
+{
+  "relaysLeftOut": [],
+  "attempts": [
+    {
+      "account": "relay-1",
+      "tier": "openai:relay",
+      "dispatch": "OPENAI_CHAT",
+      "wireModel": "relay-gpt",
+      "success": true,
+      "status": 200,
+      "inputTokens": 1300,
+      "outputTokens": 40,
+      "usageSource": "REPORTED",
+      "stopReason": "TOOL_USE",
+      "degraded": "thinking,context_management,metadata,billing_header_dropped",
+      "error": null
+    }
+  ]
+}

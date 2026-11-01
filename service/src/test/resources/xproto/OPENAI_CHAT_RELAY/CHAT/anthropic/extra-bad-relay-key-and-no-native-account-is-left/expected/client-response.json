@@ -1,0 +1,7 @@
+{
+  "status": 503,
+  "error": {
+    "code": "NO_AVAILABLE_ACCOUNT",
+    "message": "No available upstream account"
+  }
+}

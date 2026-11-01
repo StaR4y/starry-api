@@ -9,6 +9,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
@@ -137,6 +138,201 @@ class KiroUpstreamClientTest {
         verify(refreshService, never()).refresh(account);
     }
 
+    @Test
+    void anEndpointThatStreamedOutputBeforeFailingStillMarksTheErrorOfTheNextEndpoint() {
+        // First endpoint: the stream starts and is cut. Second endpoint: a plain HTTP 500 that never parsed a frame.
+        ExchangeFunction exchange = request -> "one.example.com".equals(request.url().getHost())
+            ? Mono.just(ClientResponse.create(HttpStatus.OK).header("Content-Type", "application/octet-stream").body("cut").build())
+            : Mono.just(ClientResponse.create(HttpStatus.INTERNAL_SERVER_ERROR).body("boom").build());
+        AwsEventStreamParser parser = mock(AwsEventStreamParser.class);
+        when(parser.parse(any(byte[].class), eq("auto"), any(byte[].class)))
+            .thenThrow(new UpstreamException(502, "Kiro upstream event stream was truncated", true, null, true));
+        ProxyAccountEntity account = account("access");
+        KiroUpstreamClient client = new KiroUpstreamClient(
+            WebClient.builder().exchangeFunction(exchange).build(),
+            properties(0, endpoint("primary", "AI_EDITOR", "https://one.example.com"),
+                endpoint("secondary", "AI_EDITOR", "https://two.example.com")),
+            parser,
+            mock(AccountTokenRefreshService.class)
+        );
+
+        Throwable failure = org.assertj.core.api.Assertions.catchThrowable(() ->
+            client.complete(account, payload("auto", "AI_EDITOR"), "auto").block()
+        );
+
+        assertThat(failure).isInstanceOf(UpstreamException.class);
+        UpstreamException upstream = (UpstreamException) failure;
+        assertThat(upstream.isGenerationStarted()).isTrue();
+        assertThat(upstream.getStatusCode()).isEqualTo(500);
+        assertThat(upstream.isRecoverable()).isFalse();
+        assertThat(upstream.getMessage()).contains("Kiro upstream error 500 on secondary");
+    }
+
+    @Test
+    void aRetryThatFailsBeforeAnyFrameStillCarriesTheStartOfTheEarlierAttempt() {
+        // Attempt 1 streams content and ends in a 503 frame, so it is retried. Attempt 2 meets a 429 frame first.
+        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.OK)
+            .header("Content-Type", "application/octet-stream")
+            .body("frames")
+            .build());
+        AwsEventStreamParser parser = mock(AwsEventStreamParser.class);
+        when(parser.parse(any(byte[].class), eq("auto"), any(byte[].class)))
+            .thenThrow(new UpstreamException(503, "Kiro upstream exception ServiceUnavailableException", true, null, true))
+            .thenThrow(new UpstreamException(429, "Kiro upstream exception ThrottlingException", true, "7", false));
+        ProxyAccountEntity account = account("access");
+        KiroUpstreamClient client = new KiroUpstreamClient(
+            WebClient.builder().exchangeFunction(exchange).build(),
+            properties(2, endpoint("primary", "AI_EDITOR", "https://one.example.com")),
+            parser,
+            mock(AccountTokenRefreshService.class)
+        );
+
+        Throwable failure = org.assertj.core.api.Assertions.catchThrowable(() ->
+            client.complete(account, payload("auto", "AI_EDITOR"), "auto").block()
+        );
+
+        assertThat(failure).isInstanceOf(UpstreamException.class);
+        UpstreamException upstream = (UpstreamException) failure;
+        assertThat(upstream.isGenerationStarted()).isTrue();
+        assertThat(upstream.getStatusCode()).isEqualTo(429);
+        assertThat(upstream.isRecoverable()).isTrue();
+        assertThat(UpstreamException.retryAfterSeconds(upstream)).isEqualTo(7);
+        assertThat(upstream.getMessage()).contains("ThrottlingException");
+        verify(parser, org.mockito.Mockito.times(2)).parse(any(byte[].class), eq("auto"), any(byte[].class));
+    }
+
+    @Test
+    void aGenerationAfterATokenRefreshIsNotLostWhenTheOriginalErrorIsThrown() {
+        AtomicInteger calls = new AtomicInteger();
+        ExchangeFunction exchange = request -> calls.incrementAndGet() == 1
+            ? Mono.just(ClientResponse.create(HttpStatus.FORBIDDEN)
+                .header("Content-Type", "application/json")
+                .body("{\"message\":\"The bearer token included in the request is invalid.\",\"reason\":null}")
+                .build())
+            : Mono.just(ClientResponse.create(HttpStatus.OK).header("Content-Type", "application/octet-stream").body("cut").build());
+        AwsEventStreamParser parser = mock(AwsEventStreamParser.class);
+        AccountTokenRefreshService refreshService = mock(AccountTokenRefreshService.class);
+        ProxyAccountEntity account = account("old-access");
+        when(refreshService.canRefresh(account)).thenReturn(true);
+        when(refreshService.refresh(account)).thenReturn(Mono.just(account("new-access")));
+        when(parser.parse(any(byte[].class), eq("auto"), any(byte[].class)))
+            .thenThrow(new UpstreamException(502, "Kiro upstream event stream was truncated", true, null, true));
+        KiroUpstreamClient client = new KiroUpstreamClient(
+            WebClient.builder().exchangeFunction(exchange).build(),
+            properties(0, endpoint("primary", "AI_EDITOR", "https://one.example.com")),
+            parser,
+            refreshService
+        );
+
+        Throwable failure = org.assertj.core.api.Assertions.catchThrowable(() ->
+            client.complete(account, payload("auto", "AI_EDITOR"), "auto").block()
+        );
+
+        assertThat(failure).isInstanceOf(UpstreamException.class);
+        UpstreamException upstream = (UpstreamException) failure;
+        assertThat(upstream.getStatusCode()).isEqualTo(403);
+        assertThat(upstream.isGenerationStarted()).isTrue();
+    }
+
+    @Test
+    void anErrorNoAttemptStartedIsThrownAsItIs() {
+        UpstreamException original = new UpstreamException(503, "Kiro upstream exception ServiceUnavailableException", true);
+        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.OK)
+            .header("Content-Type", "application/octet-stream")
+            .body("frames")
+            .build());
+        AwsEventStreamParser parser = mock(AwsEventStreamParser.class);
+        when(parser.parse(any(byte[].class), eq("auto"), any(byte[].class))).thenThrow(original);
+        ProxyAccountEntity account = account("access");
+        KiroUpstreamClient client = new KiroUpstreamClient(
+            WebClient.builder().exchangeFunction(exchange).build(),
+            properties(0, endpoint("primary", "AI_EDITOR", "https://one.example.com"),
+                endpoint("secondary", "AI_EDITOR", "https://two.example.com")),
+            parser,
+            mock(AccountTokenRefreshService.class)
+        );
+
+        Throwable failure = org.assertj.core.api.Assertions.catchThrowable(() ->
+            client.complete(account, payload("auto", "AI_EDITOR"), "auto").block()
+        );
+
+        assertThat(failure).isSameAs(original);
+        assertThat(((UpstreamException) failure).isGenerationStarted()).isFalse();
+    }
+
+    @Test
+    void aRetryThatCannotConnectAfterACutOffStreamLeavesTheErrorAsItIsAndSetsTheCallersFlag() {
+        AtomicInteger calls = new AtomicInteger();
+        ExchangeFunction exchange = request -> calls.incrementAndGet() == 1
+            ? Mono.just(ClientResponse.create(HttpStatus.OK).header("Content-Type", "application/octet-stream").body("cut").build())
+            : Mono.error(new java.net.ConnectException("Connection refused"));
+        AwsEventStreamParser parser = mock(AwsEventStreamParser.class);
+        when(parser.parse(any(byte[].class), eq("auto"), any(byte[].class)))
+            .thenThrow(new UpstreamException(502, "Kiro upstream event stream was truncated", true, null, true));
+        KiroUpstreamClient client = new KiroUpstreamClient(
+            WebClient.builder().exchangeFunction(exchange).build(),
+            properties(1, endpoint("primary", "AI_EDITOR", "https://one.example.com")),
+            parser,
+            mock(AccountTokenRefreshService.class)
+        );
+        AtomicBoolean generationStarted = new AtomicBoolean();
+
+        Throwable failure = org.assertj.core.api.Assertions.catchThrowable(() ->
+            client.complete(account("access"), payload("auto", "AI_EDITOR"), "auto")
+                .contextWrite(context -> context.put(UpstreamException.GENERATION_STARTED_CONTEXT_KEY, generationStarted))
+                .block()
+        );
+
+        // The error is not rewritten (an untiered request classifies it as it always did); the flag is what remembers.
+        assertThat(calls).hasValue(2);
+        Throwable thrown = reactor.core.Exceptions.unwrap(failure);
+        assertThat(thrown).isInstanceOf(java.net.ConnectException.class);
+        assertThat(thrown).hasMessage("Connection refused").hasNoCause();
+        assertThat(generationStarted).isTrue();
+    }
+
+    @Test
+    void theCallersFlagStaysDownWhenNoAttemptProducedOutput() {
+        ExchangeFunction exchange = request -> Mono.error(new java.net.ConnectException("Connection refused"));
+        KiroUpstreamClient client = new KiroUpstreamClient(
+            WebClient.builder().exchangeFunction(exchange).build(),
+            properties(0, endpoint("primary", "AI_EDITOR", "https://one.example.com")),
+            mock(AwsEventStreamParser.class),
+            mock(AccountTokenRefreshService.class)
+        );
+        AtomicBoolean generationStarted = new AtomicBoolean();
+
+        Throwable failure = org.assertj.core.api.Assertions.catchThrowable(() ->
+            client.complete(account("access"), payload("auto", "AI_EDITOR"), "auto")
+                .contextWrite(context -> context.put(UpstreamException.GENERATION_STARTED_CONTEXT_KEY, generationStarted))
+                .block()
+        );
+
+        assertThat(reactor.core.Exceptions.unwrap(failure)).isInstanceOf(java.net.ConnectException.class);
+        assertThat(generationStarted).isFalse();
+    }
+
+    @Test
+    void aCallerThatGivesNoFlagIsServedAsBefore() {
+        ExchangeFunction exchange = request -> Mono.just(ClientResponse.create(HttpStatus.OK)
+            .header("Content-Type", "application/octet-stream").body("cut").build());
+        AwsEventStreamParser parser = mock(AwsEventStreamParser.class);
+        when(parser.parse(any(byte[].class), eq("auto"), any(byte[].class)))
+            .thenThrow(new UpstreamException(502, "Kiro upstream event stream was truncated", true, null, true));
+        KiroUpstreamClient client = new KiroUpstreamClient(
+            WebClient.builder().exchangeFunction(exchange).build(),
+            properties(0, endpoint("primary", "AI_EDITOR", "https://one.example.com")),
+            parser,
+            mock(AccountTokenRefreshService.class)
+        );
+
+        Throwable failure = org.assertj.core.api.Assertions.catchThrowable(() ->
+            client.complete(account("access"), payload("auto", "AI_EDITOR"), "auto").block()
+        );
+
+        assertThat(failure).isInstanceOfSatisfying(UpstreamException.class, error -> assertThat(error.isGenerationStarted()).isTrue());
+    }
+
     private ObjectNode payload(String modelId, String origin) {
         ObjectNode root = objectMapper.createObjectNode();
         ObjectNode state = root.putObject("conversationState");
@@ -159,6 +355,19 @@ class KiroUpstreamClientTest {
         endpoint.setOrigin(origin);
         endpoint.setUrl("https://example.com");
         return endpoint;
+    }
+
+    private ProxyProperties.Endpoint endpoint(String name, String origin, String url) {
+        ProxyProperties.Endpoint endpoint = endpoint(name, origin);
+        endpoint.setUrl(url);
+        return endpoint;
+    }
+
+    private ProxyProperties properties(int maxRetries, ProxyProperties.Endpoint... endpoints) {
+        ProxyProperties properties = properties(endpoints[0]);
+        properties.getKiro().setEndpoints(List.of(endpoints));
+        properties.setMaxRetries(maxRetries);
+        return properties;
     }
 
     private ProxyProperties properties(ProxyProperties.Endpoint endpoint) {

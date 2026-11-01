@@ -1,0 +1,22 @@
+[
+  {
+    "role": "user",
+    "content": [
+      {
+        "tool_use_id": "${tool.1}",
+        "type": "tool_result",
+        "content": "second",
+        "is_error": false
+      },
+      {
+        "tool_use_id": "${tool.0}",
+        "type": "tool_result",
+        "content": "first",
+        "is_error": false,
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      }
+    ]
+  }
+]

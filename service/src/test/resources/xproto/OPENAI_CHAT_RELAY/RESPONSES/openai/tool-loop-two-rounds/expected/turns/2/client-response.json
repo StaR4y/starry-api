@@ -1,0 +1,26 @@
+{
+  "status": 200,
+  "headers": {
+    "Content-Type": "text/event-stream",
+    "X-Starry-Tier": "relay",
+    "X-Starry-Tier-Level": "1",
+    "X-Starry-Tier-Name": "relay",
+    "X-Starry-Tier-Mode": "auto",
+    "X-Starry-Tier-Status": "served"
+  },
+  "events": [
+    {"event":"response.created","data":{"type":"response.created","sequence_number":0,"response":{"id":"resp_<id>","object":"response","created_at":0,"status":"in_progress","error":null,"incomplete_details":null,"model":"gpt-5.5","output":[],"output_text":"Now the word.","usage":{"input_tokens":1400,"output_tokens":40,"total_tokens":1440,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}}},
+    {"event":"response.output_item.added","data":{"type":"response.output_item.added","sequence_number":1,"response_id":"resp_<id>","output_index":0,"item":{"type":"message","id":"msg_<id>","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Now the word."}]}}},
+    {"event":"response.content_part.added","data":{"type":"response.content_part.added","sequence_number":2,"response_id":"resp_<id>","item_id":"msg_<id>","output_index":0,"content_index":0,"part":{"type":"output_text","text":"Now the word."}}},
+    {"event":"response.output_text.delta","data":{"type":"response.output_text.delta","sequence_number":3,"response_id":"resp_<id>","item_id":"msg_<id>","output_index":0,"content_index":0,"delta":"Now the word."}},
+    {"event":"response.output_text.done","data":{"type":"response.output_text.done","sequence_number":4,"response_id":"resp_<id>","item_id":"msg_<id>","output_index":0,"content_index":0,"text":"Now the word."}},
+    {"event":"response.content_part.done","data":{"type":"response.content_part.done","sequence_number":5,"response_id":"resp_<id>","item_id":"msg_<id>","output_index":0,"content_index":0,"part":{"type":"output_text","text":"Now the word."}}},
+    {"event":"response.output_item.done","data":{"type":"response.output_item.done","sequence_number":6,"response_id":"resp_<id>","output_index":0,"item":{"type":"message","id":"msg_<id>","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Now the word."}]}}},
+    {"event":"response.output_item.added","data":{"type":"response.output_item.added","sequence_number":7,"response_id":"resp_<id>","output_index":1,"item":{"type":"function_call","id":"fc_<id>","call_id":"call_hlakthA82g7OpfE22MCQvB8z","name":"exec_command","arguments":"","status":"completed"}}},
+    {"event":"response.function_call_arguments.delta","data":{"type":"response.function_call_arguments.delta","sequence_number":8,"response_id":"resp_<id>","item_id":"fc_<id>","name":"exec_command","output_index":1,"delta":"{\"cmd\":\"echo done\"}"}},
+    {"event":"response.function_call_arguments.done","data":{"type":"response.function_call_arguments.done","sequence_number":9,"response_id":"resp_<id>","item_id":"fc_<id>","name":"exec_command","output_index":1,"arguments":"{\"cmd\":\"echo done\"}"}},
+    {"event":"response.output_item.done","data":{"type":"response.output_item.done","sequence_number":10,"response_id":"resp_<id>","output_index":1,"item":{"type":"function_call","id":"fc_<id>","call_id":"call_hlakthA82g7OpfE22MCQvB8z","name":"exec_command","arguments":"{\"cmd\":\"echo done\"}","status":"completed"}}},
+    {"event":"response.completed","data":{"type":"response.completed","sequence_number":11,"response":{"id":"resp_<id>","object":"response","created_at":0,"status":"completed","error":null,"incomplete_details":null,"model":"gpt-5.5","output":[{"type":"message","id":"msg_<id>","role":"assistant","status":"completed","content":[{"type":"output_text","text":"Now the word."}]},{"type":"function_call","id":"fc_<id>","call_id":"call_hlakthA82g7OpfE22MCQvB8z","name":"exec_command","arguments":"{\"cmd\":\"echo done\"}","status":"completed"}],"output_text":"Now the word.","usage":{"input_tokens":1400,"output_tokens":40,"total_tokens":1440,"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}}},
+    {"data":"[DONE]"}
+  ]
+}

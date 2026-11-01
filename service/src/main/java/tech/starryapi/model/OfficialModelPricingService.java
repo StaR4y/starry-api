@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
@@ -107,6 +108,15 @@ public class OfficialModelPricingService {
 
     public Optional<OfficialPriceMatch> resolve(String model, boolean approximate) {
         return resolver.resolve(model, approximate);
+    }
+
+    /**
+     * The most output tokens the catalog lists for the model (its exact id, as {@link #find} reads it), empty when it
+     * does not list the model or lists it with none.
+     */
+    public OptionalInt maxOutputTokens(String model) {
+        return find(model).map(OfficialModelPrice::maxOutputTokens).filter(tokens -> tokens > 0)
+            .map(OptionalInt::of).orElseGet(OptionalInt::empty);
     }
 
     public int size() {
@@ -295,7 +305,8 @@ public class OfficialModelPricingService {
                     input,
                     output,
                     cacheWrite == null ? input : cacheWrite,
-                    cacheRead == null ? input : cacheRead
+                    cacheRead == null ? input : cacheRead,
+                    positiveInt(value.get("max_output_tokens"))
                 ));
             });
             if (parsed.isEmpty()) {
@@ -408,16 +419,22 @@ public class OfficialModelPricingService {
         return value.signum() >= 0 ? value : null;
     }
 
+    private int positiveInt(JsonNode node) {
+        return node != null && node.isIntegralNumber() && node.canConvertToInt() && node.intValue() > 0 ? node.intValue() : 0;
+    }
+
     private String normalizeModelId(String model) {
         return model == null ? "" : model.trim().toLowerCase(Locale.ROOT);
     }
 
+    /** @param maxOutputTokens the most output tokens the catalog lists for the model; 0 when it lists none */
     public record OfficialModelPrice(
         String model,
         BigDecimal inputCostPerToken,
         BigDecimal outputCostPerToken,
         BigDecimal cacheWriteCostPerToken,
-        BigDecimal cacheReadCostPerToken
+        BigDecimal cacheReadCostPerToken,
+        int maxOutputTokens
     ) {
     }
 

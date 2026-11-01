@@ -1,0 +1,21 @@
+{
+  "relaysLeftOut": [],
+  "attempts": [
+    {
+      "account": "relay-1",
+      "tier": "anthropic:relay",
+      "dispatch": "OPENAI_CHAT",
+      "wireModel": "relay-sonnet",
+      "success": false,
+      "status": 502,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "usageSource": null,
+      "stopReason": "WITHHELD",
+      "degraded": "builtin_tool,prompt_cache_key",
+      "withheldInputTokens": 1200,
+      "withheldOutputTokens": 40,
+      "error": "The source stopped its answer with its content filter"
+    }
+  ]
+}

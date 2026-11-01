@@ -1,0 +1,385 @@
+package tech.starryapi.proxy.tier;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+import java.time.Duration;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.ToIntFunction;
+import org.junit.jupiter.api.Test;
+import tech.starryapi.config.ProxyProperties;
+import tech.starryapi.proxy.tier.TierSessionBindings.Binding;
+
+/**
+ * Where the tier each session was pushed down to is kept (design 4.7): it only moves down, in the order of the tiers as
+ * they are now, except for the one climb back, and it expires when the session has been idle for as long as the
+ * account affinity does, whatever else happens to the other sessions or to the accounts.
+ */
+class TierSessionBindingsTest {
+
+    private static final String KEY = "tier:anthropic|claude-sonnet-4.5|key-1:session-1";
+    private static final Binding OFFICIAL = new Binding("official", 1);
+    private static final Binding KIRO = new Binding("kiro", 2);
+    private static final Binding LAST = new Binding("last", 3);
+
+    private final AtomicLong nanos = new AtomicLong();
+    private final ProxyProperties properties = new ProxyProperties();
+    private final TierSessionBindings bindings = new TierSessionBindings(properties, nanos::get);
+
+    // ---- moving down only ----
+
+    @Test
+    void aSessionWithoutABindingHasNone() {
+        assertThat(bindings.find(KEY)).isEmpty();
+    }
+
+    @Test
+    void aSessionIsBoundToTheTierItWasPushedDownTo() {
+        bindings.downgrade(KEY, KIRO, Binding::level);
+
+        assertThat(bindings.find(KEY)).contains(KIRO);
+    }
+
+    @Test
+    void aBindingMovesDownAndNeverUp() {
+        bindings.downgrade(KEY, KIRO, Binding::level);
+
+        bindings.downgrade(KEY, OFFICIAL, Binding::level);
+        assertThat(bindings.find(KEY)).contains(KIRO);
+
+        bindings.downgrade(KEY, LAST, Binding::level);
+        assertThat(bindings.find(KEY)).contains(LAST);
+    }
+
+    @Test
+    void theSameTierIsRestampedWithItsLevelOfNow() {
+        bindings.downgrade(KEY, KIRO, Binding::level);
+
+        bindings.downgrade(KEY, new Binding("kiro", 1), Binding::level);
+
+        assertThat(bindings.find(KEY)).contains(new Binding("kiro", 1));
+    }
+
+    @Test
+    void whichTierIsLowerIsTheOrderTheCallerSaysAndNotTheLevelStoredWithTheBinding() {
+        // Bound as the second tier. The tiers were reordered since: kiro is the first now and official the second.
+        bindings.downgrade(KEY, new Binding("kiro", 2), Binding::level);
+        ToIntFunction<Binding> now = binding -> "kiro".equals(binding.tierId()) ? 1 : 2;
+
+        bindings.downgrade(KEY, new Binding("official", 2), now);
+
+        assertThat(bindings.find(KEY)).contains(new Binding("official", 2));
+        // And it is still only down: the first tier of the new order does not take the session back.
+        bindings.downgrade(KEY, new Binding("kiro", 1), now);
+        assertThat(bindings.find(KEY)).contains(new Binding("official", 2));
+    }
+
+    @Test
+    void aClimbIsTheOneWayBackUp() {
+        bindings.downgrade(KEY, KIRO, Binding::level);
+
+        bindings.climb(KEY, OFFICIAL);
+
+        assertThat(bindings.find(KEY)).contains(OFFICIAL);
+    }
+
+    @Test
+    void servingTheSessionCountsAsUsingItsBinding() {
+        bindings.downgrade(KEY, KIRO, Binding::level);
+
+        nanos.addAndGet(Duration.ofMinutes(9).toNanos());
+        bindings.serve(KEY);
+        nanos.addAndGet(Duration.ofMinutes(9).toNanos());
+
+        assertThat(bindings.find(KEY)).contains(KIRO);
+    }
+
+    @Test
+    void servingASessionThatIsNotBoundBindsNothing() {
+        bindings.serve(KEY);
+
+        assertThat(bindings.find(KEY)).isEmpty();
+    }
+
+    // ---- idle expiry ----
+
+    @Test
+    void aSessionGoesBackToTheBestTierWhenItHasBeenIdleForTheAffinityTtl() {
+        bindings.downgrade(KEY, KIRO, Binding::level);
+
+        nanos.addAndGet(Duration.ofMinutes(9).toNanos());
+        assertThat(bindings.find(KEY)).contains(KIRO);
+
+        nanos.addAndGet(Duration.ofMinutes(10).plusSeconds(1).toNanos());
+        assertThat(bindings.find(KEY)).isEmpty();
+    }
+
+    @Test
+    void usingTheBindingKeepsItAlive() {
+        bindings.downgrade(KEY, KIRO, Binding::level);
+
+        for (int i = 0; i < 5; i++) {
+            nanos.addAndGet(Duration.ofMinutes(9).toNanos());
+            assertThat(bindings.find(KEY)).contains(KIRO);
+        }
+    }
+
+    @Test
+    void theIdleTimeIsTheConfiguredAffinityTtl() {
+        properties.setSessionAffinityTtl(Duration.ofMinutes(2));
+        TierSessionBindings shortLived = new TierSessionBindings(properties, nanos::get);
+        shortLived.downgrade(KEY, KIRO, Binding::level);
+
+        nanos.addAndGet(Duration.ofMinutes(3).toNanos());
+
+        assertThat(shortLived.find(KEY)).isEmpty();
+    }
+
+    @Test
+    void aTtlThatIsNotPositiveFallsBackToTenMinutesLikeTheAffinity() {
+        properties.setSessionAffinityTtl(Duration.ZERO);
+        TierSessionBindings fallback = new TierSessionBindings(properties, nanos::get);
+        fallback.downgrade(KEY, KIRO, Binding::level);
+
+        nanos.addAndGet(Duration.ofMinutes(9).toNanos());
+
+        assertThat(fallback.find(KEY)).contains(KIRO);
+    }
+
+    // ---- the turns of a response chain ----
+
+    @Test
+    void theNextTurnOfAChainIsTheSessionOfTheTurnBeforeIt() {
+        bindings.follow("key-1:resp:resp_2", "key-1:session-1");
+
+        assertThat(bindings.sessionOf("key-1:resp:resp_2")).isEqualTo("key-1:session-1");
+    }
+
+    @Test
+    void aNameThatWasNotFollowedStandsForItself() {
+        bindings.follow("key-1:resp:resp_2", "key-1:session-1");
+
+        assertThat(bindings.sessionOf("key-1:resp:resp_9")).isEqualTo("key-1:resp:resp_9");
+        assertThat(bindings.sessionOf("key-1:session-1")).isEqualTo("key-1:session-1");
+        assertThat(bindings.sessionOf(null)).isNull();
+    }
+
+    @Test
+    void everyTurnOfAChainResolvesToTheNameOfTheFirstSoThatItsBindingsAndExclusionsAreFoundByAllOfThem() {
+        // The first turn named nothing the client chose, so its session is the response the second continues.
+        String first = "key-1:resp:resp_1";
+        bindings.follow("key-1:resp:resp_2", bindings.sessionOf(first));
+        bindings.follow("key-1:resp:resp_3", bindings.sessionOf("key-1:resp:resp_2"));
+
+        assertThat(bindings.sessionOf("key-1:resp:resp_3")).isEqualTo(first);
+        // What is kept under the name of the session is what every turn reads, for each model it asks for.
+        bindings.downgrade(TierSessionKeys.bindingKey("anthropic", "claude-sonnet-4.5", first), KIRO, Binding::level);
+        bindings.excludeRelay("anthropic", first, "relay-1");
+
+        String third = bindings.sessionOf("key-1:resp:resp_3");
+        assertThat(bindings.find(TierSessionKeys.bindingKey("anthropic", "claude-sonnet-4.5", third))).contains(KIRO);
+        assertThat(bindings.relayExcluded("anthropic", third, "relay-1")).isTrue();
+        // The exclusion is the two minutes of the interruption for the whole chain, not two minutes from each turn.
+        nanos.addAndGet(Duration.ofSeconds(121).toNanos());
+        assertThat(bindings.relayExcluded("anthropic", third, "relay-1")).isFalse();
+    }
+
+    @Test
+    void aSessionIsNotMadeTheSessionOfItself() {
+        bindings.follow("key-1:resp:resp_2", "key-1:resp:resp_2");
+        bindings.follow(null, "key-1:session-1");
+        bindings.follow("key-1:resp:resp_3", null);
+
+        assertThat(bindings.sessionOf("key-1:resp:resp_2")).isEqualTo("key-1:resp:resp_2");
+        assertThat(bindings.sessionOf("key-1:resp:resp_3")).isEqualTo("key-1:resp:resp_3");
+    }
+
+    @Test
+    void aChainThatIsIdleForTheAffinityTtlIsAChainAgainstANewSession() {
+        bindings.follow("key-1:resp:resp_2", "key-1:session-1");
+
+        nanos.addAndGet(properties.getSessionAffinityTtl().plusSeconds(1).toNanos());
+
+        assertThat(bindings.sessionOf("key-1:resp:resp_2")).isEqualTo("key-1:resp:resp_2");
+    }
+
+    @Test
+    void aChainThatIsInUseDoesNotExpire() {
+        bindings.follow("key-1:resp:resp_2", "key-1:session-1");
+
+        for (int i = 0; i < 3; i++) {
+            nanos.addAndGet(Duration.ofMinutes(4).toNanos());
+            assertThat(bindings.sessionOf("key-1:resp:resp_2")).isEqualTo("key-1:session-1");
+        }
+    }
+
+    @Test
+    void theChainIsKeptWithSessionAffinityOffAsTheExclusionsAre() {
+        properties.setSessionAffinityEnabled(false);
+
+        bindings.follow("key-1:resp:resp_2", "key-1:session-1");
+
+        assertThat(bindings.sessionOf("key-1:resp:resp_2")).isEqualTo("key-1:session-1");
+        assertThat(bindings.enabled()).isFalse();
+    }
+
+    // ---- what the other sessions do ----
+
+    @Test
+    void whatHappensToTheOtherSessionsDoesNotKeepAnIdleSessionFromExpiring() {
+        bindings.downgrade(KEY, KIRO, Binding::level);
+
+        for (int i = 0; i < 3; i++) {
+            nanos.addAndGet(Duration.ofMinutes(4).toNanos());
+            bindings.downgrade("other", OFFICIAL, Binding::level);
+            bindings.serve("other");
+            bindings.follow("another", "other");
+            bindings.dispatchStarted("other", "anthropic:official");
+        }
+
+        assertThat(bindings.find(KEY)).isEmpty();
+    }
+
+    // ---- requests of the session in flight ----
+
+    @Test
+    void aSessionHasRequestsInFlightInATierUntilTheyAllEnd() {
+        assertThat(bindings.hasInFlight("key-1:session-1", "anthropic:official")).isFalse();
+
+        bindings.dispatchStarted("key-1:session-1", "anthropic:official");
+        bindings.dispatchStarted("key-1:session-1", "anthropic:official");
+        assertThat(bindings.hasInFlight("key-1:session-1", "anthropic:official")).isTrue();
+        assertThat(bindings.hasInFlight("key-1:session-1", "anthropic:kiro")).isFalse();
+        assertThat(bindings.hasInFlight("key-1:session-2", "anthropic:official")).isFalse();
+
+        bindings.dispatchEnded("key-1:session-1", "anthropic:official");
+        assertThat(bindings.hasInFlight("key-1:session-1", "anthropic:official")).isTrue();
+
+        bindings.dispatchEnded("key-1:session-1", "anthropic:official");
+        assertThat(bindings.hasInFlight("key-1:session-1", "anthropic:official")).isFalse();
+    }
+
+    @Test
+    void endingMoreThanWasStartedCountsNothingBelowZero() {
+        bindings.dispatchEnded("key-1:session-1", "anthropic:official");
+        bindings.dispatchStarted("key-1:session-1", "anthropic:official");
+
+        assertThat(bindings.hasInFlight("key-1:session-1", "anthropic:official")).isTrue();
+    }
+
+    // ---- the relays that broke off an answer ----
+
+    @Test
+    void aRelayThatBrokeOffAnAnswerIsKeptFromTheSessionForTwoMinutes() {
+        bindings.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+
+        assertThat(bindings.relayExcluded("anthropic", "key-1:session-1", "relay-1")).isTrue();
+
+        nanos.addAndGet(Duration.ofSeconds(119).toNanos());
+        assertThat(bindings.relayExcluded("anthropic", "key-1:session-1", "relay-1")).isTrue();
+
+        nanos.addAndGet(Duration.ofSeconds(2).toNanos());
+        assertThat(bindings.relayExcluded("anthropic", "key-1:session-1", "relay-1")).isFalse();
+    }
+
+    @Test
+    void theExclusionIsTheSessionsAndTheRelaysAndTheVendorsOwn() {
+        bindings.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+
+        assertThat(bindings.relayExcluded("anthropic", "key-1:session-2", "relay-1")).isFalse();
+        assertThat(bindings.relayExcluded("anthropic", "key-1:session-1", "relay-2")).isFalse();
+        // The same account can be a member of the tiers of another vendor, where it is another member.
+        assertThat(bindings.relayExcluded("openai", "key-1:session-1", "relay-1")).isFalse();
+    }
+
+    @Test
+    void anotherInterruptionStartsTheTwoMinutesAgain() {
+        bindings.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+        nanos.addAndGet(Duration.ofSeconds(100).toNanos());
+
+        bindings.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+        nanos.addAndGet(Duration.ofSeconds(100).toNanos());
+
+        assertThat(bindings.relayExcluded("anthropic", "key-1:session-1", "relay-1")).isTrue();
+    }
+
+    @Test
+    void usingTheExclusionDoesNotKeepItAlive() {
+        bindings.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+
+        for (int i = 0; i < 3; i++) {
+            nanos.addAndGet(Duration.ofSeconds(50).toNanos());
+            bindings.relayExcluded("anthropic", "key-1:session-1", "relay-1");
+        }
+
+        assertThat(bindings.relayExcluded("anthropic", "key-1:session-1", "relay-1")).isFalse();
+    }
+
+    @Test
+    void aRequestWithoutASessionExcludesNothing() {
+        bindings.excludeRelay("anthropic", null, "relay-1");
+
+        assertThat(bindings.relayExcluded("anthropic", null, "relay-1")).isFalse();
+        assertThat(bindings.relayExcluded("anthropic", "key-1:session-1", "relay-1")).isFalse();
+    }
+
+    @Test
+    void theExclusionIsNoTierBindingAndMovesNoSession() {
+        bindings.downgrade(KEY, KIRO, Binding::level);
+
+        bindings.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+
+        assertThat(bindings.find(KEY)).contains(KIRO);
+        assertThat(bindings.find("key-1:session-1")).isEmpty();
+        assertThat(bindings.size()).isEqualTo(1);
+    }
+
+    @Test
+    void theExclusionHoldsWithSessionAffinityOffBecauseItIsNotTheAffinity() {
+        properties.setSessionAffinityEnabled(false);
+
+        bindings.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+
+        assertThat(bindings.relayExcluded("anthropic", "key-1:session-1", "relay-1")).isTrue();
+        assertThat(bindings.enabled()).isFalse();
+    }
+
+    // ---- switched off ----
+
+    @Test
+    void withSessionAffinityOffNothingIsReadOrWritten() {
+        properties.setSessionAffinityEnabled(false);
+
+        bindings.downgrade(KEY, KIRO, Binding::level);
+        bindings.climb(KEY, OFFICIAL);
+
+        assertThat(bindings.enabled()).isFalse();
+        assertThat(bindings.find(KEY)).isEmpty();
+        assertThat(bindings.size()).isZero();
+    }
+
+    @Test
+    void theSwitchIsReadAtEveryUseLikeTheAffinityDoes() {
+        bindings.downgrade(KEY, KIRO, Binding::level);
+        properties.setSessionAffinityEnabled(false);
+        assertThat(bindings.find(KEY)).isEmpty();
+
+        properties.setSessionAffinityEnabled(true);
+        assertThat(bindings.find(KEY)).contains(KIRO);
+    }
+
+    @Test
+    void theDisabledBindingsKeepNothing() {
+        TierSessionBindings disabled = TierSessionBindings.disabled();
+
+        disabled.downgrade(KEY, KIRO, Binding::level);
+
+        disabled.excludeRelay("anthropic", "key-1:session-1", "relay-1");
+        disabled.follow("key-1:resp:resp_2", "key-1:session-1");
+
+        assertThat(disabled.sessionOf("key-1:resp:resp_2")).isEqualTo("key-1:resp:resp_2");
+        assertThat(disabled.enabled()).isFalse();
+        assertThat(disabled.find(KEY)).isEmpty();
+        assertThat(disabled.relayExcluded("anthropic", "key-1:session-1", "relay-1")).isFalse();
+        assertThat(TierSessionBindings.disabled()).isSameAs(disabled);
+    }
+}

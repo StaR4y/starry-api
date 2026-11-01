@@ -1369,6 +1369,92 @@ class OpenAiUpstreamClientTest {
         }
     }
 
+    /**
+     * The OpenAI and Codex clients read the whole body and parse it afterwards, and their parsers have no in-band error
+     * branch, so a body that breaks after output can only fail as an unparseable body: a non-recoverable 502. That is
+     * neither retried on another account nor taken for a failure that was never billed (a tiered request is narrowed to
+     * its tier by it), which is what the generationStarted flag exists to guarantee for the clients whose parsers can
+     * raise a recoverable error after output (Kiro, Anthropic).
+     */
+    @Test
+    void aCodexStreamThatBreaksAfterItsFirstOutputFailsAsANonRecoverableBadGateway() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/responses", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            byte[] response = """
+                event: response.output_text.delta
+                data: {"type":"response.output_text.delta","delta":"partial"}
+
+                event: response.output_text.delta
+                data: {"type":"response.output_text.delta","del
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "text/event-stream");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                ProductionWebClients.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+
+            assertThatThrownBy(() -> client.completeResponses(
+                codexAccount("http://127.0.0.1:" + server.getAddress().getPort()),
+                objectMapper.readTree("{\"model\":\"gpt-5.5\",\"input\":\"hi\"}"),
+                "gpt-5.5"
+            ).block())
+                .isInstanceOfSatisfying(tech.starryapi.platform.upstream.UpstreamException.class, error -> {
+                    assertThat(error.getStatusCode()).isEqualTo(502);
+                    assertThat(error.isRecoverable()).isFalse();
+                });
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    @Test
+    void anOpenAiResponsesBodyThatCannotBeParsedFailsAsANonRecoverableBadGateway() throws Exception {
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/v1/responses", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            byte[] response = """
+                event: response.output_text.delta
+                data: {"type":"response.output_text.delta","delta":"partial"}
+
+                data: {"type":"response.completed","resp
+                """.getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set(HttpHeaders.CONTENT_TYPE, "text/event-stream");
+            exchange.sendResponseHeaders(200, response.length);
+            exchange.getResponseBody().write(response);
+            exchange.close();
+        });
+        server.start();
+
+        try {
+            OpenAiUpstreamClient client = new OpenAiUpstreamClient(
+                objectMapper,
+                ProductionWebClients.builder().build(),
+                mock(AccountTokenRefreshService.class)
+            );
+
+            assertThatThrownBy(() -> client.completeResponses(
+                openAiAccount("http://127.0.0.1:" + server.getAddress().getPort()),
+                objectMapper.readTree("{\"model\":\"gpt-5.5\",\"input\":\"hi\"}"),
+                "gpt-5.5"
+            ).block())
+                .isInstanceOfSatisfying(tech.starryapi.platform.upstream.UpstreamException.class, error -> {
+                    assertThat(error.getStatusCode()).isEqualTo(502);
+                    assertThat(error.isRecoverable()).isFalse();
+                });
+        } finally {
+            server.stop(0);
+        }
+    }
+
     private ProxyAccountEntity codexAccount(String baseUrl) {
         ProxyAccountEntity account = new ProxyAccountEntity();
         account.setProvider(AccountPlatforms.OPENAI_PROVIDER);

@@ -935,7 +935,7 @@ class AssistantDocsIndexTest {
 
     // ---- the tutorials of a fresh installation: wordings that were answered with the wrong page ----------------
 
-    /** The tutorials a fresh installation publishes (V23 and V24), as they are. */
+    /** The tutorials a fresh installation publishes (V23, V24 and V30), as they are. */
     private static AssistantDocsIndex seeded() {
         return indexOf(SeededTutorials.pages());
     }
@@ -1008,7 +1008,11 @@ class AssistantDocsIndexTest {
         for (String question : List.of("CLAUDE_CODE_MAX_OUTPUT_TOKENS 怎么改", "怎么改 CLAUDE_CODE_MAX_OUTPUT_TOKENS")) {
             assertThat(where(ask(index, question).chunks().getFirst())).as(question).isEqualTo("claude-code § 手动设置环境变量");
         }
-        assertThat(where(ask(index, "claude-sonnet-4.5 怎么换").chunks().getFirst())).isEqualTo("claude-code § 手动设置环境变量");
+        // V30 gives claude-sonnet-4.5 whole, as the example of a model with a tier ("claude-sonnet-4.5@economy"): a name that a
+        // page has is found by that page, whatever the verb. A name that no page has whole, and that has all its parts, is
+        // the one the rule is about.
+        assertThat(where(ask(index, "claude-sonnet-4.5 怎么换").chunks().getFirst())).isEqualTo("models-and-pricing § 号池价格与 模型@标识");
+        assertThat(where(ask(index, "claude-haiku-4.8 怎么换").chunks().getFirst())).isEqualTo("claude-code § 手动设置环境变量");
         assertThat(where(ask(index, "CODEX_HOME 怎么改").chunks().getFirst())).isEqualTo("codex-cli § 手动配置");
         assertThat(pageIds(ask(index, "config.yaml 怎么改"))).containsExactly("codex-cli");
         assertThat(pageIds(ask(index, "CODEX_HOME 怎么设"))).containsExactly("codex-cli");
@@ -1379,6 +1383,102 @@ class AssistantDocsIndexTest {
         assertThat(chunks.getFirst().body()).as("the beginning of the table comes first although the end scores higher")
             .contains("| row-0 |").doesNotContain("兔子");
         assertThat(chunks.getLast().body()).contains("兔子", "| row-59 |");
+    }
+
+    @Test
+    void theTwoVersionsOfASectionCutIntoDifferentNumbersOfPiecesAreNotPairedPieceByPiece() {
+        // The same table is one chunk in Chinese and three in English, where it is longer. Pairing the three with the one would
+        // give every English piece the words of the whole Chinese table: the pieces with the rows of 502 would be quoted for 401.
+        StringBuilder english = new StringBuilder("## Status codes\n\n| Status | Meaning |\n| --- | --- |\n| `401` | The key is invalid |\n");
+        for (int row = 0; row < 80; row++) {
+            english.append("| `5").append(String.format("%02d", row)).append("` | The model service returned the error number ")
+                .append(row).append(" and asks you to retry later |\n");
+        }
+        String chinese = "## 状态码\n\n| 状态 | 含义 |\n| --- | --- |\n| `401` | 密钥无效 |\n| `502` | 模型服务出错 |\n";
+        AssistantDocsIndex index = indexOf(page("errors", new Content("错误码", "排查", "", chinese, 10,
+            new Translation("Errors", "Troubleshooting", "", english.toString()))));
+
+        List<Chunk> hits = ask(index, "What does 401 mean?").chunks();
+
+        assertThat(hits).isNotEmpty().allSatisfy(chunk -> {
+            assertThat(chunk.language()).isEqualTo("en");
+            assertThat(chunk.body()).as("only the piece that has the row").contains("`401`");
+        });
+        // The heading is the same under every piece, so it is still shared: a Chinese question with an English word that only
+        // the English heading has finds the Chinese section.
+        Retrieval mixed = ask(index, "状态 Status");
+        assertThat(mixed.chunks()).isNotEmpty().allSatisfy(chunk -> assertThat(chunk.language()).isEqualTo("zh"));
+        assertThat(sections(ask(index, "Status codes"))).as("and the English heading finds its pieces").contains("Status codes");
+    }
+
+    @Test
+    void aVerbCannotLiftAChunkAboveOneThatHasMoreOfTheTopic() {
+        // The section about the tier says "报" three times and "400" once; the error reference is about the 400. Left to
+        // itself the verb would be worth 1.69 for each of its three mentions, the 400 0.69 for each of its three.
+        AssistantDocsIndex index = indexOf(
+            page("tiers", "号池", "帮助", "", "## 选择号池\n用不上所选的号池时不会报错，也不会报警，更不会报废。偶尔会遇到 400。"),
+            page("reference", "错误码", "帮助", "说明 400 错误怎么处理。",
+                "## 先看状态码\n`400` 表示请求内容无效。出现 400 时先检查请求内容，400 常见于缺少字段。\n\n## 其他\n与此无关的内容。"),
+            page("misc", "杂项", "帮助", "", "## 杂项\n报纸、报告和报名都和这个问题无关。"));
+
+        Retrieval hits = ask(index, "报 400 怎么回事");
+
+        assertThat(hits.chunks().getFirst().pageId()).isEqualTo("reference");
+        assertThat(pageIds(hits)).as("the one with the verb is still an answer").contains("tiers");
+    }
+
+    @Test
+    void aQuestionOfWordingAloneIsStillAnsweredByTheSectionsItNames() {
+        // The limit on what the wording adds is a share of what the topic is worth; a question with no topic word at all
+        // has nothing for it to be a share of, and must not be capped at nothing.
+        AssistantDocsIndex index = seeded();
+
+        assertThat(sections(ask(index, "怎么验证"))).isNotEmpty().containsOnly("验证");
+        assertThat(pageIds(ask(index, "怎么验证"))).contains("claude-code", "codex-cli", "opencode");
+        assertThat(sections(ask(index, "How do I verify?"))).isNotEmpty().containsOnly("Verify");
+        assertThat(sections(ask(index, "常见问题"))).contains("常见问题");
+        assertThat(sections(ask(index, "Common problems"))).contains("Common problems");
+        assertThat(where(ask(index, "规则").chunks().getFirst())).isEqualTo("coding-plan § 需要知道的规则");
+    }
+
+    @Test
+    void aSectionThatNamesTheKindOfSectionAskedForLeadsAmongTheSectionsOfThePageOfTheTopic() {
+        // Every section of the page has the topic in its text, and the ones that mention it twice would lead the one that
+        // mentions it once; "Verify" says what kind of section it is, which is what the question asked for.
+        List<Document> pages = new ArrayList<>();
+        for (int filler = 0; filler < 6; filler++) {
+            pages.add(page("filler-" + filler, "Filler " + filler, "Misc", "Unrelated.",
+                "## Alpha " + filler + "\nNothing here.\n\n## Beta " + filler + "\nNothing either.\n"));
+        }
+        pages.add(page("claude-code", "Set up Claude Code", "Clients", "How to connect Claude Code.",
+            "## Set environment variables\nClaude Code reads the base URL and the key from the environment, and Claude Code needs both.\n\n"
+                + "## Verify\nStart Claude Code and send a short message.\n\n"
+                + "## Choose a tier\nClaude Code can name a tier, and Claude Code sends the name.\n"));
+        pages.add(page("codex", "Set up Codex", "Clients", "How to connect Codex.", "## Verify\nRun `codex` and send a short message.\n"));
+        AssistantDocsIndex index = indexOf(pages);
+
+        List<Chunk> verifying = ask(index, "verifying Claude Code").chunks();
+
+        assertThat(verifying.getFirst().pageId()).isEqualTo("claude-code");
+        assertThat(verifying.getFirst().section()).isEqualTo("Verify");
+        assertThat(verifying).as("the Verify of a page that is not about Claude Code is not an answer")
+            .noneMatch(chunk -> chunk.pageId().equals("codex"));
+    }
+
+    @Test
+    void aPageGivesTwoSectionsBeforeItGivesTheSecondPieceOfOne() {
+        StringBuilder long1 = new StringBuilder("## 长节\n");
+        for (int row = 0; row < 40; row++) {
+            long1.append("套餐的第").append(row).append("条说明：套餐按月计费，套餐到期后不会自动续费，请留意套餐的有效期。\n\n");
+        }
+        AssistantDocsIndex index = indexOf(page("plans", "套餐", "帮助", "",
+            long1 + "\n## 短节甲\n套餐可以在订阅页购买。\n\n## 短节乙\n套餐的价格见价格表。\n"));
+
+        List<Chunk> hits = ask(index, "套餐").chunks();
+
+        assertThat(hits).hasSize(3);
+        assertThat(sections(ask(index, "套餐"))).as("one piece of the long section and the two short sections")
+            .containsExactlyInAnyOrder("长节", "短节甲", "短节乙");
     }
 
     @Test

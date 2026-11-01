@@ -1,0 +1,14 @@
+[
+  {
+    "role": "user",
+    "content": [
+      {
+        "type": "text",
+        "text": "Bye.",
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      }
+    ]
+  }
+]

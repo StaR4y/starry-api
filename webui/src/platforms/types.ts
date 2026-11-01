@@ -23,6 +23,8 @@ export type SetupContext = {
   apiBaseUrl: string;
   apiKey: string;
   apiPort: string;
+  /** 配置里写入的号池：号池标识，可带 +（`kiro`、`kiro+`）；缺省或 auto 时不写，请求按 Key 的号源偏好 */
+  tier?: string | null;
 };
 
 export type SetupScriptBlock = {

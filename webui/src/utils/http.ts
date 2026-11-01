@@ -106,6 +106,8 @@ const SILENT_PATHS = [
   '/assistant/settings',
   '/assistant/chat',
   '/system/plugin-settings',
+  // 号源分级的总览：号源分级页、账号页的批量对话框和价格预览各自处理读取失败（后者只是附加信息）
+  '/admin/source-tiers',
 ];
 
 http.interceptors.response.use(
@@ -152,6 +154,7 @@ http.interceptors.response.use(
       url.includes('/admin/accounts/chatgpt-oauth') ||
       url.includes('/admin/usage-tracker/me') ||
       url.includes('/admin/logs/me') ||
+      url.includes('/admin/source-tiers/') ||
       url.includes('/plugin-assets/');
     // 这些错误由页面自行展示：409 列出仍绑定节点的账号，默认限制的校验错误显示在编辑框内
     const shownByCaller =

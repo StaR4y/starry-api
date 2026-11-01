@@ -1,0 +1,12 @@
+{
+  "reserved": "0.505519",
+  "settled": {
+    "credits": "0.00447",
+    "inputTokens": 1450,
+    "outputTokens": 8,
+    "tier": "openai:relay",
+    "level": 1,
+    "priceFactor": "1"
+  },
+  "released": null
+}

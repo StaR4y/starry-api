@@ -1,0 +1,16 @@
+[
+  {
+    "role": "user",
+    "content": [
+      {
+        "tool_use_id": "${tool.0}",
+        "type": "tool_result",
+        "content": "",
+        "is_error": false,
+        "cache_control": {
+          "type": "ephemeral"
+        }
+      }
+    ]
+  }
+]
