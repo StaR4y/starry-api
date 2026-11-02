@@ -16,6 +16,12 @@ env_value() {
 }
 
 create_env_file() {
+  # Run through sudo or not, the data directory may not be readable from here, so its existence is what counts.
+  if [[ -d data/postgresql ]]; then
+    echo "data/postgresql exists but .env does not. New passwords would not open that database." >&2
+    echo "Restore the .env it was created with. If the directory is empty or disposable, remove it and run this again." >&2
+    exit 1
+  fi
   command -v openssl >/dev/null 2>&1 || { echo "openssl is required to generate the passwords." >&2; exit 1; }
   local temporary
   temporary="$(mktemp .env.incoming.XXXXXX)"
@@ -52,6 +58,14 @@ check_env_file() {
 
 command -v docker >/dev/null 2>&1 || { echo "Docker is required: https://docs.docker.com/get-docker/" >&2; exit 1; }
 docker compose version >/dev/null 2>&1 || { echo "Docker Compose 2 is required." >&2; exit 1; }
+
+# The containers have fixed names and Compose names a project after its directory, so a deployment in another directory of
+# the same name would have its PostgreSQL recreated on the empty data of this one.
+owner="$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' starryapi-postgres 2>/dev/null || true)"
+if [[ -n "$owner" && "$owner" != "<no value>" && ! "$owner" -ef . ]]; then
+  echo "The container starryapi-postgres belongs to the deployment in ${owner}. Run this there, or stop it first: docker compose down" >&2
+  exit 1
+fi
 
 [[ -f .env ]] || create_env_file
 check_env_file

@@ -76,6 +76,14 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.artifact }}
           cache-to: type=gha,mode=max,scope=${{ matrix.artifact }}
 
+      # By digest, on each architecture, before any tag exists: a bad image never becomes "latest".
+      - name: Check what the image carries
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker pull "${IMAGE}@${DIGEST}"
+          ./scripts/check-release-contents.sh --image "${IMAGE}@${DIGEST}"
+
       - name: Keep the digest for the manifest job
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
@@ -89,7 +97,8 @@ jobs:
           name: digest-${{ matrix.artifact }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
-          retention-days: 1
+          # Long enough to re-run the publish job after making a first package public.
+          retention-days: 7
 
   publish:
     name: Publish
@@ -122,7 +131,7 @@ jobs:
         with:
           images: ${{ env.IMAGE }}
           tags: |
-            type=semver,pattern=v{{version}}
+            type=semver,pattern={{raw}}
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
 
@@ -145,11 +154,6 @@ jobs:
             $(printf "${IMAGE}@sha256:%s " *)
           docker buildx imagetools inspect "${IMAGE}:${GITHUB_REF_NAME}"
 
-      - name: Check what the published image carries
-        run: |
-          docker pull "${IMAGE}:${GITHUB_REF_NAME}"
-          ./scripts/check-release-contents.sh --image "${IMAGE}:${GITHUB_REF_NAME}"
-
       - name: Copy the image to Docker Hub
         if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
         run: |
@@ -162,12 +166,23 @@ jobs:
       - name: Collect the release files
         run: |
           mkdir -p dist
+          docker pull "${IMAGE}:${GITHUB_REF_NAME}"
           container="$(docker create "${IMAGE}:${GITHUB_REF_NAME}")"
           docker cp "${container}:/app/app.jar" "dist/starry-api-${GITHUB_REF_NAME}.jar"
           docker cp "${container}:/app/third-party-sources" third-party-sources
           docker rm "$container"
           tar -czf "dist/third-party-sources-${GITHUB_REF_NAME}.tar.gz" third-party-sources
           (cd dist && sha256sum -- * > sha256sums.txt)
+
+      # A package starts out private, and then every install fails with "denied". Make it public once, in the package's
+      # settings, and re-run this job.
+      - name: Check that the image can be pulled without logging in
+        run: |
+          docker logout ghcr.io
+          if ! docker manifest inspect "${IMAGE}:${GITHUB_REF_NAME}" >/dev/null; then
+            echo "::error::${IMAGE} is not public. Open the package settings on GitHub, change its visibility to public, and re-run this job."
+            exit 1
+          fi
 
       - name: Create the GitHub release
         env:

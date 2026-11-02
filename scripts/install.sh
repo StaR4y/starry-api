@@ -17,6 +17,7 @@
 #   IMAGE_REPO       registry mirror, for example registry.example.com/starry-api; the tag stays the release tag
 #   STARRY_IMAGE     exact image reference to deploy instead
 #   PULL_IMAGE       false to use an image already on this machine, for example from "docker load"; default true
+#   HEALTH_WAIT_SECONDS  how long a new version may take to become healthy, default 300; raise it for a long migration
 #   REPO_RAW_BASE    mirror of the repository files (raw) at that release
 set -euo pipefail
 
@@ -70,6 +71,8 @@ ENABLE_MIHOMO="${ENABLE_MIHOMO:-auto}"
 MIHOMO_LICENSE_NOTE="the image metacubex/mihomo (https://github.com/MetaCubeX/mihomo) is licensed under GPL-3.0; Docker pulls it from its registry as a separate container, and Starry API does not bundle or distribute it"
 RELEASE_TAG=""
 DEPLOY_IMAGE=""
+# Exists from the moment an existing deployment starts changing until it is committed or rolled back.
+IN_PROGRESS_MARKER="${INSTALL_DIR}/.install-in-progress"
 # The Compose file of the deployment that was here when this run started; empty on a fresh install.
 PREVIOUS_COMPOSE_FILE=""
 # The Compose file the stack commands use: the new one, and the previous one once a rollback has restored it.
@@ -85,8 +88,9 @@ ROLLBACK_ATTEMPTED=false
 # CLI_COMMAND is how the deployment summary names the administration command.
 CLI_COMMAND=""
 
+# A terminal that went away must not stop a rollback halfway.
 log() {
-  printf '[%s] %s\n' "$APP_NAME" "$*"
+  printf '[%s] %s\n' "$APP_NAME" "$*" || true
 }
 
 fail() {
@@ -261,6 +265,14 @@ backup_current_deployment() {
     return 0
   fi
 
+  # A run that died halfway left its new files in place, so the .previous copies it made are still the last good deployment.
+  if [[ -f "$IN_PROGRESS_MARKER" ]]; then
+    log "An earlier run did not finish; keeping the rollback copies it saved."
+    [[ ! -f "${INSTALL_DIR}/.env.previous" ]] || ENV_ROLLBACK_AVAILABLE=true
+    ROLLBACK_AVAILABLE=true
+    return 0
+  fi
+
   for file in "${DEPLOYMENT_FILES[@]}"; do
     source="${INSTALL_DIR}/${file}"
     if [[ -f "$source" ]]; then
@@ -277,6 +289,7 @@ backup_current_deployment() {
   else
     rm -f -- "${INSTALL_DIR}/.env.previous"
   fi
+  : > "$IN_PROGRESS_MARKER" || fail "Could not write ${IN_PROGRESS_MARKER}."
   ROLLBACK_AVAILABLE=true
 }
 
@@ -368,27 +381,31 @@ restore_previous_deployment() {
       rmdir -p -- "$(dirname "$target")" 2>/dev/null || true
     fi
   done
+  if [[ "$ENV_UPDATED" == "true" ]] && postgres_cluster_initialized; then
+    atomic_install_file "$current_env" "$retry_env" 0600 || return 1
+    log "Retained the initialized PostgreSQL cluster credentials in ${retry_env} for a safe retry."
+  fi
   if [[ "$ENV_ROLLBACK_AVAILABLE" == "true" ]]; then
     [[ -f "$previous_env" ]] || return 1
-    if [[ "$ENV_UPDATED" == "true" ]] && postgres_cluster_initialized; then
-      atomic_install_file "$current_env" "$retry_env" 0600 || return 1
-      log "Retained the initialized PostgreSQL cluster credentials in ${retry_env} for a safe retry."
-    fi
     atomic_install_file "$previous_env" "$current_env" 0600 || return 1
   elif [[ "$ENV_UPDATED" == "true" ]]; then
     rm -f -- "$current_env" || return 1
   fi
   ENV_UPDATED=false
   ACTIVE_COMPOSE_FILE="$PREVIOUS_COMPOSE_FILE"
+  rm -f -- "$IN_PROGRESS_MARKER"
   load_runtime_env
   log "Restored the previous environment and deployment files after the failed deployment."
 }
 
-# The old jar deployment builds its runtime image from the Compose file; a published image is already on this machine.
+# The image of the previous version is already on this machine, so a rollback needs no registry. Only the old jar deployment
+# can build its image if it is gone, which needs its base image from Docker Hub.
 recreate_previous_stack() {
-  local build_flag="--no-build"
-  [[ "$PREVIOUS_COMPOSE_FILE" != "$LEGACY_COMPOSE_FILE" ]] || build_flag="--build"
-  root_cmd "${COMPOSE_CMD[@]}" -f "$PREVIOUS_COMPOSE_FILE" up -d "$build_flag" --force-recreate --remove-orphans
+  if root_cmd "${COMPOSE_CMD[@]}" -f "$PREVIOUS_COMPOSE_FILE" up -d --no-build --force-recreate --remove-orphans; then
+    return 0
+  fi
+  [[ "$PREVIOUS_COMPOSE_FILE" == "$LEGACY_COMPOSE_FILE" ]] || return 1
+  root_cmd "${COMPOSE_CMD[@]}" -f "$PREVIOUS_COMPOSE_FILE" up -d --build --force-recreate --remove-orphans
 }
 
 deployment_exit_handler() {
@@ -584,6 +601,17 @@ prepare_install_dir() {
     "$INSTALL_DIR/data/model-ranking" \
     "$INSTALL_DIR/data/model-pricing"
   root_cmd chmod 0700 "$INSTALL_DIR/data/security"
+}
+
+# The containers have fixed names and Compose names a project after its directory, so with a deployment in another directory
+# of the same name, Compose would recreate its PostgreSQL on this directory's empty data: a healthy service with an empty
+# database, and the real data no longer served.
+refuse_deployment_elsewhere() {
+  local owner
+  owner="$(root_cmd docker inspect -f '{{index .Config.Labels "com.docker.compose.project.working_dir"}}' starryapi-postgres 2>/dev/null || true)"
+  if [[ -n "$owner" && "$owner" != "<no value>" && ! "$owner" -ef "$INSTALL_DIR" ]]; then
+    fail "The container starryapi-postgres belongs to the deployment in ${owner}. To upgrade it, rerun with INSTALL_DIR=${owner}. To replace it, stop it there first: docker compose down"
+  fi
 }
 
 postgres_cluster_initialized() {
@@ -876,7 +904,7 @@ wait_for_health() {
   local last_response="" status=""
   log "Waiting for service health: ${url}"
   for attempt in $(seq 1 "$attempts"); do
-    last_response="$(curl -sS -m 3 -w '\nHTTP_STATUS:%{http_code}' "$url" 2>&1 || true)"
+    last_response="$(curl -sS --noproxy '*' -m 3 -w '\nHTTP_STATUS:%{http_code}' "$url" 2>&1 || true)"
     status="$(printf '%s\n' "$last_response" | sed -n 's/^HTTP_STATUS://p' | tail -n 1)"
     if [[ "$status" == "200" ]]; then
       return 0
@@ -995,12 +1023,15 @@ deploy_stack() {
   if ! wait_for_health; then
     fail_stack "The new service did not become healthy"
   fi
+  # The new version is healthy and may have migrated the database: from here on nothing rolls back.
+  DEPLOYMENT_COMMITTED=true
+  rm -f -- "$IN_PROGRESS_MARKER"
 
   log "Removing containers left behind by the previous Compose definition..."
-  root_cmd "${compose[@]}" up -d --no-build --remove-orphans postgres "${stack_services[@]}"
+  root_cmd "${compose[@]}" up -d --no-build --remove-orphans postgres "${stack_services[@]}" \
+    || log "Could not remove them; the new version is healthy. Run docker compose up -d --remove-orphans yourself."
   rm -f -- "${INSTALL_DIR}/.env.postgresql-retry"
   retire_legacy_deployment
-  root_cmd "${compose[@]}" logs --tail=120 service || true
 
   local summary_cli_line summary_cli_commands summary_mihomo_license
   summary_cli_line="$(cli_summary_line)"
@@ -1023,9 +1054,22 @@ Upgrade by running the installer again; .env and data/ stay as they are.
 
 Common commands:
 ${summary_cli_commands}  cd ${INSTALL_DIR}
-  docker compose logs -f service
-  docker compose restart service
-  docker compose down
+  sudo docker compose logs -f service
+  sudo docker compose restart ${stack_services[*]}
+  sudo docker compose down
+EOF
+  tls_bridge_notice
+}
+
+# The base Compose file has no TLS bridge, so a run of the installer takes a deployment off the opt-in overlay.
+tls_bridge_notice() {
+  [[ -n "$(env_file_plain_value "${INSTALL_DIR}/.env" STARRY_TLS_SECRET)" ]] || return 0
+  cat <<EOF
+
+STARRY_TLS_SECRET is set, but this run started the stack without the TLS bridge overlay. To bring it back:
+  cd ${INSTALL_DIR}
+  sudo docker compose -f docker-compose.yml -f docker-compose.tls-bridge.yml build tls-bridge
+  sudo docker compose -f docker-compose.yml -f docker-compose.tls-bridge.yml up -d --no-build
 EOF
 }
 
@@ -1037,8 +1081,13 @@ install_flow() {
   ensure_compose
   require_compose_v2
   prepare_install_dir
+  refuse_deployment_elsewhere
   resolve_release
   backup_current_deployment
+  # An interrupted run has to roll back too. Losing the SSH session does not stop it: the installer and Compose keep going.
+  trap '' HUP PIPE
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   trap 'deployment_exit_handler $?' EXIT
   write_env_file
   set_image_in_env
@@ -1046,7 +1095,6 @@ install_flow() {
   install_deployment_files
   ensure_cli_tool
   deploy_stack
-  DEPLOYMENT_COMMITTED=true
 }
 
 main() {

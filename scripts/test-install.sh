@@ -122,6 +122,10 @@ run_flow() {
         local rendered="$*"
         case "$rendered" in
           "mock-compose version --short") printf "2.30.0\n"; return 0 ;;
+          "docker inspect "*)
+            [[ "$SCENARIO" != "elsewhere" ]] || printf "%s\n" "$(dirname "$INSTALL_DIR")/another-install"
+            return 0
+            ;;
           "mkdir "*|"chmod "*) "$@"; return $? ;;
         esac
         printf "%s\n" "$rendered" >> "$TRACE_FILE"
@@ -135,6 +139,11 @@ run_flow() {
           pull:"docker pull "*) return 1 ;;
           inspect:"docker image inspect "*) return 1 ;;
           service-up:*" up -d --no-build --force-recreate service"*) return 1 ;;
+          no-runtime-image:*" up -d --no-build --force-recreate service"*) return 1 ;;
+          no-runtime-image:*" up -d --no-build --force-recreate --remove-orphans") return 1 ;;
+          orphans:*" up -d --no-build --remove-orphans postgres"*) return 1 ;;
+          term:*" up -d --no-build --force-recreate service"*) kill -TERM $$; sleep 1 ;;
+          hup:*" up -d --no-build --force-recreate service"*) kill -HUP $$; sleep 1 ;;
         esac
         return 0
       }
@@ -228,6 +237,54 @@ assert_deployment_restored "$broken_case"
 grep -q 'and the automatic rollback failed' "$broken_case.output.log" \
   || fail_test "a failed rollback must be reported"
 
+# An interrupted run rolls back like a failed one, and losing the SSH session does not interrupt it.
+term_case="$TEST_ROOT/image-term"
+prepare_image_deployment "$term_case"
+expect_flow_failure term "$term_case" false
+assert_deployment_restored "$term_case"
+grep -q 'mock-compose -f docker-compose.yml up -d --no-build --force-recreate --remove-orphans$' "$term_case.commands.log" \
+  || fail_test "TERM must roll the stack back: $(cat "$term_case.output.log")"
+[[ ! -e "$term_case/.install-in-progress" ]] || fail_test "a finished rollback must clear the marker"
+hup_case="$TEST_ROOT/image-hup"
+prepare_image_deployment "$hup_case"
+run_flow hup "$hup_case" false || fail_test "HUP must not stop the installer: $(cat "$hup_case.output.log")"
+grep -q '^STARRY_IMAGE=ghcr.io/star4y/starry-api:v2.0.0$' "$hup_case/.env" || fail_test "HUP must not roll back"
+
+# A run that died without a chance to roll back (kill -9, power loss) leaves new files and its marker. The next run must not
+# take those for the last good deployment.
+died_case="$TEST_ROOT/image-died"
+prepare_image_deployment "$died_case"
+for died_file in docker-compose.yml docker/postgresql/init/001-starry-api-roles.sh docker/egress/mihomo-entrypoint.sh .env; do
+  cp "$died_case/$died_file" "$died_case/$died_file.previous"
+done
+printf 'half-finished\n' > "$died_case/docker-compose.yml"
+printf 'STARRY_IMAGE=ghcr.io/star4y/starry-api:v9.9.9\n' >> "$died_case/.env"
+: > "$died_case/.install-in-progress"
+expect_flow_failure service-health "$died_case" false
+assert_deployment_restored "$died_case"
+grep -q 'keeping the rollback copies' "$died_case.output.log" || fail_test "the next run must say it keeps the copies"
+
+# Once the new version is healthy nothing rolls back: it may have migrated the database.
+orphans_case="$TEST_ROOT/image-orphans"
+prepare_image_deployment "$orphans_case"
+run_flow orphans "$orphans_case" false || fail_test "cleaning up orphans must not fail a healthy deployment: $(cat "$orphans_case.output.log")"
+grep -q '^STARRY_IMAGE=ghcr.io/star4y/starry-api:v2.0.0$' "$orphans_case/.env" || fail_test "a healthy version must stay"
+if grep -q -- '--force-recreate --remove-orphans' "$orphans_case.commands.log"; then
+  fail_test "a healthy version must not be rolled back"
+fi
+[[ ! -e "$orphans_case/.install-in-progress" ]] || fail_test "a committed deployment must clear the marker"
+
+# A deployment in another directory of the same name would get its PostgreSQL recreated on this directory's empty data.
+elsewhere_case="$TEST_ROOT/elsewhere"
+mkdir -p "$elsewhere_case" "$TEST_ROOT/another-install"
+expect_flow_failure elsewhere "$elsewhere_case" false
+grep -q 'belongs to the deployment in .*another-install' "$elsewhere_case.output.log" \
+  || fail_test "another deployment must be refused: $(cat "$elsewhere_case.output.log")"
+[[ ! -e "$elsewhere_case/.env" ]] || fail_test "nothing may be written when another deployment owns the containers"
+if grep -q ' up -d' "$elsewhere_case.commands.log"; then
+  fail_test "nothing may start when another deployment owns the containers"
+fi
+
 # An upgrade that works: the new image is in .env, and the rest of .env stays as it was.
 upgrade_case="$TEST_ROOT/image-upgrade"
 prepare_image_deployment "$upgrade_case"
@@ -258,6 +315,21 @@ grep -q '^Version: *v2.0.0 (ghcr.io/star4y/starry-api:v2.0.0)$' "$upgrade_case.o
 if grep -q -- '--build' "$upgrade_case.commands.log"; then
   fail_test "a deployment from the published image must never build"
 fi
+
+[[ ! -e "$upgrade_case/.install-in-progress" ]] || fail_test "a finished upgrade must clear the marker"
+grep -q '^  sudo docker compose restart service$' "$upgrade_case.output.log" \
+  || fail_test ".env is root's, so the summary must print the commands with sudo"
+if grep -q 'STARRY_TLS_SECRET' "$upgrade_case.output.log"; then
+  fail_test "a deployment without the TLS bridge must not hear about it"
+fi
+
+# The base Compose file has no TLS bridge, so a run takes a deployment off the overlay, and says how to bring it back.
+tls_case="$TEST_ROOT/image-tls"
+prepare_image_deployment "$tls_case"
+printf 'STARRY_TLS_SECRET=x\n' >> "$tls_case/.env"
+run_flow success "$tls_case" false || fail_test "an upgrade with the TLS bridge failed: $(cat "$tls_case.output.log")"
+grep -q 'docker-compose.tls-bridge.yml up -d --no-build$' "$tls_case.output.log" \
+  || fail_test "the summary must say how to bring the TLS bridge back"
 
 # The steps run in this order: a pull that fails leaves the stack alone.
 pull_line="$(grep -n '^docker pull ' "$upgrade_case.commands.log" | head -n 1 | cut -d: -f1)"
@@ -315,9 +387,29 @@ for scenario in postgres-up service-up service-health; do
   assert_deployment_restored "$case_dir"
   [[ ! -e "$case_dir/docker-compose.yml" ]] || fail_test "$scenario: the new Compose file must not stay after a rollback"
   [[ -f "$case_dir/docker-compose.artifact.yml" ]] || fail_test "$scenario: the jar deployment must stay in place"
-  [[ "$(grep -Ec 'mock-compose -f docker-compose.artifact.yml up -d --build --force-recreate --remove-orphans$' "$case_dir.commands.log")" -eq 1 ]] \
-    || fail_test "$scenario: the jar deployment must be rebuilt from its own file: $(cat "$case_dir.commands.log")"
+  [[ "$(grep -Ec 'mock-compose -f docker-compose.artifact.yml up -d --no-build --force-recreate --remove-orphans$' "$case_dir.commands.log")" -eq 1 ]] \
+    || fail_test "$scenario: the jar deployment must come back from its own file and image: $(cat "$case_dir.commands.log")"
+  if grep -q -- ' --build ' "$case_dir.commands.log"; then
+    fail_test "$scenario: rolling back must not need a registry when the old image is on the machine"
+  fi
 done
+
+# Its image is gone: only then is it built, which needs Docker Hub.
+no_image_case="$TEST_ROOT/jar-no-runtime-image"
+prepare_jar_deployment "$no_image_case" postgresql
+expect_flow_failure no-runtime-image "$no_image_case" false
+assert_deployment_restored "$no_image_case"
+grep -q 'mock-compose -f docker-compose.artifact.yml up -d --build --force-recreate --remove-orphans$' "$no_image_case.commands.log" \
+  || fail_test "a jar deployment without its image must be built: $(cat "$no_image_case.commands.log")"
+
+# Without any .env, a failed run that initialized the cluster must still keep what it generated.
+no_env_case="$TEST_ROOT/image-without-env"
+prepare_image_deployment "$no_env_case"
+rm -f "$no_env_case/.env" "$no_env_case.expected/.env"
+expect_flow_failure legacy-health "$no_env_case" false
+[[ -f "$no_env_case/.env.postgresql-retry" ]] \
+  || fail_test "the credentials of the cluster a failed run initialized must be kept, even with no earlier .env"
+grep -q '^POSTGRES_PASSWORD=' "$no_env_case/.env.postgresql-retry" || fail_test "the kept file must hold the credentials"
 
 # Regenerated credentials against a cluster that a failed run has already initialized are retained for a safe retry.
 legacy_health_case="$TEST_ROOT/jar-legacy-health"
@@ -378,6 +470,8 @@ grep -q 'up -d --no-build --force-recreate service mihomo$' "$fresh_case.command
   || fail_test "with Mihomo deployed the service and mihomo must be recreated together"
 grep -q 'up -d --no-build --remove-orphans postgres service mihomo$' "$fresh_case.commands.log" \
   || fail_test "with Mihomo deployed the final up must include mihomo"
+grep -q '^  sudo docker compose restart service mihomo$' "$fresh_case.output.log" \
+  || fail_test "Mihomo shares the network of the service, so the summary must restart them together"
 grep -q '^Mihomo egress: *deployed - switch it on in the console' "$fresh_case.output.log" \
   || fail_test "the summary must say Mihomo is deployed and how to switch it on"
 grep -q '^\[starry-api\] Mihomo is deployed: the image metacubex/mihomo .*GPL-3.0.*does not bundle or distribute it' "$fresh_case.output.log" \
@@ -938,6 +1032,9 @@ cp "$ROOT_DIR/.env.example" "$up_case/checkout/.env.example"
 cat > "$up_case/bin/docker" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$DOCKER_TRACE"
+if [[ "$1" == "inspect" && -n "${DOCKER_OWNER:-}" ]]; then
+  printf '%s\n' "$DOCKER_OWNER"
+fi
 SH
 chmod 0755 "$up_case/bin/docker"
 run_docker_up() {
@@ -962,6 +1059,29 @@ if grep -Fq "$(grep '^POSTGRES_PASSWORD=' "$up_env" | cut -d= -f2-)" "$up_case/o
 fi
 grep -q '^compose up -d$' "$up_case/docker.log" || fail_test "docker-up.sh must start the stack"
 grep -q '^Console: *http://127.0.0.1:18080/#/login$' "$up_case/output.log" || fail_test "docker-up.sh must say where the console is"
+
+# New passwords would not open a database that already exists.
+rm -f "$up_env"
+mkdir -p "$up_case/checkout/data/postgresql"
+: > "$up_case/docker.log"
+if run_docker_up; then
+  fail_test "docker-up.sh must refuse to generate passwords over an existing database"
+fi
+grep -q 'data/postgresql exists but .env does not' "$up_case/output.log" || fail_test "the refusal must say what is wrong"
+[[ ! -e "$up_env" ]] || fail_test "a refused run must not create .env"
+rm -rf "$up_case/checkout/data"
+run_docker_up || fail_test "docker-up.sh failed: $(cat "$up_case/output.log")"
+
+# Containers of a deployment in another directory stay out of it, and the owner's own directory is fine.
+: > "$up_case/docker.log"
+if DOCKER_OWNER="$up_case/bin" run_docker_up; then
+  fail_test "docker-up.sh must refuse when another directory owns the containers"
+fi
+grep -q 'belongs to the deployment in' "$up_case/output.log" || fail_test "the refusal must name the other deployment"
+if grep -q '^compose up' "$up_case/docker.log"; then
+  fail_test "a refused run must not start anything"
+fi
+DOCKER_OWNER="$up_case/checkout" run_docker_up || fail_test "its own containers must be fine: $(cat "$up_case/output.log")"
 
 # Later runs keep .env, and pass their options on.
 cp "$up_env" "$up_case/env-before"

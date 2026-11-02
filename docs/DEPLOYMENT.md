@@ -57,7 +57,7 @@ flowchart TD
     keep --> files["下载该版本的 Compose 文件和启动脚本"]
     create --> files
     files --> pull["校验 Compose 文件，拉取镜像"]
-    pull --> up["重建 PostgreSQL 和服务"]
+    pull --> up["重建 PostgreSQL 和服务<br/>（这一步之前不动运行中的容器）"]
     up --> health{"健康检查通过？"}
     health -->|是| done(["打印登录方式和常用命令"])
     health -->|否| rollback["恢复旧文件，重建旧版本"]
@@ -102,6 +102,8 @@ sudo starry-api info
 sudo starry-api reset-password
 ```
 
+（RHEL 系的 `sudo` 可能不搜索 `/usr/local/bin`，提示找不到命令时用 `sudo /opt/starry-api/starry-api`。）
+
 输入 `RESET` 确认后，它为 Root 设置新的临时密码、重启服务（所有控制台会话随之登出），并**只显示一次**新密码。更多用法见 [运维手册](OPERATIONS.md#服务器上的-starry-api-命令)。
 
 > 数据管理的安全密钥（`dmsk-…`）**不能**在服务器上显示、找回或重置，`starry-api` 只显示它的状态。被锁定时见 [恢复被锁定的数据管理](OPERATIONS.md#恢复被锁定的数据管理)。
@@ -137,8 +139,12 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
 
 `.env` 和 `data/` 保持不变。Compose 文件、启动脚本和 `.env` 的上一版留在相邻的 `.previous` 文件里。之后任何一步失败，都会恢复整套旧文件；如果容器已经开始改动，还会重建旧版本并确认健康。自动回滚每次运行最多尝试一次。
 
-要知道的两点：
+要知道的几点：
 
+- 安装目录里的 `.env` 只有 root 能读，所以 `docker compose` 命令要加 `sudo`。
+- 安装脚本运行中断时（Ctrl-C、`kill`）也会回滚；SSH 断开不会打断它。真的半途退出了，重新运行时它会沿用上次保存的 `.previous` 文件，不会用半成品覆盖。
+- 服务已经部署在别的目录时（`docker ps` 里有 `starryapi-postgres`），脚本拒绝继续，并告诉你用 `INSTALL_DIR` 指向那个目录。容器名是固定的，一台机器上只能有一套部署。
+- 用了 [TLS bridge](ACCOUNT_EGRESS.md#tls-bridge实验性) 时，脚本只启动基础的 Compose 文件。结束时它会打印把 bridge 加回来的两条命令。
 - 数据库迁移只向前。新版本已经迁移过数据库之后再回到旧版本，旧版本可能启动失败。重要升级前先在控制台做一次备份，见 [数据库备份与数据传输](OPERATIONS.md#数据库备份与数据传输)。
 - **首次安装**没有上一版可恢复。失败时生成的 `.env`、Compose 文件和 PostgreSQL 数据原样保留，修好问题后重新运行即可，脚本会复用同一份密码。
 
@@ -161,6 +167,8 @@ cd starry-api
 ```
 
 第一次运行时，脚本从 `.env.example` 生成 `.env`，三个数据库密码随机生成；已有 `.env` 时会检查密码，拒绝默认值和重复值。然后执行 `docker compose up -d`。
+
+脚本还会拒绝两种会弄丢数据的情况：`.env` 不在但 `data/postgresql` 还在（新密码打不开旧数据库），以及同一台机器上已有另一个目录里的部署。
 
 ```bash
 ./scripts/starry-api.sh info                # 登录信息
@@ -219,6 +227,7 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
 | `IMAGE_REPO` | `ghcr.io/star4y/starry-api` | 镜像仓库，标签仍是版本号。写入 `.env` 后，以后的升级继续用它 |
 | `STARRY_IMAGE` | 空 | 完整的镜像引用，优先于上面两项 |
 | `PULL_IMAGE` | `true` | `false` 时不拉取，要求镜像已经在这台机器上 |
+| `HEALTH_WAIT_SECONDS` | `300` | 等新版本通过健康检查的秒数，回滚时等旧版本也用它。升级要跑很长的数据库迁移时调大，否则会被判定失败并回滚 |
 | `REPO_RAW_BASE` | 该版本的 GitHub raw 地址 | Compose 文件和脚本的下载地址 |
 | `GITHUB_REPO` | `StaR4y/starry-api` | 查询最新 release 的仓库 |
 
@@ -237,12 +246,12 @@ curl -fsSL https://你的镜像/install.sh | sudo env \
 没有镜像仓库时，在能联网的机器上导出镜像，拷到服务器后导入：
 
 ```bash
-# 能联网的机器
-docker pull ghcr.io/star4y/starry-api:v1.2.3
+# 能联网的机器：--platform 写服务器的架构（linux/amd64 或 linux/arm64）
+docker pull --platform linux/amd64 ghcr.io/star4y/starry-api:v1.2.3
 docker save ghcr.io/star4y/starry-api:v1.2.3 | gzip > starry-api-v1.2.3.tar.gz
 
 # 服务器：导入后不再拉取
-docker load < starry-api-v1.2.3.tar.gz
+gunzip -c starry-api-v1.2.3.tar.gz | sudo docker load
 sudo env STARRY_VERSION=v1.2.3 PULL_IMAGE=false REPO_RAW_BASE=https://你的镜像/starry-api/v1.2.3 bash install.sh
 ```
 
@@ -268,18 +277,20 @@ git push origin v1.2.3
 ```mermaid
 flowchart LR
     tag(["推送标签 v1.2.3"]) --> test["全部测试"]
-    test --> amd["构建 linux/amd64"]
-    test --> arm["构建 linux/arm64"]
+    test --> amd["构建并检查 linux/amd64<br/>许可证文件齐全，没有 Mihomo"]
+    test --> arm["构建并检查 linux/arm64"]
     amd --> manifest["合并成多架构镜像<br/>ghcr.io/&lt;仓库&gt;:v1.2.3、1.2.3、1.2、latest"]
     arm --> manifest
-    manifest --> check["检查镜像内容：<br/>许可证文件齐全，没有 Mihomo"]
-    check --> hub["可选：复制到 Docker Hub"]
-    check --> gh["GitHub Release：<br/>jar、第三方源码、校验和"]
+    manifest --> public["确认未登录也能拉取"]
+    manifest --> hub["可选：复制到 Docker Hub"]
+    public --> gh["GitHub Release：<br/>jar、第三方源码、校验和"]
     gh --> installer(["安装脚本的「最新版本」指向它"])
 ```
 
+- **第一次发布要多一步**：GitHub 上新建的镜像包默认是私有的，这时所有人安装都会失败。工作流会在创建 Release 之前用未登录的状态试拉一次，私有就报错停下。到仓库的 **Packages → starry-api → Package settings** 把可见性改成 Public，再重新运行失败的任务（7 天内都可以），之后的版本不用再改。
 - 带后缀的标签（`v1.2.3-rc.1`）是预发布：不更新 `latest` 镜像标签，安装脚本默认也不会选它。
 - 同步到 Docker Hub：在仓库设置里添加 secrets `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN`，镜像会同时发布到 `docker.io/<用户名>/starry-api`。不配就只发布到 GitHub Container Registry，不需要额外的密钥。
+- 每个架构的镜像都在打标签之前检查过内容，有问题的镜像不会变成 `latest`。
 - 每次发布都带着许可证文件：镜像的 `/app` 里有 `LICENSE`、`NOTICE`、`licenses/` 和 `third-party-sources/`（5 个按 copyleft 许可证使用的 Java 库的源码，见 [NOTICE](../NOTICE) 第 3 节），jar 的 `META-INF/` 里也有。CI 用 `scripts/check-release-contents.sh` 确认这些都在，并且镜像和 jar 里没有 Mihomo 二进制（Mihomo 是 GPL-3.0，只在部署时由 Docker 拉取，不随本项目分发）。
 
 镜像不再放进 git 仓库，仓库里也没有 `artifacts/` 目录了。

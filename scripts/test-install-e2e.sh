@@ -31,12 +31,13 @@ cleanup() {
   rm -rf -- "$INSTALL_DIR"
   docker image rm "$BROKEN_IMAGE" >/dev/null 2>&1 || true
 }
-trap cleanup EXIT
 
+# Before the cleanup is armed: it removes what it finds.
 if docker ps -a --format '{{.Names}}' | grep -q '^starryapi-'; then
   fail_test "containers named starryapi-* already exist on this machine; this test would replace them."
 fi
 [[ ! -e "$INSTALL_DIR" ]] || fail_test "${INSTALL_DIR} already exists."
+trap cleanup EXIT
 
 # The files of this checkout stand in for the release, and the image built by the caller for the published one.
 run_installer() {
@@ -90,7 +91,8 @@ docker build -q -t "$BROKEN_IMAGE" - >/dev/null <<EOF
 FROM ${IMAGE}
 ENTRYPOINT ["sh", "-c", "exit 1"]
 EOF
-if run_installer STARRY_IMAGE="$BROKEN_IMAGE" HEALTH_WAIT_SECONDS=20; then
+# The same wait covers the restored version, so it has to be long enough for a real start on a slow machine.
+if run_installer STARRY_IMAGE="$BROKEN_IMAGE" HEALTH_WAIT_SECONDS=120; then
   fail_test "installing a broken image must fail"
 fi
 grep -q "^STARRY_IMAGE=${IMAGE}$" "${INSTALL_DIR}/.env" || fail_test "a rollback must restore the image in .env"
