@@ -1,6 +1,3 @@
-artifacts/*.jar binary
-artifacts/*.tar.gz binary
-
 # Cross-protocol fixtures are compared byte for byte; no line-ending or whitespace rewriting. They are captured wire data,
 # so pull request diffs collapse them.
 service/src/test/resources/xproto/** -text

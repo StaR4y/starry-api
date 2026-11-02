@@ -1,3 +1,7 @@
+# The whole stack: PostgreSQL, the service and the optional Mihomo.
+#   docker compose up -d           runs the published image (STARRY_IMAGE); without one, builds this checkout
+#   docker compose up -d --build   builds this checkout
+# The one-click installer (scripts/install.sh) uses this same file. Every setting has its default here; .env.example lists them.
 services:
   postgres:
     image: postgres:17-bookworm
@@ -58,12 +62,12 @@ services:
       - starryapi
 
   service:
+    image: ${STARRY_IMAGE:-ghcr.io/star4y/starry-api:latest}
     build:
       context: .
       dockerfile: Dockerfile
       # Always check for newer base images so JDK and CA-certificate fixes arrive with the next build.
       pull: true
-    image: starryapi-service:local
     container_name: starryapi-service
     restart: unless-stopped
     # The JVM is capped (JAVA_OPTS) and the container too, so a runaway heap ends in an exit and a restart

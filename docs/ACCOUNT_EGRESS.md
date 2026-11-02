@@ -81,12 +81,12 @@ Mihomo 是可选组件，只有 Clash 订阅里的 SS、VMess、VLESS、Hysteria
 | `true` | 部署 Mihomo | 追加缺少的配置，旧文件先保存为 `.env.previous` |
 | `false` | 不部署 | 不改动；已经部署的保持原样 |
 
-「部署」就是在 `.env` 里写入 `COMPOSE_PROFILES=mihomo` 和随机生成的 `STARRY_EGRESS_CONTROLLER_SECRET`。脚本不会打印密钥，也不写 `STARRY_EGRESS_MIHOMO_ENABLED`；已有 `.env` 里的密钥、`STARRY_EGRESS_MIHOMO_ENABLED` 和其他 Compose profile 都保持不变，重复执行不产生重复项。下载到的部署包若不含 `mihomo` 服务（旧版本），`auto` 会记一行日志并跳过 Mihomo，`true` 则报错退出。安装结束的摘要会写明 Mihomo 已部署还是未部署。
+「部署」就是在 `.env` 里写入 `COMPOSE_PROFILES=mihomo` 和随机生成的 `STARRY_EGRESS_CONTROLLER_SECRET`。脚本不会打印密钥，也不写 `STARRY_EGRESS_MIHOMO_ENABLED`；已有 `.env` 里的密钥、`STARRY_EGRESS_MIHOMO_ENABLED` 和其他 Compose profile 都保持不变，重复执行不产生重复项。安装结束的摘要会写明 Mihomo 已部署还是未部署。
 
 **已有的部署**想加上 Mihomo，重新运行安装脚本并加 `ENABLE_MIHOMO=true`：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
+curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install.sh \
   | sudo env ENABLE_MIHOMO=true bash
 ```
 
@@ -98,7 +98,7 @@ STARRY_EGRESS_CONTROLLER_SECRET=<随机十六进制>
 ```
 
 ```bash
-docker compose -f docker-compose.artifact.yml up -d   # 服务器 / 预构建部署包
+docker compose up -d
 docker compose up -d --build                          # 源码部署，同一个 profile
 ```
 
@@ -115,8 +115,8 @@ Compose 从 `.env` 读取 `COMPOSE_PROFILES`，之后的 `logs`、`down` 等命�
 只是暂时不用，在控制台把开关关掉即可，容器保持空闲。要连容器一起去掉：删掉 `.env` 里的 `COMPOSE_PROFILES` 中的 `mihomo` 和 `STARRY_EGRESS_CONTROLLER_SECRET`（旧的 `STARRY_EGRESS_MIHOMO_ENABLED` 也可以删），然后：
 
 ```bash
-docker compose -f docker-compose.artifact.yml rm -sf mihomo
-docker compose -f docker-compose.artifact.yml up -d
+docker compose rm -sf mihomo
+docker compose up -d
 ```
 
 源码部署去掉 `-f` 参数。Compose 不把未启用 profile 的容器当作孤儿，`up --remove-orphans` 不会删除它，所以要显式 `rm -sf`。移除后控制台显示「未部署」，需要 Mihomo 的节点显示不可用，账号绑定保留，这些账号的请求不会直连，而是改由其他账号处理。之后重新运行安装脚本（`auto` 或 `false`）不会把它加回来。
@@ -152,11 +152,11 @@ Compose 只传 `STARRY_EGRESS_MIHOMO_ENABLED` 和 `STARRY_EGRESS_CONTROLLER_SECR
 Anthropic 的 TLS 指纹 bridge（curl_cffi）是单独的实验性 overlay，与 Mihomo 互不依赖，也不是默认部署的一部分。在 `.env` 设置 `STARRY_TLS_SECRET`（`openssl rand -hex 32`）后叠加使用，之后的每条 `docker compose` 命令都要带同样的 `-f`：
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.tls-bridge.yml up -d --build
-docker compose -f docker-compose.artifact.yml -f docker-compose.tls-bridge.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.tls-bridge.yml build tls-bridge
+docker compose -f docker-compose.yml -f docker-compose.tls-bridge.yml up -d --no-build
 ```
 
-预构建 bundle 包含 overlay、`docker/egress` 和本文，在解压目录运行第二条。bridge 与 `service` 共享网络命名空间，监听 `127.0.0.1:9091`，限额 512 MiB，容器只读文件系统、无附加 capability，非 root 运行，最多 16 个请求并发、64 MiB 请求体总预算、单请求 16 MiB，并关闭环境代理和自动重定向。
+源码目录和一键安装的目录里都有 overlay 和 `docker/egress`，在这两处都可以运行。bridge 与 `service` 共享网络命名空间，监听 `127.0.0.1:9091`，限额 512 MiB，容器只读文件系统、无附加 capability，非 root 运行，最多 16 个请求并发、64 MiB 请求体总预算、单请求 16 MiB，并关闭环境代理和自动重定向。
 
 | 变量 | 默认值 |
 | --- | --- |

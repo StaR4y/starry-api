@@ -2,7 +2,11 @@ name: CI
 
 on:
   push:
+    # A tag runs these tests through the release workflow.
+    branches:
+      - "**"
   pull_request:
+  workflow_call:
 
 permissions:
   contents: read
@@ -44,8 +48,8 @@ jobs:
       - name: Install shell test dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends expect
 
-      - name: Test installer rollback paths
-        run: ./scripts/test-install-server.sh
+      - name: Test the installer's image selection and rollback paths
+        run: ./scripts/test-install.sh
 
       - name: Test data-management recovery tool
         run: ./scripts/test-recover-data-management.sh
@@ -53,33 +57,18 @@ jobs:
       - name: Test starry-api administration command
         run: ./scripts/test-starry-api.sh
 
-      - name: Test the bundle content check
-        run: ./scripts/test-check-bundle-contents.sh
+      - name: Test the release content check
+        run: ./scripts/test-check-release-contents.sh
 
       - name: Run all tests and build WebUI
         run: ./gradlew --no-daemon clean test :webui:npmBuild
 
-      - name: Test artifact publisher idempotency
+      # Mihomo is GPL-3.0 and optional: Docker pulls its image at deploy time, and no binary or saved image may enter the jar
+      # or our image. Both must also carry the license files; the docker-image job checks the image.
+      - name: Check the jar for Mihomo binaries and missing license files
         run: |
-          ./gradlew --no-daemon :service:bootJar :service:copyleftSources -PskipWebuiBuild=true
-          artifact_test_dir="$(mktemp -d)"
-          RUN_TESTS=false SKIP_BUILD=true ARTIFACT_DIR="$artifact_test_dir" \
-            ./scripts/publish-artifact.sh
-          RUN_TESTS=false SKIP_BUILD=true ARTIFACT_DIR="$artifact_test_dir" \
-            ./scripts/publish-artifact.sh
-          test -x "$artifact_test_dir/runtime/recover-data-management.sh"
-          cmp scripts/recover-data-management.sh \
-            "$artifact_test_dir/runtime/recover-data-management.sh"
-          test -x "$artifact_test_dir/starry-api.sh"
-          cmp scripts/starry-api.sh "$artifact_test_dir/starry-api.sh"
-          tar -tzf "$artifact_test_dir/starry-api-bundle.tar.gz" | grep -q '^\./starry-api\.sh$'
-          (cd "$artifact_test_dir" && sha256sum -c sha256sums.txt)
-          echo "ARTIFACT_TEST_DIR=$artifact_test_dir" >> "$GITHUB_ENV"
-
-      # Mihomo is GPL-3.0 and optional: Docker pulls its image at deploy time, and no binary or saved image may enter a
-      # bundle or the jar. The bundle and the jar must also carry LICENSE, NOTICE and THIRD-PARTY-NOTICES.txt.
-      - name: Check the bundle for Mihomo binaries, saved images and missing license files
-        run: ./scripts/check-bundle-contents.sh "$ARTIFACT_TEST_DIR/starry-api-bundle.tar.gz"
+          ./gradlew --no-daemon :service:bootJar -PskipWebuiBuild=true
+          ./scripts/check-release-contents.sh service/build/libs/starry-api.jar
 
       - name: Test the console license footer and third-party notices
         run: npm --prefix webui run test:legal
@@ -106,6 +95,23 @@ jobs:
           name: postgres-17-test-reports
           path: service/build/reports/tests/test
           if-no-files-found: ignore
+
+  docker-image:
+    name: Docker image and installer
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build --build-arg STARRY_VERSION=ci -t starry-api:ci .
+
+      - name: Check what the image carries
+        run: ./scripts/check-release-contents.sh --image starry-api:ci
+
+      - name: Install, upgrade and roll back with the real installer
+        run: sudo ./scripts/test-install-e2e.sh starry-api:ci
 
   postgresql-18:
     name: PostgreSQL 18 compatibility

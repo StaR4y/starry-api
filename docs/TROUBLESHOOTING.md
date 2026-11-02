@@ -105,9 +105,9 @@ SQL
 
 ```bash
 cd /opt/starry-api
-docker compose -f docker-compose.artifact.yml ps postgres
-docker compose -f docker-compose.artifact.yml logs --tail=200 postgres
-docker compose -f docker-compose.artifact.yml exec postgres pg_isready -U starry_api -d starry_api
+docker compose ps postgres
+docker compose logs --tail=200 postgres
+docker compose exec postgres pg_isready -U starry_api -d starry_api
 ```
 
 要点：**改 `.env` 里的 `POSTGRES_PASSWORD` 并不会改动已初始化集群里的角色密码**。要么在 PostgreSQL 里显式改角色密码，要么把 `.env` 恢复成原值。**千万不要为了「省事」删生产数据卷**（`./data/postgresql`）。
@@ -281,15 +281,15 @@ curl -fsS http://127.0.0.1:18080/system/status
 
 ```bash
 cd /opt/starry-api
-docker compose -f docker-compose.artifact.yml exec service \
+docker compose exec service \
   /app/bin/recover-data-management --lang zh
 # 想要英文提示用 --lang en
 
-docker compose -f docker-compose.artifact.yml restart service
+docker compose restart service
 # 等服务启动完，再验证：
-docker compose -f docker-compose.artifact.yml exec service \
+docker compose exec service \
   curl -fsS http://127.0.0.1:8080/system/status
-docker compose -f docker-compose.artifact.yml exec service \
+docker compose exec service \
   sh -c 'test ! -e /app/security/recovery.key && test ! -e /app/security/.recovery.key.consuming && echo "恢复密钥文件已消耗"'
 ```
 
@@ -299,14 +299,13 @@ docker compose -f docker-compose.artifact.yml exec service \
 - 密钥**不能**写在命令行参数、管道、`.env` 里，也**不要**用 `curl ... | sh` 下载恢复脚本。
 - 输入匹配的密钥：解除维护、清零失败次数，并销毁恢复用的临时文件。
 - 输入了格式正确但不匹配的密钥：会被审计记录（`RECOVERY_FAILED`），临时文件同样被销毁，站点仍保持维护——用**正确的密钥**再来一遍。
-- 源码方式部署（用 `docker-compose.yml`）的命令去掉 `-f docker-compose.artifact.yml`。
 
 **如果解锁后仍处于维护，或者两个文件还在**：说明清理没能确认，恢复**没有完成**。不要再跑工具，也不要手动删文件。查看安全卷和日志（**不要**打印密钥内容）：
 
 ```bash
-docker compose -f docker-compose.artifact.yml exec service \
+docker compose exec service \
   sh -c 'ls -ld /app/security; ls -l /app/security/recovery.key /app/security/.recovery.key.consuming 2>/dev/null || true'
-docker compose -f docker-compose.artifact.yml logs --tail=200 service
+docker compose logs --tail=200 service
 ```
 
 修复安全卷的属主、权限、剩余空间或文件系统错误后重启 `service`。启动时会重试清理，直到清理、删除、目录同步全部成功前，服务保持故障关闭。如果修好存储后仍清不掉，请升级给有权限的运维做有审计的恢复。
@@ -319,16 +318,16 @@ docker compose -f docker-compose.artifact.yml logs --tail=200 service
 
 ### 更新后控制台界面没变
 
-**原因**：安装脚本下载的是仓库里已提交的 `artifacts/starry-api-bundle.tar.gz`。如果前端改完后**没有重新发布并推送产物**，服务器自然会部署旧的内嵌界面。
+**原因**：服务还在跑旧镜像，或者浏览器缓存了旧页面。
 
 ```bash
 cd /opt/starry-api
-cat app/build-info.json                                  # 看产物对应的提交与构建时间
-sha256sum -c app/starry-api.jar.sha256                   # 校验 jar
-docker compose -f docker-compose.artifact.yml logs --tail=160 service
+grep STARRY_IMAGE .env                                   # .env 里写的版本
+docker inspect --format '{{.Config.Image}}' starryapi-service   # 容器正在跑的镜像
+docker compose logs --tail=160 service
 ```
 
-在开发机 / CI 上[重新发布产物](PREBUILT_ARTIFACTS.md#每次提交后发布)、提交并推送 `artifacts/`，再在服务器重新运行安装脚本。浏览器也可能缓存了旧页面，强制刷新一下（`Ctrl/⌘ + Shift + R`）。
+两个不一致时重新运行安装脚本。一致但不是你想要的版本，用 `STARRY_VERSION` 指定，见 [升级与回滚](DEPLOYMENT.md#升级与回滚)。从源码构建的部署改用 `docker compose build --no-cache service`，再 `docker compose up -d service`。最后强制刷新浏览器（`Ctrl/⌘ + Shift + R`）。
 
 ### 1Panel 反向代理 `502 Bad Gateway`
 

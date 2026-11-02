@@ -1,23 +1,24 @@
 #!/usr/bin/env bash
 # Checks what a release carries: no Mihomo binary and no saved container image, and the license files.
 #
-# Mihomo (the Clash.Meta core) is GPL-3.0 and is optional. Starry API only ever names its image in the Compose files, and
-# Docker pulls the image from its registry at deploy time; no Mihomo binary or saved image may enter a bundle or the jar
+# Mihomo (the Clash.Meta core) is GPL-3.0 and is optional. Starry API only ever names its image in the Compose file, and
+# Docker pulls the image from its registry at deploy time; no Mihomo binary or saved image may enter our image or the jar
 # (see section 6 of NOTICE). This also fails when a license file is missing: LICENSE, NOTICE, the npm and Java notices,
 # the LGPL-2.1 text and logback's notice, and the -sources jars of the libraries used under a copyleft license (section 3
-# of NOTICE), which the bundle has to carry because it is the binary release those licenses talk about.
+# of NOTICE), which our image has to carry because it is the binary release those licenses talk about.
 #
-# Usage: scripts/check-bundle-contents.sh FILE...
-#   *.tar.gz, *.tgz  a deployment bundle (starry-api-bundle.tar.gz)
-#   *.jar            the executable jar (service-*.jar or starry-api.jar)
+# Usage: scripts/check-release-contents.sh [--image IMAGE]... [JAR]...
+#   --image IMAGE   a built image (service files under /app); it is created, never started
+#   JAR             the executable jar (service/build/libs/starry-api.jar)
 set -euo pipefail
 
-APP_NAME="check-bundle"
+APP_NAME="check-release"
 problems=0
-# The libraries used under a copyleft license; their -sources jars must be in the bundle (section 3 of NOTICE).
+# The libraries used under a copyleft license; their -sources jars must be in the image (section 3 of NOTICE).
 COPYLEFT_SOURCE_LIBRARIES=(logback-classic logback-core jakarta.annotation-api jakarta.mail-api angus-mail)
 JAR_LICENSE_ENTRIES=(META-INF/LICENSE META-INF/NOTICE META-INF/JAVA-THIRD-PARTY-NOTICES.txt
   META-INF/licenses/LGPL-2.1.txt META-INF/licenses/logback-NOTICE.txt BOOT-INF/classes/static/THIRD-PARTY-NOTICES.txt)
+IMAGE_LICENSE_FILES=(LICENSE NOTICE licenses/LGPL-2.1.txt licenses/logback-NOTICE.txt)
 
 problem() {
   printf '[%s] ERROR: %s\n' "$APP_NAME" "$*" >&2
@@ -43,7 +44,6 @@ check_entry_names() {
         ;;
     esac
     case "$base" in
-      starry-api-webui.tar.gz) ;;
       *.tar|*.tar.gz|*.tgz|*.tar.xz|*.tar.zst)
         problem "${label}: ${entry} is a nested archive that could hold a saved image."
         ;;
@@ -90,39 +90,6 @@ require_copyleft_sources() {
   done
 }
 
-check_bundle() {
-  local bundle="$1"
-  local listing work file
-
-  listing="$(LC_ALL=C tar -tzf "$bundle")" || { problem "${bundle}: not a readable gzip-compressed tar archive."; return; }
-  # The bundle is made with "tar -C stage ." so every name starts with "./".
-  listing="$(sed 's#^\./##' <<<"$listing")"
-  check_entry_names "$bundle" <<<"$listing"
-  require_names "$bundle" "$listing" LICENSE NOTICE THIRD-PARTY-NOTICES.txt JAVA-THIRD-PARTY-NOTICES.txt \
-    licenses/LGPL-2.1.txt licenses/logback-NOTICE.txt app/starry-api.jar
-  require_copyleft_sources "$bundle" "$listing"
-
-  work="$(mktemp -d)"
-  if tar --no-same-owner -xzf "$bundle" -C "$work"; then
-    while IFS= read -r -d '' file; do
-      if is_native_executable "$file"; then
-        problem "${bundle}: ${file#"$work"/} is a native executable; the bundle holds scripts, configuration and the jar only."
-      fi
-    done < <(find "$work" -type f -print0)
-    if [[ -f "$work/app/starry-api.jar" ]]; then
-      check_jar "$work/app/starry-api.jar" "${bundle}!app/starry-api.jar"
-    fi
-    if [[ -f "$work/starry-api-webui.tar.gz" ]]; then
-      listing="$(LC_ALL=C tar -tzf "$work/starry-api-webui.tar.gz" | sed 's#^\./##')"
-      check_entry_names "${bundle}!starry-api-webui.tar.gz" <<<"$listing"
-      require_names "${bundle}!starry-api-webui.tar.gz" "$listing" THIRD-PARTY-NOTICES.txt LICENSE NOTICE
-    fi
-  else
-    problem "${bundle}: could not be extracted."
-  fi
-  rm -rf "$work"
-}
-
 check_jar() {
   local jar="$1"
   local label="${2:-$1}"
@@ -133,15 +100,63 @@ check_jar() {
   require_names "$label" "$listing" "${JAR_LICENSE_ENTRIES[@]}"
 }
 
+# /app holds what this project adds to the base image, so everything in it is checked. Anywhere else in the image only a
+# Mihomo binary is looked for: the base image's own files are not this project's to judge.
+check_image() {
+  local image="$1"
+  local work container listing file base
+
+  command -v docker >/dev/null 2>&1 || { problem "${image}: docker is needed to check an image."; return; }
+  container="$(docker create "$image")" || { problem "${image}: could not create a container from the image."; return; }
+  work="$(mktemp -d)"
+  # As a tar stream: the image has read-only files, which "docker cp" cannot write into a directory of its own.
+  if docker cp "${container}:/app" - | tar -xf - -C "$work" && [[ -d "$work/app" ]]; then
+    listing="$(cd "$work/app" && find . -type f | sed 's#^\./##' | sort)"
+    check_entry_names "$image" <<<"$listing"
+    require_names "$image" "$listing" "${IMAGE_LICENSE_FILES[@]}" app.jar bin/recover-data-management
+    require_copyleft_sources "$image" "$listing"
+    while IFS= read -r -d '' file; do
+      if is_native_executable "$file"; then
+        problem "${image}: /app/${file#"$work"/app/} is a native executable; /app holds scripts, license files and jars only."
+      fi
+    done < <(find "$work/app" -type f -print0)
+    if [[ -f "$work/app/app.jar" ]]; then
+      check_jar "$work/app/app.jar" "${image}!/app/app.jar"
+    fi
+  else
+    problem "${image}: has no /app directory."
+  fi
+  while IFS= read -r file; do
+    base="$(printf '%s' "${file##*/}" | tr '[:upper:]' '[:lower:]')"
+    case "$base" in
+      mihomo-entrypoint.sh) ;;
+      mihomo|mihomo-*|mihomo_*|mihomo.*)
+        problem "${image}: /${file} looks like a Mihomo binary; it must not be distributed."
+        ;;
+    esac
+  done < <(docker export "$container" | LC_ALL=C tar -tf - | sed 's#/$##')
+  docker rm "$container" >/dev/null || true
+  chmod -R u+rwX "$work"
+  rm -rf "$work"
+}
+
 main() {
-  [[ "$#" -gt 0 ]] || { printf 'Usage: %s FILE...\n' "$0" >&2; exit 2; }
-  local file
-  for file in "$@"; do
-    [[ -f "$file" ]] || { problem "${file}: no such file."; continue; }
-    case "$file" in
-      *.tar.gz|*.tgz) check_bundle "$file" ;;
-      *.jar) check_jar "$file" ;;
-      *) problem "${file}: expected a .tar.gz bundle or a .jar." ;;
+  [[ "$#" -gt 0 ]] || { printf 'Usage: %s [--image IMAGE]... [JAR]...\n' "$0" >&2; exit 2; }
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --image)
+        [[ "$#" -ge 2 ]] || { printf 'Usage: %s [--image IMAGE]... [JAR]...\n' "$0" >&2; exit 2; }
+        check_image "$2"
+        shift 2
+        ;;
+      *.jar)
+        if [[ -f "$1" ]]; then check_jar "$1"; else problem "${1}: no such file."; fi
+        shift
+        ;;
+      *)
+        problem "${1}: expected --image IMAGE or a .jar."
+        shift
+        ;;
     esac
   done
   if [[ "$problems" -gt 0 ]]; then

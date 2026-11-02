@@ -34,7 +34,7 @@ npm --prefix webui run test:i18n                 # every Chinese UI string needs
 npm --prefix webui run test:documentation
 npm --prefix webui run test:source-tiers
 npm --prefix webui run test:legal                # the license footer and THIRD-PARTY-NOTICES.txt
-./scripts/test-install-server.sh                 # when you touch scripts/install-server.sh
+./scripts/test-install.sh                        # when you touch scripts/install.sh
 ```
 
 The test JVMs get a throwaway home directory, so running the tests never touches your own `~/.starry-api`. [docs/PACKAGE_GUIDE.md](docs/PACKAGE_GUIDE.md) explains where code belongs and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) the request flow.

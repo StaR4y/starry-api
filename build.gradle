@@ -76,23 +76,3 @@ configure(subprojects.findAll { it.name in ['service-api', 'service', 'plugin-ap
         }
     }
 }
-
-tasks.register('publishArtifact', Exec) {
-    group = 'distribution'
-    description = 'Run tests, build the executable jar with WebUI, and refresh repository artifacts.'
-    dependsOn ':service:test', ':service:bootJar', ':service:copyleftSources'
-    workingDir = rootDir
-    commandLine 'bash', './scripts/publish-artifact.sh'
-    environment 'SKIP_BUILD', 'true'
-    environment 'RUN_TESTS', 'false'
-}
-
-tasks.register('publishArtifactFast', Exec) {
-    group = 'distribution'
-    description = 'Build the executable jar with WebUI and refresh repository artifacts without running tests.'
-    dependsOn ':service:bootJar', ':service:copyleftSources'
-    workingDir = rootDir
-    commandLine 'bash', './scripts/publish-artifact.sh'
-    environment 'SKIP_BUILD', 'true'
-    environment 'RUN_TESTS', 'false'
-}

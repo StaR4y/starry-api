@@ -24,7 +24,7 @@ echo "API docs: http://127.0.0.1:${SERVER_PORT}/docs"
 
 if [[ "${STARRY_RUN_MODE:-${KIRO_RUN_MODE:-bootRun}}" == "jar" ]]; then
   ./gradlew :service:bootJar
-  exec java -jar service/build/libs/service-0.1.0-SNAPSHOT.jar
+  exec java -jar service/build/libs/starry-api.jar
 fi
 
 exec ./gradlew :service:bootRun

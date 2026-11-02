@@ -87,10 +87,10 @@ version. DOMPurify is bundled, unmodified, into the console's JavaScript.
 Source code for the five Java libraries above (the two logback jars,
 jakarta.annotation-api, jakarta.mail-api and angus-mail) travels with every
 binary release: the build task :service:copyleftSources collects their -sources
-jars, and scripts/publish-artifact.sh puts them into the directory
-third-party-sources/ of the deployment bundle and of the artifact directory next
-to starry-api.jar, so they are offered from the same place as the binaries. They
-are also available from the projects (https://logback.qos.ch/,
+jars, the Docker image carries them in /app/third-party-sources/, and every GitHub
+release that attaches the jar attaches them too, as
+third-party-sources-<tag>.tar.gz, so they are offered from the same place as the
+binaries. They are also available from the projects (https://logback.qos.ch/,
 https://github.com/jakartaee/common-annotations-api,
 https://github.com/jakartaee/mail-api, https://github.com/eclipse-ee4j/angus-mail)
 and from Maven Central under the same coordinates. The source code of DOMPurify is
@@ -108,9 +108,8 @@ no license file of their own. The build therefore generates
 JAVA-THIRD-PARTY-NOTICES.txt from the Maven POMs of the runtime classpath: it
 lists every library with its version and the license it declares, and prints the
 Apache-2.0 text and, for the jars that declare MIT and carry none, the MIT text
-(it is the file META-INF/JAVA-THIRD-PARTY-NOTICES.txt inside the executable jar,
-at the root of the deployment bundle, and
-service/build/generated/java-notices/JAVA-THIRD-PARTY-NOTICES.txt after
+(it is the file META-INF/JAVA-THIRD-PARTY-NOTICES.txt inside the executable jar
+and service/build/generated/java-notices/JAVA-THIRD-PARTY-NOTICES.txt after
 "./gradlew :service:generateJavaNotices"). Jars that do carry license and notice
 files keep them under BOOT-INF/lib. The web console build writes the license
 text and notice of every npm package that ends up in the console to
@@ -182,9 +181,9 @@ Starry API can route traffic through Mihomo (the Clash.Meta core,
 https://github.com/MetaCubeX/mihomo), which is licensed under the GNU General
 Public License, version 3. Mihomo is optional and Starry API does not include,
 bundle or distribute it: no Mihomo binary or container image is part of the
-source tree, the executable jar, the deployment bundle or any release file of
-this project. When the optional egress component is deployed (the "mihomo"
-profile of the Docker Compose files; the installer scripts/install-server.sh
+source tree, the executable jar, the Starry API Docker image or any release file
+of this project. When the optional egress component is deployed (the "mihomo"
+profile of the Docker Compose files; the installer scripts/install.sh
 deploys it idle on a fresh install unless ENABLE_MIHOMO=false), Docker pulls the
 image metacubex/mihomo from its registry onto the server as a separate container.
 It communicates with Starry API only over a local network connection, as a

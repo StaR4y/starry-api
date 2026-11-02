@@ -67,7 +67,7 @@
 
 生产部署**必须**有显式的内存边界。**不要**用 `-XX:MaxRAMPercentage=75.0`（旧版 `.env.example` 和安装脚本曾经默认这个值）：在没有内存上限的宿主机上它会把堆放大到宿主机内存的四分之三；放进 2 GiB 容器里，实测 1 MiB 请求体 × 200 并发时常驻内存会顶到约 **2.0 GiB**，几乎没有余量，很快被容器杀掉。
 
-现在 Compose、一键安装脚本和预构建部署包默认就带这套配置：
+现在 Compose 文件默认就带这套配置：
 
 ```bash
 JAVA_OPTS="-Xms64m -Xmx768m -XX:MaxDirectMemorySize=256m -XX:+ExitOnOutOfMemoryError -XX:G1PeriodicGCInterval=300000 -XX:-G1PeriodicGCInvokesConcurrent -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=30"

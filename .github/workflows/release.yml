@@ -1,0 +1,184 @@
+name: Release
+
+# Pushing a tag such as v1.2.3 runs the tests, publishes the image for linux/amd64 and linux/arm64 to the GitHub Container
+# Registry, and creates the GitHub release the installer looks up. A tag with a suffix (v1.2.3-rc.1) becomes a prerelease,
+# which moves neither the "latest" image tag nor the release the installer picks by default.
+#
+# Docker Hub is optional: set the repository secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN, and the same image also goes to
+# docker.io/<DOCKERHUB_USERNAME>/starry-api.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests
+    uses: ./.github/workflows/ci.yml
+
+  image:
+    name: Image (${{ matrix.platform }})
+    needs: test
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            artifact: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            artifact: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Name the image after this repository
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Image labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          labels: |
+            org.opencontainers.image.title=Starry API
+            org.opencontainers.image.licenses=AGPL-3.0-only
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          build-args: STARRY_VERSION=${{ github.ref_name }}
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.artifact }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.artifact }}
+
+      - name: Keep the digest for the manifest job
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+
+      - name: Upload the digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.artifact }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Publish
+    needs: image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      packages: write
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Name the image after this repository
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
+      - name: Download the digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=semver,pattern=v{{version}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create the multi-platform image
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          # shellcheck disable=SC2046
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<<"$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${IMAGE}@sha256:%s " *)
+          docker buildx imagetools inspect "${IMAGE}:${GITHUB_REF_NAME}"
+
+      - name: Check what the published image carries
+        run: |
+          docker pull "${IMAGE}:${GITHUB_REF_NAME}"
+          ./scripts/check-release-contents.sh --image "${IMAGE}:${GITHUB_REF_NAME}"
+
+      - name: Copy the image to Docker Hub
+        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        run: |
+          printf '%s' "$DOCKERHUB_TOKEN" | docker login docker.io --username "$DOCKERHUB_USERNAME" --password-stdin
+          for tag in $(jq -cr '.tags[]' <<<"$DOCKER_METADATA_OUTPUT_JSON"); do
+            docker buildx imagetools create -t "docker.io/${DOCKERHUB_USERNAME}/starry-api:${tag##*:}" "$tag"
+          done
+
+      # The jar for those who run it without Docker, and the source code its copyleft libraries require next to it.
+      - name: Collect the release files
+        run: |
+          mkdir -p dist
+          container="$(docker create "${IMAGE}:${GITHUB_REF_NAME}")"
+          docker cp "${container}:/app/app.jar" "dist/starry-api-${GITHUB_REF_NAME}.jar"
+          docker cp "${container}:/app/third-party-sources" third-party-sources
+          docker rm "$container"
+          tar -czf "dist/third-party-sources-${GITHUB_REF_NAME}.tar.gz" third-party-sources
+          (cd dist && sha256sum -- * > sha256sums.txt)
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            "${prerelease[@]}"

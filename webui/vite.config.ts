@@ -163,10 +163,10 @@ export function serverSideNotice(rule: string): string[] {
     'Starry API uses logback-classic and logback-core, unmodified, under the GNU Lesser General Public License, version 2.1',
     'only (LGPL-2.1-only), and the Library and its use are covered by that License. The text of the License is at',
     'https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html, and a copy comes with every release of Starry API: the file',
-    'licenses/LGPL-2.1.txt of the deployment bundle and META-INF/licenses/LGPL-2.1.txt of the executable jar, next to the',
+    '/app/licenses/LGPL-2.1.txt of the Docker image and META-INF/licenses/LGPL-2.1.txt of the executable jar, next to the',
     'notice of logback itself (logback-NOTICE.txt). Each logback library is its own jar under BOOT-INF/lib of the executable',
-    'jar, so you can replace it with a modified version, and its source code is in the third-party-sources/ directory that',
-    'is published with the release. Section 3 of the NOTICE file and JAVA-THIRD-PARTY-NOTICES.txt give the versions.',
+    'jar, so you can replace it with a modified version, and its source code is in /app/third-party-sources/ of the Docker',
+    'image and in the archive attached to the GitHub release. Section 3 of the NOTICE file and JAVA-THIRD-PARTY-NOTICES.txt give the versions.',
   ];
 }
 

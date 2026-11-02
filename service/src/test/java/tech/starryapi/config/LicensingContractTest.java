@@ -21,11 +21,9 @@ class LicensingContractTest {
         "STARRY_SOURCE_URL: ${STARRY_SOURCE_URL:-" + SourceCodeProperties.DEFAULT_URL + "}";
 
     @Test
-    void everyDeploymentTemplateForwardsTheSourceAddressWithTheSameDefault() throws IOException {
-        for (String template : List.of("docker-compose.yml", "scripts/publish-artifact.sh", "scripts/install-server.sh")) {
-            assertThat(read(template)).as(template).contains(SOURCE_URL_FORWARDING);
-        }
-        for (String environmentFile : List.of(".env.example", "scripts/install-server.sh")) {
+    void theDeploymentForwardsTheSourceAddressWithTheSameDefault() throws IOException {
+        assertThat(read("docker-compose.yml")).contains(SOURCE_URL_FORWARDING);
+        for (String environmentFile : List.of(".env.example", "scripts/install.sh")) {
             assertThat(read(environmentFile)).as(environmentFile).contains("\nSTARRY_SOURCE_URL=" + SourceCodeProperties.DEFAULT_URL + "\n");
         }
         assertThat(read("service/src/main/resources/application.yml"))
@@ -63,15 +61,22 @@ class LicensingContractTest {
             .contains("Version 2.1, February 1999")
             .contains("That's all there is to it!");
         assertThat(read("licenses/logback-NOTICE.txt")).contains("Copyright (C) 1999-2026, QOS.ch").contains("version 2.1");
-        assertThat(read("scripts/publish-artifact.sh"))
-            .contains("cp \"$ROOT_DIR/LICENSE\" \"$stage_dir/LICENSE\"")
-            .contains("cp \"$ROOT_DIR/NOTICE\" \"$stage_dir/NOTICE\"");
+        assertThat(read("Dockerfile"))
+            .contains("org.opencontainers.image.licenses=\"AGPL-3.0-only\"")
+            .contains("COPY LICENSE NOTICE /app/")
+            .contains("COPY licenses/ /app/licenses/")
+            .contains(":service:copyleftSources")
+            .contains("/workspace/service/build/third-party-sources/ /app/third-party-sources/");
+        assertThat(read(".github/workflows/release.yml"))
+            .contains("org.opencontainers.image.licenses=AGPL-3.0-only")
+            .contains("./scripts/check-release-contents.sh --image")
+            .contains("third-party-sources-${GITHUB_REF_NAME}.tar.gz");
     }
 
     /**
-     * The libraries used under a copyleft license are named in four places: the table of the build that collects their source
-     * jars, the two scripts that must find those jars in a release, and section 3 of NOTICE. A fifth library has to be added
-     * to all of them or the release would ship binaries without the source code their license asks for.
+     * The libraries used under a copyleft license are named in three places: the table of the build that collects their source
+     * jars, the script that must find those jars in a release, and section 3 of NOTICE. A fifth library has to be added to all
+     * of them or the release would ship binaries without the source code their license asks for.
      */
     @Test
     void theCopyleftLibrariesAreTheSameInTheBuildTheScriptsAndTheNotice() throws IOException {
@@ -87,11 +92,9 @@ class LicensingContractTest {
         assertThat(artifacts).containsExactlyInAnyOrder(
             "logback-classic", "logback-core", "jakarta.annotation-api", "jakarta.mail-api", "angus-mail");
 
-        for (String script : List.of("scripts/publish-artifact.sh", "scripts/check-bundle-contents.sh")) {
-            Matcher libraries = Pattern.compile("COPYLEFT_SOURCE_LIBRARIES=\\(([^)]*)\\)").matcher(read(script));
-            assertThat(libraries.find()).as(script).isTrue();
-            assertThat(libraries.group(1).trim().split("\\s+")).as(script).containsExactlyInAnyOrderElementsOf(artifacts);
-        }
+        Matcher libraries = Pattern.compile("COPYLEFT_SOURCE_LIBRARIES=\\(([^)]*)\\)").matcher(read("scripts/check-release-contents.sh"));
+        assertThat(libraries.find()).isTrue();
+        assertThat(libraries.group(1).trim().split("\\s+")).containsExactlyInAnyOrderElementsOf(artifacts);
 
         String notice = read("NOTICE");
         assertThat(notice)
@@ -99,12 +102,11 @@ class LicensingContractTest {
             .contains("jakarta.annotation-api 3.0.0")
             .contains("jakarta.mail-api 2.1.5 and angus-mail 2.0.5")
             .contains("licenses/LGPL-2.1.txt")
-            .contains("third-party-sources/")
+            .contains("/app/third-party-sources/")
             .contains("JAVA-THIRD-PARTY-NOTICES.txt");
-        assertThat(read("scripts/publish-artifact.sh"))
+        assertThat(read("scripts/check-release-contents.sh"))
             .contains("META-INF/JAVA-THIRD-PARTY-NOTICES.txt")
-            .contains("META-INF/licenses/LGPL-2.1.txt")
-            .contains("check-bundle-contents.sh");
+            .contains("META-INF/licenses/LGPL-2.1.txt");
     }
 
     /** README quotes the additional permission for plugins; it has to be the one in NOTICE, word for word. */
@@ -187,7 +189,7 @@ class LicensingContractTest {
             .contains("BOOT-INF/classes/static/THIRD-PARTY-NOTICES.txt")
             .contains("(section 7(c), (d) and (e) of the GNU Affero General Public License, version 3)");
         assertThat(read("service/third-party-notices.gradle")).contains("generated/java-notices/JAVA-THIRD-PARTY-NOTICES.txt");
-        assertThat(read("scripts/check-bundle-contents.sh")).contains("BOOT-INF/classes/static/THIRD-PARTY-NOTICES.txt");
+        assertThat(read("scripts/check-release-contents.sh")).contains("BOOT-INF/classes/static/THIRD-PARTY-NOTICES.txt");
     }
 
     /** NOTICE names exact versions; when the build moves them, the elections have to be looked at again. */

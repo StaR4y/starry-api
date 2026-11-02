@@ -67,6 +67,7 @@ tasks.named('bootRun') {
 apply from: 'third-party-notices.gradle'
 
 tasks.named('bootJar') {
+    archiveFileName = 'starry-api.jar'
     dependsOn prepareWebuiRuntimeResources
     from(webuiRuntimeResourcesDir) {
         into 'BOOT-INF/classes'

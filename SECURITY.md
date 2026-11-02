@@ -15,7 +15,7 @@ This is a volunteer project. We aim to acknowledge a report within 7 days and to
 
 ## Supported versions
 
-Security fixes go into the latest release and the `main` branch. Older releases are not patched; upgrade to the latest release (see [docs/INSTALL_SERVER.md](docs/INSTALL_SERVER.md) for updating and rolling back).
+Security fixes go into the latest release and the `main` branch. Older releases are not patched; upgrade to the latest release (see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for upgrading and rolling back).
 
 ## In scope
 

@@ -800,11 +800,11 @@ curl -X POST http://127.0.0.1:8080/v1/chat/completions \
 
 ```bash
 cd /opt/starry-api
-docker compose -f docker-compose.artifact.yml exec service \
+docker compose exec service \
   /app/bin/recover-data-management --lang zh
 # 英文提示：把 --lang zh 换成 --lang en
 
-docker compose -f docker-compose.artifact.yml restart service
+docker compose restart service
 ```
 
 **不要加 Compose 的 `-T`**。工具会先确认站点当前确实处于维护状态，才创建固定的恢复文件；它不会重启自己的容器，所以需要显式重启。源码部署用仓库里的 `docker-compose.yml`，命令去掉 `-f docker-compose.artifact.yml`。
@@ -812,8 +812,8 @@ docker compose -f docker-compose.artifact.yml restart service
 服务启动完成后，验证公开状态和一次性文件是否被消耗：
 
 ```bash
-docker compose -f docker-compose.artifact.yml exec service curl -fsS http://127.0.0.1:8080/system/status
-docker compose -f docker-compose.artifact.yml exec service \
+docker compose exec service curl -fsS http://127.0.0.1:8080/system/status
+docker compose exec service \
   sh -c 'test ! -e /app/security/recovery.key && test ! -e /app/security/.recovery.key.consuming && echo "恢复密钥文件已消耗"'
 ```
 
@@ -825,9 +825,9 @@ docker compose -f docker-compose.artifact.yml exec service \
 **不要只凭一条审计记录就宣布恢复或消耗已完成。**如果截断、删除或同步一次性文件失败，那么即使匹配的状态提交和 `RECOVERY_SUCCEEDED` 记录已经存在，当前进程仍保持故障关闭。在**不打印内容**的情况下检查名称和权限：
 
 ```bash
-docker compose -f docker-compose.artifact.yml exec service \
+docker compose exec service \
   sh -c 'ls -ld /app/security; ls -l /app/security/recovery.key /app/security/.recovery.key.consuming 2>/dev/null || true'
-docker compose -f docker-compose.artifact.yml logs --tail=200 service
+docker compose logs --tail=200 service
 ```
 
 清理还没解决期间，**不要**再放另一个密钥，也不要手动删除任何一个文件。先修正安全卷的属主、权限、剩余空间或文件系统错误，再重启 `service`；启动时会重试清理 `/app/security/.recovery.key.consuming`。只有 `/system/status` 报告 `"maintenance":false` **并且**两个路径都不存在，恢复才算完成。如果进程在有效的恢复状态提交**之前**停止（而不是在清理期间），下次启动会把暂存文件恢复到 `/app/security/recovery.key` 并安全地重试事务。
@@ -872,7 +872,7 @@ GRANT CONNECT ON DATABASE starry_api TO starry_api_runtime;
 
 ### 部署备注
 
-- Docker 与预构建产物部署把备份挂载到 `./data/backups:/app/backups`；用 `STARRY_BACKUP_DIR` 可以覆盖备份目录。
+- Docker 部署把备份挂载到 `./data/backups:/app/backups`；用 `STARRY_BACKUP_DIR` 可以覆盖备份目录。
 - 用 `STARRY_MAX_IMPORT_BYTES`（字节）覆盖上传 / 导入的大小限制，默认 `268435456`（256 MiB）。
 - **文件不在数据库里**：用户文档附件目录（`STARRY_DOCUMENTATION_ATTACHMENT_DIR`）和模型图标目录（`STARRY_MODEL_ICON_DIR`）需要**单独备份**。
 

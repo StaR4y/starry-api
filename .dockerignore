@@ -8,8 +8,6 @@ plugin-api/build
 service/build
 webui/dist
 webui/node_modules
-artifacts/*.jar
-artifacts/*.tar.gz
 .env
 .env.*
 **/.env

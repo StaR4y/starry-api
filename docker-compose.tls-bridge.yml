@@ -1,6 +1,6 @@
-# EXPERIMENTAL and opt-in: Anthropic TLS fingerprint bridge (curl_cffi). Independent of Mihomo; add it to either base file:
-#   docker compose -f docker-compose.yml -f docker-compose.tls-bridge.yml up -d --build
-#   docker compose -f docker-compose.artifact.yml -f docker-compose.tls-bridge.yml up -d --build
+# EXPERIMENTAL and opt-in: Anthropic TLS fingerprint bridge (curl_cffi). Independent of Mihomo; add it to the base file:
+#   docker compose -f docker-compose.yml -f docker-compose.tls-bridge.yml build tls-bridge
+#   docker compose -f docker-compose.yml -f docker-compose.tls-bridge.yml up -d --no-build
 # Requires STARRY_TLS_SECRET in .env (openssl rand -hex 32). See docs/ACCOUNT_EGRESS.md.
 services:
   service:

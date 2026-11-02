@@ -49,6 +49,9 @@
   } from '@element-plus/icons-vue';
   import { formatNumber } from '@/utils/format';
 
+// The release tag the image was built from (Dockerfile); a build from a checkout says dev.
+const appVersion = import.meta.env.VITE_APP_VERSION || 'dev';
+
   const route = useRoute();
   const router = useRouter();
   const auth = useAuthStore();
@@ -363,7 +366,7 @@
         </button>
       </nav>
 
-      <footer class="layout__footer text-muted">v0.1.0 · {{ new Date().getFullYear() }}</footer>
+      <footer class="layout__footer text-muted">{{ appVersion }} · {{ new Date().getFullYear() }}</footer>
     </aside>
 
     <main class="layout__main">

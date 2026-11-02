@@ -28,7 +28,7 @@ body:
     id: version
     attributes:
       label: Version
-      description: The commit recorded in `app/build-info.json` of your install directory (server installer), in `build-info.json` at the root of an unpacked prebuilt bundle, or the output of `git rev-parse HEAD` if you run from source. A release tag is fine if you know it.
+      description: The version at the bottom of the console sidebar, `STARRY_IMAGE` in the `.env` of your install directory, or the output of `git rev-parse HEAD` if you run from source.
     validations:
       required: true
   - type: dropdown
@@ -36,9 +36,9 @@ body:
     attributes:
       label: How you run it
       options:
-        - Server installer (scripts/install-server.sh)
-        - Docker Compose from the source tree
-        - Prebuilt bundle by hand
+        - One-click installer (scripts/install.sh)
+        - Docker Compose with the published image
+        - Docker Compose built from the source tree
         - Plain jar or ./scripts/start-proxy.sh
         - Other
     validations:

@@ -1,10 +1,15 @@
+# The image of Starry API. CI builds and publishes it on release tags (.github/workflows/release.yml), and
+# "docker compose up -d --build" builds it from a checkout.
+ARG STARRY_VERSION=dev
+
 FROM node:22-bookworm-slim AS webui-build
 
+ARG STARRY_VERSION
 WORKDIR /workspace/webui
 COPY webui/package*.json ./
 RUN npm ci
 COPY webui/ ./
-RUN npm run build
+RUN VITE_APP_VERSION="${STARRY_VERSION}" npm run build
 
 FROM eclipse-temurin:25-jdk AS build
 
@@ -12,10 +17,17 @@ WORKDIR /workspace
 COPY . .
 COPY --from=webui-build /workspace/webui/dist/ /workspace/webui/dist/
 RUN chmod +x gradlew \
-    && ./gradlew --no-daemon :service:bootJar -x test -PskipWebuiBuild=true \
-    && jar tf service/build/libs/service-0.1.0-SNAPSHOT.jar | grep -q '^BOOT-INF/classes/static/index.html$'
+    && ./gradlew --no-daemon :service:bootJar :service:copyleftSources -x test -PskipWebuiBuild=true \
+    && jar tf service/build/libs/starry-api.jar | grep -q '^BOOT-INF/classes/static/index.html$'
 
 FROM eclipse-temurin:25-jre-noble
+
+ARG STARRY_VERSION
+LABEL org.opencontainers.image.title="Starry API" \
+      org.opencontainers.image.description="Self-hosted LLM API gateway and management console" \
+      org.opencontainers.image.source="https://github.com/StaR4y/starry-api" \
+      org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.version="${STARRY_VERSION}"
 
 RUN set -eux; \
     apt-get update; \
@@ -42,8 +54,13 @@ RUN set -eu; \
     ! list | grep -E '^Owner: .*(emSign|CN=AAA Certificate Services,)'
 
 WORKDIR /app
-COPY --from=build /workspace/service/build/libs/service-0.1.0-SNAPSHOT.jar /app/app.jar
+COPY --from=build /workspace/service/build/libs/starry-api.jar /app/app.jar
 COPY --chmod=0555 scripts/recover-data-management.sh /app/bin/recover-data-management
+# The license, the notices and the source code of the libraries used under a copyleft license travel with the binary
+# (section 3 of NOTICE).
+COPY LICENSE NOTICE /app/
+COPY licenses/ /app/licenses/
+COPY --from=build /workspace/service/build/third-party-sources/ /app/third-party-sources/
 
 ENV SERVER_PORT=8080
 ENV SERVER_ADDRESS=0.0.0.0

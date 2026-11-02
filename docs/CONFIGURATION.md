@@ -37,7 +37,7 @@ Starry API 的运行时配置主要来自**环境变量**，由 `service/src/mai
 | `JAVA_OPTS` | 见下 | 容器 / 脚本使用的 JVM 参数 |
 | `SERVICE_MEM_LIMIT` | `2g` | Compose 的服务容器内存上限（`mem_limit`）。堆 768 MiB + 直接缓冲 256 MiB + 元空间、代码缓存、线程栈，实测最重的压测下常驻内存约 1.5 GiB |
 
-**内存预算**：Compose、一键安装脚本和预构建部署包现在默认带上下面这套参数，并给服务容器设了 `2g` 上限和健康检查：
+**内存预算**：Compose 文件现在默认带上下面这套参数，并给服务容器设了 `2g` 上限和健康检查：
 
 ```bash
 JAVA_OPTS="-Xms64m -Xmx768m -XX:MaxDirectMemorySize=256m -XX:+ExitOnOutOfMemoryError -XX:G1PeriodicGCInterval=300000 -XX:-G1PeriodicGCInvokesConcurrent -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=30"

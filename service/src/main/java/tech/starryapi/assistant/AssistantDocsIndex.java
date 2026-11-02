@@ -258,7 +258,7 @@ public class AssistantDocsIndex {
         "docs/CONFIGURATION.md",
         "docs/OPERATIONS.md",
         "docs/TROUBLESHOOTING.md",
-        "docs/INSTALL_SERVER.md",
+        "docs/DEPLOYMENT.md",
         "docs/PLUGINS.md",
         "docs/SUPPORT_TICKETS.md",
         "webui/README.md"

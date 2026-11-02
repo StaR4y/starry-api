@@ -31,7 +31,7 @@ function launch(command, args, env, log, cwd = repo) {
     STARRY_DATA_MANAGEMENT_SECURITY_FILE: `${output}/security.json`, STARRY_PLUGIN_DIR: `${output}/plugins`,
     STARRY_ADMIN_TOKEN: '', STARRY_PLUGINS_DISABLED: 'false', STARRY_WEBUI_URL: 'http://127.0.0.1:5175' };
   const java = process.env.JAVA_HOME ? path.join(process.env.JAVA_HOME, 'bin/java') : 'java';
-  const backend = launch(java, ['-Xms64m', '-Xmx256m', '-jar', 'service/build/libs/service-0.1.0-SNAPSHOT.jar'], env, 'backend.log');
+  const backend = launch(java, ['-Xms64m', '-Xmx256m', '-jar', 'service/build/libs/starry-api.jar'], env, 'backend.log');
   const web = launch(process.execPath, ['node_modules/vite/bin/vite.js', '--host', '127.0.0.1', '--port', '5175', '--strictPort'],
     { ...process.env, VITE_API_BASE: 'http://127.0.0.1:8082' }, 'web.log', path.join(repo, 'webui'));
   writeFileSync(path.join(output, 'processes.json'), JSON.stringify({ backend, web }), { mode: 0o600 });

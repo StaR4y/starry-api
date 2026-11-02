@@ -170,7 +170,7 @@
 
 **开发环境的补充来源**
 
-如果服务的**工作目录**下有这几个文件，它们也会进入同一份检索（同分时使用文档页面排在前面）：`README.md`、`docs/API.md`、`docs/ARCHITECTURE.md`、`docs/CONFIGURATION.md`、`docs/OPERATIONS.md`、`docs/TROUBLESHOOTING.md`、`docs/INSTALL_SERVER.md`、`docs/PLUGINS.md`、`docs/SUPPORT_TICKETS.md`、`webui/README.md`，最多 80 段；其他 `docs/*.md` 不在其中。用 `./gradlew :service:bootRun` 启动时工作目录是 `service/`，读不到这些文件；在仓库根目录启动（例如 `java -jar`）才读得到。正常安装没有这些文件，助手只用使用文档。
+如果服务的**工作目录**下有这几个文件，它们也会进入同一份检索（同分时使用文档页面排在前面）：`README.md`、`docs/API.md`、`docs/ARCHITECTURE.md`、`docs/CONFIGURATION.md`、`docs/OPERATIONS.md`、`docs/TROUBLESHOOTING.md`、`docs/DEPLOYMENT.md`、`docs/PLUGINS.md`、`docs/SUPPORT_TICKETS.md`、`webui/README.md`，最多 80 段；其他 `docs/*.md` 不在其中。用 `./gradlew :service:bootRun` 启动时工作目录是 `service/`，读不到这些文件；在仓库根目录启动（例如 `java -jar`）才读得到。正常安装没有这些文件，助手只用使用文档。
 
 ---
 
