@@ -64,7 +64,7 @@ class ProxyPropertiesBindingTest {
         assertThat(properties.getKiro().getPreferredEndpoint()).isEqualTo("codewhisperer");
     }
 
-    /** The output limit of a Responses request that names none is the operator's to set (D14), 16,000 unless they do. */
+    /** The output limit of a Responses request that names none is the operator's to set, 16,000 unless they do. */
     @Test
     void readsTheDefaultOutputLimitOfAResponsesRequest() throws IOException {
         assertThat(bind(Map.of("STARRY_RESPONSES_DEFAULT_OUTPUT_TOKENS", "32000")).getResponsesDefaultOutputTokens()).isEqualTo(32_000L);

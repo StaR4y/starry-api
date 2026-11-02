@@ -3,8 +3,10 @@ const { chromium } = require('playwright');
 const net = require('node:net');
 const { mkdirSync, writeFileSync } = require('node:fs');
 const assert = require('node:assert/strict');
+const os = require('node:os');
+const path = require('node:path');
 const base = 'http://127.0.0.1:5175';
-const output = '/private/tmp/starry-ticket-preview';
+const output = path.join(os.tmpdir(), 'starry-ticket-preview');
 if (process.env.TICKET_PREVIEW_TESTS !== 'true' || !process.env.TICKET_PREVIEW_PASSWORD) {
   throw new Error('Requires TICKET_PREVIEW_TESTS=true and a disposable preview password');
 }

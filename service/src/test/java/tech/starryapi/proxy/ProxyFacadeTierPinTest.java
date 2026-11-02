@@ -1173,7 +1173,7 @@ class ProxyFacadeTierPinTest {
         assertServedBy(first, "codex", "2", "auto", "served");
         busy.clear();
 
-        // Within the ten minutes the session stays in Codex (x2), also for the chain whose owner Codex is (D4).
+        // Within the ten minutes the session stays in Codex (x2), also for the chain whose owner Codex is.
         clock.addAndGet(Duration.ofMinutes(5).toNanos());
         ledger.settled.clear();
         ResponseEntity<?> stays = responses("gpt-5.4", responseId(first), "s1");

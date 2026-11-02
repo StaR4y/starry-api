@@ -956,7 +956,7 @@ class AccountPoolServiceTest {
         ProxyAccountRepository repository = mock(ProxyAccountRepository.class);
         SqlAccountPoolHarness harness = sqlService(repository, failedAccount("ACCOUNT_TEST_FAILED", "token_invalidated", false));
 
-        // A relay of another protocol (D5): its raw answer says the token is gone, and the error is still counted.
+        // A relay of another protocol: its raw answer says the token is gone, and the error is still counted.
         harness.service().recordTestFailure(
             "acc-1", AccountPoolService.UpstreamErrorType.FATAL, 401, "OpenAI account test error 401: token_invalidated", true, false, false
         ).block();

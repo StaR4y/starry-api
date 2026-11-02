@@ -75,7 +75,7 @@ class ModelPricingServiceTest {
     }
 
     @Test
-    void chargesCacheReadAndWriteWithSub2ApiStyleItemizedPrices() {
+    void chargesCacheReadAndWriteWithItemizedPrices() {
         Map<String, String> store = new ConcurrentHashMap<>();
         SystemSettingRepository repository = mockRepository(store);
         ModelPricingService service = new ModelPricingService(repository, objectMapper, officialModelPricingService);

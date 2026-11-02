@@ -188,6 +188,8 @@ dependencies {
 }
 ```
 
+**许可证**：`plugin-api` 使用 Apache-2.0；此外 Starry API 在 AGPL-3.0 第 7 条下给出一项附加许可：只通过 `plugin-api` 与服务交互、且不含 Starry API 其他部分的插件，是独立作品，可以按你选择的条款（包括闭源）发布。这项许可**不覆盖**前端挂件插件的浏览器脚本（`widget.json` 声明、由控制台从 `/plugin-assets` 加载的脚本，如灵动岛的 `web/widget.js`）：它运行在控制台页面里，用的是控制台自己的钩子，不是 `plugin-api` 的接口。`service-api`（宿主的业务契约和 DTO）属于 AGPL-3.0-only 的部分，这项附加许可**不覆盖**依赖它的插件。完整原文见 [NOTICE](../NOTICE) 第 2 节。
+
 ### 必需的清单（Manifest）
 
 ```text

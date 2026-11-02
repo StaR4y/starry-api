@@ -1031,7 +1031,7 @@ class ChatWireSanitizerTest {
         assertThat(ChatWireSanitizer.entryDigest(tree("[1]")).isEmpty()).isTrue();
     }
 
-    // ---------------------------------------------------------------------------------------- the billing header of Claude Code (D7)
+    // ---------------------------------------------------------------------------------------- the billing header of Claude Code
 
     private static final AnthropicRequestAdapter ADAPTER = new AnthropicRequestAdapter(JSON, new DefaultModelCatalogProvider());
     private static final String HEADER = "x-anthropic-billing-header: cc_version=2.1.168.177; cc_entrypoint=cli; cch=278c4;";

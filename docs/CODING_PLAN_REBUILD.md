@@ -48,7 +48,7 @@ The estimate uses serialized input bytes plus a margin and the output-token boun
 Unspecified output limit defaults to 4096 on the Chat, Messages and Gemini endpoints. On the Responses endpoint it
 defaults to `STARRY_RESPONSES_DEFAULT_OUTPUT_TOKENS` (16,000 unless the operator changed it; 4,096 to 1,000,000, and
 the service does not start outside that range), capped at the model's maximum output. That maximum is the smaller of
-the `max_output_tokens` the model list shows for the model and the one the official price catalog lists for it, or
+the `max_output_tokens` the model list shows for the model and the one the vendor list price catalog lists for it, or
 whichever of the two exists. The model is the one the request is served as (after the key's model mapping, never the
 name the client wrote), so most Claude and GPT aliases get 16,000 (a model whose price-catalog figure is below the setting gets
 that figure: `gpt-4`, `claude-3-haiku-20240307` and `gpt-4o-2024-05-13` 4,096, `gemini-2.0-flash` 8,192; `gpt-4o` and `gpt-4o-mini` are held to 16,384
@@ -57,7 +57,7 @@ snapshot bundled with the gateway and 393,216 in the catalog the gateway refresh
 turns the refresh off gets 8,192 (the price-catalog figures follow the catalog in use). A model
 the model list does not list gets 4096, and so does a model served by the operator's own backend: one the administrator
 added, one written with the `openai-compatible/` prefix (even when a built-in has the same name after it), or a built-in one
-the administrator pointed at their own vendor (each is listed with a placeholder and counts as listing none). The in-flight output tokens that account admission holds stay at 4096. A cross-protocol relay is not sent that default (D15): it is
+the administrator pointed at their own vendor (each is listed with a placeholder and counts as listing none). The in-flight output tokens that account admission holds stay at 4096. A cross-protocol relay is not sent that default: it is
 sent the maximum output its mapping states, no more than the default, or 4096 when the mapping states none, so for a relay the
 reservation is an upper bound and the settlement is of what it served. Invalid limits are rejected. Remote
 media and server-side response chains use a conservative input bound. Some upstream
@@ -190,8 +190,6 @@ only the disposable 5174 preview and requires explicit environment opt-in/creden
 
 Preview: `http://127.0.0.1:5174/#/coding-plans`, backend on 8081, PostgreSQL on 55437.
 It has no upstream provider credentials. The existing 8080/5173 services are untouched.
-Local preview logs and process IDs are in `/private/tmp/starry-coding-preview`;
-screenshots and `report.json` are in its `screenshots` subdirectory.
 The preview database and accounts are test-only, not production data.
 
 No live paid model request, external gateway callback, or production database

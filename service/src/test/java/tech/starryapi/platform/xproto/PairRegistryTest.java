@@ -27,8 +27,8 @@ class PairRegistryTest {
     void thisReleaseOffersTheChatMessagesResponsesAndGeminiPairsOnTrial() {
         PairRegistry defaults = PairRegistry.defaults();
 
-        // The pairs of the fifth, the sixth and the seventh phase stay EXPERIMENTAL until the upgrade tasks have the evidence
-        // (P5-09, P6-05, P7-04): Chat, Messages and Responses for the anthropic and openai vendors, the Chat entry for google,
+        // The pairs of the fifth, the sixth and the seventh phase stay EXPERIMENTAL until the status page shows the evidence
+        // for each: Chat, Messages and Responses for the anthropic and openai vendors, the Chat entry for google,
         // and the Gemini entry for the anthropic and google vendors.
         assertThat(defaults.offeredPairs()).containsExactly(
             new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.CHAT, "anthropic"),

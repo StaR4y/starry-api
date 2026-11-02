@@ -58,3 +58,9 @@ webui/components.d.ts
 
 ### Local persistent data ###
 /data/
+
+### Local tooling and credentials ###
+.claude/
+.github-token
+*.pem
+*.key

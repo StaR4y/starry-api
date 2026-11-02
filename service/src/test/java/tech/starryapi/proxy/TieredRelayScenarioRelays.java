@@ -24,7 +24,7 @@ import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
 /**
- * OpenAI-format relays for the tests of the owner's example, on one loopback port: {@code /<account>/v1/chat/completions}
+ * OpenAI-format relays for the tests of the reference scenario, on one loopback port: {@code /<account>/v1/chat/completions}
  * is the endpoint of the account of that name. A relay answers what a scenario scripts for it (a stream or a JSON body as
  * the request asks, an error, an error inside a 200, a stream cut off), and otherwise like a good relay; every request
  * that came is kept, with the headers it got. The answers are authored from the documented Chat Completions shapes, never
@@ -32,9 +32,9 @@ import tools.jackson.databind.node.ObjectNode;
  *
  * <p>What a relay reports for an answer is {@link #INPUT_TOKENS} in and {@link #OUTPUT_TOKENS} out, which the sources of
  * the scenarios all report, so that what each tier charges for a request is comparable: 0.0039 at the standard price of
- * the owner's example ($3 and $15 per million), 0.00234 at 0.6 of it.
+ * the reference scenario ($3 and $15 per million), 0.00234 at 0.6 of it.
  */
-public final class OwnerExampleRelays implements AutoCloseable {
+public final class TieredRelayScenarioRelays implements AutoCloseable {
 
     public static final int INPUT_TOKENS = 800;
     public static final int OUTPUT_TOKENS = 100;
@@ -109,7 +109,7 @@ public final class OwnerExampleRelays implements AutoCloseable {
 
         /**
          * A stream that starts to answer, reports what it used, and ends without a finish reason or [DONE]: a relay that broke
-         * off an answer it has already counted. Nobody is charged for it (D8).
+         * off an answer it has already counted. Nobody is charged for it.
          */
         static Reply cutAfterUsage(String text, long promptTokens, long completionTokens) {
             return (exchange, request) -> {
@@ -191,7 +191,7 @@ public final class OwnerExampleRelays implements AutoCloseable {
 
     private final HttpServer server;
     private final ExecutorService executor = Executors.newCachedThreadPool(runnable -> {
-        Thread thread = new Thread(runnable, "owner-example-relay");
+        Thread thread = new Thread(runnable, "reference-scenario-relay");
         thread.setDaemon(true);
         return thread;
     });
@@ -202,7 +202,7 @@ public final class OwnerExampleRelays implements AutoCloseable {
     private final ObjectMapper mapper = new ObjectMapper();
 
     /** @param onRequest told the name of the account of each request as it comes, before the relay answers it */
-    public OwnerExampleRelays(Consumer<String> onRequest) throws IOException {
+    public TieredRelayScenarioRelays(Consumer<String> onRequest) throws IOException {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.setExecutor(executor);
         server.createContext("/", exchange -> {

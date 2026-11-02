@@ -837,7 +837,7 @@ class ProxyFacadeTieredRetryTest {
         assertThatThrownBy(() -> facade.chat(chatBody(), MockServerWebExchange.from(MockServerHttpRequest.post(ENDPOINT))).block())
             .isInstanceOf(ApiException.class);
 
-        // A 402 is a refusal and not a generation, with or without tiers (O7).
+        // A 402 is a refusal and not a generation, with or without tiers.
         verify(apiKeyService).releaseUsage(any(), anyString(), eq(true), anyString());
         verify(apiKeyService, never()).releaseUsage(any(), anyString(), eq(false), anyString());
         verify(apiKeyService, times(1)).reserveUsage(any(), anyString(), any(), anyString());

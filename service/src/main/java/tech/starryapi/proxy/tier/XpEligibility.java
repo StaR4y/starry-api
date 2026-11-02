@@ -58,7 +58,7 @@ import tools.jackson.databind.JsonNode;
  *   <li>it fits the window of the mapping, and is smaller than any prompt this node has seen the relay refuse for its
  *       length ({@link XpLearnedLimits}); the window is measured on the prompt alone, except that a relay whose mapping states
  *       a maximum output is sent the output limit that the maximum allows when the client wrote none, if the window holds that
- *       beside the prompt and this node has not seen the relay refuse a body as large with it (D15, {@link #evaluate}), and
+ *       beside the prompt and this node has not seen the relay refuse a body as large with it ({@link #evaluate}), and
  *       the 4,096 it is otherwise sent when it does not;
  *   <li>and the relay has not broken off an answer for this session a moment ago ({@link TierSessionBindings#relayExcluded}).
  * </ol>
@@ -183,11 +183,11 @@ final class XpEligibility {
     }
 
     /**
-     * The output limits a relay may be sent for a request whose limit the gateway chose (D15, {@link
+     * The output limits a relay may be sent for a request whose limit the gateway chose ({@link
      * TierEntryFacts#gatewayOutput}), as its mapping decides them.
      *
-     * @param narrow the limit the prompt is judged with, the most that a relay was sent before D11 (4,096, or the maximum
-     *     output of the mapping if that is less); 0 for a request whose limit is the client's or the entry's own, which
+     * @param narrow the limit the prompt is judged with, what a relay is sent when its window cannot hold the wider one
+     *     (4,096, or the maximum output of the mapping if that is less); 0 for a request whose limit is the client's or the entry's own, which
      *     has one body, the planned one
      * @param wide the limit the relay is sent when the window holds it beside the prompt and this node has not seen the
      *     relay refuse a body as large with it (the maximum output of the mapping, as far as the gateway's own default
@@ -363,8 +363,8 @@ final class XpEligibility {
                     verdict.hard().stream().map(Feature::label).distinct().collect(Collectors.joining(","))));
                 continue;
             }
-            // The prompt is judged on the body the relay was sent before D11 (the 4,096 that was never counted besides it, as
-            // far as its mapping allows no more); a relay is left out for what that body is left out for, as it was.
+            // The prompt is judged on the narrow body (its output is 4,096, which is not counted beside the prompt, or less where
+            // its mapping allows no more); a relay is left out for what that body is left out for.
             Outputs outputs = Outputs.of(request, facts, mapping);
             Built body = built.computeIfAbsent(new BodyKey(settings, outputs.narrow()),
                 ignored -> build(chat, facts, settings, outputs.narrow()));
@@ -375,9 +375,8 @@ final class XpEligibility {
             }
             long beyondFallback = 0;
             if (outputs.widerThanBefore()) {
-                // D15: the maximum its mapping states, if the window holds it beside the prompt and this node has not seen the
-                // relay refuse a body as large with it; if not, the relay is sent the request it was sent before D11, which
-                // its prompt fits.
+                // The maximum its mapping states, if the window holds it beside the prompt and this node has not seen the
+                // relay refuse a body as large with it; if not, the relay is sent the narrow body, which its prompt fits.
                 long extra = outputs.wide() - outputs.narrow();
                 Built wide = built.computeIfAbsent(new BodyKey(settings, outputs.wide()),
                     ignored -> build(chat, facts, settings, outputs.wide()));
@@ -527,7 +526,7 @@ final class XpEligibility {
     /**
      * The body for one set of settings, made from the request as it is reserved (the Responses entry's body is converted
      * from that one) and from what the original body says about reasoning and tool search. The output limit is the one of the
-     * request, unless {@code output} says what a relay is given for a limit the gateway chose (D15, {@link Outputs}). A body
+     * request, unless {@code output} says what a relay is given for a limit the gateway chose ({@link Outputs}). A body
      * that cannot be made, or does not pass the lint, is a conversion this member cannot serve; a defect in the conversion
      * costs the request its relays, not the request. (The names of the functions of a Gemini request are held to what the
      * upstreams of the other vendors take by the policy, as a feature, and not here: they are the client's, not a defect.)

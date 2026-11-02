@@ -250,7 +250,7 @@ class AccountImportParserTest {
     }
 
     @Test
-    void acceptsSub2ApiAnthropicApiKeyPassthroughShape() throws Exception {
+    void acceptsAnthropicApiKeyAccountWithPassthroughFlag() throws Exception {
         AccountDtos.ImportAccountsRequest request = parser.parse(objectMapper.readTree("""
             {
               "name": "anthropic-key-1",

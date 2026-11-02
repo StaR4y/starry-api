@@ -4,10 +4,13 @@
   "private": true,
   "type": "module",
   "description": "Starry API 管理后台",
+  "license": "AGPL-3.0-only",
   "scripts": {
     "test:i18n": "node --test tests/i18n.test.mjs",
     "test:documentation": "node --test tests/documentMarkdown.test.mjs",
     "test:source-tiers": "node --test tests/sourceTiers.test.mjs",
+    "test:legal": "node --test tests/sourceNotice.test.mjs tests/thirdPartyNotices.test.mjs",
+    "test:links": "node --test tests/webLink.test.mjs",
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",

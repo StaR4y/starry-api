@@ -130,7 +130,7 @@ import tools.jackson.databind.node.ObjectNode;
 /**
  * The Responses entry served by a relay, end to end through the facade and its dispatch loop (design 4.8, 7.5, 7.8, 7.9):
  * Codex asking for a Claude model, a relay as the first tier of the anthropic vendor and Kiro as the second, the way the
- * owner's example has it. The planner is the real one with a registry that offers the Responses pair; the dispatcher of
+ * reference scenario has it. The planner is the real one with a registry that offers the Responses pair; the dispatcher of
  * the relays is a stand-in that answers per account, and so are Kiro and the account pool. What is looked at is what the
  * relay is asked, what Codex is answered, who owns the chain the answer starts, what the next turns of a chain meet, and
  * that a request that no relay takes part in is served as it was.
@@ -148,11 +148,11 @@ class ProxyFacadeTieredXpResponsesTest {
         new BigDecimal("0.00000375"), new BigDecimal("0.000003"));
     private static final String CALL_ID = "call_ABCDEFGHIJKLMNOPQRSTUVWX";
     /**
-     * The limit a request that names none is held to (D14): the default of the gateway, which claude-sonnet-4.5 writes, the
+     * The limit a request that names none is held to: the default of the gateway, which claude-sonnet-4.5 writes, the
      * catalog listing 64,000 for it.
      */
     private static final int DEFAULT_OUTPUT = 16_000;
-    /** What a relay whose mapping states no maximum output is given for a request that names none (D15), as it was before D11. */
+    /** What a relay whose mapping states no maximum output is given for a request that names none, as it was before the gateway chose a default. */
     private static final int RELAY_OUTPUT = 4_096;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -344,7 +344,7 @@ class ProxyFacadeTieredXpResponsesTest {
             .containsExactly("exec_command", "update_plan");
         assertThat(body.path("tool_choice").asString()).isEqualTo("auto");
         // The request did not name a limit, and the mapping of the relay states no maximum output: the relay is given and held to
-        // the 4,096 it always was, not the default output of the gateway that the reservation assumes (D15).
+        // the 4,096 it always was, not the default output of the gateway that the reservation assumes.
         assertThat(body.path("max_tokens").asInt()).isEqualTo(RELAY_OUTPUT);
         assertThat(lastLimits.maxOutputTokens()).isEqualTo(RELAY_OUTPUT);
         assertThat(body.path("stream").booleanValue()).isTrue();
@@ -390,7 +390,7 @@ class ProxyFacadeTieredXpResponsesTest {
 
         responses(body);
 
-        // D6: the advice about the length is not sent and does not keep the relay from the request.
+        // The advice about the length is not sent and does not keep the relay from the request.
         assertThat(dispatched).containsExactly("relay-1");
         assertThat(onlyLog().degradedFeatures()).contains("verbosity");
         assertThat(relayDispatches.getFirst().wireBody().toString()).doesNotContain("verbosity");
@@ -594,7 +594,7 @@ class ProxyFacadeTieredXpResponsesTest {
         }
         assertThat(dispatched).containsExactly("relay-1", "kiro-1", "kiro-1", "kiro-1", "kiro-1", "kiro-1");
         verify(apiKeyService, times(5)).accountUsageServed(any(), anyString(), any(), anyLong(), anyLong(), eq("anthropic:kiro"), eq(2), any());
-        // The relay was held to the 4,096 it always was, where the retry that Kiro serves is given the default output (D14, D15):
+        // The relay was held to the 4,096 it always was, where the retry that Kiro serves is given the default output:
         // the client that was held back at the relay's bound is not held to it again.
         assertThat(relayDispatches.getFirst().forwardedOutputLimit()).isEqualTo(RELAY_OUTPUT);
         assertThat(kiroPayloads).hasSize(5).allSatisfy(payload ->
@@ -602,7 +602,7 @@ class ProxyFacadeTieredXpResponsesTest {
     }
 
     /**
-     * The operator paid for the answer that was held back, and the row of the attempt says what the relay reported of it (D11)
+     * The operator paid for the answer that was held back, and the row of the attempt says what the relay reported of it
      * in columns of their own: the tokens and the credits of the row are the user's usage and charge, which are nothing.
      */
     @Test
@@ -653,10 +653,10 @@ class ProxyFacadeTieredXpResponsesTest {
     }
 
     /**
-     * The limit a request that names none is held to, the default output of the gateway (D14), is the gateway's for the native
+     * The limit a request that names none is held to, the default output of the gateway, is the gateway's for the native
      * sources: Kiro is sent it as its {@code maxTokens} (it is the bound the reservation is sized from). Codex accounts, which drop
      * the field, are the only ones that are not held to it. A relay whose mapping states no maximum output is given the 4,096 it was
-     * given before the gateway chose a default (D15, design 7.10): the gateway does not know what its upstream writes.
+     * given before the gateway chose a default (design 7.10): the gateway does not know what its upstream writes.
      */
     @Test
     void kiroIsHeldToTheDefaultOutputLimitAndTheRelayToTheFourThousandWhenTheClientNamesNone() {
@@ -731,7 +731,7 @@ class ProxyFacadeTieredXpResponsesTest {
                 org.assertj.core.groups.Tuple.tuple("relay-1", 20_000L),
                 org.assertj.core.groups.Tuple.tuple("relay-1", 4096L),
                 org.assertj.core.groups.Tuple.tuple("kiro-1", 4096L));
-        // The body Kiro is sent and the reservation are the default, the relay's body is its own 4,096 (D15).
+        // The body Kiro is sent and the reservation are the default, the relay's body is its own 4,096.
         assertThat(relayDispatches.getFirst().wireBody().path("max_tokens").asInt()).isEqualTo(RELAY_OUTPUT);
         assertThat(kiroPayloads.getFirst().path("inferenceConfig").path("maxTokens").asInt()).isEqualTo(DEFAULT_OUTPUT);
     }
@@ -739,7 +739,7 @@ class ProxyFacadeTieredXpResponsesTest {
     /**
      * The default is the operator's to set (STARRY_RESPONSES_DEFAULT_OUTPUT_TOKENS): it is the one number that Kiro is sent and that
      * the reservation is sized from, however high it is set (the models of this test write 64,000). A relay whose mapping states no
-     * maximum output is not given it (D15).
+     * maximum output is not given it.
      */
     @Test
     void theDefaultOutputTheOperatorSetIsTheOneKiroAndTheReservationAreHeldToAndAnUnboundedRelayStaysAtFourThousand() {
@@ -757,7 +757,7 @@ class ProxyFacadeTieredXpResponsesTest {
         ArgumentCaptor<BigDecimal> reserved = ArgumentCaptor.forClass(BigDecimal.class);
         verify(apiKeyService, times(2)).reserveUsage(any(), anyString(), reserved.capture(), anyString());
         // $15/M out at Kiro's 0.6, the tier that is sent the default: about 0.288 for 32,000 tokens, plus the input. The relay's
-        // tier is reserved for the 4,096 its relay is given (D15).
+        // tier is reserved for the 4,096 its relay is given.
         assertThat(reserved.getAllValues()).allSatisfy(hold -> assertThat(hold).isGreaterThan(new BigDecimal("0.288")).isLessThan(new BigDecimal("0.31")));
         // Admission is asked for the 4,096 it always was.
         ArgumentCaptor<AdmissionRequest> asked = ArgumentCaptor.forClass(AdmissionRequest.class);
@@ -774,7 +774,7 @@ class ProxyFacadeTieredXpResponsesTest {
         return body;
     }
 
-    // ---- what a relay is given for a request that names no output limit (D15) ----
+    // ---- what a relay is given for a request that names no output limit ----
 
     /** {@link #owner} for a relay whose mapping of the model states {@code maxOutput} as its maximum output (null: none). */
     private SourceTierSnapshot ownerWithMaximumOutput(Integer maxOutput, PairGate... gates) {
@@ -876,7 +876,7 @@ class ProxyFacadeTieredXpResponsesTest {
         assertThat(tight.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
         assertThat(over.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
         assertThat(relayDispatches).extracting(TierDispatch::forwardedOutputLimit).containsExactly(16_000L, 4_096L);
-        // The fallback is the body the relay was given before D11, and nothing was learned or left out for the output.
+        // The fallback is the body the relay was given before the gateway chose a default, and nothing was learned or left out for the output.
         MemberModel mapping = mapping(relayMember("relay-1"), relay, 200_000, 16_000);
         assertThat(learnedLimits.refusedFrom(mapping)).isEmpty();
         verify(apiKeyService, never()).releaseUsage(any(), anyString(), anyBoolean(), anyString());
@@ -1036,7 +1036,7 @@ class ProxyFacadeTieredXpResponsesTest {
     /**
      * Anthropic's words say a prompt did not fit beside the output asked for. For a limit the client wrote that is no number this
      * node chose, and learning the prompt alone from it would keep the relay, for six hours, from every prompt that large, the
-     * 4,096 bodies of the same mapping included: it stays what it was before D15, a 400 of the converted request that teaches
+     * 4,096 bodies of the same mapping included: it stays any other 400 of the converted request: one that teaches
      * nothing and crosses to Kiro once.
      */
     @Test
@@ -1375,7 +1375,7 @@ class ProxyFacadeTieredXpResponsesTest {
         assertThat(dispatched).containsExactly("kiro-1");
         assertThat(startedFrom()).isEqualTo("anthropic:relay");
 
-        // The relay is free again, but the chain was pushed down and stays where it is (D4): the binding follows the
+        // The relay is free again, but the chain was pushed down and stays where it is: the binding follows the
         // response of each turn, whose id is the name of the session for the next one.
         busy.clear();
         String second = idOf(responses(plain("second turn", first)));
@@ -1390,7 +1390,7 @@ class ProxyFacadeTieredXpResponsesTest {
 
     /**
      * A chain that fell to Kiro and finds Kiro without an account does not climb back to the relay above it, as it did not before the
-     * reservation of a tier of relays alone followed what the relay is sent (D15): it is told what Kiro said (D4) and stays where it
+     * reservation of a tier of relays alone followed what the relay is sent: it is told what Kiro said and stays where it
      * is, instead of being charged the relay's factor for the turn and having its binding moved up to the relay.
      */
     @Test
@@ -1691,7 +1691,7 @@ class ProxyFacadeTieredXpResponsesTest {
 
         ResponseEntity<?> response = responses(codexTurn());
 
-        // D5: the key of the relay is the operator's to mend; the request goes on to the next source.
+        // The key of the relay is the operator's to mend; the request goes on to the next source.
         assertThat(dispatched).containsExactly("relay-1", "kiro-1");
         assertThat(response.getStatusCode().value()).isEqualTo(200);
         assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
@@ -1723,7 +1723,7 @@ class ProxyFacadeTieredXpResponsesTest {
         assertThatThrownBy(() -> responses(codexTurn()))
             .isInstanceOfSatisfying(ApiException.class, error -> assertThat(error.getStatus()).isEqualTo(HttpStatus.BAD_GATEWAY));
 
-        // D8: the operator carries it. The reservation is released for good, not left for review, and nothing is charged.
+        // The operator carries it. The reservation is released for good, not left for review, and nothing is charged.
         assertThat(dispatched).containsExactly("relay-1");
         verify(apiKeyService).releaseUsage(any(), anyString(), eq(true), anyString());
         verify(apiKeyService, never()).releaseUsage(any(), anyString(), eq(false), anyString());
@@ -1877,7 +1877,7 @@ class ProxyFacadeTieredXpResponsesTest {
 
         assertThat(dispatched).containsExactly("relay-1");
         assertThat(answer.path("output")).extracting(item -> item.path("type").asString()).containsExactly("reasoning", "message");
-        // The relay is busy for the next turn of the chain, which falls to the official keys (D2).
+        // The relay is busy for the next turn of the chain, which falls to the official keys.
         busy.add("relay-1");
         dispatched.clear();
         ObjectNode next = objectMapper.createObjectNode();
@@ -1987,7 +1987,7 @@ class ProxyFacadeTieredXpResponsesTest {
         assertThat(call.path("name").asString()).isEqualTo("apply_patch");
         assertThat(call.path("toolUseId").asString()).isEqualTo(callId);
         // The argument is the one Kiro was declared the tool with: the `patch` of the function the relays are given when the client
-        // declared the tool as a custom tool (D13), the string property of the client's own function when it declared one.
+        // declared the tool as a custom tool, the string property of the client's own function when it declared one.
         JsonNode declared = payload.path("conversationState").path("currentMessage").path("userInputMessage").path("userInputMessageContext")
             .path("tools").get(0).path("toolSpecification");
         String argument = "function".equals(declaredAs) ? "input" : "patch";
@@ -2002,7 +2002,7 @@ class ProxyFacadeTieredXpResponsesTest {
         assertThat(results.get(0).toString()).contains("Done!");
     }
 
-    // ---- the editing tool on the Kiro and Anthropic routes of a vendor that has relays (D13) ----
+    // ---- the editing tool on the Kiro and Anthropic routes of a vendor that has relays ----
 
     /** What Kiro answers when it calls the editing tool: a function call with the argument it was declared the tool with. */
     private PlatformCompletionResult kiroPatchCall(String argument) {
@@ -2599,7 +2599,7 @@ class ProxyFacadeTieredXpResponsesTest {
         return new Tier("anthropic", tierId, level, tierId, new BigDecimal(factor), listed, true, true, null);
     }
 
-    /** The owner's example: the relay as the first tier, Kiro as the second at 0.6. */
+    /** The reference scenario: the relay as the first tier, Kiro as the second at 0.6. */
     private SourceTierSnapshot owner(Member member, PairGate... gates) {
         return SourceTierSnapshot.of(7L, List.of(vendor()), List.of(
             tier("relay", 1, "1"),
@@ -2608,7 +2608,7 @@ class ProxyFacadeTieredXpResponsesTest {
     }
 
     /**
-     * The owner's example with the Anthropic keys in place of Kiro: the relay as the first tier, the keys as the second at 0.8.
+     * The reference scenario with the Anthropic keys in place of Kiro: the relay as the first tier, the keys as the second at 0.8.
      * The keys serve the Responses entry when the vendor serves every endpoint from the Anthropic route (the all-endpoints switch).
      */
     private SourceTierSnapshot ownerWithAnthropicKeys(Member member, PairGate... gates) {

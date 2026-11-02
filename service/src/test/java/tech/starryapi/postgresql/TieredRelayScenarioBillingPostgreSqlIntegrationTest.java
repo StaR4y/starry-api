@@ -54,8 +54,8 @@ import tech.starryapi.platform.core.PlatformUsage;
 import tech.starryapi.platform.kiro.KiroUpstreamClient;
 import tech.starryapi.platform.openai.OpenAiUpstreamClient;
 import tech.starryapi.platform.upstream.UpstreamException;
-import tech.starryapi.proxy.OwnerExampleRelays;
-import tech.starryapi.proxy.OwnerExampleRelays.Reply;
+import tech.starryapi.proxy.TieredRelayScenarioRelays;
+import tech.starryapi.proxy.TieredRelayScenarioRelays.Reply;
 import tech.starryapi.proxy.ProxyFacade;
 import tech.starryapi.proxy.tier.TierResponseHeaders;
 import tech.starryapi.sourcetier.SourceTierAdminService;
@@ -68,12 +68,12 @@ import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
 
 /**
- * The money of the owner's example (design 5, 7.8 and 11, invariants I2, I3 and I7) on the beans of the application and a
+ * The money of the reference scenario (design 5, 7.8 and 11, invariants I2, I3 and I7) on the beans of the application and a
  * real database, with the relay a server on a loopback port that the real relay client asks: the anthropic vendor with an
  * OpenAI-format relay as its first tier at the standard price and Kiro as its second at 0.6 of it, set up through the
  * administrator API as an operator would, served to Claude Code (the Messages endpoint) and to OpenCode (the Chat
  * endpoint) by the same scenarios. Only the upstream clients of Kiro, Anthropic and OpenAI are stand-ins. The facade side
- * of the same scenarios is {@code OwnerExampleTieredXpTest}; here the question is what the books say.
+ * of the same scenarios is {@code TieredRelayScenarioTest}; here the question is what the books say.
  *
  * <p>Every scenario ends on the same four promises: a user is charged the standard price times the factor of the tier
  * that served, never more than was reserved; a request that nobody served is released and its money is back; nothing is
@@ -85,13 +85,13 @@ import tools.jackson.databind.node.ObjectNode;
     "starry.stats.aggregation-enabled=false"
 })
 @Timeout(value = 5, unit = TimeUnit.MINUTES)
-class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSupport {
+class TieredRelayScenarioBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSupport {
 
     private static final String MODEL = "claude-sonnet-4.5";
     private static final BigDecimal START = new BigDecimal("10");
     /** What the relay reports, and what Kiro reports: 800 tokens in and 100 out, whatever the request. */
     private static final PlatformUsage REPORTED = new PlatformUsage(
-        OwnerExampleRelays.INPUT_TOKENS, OwnerExampleRelays.OUTPUT_TOKENS, BigDecimal.ZERO, 0, 0, 0);
+        TieredRelayScenarioRelays.INPUT_TOKENS, TieredRelayScenarioRelays.OUTPUT_TOKENS, BigDecimal.ZERO, 0, 0, 0);
     private static final PlatformCompletionResult KIRO_ANSWER = new PlatformCompletionResult("from kiro", REPORTED);
 
     @MockitoBean KiroUpstreamClient kiroClient;
@@ -112,7 +112,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     private final List<String> dispatched = Collections.synchronizedList(new ArrayList<>());
     private final Map<String, Supplier<Mono<PlatformCompletionResult>>> nativeAnswers = new HashMap<>();
     private final List<String> accounts = new ArrayList<>();
-    private OwnerExampleRelays relays;
+    private TieredRelayScenarioRelays relays;
     private BillingQuote standard;
     private String suffix;
 
@@ -142,7 +142,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
             .fetch().rowsUpdated().block();
         registry.refresh().block();
         suffix = UUID.randomUUID().toString().substring(0, 6);
-        relays = new OwnerExampleRelays(dispatched::add);
+        relays = new TieredRelayScenarioRelays(dispatched::add);
         standard = pricing.billingQuote(MODEL, false, payments.config().block().apiBillingMultiplier()).block();
         when(kiroClient.complete(any(), any(), anyString())).thenAnswer(invocation -> {
             String id = ((ProxyAccountEntity) invocation.getArgument(0)).getAccountId();
@@ -165,7 +165,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     @EnumSource(Entry.class)
     void theRelayIsChargedTheStandardPriceAndTheRestOfTheReservationGoesBack(Entry entry) {
         Client client = client();
-        ownersExample(client, 1, 200_000);
+        referenceScenario(client, 1, 200_000);
 
         ResponseEntity<?> response = ask(client, entry, body(entry, MODEL, "hello"), "session-a");
 
@@ -199,7 +199,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     @EnumSource(Entry.class)
     void aRelayThatDoesNotServeTheModelLeavesTheRequestToKiroAndKiroIsWhatIsCharged(Entry entry) {
         Client client = client();
-        ownersExample(client, 1, 200_000);
+        referenceScenario(client, 1, 200_000);
         relays.always(id("relay-1"), Reply.failure(404, "model_not_found"));
 
         ResponseEntity<?> response = ask(client, entry, body(entry, MODEL, "hello"), "session-a");
@@ -219,7 +219,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     @EnumSource(Entry.class)
     void anErrorInsideA200LeavesTheRequestToKiroAndKiroIsWhatIsCharged(Entry entry) {
         Client client = client();
-        ownersExample(client, 1, 200_000);
+        referenceScenario(client, 1, 200_000);
         relays.always(id("relay-1"), Reply.inBand("model_not_found", "no available channel for model " + MODEL));
 
         ResponseEntity<?> response = ask(client, entry, body(entry, MODEL, "hello"), "session-a");
@@ -234,7 +234,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     @EnumSource(Entry.class)
     void aStreamThatEndedBeforeAnythingWasGeneratedLeavesTheRequestToKiroAndKiroIsWhatIsCharged(Entry entry) {
         Client client = client();
-        ownersExample(client, 1, 200_000);
+        referenceScenario(client, 1, 200_000);
         relays.always(id("relay-1"), Reply.cutBeforeAnything());
 
         ResponseEntity<?> response = ask(client, entry, body(entry, MODEL, "hello"), "session-a");
@@ -249,7 +249,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     @EnumSource(Entry.class)
     void aBusyRelayLeavesTheRequestToKiroTheSessionStaysThereAndANewSessionStartsFromTheRelay(Entry entry) {
         Client client = client();
-        ownersExample(client, 1, 200_000);
+        referenceScenario(client, 1, 200_000);
         // The relay takes one request at a time and one is being served: admission turns the next one away (design 4.2).
         makeBusy(id("relay-1"));
 
@@ -280,13 +280,13 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
         assertTheBooksBalance(client);
     }
 
-    // ---- the relay turns its own key down (D5) ----
+    // ---- the relay turns its own key down ----
 
     @ParameterizedTest(name = "{0}")
     @EnumSource(Entry.class)
     void aRelayThatRejectsItsOwnKeyLeavesTheRequestToKiroKiroIsWhatIsChargedAndTheRelayRestsForTenMinutes(Entry entry) {
         Client client = client();
-        ownersExample(client, 1, 200_000);
+        referenceScenario(client, 1, 200_000);
         relays.always(id("relay-1"), Reply.failure(401, "invalid_api_key"));
 
         ResponseEntity<?> response = ask(client, entry, body(entry, MODEL, "hello"), "session-a");
@@ -323,7 +323,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     @EnumSource(Entry.class)
     void aRelayThatRejectsItsKeyTwiceAndSaysItsTokenWasInvalidatedIsStillNotDisabledByTheHealthTestThatTheSecondRefusalStarts(Entry entry) {
         Client client = client();
-        ownersExample(client, 1, 200_000);
+        referenceScenario(client, 1, 200_000);
         // The words the health test of a native account takes for a credential that is gone for good, from the relay.
         relays.always(id("relay-1"), Reply.failure(401, "token_invalidated"));
 
@@ -340,7 +340,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
         });
 
         // The automatic test asks the relay as well, is turned down by the same words, and leaves the account enabled: it
-        // rests, and serves again once the key is mended (D5).
+        // rests, and serves again once the key is mended.
         await().atMost(Duration.ofSeconds(20)).pollInterval(Duration.ofMillis(250))
             .untilAsserted(() -> assertThat(((Number) health(id("relay-1")).get("error_count")).intValue()).isGreaterThanOrEqualTo(3));
         assertThat(health(id("relay-1"))).containsEntry("enabled", true).containsEntry("suspend_reason", null);
@@ -356,7 +356,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     @EnumSource(Entry.class)
     void aRelayThatRejectsItsOwnKeyWithKiroBusyIsNotToldToTheUserAndTheMoneyIsBack(Entry entry) {
         Client client = client();
-        ownersExample(client, 1, 200_000);
+        referenceScenario(client, 1, 200_000);
         makeBusy(id("kiro-1"));
         relays.always(id("relay-1"), Reply.failure(403, "permission_error"));
 
@@ -387,7 +387,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     @EnumSource(Entry.class)
     void aFailureOfTheFirstRelayIsRetriedOnTheSecondAndTheRelayIsWhatIsCharged(Entry entry) {
         Client client = client();
-        ownersExample(client, 2, 200_000);
+        referenceScenario(client, 2, 200_000);
         // The ranker says which relay is asked first; whichever it is, it fails and the other is asked.
         relays.nextAny(Reply.failure(404, "model_not_found"));
 
@@ -405,7 +405,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     @EnumSource(Entry.class)
     void whenBothRelaysFailTheReservedSlotTakesTheRequestToKiroAndKiroIsWhatIsCharged(Entry entry) {
         Client client = client();
-        ownersExample(client, 2, 200_000);
+        referenceScenario(client, 2, 200_000);
         relays.always(id("relay-1"), Reply.failure(404, "model_not_found"));
         relays.always(id("relay-2"), Reply.failure(404, "model_not_found"));
 
@@ -426,7 +426,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     @EnumSource(Entry.class)
     void aStreamThatBrokeOffAfterItStartedReleasesTheReservationAndTheRetryIsServedByKiro(Entry entry) {
         Client client = client();
-        ownersExample(client, 1, 200_000);
+        referenceScenario(client, 1, 200_000);
         relays.next(id("relay-1"), Reply.cutAfterStart("I will run the"));
 
         assertThatThrownBy(() -> ask(client, entry, body(entry, MODEL, "hello"), "session-a"))
@@ -455,12 +455,12 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
         assertTheBooksBalance(client);
     }
 
-    /** D8: the operator carries an interrupted attempt even when the relay had counted its tokens before it broke off. */
+    /** The operator carries an interrupted attempt even when the relay had counted its tokens before it broke off. */
     @ParameterizedTest(name = "{0}")
     @EnumSource(Entry.class)
     void aStreamThatBrokeOffAfterTheRelayReportedUsageCostsTheUserNothingAndLeavesNothingForAReview(Entry entry) {
         Client client = client();
-        ownersExample(client, 1, 200_000);
+        referenceScenario(client, 1, 200_000);
         relays.next(id("relay-1"), Reply.cutAfterUsage("I will run the", 5_000, 700));
 
         assertThatThrownBy(() -> ask(client, entry, body(entry, MODEL, "hello"), "session-a"))
@@ -485,7 +485,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     void aClientThatGivesUpWhileTheRelayIsGeneratingGetsTheMoneyBackAndNothingWaitsForAReview(Entry entry)
         throws InterruptedException {
         Client client = client();
-        ownersExample(client, 1, 200_000);
+        referenceScenario(client, 1, 200_000);
         CountDownLatch arrived = new CountDownLatch(1);
         CountDownLatch letGo = new CountDownLatch(1);
         relays.next(id("relay-1"), Reply.holding(arrived, letGo, Reply.text("too late")));
@@ -515,7 +515,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     @EnumSource(Entry.class)
     void aRelayWithoutQuotaAndAKiroThatRefusesTheRequestReleaseTheReservationAndTheUserCarriesOn(Entry entry) {
         Client client = client();
-        ownersExample(client, 1, 200_000);
+        referenceScenario(client, 1, 200_000);
         relays.always(id("relay-1"), Reply.failure(402, "insufficient_quota"));
         nativeAnswers.put(id("kiro-1"), () -> Mono.error(new UpstreamException(400, "Improperly formed request", false)));
 
@@ -542,21 +542,21 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     @ParameterizedTest(name = "{0}")
     @EnumSource(Entry.class)
     void aRelayThatReportsFarMoreInputThanTheRequestCouldHaveHadIsChargedNoMoreThanWasReserved(Entry entry) {
-        assertChargedNoMoreThanReservedForAnswerClaiming(entry, 90_000_000L, OwnerExampleRelays.OUTPUT_TOKENS);
+        assertChargedNoMoreThanReservedForAnswerClaiming(entry, 90_000_000L, TieredRelayScenarioRelays.OUTPUT_TOKENS);
     }
 
     @ParameterizedTest(name = "{0}")
     @EnumSource(Entry.class)
     void aRelayThatReportsFarMoreOutputThanTheRequestAllowedIsChargedNoMoreThanWasReserved(Entry entry) {
-        assertChargedNoMoreThanReservedForAnswerClaiming(entry, OwnerExampleRelays.INPUT_TOKENS, 9_000_000L);
+        assertChargedNoMoreThanReservedForAnswerClaiming(entry, TieredRelayScenarioRelays.INPUT_TOKENS, 9_000_000L);
     }
 
     @ParameterizedTest(name = "{0}")
     @EnumSource(Entry.class)
     void aRelayThatReportsMoreOutputThanTheLimitItWasSentIsChargedForThatLimitAlone(Entry entry) {
         Client client = client();
-        ownersExample(client, 1, 200_000);
-        relays.always(id("relay-1"), Reply.textReporting("from relay-1", OwnerExampleRelays.INPUT_TOKENS, 9_000_000L));
+        referenceScenario(client, 1, 200_000);
+        relays.always(id("relay-1"), Reply.textReporting("from relay-1", TieredRelayScenarioRelays.INPUT_TOKENS, 9_000_000L));
         // A client of the SDKs asks for as many tokens as it needs: the tier is reserved for the default limit all the same.
         ObjectNode request = body(entry, MODEL, "hello");
         request.put("max_tokens", 100);
@@ -567,7 +567,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
         assertThat(relays.seen()).singleElement().satisfies(seen -> assertThat(seen.body().path("max_tokens").asInt()).isEqualTo(100));
         Map<String, Object> reservation = reservations(client).getLast();
         // The relay was told it may write 100 tokens, and 100 tokens are what the user is charged for, not the 4096 reserved.
-        BigDecimal limited = standard.cost(new PlatformUsage(OwnerExampleRelays.INPUT_TOKENS, 100, BigDecimal.ZERO, 0, 0, 0));
+        BigDecimal limited = standard.cost(new PlatformUsage(TieredRelayScenarioRelays.INPUT_TOKENS, 100, BigDecimal.ZERO, 0, 0, 0));
         assertThat((BigDecimal) reservation.get("actual_credits")).isEqualByComparingTo(limited);
         assertThat((BigDecimal) reservation.get("reserved_credits")).isGreaterThan(limited);
         assertThat(logs(client)).singleElement().satisfies(row -> assertThat(row.get("usage_source")).isEqualTo("CLAMPED"));
@@ -580,7 +580,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
      */
     private void assertChargedNoMoreThanReservedForAnswerClaiming(Entry entry, long claimedIn, long claimedOut) {
         Client client = client();
-        ownersExample(client, 1, 200_000);
+        referenceScenario(client, 1, 200_000);
         relays.always(id("relay-1"), Reply.textReporting("from relay-1", claimedIn, claimedOut));
 
         ResponseEntity<?> response = ask(client, entry, body(entry, MODEL, "hello"), "session-a");
@@ -601,7 +601,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     @EnumSource(Entry.class)
     void aRequestWithAServerSideSearchIsKirosToServeAndTheMainLoopStaysWithTheRelay(Entry entry) {
         Client client = client();
-        ownersExample(client, 1, 200_000);
+        referenceScenario(client, 1, 200_000);
 
         ask(client, entry, body(entry, MODEL, "Run echo hello"), "session-a");
         ResponseEntity<?> search = ask(client, entry, webSearch(entry), "session-a");
@@ -619,7 +619,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     @EnumSource(Entry.class)
     void aRequestLongerThanTheWindowOfTheRelayIsKirosToServeAndTheReservationIsBoundedByTheLongRequest(Entry entry) {
         Client client = client();
-        ownersExample(client, 1, 20_000);
+        referenceScenario(client, 1, 20_000);
 
         ResponseEntity<?> response = ask(client, entry, history(entry, 20, 6_000), "session-a");
 
@@ -639,7 +639,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     @EnumSource(Entry.class)
     void aPromptTheRelayRefusedForItsLengthIsKirosToServeAndOnlyTheLongOnesGoThereAfterIt(Entry entry) {
         Client client = client();
-        ownersExample(client, 1, 200_000);
+        referenceScenario(client, 1, 200_000);
         relays.next(id("relay-1"), Reply.failure(400, "context_length_exceeded"));
 
         ResponseEntity<?> refused = ask(client, entry, history(entry, 10, 6_000), "session-a");
@@ -661,7 +661,7 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     @Test
     void aRelayKeptForClaudeDoesNotServeGlmWhoseKeyIsTheOnlyOneThatDoes() {
         Client client = client();
-        ownersExample(client, 1, 200_000);
+        referenceScenario(client, 1, 200_000);
         // A model the compatible keys serve, as GLM is, priced like the official model it is named after. The relay is the
         // one the ranker prefers: if it were not left out of the pool, it would be given the request.
         String glm = account(id("z-glm"), "OpenAI-compatible", "api-key", "https://glm.example/v1", "sk-glm");
@@ -742,11 +742,11 @@ class OwnerExampleBillingPostgreSqlIntegrationTest extends PostgreSqlIntegration
     }
 
     /**
-     * The owner's example as an operator sets it up through the administrator API: the relay (or {@code relays} of them) as
+     * The reference scenario as an operator sets it up through the administrator API: the relay (or {@code relays} of them) as
      * the first tier at the standard price, mapped for Sonnet and Opus and open to the key of the client on both
      * endpoints, and Kiro as the second at 0.6, with the accounts the pools find them as.
      */
-    private void ownersExample(Client client, int relayCount, int window) {
+    private void referenceScenario(Client client, int relayCount, int window) {
         List<String> relayIds = new ArrayList<>();
         for (int i = 1; i <= relayCount; i++) {
             relayIds.add(account(id("relay-" + i), "OpenAI-compatible", "api-key", relays.url(id("relay-" + i)), "sk-relay-" + i));

@@ -1,0 +1,17 @@
+Logback: the reliable, generic, fast and flexible logging framework.
+Copyright (C) 1999-2026, QOS.ch. All rights reserved.
+
+This program and the accompanying materials are dual-licensed under either the
+terms of the Eclipse Public License v2.0 as published by the Eclipse Foundation,
+or (per the licensee's choosing) under the terms of the GNU Lesser General Public
+License version 2.1 as published by the Free Software Foundation.
+
+(The notice above is the one in the source files of logback 1.5.38; the project
+is at https://logback.qos.ch/.)
+
+Starry API uses logback-classic and logback-core, unmodified, under the second
+choice: the GNU Lesser General Public License, version 2.1 only. The text of that
+license is in LGPL-2.1.txt next to this file. Each library is its own jar under
+BOOT-INF/lib of the executable jar, so you can replace it with a modified version
+of your own, and its source code is in the -sources jars published with the
+release (see section 3 of the NOTICE file).

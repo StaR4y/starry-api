@@ -239,7 +239,7 @@ public class StatsService {
      * @param factor the tier's price factor, which the attempt would be charged at
      * @param selection how the tier was chosen: AUTO or PINNED
      * @param dispatch how the request was sent, when that was not natively
-     * @param withheldInputTokens what a relay reported as the input of an answer the gateway held back (D11), or null: the
+     * @param withheldInputTokens what a relay reported as the input of an answer the gateway held back, or null: the
      *     operator's cost, which is no usage of the user's, so it is not among the tokens of the row
      * @param withheldOutputTokens the same for the output
      */

@@ -62,9 +62,22 @@ tasks.named('bootRun') {
     classpath webuiRuntimeResourcesDir
 }
 
+// generateJavaNotices (JAVA-THIRD-PARTY-NOTICES.txt for the jar) and copyleftSources (the -sources jars of the libraries
+// used under a copyleft license), see the script.
+apply from: 'third-party-notices.gradle'
+
 tasks.named('bootJar') {
     dependsOn prepareWebuiRuntimeResources
     from(webuiRuntimeResourcesDir) {
         into 'BOOT-INF/classes'
+    }
+    // AGPL-3.0-only: the license text and the notices (license elections, data credits, trademarks) travel with the
+    // binary, at META-INF/ like the files in the Spring Boot jars it nests. The console's own third-party notices
+    // (THIRD-PARTY-NOTICES.txt) arrive with the webui resources above.
+    from(rootProject.layout.projectDirectory.file('LICENSE')) {
+        into 'META-INF'
+    }
+    from(rootProject.layout.projectDirectory.file('NOTICE')) {
+        into 'META-INF'
     }
 }

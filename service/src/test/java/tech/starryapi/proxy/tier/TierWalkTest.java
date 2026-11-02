@@ -154,7 +154,7 @@ class TierWalkTest {
         assertThat(tierIds(walk.levels())).containsExactly("official");
     }
 
-    // ---- the refusal cap (D2) ----
+    // ---- the refusal cap ----
 
     @Test
     void aTierThatRefusedAsOftenAsTheCapIsLeftOutWhileALowerTierRemains() {

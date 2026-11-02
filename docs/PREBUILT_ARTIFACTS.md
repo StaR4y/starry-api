@@ -23,7 +23,8 @@ Starry API 支持两种部署方式：**源码构建**（在服务器上用 Dock
 | `artifacts/starry-api-bundle.tar.gz.sha256` | 服务器脚本用的校验和 |
 | `artifacts/starry-api.jar` | 可执行的 Spring Boot jar（内嵌控制台） |
 | `artifacts/starry-api.jar.sha256` | jar 的校验和（也包含在整包里） |
-| `artifacts/starry-api-webui.tar.gz` | 单独的控制台静态文件包，用于检查或 CDN |
+| `artifacts/starry-api-webui.tar.gz` | 单独的控制台静态文件包，用于检查或 CDN（带 `LICENSE` 和 `NOTICE`） |
+| `artifacts/third-party-sources/*-sources.jar` | 按 copyleft 许可证使用的 5 个 Java 库（logback-classic、logback-core、jakarta.annotation-api、jakarta.mail-api、angus-mail）的源码 jar，和 jar、整包放在同一个位置 |
 | `artifacts/docker-compose.artifact.yml` | 用 JRE 镜像运行 jar 的 Compose 文件 |
 | `artifacts/runtime/recover-data-management.sh` | 双语交互恢复工具，会被复制进服务镜像的 `/app/bin/recover-data-management` |
 | `artifacts/runtime/recover-data-management.sh.sha256` | 恢复工具校验和，安装时会校验 |
@@ -33,6 +34,8 @@ Starry API 支持两种部署方式：**源码构建**（在服务器上用 Dock
 | `artifacts/build-info.json` | 源码提交、分支、版本、构建时间、大小、校验和等元数据 |
 
 整包还带有 `docker/egress/mihomo-entrypoint.sh`（可选 Mihomo 组件的启动脚本）、实验性的 `docker-compose.tls-bridge.yml`（TLS 指纹 bridge）和 `docs/ACCOUNT_EGRESS.md`。Compose 文件里的 `mihomo` 服务属于 `mihomo` profile：一键安装脚本在全新安装时默认选中它（空闲，由管理员在控制台打开），手动部署时 `.env` 没有 `COMPOSE_PROFILES=mihomo` 就不启动；整包不含 Mihomo 二进制，部署时拉取官方镜像。
+
+整包根目录还带有 `LICENSE`（AGPL-3.0-only）、`NOTICE`（依赖的许可证选择、源码和许可证文本在哪里、数据来源、商标声明）、`THIRD-PARTY-NOTICES.txt`（打进控制台的 npm 依赖的许可证，末尾是 logback 的版权声明和 LGPL-2.1-only 说明）、`JAVA-THIRD-PARTY-NOTICES.txt`（构建时根据运行时依赖的 POM 生成：每个 Java 库的版本和声明的许可证，以及许多 jar 自己不带的 Apache-2.0 / MIT 文本）、`licenses/`（logback 按 LGPL-2.1 使用，这里是 LGPL-2.1 全文和 logback 的版权声明）和 `third-party-sources/`（上面那 5 个库的源码 jar）；jar 的 `META-INF/` 里有 `LICENSE`、`NOTICE`、`JAVA-THIRD-PARTY-NOTICES.txt` 和 `licenses/`，控制台目录里有同一份 `THIRD-PARTY-NOTICES.txt`。一键安装脚本会把 `LICENSE`、`NOTICE` 和 `THIRD-PARTY-NOTICES.txt` 放进安装目录。发布脚本会检查这些都在，并在最后运行 `scripts/check-bundle-contents.sh`（CI 也会运行），它还确认整包和 jar 里没有 Mihomo 二进制或导出的容器镜像（Mihomo 是 GPL-3.0，只在部署时由 Docker 拉取，不随本项目分发）。源码 jar 由 `./gradlew :service:copyleftSources` 收集（第一次需要联网），`publish-artifact.sh` 的构建步骤会运行它；用 `SKIP_BUILD=true` 时要先自己运行。
 
 ---
 
@@ -76,8 +79,6 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
 curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
   | sudo env PUBLIC_BASE_URL=https://api.example.com bash
 ```
-
-私有仓库需要先保存 GitHub Token，见 [服务器一键安装](INSTALL_SERVER.md#二私有仓库怎么办)。
 
 部署脚本会：
 
@@ -126,8 +127,6 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
 | `FORCE_ENV` | `false` | 仅在 PostgreSQL 初始化**之前**重新生成 `.env`；已初始化的集群需要先在数据库里轮换角色密码，再手动更新 `.env` |
 | `INSTALL_DOCKER` | `true` | 缺少 Docker 时是否自动安装 |
 | `ENABLE_MIHOMO` | `auto` | `auto`：全新安装时部署可选的 Mihomo 出站组件（`.env` 里的 `COMPOSE_PROFILES=mihomo` 和随机的 `STARRY_EGRESS_CONTROLLER_SECRET`），已有 `.env` 不改动；`true`：已有 `.env` 也追加；`false`：不部署，已有的保持不变。部署后由管理员在「系统设置 → 出站代理」打开。整包只含启动脚本，不含 Mihomo 二进制，镜像部署时拉取官方 `metacubex/mihomo`。见 [账号出站代理](ACCOUNT_EGRESS.md#部署) |
-| `GITHUB_TOKEN` | 空 | 私有仓库下载用的 Token |
-| `GITHUB_TOKEN_FILE` | `${INSTALL_DIR}/.github-token` | `GITHUB_TOKEN` 为空时使用的本地 Token 文件 |
 
 ---
 

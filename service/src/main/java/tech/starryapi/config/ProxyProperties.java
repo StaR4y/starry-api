@@ -9,9 +9,9 @@ import tech.starryapi.proxy.tier.RequestBounds;
 @ConfigurationProperties(prefix = "starry.proxy")
 public class ProxyProperties {
 
-    /** What a Responses request that names no output limit is given, when the model writes that much (D14). */
+    /** What a Responses request that names no output limit is given, when the model writes that much. */
     public static final long DEFAULT_RESPONSES_OUTPUT_TOKENS = 16_000L;
-    /** The least the default may be set to: the 4,096 the gateway gave before D11. The setting raises it, it does not cut answers shorter. */
+    /** The least the default may be set to: the 4,096 the gateway applied to such a request before it had a configurable default. The setting raises it, it does not cut answers shorter. */
     public static final long MIN_RESPONSES_OUTPUT_TOKENS = RequestBounds.FALLBACK_OUTPUT_TOKENS;
     /** The most the default may be set to: the most output a client itself may ask for. */
     public static final long MAX_RESPONSES_OUTPUT_TOKENS = RequestBounds.MAX_OUTPUT_TOKENS;
@@ -162,7 +162,7 @@ public class ProxyProperties {
     /**
      * The output limit of a Responses request that names none (Codex never does): what the reservation and the native sources
      * (Kiro, official OpenAI keys, Anthropic keys) are held to; the model's own maximum output is the most it is ever given. A
-     * relay is not given it: it is given the maximum output its mapping states, up to this, or 4,096 (D15). A value outside the
+     * relay is not given it: it is given the maximum output its mapping states, up to this, or 4,096. A value outside the
      * range is refused at startup.
      */
     public long getResponsesDefaultOutputTokens() {

@@ -41,7 +41,10 @@ public class SystemMaintenanceWebFilter implements WebFilter, Ordered {
         "/logo.svg",
         "/manifest.json",
         "/robots.txt",
-        "/apple-touch-icon.png"
+        "/apple-touch-icon.png",
+        // The "Third-party licenses" link of the footer (AGPL section 13 and the notices of the bundled packages): the
+        // maintenance page shows that footer, and it has to keep working.
+        "/THIRD-PARTY-NOTICES.txt"
     );
 
     private final DataManagementSecurityService securityService;

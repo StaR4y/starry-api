@@ -199,7 +199,7 @@ public class ModelPricingService {
     }
 
     /**
-     * The most output tokens the official price catalog lists for the model, which is what the upstream of that model
+     * The most output tokens the vendor list price catalog lists for the model, which is what the upstream of that model
      * itself holds a request to; empty when the catalog does not list the model or lists it with none.
      */
     public OptionalInt maxOutputTokens(String model) {
@@ -311,7 +311,7 @@ public class ModelPricingService {
                     effectiveCacheWriteMultiplier(rule), UNKNOWN_MODEL_FALLBACK_MULTIPLIER), false);
         }
         BigDecimal ratio = rule != null ? rule.priceMultiplier() : safeBillingMultiplier(multiplier);
-        // Only exact/normalized catalog keys may establish a billable official price.
+        // Only exact/normalized catalog keys may establish a billable list price.
         var official = officialModelPricingService.resolve(target, false);
         if (official.isEmpty()) return new ResolvedPricing(target, "unavailable", null, ratio, matched, null, false);
         var found = official.get();
@@ -360,7 +360,7 @@ public class ModelPricingService {
     private BillingQuote quote(ResolvedPricing resolved, boolean fastMode) {
         var rates = resolved.rates();
         if (rates == null) throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "MODEL_PRICE_UNAVAILABLE",
-            "Model price is unavailable; configure an explicit price or synchronize the official catalog");
+            "Model price is unavailable; configure an explicit price or synchronize the vendor list price catalog");
         if (!fastMode) return rates;
         return new BillingQuote(rates.input().multiply(FAST_MODE_MULTIPLIER), rates.output().multiply(FAST_MODE_MULTIPLIER),
             rates.cacheRead().multiply(FAST_MODE_MULTIPLIER), rates.cacheWrite().multiply(FAST_MODE_MULTIPLIER),

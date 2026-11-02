@@ -1,0 +1,308 @@
+// The Java side of the third-party notices of the executable jar (the console's npm packages are covered by
+// webui/vite.config.ts, which writes THIRD-PARTY-NOTICES.txt):
+//
+//   generateJavaNotices  lists every Java library the jar nests under BOOT-INF/lib with the license its POM declares,
+//                        and prints the license texts that the libraries do not carry themselves (Apache-2.0 for the
+//                        many jars without a LICENSE file, MIT for those that declare it). The jar and the deployment
+//                        bundle carry the result as JAVA-THIRD-PARTY-NOTICES.txt.
+//   copyleftSources      collects the -sources jars of the libraries whose copyleft license this project elects (see
+//                        section 3 of NOTICE). The release publishes them next to the executable jar and in the
+//                        bundle, which is how it offers the source code those licenses require.
+//
+// Both resolve through Gradle's artifact resolution, so offline they work for whatever the dependency cache holds; the
+// release build has network access and fetches what is missing.
+//
+// generateJavaNotices stops the build for a library it cannot account for (see permissiveKinds below), because section 3
+// of NOTICE promises that every dependency that is not elected copyleft is permissive and that the texts it needs are printed.
+
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import groovy.xml.XmlSlurper
+import java.util.zip.ZipFile
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.artifacts.result.ResolvedArtifactResult
+import org.gradle.jvm.JvmLibrary
+import org.gradle.language.base.artifact.SourcesArtifact
+import org.gradle.maven.MavenModule
+import org.gradle.maven.MavenPomArtifact
+
+// The license this project elects for each library that offers a choice and whose pick is a copyleft license. Section 3 of
+// NOTICE says the same; LicensingContractTest keeps NOTICE, this table and the files that ship in step.
+def electedCopyleft = [
+    'ch.qos.logback:logback-classic'           : 'LGPL-2.1-only',
+    'ch.qos.logback:logback-core'              : 'LGPL-2.1-only',
+    'jakarta.annotation:jakarta.annotation-api': 'GPL-2.0-only WITH Classpath-exception-2.0',
+    'jakarta.mail:jakarta.mail-api'            : 'GPL-2.0-only WITH Classpath-exception-2.0',
+    'org.eclipse.angus:angus-mail'             : 'GPL-2.0-only WITH Classpath-exception-2.0',
+]
+
+def runtimeClasspath = configurations.named('runtimeClasspath')
+def apacheLicense = rootProject.layout.projectDirectory.file('plugin-api/LICENSE')
+def javaNoticesFile = layout.buildDirectory.file('generated/java-notices/JAVA-THIRD-PARTY-NOTICES.txt')
+def copyleftSourcesDir = layout.buildDirectory.dir('third-party-sources')
+
+// The external libraries of the runtime classpath (not this build's own projects), one entry per module and version.
+def externalModules = {
+    def modules = new TreeMap<String, Map>()
+    runtimeClasspath.get().incoming.artifacts.artifacts.each { ResolvedArtifactResult artifact ->
+        def id = artifact.id.componentIdentifier
+        if (id instanceof ModuleComponentIdentifier) {
+            def entry = modules.computeIfAbsent("${id.group}:${id.module}:${id.version}".toString()) {
+                [group: id.group, name: id.module, version: id.version, files: []]
+            }
+            entry.files << artifact.file
+        }
+    }
+    modules
+}
+
+// The POM of a module, from the dependency cache (or the repository when it is not cached yet).
+def pomOf = { String group, String name, String version ->
+    def result = dependencies.createArtifactResolutionQuery()
+        .forModule(group, name, version)
+        .withArtifacts(MavenModule, MavenPomArtifact)
+        .execute()
+    for (component in result.resolvedComponents) {
+        for (artifact in component.getArtifacts(MavenPomArtifact)) {
+            if (artifact instanceof ResolvedArtifactResult) {
+                return artifact.file
+            }
+        }
+    }
+    return null
+}
+
+// What the POM of a module, or the nearest parent POM that says so, declares: licenses, project URL and developers.
+def declaredBy = { String group, String name, String version ->
+    def info = [licenses: [], url: '', developers: []]
+    def coordinates = [group, name, version]
+    for (int depth = 0; coordinates != null && depth < 10; depth++) {
+        def pom = pomOf(coordinates[0], coordinates[1], coordinates[2])
+        if (pom == null) {
+            break
+        }
+        def xml = new XmlSlurper(false, false).parse(pom)
+        if (!info.licenses) {
+            info.licenses = xml.licenses.license.collect { [name: it.name.text().trim(), url: it.url.text().trim()] }
+        }
+        if (!info.url) {
+            info.url = xml.url.text().trim()
+        }
+        if (!info.developers) {
+            info.developers = xml.developers.developer.collect { it.name.text().trim() }.findAll { it }
+        }
+        def parent = xml.parent
+        coordinates = parent.size() > 0
+            ? [parent.groupId.text().trim(), parent.artifactId.text().trim(), parent.version.text().trim()]
+            : null
+    }
+    info
+}
+
+// True when the jar has a license or copying file of its own (a NOTICE file alone does not carry the license text).
+def carriesLicenseText = { File jar ->
+    new ZipFile(jar).withCloseable { zip ->
+        zip.entries().any { entry ->
+            !entry.directory && entry.name ==~ /(?i)META-INF\/(.*\/)?(licen[sc]e|copying)[^\/]*/
+        }
+    }
+}
+
+def licenseKind = { Map license ->
+    def text = "${license.name} ${license.url}".toLowerCase()
+    if (text =~ /\bmit-0\b/) {
+        return 'MIT-0'   // no attribution is required, so there is nothing to reproduce
+    }
+    if (text.contains('apache')) {
+        return 'Apache-2.0'
+    }
+    if (text =~ /\bmit\b/ || text.contains('opensource.org/licenses/mit')) {
+        return 'MIT'
+    }
+    if (text =~ /\bcc0\b/ || text.contains('publicdomain/zero')) {
+        return 'CC0'     // a public-domain dedication: no attribution is required either
+    }
+    if (text =~ /\bbsd[ -]2-clause\b/) {
+        return 'BSD-2-Clause'
+    }
+    if (text =~ /\bbsd[ -]3-clause\b/ || text.contains('new bsd')) {
+        return 'BSD-3-Clause'
+    }
+    if (text.contains('eclipse distribution license') || text =~ /\bedl\b/) {
+        return 'EDL-1.0'  // the Eclipse Distribution License has the terms of BSD-3-Clause
+    }
+    if (text =~ /\bisc\b/) {
+        return 'ISC'
+    }
+    return null
+}
+
+// The licenses this task can account for. A library without a license text in its jar must declare one of printableKinds:
+// Apache-2.0 and MIT get their text printed at the end of the file, and MIT-0 and CC0 ask for no notice. Every library that
+// is not in electedCopyleft must declare at least one of permissiveKinds, which is the list section 3 of NOTICE promises.
+// Anything else (a BSD library with no text in its jar, a library under EPL-only or GPL-only, one with no license in its POM)
+// stops the build until someone has looked at it and either extended these lists and NOTICE or dropped the library.
+def printableKinds = ['Apache-2.0', 'MIT', 'MIT-0', 'CC0']
+def permissiveKinds = printableKinds + ['BSD-2-Clause', 'BSD-3-Clause', 'EDL-1.0', 'ISC']
+
+def generateJavaNotices = tasks.register('generateJavaNotices') {
+    group = 'build'
+    description = 'Writes JAVA-THIRD-PARTY-NOTICES.txt: the Java libraries in the executable jar, their licenses, and the license texts they lack.'
+    inputs.files(runtimeClasspath)
+    inputs.file(apacheLicense)
+    outputs.file(javaNoticesFile)
+    notCompatibleWithConfigurationCache('It resolves the POM files of the runtime classpath while it runs.')
+
+    doLast {
+        def modules = externalModules()
+        def text = new StringBuilder()
+        text << 'JAVA THIRD-PARTY NOTICES\n\n'
+        text << 'The Starry API executable jar nests the Java libraries of its runtime classpath, unmodified, each as its\n'
+        text << 'own jar under BOOT-INF/lib; they are listed below. (The Spring Boot "starter" modules in the list contain\n'
+        text << 'no code and are not nested, and the Spring Boot build adds spring-boot-jarmode-tools, which carries its own\n'
+        text << 'license text.) For each library this file gives the license its Maven POM declares. A library that offers a\n'
+        text << 'choice of licenses is used under the one that NOTICE (section 3) names. Many jars carry no license file of\n'
+        text << 'their own; the texts they need are printed at the end of this file. Starry API itself is licensed under\n'
+        text << 'AGPL-3.0-only; see the LICENSE and NOTICE files of the distribution. The console\'s npm packages are listed\n'
+        text << 'in THIRD-PARTY-NOTICES.txt.\n\n'
+        text << 'This file is generated by the build (generateJavaNotices in service/third-party-notices.gradle) from the\n'
+        text << 'runtime classpath. Do not edit it by hand.\n\n'
+        text << "${modules.size()} libraries\n"
+
+        def needsApacheText = false
+        def mitWithoutText = []
+        def unaccountedFor = []
+        def rule = '=' * 78
+        modules.each { String coordinates, Map module ->
+            def info = declaredBy(module.group, module.name, module.version)
+            def hasText = module.files.every { carriesLicenseText(it) }
+            def kinds = info.licenses.collect { licenseKind(it) }
+            def moduleKey = "${module.group}:${module.name}".toString()
+            def named = "${module.group}:${module.name}:${module.version}".toString()
+            def declared = info.licenses.collect { it.name ?: it.url }.join(', ')
+            if (!electedCopyleft.containsKey(moduleKey)) {
+                if (!info.licenses) {
+                    unaccountedFor << "${named} declares no license in its POM or its parent POMs".toString()
+                } else if (!kinds.any { permissiveKinds.contains(it) }) {
+                    unaccountedFor << "${named} declares only ${declared}, which is not on the permissive list; NOTICE section 3 says every library outside the elections is permissive".toString()
+                }
+            }
+            // The LGPL text and logback's notice come from licenses/ (the jar and the bundle carry them), not from logback's jars.
+            if (!hasText && !moduleKey.startsWith('ch.qos.logback:') && !kinds.any { printableKinds.contains(it) }) {
+                unaccountedFor << "${named} has no license text in its jar and declares ${declared ?: 'no license'}, whose text this task cannot print".toString()
+            }
+            text << "\n${rule}\n${module.group}:${module.name} ${module.version}\n"
+            if (info.licenses) {
+                info.licenses.each { text << "Declared license: ${it.name}${it.url ? " (${it.url})" : ''}\n" }
+            } else {
+                text << 'Declared license: none in the POM; see the jar and the project page\n'
+            }
+            if (electedCopyleft.containsKey(moduleKey)) {
+                text << "Elected by Starry API: ${electedCopyleft[moduleKey]}; the source code is in the -sources jar published with the release.\n"
+                if (moduleKey.startsWith('ch.qos.logback:')) {
+                    text << 'License text: licenses/LGPL-2.1.txt and licenses/logback-NOTICE.txt (META-INF/licenses in the jar).\n'
+                }
+            }
+            if (info.url) {
+                text << "Project: ${info.url}\n"
+            }
+            if (hasText) {
+                text << 'License text: in the library\'s own jar.\n'
+            } else if (kinds.contains('Apache-2.0')) {
+                text << 'License text: not in the library\'s own jar; the Apache License 2.0 is printed below.\n'
+                needsApacheText = true
+            } else if (kinds.contains('MIT')) {
+                text << 'License text: not in the library\'s own jar; the MIT License is printed below.\n'
+                mitWithoutText << [module: "${module.group}:${module.name} ${module.version}".toString(), info: info]
+            } else if (kinds.contains('MIT-0') || kinds.contains('CC0')) {
+                text << 'License text: not in the library\'s own jar; see the license address above (MIT-0 and public-domain dedications ask for no notice).\n'
+            }
+        }
+
+        if (unaccountedFor) {
+            throw new GradleException(
+                "The Java third-party notices cannot account for ${unaccountedFor.size()} librar${unaccountedFor.size() == 1 ? 'y' : 'ies'} of the runtime classpath:\n  - "
+                    + unaccountedFor.join('\n  - ')
+                    + "\nLook at its license. If it is permissive, add the license to licenseKind, printableKinds or permissiveKinds in service/third-party-notices.gradle and to section 3 of NOTICE; if it is copyleft, elect a license for it in electedCopyleft, section 3 of NOTICE and the scripts that collect its source; otherwise drop the library.")
+        }
+
+        if (needsApacheText) {
+            text << "\n${rule}\nApache License, Version 2.0\n\n"
+            text << 'The libraries above that declare the Apache License 2.0 and carry no license text of their own are\n'
+            text << 'licensed under it. Where a library has a NOTICE file, it is in that library\'s jar.\n\n'
+            text << apacheLicense.asFile.getText('UTF-8').stripTrailing() << '\n'
+        }
+        mitWithoutText.each { Map entry ->
+            def holders = entry.info.developers ? entry.info.developers.join(', ') : 'the authors of the library'
+            text << "\n${rule}\nMIT License: ${entry.module}\n\n"
+            text << "The library declares the MIT license in its POM and its jar carries no license text. The standard text\n"
+            text << "follows. The copyright holder is the developer the POM names; the project's own license file\n"
+            text << "(${entry.info.licenses.collect { it.url }.findAll { it }.join(', ') ?: entry.info.url}) is authoritative.\n\n"
+            text << 'MIT License\n\n'
+            text << "Copyright (c) ${holders}\n\n"
+            text << 'Permission is hereby granted, free of charge, to any person obtaining a copy\n'
+            text << 'of this software and associated documentation files (the "Software"), to deal\n'
+            text << 'in the Software without restriction, including without limitation the rights\n'
+            text << 'to use, copy, modify, merge, publish, distribute, sublicense, and/or sell\n'
+            text << 'copies of the Software, and to permit persons to whom the Software is\n'
+            text << 'furnished to do so, subject to the following conditions:\n\n'
+            text << 'The above copyright notice and this permission notice shall be included in all\n'
+            text << 'copies or substantial portions of the Software.\n\n'
+            text << 'THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR\n'
+            text << 'IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,\n'
+            text << 'FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE\n'
+            text << 'AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER\n'
+            text << 'LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,\n'
+            text << 'OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE\n'
+            text << 'SOFTWARE.\n'
+        }
+
+        def output = javaNoticesFile.get().asFile
+        output.parentFile.mkdirs()
+        output.setText(text.toString(), 'UTF-8')
+    }
+}
+
+def copyleftSources = tasks.register('copyleftSources') {
+    group = 'distribution'
+    description = 'Collects the -sources jars of the libraries used under a copyleft license, for publishing next to the executable jar.'
+    inputs.files(runtimeClasspath)
+    outputs.dir(copyleftSourcesDir)
+    notCompatibleWithConfigurationCache('It resolves the sources artifacts of the runtime classpath while it runs.')
+
+    doLast {
+        def wanted = externalModules().values().findAll { electedCopyleft.containsKey("${it.group}:${it.name}".toString()) }
+        def missing = electedCopyleft.keySet().findAll { key -> !wanted.any { "${it.group}:${it.name}".toString() == key } }
+        if (missing) {
+            throw new GradleException("The runtime classpath no longer contains ${missing}; update electedCopyleft in service/third-party-notices.gradle and section 3 of NOTICE")
+        }
+        def directory = copyleftSourcesDir.get().asFile
+        directory.deleteDir()
+        directory.mkdirs()
+        wanted.each { module ->
+            def query = dependencies.createArtifactResolutionQuery()
+                .forModule(module.group, module.name, module.version)
+                .withArtifacts(JvmLibrary, SourcesArtifact)
+                .execute()
+            def sources = query.resolvedComponents.collectMany { it.getArtifacts(SourcesArtifact) }
+            def resolved = sources.findAll { it instanceof ResolvedArtifactResult }
+            if (resolved.isEmpty()) {
+                throw new GradleException("No -sources jar for ${module.group}:${module.name}:${module.version}; it is required for the copyleft license this project elects for it")
+            }
+            resolved.each { ResolvedArtifactResult source ->
+                Files.copy(source.file.toPath(), new File(directory, source.file.name).toPath(), StandardCopyOption.REPLACE_EXISTING)
+            }
+        }
+    }
+}
+
+tasks.named('bootJar') {
+    dependsOn generateJavaNotices
+    from(generateJavaNotices) {
+        into 'META-INF'
+    }
+    // LGPL-2.1 (logback) asks that its text and the library's notice come with the work.
+    from(rootProject.layout.projectDirectory.dir('licenses')) {
+        into 'META-INF/licenses'
+    }
+}

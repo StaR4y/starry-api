@@ -9,7 +9,7 @@ import tools.jackson.databind.node.ObjectNode;
 
 /**
  * The conversion of a Messages request to Chat as {@link AnthropicRequestAdapter} did it before the shared helpers of the
- * conversion for relays (P8-01) were taken out of it, copied as it was committed (phase 7). It is the oracle of the tests
+ * conversion for relays were taken out of it, copied as it was committed (phase 7). It is the oracle of the tests
  * that say {@code messagesToChat} still gives byte for byte what the native accounts were always given, and that the
  * conversion for relays gives a body that comes to the same for a request none of whose content it has a new place for.
  * It is not used by anything else, and is never to be edited to follow the adapter.

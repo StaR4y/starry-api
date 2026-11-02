@@ -585,7 +585,7 @@ class OpenAiResponseFactoryTest {
         assertThat(replayedPatchArgument(null)).isEqualTo("input");
     }
 
-    // ---- the editing tool on the Kiro and Anthropic routes of a vendor that has relays (D13) ----
+    // ---- the editing tool on the Kiro and Anthropic routes of a vendor that has relays ----
 
     private static final String PATCH = "*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch";
 

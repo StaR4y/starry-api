@@ -672,7 +672,7 @@ class ProxyFacadeUnifyEndpointsTest {
     private record Settled(BigDecimal credits, String tierRef, Integer level, BigDecimal factor) {
     }
 
-    /** The owner's example on the Anthropic vendor: official keys in the first tier, Kiro at 0.6 in the second. */
+    /** The reference scenario on the Anthropic vendor: official keys in the first tier, Kiro at 0.6 in the second. */
     private static SourceTierSnapshot anthropic(boolean unifyEndpoints) {
         return SourceTierSnapshot.of(5L,
             List.of(new VendorConfig("anthropic", true, unifyEndpoints, false, true, 16, true, 5L)),

@@ -83,6 +83,7 @@ class SystemMaintenanceWebFilterTest {
             "/",
             "/index.html",
             "/favicon.svg",
+            "/THIRD-PARTY-NOTICES.txt",
             "/assets/index.js",
             "/assets/index.css.br",
             "/plugin-assets/usage-maid/maid.png"

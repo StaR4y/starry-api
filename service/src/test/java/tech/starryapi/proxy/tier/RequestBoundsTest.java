@@ -31,7 +31,7 @@ class RequestBoundsTest {
 
     // ---- what a relay is given for a request whose output the gateway chose ----
 
-    /** D15: the maximum the mapping states, as far as the default of the request goes; 4,096 when it states none. */
+    /** The maximum the mapping states, as far as the default of the request goes; 4,096 when it states none. */
     @Test
     void aRelayIsGivenTheMaximumOfItsMappingUpToTheDefaultAndFourThousandNinetySixWhenTheMappingStatesNone() {
         assertThat(RequestBounds.relayOutputTokens(16_000, null)).isEqualTo(4096);

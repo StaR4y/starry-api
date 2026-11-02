@@ -88,7 +88,7 @@ import tools.jackson.databind.node.ObjectNode;
 
 /**
  * The money of a request that a relay serves, on the beans of the application and a real database (design 5.2, 5.3 and
- * 7.8, invariants I2, I3 and I7): the owner's example with the relay as the first tier and Kiro as the second, where the
+ * 7.8, invariants I2, I3 and I7): the reference scenario with the relay as the first tier and Kiro as the second, where the
  * relay is the only stand-in besides the upstream clients. What is looked at is the reservation and what becomes of it.
  * A relay's attempt is generated once and the operator carries it: it is charged at the price of its tier and never
  * above what the tier reserved, and it never ends in a review, whether it is answered, fails, is cut off, or the client
@@ -105,11 +105,11 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     private static final String MODEL = "claude-sonnet-4.5";
     private static final String CLIENT_DISCONNECTED = "Client disconnected; cross-protocol attempt released";
     /**
-     * What a Responses request that names no limit is held to (D14): the default of the gateway, 16,000 tokens, which MODEL
+     * What a Responses request that names no limit is held to: the default of the gateway, 16,000 tokens, which MODEL
      * writes (the model list shows 64,000 for it) and the application settings leave as they are.
      */
     private static final int DEFAULT_OUTPUT = 16_000;
-    /** What a relay whose mapping states no maximum output is given for such a request (D15): what it was given before D11. */
+    /** What a relay whose mapping states no maximum output is given for such a request: what it was given before the gateway chose a default. */
     private static final int RELAY_OUTPUT = 4_096;
     /** What a small request (a few hundred bytes of input) is reserved for as its input. */
     private static final int SMALL_INPUT = 5_000;
@@ -202,7 +202,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aRelaysAnswerIsChargedAtThePriceOfItsTierAndTheRestOfTheReservationGoesBack() {
         Client client = client("10");
-        ownersExample(client, false, 8192);
+        referenceScenario(client, false, 8192);
 
         ResponseEntity<?> response = chat(client, chatBody("hello"));
 
@@ -231,7 +231,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aRelayThatReportsMoreThanItsTierReservedIsNeverChargedAboveTheReservation() {
         Client client = client("10");
-        ownersExample(client, false, 8192);
+        referenceScenario(client, false, 8192);
         relayAnswers(() -> Mono.just(relayAnswer(new PlatformUsage(900_000_000L, 900_000_000L, BigDecimal.ZERO, 0, 0, 0))));
 
         chat(client, chatBody("hello"));
@@ -253,7 +253,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aRelaysAnswerToTheResponsesEntryIsChargedAtThePriceOfItsTierAndTheRestOfTheReservationGoesBack() {
         Client client = client("10");
-        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+        referenceScenario(client, "RESPONSES", client.keyId(), false, 8192);
 
         ResponseEntity<?> response = responses(client, responsesBody("hello"));
 
@@ -290,7 +290,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void anAnswerOfTheResponsesEntryCutAtTheGatewaysLimitIsFinishedForTheClientAndChargedForWhatTheRelayWrote() {
         Client client = client("10");
-        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+        referenceScenario(client, "RESPONSES", client.keyId(), false, 8192);
         relayAnswers(() -> {
             ObjectNode reported = objectMapper.createObjectNode();
             reported.put("prompt_tokens", 500).put("completion_tokens", 900_000);
@@ -307,7 +307,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
         Map<String, Object> reservation = reservations(client).getLast();
         assertThat(reservation).containsEntry("status", "SETTLED").containsEntry("served_tier_ref", "anthropic:relay");
         BigDecimal charged = (BigDecimal) reservation.get("actual_credits");
-        // What the relay says it wrote is held to the 4,096 tokens it was told it may write (D15); the tier reserved for the default.
+        // What the relay says it wrote is held to the 4,096 tokens it was told it may write; the tier reserved for the default.
         assertThat(charged).isEqualByComparingTo(standard.cost(new PlatformUsage(500, RELAY_OUTPUT, BigDecimal.ZERO, 0, 0, 0)));
         assertThat(charged).isLessThanOrEqualTo((BigDecimal) reservation.get("reserved_credits"));
         assertThat(balance(client)).isEqualByComparingTo(new BigDecimal("10").subtract(charged));
@@ -317,15 +317,15 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     }
 
     /**
-     * A request that names no limit is reserved for the output of the default, which the native sources are held to (D11, D14), at
-     * the price of the tier that is sent that (Kiro's, at 0.6; the relay's tier is reserved for the 4,096 its relay is given, D15),
+     * A request that names no limit is reserved for the output of the default, which the native sources are held to, at
+     * the price of the tier that is sent that (Kiro's, at 0.6; the relay's tier is reserved for the 4,096 its relay is given),
      * which is the tier that reserves the most, and one that names its own limit for that: a user pays for the room the request may
      * use, and the rest goes back with the settlement.
      */
     @Test
     void aResponsesRequestThatNamesNoLimitIsReservedForTheDefaultOutputAndOneThatNamesItsOwnForThat() {
         Client client = client("10");
-        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+        referenceScenario(client, "RESPONSES", client.keyId(), false, 8192);
         BigDecimal defaultOutput = standard.scaled(new BigDecimal("0.6")).output().multiply(BigDecimal.valueOf(DEFAULT_OUTPUT));
         BigDecimal named = standard.output().multiply(BigDecimal.valueOf(2000));
         BigDecimal anyInput = standard.estimate(SMALL_INPUT, 0);
@@ -339,7 +339,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
         BigDecimal limited = (BigDecimal) reservations.get(1).get("reserved_credits");
         assertThat(unlimited).isGreaterThan(defaultOutput).isLessThan(defaultOutput.add(anyInput));
         assertThat(limited).isGreaterThan(named).isLessThan(named.add(anyInput));
-        // The relay is not sent what the reservation holds: its mapping states no maximum output, so it is given 4,096 (D15).
+        // The relay is not sent what the reservation holds: its mapping states no maximum output, so it is given 4,096.
         assertThat(relayBodies.get(0).path("max_tokens").asInt()).isEqualTo(RELAY_OUTPUT);
         assertThat(relayBodies.get(1).path("max_tokens").asInt()).isEqualTo(2000);
         // Only what the relay wrote is charged, whatever was reserved.
@@ -361,7 +361,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
         BigDecimal balance = defaultReservation.divide(BigDecimal.valueOf(2), 6, java.math.RoundingMode.HALF_UP);
         assertThat(balance).isGreaterThan(oldReservation).isLessThan(defaultReservation.multiply(new BigDecimal("0.6")));
         Client client = client(balance.toPlainString());
-        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+        referenceScenario(client, "RESPONSES", client.keyId(), false, 8192);
 
         assertThatThrownBy(() -> responses(client, responsesBody("hello"))).isInstanceOfSatisfying(ApiException.class, error -> {
             assertThat(error.getStatus()).isEqualTo(HttpStatus.PAYMENT_REQUIRED);
@@ -392,7 +392,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void anAnswerOfTheResponsesEntryThatLostItsOnlyCallToTheGatewaysLimitIsReleasedForGoodAndTheRetryIsKiros() {
         Client client = client("10");
-        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+        referenceScenario(client, "RESPONSES", client.keyId(), false, 8192);
         relayAnswers(() -> {
             ObjectNode reported = objectMapper.createObjectNode();
             reported.put("prompt_tokens", 500).put("completion_tokens", 900_000);
@@ -428,8 +428,8 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
             assertThat((BigDecimal) row.get("credits")).isEqualByComparingTo("0");
         });
 
-        // The retry is Kiro's, once, at the price of Kiro's tier; the relay is not asked again. The owner's example: the relay was
-        // held to 4,096 and lost a long call to it, and Kiro is given the default output (D14), which the call fits.
+        // The retry is Kiro's, once, at the price of Kiro's tier; the relay is not asked again. The reference scenario: the relay was
+        // held to 4,096 and lost a long call to it, and Kiro is given the default output, which the call fits.
         for (int retry = 0; retry < 2; retry++) {
             ResponseEntity<?> response = responses(client, responsesBody("hello"));
             assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("kiro");
@@ -461,7 +461,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
 
     private void assertTheRelayStaysInService(Supplier<Completion> held) {
         Client client = client("10");
-        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+        referenceScenario(client, "RESPONSES", client.keyId(), false, 8192);
         relayAnswers(() -> Mono.just(held.get()));
         Map<String, Object> before = allocationState(relayId);
 
@@ -498,7 +498,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void fourBreakdownsOfTheRelayFromFourSessionsStillCoolItDown() {
         Client client = client("10");
-        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+        referenceScenario(client, "RESPONSES", client.keyId(), false, 8192);
         relayAnswers(() -> Mono.error(new RelayAbortedAfterDispatchException("The exchange with the source failed after the request was sent")));
 
         for (int session = 0; session < 4; session++) {
@@ -517,7 +517,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aClientOfTheResponsesEntryThatGivesUpWhileTheRelayIsAskedIsReleasedForGoodAndNothingIsLeftForReview() {
         Client client = client("10");
-        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+        referenceScenario(client, "RESPONSES", client.keyId(), false, 8192);
         relayAnswers(Mono::never);
 
         Disposable request = responsesRequest(client, responsesBody("hello")).subscribe(response -> { }, error -> { });
@@ -538,7 +538,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aClientOfTheResponsesEntryThatGivesUpWhileKiroIsAskedAfterTheRelayRefusedIsLeftForReviewAsItAlwaysWas() {
         Client client = client("10");
-        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+        referenceScenario(client, "RESPONSES", client.keyId(), false, 8192);
         relayAnswers(() -> Mono.error(relayErrors.fromResponse(404, error("model_not_found", "no such model"), null, "relay", "sk-secret")));
         List<Object> kiroCalls = new CopyOnWriteArrayList<>();
         kiroAnswers(() -> {
@@ -562,7 +562,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void anInlineImageCountsAsTheCapOfItsMappingAndDoesNotRaiseTheReservationToTheMillionTokenFloor() {
         Client client = client("100");
-        ownersExample(client, true, 5_000);
+        referenceScenario(client, true, 5_000);
 
         chat(client, chatBodyWithImage("data:image/png;base64," + "A".repeat(200_000)));
 
@@ -579,14 +579,14 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     }
 
     /**
-     * A user who has almost nothing left sends a screenshot (design 7.6, P8-01): the reservation is a bound of what the
+     * A user who has almost nothing left sends a screenshot (design 7.6): the reservation is a bound of what the
      * tiers can be sent, and the screenshot is counted as the cap of its mapping where a relay is sent it and not at all
      * where Kiro is sent the text. It is not the 1,000,000 tokens of input that an image the gateway cannot count would be.
      */
     @Test
     void aScreenshotOfClaudeCodeDoesNotMakeAUserWithAlmostNothingLeftPayForTheMillionTokenFloor() {
         Client client = client("1");
-        ownersExample(client, "MESSAGES", client.keyId(), true, 5_000);
+        referenceScenario(client, "MESSAGES", client.keyId(), true, 5_000);
         BigDecimal floor = standard.estimate(1_000_000L, 4096);
         assertThat(floor).as("the floor is more than this user has").isGreaterThan(new BigDecimal("1"));
 
@@ -606,7 +606,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aScreenshotOfOpenCodeDoesNotMakeAUserWithAlmostNothingLeftPayForTheMillionTokenFloorEither() {
         Client client = client("1");
-        ownersExample(client, true, 5_000);
+        referenceScenario(client, true, 5_000);
         BigDecimal floor = standard.estimate(1_000_000L, 4096);
 
         ResponseEntity<?> answered = chat(client, chatBodyWithImage("data:image/png;base64," + "A".repeat(200_000)));
@@ -625,7 +625,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aScreenshotOfOpenCodeOnTheAnthropicRouteOfTheAllEndpointsSwitchDoesNotMakeAUserWithAlmostNothingLeftPayTheFloorEither() {
         Client client = client("1");
-        ownersExample(client, true, 5_000);
+        referenceScenario(client, true, 5_000);
         db.sql("UPDATE source_tier_vendors SET unify_endpoints = TRUE WHERE vendor = 'anthropic'").fetch().rowsUpdated().block();
         registry.refresh().block();
         BigDecimal floor = standard.estimate(1_000_000L, 4096);
@@ -641,7 +641,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aScreenshotThatTheRelayDoesNotTakeIsServedByKiroForTheSameLittleMoney() {
         Client client = client("1");
-        ownersExample(client, "MESSAGES", client.keyId(), true, 5_000);
+        referenceScenario(client, "MESSAGES", client.keyId(), true, 5_000);
         relayAnswers(() -> Mono.error(relayErrors.fromResponse(429, error("rate_limit_exceeded", "slow down"), null, "relay", "sk-secret")));
 
         ResponseEntity<?> answered = messages(client, messagesBodyWithScreenshot("A".repeat(200_000)));
@@ -659,7 +659,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
         BigDecimal multiplier = payments.config().block().apiBillingMultiplier();
         BigDecimal gptFactor = new BigDecimal("0.5");
         BillingQuote gpt = pricing.billingQuote("gpt-5.5", false, multiplier).block();
-        openAiOwnersExample(client, 5_000);
+        openAiReferenceScenario(client, 5_000);
         ObjectNode image = gptBodyWithImage("data:image/png;base64," + "A".repeat(200_000));
 
         // Pinned to the relay's tier: the reservation is that tier's, for what the relay is sent and not for the whole image
@@ -691,7 +691,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
         // Too little to pay for the floor for hidden input that the official keys of the other tier would be reserved for.
         Client client = client("1");
         BillingQuote gpt = pricing.billingQuote("gpt-5.5", false, payments.config().block().apiBillingMultiplier()).block();
-        openAiOwnersExample(client, 5_000);
+        openAiReferenceScenario(client, 5_000);
         relayAnswers(() -> Mono.error(new RelayAbortedAfterDispatchException("The exchange with the source failed after the request was sent")));
         ObjectNode pinned = gptBodyWithImage("data:image/png;base64," + "A".repeat(200_000));
         pinned.put("model", "gpt-5.5@relay");
@@ -734,7 +734,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void anImageTheRelayIsOnlyPointedAtHasNothingToCountAndRaisesTheReservationToTheFloor() {
         Client client = client("100");
-        ownersExample(client, true, 5_000);
+        referenceScenario(client, true, 5_000);
 
         chat(client, chatBodyWithImage("https://images.example/cat.png"));
 
@@ -752,7 +752,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aGeminiClientsScreenshotDoesNotMakeAUserWithAlmostNothingLeftPayForTheMillionTokenFloor() {
         Client client = client("1");
-        ownersExample(client, "GEMINI", client.keyId(), true, 5_000);
+        referenceScenario(client, "GEMINI", client.keyId(), true, 5_000);
         BigDecimal floor = standard.estimate(1_000_000L, 4096);
         assertThat(floor).as("the floor is more than this user has").isGreaterThan(new BigDecimal("1"));
 
@@ -778,7 +778,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aGeminiRequestTheRelayCutOffReleasesTheReservationAndKiroIsNotAsked() {
         Client client = client("10");
-        ownersExample(client, "GEMINI", client.keyId(), false, 8192);
+        referenceScenario(client, "GEMINI", client.keyId(), false, 8192);
         relayAnswers(() -> Mono.error(new RelayAbortedAfterDispatchException("The exchange with the source failed after the request was sent")));
 
         assertThatThrownBy(() -> geminiRequest(client, MODEL, geminiBody(null, null)).block()).isInstanceOf(ApiException.class);
@@ -798,7 +798,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aGeminiClientThatGivesUpWhileTheRelayIsAskedIsReleasedForGoodAndNothingIsLeftForReview() {
         Client client = client("10");
-        ownersExample(client, "GEMINI", client.keyId(), false, 8192);
+        referenceScenario(client, "GEMINI", client.keyId(), false, 8192);
         relayAnswers(Mono::never);
 
         Disposable request = geminiRequest(client, MODEL, geminiBody(null, null)).subscribe(response -> { }, error -> { });
@@ -818,7 +818,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aGeminiRequestTheRelayRefusesIsServedByKiroAtThePriceOfItsTier() {
         Client client = client("10");
-        ownersExample(client, "GEMINI", client.keyId(), true, 5_000);
+        referenceScenario(client, "GEMINI", client.keyId(), true, 5_000);
         relayAnswers(() -> Mono.error(relayErrors.fromResponse(429, error("rate_limit_exceeded", "slow down"), null, "relay", "sk-secret")));
 
         ResponseEntity<?> answered = geminiRequest(client, MODEL, geminiBody("A".repeat(200_000), 100)).block();
@@ -835,7 +835,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aGeminiRequestTheRelayDoesNotKnowTheKeyOfIsServedByKiroAndTheRelaysRowSaysSo() {
         Client client = client("10");
-        ownersExample(client, "GEMINI", client.keyId(), false, 5_000);
+        referenceScenario(client, "GEMINI", client.keyId(), false, 5_000);
         relayAnswers(() -> Mono.error(relayErrors.fromResponse(401, error("invalid_api_key", "bad key"), null, "relay", "sk-secret")));
 
         ResponseEntity<?> answered = geminiRequest(client, MODEL, geminiBody(null, null)).block();
@@ -856,7 +856,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aRelaysUsageIsHeldToTheLimitAGeminiClientWroteAndToTheBoundOfItsTier() {
         Client client = client("10");
-        ownersExample(client, "GEMINI", client.keyId(), false, 5_000);
+        referenceScenario(client, "GEMINI", client.keyId(), false, 5_000);
         relayAnswers(() -> Mono.just(relayAnswer(new PlatformUsage(9_999_999L, 9_999_999L, BigDecimal.ZERO, 0, 0, 0))));
 
         geminiRequest(client, MODEL, geminiBody(null, 100)).block();
@@ -881,7 +881,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aClientThatGivesUpWhileTheRelayIsAskedIsReleasedForGoodAndNothingIsLeftForReview() {
         Client client = client("10");
-        ownersExample(client, false, 8192);
+        referenceScenario(client, false, 8192);
         relayAnswers(Mono::never);
 
         Disposable request = chatRequest(client, chatBody("hello")).subscribe(response -> { }, error -> { });
@@ -902,7 +902,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aClientThatGivesUpAfterTheRelayAnsweredAndBeforeTheSettlementReturnedIsReleasedForGood() {
         Client client = client("10");
-        ownersExample(client, false, 8192);
+        referenceScenario(client, false, 8192);
         // The settlement never gets as far as the database: the answer is in, and nobody has been charged for it.
         doReturn(Mono.never()).when(apiKeys).accountUsageServed(any(), anyString(), any(), anyLong(), anyLong(), anyString(), anyInt(), any());
 
@@ -923,7 +923,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aClientThatGivesUpAfterTheSettlementWasCommittedButBeforeItsResultReturnedKeepsTheCharge() {
         Client client = client("10");
-        ownersExample(client, false, 8192);
+        referenceScenario(client, false, 8192);
         // The charge is made and the word of it is lost on the way back: the release that follows finds the books closed.
         doAnswer(invocation -> ((Mono<?>) invocation.callRealMethod()).then(Mono.never()))
             .when(apiKeys).accountUsageServed(any(), anyString(), any(), anyLong(), anyLong(), anyString(), anyInt(), any());
@@ -946,7 +946,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aClientThatGivesUpWhileKiroIsAskedAfterTheRelayRefusedIsLeftForReviewAsItAlwaysWas() {
         Client client = client("10");
-        ownersExample(client, false, 8192);
+        referenceScenario(client, false, 8192);
         relayAnswers(() -> Mono.error(relayErrors.fromResponse(404, error("model_not_found", "no such model"), null, "relay", "sk-secret")));
         List<Object> kiroCalls = new CopyOnWriteArrayList<>();
         kiroAnswers(() -> {
@@ -972,7 +972,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     void aClientThatGivesUpWhileKiroIsAskedForARequestTheRelayDoesNotTakeIsLeftForReviewAsItAlwaysWas() {
         Client client = client("10");
         // The gate lists another key: the relay is left out of the request, and Kiro is the only source.
-        ownersExample(client, "key-of-somebody-else", false, 8192);
+        referenceScenario(client, "key-of-somebody-else", false, 8192);
         List<Object> kiroCalls = new CopyOnWriteArrayList<>();
         kiroAnswers(() -> {
             kiroCalls.add("asked");
@@ -1069,7 +1069,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aRelayThatWasCutOffReleasesTheReservationAndNothingElseIsAsked() {
         Client client = client("10");
-        ownersExample(client, false, 8192);
+        referenceScenario(client, false, 8192);
         relayAnswers(() -> Mono.error(new RelayAbortedAfterDispatchException("The exchange with the source failed after the request was sent")));
 
         assertThatThrownBy(() -> chat(client, chatBody("hello"))).isInstanceOf(ApiException.class);
@@ -1090,7 +1090,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aRelayWithoutQuotaThenAKiroRequestTheyRefuseReleasesTheReservationAndTheUserCarriesOn() {
         Client client = client("10");
-        ownersExample(client, false, 8192);
+        referenceScenario(client, false, 8192);
         relayAnswers(() -> Mono.error(relayErrors.fromResponse(402, error("insufficient_quota", "You exceeded your current quota"), null,
             "relay", "sk-secret")));
         kiroAnswers(() -> Mono.error(new UpstreamException(400, "Improperly formed request", false)));
@@ -1112,7 +1112,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
         assertThat(balance(client)).isEqualByComparingTo(new BigDecimal("10").subtract(standard.scaled(new BigDecimal("0.6")).cost(KIRO_USAGE)));
     }
 
-    // ---- the output a relay is given when the client names none (D15) ----
+    // ---- the output a relay is given when the client names none ----
 
     /**
      * The mapping of the relay states a maximum output: the relay is given it, held to it (what it says it wrote is cut to it), and
@@ -1121,7 +1121,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aRelayWhoseMappingStatesAMaximumOutputIsGivenAndHeldToItAndChargedForWhatItWrote() {
         Client client = client("10");
-        ownersExample(client, "RESPONSES", client.keyId(), false, 8192, 8_192);
+        referenceScenario(client, "RESPONSES", client.keyId(), false, 8192, 8_192);
         relayAnswers(() -> {
             ObjectNode reported = objectMapper.createObjectNode();
             reported.put("prompt_tokens", 500).put("completion_tokens", 900_000);
@@ -1149,7 +1149,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     @Test
     void aMaximumOutputAboveTheDefaultIsCappedByItAndTheRelayIsChargedForNoMoreThanTheReservationHolds() {
         Client client = client("10");
-        ownersExample(client, "RESPONSES", client.keyId(), false, 8192, 64_000);
+        referenceScenario(client, "RESPONSES", client.keyId(), false, 8192, 64_000);
         relayAnswers(() -> Mono.just(new Completion("cut off in the mi", "", List.of(), PlatformCompletionResult.StopReason.MAX_TOKENS,
             reported(500, 900_000), "length")));
 
@@ -1165,13 +1165,13 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
 
     /**
      * The window of the relay (200,000) does not hold the prompt and the maximum output of its mapping together: it is given the
-     * 4,096 it was given before D11, which its window holds, and served once. One reservation, one settlement at the price of its
+     * 4,096 it was given before the gateway chose a default, which its window holds, and served once. One reservation, one settlement at the price of its
      * tier, nothing left for review.
      */
     @Test
     void aRelayWhoseWindowCannotHoldItsMaximumOutputBesideThePromptIsServedWithFourThousandNinetySixAndChargedOnce() {
         Client client = client("10");
-        ownersExample(client, "RESPONSES", client.keyId(), false, 8192, 16_000);
+        referenceScenario(client, "RESPONSES", client.keyId(), false, 8192, 16_000);
 
         ResponseEntity<?> response = responses(client, longTurnPinnedToTheRelay());
 
@@ -1191,18 +1191,18 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
         assertThat(reviews(client)).isEmpty();
     }
 
-    // ---- what each tier is reserved for (D15) ----
+    // ---- what each tier is reserved for ----
 
     /**
      * The reservation is the most the request may cost over the tiers it may be served from, each as far as it can be sent: the
      * relay's tier for the 4,096 its relay is given when the mapping states no maximum, Kiro's for the default output at its price.
      * A request pinned to the relay is reserved for the relay alone and for no more than a request that wrote the 4,096 itself, as
-     * it was before D11; one pinned to Kiro for the default at Kiro's price.
+     * it was before the gateway chose a default; one pinned to Kiro for the default at Kiro's price.
      */
     @Test
     void eachTierIsReservedForTheOutputItCanBeSentAndAPinnedRequestForItsTierAlone() {
         Client client = client("10");
-        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+        referenceScenario(client, "RESPONSES", client.keyId(), false, 8192);
         BigDecimal kiroOutput = standard.scaled(new BigDecimal("0.6")).output().multiply(BigDecimal.valueOf(DEFAULT_OUTPUT));
         BigDecimal relayOutput = standard.output().multiply(BigDecimal.valueOf(RELAY_OUTPUT));
         BigDecimal anyInput = standard.estimate(SMALL_INPUT, 0);
@@ -1240,7 +1240,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
         BigDecimal balance = relayReservation.add(kiroReservation).divide(BigDecimal.valueOf(2), 6, java.math.RoundingMode.HALF_UP);
         assertThat(balance).isGreaterThan(relayReservation).isLessThan(kiroReservation);
         Client client = client(balance.toPlainString());
-        ownersExample(client, "RESPONSES", client.keyId(), false, 8192);
+        referenceScenario(client, "RESPONSES", client.keyId(), false, 8192);
 
         assertThatThrownBy(() -> responses(client, responsesBody("hello"))).isInstanceOfSatisfying(ApiException.class, error -> {
             assertThat(error.getStatus()).isEqualTo(HttpStatus.PAYMENT_REQUIRED);
@@ -1269,21 +1269,21 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
 
     // ---- fixtures ----
 
-    /** The owner's example for this client: the relay as the first tier, Kiro as the second at 0.6. */
-    private void ownersExample(Client client, boolean vision, int imageTokenCap) {
-        ownersExample(client, client.keyId(), vision, imageTokenCap);
+    /** The reference scenario for this client: the relay as the first tier, Kiro as the second at 0.6. */
+    private void referenceScenario(Client client, boolean vision, int imageTokenCap) {
+        referenceScenario(client, client.keyId(), vision, imageTokenCap);
     }
 
-    private void ownersExample(Client client, String gatedKey, boolean vision, int imageTokenCap) {
-        ownersExample(client, "CHAT", gatedKey, vision, imageTokenCap);
+    private void referenceScenario(Client client, String gatedKey, boolean vision, int imageTokenCap) {
+        referenceScenario(client, "CHAT", gatedKey, vision, imageTokenCap);
     }
 
-    private void ownersExample(Client client, String entry, String gatedKey, boolean vision, int imageTokenCap) {
-        ownersExample(client, entry, gatedKey, vision, imageTokenCap, null);
+    private void referenceScenario(Client client, String entry, String gatedKey, boolean vision, int imageTokenCap) {
+        referenceScenario(client, entry, gatedKey, vision, imageTokenCap, null);
     }
 
-    /** {@link #ownersExample} for a relay whose mapping of the model states {@code maxOutputTokens} as its maximum output (null: none). */
-    private void ownersExample(Client client, String entry, String gatedKey, boolean vision, int imageTokenCap, Integer maxOutputTokens) {
+    /** {@link #referenceScenario} for a relay whose mapping of the model states {@code maxOutputTokens} as its maximum output (null: none). */
+    private void referenceScenario(Client client, String entry, String gatedKey, boolean vision, int imageTokenCap, Integer maxOutputTokens) {
         relayId = account("OpenAI-compatible", "api-key", "https://relay.example/v1");
         kiroId = account("BuilderId", "idc", null);
         accountPool.refreshCache().block();
@@ -1308,7 +1308,7 @@ class XpBillingPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSuppor
     }
 
     /** The same for the openai vendor: the relay as the first tier, official keys as the second at half the price. */
-    private void openAiOwnersExample(Client client, int imageTokenCap) {
+    private void openAiReferenceScenario(Client client, int imageTokenCap) {
         relayId = account("OpenAI-compatible", "api-key", "https://relay.example/v1");
         account("OpenAI", "api-key", null);
         accountPool.refreshCache().block();

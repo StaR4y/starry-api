@@ -1,9 +1,9 @@
 # The calls the facade made for a vendor without tiers, scenario by scenario, in order (see
 # SelectForPoolCallSequenceSnapshotTest). Taken from the facade as it was before tiered source pools (commit dbcc0c0)
 # and unchanged since: a scenario that has to be edited here changes what a deployment without tiers does. The two
-# Responses scenarios (responseOwner, responseOwnerGone) were edited on 2026-10-27 for the owner's decision D11, and again
-# for D14 (the default is 16,000, not the model's maximum): a Responses request that names no output limit is held to
-# the default of the gateway (16,000, no more than the model writes: 64,000 for gpt-5.4) and no longer to 4,096, so the
+# Responses scenarios (responseOwner, responseOwnerGone) were edited on 2026-10-27 when the output limit of a Responses
+# request that names none changed: it is held to the default of the gateway (16,000, not the model's maximum, and no more
+# than the model writes: 64,000 for gpt-5.4) and no longer to 4,096, so the
 # reservation and the body the upstream is sent changed, and the facade looks the model's maximum up in the price catalog
 # once (pricing.maxOutputTokens). The in-flight tokens admission is asked for did not change: they are still sized from
 # 4,096 (out=4096), as they were.

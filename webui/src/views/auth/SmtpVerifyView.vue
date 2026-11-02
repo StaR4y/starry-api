@@ -5,6 +5,7 @@
   import { authApi } from '@/api';
   import { useAppearanceStore } from '@/stores/appearance';
   import SiteBrandLogo from '@/components/SiteBrandLogo.vue';
+  import SourceNotice from '@/components/SourceNotice.vue';
   import { ApiError } from '@/utils/http';
 
   const route = useRoute();
@@ -58,6 +59,7 @@
         {{ t('前往登录') }}
       </el-button>
     </div>
+    <SourceNotice class="smtp-verify__source text-muted" />
   </div>
 </template>
 
@@ -67,7 +69,16 @@
     align-items: center;
     justify-content: center;
     min-height: 100vh;
-    padding: 24px;
+    padding: 24px 24px 56px;
+    position: relative;
+  }
+
+  .smtp-verify__source {
+    position: absolute;
+    left: 16px;
+    right: 16px;
+    bottom: 12px;
+    font-size: 12px;
   }
 
   .smtp-verify__panel {

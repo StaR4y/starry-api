@@ -2,8 +2,10 @@
 const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 const { mkdirSync } = require('node:fs');
+const os = require('node:os');
+const { join } = require('node:path');
 const base = process.env.TICKET_UI_BASE || 'http://127.0.0.1:5175';
-const output = process.env.TICKET_UI_OUTPUT || '/private/tmp/starry-ticket-ui/pages';
+const output = process.env.TICKET_UI_OUTPUT || join(os.tmpdir(), 'starry-ticket-ui', 'pages');
 assert.ok(['localhost', '127.0.0.1'].includes(new URL(base).hostname));
 const stamp = '2026-09-21T02:30:00Z';
 const ticketId = '61ae8aca-e6b4-4d8f-a08d-04bb3f26eb90';

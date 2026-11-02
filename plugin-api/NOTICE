@@ -1,0 +1,12 @@
+Starry API plugin SDK (plugin-api)
+Copyright (C) 2026 StaR4y and contributors
+
+This module is licensed under the Apache License, Version 2.0; the license text
+is in the file LICENSE next to this one. The rest of Starry API is licensed under
+the GNU Affero General Public License, version 3 only (see the LICENSE and NOTICE
+files at the root of the repository). A plugin that uses Starry API only through
+this module also has an additional permission under section 7 of that license;
+see section 2 of the root NOTICE.
+
+The names "Starry" and "Starry API" and the Starry logo are not licensed under
+either license (see section 5 of the root NOTICE).

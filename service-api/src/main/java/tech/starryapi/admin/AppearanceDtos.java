@@ -41,12 +41,62 @@ public final class AppearanceDtos {
         Integer backgroundBlurPx,
         @JsonProperty("chrome")
         @JsonInclude(JsonInclude.Include.ALWAYS)
-        String chrome
+        String chrome,
+        // Where the source code of the running version is offered to the people who use it (AGPL-3.0, section 13). The
+        // server fills it in from STARRY_SOURCE_URL on the way out; it is never stored and an update cannot change it.
+        String sourceUrl
     ) {
         public AppearanceResponse {
             chrome = CHROME_EDITORIAL.equalsIgnoreCase(chrome == null ? "" : chrome.trim())
                 ? CHROME_EDITORIAL
                 : CHROME_CLASSIC;
+        }
+
+        public AppearanceResponse(
+            String siteName,
+            String logoUrl,
+            String faviconUrl,
+            String backgroundImageUrl,
+            String preset,
+            String primary,
+            String primaryMid,
+            String accent,
+            String success,
+            String warning,
+            String danger,
+            String header,
+            String text,
+            String textSecondary,
+            String textMuted,
+            Double sidebarOpacity,
+            Double surfaceOpacity,
+            Integer blurPx,
+            Integer backgroundBlurPx,
+            String chrome
+        ) {
+            this(
+                siteName,
+                logoUrl,
+                faviconUrl,
+                backgroundImageUrl,
+                preset,
+                primary,
+                primaryMid,
+                accent,
+                success,
+                warning,
+                danger,
+                header,
+                text,
+                textSecondary,
+                textMuted,
+                sidebarOpacity,
+                surfaceOpacity,
+                blurPx,
+                backgroundBlurPx,
+                chrome,
+                null
+            );
         }
 
         public AppearanceResponse(
@@ -91,6 +141,33 @@ public final class AppearanceDtos {
                 blurPx,
                 backgroundBlurPx,
                 CHROME_CLASSIC
+            );
+        }
+
+        /** The same appearance with the address of the source code that the console links to. */
+        public AppearanceResponse withSourceUrl(String sourceUrl) {
+            return new AppearanceResponse(
+                siteName,
+                logoUrl,
+                faviconUrl,
+                backgroundImageUrl,
+                preset,
+                primary,
+                primaryMid,
+                accent,
+                success,
+                warning,
+                danger,
+                header,
+                text,
+                textSecondary,
+                textMuted,
+                sidebarOpacity,
+                surfaceOpacity,
+                blurPx,
+                backgroundBlurPx,
+                chrome,
+                sourceUrl
             );
         }
     }

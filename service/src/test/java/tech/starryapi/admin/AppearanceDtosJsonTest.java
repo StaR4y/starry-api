@@ -109,4 +109,15 @@ class AppearanceDtosJsonTest {
 
         assertThat(mapper.writeValueAsString(appearance)).contains("\"chrome\":\"editorial\"");
     }
+
+    @Test
+    void jacksonWritesTheSourceAddressWhenItIsSetAndOmitsItOtherwise() throws Exception {
+        AppearanceDtos.AppearanceResponse stored = AppearanceSettingsService.defaults();
+
+        assertThat(stored.sourceUrl()).isNull();
+        assertThat(mapper.writeValueAsString(stored)).doesNotContain("sourceUrl");
+        assertThat(mapper.writeValueAsString(stored.withSourceUrl("https://github.com/StaR4y/starry-api")))
+            .contains("\"sourceUrl\":\"https://github.com/StaR4y/starry-api\"")
+            .contains("\"chrome\":\"classic\"");
+    }
 }

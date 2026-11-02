@@ -89,7 +89,7 @@ import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
 /**
- * A session that really fell to a lower tier stays there until it has been idle (design 4.7, owner decision D4,
+ * A session that really fell to a lower tier stays there until it has been idle (design 4.7,
  * invariant I8), end to end through the facade: what pushes a session down and what does not, where the next request
  * of the session starts and what it reserves, and the one way back up. The upstream clients are stand-ins; the account
  * pool and admission are those of the other tiered facade tests, the planner and the bindings are the real ones.
@@ -670,7 +670,7 @@ class ProxyFacadeTieredStickyTest {
 
     @Test
     void leavingTheBestTierOnTheReservedSlotWhenItHadNothingLeftPushesTheSessionDown() {
-        // The owner's example of the slot: both sources of the first tier fail definitively with a budget of two.
+        // The reference scenario of the slot: both sources of the first tier fail definitively with a budget of two.
         loaded(anthropic(true, "1", "1"));
         add(officialKey("official-1"), officialKey("official-2"), kiro("kiro-1"));
         fails("official-1", new UpstreamException(429, "slow down", true));

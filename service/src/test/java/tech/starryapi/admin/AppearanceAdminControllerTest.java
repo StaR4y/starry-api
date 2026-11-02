@@ -11,6 +11,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
 import reactor.core.publisher.Mono;
 import tech.starryapi.common.AdminAuth;
+import tech.starryapi.config.SourceCodeProperties;
 
 class AppearanceAdminControllerTest {
 
@@ -50,7 +51,7 @@ class AppearanceAdminControllerTest {
             ));
         });
 
-        WebTestClient.bindToController(new AppearanceAdminController(service, adminAuth))
+        WebTestClient.bindToController(new AppearanceAdminController(service, adminAuth, new SourceCodeProperties()))
             .build()
             .patch()
             .uri("/admin/appearance")
@@ -79,7 +80,7 @@ class AppearanceAdminControllerTest {
         );
         when(service.settings()).thenReturn(Mono.just(AppearanceSettingsService.defaults()));
 
-        WebTestClient.bindToController(new AppearanceAdminController(service, adminAuth))
+        WebTestClient.bindToController(new AppearanceAdminController(service, adminAuth, new SourceCodeProperties()))
             .build()
             .get()
             .uri("/admin/appearance")
@@ -87,5 +88,29 @@ class AppearanceAdminControllerTest {
             .expectStatus().isOk()
             .expectBody()
             .jsonPath("$.data.chrome").isEqualTo("classic");
+    }
+
+    /** The console swaps its public appearance for what an admin call returns, so these must name the source too. */
+    @Test
+    void adminResponsesCarryTheSourceAddressLikeThePublicOne() {
+        AppearanceSettingsService service = mock(AppearanceSettingsService.class);
+        AdminAuth adminAuth = mock(AdminAuth.class);
+        when(adminAuth.verifyAdmin(any())).thenReturn(
+            new AdminPrincipal("admin-1", "admin", "ADMIN", null, false)
+        );
+        when(service.settings()).thenReturn(Mono.just(AppearanceSettingsService.defaults()));
+        when(service.update(any())).thenReturn(Mono.just(AppearanceSettingsService.defaults()));
+        SourceCodeProperties sourceCode = new SourceCodeProperties();
+        sourceCode.setUrl("https://git.example.com/me/starry-api-fork");
+        WebTestClient client = WebTestClient.bindToController(new AppearanceAdminController(service, adminAuth, sourceCode))
+            .build();
+
+        client.get().uri("/admin/appearance").exchange()
+            .expectStatus().isOk()
+            .expectBody().jsonPath("$.data.sourceUrl").isEqualTo("https://git.example.com/me/starry-api-fork");
+        client.patch().uri("/admin/appearance").contentType(MediaType.APPLICATION_JSON).bodyValue("{\"siteName\":\"Starry API\"}")
+            .exchange()
+            .expectStatus().isOk()
+            .expectBody().jsonPath("$.data.sourceUrl").isEqualTo("https://git.example.com/me/starry-api-fork");
     }
 }

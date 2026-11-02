@@ -1,5 +1,5 @@
 import { t } from '@/i18n';
-/** Beijing peak/off-peak helpers, aligned with dsh-usage-plugin. */
+/** Beijing peak/off-peak helpers, aligned with the service-side PeakHours. */
 
 export const WEEKEND_FLAT_AT = Date.parse('2026-08-23T00:00:00+08:00');
 

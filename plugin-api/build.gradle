@@ -12,3 +12,9 @@ dependencies {
 java {
     withSourcesJar()
 }
+
+// The SDK is Apache-2.0 while the rest of the project is AGPL-3.0-only, so its jars carry their own license text.
+tasks.withType(Jar).configureEach {
+    from(layout.projectDirectory.file('LICENSE')) { into 'META-INF' }
+    from(layout.projectDirectory.file('NOTICE')) { into 'META-INF' }
+}

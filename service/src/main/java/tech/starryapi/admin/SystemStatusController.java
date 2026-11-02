@@ -8,6 +8,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Mono;
 import tech.starryapi.common.ApiResponse;
+import tech.starryapi.config.SourceCodeProperties;
 import tech.starryapi.model.ModelCatalogManagementService;
 import tech.starryapi.model.ModelDtos;
 
@@ -20,15 +21,18 @@ public class SystemStatusController implements SystemStatusApi {
     private final DataManagementSecurityService securityService;
     private final AppearanceSettingsService appearanceSettingsService;
     private final ModelCatalogManagementService modelCatalogManagementService;
+    private final SourceCodeProperties sourceCode;
 
     public SystemStatusController(
         DataManagementSecurityService securityService,
         AppearanceSettingsService appearanceSettingsService,
-        ModelCatalogManagementService modelCatalogManagementService
+        ModelCatalogManagementService modelCatalogManagementService,
+        SourceCodeProperties sourceCode
     ) {
         this.securityService = securityService;
         this.appearanceSettingsService = appearanceSettingsService;
         this.modelCatalogManagementService = modelCatalogManagementService;
+        this.sourceCode = sourceCode;
     }
 
     @Override
@@ -53,7 +57,7 @@ public class SystemStatusController implements SystemStatusApi {
         return appearanceSettingsService.settings()
             .map(appearance -> ResponseEntity.ok()
                 .cacheControl(CacheControl.noStore())
-                .body(ApiResponse.ok(appearance)));
+                .body(ApiResponse.ok(appearance.withSourceUrl(sourceCode.effectiveUrl()))));
     }
 
     @Override

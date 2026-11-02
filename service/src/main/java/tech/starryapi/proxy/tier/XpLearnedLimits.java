@@ -23,8 +23,8 @@ import tech.starryapi.sourcetier.SourceTierSnapshot.MemberModel;
  * been refused once, so it is not sent a second time, which is also why a request that is exactly as large is left out
  * and not only a larger one. The size only goes down while the knowledge lasts: a relay's real window is somewhere
  * below the smallest prompt it refused, and every refusal narrows where. The estimate counts the input only. A body that
- * asks for more output than the 4,096 the plans judge a prompt beside (a relay whose mapping states a maximum output,
- * D15) may have been refused for the output it asked for and not for the prompt, which the gateway's estimate, often
+ * asks for more output than the 4,096 the plans judge a prompt beside (a relay whose mapping states a maximum output)
+ * may have been refused for the output it asked for and not for the prompt, which the gateway's estimate, often
  * low, does not tell apart: it is kept as the size its prompt would be beside 4,096 ({@link
  * TierPlan.Relay#taughtByRefusal}), and the plans compare such a body in the same terms. A body with a limit the client
  * wrote is compared on its prompt alone, whatever output it asks for, so that value does not tell it from the refused

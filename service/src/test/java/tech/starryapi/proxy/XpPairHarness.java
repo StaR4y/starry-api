@@ -195,7 +195,7 @@ public final class XpPairHarness {
     private static final Set<String> RELAY_HEADERS = Set.of(
         "accept", "accept-encoding", "authorization", "connection", "content-length", "content-type", "host", "user-agent");
 
-    /** $3/M in, $15/M out, $0.30/M cache read, $3.75/M cache write: the prices of the owner's example (design 5.5). */
+    /** $3/M in, $15/M out, $0.30/M cache read, $3.75/M cache write: the prices of the reference scenario (design 5.5). */
     private static final BillingQuote QUOTE = new BillingQuote(
         new BigDecimal("0.000003"), new BigDecimal("0.000015"), new BigDecimal("0.0000003"),
         new BigDecimal("0.00000375"), new BigDecimal("0.000003"));
@@ -630,7 +630,7 @@ public final class XpPairHarness {
                 "popup", false, new BigDecimal("0.10"), 10, null, null);
         }
 
-        // ---- the tiers: the owner's example, the relay first and a native tier below ----
+        // ---- the tiers: the reference scenario, the relay first and a native tier below ----
 
         private Member member() {
             ObjectNode s = memberSettings;

@@ -2,8 +2,10 @@
 const { chromium } = require('playwright');
 const { mkdirSync, writeFileSync } = require('node:fs');
 const assert = require('node:assert/strict');
+const os = require('node:os');
+const { join } = require('node:path');
 const base = 'http://127.0.0.1:5174';
-const out = process.env.CODING_PLAN_SCREENSHOTS || '/private/tmp/starry-coding-preview/screenshots';
+const out = process.env.CODING_PLAN_SCREENSHOTS || join(os.tmpdir(), 'starry-coding-preview', 'screenshots');
 if (process.env.CODING_PLAN_PREVIEW_TESTS !== 'true' || !process.env.CODING_PLAN_PREVIEW_PASSWORD) {
   throw new Error('Requires CODING_PLAN_PREVIEW_TESTS=true and disposable preview credentials');
 }

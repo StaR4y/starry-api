@@ -60,31 +60,7 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
 
 ---
 
-## 二、私有仓库怎么办
-
-私有仓库的 GitHub raw 地址不带认证会返回 `404`。在服务器上**一次性**保存一个只读的 GitHub Token（Fine-grained token，只给 Contents 的读权限）：
-
-```bash
-sudo mkdir -p /opt/starry-api
-sudo install -m 600 /dev/null /opt/starry-api/.github-token
-sudo sh -c 'printf "%s" "把你的token粘在这里" > /opt/starry-api/.github-token'
-```
-
-之后安装 / 更新就不用再手敲 Token：
-
-```bash
-GITHUB_TOKEN="$(sudo cat /opt/starry-api/.github-token)"
-curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-  https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
-  -o /tmp/install-server.sh
-sudo bash /tmp/install-server.sh
-```
-
-如果服务器上已有仓库的本地副本，直接 `sudo bash scripts/install-server.sh` 也可以，它会自动读取 `/opt/starry-api/.github-token`。
-
----
-
-## 三、安装完成后做什么
+## 二、安装完成后做什么
 
 ### 1. 查看 admin 登录信息
 
@@ -147,8 +123,6 @@ sudo env \
 | `FORCE_ENV` | `false` | 在数据库初始化**之前**重新生成 `.env`；或重新启用上次失败部署保留的凭据。已初始化的集群见下文 |
 | `INSTALL_DOCKER` | `true` | 缺少 Docker 时是否自动安装 |
 | `ENABLE_MIHOMO` | `auto` | 可选的 Mihomo 出站组件。`auto`：全新安装时部署（空闲，约 20 MB），已有 `.env` 不改动，所以升级不会悄悄多出容器；`true`：也给已有 `.env` 追加（旧文件先保存为 `.env.previous`，重复执行不产生重复项）；`false`：不部署，已有的保持不变。部署 = 在 `.env` 写入 `COMPOSE_PROFILES=mihomo` 和随机生成的 `STARRY_EGRESS_CONTROLLER_SECRET`（不会打印）并拉取官方 `metacubex/mihomo` 镜像；是否使用由管理员在「系统设置 → 出站代理」打开开关。下载到的部署包不含 `mihomo` 服务（旧版本）时，`auto` 跳过它，`true` 报错退出。详见 [账号出站代理](ACCOUNT_EGRESS.md#部署) |
-| `GITHUB_TOKEN` | 空 | 私有仓库下载用的 Token |
-| `GITHUB_TOKEN_FILE` | `${INSTALL_DIR}/.github-token` | `GITHUB_TOKEN` 为空时读取的 Token 文件 |
 | `CLI_LINK_PATH` | `/usr/local/bin/starry-api` | `starry-api` 命令的链接位置。只在目录存在、且该路径不存在或已经是指向某个安装目录的链接时才创建 / 更新，**绝不覆盖**无关文件；设成空字符串则不创建链接（仍可直接运行 `${INSTALL_DIR}/starry-api`） |
 | `REPO_URL` | `https://github.com/StaR4y/starry-api.git` | 用来推导 raw 下载地址的仓库 |
 | `BRANCH` | `main` | 用来推导 raw 下载地址的分支 |

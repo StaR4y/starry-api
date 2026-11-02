@@ -482,7 +482,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
             // request takes (design 4.7): an automatic request starts from the tier its session is bound to, or from the
             // best one, and a request pinned to "tier+" from that tier (a strict pin has that tier alone). The owner is
             // tried first only when it sits in the tier the walk starts from. An owner anywhere else is a lower tier's
-            // doing (a D2 fall inside a "+" range, a strict pin to a lower tier, or what is left of a fall the session has
+            // doing (a fall for busyness inside a "+" range, a strict pin to a lower tier, or what is left of a fall the session has
             // been idle for too long to keep); keeping it would hold the chain in that tier, and pay its factor, for as
             // long as the chain lasts, whatever the named or the best tier could serve. A chain that cannot leave its
             // owner keeps it.
@@ -715,8 +715,8 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
                 inputBound = Math.max(inputBound, relay.inputBound());
             }
             // The output is bounded the same way: a tier that can hold native accounts is reserved for the limit of the request,
-            // which they are sent, and a tier of relays alone for the most its relays are sent where the gateway chose the limit
-            // (D15), since the default it chose for the native sources is not one a relay is ever given.
+            // which they are sent, and a tier of relays alone for the most its relays are sent where the gateway chose the limit,
+            // since the default it chose for the native sources is not one a relay is ever given.
             long levelOutput = natives || !gatewayOutput ? outputBound : relayOutputBound(relays, outputBound);
             compared.add(quote == null ? null : quote.estimate(inputBound, outputBound));
             levels.add(new Level(
@@ -786,7 +786,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
     }
 
     /**
-     * What a tier that holds relays alone is reserved to write, for a request whose output limit the gateway chose (D15): the
+     * What a tier that holds relays alone is reserved to write, for a request whose output limit the gateway chose: the
      * most any of its relays is sent, as far as the limit of the request goes, which is what the usage of a relay is bounded
      * by when it serves. A tier none of whose relays can serve this request is kept for a request pinned to it, which is
      * answered with a retry and never dispatched, and is reserved for the fallback output a relay is given when its mapping
@@ -857,7 +857,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
      * <p>The words are those the advice always had (the dearest tier, cheaper tiers) for as long as every tier is reserved
      * for the output the request is limited to, when the tier that reserves the most is the dearest and the ones that
      * reserve less are the cheaper. Once a tier is reserved for less than that (a tier of relays alone, for a request whose
-     * limit the gateway chose, D15), or when a relay is reserved for an image it is sent as the mapping says (or as a million
+     * limit the gateway chose), or when a relay is reserved for an image it is sent as the mapping says (or as a million
      * tokens, for one that is only pointed at) so that a tier of a higher factor reserves less than one of a lower, that is no
      * longer so: the words are about what is reserved, with the factors given for the user to read the prices by. Only a plan
      * with such a tier gets the new words, so that a vendor whose tiers have no relays, and a plan whose tiers are reserved in
@@ -908,8 +908,8 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
             : request.keyHoldsPreference()
                 ? header + "，或在 API Key 的设置里选择号源偏好"
                 : header;
-        // Pools that reserve less, not cheaper ones, where a tier of relays alone is reserved for the few tokens its relays are sent
-        // (D15): it may reserve less than a tier of a lower factor whose accounts are sent the default output; the factors are given.
+        // Pools that reserve less, not cheaper ones, where a tier of relays alone is reserved for the few tokens its relays are sent:
+        // it may reserve less than a tier of a lower factor whose accounts are sent the default output; the factors are given.
         return "；可以改选" + (byAmount ? "预留更少" : "更便宜") + "的号池（" + ways + "）："
             + reservingLess.stream()
                 .map(level -> (suffix ? request.requestedModel() + "@" + level.tierId() : level.tierId()) + "（系数 "
@@ -934,7 +934,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
 
     /**
      * Whether a tier is reserved for less than the limit of the request, which is the output every tier was reserved for
-     * before a tier of relays alone was reserved for what its relays are sent (D15).
+     * before a tier of relays alone was reserved for what its relays are sent.
      *
      * @param compared what each level would be reserved at under the limit of the request, parallel to the levels
      */
@@ -1010,7 +1010,7 @@ public class DefaultSourceTierPlanner implements TierRuntime.Planner {
      *
      * <p>The tiers are compared at the output the request is limited to in every one of them ({@code compared}, parallel to
      * the levels), not at what each is reserved to write: a tier of relays alone is reserved for the few tokens its relays are
-     * sent (D15), which makes its estimate smaller than that of the tier of Kiro below it, and it would then be a tier that a
+     * sent, which makes its estimate smaller than that of the tier of Kiro below it, and it would then be a tier that a
      * session pushed down to Kiro climbs back to as a last resort, moving its binding there, for the turns of small prompts
      * and not for large ones. The reservation is the largest estimate of the tiers that are held, whichever way they are chosen.
      *

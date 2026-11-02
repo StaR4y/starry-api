@@ -341,6 +341,8 @@ export interface Appearance {
   blurPx: number;
   backgroundBlurPx: number;
   chrome: AppearanceChrome;
+  /** Where the source of the running version is (STARRY_SOURCE_URL); set by the server, never sent back. */
+  sourceUrl?: string | null;
 }
 
 export interface UpdateAppearanceRequest {

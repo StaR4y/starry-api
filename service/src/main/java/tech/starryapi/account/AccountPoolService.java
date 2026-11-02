@@ -1180,7 +1180,7 @@ public class AccountPoolService {
 
     /**
      * @param credentialWordsDisable whether an authentication failure whose text says the credential was revoked disables the
-     *     account. False for a relay of another protocol (D5): the text is the relay's own, taken from its raw answer, and the
+     *     account. False for a relay of another protocol: the text is the relay's own, taken from its raw answer, and the
      *     key it turns down is the administrator's to mend, so the account only rests, and serves again when the key is good.
      */
     public Mono<Void> recordTestFailure(

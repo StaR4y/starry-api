@@ -2,10 +2,14 @@
 const { chromium } = require('playwright');
 const { readFileSync, mkdirSync, writeFileSync } = require('node:fs');
 const assert = require('node:assert/strict');
+const os = require('node:os');
+const path = require('node:path');
 const base = 'http://127.0.0.1:5175';
-const output = '/private/tmp/starry-plugin-preview';
-if (process.env.PRICING_PREVIEW_TESTS !== 'true') throw new Error('Requires PRICING_PREVIEW_TESTS=true');
-const password = 'pricing-preview-only-password-2026';
+const output = path.join(os.tmpdir(), 'starry-plugin-preview');
+if (process.env.PRICING_PREVIEW_TESTS !== 'true' || !process.env.PRICING_PREVIEW_PASSWORD) {
+  throw new Error('Requires PRICING_PREVIEW_TESTS=true and a disposable preview password');
+}
+const password = process.env.PRICING_PREVIEW_PASSWORD;
 const report = { checks: [], screenshots: [], errors: [] };
 async function api(route, token, method = 'GET', body, expected = 200) {
   const response = await fetch(base + route, { method,
@@ -164,7 +168,7 @@ async function main() {
     await modelSelect.fill('review-legacy');
     await modelSelect.press('Enter');
     await preview();
-    await panel.getByText('未找到可核实的官方价格，暂不可计费', { exact: true }).waitFor();
+    await panel.getByText('未找到可核实的厂商标价，暂不可计费', { exact: true }).waitFor();
     report.checks.push('unknown price shown as unavailable');
     await modelSelect.fill('gpt-5.5');
     await page.getByRole('option', { name: 'gpt-5.5', exact: true }).click();
@@ -180,7 +184,7 @@ async function main() {
     }
     await page.setViewportSize({ width: 1440, height: 1050 });
     await panel.locator('.el-switch').filter({ has: page.getByRole('switch', { name: '启用 gpt-5.5', exact: true }) }).click();
-    await panel.getByText('官方价格数据源', { exact: true }).click();
+    await panel.getByText('厂商标价数据源', { exact: true }).click();
     await page.route('**/admin/model-pricing/refresh', route => route.fulfill({
       status: 503, json: { success: false, error: { code: 'MODEL_PRICE_REFRESH_FAILED', message: 'Preview injected sync failure' } },
     }));

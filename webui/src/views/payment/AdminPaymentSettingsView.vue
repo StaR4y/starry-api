@@ -3,7 +3,7 @@
   /**
    * 管理员支付设置。
    *
-   * 配置项参考 sub2api 的支付设置，实际落库由后端 payment settings 服务负责。
+   * 配置项和实际落库都由后端 payment settings 服务负责。
    */
   import { computed, onMounted, reactive, ref } from 'vue';
   import { ElMessage } from 'element-plus';
@@ -485,7 +485,7 @@
                   style="width: 100%"
                 />
               </el-form-item>
-              <el-form-item :label="t('模型官方价格计费倍率')">
+              <el-form-item :label="t('模型标价计费倍率')">
                 <el-input-number
                   v-model="form.apiBillingMultiplier"
                   :min="0.0001"
@@ -495,7 +495,7 @@
                   style="width: 100%"
                 />
                 <p class="field-hint text-muted">
-                  {{ t('1.0 按模型官方美元成本计费；2.0 为官方成本的 2 倍。') }}
+                  {{ t('1.0 按模型厂商标价（美元）计费；2.0 为标价的 2 倍。') }}
                 </p>
               </el-form-item>
               <el-form-item :label="t('充值手续费率 (例如 0.006)')">

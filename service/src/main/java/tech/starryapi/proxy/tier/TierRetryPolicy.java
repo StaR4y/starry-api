@@ -35,7 +35,7 @@ import tech.starryapi.proxy.tier.TierPlan.Level;
  *   <li>A request more than {@link #CROSS_TIER_DEADLINE} old does not cross any more: a native attempt in the next tier
  *       can run for minutes, and a client that gives up meanwhile ends the request in a state that is billed for
  *       review. It is narrowed like a request that failed in a way that may have generated.
- *   <li>A relay that rejects the key of its own account (a 401 or 403, D5) has failed as that account, before it generated
+ *   <li>A relay that rejects the key of its own account (a 401 or 403) has failed as that account, before it generated
  *       anything: it is a definitive failure that is retried like one of a busy account, in the tier and then in the tier
  *       below, and is never what the request ends with. What the client is told when nothing is left is the facade's to say.
  *   <li>A relay that refuses the request itself (a prompt longer than its window, a conversion it will not take) is

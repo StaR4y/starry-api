@@ -1,10 +1,10 @@
 .git
+.claude
 .gradle
 .idea
 build
 service-api/build
 plugin-api/build
-examples/plugin-demo/build
 service/build
 webui/dist
 webui/node_modules
@@ -12,6 +12,8 @@ artifacts/*.jar
 artifacts/*.tar.gz
 .env
 .env.*
+**/.env
+**/.env.*
 *.log
 data
 tmp

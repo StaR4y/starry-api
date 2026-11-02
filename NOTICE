@@ -1,0 +1,194 @@
+Starry API
+Copyright (C) 2026 StaR4y and contributors
+
+Starry API is free software: you can redistribute it and/or modify it under the
+terms of the GNU Affero General Public License, version 3 only, as published by
+the Free Software Foundation (SPDX-License-Identifier: AGPL-3.0-only). The full
+text is in the file LICENSE.
+
+Starry API is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU Affero General Public License for more details.
+
+This file lists what the license text does not say by itself: how network users
+get the source code, the additional permission for plugins, the license
+elections this project makes for dependencies that offer a choice, where the
+license texts and source code of dependencies are, credits for bundled data, the
+trademark exclusion, and the optional Mihomo component. The
+license of everything else you receive with the software is stated in that
+component's own files.
+
+
+1. Source code for network users (AGPL-3.0, section 13)
+
+If you run a modified version of Starry API and let other people interact with
+it through a computer network, section 13 requires you to offer those users the
+corresponding source code of your modified version. The console shows a
+"Source code" link in its footer for this purpose. Its address is the runtime
+setting STARRY_SOURCE_URL (default https://github.com/StaR4y/starry-api). If
+you modify the code, point STARRY_SOURCE_URL at where your modified source can
+be downloaded. See docs/CONFIGURATION.md.
+
+
+2. Plugins and the plugin-api module
+
+The directory plugin-api/ (the plugin SDK, package tech.starryapi.plugin.sdk)
+is licensed under the Apache License, Version 2.0. Its license text is in
+plugin-api/LICENSE.
+
+Additional permission under section 7 of the GNU Affero General Public License,
+version 3: a plugin that interacts with Starry API only through the interfaces
+of the plugin-api module (including the HTTP calls it makes through
+PluginContext.request), and that contains no other part of Starry API, is an
+independent work and is not a covered work under the license of Starry API. You
+may license, convey and use such a plugin under terms of your choice, including
+proprietary terms, together with an unmodified or modified Starry API. This
+permission does not extend to a plugin that copies, links against or otherwise
+builds on any part of Starry API other than plugin-api, and it does not extend
+to the browser script of a web widget plugin (the script that widget.json
+declares and the console loads from /plugin-assets), which runs inside the
+console page and uses the console's own hooks, not the interfaces of plugin-api.
+If you modify Starry API, you may extend this permission to your version, but
+you are not obliged to; if you do not wish to, delete this paragraph from your
+version.
+
+Plugins run inside the service process with full access to it. This permission
+is about copyright licensing only, and it says nothing about the safety of any
+plugin. See docs/PLUGINS.md and SECURITY.md.
+
+
+3. Dependencies: license elections, license texts and source code
+
+Some dependencies are offered under more than one license. This project elects
+the following. The Java versions are the ones resolved by the Gradle build
+(runtimeClasspath) of this release and the npm version is the one locked in
+webui/package-lock.json; the license choices are those declared in each project's
+POM, source files or package.json.
+
+  - logback-classic and logback-core 1.5.38 are offered under EPL-2.0 or
+    LGPL-2.1-only. Elected: LGPL-2.1-only. The text of that license is the file
+    licenses/LGPL-2.1.txt and logback's copyright notice is the file
+    licenses/logback-NOTICE.txt; both are also in META-INF/licenses of the
+    executable jar.
+  - jakarta.annotation-api 3.0.0 is offered under EPL-2.0 or GPL-2.0 with the
+    Classpath Exception. Elected: GPL-2.0 with the Classpath Exception.
+  - jakarta.mail-api 2.1.5 and angus-mail 2.0.5 are offered under EPL-2.0 or
+    GPL-2.0 with the Classpath Exception: their source files and their
+    META-INF/NOTICE.md say so, and their jars carry both texts. (Their POMs also
+    list EDL-1.0, which those files do not grant, so it is not elected.) Elected:
+    GPL-2.0 with the Classpath Exception.
+  - DOMPurify 3.4.16 (the web console) is offered under MPL-2.0 or Apache-2.0.
+    Elected: Apache-2.0.
+
+The Java libraries are shipped unmodified, each as its own jar under
+BOOT-INF/lib of the executable jar, so a user can replace one with a modified
+version. DOMPurify is bundled, unmodified, into the console's JavaScript.
+
+Source code for the five Java libraries above (the two logback jars,
+jakarta.annotation-api, jakarta.mail-api and angus-mail) travels with every
+binary release: the build task :service:copyleftSources collects their -sources
+jars, and scripts/publish-artifact.sh puts them into the directory
+third-party-sources/ of the deployment bundle and of the artifact directory next
+to starry-api.jar, so they are offered from the same place as the binaries. They
+are also available from the projects (https://logback.qos.ch/,
+https://github.com/jakartaee/common-annotations-api,
+https://github.com/jakartaee/mail-api, https://github.com/eclipse-ee4j/angus-mail)
+and from Maven Central under the same coordinates. The source code of DOMPurify is
+at https://github.com/cure53/DOMPurify (its Apache-2.0 election has no source
+obligation).
+
+All other Java and npm dependencies are offered under permissive licenses
+(Apache-2.0, MIT, MIT-0, BSD-2-Clause, BSD-3-Clause, ISC, CC0-1.0 and the Eclipse
+Distribution License 1.0, which has the terms of BSD-3-Clause), and any choice
+they offer is between permissive licenses. The Java build checks this: it stops
+when a library declares only licenses outside that list (or none) and is not one
+of the elections above, and when a jar carries no license text and declares a
+license other than Apache-2.0, MIT, MIT-0 or CC0-1.0. Many of the Java jars carry
+no license file of their own. The build therefore generates
+JAVA-THIRD-PARTY-NOTICES.txt from the Maven POMs of the runtime classpath: it
+lists every library with its version and the license it declares, and prints the
+Apache-2.0 text and, for the jars that declare MIT and carry none, the MIT text
+(it is the file META-INF/JAVA-THIRD-PARTY-NOTICES.txt inside the executable jar,
+at the root of the deployment bundle, and
+service/build/generated/java-notices/JAVA-THIRD-PARTY-NOTICES.txt after
+"./gradlew :service:generateJavaNotices"). Jars that do carry license and notice
+files keep them under BOOT-INF/lib. The web console build writes the license
+text and notice of every npm package that ends up in the console to
+THIRD-PARTY-NOTICES.txt, and stops when a bundled package has none. That file is
+served next to the console (it is the file
+BOOT-INF/classes/static/THIRD-PARTY-NOTICES.txt inside the executable jar and
+webui/dist/THIRD-PARTY-NOTICES.txt after "npm run build"). Because the console
+displays a copyright line while it runs, that file also ends with the notice for
+logback: its copyright line, the LGPL-2.1-only election and where the license text
+is (section 6 of the LGPL-2.1 asks for a copyright notice and a reference to the
+license among what a running work displays).
+
+The Gradle wrapper (gradlew, gradlew.bat, gradle/wrapper/) is Copyright 2015 the
+original author or authors, as its files say, and is licensed under the Apache
+License, Version 2.0.
+
+
+4. Bundled and fetched data
+
+Model price catalog. service/src/main/resources/model-pricing/ holds a snapshot
+of the community-maintained price list in the repository Wei-Shaw/model-price-repo
+(https://github.com/Wei-Shaw/model-price-repo), which its maintainers license
+under the MIT License. The file follows the format of the LiteLLM model price
+list (https://github.com/BerriAI/litellm, MIT License), which is credited here as
+the format and likely upstream of that data. The prices are vendor list prices
+as collected by that community catalog, not data supplied by the vendors. Unless
+STARRY_MODEL_PRICING_REMOTE_REFRESH_ENABLED is set to false, the service
+refreshes the catalog from that repository at run time. See
+service/src/main/resources/model-pricing/README.md for the snapshot's details.
+
+Model ranking. service/src/main/resources/model-ranking/ holds small factual
+snapshots of two public leaderboards: ProgramBench (https://programbench.com/)
+and the Terminal-Bench 3.0 leaderboard published at https://www.frontierbench.ai/.
+Each snapshot records its source address. The scores and model names belong to
+their publishers. By default the service refreshes them at run time from the
+files in https://github.com/StaR4y/ai-benchmark-ranking (the
+STARRY_MODEL_RANKING_* settings in service/src/main/resources/application.yml
+and docker-compose.yml change or switch off that refresh).
+
+News. The console's news page shows items that the service fetches at run time
+from the API of https://aihot.news. No news content is bundled with the
+software, and the items belong to their publishers.
+
+
+5. Trademarks and names
+
+"Starry", "Starry API" and the Starry logo (webui/public/logo.svg,
+webui/public/favicon.svg and the files in docs/images/brand/) identify this
+project. The software license grants no right to use these names or the logo as
+trademarks or service marks, and no right to suggest that a modified version or
+a service you run is the official Starry API or is endorsed by its authors
+(section 7(c), (d) and (e) of the GNU Affero General Public License, version 3). You may
+describe truthfully where your version comes from. A modified version that you
+distribute or host for others should carry a name and logo of its own.
+
+Anthropic, Claude, Claude Code, OpenAI, ChatGPT, Codex, Google, Gemini, Amazon
+Web Services, Amazon Q, CodeWhisperer, Kiro, DeepSeek and every other provider,
+product or model name, logo or mark that appears in this software, its
+documentation or its screenshots belong to their respective owners. They are
+used only to identify the services this software can connect to, and they are
+not covered by the license of this software. Starry API is an independent
+project and is not affiliated with, endorsed by or sponsored by any of them. See
+the Disclaimer in README.md.
+
+
+6. Mihomo (optional, not distributed)
+
+Starry API can route traffic through Mihomo (the Clash.Meta core,
+https://github.com/MetaCubeX/mihomo), which is licensed under the GNU General
+Public License, version 3. Mihomo is optional and Starry API does not include,
+bundle or distribute it: no Mihomo binary or container image is part of the
+source tree, the executable jar, the deployment bundle or any release file of
+this project. When the optional egress component is deployed (the "mihomo"
+profile of the Docker Compose files; the installer scripts/install-server.sh
+deploys it idle on a fresh install unless ENABLE_MIHOMO=false), Docker pulls the
+image metacubex/mihomo from its registry onto the server as a separate container.
+It communicates with Starry API only over a local network connection, as a
+separate program. Its own license (GPL-3.0) governs that image. The file
+docker/egress/mihomo-entrypoint.sh and the "mihomo" service in the Compose files
+are Starry API's own and are licensed like the rest of Starry API (AGPL-3.0-only),
+not under the license of Mihomo.

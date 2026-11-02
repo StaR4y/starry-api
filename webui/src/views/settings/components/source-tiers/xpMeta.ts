@@ -455,7 +455,7 @@ export function applyCacheSuggestion(draft: RelayDraft, suggestion: CacheSuggest
  * Claude Code 的缓存成本警告（设计 7.15）：成员没有打开 cache_control 时，网关不把 Claude Code 的缓存标记发给中转（system
  * 和内容是字符串），中转只有自己按前缀自动缓存的本事才用得上缓存，没有的话每轮按全价付输入，而 Kiro 计缓存读；同系数下
  * 中转级可能每轮贵数倍。打开 cache_control 后，Claude Code 的标记（system 的块、最近几轮的文本、工具结果）原样发给中转，
- * 不再警告。请求头不挡中转自己的前缀缓存（D7），中转报告的缓存命中按缓存读价计费。只对 Anthropic 厂商说。
+ * 不再警告。请求头不挡中转自己的前缀缓存，中转报告的缓存命中按缓存读价计费。只对 Anthropic 厂商说。
  *
  * 但 cache_control 和「映射为 reasoning_effort」一起打开时另有一条（设计 7.6）：reasoning_effort 只在用户提示的轮次发、
  * 工具结果之后的轮次不发（那一轮没有可回放的签名思考块），中转若把它映射成 Claude 的思考开关，同一场对话里思考来回切换，

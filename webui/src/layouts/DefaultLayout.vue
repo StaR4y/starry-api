@@ -26,6 +26,7 @@
   import LanguageSelect from '@/components/LanguageSelect.vue';
   import UsageMaidAssistant from '@/components/UsageMaidAssistant.vue';
   import PluginScriptHost from '@/components/PluginScriptHost.vue';
+  import SourceNotice from '@/components/SourceNotice.vue';
   import { ElMessageBox } from 'element-plus';
   import {
     DataAnalysis,
@@ -431,7 +432,8 @@
       </section>
 
       <footer class="layout__main-footer text-muted">
-        <span>© {{ new Date().getFullYear() }} {{ appearance.siteName }}. All rights reserved.</span>
+        <span>© {{ new Date().getFullYear() }} {{ appearance.siteName }}</span>
+        <SourceNotice />
       </footer>
     </main>
     <UsageMaidAssistant />
@@ -676,8 +678,10 @@
       border-top: 1px solid var(--kp-divider);
       opacity: 0.8;
       display: flex;
+      flex-wrap: wrap;
       justify-content: center;
       align-items: center;
+      gap: 2px 18px;
     }
 
     &.is-editorial {

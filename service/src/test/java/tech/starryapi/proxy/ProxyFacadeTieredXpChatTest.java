@@ -129,7 +129,7 @@ import tools.jackson.databind.node.ObjectNode;
 
 /**
  * A tiered request whose plan holds a relay, end to end through the entries of the facade and its dispatch loop (design
- * 7.5, 7.8): the owner's example, a relay as the first tier of the anthropic vendor and Kiro as the second. The planner
+ * 7.5, 7.8): the reference scenario, a relay as the first tier of the anthropic vendor and Kiro as the second. The planner
  * is the real one, with a registry that offers the Chat Completions and Messages pairs; the dispatcher of the relays is a
  * stand-in that answers per account, and so are Kiro and the account pool. What is looked at is where the request goes,
  * what the relay is asked, what the client is answered, what is charged and how each attempt is recorded.
@@ -565,7 +565,7 @@ class ProxyFacadeTieredXpChatTest {
         assertThat(response.getHeaders().getFirst(TierResponseHeaders.TIER)).isEqualTo("relay");
     }
 
-    // ---- the relay turns its own key down (D5) ----
+    // ---- the relay turns its own key down ----
 
     /** Statuses and the words of the three ways a relay says it will not take the key of its account. */
     private UpstreamException relayRejectsItsKey(String how) {
@@ -990,7 +990,7 @@ class ProxyFacadeTieredXpChatTest {
 
     /**
      * Anthropic says a prompt does not fit beside max_tokens in words of its own, which a relay in front of it passes on. The Chat
-     * entry has no output limit that the gateway chose (D15), so the refusal teaches this node nothing and is any other 400 of the
+     * entry has no output limit that the gateway chose, so the refusal teaches this node nothing and is any other 400 of the
      * converted request: a request whose header named the tier is told the relay's error and not invited to try again, and a
      * request with nowhere native to go is not told the prompt is too long.
      */
@@ -1627,7 +1627,7 @@ class ProxyFacadeTieredXpChatTest {
     // The relay of one vendor is nothing to the requests of the others, though it makes the requests of every vendor be read: the
     // entries of the facade, the planner and the billing meet it only for the vendor it is registered in (invariant I4).
 
-    /** The anthropic relay of the owner's example, open to key-1 on both entries, beside the openai vendor with or without tiers. */
+    /** The anthropic relay of the reference scenario, open to key-1 on both entries, beside the openai vendor with or without tiers. */
     private SourceTierSnapshot relayBesideOpenAi(boolean openAiHasTiers) {
         Member member = relayMember("relay-1");
         List<VendorConfig> vendors = new ArrayList<>(List.of(vendor()));
@@ -1872,7 +1872,7 @@ class ProxyFacadeTieredXpChatTest {
         assertThat(dispatched).containsExactly("relay-1");
     }
 
-    /** OpenCode sends a verbosity of low with every request of a gpt model (D6): the relay is given the request all the same. */
+    /** OpenCode sends a verbosity of low with every request of a gpt model: the relay is given the request all the same. */
     @Test
     void aGptChatRequestThatAsksForALowVerbosityIsServedByTheRelayWhichIsNotSentItAndTheRequestLogsItAsLeftOut() {
         configure(openAiRelayBesideOfficialKeys());
@@ -2229,7 +2229,7 @@ class ProxyFacadeTieredXpChatTest {
         return new Tier("anthropic", tierId, level, tierId, new BigDecimal(factor), listed, true, true, null);
     }
 
-    /** The owner's example: the relay as the first tier, Kiro as the second at 0.6. */
+    /** The reference scenario: the relay as the first tier, Kiro as the second at 0.6. */
     private SourceTierSnapshot owner(Member member, PairGate... gates) {
         return owner(List.of(member), gates);
     }
@@ -2249,7 +2249,7 @@ class ProxyFacadeTieredXpChatTest {
             members, models, List.of(gates));
     }
 
-    /** The tiers of the owner's example with no relay registered in the first: an empty tier above Kiro's. */
+    /** The tiers of the reference scenario with no relay registered in the first: an empty tier above Kiro's. */
     private static SourceTierSnapshot anthropicTiersWithoutRelay() {
         return SourceTierSnapshot.of(7L, List.of(vendor()), List.of(
             tier("relay", 1, "1"),

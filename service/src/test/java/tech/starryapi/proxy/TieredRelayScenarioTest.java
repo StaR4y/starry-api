@@ -97,8 +97,8 @@ import tech.starryapi.platform.openai.OpenAiResponseStateStore;
 import tech.starryapi.platform.openai.OpenAiUpstreamClient;
 import tech.starryapi.platform.upstream.UpstreamException;
 import tech.starryapi.platform.xproto.PairRegistry;
-import tech.starryapi.proxy.OwnerExampleRelays.Reply;
-import tech.starryapi.proxy.OwnerExampleRelays.Seen;
+import tech.starryapi.proxy.TieredRelayScenarioRelays.Reply;
+import tech.starryapi.proxy.TieredRelayScenarioRelays.Seen;
 import tech.starryapi.proxy.tier.DefaultSourceTierPlanner;
 import tech.starryapi.proxy.tier.TierEntry;
 import tech.starryapi.proxy.tier.TierPlan;
@@ -125,7 +125,7 @@ import tools.jackson.databind.node.ArrayNode;
 import tools.jackson.databind.node.ObjectNode;
 
 /**
- * The owner's example from the first request to the last credit (design 1, 4.5, 4.7, 5 and 7): the anthropic vendor with an
+ * The reference scenario from the first request to the last credit (design 1, 4.5, 4.7, 5 and 7): the anthropic vendor with an
  * OpenAI-format relay as its first tier at the standard price and Kiro as its second at 0.6 of it, served to Claude Code
  * (the Messages endpoint, whose route also holds the Anthropic keys) and to OpenCode (the Chat endpoint, whose route is Kiro
  * alone), each by the same scenarios. Everything between the client and the wire is the code of this release: the facade,
@@ -134,7 +134,7 @@ import tools.jackson.databind.node.ObjectNode;
  * what a scenario scripts (a stream, a JSON body, an error, a stream cut off) and keeps what it was asked. What is stood in
  * for is only what is outside the gateway: Kiro and the Anthropic keys answer per account, admission says who is busy, and
  * a ledger takes the place of the billing functions of the database (their SQL side is
- * {@code OwnerExampleBillingPostgreSqlIntegrationTest}).
+ * {@code TieredRelayScenarioBillingPostgreSqlIntegrationTest}).
  *
  * <p>The requests are the shapes the two clients send (Claude Code 2.1.168: a system array, cache marks, thinking, context
  * management, metadata and a stream; OpenCode 1.18.16: a system message, cache marks, {@code tool_choice} and a stream with
@@ -143,16 +143,16 @@ import tools.jackson.databind.node.ObjectNode;
  * <p>Every scenario ends on the same promise: what the user is charged is the standard price times the factor of the tier
  * that served, never more than was reserved, and a request that nobody served is released, not left for review.
  */
-class OwnerExampleTieredXpTest {
+class TieredRelayScenarioTest {
 
     private static final String KEY = "key-1";
     private static final String MODEL = "claude-sonnet-4.5";
     private static final String HAIKU = "claude-haiku-4.5";
     /** What every source reports for a request: 800 in and 100 out, 0.0039 at the standard price and 0.00234 at 0.6 of it. */
     private static final PlatformUsage USAGE = new PlatformUsage(
-        OwnerExampleRelays.INPUT_TOKENS, OwnerExampleRelays.OUTPUT_TOKENS, BigDecimal.ZERO, 0, 0, 0);
+        TieredRelayScenarioRelays.INPUT_TOKENS, TieredRelayScenarioRelays.OUTPUT_TOKENS, BigDecimal.ZERO, 0, 0, 0);
     private static final PlatformCompletionResult KIRO_ANSWER = new PlatformCompletionResult("from kiro", USAGE);
-    /** $3/M in, $15/M out: the prices of the owner's example (design 5.5). */
+    /** $3/M in, $15/M out: the prices of the reference scenario (design 5.5). */
     private static final BillingQuote QUOTE = new BillingQuote(
         new BigDecimal("0.000003"), new BigDecimal("0.000015"), new BigDecimal("0.0000003"),
         new BigDecimal("0.00000375"), new BigDecimal("0.000003"));
@@ -206,7 +206,7 @@ class OwnerExampleTieredXpTest {
 
     /** The headers a client is configured to send with every request, such as the one that names a tier. */
     private final Map<String, String> extraHeaders = new HashMap<>();
-    private OwnerExampleRelays relays;
+    private TieredRelayScenarioRelays relays;
     private ProxyFacade facade;
     private AccountPoolService accountPool;
     /** The exchange of the latest request, whose response is where the gateway puts the Retry-After of a refusal. */
@@ -214,7 +214,7 @@ class OwnerExampleTieredXpTest {
 
     @BeforeEach
     void standInForTheEdges() throws IOException {
-        relays = new OwnerExampleRelays(dispatched::add);
+        relays = new TieredRelayScenarioRelays(dispatched::add);
         when(payments.config()).thenReturn(Mono.just(paymentConfig()));
         when(pricing.billingQuote(anyString(), anyBoolean(), any())).thenReturn(Mono.just(QUOTE));
         when(apiKeyService.authenticate(any())).thenReturn(Mono.just(principal));
@@ -340,7 +340,7 @@ class OwnerExampleTieredXpTest {
 
     /**
      * The first system block of Claude Code changes with every request, which keeps a relay from caching the start of the
-     * prompt: the relay is not sent it (D7). Kiro, which the same request falls to, is sent what it always was.
+     * prompt: the relay is not sent it. Kiro, which the same request falls to, is sent what it always was.
      */
     @Test
     void theBillingHeaderOfClaudeCodeIsLeftOutOfWhatTheRelayIsSentAndNotOfWhatKiroIsSent() {
@@ -449,7 +449,7 @@ class OwnerExampleTieredXpTest {
         assertKiroServedAfterRelays(turn, 1);
     }
 
-    // ---- the relay turns its own key down (D5) ----
+    // ---- the relay turns its own key down ----
 
     /** How a relay says it will not take the key of its account: a status of 401 or 403, and the same as an error inside a 200. */
     private record Rejection(String name, Reply reply, int status) {
@@ -769,7 +769,7 @@ class OwnerExampleTieredXpTest {
     }
 
     /**
-     * D8: the operator carries the cost of an interrupted attempt even when the relay had counted the tokens before it broke
+     * The operator carries the cost of an interrupted attempt even when the relay had counted the tokens before it broke
      * off. What it reported is not a reason to charge the user for an answer that was never completed.
      */
     @ParameterizedTest(name = "{0}")
@@ -860,13 +860,13 @@ class OwnerExampleTieredXpTest {
     @ParameterizedTest(name = "{0}")
     @EnumSource(Client.class)
     void aRelayThatReportsFarMoreInputThanTheRequestCouldHaveHadIsChargedNoMoreThanWasReserved(Client client) {
-        assertChargedNoMoreThanReservedForAnswerClaiming(client, 90_000_000L, OwnerExampleRelays.OUTPUT_TOKENS);
+        assertChargedNoMoreThanReservedForAnswerClaiming(client, 90_000_000L, TieredRelayScenarioRelays.OUTPUT_TOKENS);
     }
 
     @ParameterizedTest(name = "{0}")
     @EnumSource(Client.class)
     void aRelayThatReportsFarMoreOutputThanTheRequestAllowedIsChargedNoMoreThanWasReserved(Client client) {
-        assertChargedNoMoreThanReservedForAnswerClaiming(client, OwnerExampleRelays.INPUT_TOKENS, 9_000_000L);
+        assertChargedNoMoreThanReservedForAnswerClaiming(client, TieredRelayScenarioRelays.INPUT_TOKENS, 9_000_000L);
     }
 
     /** The relay's word about its usage is trusted only as far as the request could have gone (design 5.8, invariant I2). */
@@ -2102,7 +2102,7 @@ class OwnerExampleTieredXpTest {
 
     // ---- the clients ----
 
-    /** The two clients of the owner's example, and what each sends and is answered in. */
+    /** The two clients of the reference scenario, and what each sends and is answered in. */
     private enum Client {
         CLAUDE_CODE("/v1/messages", "x-claude-code-session-id", "Bash"),
         OPENCODE("/v1/chat/completions", "x-opencode-session", "bash");
@@ -2150,7 +2150,7 @@ class OwnerExampleTieredXpTest {
         ObjectNode body = json.createObjectNode();
         body.put("model", model).put("max_tokens", 32000).put("stream", true);
         if (client.messages()) {
-            // The first block is Claude Code's billing header, whose hash is new with every request (D7).
+            // The first block is Claude Code's billing header, whose hash is new with every request.
             ArrayNode system = body.putArray("system");
             system.addObject().put("type", "text").put("text", BILLING_HEADER);
             system.addObject().put("type", "text")

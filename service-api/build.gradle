@@ -16,3 +16,10 @@ dependencies {
     testImplementation 'org.junit.jupiter:junit-jupiter'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
+
+// service-api is part of the AGPL-3.0-only code base (the Apache-2.0 SDK is plugin-api), and plugin developers build
+// against its jars, so its jars carry the license text and the notices like the executable jar does.
+tasks.withType(Jar).configureEach {
+    from(rootProject.layout.projectDirectory.file('LICENSE')) { into 'META-INF' }
+    from(rootProject.layout.projectDirectory.file('NOTICE')) { into 'META-INF' }
+}

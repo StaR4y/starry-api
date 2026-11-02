@@ -265,7 +265,7 @@ class UpstreamFailureClassifierRelayTest {
         }
     }
 
-    // --- the relay turns its own key down (D5) ---
+    // --- the relay turns its own key down ---
 
     @Test
     void aRelayThatRejectsItsOwnKeyHasFailedAsThatAccountAndTheRequestGoesOnToAnotherAccountOrTier() {

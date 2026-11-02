@@ -96,7 +96,7 @@ class AnthropicUpstreamClientTest {
     }
 
     @Test
-    void testClaudeCodeSendsSub2ApiStylePayload() throws Exception {
+    void testClaudeCodeSendsTheClaudeCodeHeadersAndPayload() throws Exception {
         AtomicReference<String> requestBody = new AtomicReference<>();
         AtomicReference<List<String>> apiKey = new AtomicReference<>();
         AtomicReference<List<String>> authorization = new AtomicReference<>();

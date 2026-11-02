@@ -590,7 +590,7 @@ class AssistantChatServiceTest {
         Throwable mapped = AssistantChatService.mapChatError(new ApiException(
             HttpStatus.SERVICE_UNAVAILABLE,
             "MODEL_PRICE_UNAVAILABLE",
-            "Model price is unavailable; configure an explicit price or synchronize the official catalog"
+            "Model price is unavailable; configure an explicit price or synchronize the vendor list price catalog"
         ));
         assertThat(((ApiException) mapped).getMessage()).contains("定价");
     }

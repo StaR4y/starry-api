@@ -2,10 +2,11 @@
 const { chromium } = require('playwright');
 const net = require('node:net');
 const { readFileSync, mkdirSync, writeFileSync } = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const assert = require('node:assert/strict');
 const base = 'http://127.0.0.1:5175';
-const output = '/private/tmp/starry-plugin-preview';
+const output = path.join(os.tmpdir(), 'starry-plugin-preview');
 if (process.env.PLUGIN_PREVIEW_TESTS !== 'true' || !process.env.PLUGIN_PREVIEW_PASSWORD) {
   throw new Error('Requires PLUGIN_PREVIEW_TESTS=true and a disposable preview password');
 }

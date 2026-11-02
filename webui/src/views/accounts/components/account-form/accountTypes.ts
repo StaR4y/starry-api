@@ -263,7 +263,7 @@ export function baseUrlLabel(type: AccountTypeKey): string {
 export function baseUrlPlaceholder(type: AccountTypeKey): string {
   if (type === 'deepseek') return t('默认 {p0}', { p0: DEEPSEEK_DEFAULT_BASE_URL });
   if (type === 'compatible') {
-    return t('例如 https://joystar.cc、https://api.deepseek.com 或 https://openrouter.ai/api/v1');
+    return t('例如 https://relay.example.com、https://api.deepseek.com 或 https://openrouter.ai/api/v1');
   }
   if (type === 'anthropic') {
     return t('默认 https://api.anthropic.com/v1，也可填第三方 Anthropic 兼容地址');

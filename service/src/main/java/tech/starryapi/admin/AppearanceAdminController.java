@@ -15,6 +15,7 @@ import org.springframework.web.server.ServerWebExchange;
 import reactor.core.publisher.Mono;
 import tech.starryapi.common.AdminAuth;
 import tech.starryapi.common.ApiResponse;
+import tech.starryapi.config.SourceCodeProperties;
 
 @RestController
 @RequestMapping("/admin/appearance")
@@ -22,20 +23,28 @@ public class AppearanceAdminController implements AppearanceAdminApi {
 
     private final AppearanceSettingsService appearanceSettingsService;
     private final AdminAuth adminAuth;
+    private final SourceCodeProperties sourceCode;
 
     public AppearanceAdminController(
         AppearanceSettingsService appearanceSettingsService,
-        AdminAuth adminAuth
+        AdminAuth adminAuth,
+        SourceCodeProperties sourceCode
     ) {
         this.appearanceSettingsService = appearanceSettingsService;
         this.adminAuth = adminAuth;
+        this.sourceCode = sourceCode;
+    }
+
+    /** The console replaces its public appearance with what an admin call returns, so these carry the source address too. */
+    private Mono<ApiResponse<AppearanceDtos.AppearanceResponse>> respond(Mono<AppearanceDtos.AppearanceResponse> appearance) {
+        return appearance.map(value -> ApiResponse.ok(value.withSourceUrl(sourceCode.effectiveUrl())));
     }
 
     @Override
     @GetMapping
     public Mono<ApiResponse<AppearanceDtos.AppearanceResponse>> get(ServerWebExchange exchange) {
         adminAuth.verifyAdmin(exchange);
-        return appearanceSettingsService.settings().map(ApiResponse::ok);
+        return respond(appearanceSettingsService.settings());
     }
 
     @Override
@@ -45,7 +54,7 @@ public class AppearanceAdminController implements AppearanceAdminApi {
         @Valid @RequestBody AppearanceDtos.UpdateAppearanceRequest request
     ) {
         adminAuth.verifyAdmin(exchange);
-        return appearanceSettingsService.update(request).map(ApiResponse::ok);
+        return respond(appearanceSettingsService.update(request));
     }
 
     @Override
@@ -55,7 +64,7 @@ public class AppearanceAdminController implements AppearanceAdminApi {
         @RequestPart("file") Mono<FilePart> file
     ) {
         adminAuth.verifyAdmin(exchange);
-        return appearanceSettingsService.upload("logo", file).map(ApiResponse::ok);
+        return respond(appearanceSettingsService.upload("logo", file));
     }
 
     @Override
@@ -65,7 +74,7 @@ public class AppearanceAdminController implements AppearanceAdminApi {
         @RequestPart("file") Mono<FilePart> file
     ) {
         adminAuth.verifyAdmin(exchange);
-        return appearanceSettingsService.upload("favicon", file).map(ApiResponse::ok);
+        return respond(appearanceSettingsService.upload("favicon", file));
     }
 
     @Override
@@ -75,27 +84,27 @@ public class AppearanceAdminController implements AppearanceAdminApi {
         @RequestPart("file") Mono<FilePart> file
     ) {
         adminAuth.verifyAdmin(exchange);
-        return appearanceSettingsService.upload("background", file).map(ApiResponse::ok);
+        return respond(appearanceSettingsService.upload("background", file));
     }
 
     @Override
     @DeleteMapping("/logo")
     public Mono<ApiResponse<AppearanceDtos.AppearanceResponse>> deleteLogo(ServerWebExchange exchange) {
         adminAuth.verifyAdmin(exchange);
-        return appearanceSettingsService.clearAsset("logo").map(ApiResponse::ok);
+        return respond(appearanceSettingsService.clearAsset("logo"));
     }
 
     @Override
     @DeleteMapping("/favicon")
     public Mono<ApiResponse<AppearanceDtos.AppearanceResponse>> deleteFavicon(ServerWebExchange exchange) {
         adminAuth.verifyAdmin(exchange);
-        return appearanceSettingsService.clearAsset("favicon").map(ApiResponse::ok);
+        return respond(appearanceSettingsService.clearAsset("favicon"));
     }
 
     @Override
     @DeleteMapping("/background")
     public Mono<ApiResponse<AppearanceDtos.AppearanceResponse>> deleteBackground(ServerWebExchange exchange) {
         adminAuth.verifyAdmin(exchange);
-        return appearanceSettingsService.clearAsset("background").map(ApiResponse::ok);
+        return respond(appearanceSettingsService.clearAsset("background"));
     }
 }

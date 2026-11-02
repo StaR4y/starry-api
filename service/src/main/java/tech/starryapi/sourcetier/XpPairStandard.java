@@ -8,9 +8,8 @@ import tech.starryapi.sourcetier.SourceTierDtos.XpFigures;
 
 /**
  * What a cross-protocol pair has to show before it is upgraded from EXPERIMENTAL to VERIFIED and a gate may be ON for
- * everyone (design 7.3). The same standard for every pair; the evidence is the status page's export, and the owner may
- * waive the number of requests in writing in the task that does the upgrade, which is why that condition is one line of
- * the evidence and not hidden in the verdict.
+ * everyone (design 7.3). The same standard for every pair; the evidence is the status page's export, and each condition
+ * is a line of it and not hidden in a verdict, so that the number of requests can be read apart from the rest.
  *
  * <ul>
  *   <li>{@code requests}: at least 200 attempts were sent to relays for the pair, under the keys the gate listed.

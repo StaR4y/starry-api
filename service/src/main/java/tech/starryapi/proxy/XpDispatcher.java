@@ -62,14 +62,14 @@ import tools.jackson.databind.node.ObjectNode;
  *       entry that matter take {@code response.incomplete} for a failure of the stream and send the request again, and a
  *       relay that is asked again answers again and is paid for it. So an answer that the relay's filter stopped, and one
  *       that the gateway's own bound cut off (the client named no limit, so the relay was held to the limit the gateway
- *       chose for it: 4,096, or the maximum output of its mapping, D15) when it lost a call or has nothing to show, are not
+ *       chose for it: 4,096, or the maximum output of its mapping) when it lost a call or has nothing to show, are not
  *       told as {@code incomplete}: nothing is charged for them, the relay is kept from the session for a couple of minutes,
  *       and the client's retry reaches another source. That source is held to the default of the model unless it is a Codex
  *       account (the other native sources are sent it, see {@link #cannotBeTold}), so the retry is no promise that the
  *       answer fits. It is a
  *       {@link RelayAnswerWithheldException}, which is an interruption to the request and none to the relay's health: the
  *       relay did what it was asked. It carries what the relay reported of the answer, read as a served answer's usage is,
- *       for the request log to show the operator what it cost (D11); the user is still charged nothing.
+ *       for the request log to show the operator what it cost; the user is still charged nothing.
  *   <li><b>Every failure is the gateway's own</b>, and never one that leaves a reservation for review: a cross-protocol
  *       attempt is generated once, and whatever goes wrong with it is absorbed by the operator (invariant I7). The
  *       relay client already says what it can prove, and an {@link UpstreamException} it raises is kept (its status is
@@ -138,7 +138,7 @@ class XpDispatcher {
      * gateway's own.
      *
      * @param defaultOutputLimit whether the limit the relay was told it may write is one the gateway chose (the client wrote
-     *     none: 4,096 or the maximum output of the mapping, D15) and not one the client wrote: the Responses entry's answers
+     *     none: 4,096 or the maximum output of the mapping) and not one the client wrote: the Responses entry's answers
      *     that this bound cut off are judged by it
      */
     Mono<PlatformCompletionResult> dispatch(
@@ -233,7 +233,7 @@ class XpDispatcher {
 
     /**
      * What the relay reported of an answer that is held back, read as the usage of a served answer is, so that the request
-     * log shows the operator what the answer cost (D11). Nothing is charged for it, whatever it says. The answer is held back
+     * log shows the operator what the answer cost. Nothing is charged for it, whatever it says. The answer is held back
      * all the same when the usage cannot be read: it is no reason to make the failure another kind, which would count against
      * the relay.
      */
@@ -263,10 +263,10 @@ class XpDispatcher {
      *   <li>One that the relay's filter stopped. Another source may answer the request, and the same relay is likely to
      *       stop the retry in the same place.
      *   <li>One that the gateway's own bound cut off ({@code defaultOutputLimit}: the client wrote none, so the relay was
-     *       held to the limit the gateway chose for it, 4,096 or the maximum output of its mapping, D15) and that lost a call
+     *       held to the limit the gateway chose for it, 4,096 or the maximum output of its mapping) and that lost a call
      *       to it, or that has nothing the client can show: no text and no whole call, only reasoning. The bound is the
      *       gateway's for every source: Codex accounts drop the field, but Kiro, official OpenAI keys and Anthropic keys are
-     *       sent the default of the model (D14) when the client names none, and Kiro's answer has no stop reason, so a native
+     *       sent the default of the model when the client names none, and Kiro's answer has no stop reason, so a native
      *       source renders what it was cut at as a finished answer. An answer that is text alone, or has the calls it came to, is told as {@code completed}
      *       by the facade ({@code ProxyFacade#responsesAnswerOfRelay}) as a native source's is; one that lost a call would
      *       end the turn without the step the model was taking, or run the calls it kept without the one it cut.

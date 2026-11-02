@@ -993,7 +993,7 @@ class DefaultSourceTierPlannerSelectorTest {
         assertThat(hint).contains("claude-sonnet-4.5@kiro").contains("系数 0.6").doesNotContain("oauth")
             .contains(TierSelectorParser.REQUEST_HEADER);
         // No tier here holds relays alone, so every tier is reserved for the same output and one that reserves less is a cheaper one:
-        // the advice is worded as it was before D15.
+        // the advice is worded for a cheaper tier and not for one that reserves less.
         assertThat(hint).startsWith("；可以改选更便宜的号池（").doesNotContain("预留更少");
         // The setting of the key is called what its form, the docs and the list of keys call it.
         assertThat(hint).contains("在 API Key 的设置里选择号源偏好").doesNotContainPattern("选择号源(?!偏好)");

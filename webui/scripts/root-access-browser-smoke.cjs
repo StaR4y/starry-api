@@ -2,9 +2,11 @@
 const { chromium } = require('playwright');
 const assert = require('node:assert/strict');
 const { mkdirSync } = require('node:fs');
+const os = require('node:os');
+const { join } = require('node:path');
 const base = process.env.ROOT_ACCESS_UI_BASE || 'http://127.0.0.1:5175';
 assert.ok(['127.0.0.1', 'localhost'].includes(new URL(base).hostname));
-const output = '/private/tmp/starry-root-access-ui';
+const output = join(os.tmpdir(), 'starry-root-access-ui');
 const errors = [];
 const checks = [];
 const response = data => ({ success: true, data });

@@ -420,7 +420,7 @@ class DefaultSourceTierPlannerSessionTest {
     @Test
     void aSessionThatIsNotBoundStartsFromTheBestTierWhateverTierTheOwnerOfItsChainIsIn() {
         // A pinned turn left the chain with a Codex owner while the session was never pushed down, or the binding of a
-        // session that was has expired (D4). The turns after it are automatic and the best tier has an account, so they are
+        // session that was has expired. The turns after it are automatic and the best tier has an account, so they are
         // served by it and priced by it (design 4.7).
         openAiPlan(false);
 

@@ -27,7 +27,7 @@ import tools.jackson.databind.node.ObjectNode;
 
 /**
  * Design 7.9 line by line: for the Messages, Chat and Responses entries, what each feature comes to for a member (carried, left out
- * and recorded, or the reason to skip the member), under the two baselines of design 7.2 (P3). The scenario tests of the
+ * and recorded, or the reason to skip the member), under the two baselines of design 7.2. The scenario tests of the
  * task come first: the Claude Code main loop has no HARD feature, {@code web_search} has, and a {@code gpt} request's
  * images and schemas are HARD where a Claude request's are SOFT.
  */
@@ -132,7 +132,7 @@ class FeaturePolicyTest {
         );
 
         // A member without reasoning effort gets no thinking, and one that does not pass cache control through none of the
-        // cache controls (the conversion for relays has them: P8-01); with both, a new turn gets thinking and a tool
+        // cache controls (the conversion for relays has them); with both, a new turn gets thinking and a tool
         // continuation does not.
         Set<Feature> memberTakesNothing = withThinking(alwaysLeftOut);
         memberTakesNothing.add(Feature.CACHE_CONTROL);
@@ -338,7 +338,7 @@ class FeaturePolicyTest {
             """;
 
         // The failure of a tool result is told in the text of the result, which no member can refuse; the cache control is
-        // sent to the members that pass it through and recorded as left out for the others (P8-01).
+        // sent to the members that pass it through and recorded as left out for the others.
         Verdict passes = messages(body, FULL);
         Verdict doesNot = messages(body, NONE);
 
@@ -532,7 +532,7 @@ class FeaturePolicyTest {
 
     /**
      * The length of the answer is only advice, which OpenCode sends with every request of a gpt model: it is left out of
-     * the relay's body and recorded on every route, entry and member, so that a relay can serve those requests at all (D6).
+     * the relay's body and recorded on every route, entry and member, so that a relay can serve those requests at all.
      * A request that asks for it and for the odds still has the odds as its hard feature.
      */
     @Test
@@ -711,7 +711,7 @@ class FeaturePolicyTest {
 
     /**
      * Codex declares a cached web search and the sub-agents' namespace in every request it makes for a model it has no
-     * metadata for, so the request of the owner's example has none of the things that keep a relay out (task P6-02).
+     * metadata for, so the request of the reference scenario has none of the things that keep a relay out.
      */
     @Test
     void theCodexRequestForAClaudeModelHasNoHardFeatureAndItsBuiltInToolsAreOnlyLeftOut() {
@@ -726,7 +726,7 @@ class FeaturePolicyTest {
 
     /**
      * The same request for a model OpenAI serves is handed to an OpenAI account whole, which runs the web search and finds
-     * the deferred tools: a relay cannot, so it is not given the request at all (design 7.2, P3).
+     * the deferred tools: a relay cannot, so it is not given the request at all (design 7.2).
      */
     @Test
     void theCodexRequestForAGptModelKeepsEveryRelayOutBecauseOfItsBuiltInTools() {

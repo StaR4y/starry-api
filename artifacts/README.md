@@ -10,7 +10,8 @@ Generated files:
 - `starry-api-bundle.tar.gz.sha256`: SHA256 checksum for the full bundle.
 - `starry-api.jar`: Spring Boot executable jar with the WebUI embedded.
 - `starry-api.jar.sha256`: SHA256 checksum for the jar.
-- `starry-api-webui.tar.gz`: standalone built WebUI dist archive.
+- `starry-api-webui.tar.gz`: standalone built WebUI dist archive (with `LICENSE` and `NOTICE`).
+- `third-party-sources/`: the `-sources` jars of the five Java libraries used under a copyleft license (logback-classic, logback-core, jakarta.annotation-api, jakarta.mail-api, angus-mail), published next to the jar and also inside the bundle.
 - `starry-api-webui.tar.gz.sha256`: SHA256 checksum for the WebUI archive.
 - `docker-compose.artifact.yml`: Docker Compose file used by the server installer.
 - `runtime/recover-data-management.sh`: bilingual interactive recovery utility copied into the service image as `/app/bin/recover-data-management`.
@@ -51,21 +52,12 @@ docker compose -f docker-compose.artifact.yml exec service \
   sh -c 'test ! -e /app/security/recovery.key && test ! -e /app/security/.recovery.key.consuming'
 ```
 
-Do not use `exec -T`, expose the key in arguments, or download a recovery script with `curl ... | sh`. The utility reads a valid-format key twice with terminal echo disabled. On the normal path, the service consumes the recovery file whether key comparison matches or fails. If either the input or `/app/security/.recovery.key.consuming` remains, cleanup is incomplete and the service stays fail-closed until a restart can confirm cleanup. See [`docs/OPERATIONS.md`](../docs/OPERATIONS.md#recover-a-docker-compose-deployment) for the full procedure.
+Do not use `exec -T`, expose the key in arguments, or download a recovery script with `curl ... | sh`. The utility reads a valid-format key twice with terminal echo disabled. On the normal path, the service consumes the recovery file whether key comparison matches or fails. If either the input or `/app/security/.recovery.key.consuming` remains, cleanup is incomplete and the service stays fail-closed until a restart can confirm cleanup. See [`docs/OPERATIONS.md`](../docs/OPERATIONS.md#docker-compose-部署) for the full procedure.
 
 Servers should only download and deploy the already checked-in bundle:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh | sudo bash
-```
-
-For a private repository, pass a GitHub token with read-only Contents permission:
-
-```bash
-GITHUB_TOKEN=replace-with-token
-curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-  https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/install-server.sh \
-  | sudo env GITHUB_TOKEN="${GITHUB_TOKEN}" bash
 ```
 
 The publish script needs either local Java 25 or Docker. When local Java is missing it automatically falls back to Docker; you can force that path with:

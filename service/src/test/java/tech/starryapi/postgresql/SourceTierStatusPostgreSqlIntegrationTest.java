@@ -221,7 +221,7 @@ class SourceTierStatusPostgreSqlIntegrationTest extends PostgreSqlIntegrationTes
         relayLog(relay, "/v1/chat/completions", true, 500, "REPORTED", "END_TURN", null, now.minus(1, ChronoUnit.MINUTES));
         relayLog(relay, "/v1/chat/completions", false, 300, null, "MODEL_NOT_SERVED", null, now.minus(1, ChronoUnit.MINUTES));
         relayLog(relay, "/v1/chat/completions", false, 100, null, null, null, now.minus(1, ChronoUnit.MINUTES));
-        // And one that the relay turned down for the key of its account (D5).
+        // And one that the relay turned down for the key of its account.
         relayLog(relay, "/v1/chat/completions", false, 100, null, "KEY_REFUSED", null, now.minus(1, ChronoUnit.MINUTES));
         // Not relay attempts: a native attempt of the same tier, and one of Kiro.
         log("anthropic:relay", "AUTO", true, now.minus(1, ChronoUnit.MINUTES));
@@ -313,7 +313,7 @@ class SourceTierStatusPostgreSqlIntegrationTest extends PostgreSqlIntegrationTes
     }
 
     /**
-     * The relay was paid for the answers the gateway held back (D11), and the status page shows what it cost the operator next to
+     * The relay was paid for the answers the gateway held back, and the status page shows what it cost the operator next to
      * how many there were: the tokens the relay reported of them, summed by relay and by pair, in the window of the page and in
      * the days of the evidence. A held back answer whose usage was not known adds none, and the tokens of the other kinds of failure
      * are not counted here.

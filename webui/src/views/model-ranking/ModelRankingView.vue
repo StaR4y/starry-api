@@ -5,6 +5,7 @@
   import PageSection from '@/components/PageSection.vue';
   import { systemApi } from '@/api';
   import type { ModelRankingBenchmark, ModelRankingSnapshot } from '@/types/api';
+  import { webHost, webLink } from '@/utils/webLink';
 
   type BarStyle = CSSProperties & Record<`--${string}`, string>;
 
@@ -48,6 +49,8 @@
   const benchmarkTitle = computed(() =>
     (snapshot.value?.title || benchmarkConfig.value.fallbackTitle).replace(/\s+Leaderboard$/i, ''),
   );
+
+  const sourceLink = computed(() => webLink(snapshot.value?.sourceUrl));
 
   async function loadRanking() {
     loading.value = true;
@@ -103,8 +106,12 @@
           <router-link :to="{ name: 'model-ranking-frontierbench' }">FrontierBench</router-link>
         </nav>
       </template>
-      <p v-if="benchmarkTitle !== benchmarkConfig.label" class="ranking-page__meta">
+      <p v-if="snapshot || benchmarkTitle !== benchmarkConfig.label" class="ranking-page__meta">
         {{ benchmarkTitle }}
+        <template v-if="sourceLink">
+          · {{ t('数据来源') }}
+          <a :href="sourceLink" target="_blank" rel="noreferrer">{{ webHost(sourceLink) }}</a>
+        </template>
       </p>
 
       <div class="ranking-chart">
@@ -194,6 +201,16 @@
       margin: 0 0 16px;
       color: var(--kp-text-muted);
       font-size: 12px;
+
+      a {
+        color: inherit;
+        text-decoration: underline;
+        text-underline-offset: 2px;
+
+        &:hover {
+          color: var(--kp-primary);
+        }
+      }
     }
 
     &__live {

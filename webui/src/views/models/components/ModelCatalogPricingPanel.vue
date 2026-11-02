@@ -330,7 +330,7 @@
   async function convertLegacy() {
     try {
       await ElMessageBox.confirm(
-        t('固定单价将替换为官方价格 × 倍率，实际费用会改变。'),
+        t('固定单价将替换为厂商标价 × 倍率，实际费用会改变。'),
         t('改为倍率计费'),
         {
           get confirmButtonText() {
@@ -482,7 +482,7 @@
       };
       invalidatePreview();
       emit('saved');
-      ElMessage.success(t('官方价格已同步'));
+      ElMessage.success(t('厂商标价已同步'));
     } catch {
       ElMessage.error(t('同步失败，已保留当前规则草稿和上次成功价格'));
     } finally {
@@ -501,7 +501,7 @@
       <div>
         <span class="eyebrow">{{ t('默认计费') }}</span>
         <div class="default-price">
-          {{ t('官方价格') }} <span>×</span> {{ number(billingMultiplier) }}
+          {{ t('厂商标价') }} <span>×</span> {{ number(billingMultiplier) }}
         </div>
       </div>
       <div class="summary-meta">
@@ -784,13 +784,13 @@
         </p>
         <el-alert
           v-if="preview.pricing.billingMode === 'unavailable'"
-          :title="t('未找到可核实的官方价格，暂不可计费')"
+          :title="t('未找到可核实的厂商标价，暂不可计费')"
           type="warning"
           :closable="false"
         />
         <div class="price-table">
           <div class="price-line price-table-head">
-            <span>{{ t('计费项') }}</span><span>{{ t('官方价格') }}</span><span>{{ t('当前价格') }}</span>
+            <span>{{ t('计费项') }}</span><span>{{ t('厂商标价') }}</span><span>{{ t('当前价格') }}</span>
           </div>
           <div v-for="field in priceFields" :key="field.key" class="price-line">
             <el-tooltip
@@ -837,7 +837,7 @@
           </div>
         </template>
         <div v-if="preview.matchedPriceModel" class="price-source">
-          {{ t('官方价格模型') }} <code>{{ preview.matchedPriceModel }}</code>
+          {{ t('厂商标价模型') }} <code>{{ preview.matchedPriceModel }}</code>
         </div>
       </template>
     </section>
@@ -846,7 +846,7 @@
       <el-collapse-item name="source">
         <template #title>
           <div class="source-title">
-            <span>{{ t('官方价格数据源') }}</span><el-tag :type="source.lastError ? 'warning' : 'info'" size="small" effect="plain">
+            <span>{{ t('厂商标价数据源') }}</span><el-tag :type="source.lastError ? 'warning' : 'info'" size="small" effect="plain">
               {{ source.lastError ? t('同步异常') : source.catalogEntries + t(' 条价格') }}
             </el-tag>
           </div>
@@ -936,7 +936,7 @@
           </div>
           <el-button text type="primary" @click="convertLegacy">{{ t('改为倍率') }}</el-button>
         </div>
-        <el-form-item v-else :label="t('官方价格倍率')">
+        <el-form-item v-else :label="t('标价倍率')">
           <el-input-number
             :model-value="draft.priceMultiplier ?? undefined"
             :min="0.000001"

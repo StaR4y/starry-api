@@ -135,7 +135,7 @@ public final class TierPlan {
      * @param estimatedInput what the body weighs, as it was measured against the window of the mapping
      * @param outputBeyondFallback how many tokens of output the body asks for beyond the {@link
      *     RequestBounds#FALLBACK_OUTPUT_TOKENS} the prompt of every relay is judged beside: the maximum output of the mapping
-     *     where the gateway chose the limit and the window holds it (D15, design 7.10); 0 for any other body
+     *     where the gateway chose the limit and the window holds it (design 7.10); 0 for any other body
      */
     public record Relay(TierDispatch dispatch, MemberModel mapping, long estimatedInput, long outputBeyondFallback) {
 
@@ -614,7 +614,7 @@ public final class TierPlan {
      * the tiers below it, plus the tiers above that are not dearer at the output the request is limited to, so that a
      * user who has only enough for the tier the session is in is not refused for a dearer one it is no longer in. A tier
      * above that is held can still reserve more than those at or below the start, when the session's tier holds relays alone
-     * and is reserved for the few tokens they are sent (D15): that user is refused for it, and told to pin the tier he can pay.
+     * and is reserved for the few tokens they are sent: that user is refused for it, and told to pin the tier he can pay.
      */
     public List<Level> holdLevels() {
         return holdLevels;
@@ -700,7 +700,7 @@ public final class TierPlan {
     /**
      * The most output the request may ask of a source, as the limit it is held to says (the default of the gateway when the
      * client named none), which the usage of every source is bounded by. A tier that holds relays alone is reserved for less
-     * where the gateway chose the limit: a relay is not given that default (D15, {@link Level#estimate}).
+     * where the gateway chose the limit: a relay is not given that default ({@link Level#estimate}).
      */
     public long outputBound() {
         return outputBound;
@@ -733,7 +733,7 @@ public final class TierPlan {
      * and the client is told the refusal. A pin by the suffix counts the tiers it names in both cases.
      *
      * <p>The plan does not know one thing the answer depends on: a relay that refused the length of the body with the maximum
-     * output of its mapping (D15) is answered with a retry whatever the plan's accounts are, since the identical request is
+     * output of its mapping is answered with a retry whatever the plan's accounts are, since the identical request is
      * sent the smaller body its refusal taught and may be served by the relay itself ({@code ProxyFacade}, which knows what
      * the relay was sent).
      *

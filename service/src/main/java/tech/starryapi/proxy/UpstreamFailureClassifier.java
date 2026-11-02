@@ -70,7 +70,7 @@ final class UpstreamFailureClassifier {
      *       another source of the same kind, but one crossing to a tier whose first source is a native one is allowed
      *       ({@link Classification#crossTierOnly()}). Such a refusal says the relay did not generate.
      *   <li>A relay that rejects the key of its account (a 401 or 403, or an authentication or permission error inside a
-     *       successful response; D5) has failed as that account and as nothing else: the key is the administrator's, and the
+     *       successful response) has failed as that account and as nothing else: the key is the administrator's, and the
      *       client's request has done nothing wrong. The account rests for ten minutes, as a native account does for
      *       credentials that are bad, and the request goes on to the next account or tier like it does after one that is out
      *       of money or busy, since a rejection is given before anything is generated. It is never a permanent failure (a
@@ -612,7 +612,7 @@ final class UpstreamFailureClassifier {
         }
 
         /**
-         * What the relay reported of the answer the gateway held back, as the usage of a served answer is read (D11), or null
+         * What the relay reported of the answer the gateway held back, as the usage of a served answer is read, or null
          * when this is not such a failure or the usage could not be read. It is the operator's cost: the request log keeps it
          * apart from the tokens of the user's usage, which stay 0 because nothing is charged.
          */

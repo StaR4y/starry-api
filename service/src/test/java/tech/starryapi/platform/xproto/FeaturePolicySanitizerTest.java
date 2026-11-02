@@ -511,7 +511,7 @@ class FeaturePolicySanitizerTest {
 
     /**
      * A field that the sanitizer leaves out and a native account would have been handed must be a feature, or the answer
-     * is made without it and nothing says so (design 7.2, P3): the two lists are joined here, by the keys the relay's body
+     * is made without it and nothing says so (design 7.2): the two lists are joined here, by the keys the relay's body
      * has not got and the features the request has.
      */
     @Test
@@ -532,7 +532,7 @@ class FeaturePolicySanitizerTest {
                 assertThat(body.has(key)).as(key).isTrue();
                 assertThat(wire.body().has(key)).as("%s is not sent, %s", key, settings).isFalse();
                 assertThat(detected.has(feature)).as("%s is named", key).isTrue();
-                // The odds of the words change the answer; the length is only advice, and soft everywhere (D6).
+                // The odds of the words change the answer; the length is only advice, and soft everywhere.
                 boolean changesTheAnswer = feature == Feature.LOGIT_BIAS;
                 assertThat(FeaturePolicy.treatment(feature, detected, Baseline.PASSTHROUGH, settings))
                     .as("%s on a passthrough route", key).isEqualTo(changesTheAnswer ? Treatment.HARD : Treatment.SOFT);

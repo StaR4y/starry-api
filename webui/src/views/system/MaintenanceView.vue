@@ -6,6 +6,7 @@
   import { systemApi } from '@/api';
   import { useAuthStore } from '@/stores/auth';
   import SiteBrandLogo from '@/components/SiteBrandLogo.vue';
+  import SourceNotice from '@/components/SourceNotice.vue';
   import type { SystemStatus } from '@/types/api';
 
   const route = useRoute();
@@ -73,6 +74,7 @@
         {{ t('检查服务状态') }}
       </el-button>
     </section>
+    <SourceNotice class="maintenance__source text-muted" />
   </main>
 </template>
 
@@ -81,7 +83,16 @@
     min-height: 100vh;
     display: grid;
     place-items: center;
-    padding: 24px;
+    padding: 24px 24px 56px;
+    position: relative;
+
+    &__source {
+      position: absolute;
+      left: 16px;
+      right: 16px;
+      bottom: 12px;
+      font-size: 12px;
+    }
 
     &__panel {
       width: min(440px, 100%);
@@ -118,7 +129,7 @@
 
   @media (max-width: 520px) {
     .maintenance {
-      padding: 16px;
+      padding: 16px 16px 56px;
 
       &__panel {
         padding: 30px 22px;

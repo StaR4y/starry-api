@@ -102,7 +102,7 @@ import tools.jackson.databind.node.ObjectNode;
  * <p>Claude Code writes the first block of its system prompt as {@code x-anthropic-billing-header: cc_version=…;
  * cch=<hash>;}, and the hash changes with every request. The conversion to Chat makes that block the first line of the
  * system message, which is the start of every request and so defeats the prefix caching of a relay that has it. The relay
- * is not sent the block (D7): a system text block that is only the header line (its text, trimmed, starts with {@code
+ * is not sent the block: a system text block that is only the header line (its text, trimmed, starts with {@code
  * x-anthropic-billing-header:} and runs no further than that line, as Claude Code writes it) is taken out of the system
  * message, whole and only so (a block that carries more after the header line, a system prompt given as a plain string, a
  * block that merely mentions the header, and a user's text are not touched), and a system message that had nothing else
@@ -138,7 +138,7 @@ public final class ChatWireSanitizer {
 
     /**
      * The repair of the sanitizer, not a feature of the request: the billing header of Claude Code was left out of the system
-     * message (D7). The policy has no word for it, and no feature may be named like it.
+     * message. The policy has no word for it, and no feature may be named like it.
      */
     public static final String BILLING_HEADER_DROPPED = "billing_header_dropped";
 
@@ -539,7 +539,7 @@ public final class ChatWireSanitizer {
     }
 
     /**
-     * The messages of the Chat body without the billing header of Claude Code (D7), or {@code input} itself when there is
+     * The messages of the Chat body without the billing header of Claude Code, or {@code input} itself when there is
      * nothing to take out. The system message the conversion made of the blocks of the original is its first one, and the
      * string of the blocks it holds is rebuilt from them without the header; a system message that is not exactly what the
      * blocks make is not touched. A system message that has nothing left is not sent.

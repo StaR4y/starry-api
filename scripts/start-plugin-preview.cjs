@@ -1,10 +1,11 @@
 // Disposable local preview only. Does not replace services on 8080/5173.
 const { spawn } = require('node:child_process');
 const { mkdirSync, openSync, closeSync, writeFileSync } = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const net = require('node:net');
 const repo = path.resolve(__dirname, '..');
-const output = '/private/tmp/starry-plugin-preview';
+const output = path.join(os.tmpdir(), 'starry-plugin-preview');
 if (process.env.PLUGIN_PREVIEW_TESTS !== 'true'
     || process.env.POSTGRES_DATABASE !== 'starry_api'
     || process.env.POSTGRES_HOST !== '127.0.0.1' || process.env.POSTGRES_PORT !== '55438') {

@@ -152,7 +152,7 @@ public final class RequestFeatureDetector {
         SERVICE_TIER("service_tier"),
         /**
          * The {@code verbosity} of a Chat request (GPT-5's control of the length of the answer) when it is {@code low} or
-         * {@code high}: no relay is sent it, and the answer is recorded as made without it (design 7.9, D6). OpenCode sends
+         * {@code high}: no relay is sent it, and the answer is recorded as made without it (design 7.9). OpenCode sends
          * {@code low} with every request of a gpt model, so a relay that refused the request for it would never be given one.
          * {@code medium} is the default and is not a feature.
          */

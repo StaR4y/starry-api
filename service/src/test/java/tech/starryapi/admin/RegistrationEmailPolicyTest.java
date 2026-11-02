@@ -10,7 +10,7 @@ import tech.starryapi.common.ApiException;
 class RegistrationEmailPolicyTest {
 
     @Test
-    void normalizesEmailSuffixWhitelistLikeSub2Api() {
+    void normalizesEmailSuffixWhitelistToLowercaseAtPrefixedEntries() {
         List<String> normalized = RegistrationEmailPolicy.normalizeWhitelist(
             List.of("example.com", "@EXAMPLE.com", " @foo.bar ", "*.EDU.CN"),
             true

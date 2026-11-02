@@ -226,7 +226,7 @@ class SourceTierAdminPostgreSqlIntegrationTest extends PostgreSqlIntegrationTest
     @Test
     void aGateThatOpensAPairNoReleaseOffersIsNotStored() {
         // A Gemini client asking for a gpt model and a Messages client asking for a Gemini model have no client to speak of;
-        // the other pairs of the Chat, Messages, Responses and Gemini entries are on trial (P5-05, P6-04, P7-03).
+        // the other pairs of the Chat, Messages, Responses and Gemini entries are on trial.
         Map<String, List<SourceTierDtos.Gate>> notOffered = Map.of(
             "openai", List.of(new SourceTierDtos.Gate(null, "GEMINI", "KEYS", List.of("key-1"))),
             "google", List.of(new SourceTierDtos.Gate(null, "MESSAGES", "KEYS", List.of("key-1")),

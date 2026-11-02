@@ -28,7 +28,7 @@ curl -fsSL https://raw.githubusercontent.com/StaR4y/starry-api/main/scripts/inst
   | sudo env PUBLIC_BASE_URL=https://你的域名 bash
 ```
 
-私有仓库的做法见 [服务器一键安装：私有仓库](INSTALL_SERVER.md#二私有仓库怎么办)。装完后跳到 [配置 1Panel 反向代理](#配置-1panel-反向代理)。
+装完后跳到 [配置 1Panel 反向代理](#配置-1panel-反向代理)。
 
 ---
 

@@ -4,6 +4,7 @@
 import { defineStore } from 'pinia';
 import { appearanceApi } from '@/api';
 import type { Appearance, AppearanceChrome } from '@/types/api';
+import { DEFAULT_SOURCE_URL, resolveSourceUrl } from '@/utils/sourceCode';
 
 export const DEFAULT_APPEARANCE: Appearance = {
   siteName: 'Starry API',
@@ -26,6 +27,7 @@ export const DEFAULT_APPEARANCE: Appearance = {
   blurPx: 18,
   backgroundBlurPx: 0,
   chrome: 'classic',
+  sourceUrl: DEFAULT_SOURCE_URL,
 };
 
 export function normalizeChrome(value: string | null | undefined): AppearanceChrome {
@@ -140,6 +142,10 @@ export const useAppearanceStore = defineStore('appearance', {
     isEditorial(): boolean {
       return normalizeChrome(this.displayed.chrome) === 'editorial';
     },
+    /** Where the source of the running version is (AGPL-3.0, section 13); not part of any preview. */
+    sourceUrl(): string {
+      return resolveSourceUrl(this.current.sourceUrl);
+    },
   },
 
   actions: {
@@ -148,6 +154,8 @@ export const useAppearanceStore = defineStore('appearance', {
         ...DEFAULT_APPEARANCE,
         ...appearance,
         chrome: normalizeChrome(appearance.chrome),
+        // The server sets this from STARRY_SOURCE_URL; an answer without it (a draft, an old server) keeps what is known.
+        sourceUrl: resolveSourceUrl(appearance.sourceUrl ?? this.current.sourceUrl),
       };
       this.draft = null;
       this.loaded = true;

@@ -68,6 +68,11 @@ class RelayErrorMapperTest {
         return value == null ? "null" : JSON.writeValueAsString(value);
     }
 
+    /** A string shaped like a Google API key, joined at run time so that no literal in the source looks like one. */
+    private static String googleKeyShape() {
+        return "AIza" + "SyA-1234567890abcdefghijklmnopqrstu";
+    }
+
     private RelayErrorException map(int httpStatus, String body) {
         return mapper.fromResponse(httpStatus, body, null, "account 7", null);
     }
@@ -549,7 +554,7 @@ class RelayErrorMapperTest {
         String key = "relay-key-9f8e7d6c5b4a";
         String body = error("authentication_error", null, "Incorrect key " + key + " for relay.internal.example.com; "
             + "got Authorization: Bearer abc.DEF-123_xyz and api_key=hunter2hunter2 and sk-ant-api03-AbCdEf_123456-xyz and "
-            + "sk-proj-0123456789abcdef and AIzaSyA-1234567890abcdefghijklmnopqrstu and token=\"s3cr3t-value\" and a hash "
+            + "sk-proj-0123456789abcdef and " + googleKeyShape() + " and token=\"s3cr3t-value\" and a hash "
             + "0123456789abcdef0123456789abcdef0123456789abcdef");
 
         mapper.fromResponse(401, body, null, "account 7", key);

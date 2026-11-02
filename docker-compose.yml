@@ -63,7 +63,7 @@ services:
       dockerfile: Dockerfile
       # Always check for newer base images so JDK and CA-certificate fixes arrive with the next build.
       pull: true
-    image: star4y/starryapi-service:local
+    image: starryapi-service:local
     container_name: starryapi-service
     restart: unless-stopped
     # The JVM is capped (JAVA_OPTS) and the container too, so a runaway heap ends in an exit and a restart
@@ -115,6 +115,7 @@ services:
       STARRY_SESSION_AFFINITY_TTL: ${STARRY_SESSION_AFFINITY_TTL:-${KIRO_SESSION_AFFINITY_TTL:-10m}}
       STARRY_SESSION_AFFINITY_MAXIMUM_SIZE: ${STARRY_SESSION_AFFINITY_MAXIMUM_SIZE:-${KIRO_SESSION_AFFINITY_MAXIMUM_SIZE:-100000}}
       STARRY_WEBUI_URL: ${STARRY_WEBUI_URL:-${KIRO_WEBUI_URL:-}}
+      STARRY_SOURCE_URL: ${STARRY_SOURCE_URL:-https://github.com/StaR4y/starry-api}
       STARRY_ADMIN_TOKEN: ${STARRY_ADMIN_TOKEN:-${KIRO_ADMIN_TOKEN:-}}
       STARRY_TOKEN_REFRESH_INTERVAL_MS: ${STARRY_TOKEN_REFRESH_INTERVAL_MS:-${KIRO_TOKEN_REFRESH_INTERVAL_MS:-3600000}}
       STARRY_TOKEN_REFRESH_INITIAL_DELAY_MS: ${STARRY_TOKEN_REFRESH_INITIAL_DELAY_MS:-${KIRO_TOKEN_REFRESH_INITIAL_DELAY_MS:-60000}}

@@ -109,8 +109,8 @@ import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
 /**
- * The Gemini entry on the tiers (P7-03): a {@code generateContent} request whose plan holds a relay, through the facade, the
- * real planner and the real converter of the Gemini entry, as the owner's example reads for the google vendor (the relay as
+ * The Gemini entry on the tiers: a {@code generateContent} request whose plan holds a relay, through the facade, the
+ * real planner and the real converter of the Gemini entry, as the reference scenario reads for the google vendor (the relay as
  * the first tier, Kiro as the second at 0.6) and for a Claude model asked through the Gemini endpoint. The dispatcher of
  * the relays is a stand-in that answers per account, and so are Kiro and the account pool; the fixtures of the pairs
  * ({@code CrossProtocolContractTest}) play the same entry against a relay over HTTP. What is looked at here is what the
@@ -561,7 +561,7 @@ class ProxyFacadeTieredXpGeminiTest {
         return new Tier(vendor, tierId, level, tierId, new BigDecimal(factor), listed, true, true, null);
     }
 
-    /** The owner's example: the relay as the first tier, Kiro as the second at 0.6. */
+    /** The reference scenario: the relay as the first tier, Kiro as the second at 0.6. */
     private SourceTierSnapshot owner(String vendor, Member member, PairGate... gates) {
         return SourceTierSnapshot.of(7L, List.of(vendor(vendor)), List.of(
             tier(vendor, "relay", 1, "1"),

@@ -269,7 +269,7 @@ public class AccountTestService {
                 // A broken outbound route is not evidence about the account: report it, but leave the account's health alone.
                 Mono<Void> failureUpdate = failure instanceof tech.starryapi.egress.EgressException
                     ? Mono.empty()
-                    // What a relay says of its own key is the relay's word, and no ground for disabling the account (D5).
+                    // What a relay says of its own key is the relay's word, and no ground for disabling the account.
                     : isRelay(account)
                     ? accountPoolService.recordTestFailure(
                         account.getAccountId(),

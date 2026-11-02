@@ -56,7 +56,7 @@ import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
 /**
- * The owner's example from the client to the books, on the beans of the application and a real database (design 0, 5
+ * The reference scenario from the client to the books, on the beans of the application and a real database (design 0, 5
  * and 11): a request enters the facade as a client sends it, the stored tier configuration is planned and selected over
  * the real account cache and the real admission, the reservation is made, leased to each tier it is dispatched to and
  * settled by {@code settle_api_usage_served}, the usage event takes the tier from the reservation, and the revenue
@@ -119,7 +119,7 @@ class SourceTierEndToEndPostgreSqlIntegrationTest extends PostgreSqlIntegrationT
         accountPool.refreshCache().block();
     }
 
-    // ---- the owner's example ----
+    // ---- the reference scenario ----
 
     @Test
     void anOfficialKeyThenKiroFromTheRequestToTheRevenuePerSourcePool() {

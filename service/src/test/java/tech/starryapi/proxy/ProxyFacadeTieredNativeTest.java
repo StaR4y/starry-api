@@ -95,7 +95,7 @@ import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.node.ObjectNode;
 
 /**
- * Native tiers end to end, the way the owner's example runs (design 0 and 11, decisions D2 to D4): a client request enters
+ * Native tiers end to end, the way the reference scenario runs (design 0 and 11): a client request enters
  * the facade, the real planner plans it over official Anthropic keys (tier 1) and Kiro (tier 2, at 0.6 of the standard
  * price), the real account pool and the real session bindings select, and the reservation, the lease, the settlement,
  * the release and the log row are followed to the end. Only the edges are stand-ins: admission answers per account, the
@@ -234,7 +234,7 @@ class ProxyFacadeTieredNativeTest {
         });
     }
 
-    // ---- busy is unavailable (D2) and a session that fell stays there (D4) ----
+    // ---- busy is unavailable and a session that fell stays there ----
 
     @Test
     void aFirstTierThatIsBusyEverywhereSendsTheRequestToKiroAndChargesKirosPrice() {

@@ -13,7 +13,7 @@ import tech.starryapi.config.ProxyProperties;
 
 /**
  * The tier each session was pushed down to, kept until the session has been idle for as long as the account affinity
- * is (design 4.7, owner decision D4). A session that really fell to a lower tier stays there instead of going back to
+ * is (design 4.7). A session that really fell to a lower tier stays there instead of going back to
  * the better one on every request, which would move it between kinds of account whenever the better one flaps. Read
  * and write rules are in the planner and in {@link TierWalk}; this is only the store.
  *

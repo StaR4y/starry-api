@@ -9,8 +9,8 @@ class OpenAiEndpointsTest {
 
     @Test
     void rootOpenAiCompatibleBaseDefaultsToV1ApiPath() {
-        assertThat(OpenAiEndpoints.openAiApi("https://joystar.cc", "/chat/completions"))
-            .isEqualTo("https://joystar.cc/v1/chat/completions");
+        assertThat(OpenAiEndpoints.openAiApi("https://relay.example.com", "/chat/completions"))
+            .isEqualTo("https://relay.example.com/v1/chat/completions");
     }
 
     @Test

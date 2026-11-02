@@ -62,7 +62,7 @@ import tools.jackson.databind.node.ObjectNode;
 /**
  * The relays of a vendor in its plans (design 3, steps 4 and 5b): when a relay is a cell of a tier, which of its
  * mappings serves a model, what is checked before it may serve a request, what it is sent, why it is left out, and what a
- * request that nothing else can serve is told. The configuration is the owner's example: a relay as the first tier of the
+ * request that nothing else can serve is told. The configuration is the reference scenario: a relay as the first tier of the
  * anthropic vendor, Kiro as the second.
  */
 class TierPlannerXpTest {
@@ -133,7 +133,7 @@ class TierPlannerXpTest {
         usable.addAll(cached);
     }
 
-    // ---- the owner's example: a relay as the first tier, Kiro as the second ----
+    // ---- the reference scenario: a relay as the first tier, Kiro as the second ----
 
     @Test
     void aClaudeCodeRequestIsPlannedOverTheRelayAndThenKiro() {
@@ -827,7 +827,7 @@ class TierPlannerXpTest {
         assertThat(first.inputBound()).isBetween(5_000L, 20_000L);
     }
 
-    // ---- the original-body conversion of the Messages entry (P8-01) ----
+    // ---- the original-body conversion of the Messages entry ----
 
     /** A Claude Code request whose last message holds a screenshot, as the client sends it (a base64 source). */
     private String claudeCodeWithAScreenshot(String source) {
@@ -961,7 +961,7 @@ class TierPlannerXpTest {
         assertThat(converted.reservation()).isEqualByComparingTo(nativeBody.reservation());
     }
 
-    // ---- availability, D4 and the cells of a tier ----
+    // ---- availability and the cells of a tier ----
 
     @Test
     void aRelayThatCannotServeRightNowKeepsItsTierInTheOrderOfThePlanAsAnUnavailableOne() {
@@ -2042,7 +2042,7 @@ class TierPlannerXpTest {
         assertThat(TierEntryFacts.of(TierEntry.CHAT, chatBody("claude-sonnet-4.5")).entryDigest()).isNull();
     }
 
-    // ---- the Responses entry (P6-02): Codex, and a chain this node could not expand ----
+    // ---- the Responses entry: Codex, and a chain this node could not expand ----
 
     private static final PairKey RESPONSES_PAIR = new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.RESPONSES, "anthropic");
 
@@ -2153,7 +2153,7 @@ class TierPlannerXpTest {
         assertThat(lean.levels()).extracting(Level::tierId).containsExactly("relay", "official");
         Relay chosen = lean.levels().get(0).relay("relay-1").orElseThrow();
         assertThat(chosen.dispatch().pair()).isEqualTo(new PairKey(SourceKind.OPENAI_CHAT_RELAY, Entry.RESPONSES, "openai"));
-        // The length of the answer is advice and the encrypted reasoning is the OpenAI API's: left out, and said (design 7.9, D6).
+        // The length of the answer is advice and the encrypted reasoning is the OpenAI API's: left out, and said (design 7.9).
         assertThat(chosen.dispatch().degraded()).containsExactlyInAnyOrder("include", "verbosity", "prompt_cache_key", "reasoning_effort");
         assertThat(chosen.dispatch().wireBody().path("tools")).extracting(tool -> tool.path("function").path("name").stringValue())
             .containsExactly("exec_command", "apply_patch");
@@ -2332,7 +2332,7 @@ class TierPlannerXpTest {
         assertThat(plan.levels().get(0).relay("relay-1").orElseThrow().dispatch().degraded()).contains("verbosity");
     }
 
-    // ---- the Responses entry planned over its own body (P6-03) ----
+    // ---- the Responses entry planned over its own body ----
 
     /**
      * A Codex request as the facade plans it: over the Responses body its native accounts are sent (the reservation is sized
@@ -2425,7 +2425,7 @@ class TierPlannerXpTest {
         assertThat(plan.relaySession()).isEqualTo("key-1:resp:one");
     }
 
-    // ---- the output a relay is given for a request whose limit the gateway chose (D15) ----
+    // ---- the output a relay is given for a request whose limit the gateway chose ----
 
     /**
      * A Codex request for a Claude model with a prompt of about {@code words} tokens, as the facade plans it: the default of the
@@ -2457,7 +2457,7 @@ class TierPlannerXpTest {
     }
 
     /**
-     * A mapping that states no maximum output gives the relay the 4,096 it was given before the gateway chose a default (D11, D14):
+     * A mapping that states no maximum output gives the relay the 4,096 it was given before the gateway chose a default:
      * the body is that of a request that wrote the 4,096 itself, and the tier of the relay is reserved for no more.
      */
     @Test
@@ -2484,9 +2484,9 @@ class TierPlannerXpTest {
     }
 
     /**
-     * A tier of relays alone is reserved for the most its relays are sent where the gateway chose the limit (D15): what the mapping
+     * A tier of relays alone is reserved for the most its relays are sent where the gateway chose the limit: what the mapping
      * states, as far as the default of the request goes, or the 4,096; a request pinned to it, which has no native tier to cover,
-     * is reserved for that alone, as it was before D11. A tier that can hold native accounts is reserved for the limit of the
+     * is reserved for that alone, as it was before the gateway chose a default. A tier that can hold native accounts is reserved for the limit of the
      * request, which they are sent.
      */
     @Test
@@ -2637,7 +2637,7 @@ class TierPlannerXpTest {
 
     /**
      * What a tier is reserved for is not what the tiers a session may climb back to are chosen by. The tier of the relays is reserved
-     * for the few tokens they are sent, less than Kiro's tier, but a session pushed down to Kiro (D4) climbs to a tier above it as a
+     * for the few tokens they are sent, less than Kiro's tier, but a session pushed down to Kiro climbs to a tier above it as a
      * last resort only if that tier would not be dearer at the limit the request is held to, as it was before the reservation of a tier
      * of relays alone followed what its relays are sent: the climb moves the binding of the session, and for turns of small prompts only
      * would have done so for no reason of the session.
@@ -2763,7 +2763,7 @@ class TierPlannerXpTest {
     /**
      * What a refusal of the body with the maximum output teaches is the prompt beside 4,096 (the estimate and the output beyond it):
      * the prompt alone may not be what it was refused for. The relay is then not sent bodies that ask for as much from requests as
-     * large, and is still sent the 4,096 body of the same request, which is the request it had before D11.
+     * large, and is still sent the 4,096 body of the same request, which is the request it had before the gateway chose a default.
      */
     @Test
     void aRefusalOfTheBodyWithTheMaximumOutputKeepsTheRelayFromBodiesThatAskForAsMuchAndNotFromTheFourThousandOne() {

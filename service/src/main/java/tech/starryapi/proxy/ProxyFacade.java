@@ -171,7 +171,7 @@ public class ProxyFacade {
     private ResponsesChatConverter responsesChatConverter;
     private GeminiChatConverter geminiChatConverter;
     private AnthropicChatWireConverter anthropicChatWireConverter;
-    /** The limit of a Responses request that names none, before the model's own maximum is applied (D14). */
+    /** The limit of a Responses request that names none, before the model's own maximum is applied. */
     private long responsesDefaultOutputTokens = ProxyProperties.DEFAULT_RESPONSES_OUTPUT_TOKENS;
 
     public ProxyFacade(
@@ -869,7 +869,7 @@ public class ProxyFacade {
      * a facade that was built without the converter.
      *
      * @param gatewayOutput whether the output limit of the planned body is the default the gateway gave a request that named
-     *     none (D14), which a relay is not sent: its own is chosen from its mapping (D15)
+     *     none, which a relay is not sent: its own is chosen from its mapping
      */
     private TierEntryFacts responsesEntryFacts(JsonNode expandedRequest, boolean gatewayOutput) {
         if (responsesChatConverter == null) {
@@ -1296,7 +1296,7 @@ public class ProxyFacade {
             ? deepSeekRequest(expandedRequest)
             : fastMode ? openAiFastRequest(expandedRequest) : expandedRequest, true, defaultLimit);
         // The limit is the gateway's own when the client wrote none: a relay is then given the output of its own mapping
-        // (D15) and not this one.
+        // and not this one.
         boolean gatewayOutput = !namesAnOutputLimit(request);
         AccountPoolRequestContext poolContext = poolContext(
             requestId,
@@ -1625,7 +1625,7 @@ public class ProxyFacade {
     /**
      * The request with the output limit it is reserved and sent upstream by: the largest the client wrote in any of the
      * fields, or {@code defaultLimit} when it wrote none. The reservation and the body the native sources are sent are read
-     * from this one number; a relay is sent the number of its own mapping instead (D15, {@code XpEligibility}).
+     * from this one number; a relay is sent the number of its own mapping instead ({@code XpEligibility}).
      */
     private JsonNode boundedBillingRequest(JsonNode request, boolean responses, long defaultLimit) {
         // Only top-level token limits change here, so share the (possibly multi-MB) children instead of deep-copying them.
@@ -1648,11 +1648,11 @@ public class ProxyFacade {
      * What a Responses request that names no output limit is held to (Codex never names one): the default the operator
      * configured ({@code starry.proxy.responses-default-output-tokens}, 16,000), no more than the model it is served as writes
      * ({@link RequestBounds#modelMaximumOutput}). The same number goes into the reservation and into the body the native sources
-     * are sent (a relay is given the output of its own mapping, D15). The model is the one the upstream is asked for, after the key's mapping,
+     * are sent (a relay is given the output of its own mapping). The model is the one the upstream is asked for, after the key's mapping,
      * and no other: a mapping rule that sends a built-in name to a model the catalog does not list, or that the administrator
      * added, says where the request goes, and the name the client wrote says nothing of that backend.
      *
-     * <p>The model writes the smaller of what the model list shows as its {@code max_output_tokens} and what the official price
+     * <p>The model writes the smaller of what the model list shows as its {@code max_output_tokens} and what the vendor list price
      * catalog lists for it, when both give a figure: the model list gives most aliases one figure (64,000), above what several
      * of the models it names are held to by their own upstream (gpt-4o 16,384, gpt-4.1 32,768, gpt-4 4,096), and an upstream
      * refuses a request over its own limit. A figure only one of them gives is that one's. The price catalog is the one in use:
@@ -2647,7 +2647,7 @@ public class ProxyFacade {
         // tool is a custom tool call from a relay, and was lost from what they were asked). A client that declared the editing
         // tool as a custom tool (Codex does) has it declared to those accounts as the function the relays are given, with the
         // patch for its one argument, which is the argument of the calls replayed to them; and what they call it with is told
-        // as the custom tool call Codex applies, as a relay's is (D13). A vendor without relays, and a client that declared the
+        // as the custom tool call Codex applies, as a relay's is. A vendor without relays, and a client that declared the
         // tool as a function, are sent their request as it always was.
         boolean patchAsFunction = run.plan().vendorHasRelays() && run.route() != UpstreamRoute.OPENAI
             && OpenAiResponseFactory.declaresEditingToolAsCustom(run.upstreamRequest());
@@ -2724,8 +2724,8 @@ public class ProxyFacade {
     }
 
     /**
-     * The Responses request as the in-flight tokens of an account are sized from it. The default output that a request
-     * naming no limit is reserved and sent by (D11, D14) is the limit of the request, not what admission is asked to hold
+     * The Responses request as the in-flight tokens of an account are sized from it. The default output limit that a
+     * request naming none is reserved and sent by is the limit of the request, not what admission is asked to hold
      * the account for: that stays the {@link RequestBounds#FALLBACK_OUTPUT_TOKENS} it always was, so that the cap of the
      * account ({@code maxInflightTokens}) admits as many requests as it did, and a request whose input fits it is not
      * refused for a limit the client never wrote. A request that names a limit is held for that limit.
@@ -2842,13 +2842,13 @@ public class ProxyFacade {
                             // holds whether the request has no tier to cross to or may not cross now (it is too old, its lease
                             // is spent, its budget is): what the identical request is told does not depend on that. So does a
                             // refusal of a body that asked for the maximum output of the mapping, which the identical request is
-                            // not sent again (D15): the relay has learned it, and the client is told to try again whatever is
+                            // not sent again: the relay has learned it, and the client is told to try again whatever is
                             // below. A stop for a failure that may have started a generation or been billed is the failure's,
                             // and is returned.
                             boolean tryAgain = classification.crossTierOnly()
                                 && (plan.retriesAfterRelayRefusal(classification.contextExceeded())
                                     || refusedTheMaximumOutput(selection, classification));
-                            // A relay that turned its own key down is a failure of that account, which the operator mends (D5): it
+                            // A relay that turned its own key down is a failure of that account, which the operator mends: it
                             // goes on to the next account or tier like a busy one, and the client is never told the relay's 401 or
                             // 403. Where it cannot go on (the budget is spent, the lease is) or nothing is left, it is told what
                             // a request nothing can serve is told; an earlier failure of the request keeps its own answer.
@@ -2883,7 +2883,7 @@ public class ProxyFacade {
 
     /**
      * Whether the relay refused the length of a body that asked for more output than the 4,096 the plans judge a prompt beside
-     * (the maximum output of its mapping, D15). The refusal is learned in the terms of the smaller body ({@link
+     * (the maximum output of its mapping). The refusal is learned in the terms of the smaller body ({@link
      * TierPlan.Relay#taughtByRefusal}), so the identical request is sent that one and the relay may serve it: the client is not
      * told its prompt does not fit, which the next identical request would contradict.
      */
@@ -2957,7 +2957,7 @@ public class ProxyFacade {
         TierDispatch dispatch = tier.dispatch();
         boolean relay = dispatch.kind() != TierDispatch.Kind.NATIVE;
         // An answer that was held back was paid for by the operator: the row says what it cost, apart from the tokens of the
-        // user's usage, which stay 0 because nothing is charged (D11).
+        // user's usage, which stay 0 because nothing is charged.
         PlatformUsage held = relay && failure != null ? failure.withheldUsage() : null;
         return new StatsService.SourceColumns(
             level.tierRef(),
@@ -3073,7 +3073,7 @@ public class ProxyFacade {
         }
         // The relay is charged for no more than it was told it may write, which can be less than the bound the tier reserved
         // for (a request that names a small limit is still reserved for the default one, and so is a Responses request that
-        // names none, which a relay is sent the limit of its own mapping for, D15).
+        // names none, which a relay is sent the limit of its own mapping for).
         long forwarded = dispatch.forwardedOutputLimit();
         long outputLimit = forwarded > 0 ? Math.min(run.plan().outputBound(), forwarded) : run.plan().outputBound();
         // A Responses request that names no limit of its own (Codex never does) has one chosen for it: the default of the
@@ -3090,7 +3090,7 @@ public class ProxyFacade {
             // length only for a body whose output this node chose: the limit is then a number it knows, and the refusal is learned
             // in the terms of the 4,096 body. A limit the client wrote is no such number, and learning the prompt alone from a
             // refusal that included it would keep the relay from prompts it takes beside less output: it stays any other 400 the
-            // relay gave to the converted request, as it was before D15.
+            // relay gave to the converted request.
             .onErrorMap(RelayErrorException.class,
                 refusal -> defaultOutputLimit && refusal.isBesideOutput() ? refusal.asContextExceeded() : refusal);
     }

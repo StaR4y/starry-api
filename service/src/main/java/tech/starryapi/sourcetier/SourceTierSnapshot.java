@@ -93,7 +93,7 @@ public final class SourceTierSnapshot {
 
     /**
      * @param maxOutputTokens the most output tokens the relay's upstream writes for the model, which the gateway cannot know;
-     *     null when the mapping states none (D15: a request that names no limit is then sent the relay as 4,096)
+     *     null when the mapping states none (a request that names no limit is then sent the relay as 4,096)
      */
     public record MemberModel(
         String vendor,
@@ -432,7 +432,7 @@ public final class SourceTierSnapshot {
      * untiered traffic (GLM, say) is the automatic and scheduled test, which asks for {@code auto} and so tests the first
      * mapping, a Claude model, and may suspend or revive the account for the untiered pool by it. The console warns
      * about a relay that is not exclusive (design 7.5); whether a preset test of such a relay should keep the model it had
-     * is the owner's decision.
+     * is not settled.
      */
     public Optional<String> relayTestModel(String accountId, String requestedModel) {
         if (accountId == null) {

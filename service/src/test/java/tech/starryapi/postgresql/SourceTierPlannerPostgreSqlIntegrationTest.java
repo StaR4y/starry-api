@@ -45,7 +45,7 @@ import tools.jackson.databind.node.ObjectNode;
 
 /**
  * The planner on the beans of the application: the runtime wired into the facade follows the capability of the release,
- * and a planner over the real registry and account cache plans the owner's example from the stored configuration.
+ * and a planner over the real registry and account cache plans the reference scenario from the stored configuration.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE, properties = {
     "spring.main.lazy-initialization=true", "spring.jmx.enabled=false", "starry.stats.aggregation-enabled=false"
@@ -93,7 +93,7 @@ class SourceTierPlannerPostgreSqlIntegrationTest extends PostgreSqlIntegrationTe
     }
 
     @Test
-    void aPlannerOverTheRealRegistryAndAccountCachePlansTheOwnersExample() {
+    void aPlannerOverTheRealRegistryAndAccountCachePlansTheReferenceScenario() {
         DefaultSourceTierPlanner planner = new DefaultSourceTierPlanner(registry, resolver, catalog, accountPool, payments, pricing, TierSessionBindings.disabled());
         String official = account("Anthropic", "api-key", null);
         String kiro = account("BuilderId", "idc", null);
@@ -132,14 +132,14 @@ class SourceTierPlannerPostgreSqlIntegrationTest extends PostgreSqlIntegrationTe
         // The planner the application runs, over the real registry and account cache.
         TierRuntime.Planner planner = tierRuntime.planner();
 
-        saveOwnersExample(false);
+        saveReferenceScenario(false);
         TierPlan off = planner.plan(chatRequest()).block();
         assertThat(off.tiered()).isTrue();
         assertThat(off.unified()).isFalse();
         assertThat(off.levels()).extracting(TierPlan.Level::tierId).containsExactly("kiro");
         assertThat(off.levels().get(0).cells()).containsExactly(PoolCell.KIRO_COMPATIBLE);
 
-        saveOwnersExample(true);
+        saveReferenceScenario(true);
         TierPlan on = planner.plan(chatRequest()).block();
         assertThat(on.unified()).isTrue();
         assertThat(on.levels()).extracting(TierPlan.Level::tierId).containsExactly("official", "kiro");
@@ -153,7 +153,7 @@ class SourceTierPlannerPostgreSqlIntegrationTest extends PostgreSqlIntegrationTe
         String official = account("Anthropic", "api-key", null);
         String kiro = account("BuilderId", "idc", null);
         accountPool.refreshCache().block();
-        saveOwnersExample(false);
+        saveReferenceScenario(false);
         TierRuntime.Planner planner = tierRuntime.planner();
         // The health tests of the pool suspend the only official key: it is disabled, and it leaves the account cache.
         accountPool.suspend(official, "AUTO_TEST_FAILED", "health test failed").block();
@@ -242,7 +242,7 @@ class SourceTierPlannerPostgreSqlIntegrationTest extends PostgreSqlIntegrationTe
         assertThat(stranger.xpSkips()).extracting(XpSkip::reason).containsExactly(XpSkip.Reason.GATE);
         assertThat(counts.snapshot()).containsEntry(new XpSkipCounts.Key("anthropic", "MESSAGES", "relay", XpSkip.Reason.GATE), 1L)
             .containsEntry(new XpSkipCounts.Key("anthropic", "MESSAGES", "relay", XpSkip.Reason.UNVERIFIED), 1L);
-        // The application's own runtime offers the Messages pair on trial (P5-05): it reads a request of that entry for the
+        // The application's own runtime offers the Messages pair on trial: it reads a request of that entry for the
         // relays and plans it as the planner above does, for the key the gate lists and for no other.
         assertThat(tierRuntime.planner().wantsEntryFacts(TierEntry.MESSAGES)).isTrue();
         assertThat(tierRuntime.planner().wantsEntryFacts(TierEntry.RESPONSES)).isFalse();
@@ -264,8 +264,8 @@ class SourceTierPlannerPostgreSqlIntegrationTest extends PostgreSqlIntegrationTe
             keyId, null).withEntry(TierEntry.MESSAGES).withEntryFacts(TierEntryFacts.of(TierEntry.MESSAGES, raw));
     }
 
-    /** The owner's example on the Anthropic vendor, with the all-endpoints switch as given. */
-    private void saveOwnersExample(boolean unify) {
+    /** The reference scenario on the Anthropic vendor, with the all-endpoints switch as given. */
+    private void saveReferenceScenario(boolean unify) {
         SourceTierAdminService admin = new SourceTierAdminService(db, transactionManager, settings, registry,
             new SourceTierValidator(catalog, resolver, thisRelease), thisRelease);
         long version = admin.overview().block().vendors().stream().filter(vendor -> vendor.vendor().equals("anthropic"))

@@ -18,7 +18,7 @@ public class OpenApiConfig {
                 .title("Starry API")
                 .version("0.1.0")
                 .description("OpenAI, Anthropic, and Gemini compatible multi-platform model routing service")
-                .license(new License().name("MIT")));
+                .license(new License().name("AGPL-3.0-only").url("https://www.gnu.org/licenses/agpl-3.0.html")));
     }
 
     /**

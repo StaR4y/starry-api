@@ -21,7 +21,7 @@ import tech.starryapi.platform.xproto.RequestFeatureDetector.Feature;
  * <ul>
  *   <li><b>CARRY</b>: the relay is given it, so nothing is said of it.
  *   <li><b>SOFT</b>: the relay is not given it and the request goes on; the request log records the name. This is
- *       what the native path does too (design 7.2, P3): the answer is no worse than the one the next tier would give.
+ *       what the native path does too (design 7.2): the answer is no worse than the one the next tier would give.
  *   <li><b>HARD</b>: the native path would have carried it and this member cannot, so the member is skipped for this
  *       request. A request that is served by a relay may not quietly lose what a native account would have kept.
  * </ul>
@@ -57,7 +57,7 @@ import tech.starryapi.platform.xproto.RequestFeatureDetector.Feature;
  *       {@code cachedContent}, several candidates, more than four stop sequences) is HARD, as is a function name only Gemini's
  *       upstream takes for a member of any other vendor ({@link Feature#FUNCTION_NAME}: a dot or a colon in it, which the native
  *       accounts are given as it is). A {@code serviceTier} and the summaries of thoughts ({@code includeThoughts}) are SOFT. A {@code verbosity} is SOFT
- *       on every baseline and entry (D6): it only asks the model to be brief or full, OpenCode sends it with every
+ *       on every baseline and entry: it only asks the model to be brief or full, OpenCode sends it with every
  *       request of a gpt model, and a relay that refused the request for it would never be given one. The sanitizer does not send it and the request
  *       log records it. Three things of the Responses entry are HARD on every baseline: a custom tool other than {@code
  *       apply_patch} (a relay's model answers with a function, which the client cannot run as its tool), a chain that
@@ -145,7 +145,7 @@ public final class FeaturePolicy {
 
     /**
      * The features each entry's conversion can give a relay at all, when the member allows it. The Messages entry
-     * gives the images of the user's turns, the cache controls and the tool-result error flag (P8-01), and the reasoning
+     * gives the images of the user's turns, the cache controls and the tool-result error flag, and the reasoning
      * request through the sanitizer (which reads the original body for it). The Responses conversion gives
      * the images of the user's messages, the response schema and the reasoning effort (not the images in the output of a
      * tool, nor cache control, which the API does not have). The Gemini conversion gives the images of the user's turns
@@ -229,7 +229,7 @@ public final class FeaturePolicy {
             // no place for.
             case AUDIO, FILE, TOOL_CHOICE, LOGIT_BIAS, BUILTIN_TOOL, TOOL_OUTPUT_IMAGE ->
                 carriedOr(entry, feature, false, baseline);
-            // A verbosity is advice about the length of the answer, left out on every baseline and entry (D6), recorded.
+            // A verbosity is advice about the length of the answer, left out on every baseline and entry, recorded.
             case DOCUMENT, TOOL_SEARCH, CONTEXT_MANAGEMENT, HISTORY_THINKING, SERVER_TOOL_HISTORY, OUTPUT_CONFIG,
                  TOP_K, METADATA, SERVICE_TIER, VERBOSITY, INCLUDE, TRUNCATION, MAX_TOOL_CALLS, REASONING_SUMMARY, LOGPROBS,
                  USER, STORE, PREDICTION,

@@ -661,7 +661,7 @@ class SourceTierValidatorTest {
             .models().getFirst().imageTokenCap()).isEqualTo(1);
     }
 
-    /** D15: the most the relay's upstream writes is optional, and when it is given it is a limit a client could ask for. */
+    /** The most the relay's upstream writes is optional, and when it is given it is a limit a client could ask for. */
     @Test
     void theMaximumOutputIsOptionalAndWhenGivenBetweenOneAndAMillion() {
         assertRejected(mappingRejected("anthropic", new SourceTierDtos.MemberModel("claude-sonnet-4.5", "x", 1000, null, 0, null, null, null)),
@@ -813,8 +813,8 @@ class SourceTierValidatorTest {
         Config openaiKeys = validator.normalize("openai", replace(false, List.of(), List.of(), List.of(gate("CHAT", "KEYS", "k"))));
         Config googleKeys = validator.normalize("google", replace(false, List.of(), List.of(), List.of(gate("CHAT", "KEYS", "k"))));
 
-        // The relay is registered (and kept out of the untiered pools, P4-10), and the pairs of the Chat, Messages,
-        // Responses and Gemini entries are on trial (P5-05, P6-04, P7-03): open to the keys a gate lists and to no more.
+        // The relay is registered (and kept out of the untiered pools), and the pairs of the Chat, Messages,
+        // Responses and Gemini entries are on trial: open to the keys a gate lists and to no more.
         assertThatCode(() -> validator.requireSupported(relay)).doesNotThrowAnyException();
         assertThatCode(() -> validator.requireSupported(offGate)).doesNotThrowAnyException();
         assertThatCode(() -> validator.requireSupported(keysGate)).doesNotThrowAnyException();
@@ -835,7 +835,7 @@ class SourceTierValidatorTest {
         SourceTierDtos.ReplaceVendor request = new SourceTierDtos.ReplaceVendor(0L, false, true, null, null, null, null,
             OWNER_TIERS, null, null);
 
-        // This release runs it (P3-03): the switch is stored and takes effect.
+        // This release runs it: the switch is stored and takes effect.
         assertThatCode(() -> validator.requireSupported(validator.normalize("anthropic", request))).doesNotThrowAnyException();
 
         SourceTierValidator without = withRuntime(true, false, false, PairStatus.NOT_OFFERED);

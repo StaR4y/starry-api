@@ -16,6 +16,7 @@
   import { useAuthStore } from '@/stores/auth';
   import { useAppearanceStore } from '@/stores/appearance';
   import SiteBrandLogo from '@/components/SiteBrandLogo.vue';
+  import SourceNotice from '@/components/SourceNotice.vue';
   import { ApiError } from '@/utils/http';
 
   const route = useRoute();
@@ -637,6 +638,8 @@
       </template>
     </el-dialog>
 
+    <SourceNotice class="login__source text-muted" />
+
     <div class="login__bg-orb login__bg-orb--a" />
     <div class="login__bg-orb login__bg-orb--b" />
   </div>
@@ -653,9 +656,18 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 24px;
+    padding: 24px 24px 56px;
     position: relative;
     overflow: hidden;
+
+    &__source {
+      position: absolute;
+      left: 16px;
+      right: 16px;
+      bottom: 12px;
+      z-index: 1;
+      font-size: 12px;
+    }
 
     &__panel {
       position: relative;

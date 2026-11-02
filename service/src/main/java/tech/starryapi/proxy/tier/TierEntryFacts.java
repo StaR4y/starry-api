@@ -33,8 +33,8 @@ import tools.jackson.databind.JsonNode;
  *     that body already is one (the Chat entry). Messages and Gemini hand out the body their converter made of the original
  *     at the entry, under the output limit the planned body is held to, until the request is planned ({@link #release})
  * @param gatewayOutput whether the output limit of the planned body is one the gateway chose and not the client: the
- *     default of the model, which a Responses request that names no limit is given (D14, design 7.10). A relay is not
- *     given it: its output is the maximum its mapping states, or 4,096 (D15, {@link XpEligibility}). A limit the client
+ *     default of the model, which a Responses request that names no limit is given (design 7.10). A relay is not
+ *     given it: its output is the maximum its mapping states, or 4,096 ({@link XpEligibility}). A limit the client
  *     wrote, and the 4,096 the other entries give, are sent to a relay as they are
  */
 public record TierEntryFacts(Detected detected, JsonNode entryDigest, UnaryOperator<JsonNode> chatConversion, boolean gatewayOutput) {
@@ -82,7 +82,7 @@ public record TierEntryFacts(Detected detected, JsonNode entryDigest, UnaryOpera
         return new TierEntryFacts(detected, entryDigest, conversion, gatewayOutput);
     }
 
-    /** The same facts, saying whether the output limit of the planned body is the gateway's own (D14). */
+    /** The same facts, saying whether the output limit of the planned body is the gateway's own. */
     public TierEntryFacts withGatewayOutput(boolean gatewayOutput) {
         return new TierEntryFacts(detected, entryDigest, chatConversion, gatewayOutput);
     }

@@ -98,7 +98,7 @@ service/src/main/java/tech/starryapi
 - `proxy` 可以依赖 `platform/*`。
 - `platform/openai`、`anthropic`、`gemini` 拥有各自的入站 / 出站协议形状，可以依赖 `platform/core` 和 `platform/catalog`，但**互相不能 import**，也不能 import `platform/kiro`。
 - `platform/openai` 同时提供共享的 OpenAI 兼容 HTTP 传输；`platform/deepseek` 拥有官方模型 ID、规范化和 Chat / Responses 能力策略，**复用** `OpenAiUpstreamClient` 做 HTTP 传输，而不是重复造一个客户端。
-- `model/OfficialModelPricingService` 拥有经验证的官方美元价格目录：从内置的 `Wei-Shaw/model-price-repo` 快照起步，仅当远程 JSON 与发布的 SHA-256 校验和匹配后才定期替换。
+- `model/OfficialModelPricingService` 拥有经验证的厂商标价（美元）目录：从内置的、社区维护的 `Wei-Shaw/model-price-repo` 快照起步，仅当远程 JSON 与发布的 SHA-256 校验和匹配后才定期替换。
 - `platform/catalog/ModelPriceRepoModelIds` 从该快照派生内置的 OpenAI、Anthropic、Gemini、DeepSeek 聊天模型 ID。一个条目要被默认公布，必须有输入 / 输出 token 价格和与当前代理兼容的请求端点；仅 Realtime 的条目被排除。
 - `service-api/model` 包含公开的模型目录 REST 契约、模型 DTO 和 `ModelCatalogProvider`；`platform/catalog` 只是服务端聚合用的实现细节。
 - admin / account / apikey / stat 模块**不能**依赖 OpenAI / Anthropic / Gemini 的响应工厂。
@@ -145,7 +145,7 @@ webui/src
 | token 与输入能力元数据 | 上下文长度、支持的输入类型等 |
 | 可选的管理员图标、请求格式、客户端端点元数据 | |
 
-**价格**：OpenAI、Google / Gemini、Anthropic、DeepSeek 的内置模型来自随仓库提交的 `model-price-repo` 快照，外加少量兼容路由别名。官方美元价格在启动时和每 10 分钟刷新（经校验和验证，保留最近一次可用的磁盘缓存）。目录别名按这个顺序解析到官方价格：**精确 ID → 去前缀 → 连字符 / 点规范化 → 系列 / 厂商中位数**——**绝不会**通过路由用的 `targetModelId` 去取价。「16.67 / MTok」的安全兜底只保留给**不在托管目录里**的 ID。管理员可以在「系统设置 → 模型管理 → 价格倍率」里开启 `syncCatalogIds`，让新发布的一线聊天模型被追加进目录；已停用的 ID 不会被复活。
+**价格**：OpenAI、Google / Gemini、Anthropic、DeepSeek 的内置模型来自随仓库提交的 `model-price-repo` 快照，外加少量兼容路由别名。厂商标价（美元）在启动时和每 10 分钟刷新（经校验和验证，保留最近一次可用的磁盘缓存）。目录别名按这个顺序解析到厂商标价：**精确 ID → 去前缀 → 连字符 / 点规范化 → 系列 / 厂商中位数**——**绝不会**通过路由用的 `targetModelId` 去取价。「16.67 / MTok」的安全兜底只保留给**不在托管目录里**的 ID。管理员可以在「系统设置 → 模型管理 → 价格倍率」里开启 `syncCatalogIds`，让新发布的一线聊天模型被追加进目录；已停用的 ID 不会被复活。
 
 **管理员能做什么**：增加厂商和模型、覆盖内置项、停用条目、上传 PNG / JPEG / WebP 图标，并通过 `/admin/models` 持久化全局的模型 ID 显示顺序和画廊样式。目录自定义、顺序和显示设置保存在 `system_settings` 里；图标文件在 `STARRY_MODEL_ICON_DIR` 里，**需要和 PostgreSQL 导出分开备份**。
 

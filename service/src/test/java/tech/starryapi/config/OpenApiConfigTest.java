@@ -30,4 +30,11 @@ class OpenApiConfigTest {
 
         assertThat(openApi.getComponents()).isNull();
     }
+
+    @Test
+    void declaresTheLicenseOfTheProject() {
+        assertThat(new OpenApiConfig().openAPI().getInfo().getLicense().getName()).isEqualTo("AGPL-3.0-only");
+        assertThat(new OpenApiConfig().openAPI().getInfo().getLicense().getUrl())
+            .isEqualTo("https://www.gnu.org/licenses/agpl-3.0.html");
+    }
 }

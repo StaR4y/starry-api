@@ -284,7 +284,7 @@ public class AssistantChatService {
                 return new ApiException(
                     api.getStatus(),
                     "MODEL_PRICE_UNAVAILABLE",
-                    "该模型还没有定价。请在系统设置 → 模型管理里为它填写价格，或换一个已同步官方价格的模型。"
+                    "该模型还没有定价。请在系统设置 → 模型管理里为它填写价格，或换一个已同步厂商标价的模型。"
                 ).initCause(api);
             }
             return api;

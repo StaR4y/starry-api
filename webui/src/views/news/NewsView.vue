@@ -11,6 +11,7 @@
     type NewsHotTopic,
   } from '@/api/news';
   import { useAppearanceStore } from '@/stores/appearance';
+  import { webLink } from '@/utils/webLink';
 
   const route = useRoute();
   const router = useRouter();
@@ -122,21 +123,33 @@
         <section v-if="showTopics && topics.length" class="news__hot">
           <h3>{{ t('正在发生') }}</h3>
           <div class="news__hot-list">
-            <component
-              :is="topic.originalUrl ? 'a' : 'div'"
-              v-for="topic in topics"
-              :key="topic.rank"
-              class="news__hot-item"
-              :href="topic.originalUrl || undefined"
-              :target="topic.originalUrl ? '_blank' : undefined"
-              :rel="topic.originalUrl ? 'noreferrer' : undefined"
-            >
+            <div v-for="topic in topics" :key="topic.rank" class="news__hot-item">
               <em>{{ topic.rank }}</em>
               <span>
-                <strong>{{ topic.title }}</strong>
-                <small>{{ topic.source }} · {{ topic.sourceCount }} {{ t('个来源') }}</small>
+                <strong>
+                  <a
+                    v-if="topic.originalUrl"
+                    class="news__hot-link"
+                    :href="topic.originalUrl"
+                    target="_blank"
+                    rel="noreferrer"
+                  >{{ topic.title }}</a>
+                  <template v-else>{{ topic.title }}</template>
+                </strong>
+                <small>
+                  {{ topic.source }} · {{ topic.sourceCount }} {{ t('个来源') }}
+                  <template v-if="webLink(topic.aihotUrl)">
+                    ·
+                    <a
+                      class="news__via"
+                      :href="webLink(topic.aihotUrl) || undefined"
+                      target="_blank"
+                      rel="noreferrer"
+                    >{{ t('来自 aihot.news') }}</a>
+                  </template>
+                </small>
               </span>
-            </component>
+            </div>
           </div>
         </section>
 
@@ -160,7 +173,17 @@
               <template v-else>{{ item.title }}</template>
             </h4>
             <p v-if="item.summary">{{ item.summary }}</p>
-            <footer v-if="item.source">{{ item.source }}</footer>
+            <footer v-if="item.source || webLink(item.aihotUrl)">
+              <template v-if="item.source">{{ item.source }}</template>
+              <template v-if="item.source && webLink(item.aihotUrl)"> · </template>
+              <a
+                v-if="webLink(item.aihotUrl)"
+                class="news__via"
+                :href="webLink(item.aihotUrl) || undefined"
+                target="_blank"
+                rel="noreferrer"
+              >{{ t('来自 aihot.news') }}</a>
+            </footer>
           </article>
         </section>
         <p v-if="report && !report.sections.length" class="news__empty">
@@ -293,6 +316,7 @@
   }
 
   .news__hot-item {
+    position: relative;
     display: grid;
     grid-template-columns: 22px minmax(0, 1fr);
     gap: 8px;
@@ -325,6 +349,30 @@
     }
 
     &:hover strong {
+      color: var(--kp-primary);
+    }
+  }
+
+  // The whole card opens the article; the attribution link sits above that area and opens aihot.news.
+  .news__hot-link {
+    color: inherit;
+    text-decoration: none;
+
+    &::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: inherit;
+    }
+  }
+
+  .news__via {
+    position: relative;
+    color: inherit;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+
+    &:hover {
       color: var(--kp-primary);
     }
   }

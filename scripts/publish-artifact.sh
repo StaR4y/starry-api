@@ -17,6 +17,10 @@ COMMIT_ARTIFACTS="${COMMIT_ARTIFACTS:-false}"
 PUSH_ARTIFACTS="${PUSH_ARTIFACTS:-false}"
 BUILD_WITH_DOCKER="${BUILD_WITH_DOCKER:-auto}"
 DOCKER_BUILD_IMAGE="${DOCKER_BUILD_IMAGE:-starry-api-artifact-builder}"
+# Where the -sources jars of the libraries used under a copyleft license (NOTICE, section 3) are published: in the
+# artifact directory next to the jar, and in the bundle. The build task :service:copyleftSources collects them.
+SOURCES_DIR_NAME="third-party-sources"
+COPYLEFT_SOURCE_LIBRARIES=(logback-classic logback-core jakarta.annotation-api jakarta.mail-api angus-mail)
 
 log() {
   printf '[%s] %s\n' "$APP_NAME" "$*"
@@ -25,6 +29,18 @@ log() {
 fail() {
   printf '[%s] ERROR: %s\n' "$APP_NAME" "$*" >&2
   exit 1
+}
+
+# Writes the content of a directory as a gzip tar archive that names neither the account nor the ids of whoever built it.
+create_tar_gz() {
+  local archive="$1" directory="$2"
+  local owner_options
+  if tar --version 2>/dev/null | grep -q 'GNU tar'; then
+    owner_options=(--owner=0 --group=0 --numeric-owner)
+  else
+    owner_options=(--uid 0 --gid 0 --uname '' --gname '')
+  fi
+  tar "${owner_options[@]}" -C "$directory" -czf "$archive" .
 }
 
 sha256_file() {
@@ -70,6 +86,36 @@ list_zip_entries() {
   else
     return 1
   fi
+}
+
+# Writes one entry of a zip or jar to a file.
+extract_zip_entry() {
+  local archive="$1" entry="$2" output="$3" work absolute
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -p "$archive" "$entry" > "$output"
+  elif command -v jar >/dev/null 2>&1; then
+    work="$(mktemp -d)"
+    absolute="$(cd "$(dirname "$archive")" && pwd)/$(basename "$archive")"
+    (cd "$work" && jar xf "$absolute" "$entry")
+    cp "$work/$entry" "$output"
+    rm -rf "$work"
+  else
+    return 1
+  fi
+}
+
+# Copies the -sources jars that :service:copyleftSources built into a directory, and fails unless there is exactly one
+# for every library NOTICE says is used under a copyleft license.
+collect_copyleft_sources() {
+  local destination="$1" library count
+  for library in "${COPYLEFT_SOURCE_LIBRARIES[@]}"; do
+    count="$(find service/build/third-party-sources -maxdepth 1 -type f -name "${library}-[0-9]*-sources.jar" 2>/dev/null | wc -l | tr -d '[:space:]')"
+    [[ "$count" == "1" ]] \
+      || fail "Expected one ${library}-<version>-sources.jar in service/build/third-party-sources, found ${count}. Run ./gradlew :service:copyleftSources (it downloads the jars the first time); a release has to offer the source code of these libraries."
+  done
+  rm -rf "$destination"
+  mkdir -p "$destination"
+  cp service/build/third-party-sources/*-sources.jar "$destination/"
 }
 
 write_artifact_compose() {
@@ -221,6 +267,7 @@ services:
       STARRY_SESSION_AFFINITY_TTL: ${STARRY_SESSION_AFFINITY_TTL:-${KIRO_SESSION_AFFINITY_TTL:-10m}}
       STARRY_SESSION_AFFINITY_MAXIMUM_SIZE: ${STARRY_SESSION_AFFINITY_MAXIMUM_SIZE:-${KIRO_SESSION_AFFINITY_MAXIMUM_SIZE:-100000}}
       STARRY_WEBUI_URL: ${STARRY_WEBUI_URL:-${KIRO_WEBUI_URL:-}}
+      STARRY_SOURCE_URL: ${STARRY_SOURCE_URL:-https://github.com/StaR4y/starry-api}
       STARRY_ADMIN_TOKEN: ${STARRY_ADMIN_TOKEN:-${KIRO_ADMIN_TOKEN:-}}
       STARRY_TOKEN_REFRESH_INTERVAL_MS: ${STARRY_TOKEN_REFRESH_INTERVAL_MS:-${KIRO_TOKEN_REFRESH_INTERVAL_MS:-3600000}}
       STARRY_TOKEN_REFRESH_INITIAL_DELAY_MS: ${STARRY_TOKEN_REFRESH_INITIAL_DELAY_MS:-${KIRO_TOKEN_REFRESH_INITIAL_DELAY_MS:-60000}}
@@ -320,7 +367,7 @@ Package layout:
 
 - app/starry-api.jar: executable Spring Boot jar with WebUI files embedded.
 - app/starry-api.jar.sha256: jar checksum.
-- starry-api-webui.tar.gz: standalone WebUI dist archive for inspection or CDN use.
+- starry-api-webui.tar.gz: standalone WebUI dist archive for inspection or CDN use (with LICENSE and NOTICE).
 - docker-compose.artifact.yml: compose file that runs the jar with a JRE image. It also defines the optional
   Mihomo service (the installer deploys it idle on a fresh install; an administrator switches it on in the console,
   and COMPOSE_PROFILES=mihomo with STARRY_EGRESS_CONTROLLER_SECRET deploys it by hand, see docs/ACCOUNT_EGRESS.md).
@@ -328,6 +375,15 @@ Package layout:
 - docker-compose.tls-bridge.yml: experimental, opt-in overlay for the Anthropic TLS fingerprint bridge.
 - docker/egress/: Mihomo entrypoint script and the TLS bridge build context.
 - docs/ACCOUNT_EGRESS.md: account egress deployment and limits.
+- LICENSE: the GNU Affero General Public License, version 3 (AGPL-3.0-only), the license of Starry API.
+- NOTICE: license elections for dependencies, additional permission for plugins, data credits, trademarks, and the
+  statement that the optional Mihomo component is GPL-3.0 and not distributed.
+- THIRD-PARTY-NOTICES.txt: licenses of the npm packages bundled into the web console (also served by the console).
+- JAVA-THIRD-PARTY-NOTICES.txt: the Java libraries in the jar with the license each declares, and the license texts
+  (Apache-2.0, MIT) that many of the jars do not carry themselves (also in the jar under META-INF/).
+- licenses/: LGPL-2.1.txt and logback-NOTICE.txt, the license text and the notice of logback, which is used under LGPL-2.1.
+- third-party-sources/: the -sources jars of the libraries used under a copyleft license (logback-classic, logback-core,
+  jakarta.annotation-api, jakarta.mail-api, angus-mail), which is the source code those licenses require us to offer.
 - postgres-init/001-starry-api-roles.sh: first-start least-privilege role bootstrap.
 - runtime/recover-data-management.sh: interactive container recovery tool.
 - runtime/recover-data-management.sh.sha256: recovery tool checksum.
@@ -401,10 +457,10 @@ select_boot_jar() {
 build_with_gradle() {
   if [[ "$RUN_TESTS" == "true" ]]; then
     log "Running a clean test and boot-jar build..."
-    ./gradlew clean test :service:bootJar
+    ./gradlew clean test :service:bootJar :service:copyleftSources
   else
     log "Running a clean boot-jar build..."
-    ./gradlew clean :service:bootJar
+    ./gradlew clean :service:bootJar :service:copyleftSources
   fi
 }
 
@@ -435,6 +491,17 @@ build_with_docker() {
   docker cp "${container_id}:/workspace/webui/dist/." webui/dist/
   docker rm "$container_id" >/dev/null
   trap - RETURN
+
+  # The -sources jars of the copyleft libraries are not needed by the image itself, so a second container collects them.
+  log "Collecting the -sources jars of the copyleft libraries inside Docker..."
+  container_id="$(docker create "$image_tag" sh -c 'chmod +x gradlew && ./gradlew --no-daemon -q :service:copyleftSources -PskipWebuiBuild=true')"
+  trap 'docker rm -f "$container_id" >/dev/null 2>&1 || true' RETURN
+  docker start -a "$container_id" || fail "Collecting the -sources jars inside Docker failed."
+  rm -rf service/build/third-party-sources
+  mkdir -p service/build/third-party-sources
+  docker cp "${container_id}:/workspace/service/build/third-party-sources/." service/build/third-party-sources/
+  docker rm "$container_id" >/dev/null
+  trap - RETURN
 }
 
 main() {
@@ -451,6 +518,7 @@ main() {
   local webui_dist_path webui_checksum webui_size compose_path compose_checksum init_path init_checksum
   local recovery_path recovery_checksum recovery_checksum_path checksums_path bundle_path bundle_checksum bundle_size tmp_dir stage_dir
   local admin_command_path admin_command_checksum admin_command_checksum_path
+  local jar_entries required_entry notice_file sources_dir webui_stage source_jar
   version="${VERSION:-$(project_version)}"
   version="${version:-0.1.0-SNAPSHOT}"
   branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || printf 'unknown')"
@@ -489,13 +557,32 @@ main() {
     fail "Boot jar does not contain the built WebUI. Expected BOOT-INF/classes/static/index.html."
   fi
   [[ -f webui/dist/index.html ]] || fail "WebUI dist is missing. Expected webui/dist/index.html."
+  [[ -f webui/dist/THIRD-PARTY-NOTICES.txt ]] \
+    || fail "WebUI dist has no THIRD-PARTY-NOTICES.txt. Rebuild the console (npm run build writes it)."
+  [[ -f LICENSE && -f NOTICE ]] || fail "LICENSE and NOTICE must be at the root of the repository."
+  jar_entries="$(list_zip_entries "$artifact_path")" || fail "Could not list the entries of the boot jar."
+  for required_entry in META-INF/LICENSE META-INF/NOTICE META-INF/JAVA-THIRD-PARTY-NOTICES.txt \
+      META-INF/licenses/LGPL-2.1.txt META-INF/licenses/logback-NOTICE.txt BOOT-INF/classes/static/THIRD-PARTY-NOTICES.txt; do
+    grep -qxF "$required_entry" <<<"$jar_entries" || fail "Boot jar does not contain ${required_entry}."
+  done
+  [[ -f licenses/LGPL-2.1.txt && -f licenses/logback-NOTICE.txt ]] \
+    || fail "licenses/LGPL-2.1.txt and licenses/logback-NOTICE.txt must be in the repository (logback is used under LGPL-2.1)."
+  sources_dir="${ARTIFACT_DIR}/${SOURCES_DIR_NAME}"
+  collect_copyleft_sources "$sources_dir"
 
   checksum="$(sha256_file "$artifact_path")"
   size_bytes="$(wc -c < "$artifact_path" | tr -d '[:space:]')"
   printf '%s  %s\n' "$checksum" "$ARTIFACT_NAME" > "$checksum_path"
 
+  # The standalone console archive carries LICENSE and NOTICE too: its THIRD-PARTY-NOTICES.txt points at them.
+  tmp_dir="$(mktemp -d)"
+  webui_stage="${tmp_dir}/webui"
+  mkdir -p "$webui_stage"
+  cp -R webui/dist/. "$webui_stage/"
+  cp "$ROOT_DIR/LICENSE" "$webui_stage/LICENSE"
+  cp "$ROOT_DIR/NOTICE" "$webui_stage/NOTICE"
   webui_dist_path="${ARTIFACT_DIR}/${WEBUI_DIST_NAME}"
-  tar -C webui/dist -czf "$webui_dist_path" .
+  create_tar_gz "$webui_dist_path" "$webui_stage"
   webui_checksum="$(sha256_file "$webui_dist_path")"
   webui_size="$(wc -c < "$webui_dist_path" | tr -d '[:space:]')"
   printf '%s  %s\n' "$webui_checksum" "$WEBUI_DIST_NAME" > "${webui_dist_path}.sha256"
@@ -556,10 +643,12 @@ EOF
     printf '%s  %s\n' "$admin_command_checksum" "$ADMIN_COMMAND_NAME"
     printf '%s  %s\n' "$(sha256_file "$admin_command_checksum_path")" "${ADMIN_COMMAND_NAME}.sha256"
     printf '%s  %s\n' "$(sha256_file "$info_path")" "build-info.json"
+    for source_jar in "$sources_dir"/*-sources.jar; do
+      printf '%s  %s\n' "$(sha256_file "$source_jar")" "${SOURCES_DIR_NAME}/$(basename "$source_jar")"
+    done
   } > "$checksums_path"
 
   bundle_path="${ARTIFACT_DIR}/${BUNDLE_NAME}"
-  tmp_dir="$(mktemp -d)"
   stage_dir="${tmp_dir}/starry-api"
   mkdir -p "$stage_dir/app" "$stage_dir/postgres-init" "$stage_dir/runtime"
   cp "$artifact_path" "$stage_dir/app/starry-api.jar"
@@ -573,6 +662,15 @@ EOF
   cp "$admin_command_path" "$stage_dir/${ADMIN_COMMAND_NAME}"
   cp "$admin_command_checksum_path" "$stage_dir/${ADMIN_COMMAND_NAME}.sha256"
   cp "$info_path" "$stage_dir/build-info.json"
+  cp "$ROOT_DIR/LICENSE" "$stage_dir/LICENSE"
+  cp "$ROOT_DIR/NOTICE" "$stage_dir/NOTICE"
+  cp "$ROOT_DIR/webui/dist/THIRD-PARTY-NOTICES.txt" "$stage_dir/THIRD-PARTY-NOTICES.txt"
+  extract_zip_entry "$artifact_path" META-INF/JAVA-THIRD-PARTY-NOTICES.txt "$stage_dir/JAVA-THIRD-PARTY-NOTICES.txt" \
+    || fail "Could not read META-INF/JAVA-THIRD-PARTY-NOTICES.txt from the boot jar."
+  mkdir -p "$stage_dir/licenses" "$stage_dir/${SOURCES_DIR_NAME}"
+  cp "$ROOT_DIR/licenses/LGPL-2.1.txt" "$stage_dir/licenses/LGPL-2.1.txt"
+  cp "$ROOT_DIR/licenses/logback-NOTICE.txt" "$stage_dir/licenses/logback-NOTICE.txt"
+  cp "$sources_dir"/*-sources.jar "$stage_dir/${SOURCES_DIR_NAME}/"
   mkdir -p "$stage_dir/docker/egress" "$stage_dir/docs"
   cp "$ROOT_DIR/docker-compose.tls-bridge.yml" "$stage_dir/docker-compose.tls-bridge.yml"
   for egress_file in Dockerfile requirements.txt bridge.py mihomo-entrypoint.sh; do
@@ -591,16 +689,26 @@ EOF
     printf '%s  %s\n' "$(sha256_file "$stage_dir/${ADMIN_COMMAND_NAME}")" "$ADMIN_COMMAND_NAME"
     printf '%s  %s\n' "$(sha256_file "$stage_dir/${ADMIN_COMMAND_NAME}.sha256")" "${ADMIN_COMMAND_NAME}.sha256"
     printf '%s  %s\n' "$(sha256_file "$stage_dir/build-info.json")" "build-info.json"
+    for notice_file in LICENSE NOTICE THIRD-PARTY-NOTICES.txt JAVA-THIRD-PARTY-NOTICES.txt licenses/LGPL-2.1.txt licenses/logback-NOTICE.txt; do
+      printf '%s  %s\n' "$(sha256_file "$stage_dir/$notice_file")" "$notice_file"
+    done
+    for source_jar in "$stage_dir/${SOURCES_DIR_NAME}"/*-sources.jar; do
+      printf '%s  %s\n' "$(sha256_file "$source_jar")" "${SOURCES_DIR_NAME}/$(basename "$source_jar")"
+    done
     for egress_file in docker-compose.tls-bridge.yml docker/egress/Dockerfile docker/egress/requirements.txt docker/egress/bridge.py docker/egress/mihomo-entrypoint.sh docs/ACCOUNT_EGRESS.md; do
       printf '%s  %s\n' "$(sha256_file "$stage_dir/$egress_file")" "$egress_file"
     done
   } > "$stage_dir/sha256sums.txt"
   write_bundle_readme "$stage_dir/README.txt"
-  tar -C "$stage_dir" -czf "$bundle_path" .
+  create_tar_gz "$bundle_path" "$stage_dir"
   rm -rf "$tmp_dir"
   bundle_checksum="$(sha256_file "$bundle_path")"
   bundle_size="$(wc -c < "$bundle_path" | tr -d '[:space:]')"
   printf '%s  %s\n' "$bundle_checksum" "$BUNDLE_NAME" > "${bundle_path}.sha256"
+
+  # The release has to carry the license files and the source code of the copyleft libraries, and no Mihomo binary.
+  bash "$ROOT_DIR/scripts/check-bundle-contents.sh" "$bundle_path" \
+    || fail "The bundle or the jar is missing license files (see above); do not publish ${ARTIFACT_DIR}."
 
   log "Updated ${artifact_path}"
   log "SHA256 ${checksum}"

@@ -203,7 +203,7 @@ class DefaultSourceTierPlannerTest {
     // ---- tiers, prices and reservation ----
 
     @Test
-    void theOwnersExampleIsPlannedAsTwoTiersWithTheirOwnPrices() {
+    void theReferenceScenarioIsPlannedAsTwoTiersWithTheirOwnPrices() {
         loaded(snapshot(List.of(vendor("anthropic", true)), anthropicTiers(), List.of()));
         TierPlanRequest request = request("claude-sonnet-4.5", TierRoute.ANTHROPIC);
 

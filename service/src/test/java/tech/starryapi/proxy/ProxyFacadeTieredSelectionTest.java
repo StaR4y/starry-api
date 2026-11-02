@@ -306,7 +306,7 @@ class ProxyFacadeTieredSelectionTest {
         assertThat(attempt.selection().cell()).isEqualTo(PoolCell.OFFICIAL_OR_CODEX);
     }
 
-    // ---- refusals (D2) ----
+    // ---- refusals ----
 
     @Test
     void sixteenRefusalsInTheFirstTierSendTheRequestToTheSecondTier() {

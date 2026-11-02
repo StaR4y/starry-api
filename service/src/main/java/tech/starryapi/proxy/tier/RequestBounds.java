@@ -32,8 +32,8 @@ public final class RequestBounds {
     }
 
     /**
-     * The most output the model writes, as far as the gateway knows (D14): the smaller of the figure the model list shows
-     * ({@code listed}) and the one the official price catalog lists ({@code priced}) when both are known, whichever is known
+     * The most output the model writes, as far as the gateway knows: the smaller of the figure the model list shows
+     * ({@code listed}) and the one the vendor list price catalog lists ({@code priced}) when both are known, whichever is known
      * when only one is, and {@link #FALLBACK_OUTPUT_TOKENS} for a model that neither gives a figure for. A figure below 1 is
      * no figure.
      */
@@ -50,7 +50,7 @@ public final class RequestBounds {
     }
 
     /**
-     * The limit a request that names none is given (D14): the default the operator configured ({@code configured}), no more
+     * The limit a request that names none is given: the default the operator configured ({@code configured}), no more
      * than the model writes ({@link #modelMaximumOutput}) and no more than {@link #MAX_OUTPUT_TOKENS}.
      */
     public static long defaultOutputTokens(long configured, OptionalInt listed, OptionalInt priced) {
@@ -58,8 +58,8 @@ public final class RequestBounds {
     }
 
     /**
-     * What a relay is given for a request whose output limit the gateway chose (D15): the maximum output its mapping states,
-     * no more than {@code gatewayDefault}, the limit that the reservation and the native sources hold the request to (D14); or
+     * What a relay is given for a request whose output limit the gateway chose: the maximum output its mapping states,
+     * no more than {@code gatewayDefault}, the limit that the reservation and the native sources hold the request to; or
      * {@link #FALLBACK_OUTPUT_TOKENS} when the mapping states none, since the gateway does not know what the relay's upstream
      * can write and a relay that is sent more than it can write refuses the request. Never more than {@code gatewayDefault}:
      * the reservation covers no more, and a model that writes less than the fallback is not asked for it.

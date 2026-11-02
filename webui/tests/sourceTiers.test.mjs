@@ -416,7 +416,7 @@ test('presets are drafts that pass validation and never set a price', () => {
   }
   const anthropic = tierPresets('anthropic')[0].build();
   assert.deepEqual(anthropic.map((row) => [row.tierId, row.memberCategories]), [['official', ['OFFICIAL_API_KEY']], ['kiro', ['KIRO', 'CLAUDE_OAUTH']]]);
-  // The owner's example: an OpenAI-format relay in front of Kiro; the relay is registered afterwards, so its tier lists no category.
+  // The reference scenario: an OpenAI-format relay in front of Kiro; the relay is registered afterwards, so its tier lists no category.
   const relayKiro = tierPresets('anthropic').find((preset) => preset.id === 'relay-kiro').build();
   assert.deepEqual(relayKiro.map((row) => [row.tierId, row.memberCategories]), [['relay', []], ['kiro', ['KIRO', 'CLAUDE_OAUTH']]]);
   const openai = tierPresets('openai')[0].build();
@@ -500,7 +500,7 @@ test('setting accounts to a tier skips the exclusive relays of other vendors, bu
   assert.deepEqual(batchPlan(zhipu, ['relay-1'], 'direct').skippedElsewhere, []);
 });
 
-/* ---------- status panel, account list, pricing preview, billing review, request log (P2-07) ---------- */
+/* ---------- status panel, account list, pricing preview, billing review, request log ---------- */
 
 test('the layer bar has a segment for every layer that holds accounts, in the order of the layers', () => {
   const segments = layerSegments({ disabled: 1, unavailable: 0, resting: 1, busy: 0, ready: 2 });

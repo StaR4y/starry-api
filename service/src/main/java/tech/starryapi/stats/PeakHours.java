@@ -5,7 +5,7 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 
-/** Beijing peak hours used by the usage-maid calendar, matching dsh-usage-plugin. */
+/** Beijing peak hours used by the usage-maid calendar. */
 final class PeakHours {
 
     static final Instant WEEKEND_FLAT_AT = Instant.parse("2026-08-22T16:00:00Z");

@@ -61,6 +61,8 @@ ENABLE_MIHOMO="${ENABLE_MIHOMO:-auto}"
 # Set when this run put Mihomo into a new .env on its own (ENABLE_MIHOMO=auto), which is the only case in which a
 # bundle without the mihomo service is skipped instead of refused.
 MIHOMO_AUTO_DEPLOYED=false
+# Said whenever Mihomo is deployed: its license is not the project's, and the image is not ours to distribute.
+MIHOMO_LICENSE_NOTE="the image metacubex/mihomo (https://github.com/MetaCubeX/mihomo) is licensed under GPL-3.0; Docker pulls it from its registry as a separate container, and Starry API does not bundle or distribute it"
 ARTIFACT_UPDATED=false
 ARTIFACT_ROLLBACK_AVAILABLE=false
 COMPOSE_ROLLBACK_AVAILABLE=false
@@ -553,8 +555,8 @@ download_file() {
 
 download_failure_hint() {
   if [[ -z "${GITHUB_TOKEN:-}" ]]; then
-    log "Download failed without GITHUB_TOKEN. If the repository is private, GitHub returns 404 for raw files."
-    log "Use a fine-grained GitHub token with read-only Contents permission and pass GITHUB_TOKEN to this script."
+    log "Download failed. Check the network and the download location (REPO_URL=${REPO_URL}, BRANCH=${BRANCH});"
+    log "BUNDLE_URL and the other *_URL variables point the installer at a mirror."
   else
     log "Download failed even though GITHUB_TOKEN was provided. Check that the token can read ${REPO_URL}."
   fi
@@ -1027,6 +1029,10 @@ STARRY_TOKEN_REFRESH_INTERVAL_MS=3600000
 STARRY_TOKEN_REFRESH_INITIAL_DELAY_MS=60000
 STARRY_KIRO_PREFERRED_ENDPOINT=codewhisperer
 
+# AGPL-3.0, section 13: where the users of this service can get its source code (the console footer links to it).
+# If you run a modified version, set this to where your modified source can be downloaded.
+STARRY_SOURCE_URL=https://github.com/StaR4y/starry-api
+
 JAVA_OPTS="-Xms64m -Xmx768m -XX:MaxDirectMemorySize=256m -XX:+ExitOnOutOfMemoryError -XX:G1PeriodicGCInterval=300000 -XX:-G1PeriodicGCInvokesConcurrent -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=30"
 EOF
   if [[ "$ENABLE_MIHOMO" != "false" ]]; then
@@ -1211,6 +1217,7 @@ services:
       STARRY_SESSION_AFFINITY_TTL: ${STARRY_SESSION_AFFINITY_TTL:-${KIRO_SESSION_AFFINITY_TTL:-10m}}
       STARRY_SESSION_AFFINITY_MAXIMUM_SIZE: ${STARRY_SESSION_AFFINITY_MAXIMUM_SIZE:-${KIRO_SESSION_AFFINITY_MAXIMUM_SIZE:-100000}}
       STARRY_WEBUI_URL: ${STARRY_WEBUI_URL:-${KIRO_WEBUI_URL:-}}
+      STARRY_SOURCE_URL: ${STARRY_SOURCE_URL:-https://github.com/StaR4y/starry-api}
       STARRY_ADMIN_TOKEN: ${STARRY_ADMIN_TOKEN:-${KIRO_ADMIN_TOKEN:-}}
       STARRY_TOKEN_REFRESH_INTERVAL_MS: ${STARRY_TOKEN_REFRESH_INTERVAL_MS:-${KIRO_TOKEN_REFRESH_INTERVAL_MS:-3600000}}
       STARRY_TOKEN_REFRESH_INITIAL_DELAY_MS: ${STARRY_TOKEN_REFRESH_INITIAL_DELAY_MS:-${KIRO_TOKEN_REFRESH_INITIAL_DELAY_MS:-60000}}
@@ -1427,6 +1434,13 @@ download_bundle() {
   [[ ! -f "${extract_dir}/starry-api-webui.tar.gz.sha256" ]] \
     || atomic_install_file "${extract_dir}/starry-api-webui.tar.gz.sha256" "${INSTALL_DIR}/app/starry-api-webui.tar.gz.sha256" 0644 \
     || fail "Could not install the WebUI checksum atomically."
+  # The license and the notices travel with the deployment, next to the jar that carries its own copies.
+  local notice_file
+  for notice_file in LICENSE NOTICE THIRD-PARTY-NOTICES.txt; do
+    [[ ! -f "${extract_dir}/${notice_file}" ]] \
+      || atomic_install_file "${extract_dir}/${notice_file}" "${INSTALL_DIR}/${notice_file}" 0644 \
+      || fail "Could not install ${notice_file} atomically."
+  done
   if [[ -f "${extract_dir}/starry-api.sh" && -f "${extract_dir}/starry-api.sh.sha256" ]]; then
     install_verified_cli_tool "${extract_dir}/starry-api.sh" "${extract_dir}/starry-api.sh.sha256"
   fi
@@ -1496,6 +1510,12 @@ try_artifact_rollback() {
   ROLLBACK_COMPLETED=true
 }
 
+# The deployment summary's line about the Mihomo license (starts with its own newline, and is empty when Mihomo is not deployed).
+mihomo_license_summary_line() {
+  mihomo_profile_listed "${INSTALL_DIR}/.env" || return 0
+  printf '\nMihomo license:     %s' "${MIHOMO_LICENSE_NOTE}"
+}
+
 # The deployment summary's lines for the administration command (each starts or ends with its own newline so that
 # nothing is printed when this release does not have one).
 cli_summary_line() {
@@ -1518,6 +1538,7 @@ deploy_stack() {
   if mihomo_profile_listed "${INSTALL_DIR}/.env"; then
     stack_services+=(mihomo)
     MIHOMO_STACK_STARTED=true
+    log "Mihomo is deployed: ${MIHOMO_LICENSE_NOTE}."
   fi
   log "Starting Docker Compose stack from prebuilt artifact..."
   STACK_MUTATION_STARTED=true
@@ -1547,8 +1568,9 @@ deploy_stack() {
   rm -f -- "${INSTALL_DIR}/.env.postgresql-retry"
   root_cmd "${COMPOSE_CMD[@]}" -f docker-compose.artifact.yml logs --tail=120 service || true
 
-  local summary_cli_line summary_cli_commands
+  local summary_cli_line summary_cli_commands summary_mihomo_license
   summary_cli_line="$(cli_summary_line)"
+  summary_mihomo_license="$(mihomo_license_summary_line)"
   summary_cli_commands="$(cli_common_commands)"
   [[ -z "$summary_cli_commands" ]] || summary_cli_commands+=$'\n'
 
@@ -1561,7 +1583,7 @@ Artifact file:      ${INSTALL_DIR}/app/starry-api.jar
 Local WebUI:        http://$(local_access_host):${HOST_HTTP_PORT}/#/login
 Local API docs:     http://$(local_access_host):${HOST_HTTP_PORT}/docs
 Reverse proxy to:   $(reverse_proxy_target)
-Mihomo egress:      $(mihomo_state_line)${summary_cli_line}
+Mihomo egress:      $(mihomo_state_line)${summary_mihomo_license}${summary_cli_line}
 
 Common commands:
 ${summary_cli_commands}  cd ${INSTALL_DIR}

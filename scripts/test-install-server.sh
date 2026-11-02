@@ -319,6 +319,9 @@ printf 'bundle-compose\n' > "$bundle_source/docker-compose.artifact.yml"
 mkdir -p "$bundle_source/docker/egress"
 printf 'bundle-mihomo-entrypoint\n' > "$bundle_source/docker/egress/mihomo-entrypoint.sh"
 printf 'bundle-init\n' > "$bundle_source/postgres-init/001-starry-api-roles.sh"
+printf 'bundle-license\n' > "$bundle_source/LICENSE"
+printf 'bundle-notice\n' > "$bundle_source/NOTICE"
+printf 'bundle-third-party-notices\n' > "$bundle_source/THIRD-PARTY-NOTICES.txt"
 printf 'bundle-recovery-tool\n' > "$bundle_source/runtime/recover-data-management.sh"
 printf '%s  recover-data-management.sh\n' \
   "$(sha256_file "$bundle_source/runtime/recover-data-management.sh")" \
@@ -346,6 +349,10 @@ cmp -s "$bundle_install/runtime/recover-data-management.sh.sha256" "$bundle_sour
   || fail_test "bundle recovery tool must be executable"
 cmp -s "$bundle_install/docker/egress/mihomo-entrypoint.sh" "$bundle_source/docker/egress/mihomo-entrypoint.sh" \
   || fail_test "bundle installation must install the Mihomo entrypoint the Compose file mounts"
+for notice_file in LICENSE NOTICE THIRD-PARTY-NOTICES.txt; do
+  cmp -s "$bundle_install/$notice_file" "$bundle_source/$notice_file" \
+    || fail_test "bundle installation must install ${notice_file} next to the deployment"
+done
 
 fallback_case="$TEST_ROOT/fallback"
 fallback_input="$fallback_case/input"
@@ -520,6 +527,8 @@ run_installer_function "$mihomo_fresh" default "$mihomo_fresh.log" write_env_fil
 assert_mihomo_deployed_env "$mihomo_fresh/.env" "fresh install (default)"
 [[ "$(env_value "$mihomo_fresh/.env" COMPOSE_PROFILES)" == "mihomo" ]] \
   || fail_test "fresh install: COMPOSE_PROFILES must select the mihomo profile"
+[[ "$(env_value "$mihomo_fresh/.env" STARRY_SOURCE_URL)" == "https://github.com/StaR4y/starry-api" ]] \
+  || fail_test "a fresh .env must name the source address that the console links to (AGPL-3.0, section 13)"
 [[ "$(env_count "$mihomo_fresh/.env" STARRY_EGRESS_MIHOMO_ENABLED)" -eq 0 ]] \
   || fail_test "fresh install: the installer must leave the backend switch to the console"
 grep -q '^POSTGRES_BOOTSTRAP_PASSWORD=' "$mihomo_fresh/.env" \
@@ -741,6 +750,10 @@ fi
 if grep -q '^Mihomo egress: *not deployed' "$mihomo_deploy/output.log"; then
   fail_test "a deployed Mihomo must not be summarised as not deployed"
 fi
+grep -q '^\[starry-api\] Mihomo is deployed: the image metacubex/mihomo .*GPL-3.0.*does not bundle or distribute it' "$mihomo_deploy/output.log" \
+  || fail_test "deploying Mihomo must say that its image is GPL-3.0 and not distributed by this project"
+grep -q '^Mihomo license: *the image metacubex/mihomo .*GPL-3.0' "$mihomo_deploy/output.log" \
+  || fail_test "the deployment summary must repeat the Mihomo image and its license"
 success_summary="$TEST_ROOT/success-summary.log"
 INSTALL_DIR="$success_case" \
 STARRY_INSTALL_SERVER_LIBRARY_ONLY=true \
@@ -753,6 +766,9 @@ STARRY_INSTALL_SERVER_LIBRARY_ONLY=true \
   ' _ "$INSTALLER" > "$success_summary" 2>&1
 grep -q '^Mihomo egress: *not deployed (rerun with ENABLE_MIHOMO=true' "$success_summary" \
   || fail_test "the deployment summary must say Mihomo is not deployed and how to deploy it"
+if grep -qi 'mihomo license\|GPL-3.0' "$success_summary"; then
+  fail_test "an install without Mihomo must not talk about the Mihomo license"
+fi
 
 # A failed deployment that had started Mihomo restores the old .env, and a Mihomo container left over from the failed
 # attempt is removed explicitly because Compose does not treat an inactive profile's container as an orphan.

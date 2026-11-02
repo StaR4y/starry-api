@@ -1,0 +1,67 @@
+name: Bug report
+description: Something does not work the way the documentation says
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste API keys, tokens, passwords, cookies, `.env` files or upstream credentials into an issue.** Replace them with `***` first, and also in logs and screenshots. Issues are public.
+
+        A security vulnerability does not belong here. Use [private vulnerability reporting](https://github.com/StaR4y/starry-api/security/advisories/new) instead (see SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, and what happened instead? Chinese or English is fine.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The commit recorded in `app/build-info.json` of your install directory (server installer), in `build-info.json` at the root of an unpacked prebuilt bundle, or the output of `git rev-parse HEAD` if you run from source. A release tag is fine if you know it.
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How you run it
+      options:
+        - Server installer (scripts/install-server.sh)
+        - Docker Compose from the source tree
+        - Prebuilt bundle by hand
+        - Plain jar or ./scripts/start-proxy.sh
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, Docker version, PostgreSQL version, browser (for console problems).
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: Relevant log lines (`docker compose logs service`) or request and response details. Remove every secret first.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you submit
+      options:
+        - label: I removed all API keys, tokens, passwords and cookies from everything I pasted.
+          required: true
+        - label: I searched the existing issues and the troubleshooting guide (docs/TROUBLESHOOTING.md).
+          required: true
+        - label: This is not a security vulnerability (those go through private vulnerability reporting).
+          required: true

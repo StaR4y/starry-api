@@ -191,7 +191,7 @@ class TierLogPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSupport 
     }
 
     /**
-     * The relay was paid for an answer the gateway held back (D11) and the user was not: the row keeps what the relay reported
+     * The relay was paid for an answer the gateway held back and the user was not: the row keeps what the relay reported
      * in columns of their own, only the administrator reads them, and the tokens the user's statistics sum stay what the user
      * was served, which is nothing.
      */

@@ -125,7 +125,7 @@ public final class RelayErrorMapper {
     // Sonnet 4, Opus 4, Opus 4.1) answer and a relay in front of them passes on: "input length and `max_tokens` exceed context
     // limit: 188240 + 21333 > 200000, decrease input length or `max_tokens` and try again". It is no refusal of the prompt, whose
     // length is not said to be over the window, so it is no CONTEXT_IN_TEXT; the caller that chose the output limit may read it as
-    // one (RelayErrorException#asContextExceeded), which the refusal of a body of D15 needs to be learned and not sent again.
+    // one (RelayErrorException#asContextExceeded), which the refusal of a body with the wider output limit needs to be learned and not sent again.
     private static final List<String> CONTEXT_BESIDE_OUTPUT_IN_TEXT = List.of("exceed context limit");
     // The union of what the OpenAI client retries on (OpenAiUpstreamClient.isModelNotFound) and what the failure
     // classifier reads as a model the account may not use (UpstreamFailureClassifier.forbiddenFailure).

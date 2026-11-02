@@ -14,12 +14,12 @@ import tech.starryapi.platform.xproto.PairRegistry;
  * SOURCE_TIER_RUNTIME_UNSUPPORTED): nothing is stored that a later upgrade would switch on without anyone deciding to.
  *
  * <p>A capability is true only once the task that completes its runtime has landed: {@link #nativeTiers()} was set by
- * the end-to-end task of native tiering (P2-09) and {@link #selectors()} by the selector task (P3-01), which the key
- * preference (P3-02) joined; {@link #unifyEndpoints()} by the all-endpoints switch (P3-03); {@link #xpMembers()} by the
- * exclusive-relay task (P4-10), which keeps a registered relay out of the pools of untiered traffic. The status of a
+ * the end-to-end task of native tiering and {@link #selectors()} by the selector task, which the key
+ * preference joined; {@link #unifyEndpoints()} by the all-endpoints switch; {@link #xpMembers()} by the
+ * exclusive-relay task, which keeps a registered relay out of the pools of untiered traffic. The status of a
  * pair is what the code's {@link PairRegistry} lists: the Chat, Messages and Responses pairs of the anthropic and openai
- * vendors (P5-05, P6-04), the Chat pair of the google vendor and the Gemini pairs of the anthropic and google vendors
- * (P7-03) are on trial, open to the API keys a gate lists, and the rest (the Gemini entry for gpt models, the Messages and
+ * vendors, the Chat pair of the google vendor and the Gemini pairs of the anthropic and google vendors
+ * are on trial, open to the API keys a gate lists, and the rest (the Gemini entry for gpt models, the Messages and
  * Responses entries for Gemini models) are not offered.
  */
 @Component

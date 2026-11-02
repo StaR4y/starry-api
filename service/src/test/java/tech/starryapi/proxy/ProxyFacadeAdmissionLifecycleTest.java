@@ -248,7 +248,7 @@ class ProxyFacadeAdmissionLifecycleTest {
     }
 
     /**
-     * The default output that a Responses request naming no limit is reserved and sent by (D11, D14) is not what the account
+     * The default output that a Responses request naming no limit is reserved and sent by is not what the account
      * is held for: admission is asked for the 4,096 in-flight output tokens it always was, which keeps the account's cap on
      * in-flight tokens admitting as many Codex turns as before. A request that names a limit is held for that limit.
      */

@@ -126,6 +126,10 @@ starry:
     branding-dir: ${STARRY_APPEARANCE_BRANDING_DIR:${user.home}/.starry-api/branding}
     max-logo-bytes: ${STARRY_APPEARANCE_MAX_LOGO_BYTES:8388608}
     max-background-bytes: ${STARRY_APPEARANCE_MAX_BACKGROUND_BYTES:16777216}
+  # AGPL-3.0, section 13: where the users of this service can get its source code; the console footer links to it.
+  # An operator who modifies the code points it at where the modified source can be downloaded.
+  source:
+    url: ${STARRY_SOURCE_URL:https://github.com/StaR4y/starry-api}
   data-transfer:
     backup-dir: ${STARRY_BACKUP_DIR:${user.home}/.starry-api/backups}
     max-import-bytes: ${STARRY_MAX_IMPORT_BYTES:268435456}

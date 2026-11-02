@@ -14,16 +14,16 @@ class SourceTierRuntimeInfoTest {
     void thisReleaseRunsTheNativeTiersTheSelectorsTheAllEndpointsSwitchTheRelayRowsAndTheChatMessagesResponsesAndGeminiPairsOnTrial() {
         SourceTierRuntimeInfo runtime = new SourceTierRuntimeInfo();
 
-        // Native tiering (P2-09), the selectors (P3-01) and the all-endpoints switch (P3-03) are complete: requests are
+        // Native tiering, the selectors and the all-endpoints switch are complete: requests are
         // planned over the tiers, a client can name the one it wants, and a Claude model asked through Chat Completions or
         // Responses can be served on the Anthropic route.
         assertThat(runtime.nativeTiers()).isTrue();
         assertThat(runtime.selectors()).isTrue();
         assertThat(runtime.unifyEndpoints()).isTrue();
-        // A relay can be registered (P4-10): the pools of untiered traffic leave it out from then on.
+        // A relay can be registered: the pools of untiered traffic leave it out from then on.
         assertThat(runtime.xpMembers()).isTrue();
-        // The Chat, Messages and Responses pairs of the anthropic and openai vendors (P5-05, P6-04), the Gemini entry for the
-        // anthropic and google vendors and the Chat entry for google (P7-03) are offered on trial: their gates open to listed
+        // The Chat, Messages and Responses pairs of the anthropic and openai vendors, the Gemini entry for the
+        // anthropic and google vendors and the Chat entry for google are offered on trial: their gates open to listed
         // keys only. Everything else the cross-protocol phases bring is still off.
         List<String> offered = List.of(
             "anthropic/CHAT", "openai/CHAT", "google/CHAT", "anthropic/MESSAGES", "openai/MESSAGES",

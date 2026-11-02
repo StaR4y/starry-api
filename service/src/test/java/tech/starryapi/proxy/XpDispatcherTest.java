@@ -348,7 +348,7 @@ class XpDispatcherTest {
 
     /**
      * The operator paid for the answer that is held back, and what the relay reported of it goes out with the failure for the
-     * request log (D11), read as the usage of a served answer is: the cache added to the prompt as the member's caliber says,
+     * request log, read as the usage of a served answer is: the cache added to the prompt as the member's caliber says,
      * and the counts bounded by what the tier reserved. The user is charged nothing, whatever it says.
      */
     @Test

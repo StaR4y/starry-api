@@ -53,12 +53,15 @@ jobs:
       - name: Test starry-api administration command
         run: ./scripts/test-starry-api.sh
 
+      - name: Test the bundle content check
+        run: ./scripts/test-check-bundle-contents.sh
+
       - name: Run all tests and build WebUI
         run: ./gradlew --no-daemon clean test :webui:npmBuild
 
       - name: Test artifact publisher idempotency
         run: |
-          ./gradlew --no-daemon :service:bootJar -PskipWebuiBuild=true
+          ./gradlew --no-daemon :service:bootJar :service:copyleftSources -PskipWebuiBuild=true
           artifact_test_dir="$(mktemp -d)"
           RUN_TESTS=false SKIP_BUILD=true ARTIFACT_DIR="$artifact_test_dir" \
             ./scripts/publish-artifact.sh
@@ -71,6 +74,18 @@ jobs:
           cmp scripts/starry-api.sh "$artifact_test_dir/starry-api.sh"
           tar -tzf "$artifact_test_dir/starry-api-bundle.tar.gz" | grep -q '^\./starry-api\.sh$'
           (cd "$artifact_test_dir" && sha256sum -c sha256sums.txt)
+          echo "ARTIFACT_TEST_DIR=$artifact_test_dir" >> "$GITHUB_ENV"
+
+      # Mihomo is GPL-3.0 and optional: Docker pulls its image at deploy time, and no binary or saved image may enter a
+      # bundle or the jar. The bundle and the jar must also carry LICENSE, NOTICE and THIRD-PARTY-NOTICES.txt.
+      - name: Check the bundle for Mihomo binaries, saved images and missing license files
+        run: ./scripts/check-bundle-contents.sh "$ARTIFACT_TEST_DIR/starry-api-bundle.tar.gz"
+
+      - name: Test the console license footer and third-party notices
+        run: npm --prefix webui run test:legal
+
+      - name: Test the links the console takes from remote data
+        run: npm --prefix webui run test:links
 
       - name: Verify PostgreSQL integration tests ran
         run: |
