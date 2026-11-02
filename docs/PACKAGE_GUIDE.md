@@ -1,8 +1,8 @@
 # 包结构与扩展指南
 
-Starry API 已经从「以 Kiro 为中心的代理」演进成**多平台路由服务**。包名描述的是它所拥有的**平台边界**，而不是碰巧第一个执行调用的上游适配器。
+Starry API 已经从「以 Kiro 为中心的代理」演进成多平台路由服务。包名描述的是它所拥有的平台边界，而不是碰巧第一个执行调用的上游适配器。
 
-这份指南讲三件事：**代码该放在哪个包**、**包与包之间的硬性规则**、以及**怎么新增一个客户端协议或上游适配器**。整体设计见 [架构说明](ARCHITECTURE.md)。
+这份指南讲三件事：代码该放在哪个包、包与包之间的硬性规则，以及怎么新增一个客户端协议或上游适配器。整体设计见 [架构说明](ARCHITECTURE.md)。
 
 ---
 
@@ -31,7 +31,7 @@ service/src/main/java/tech/starryapi
 ### 硬性规则
 
 1. **OpenAI、Anthropic、Gemini 三个模块不能互相 import。**
-2. 客户端协议模块**不能** import `platform/kiro`——它们只格式化 `PlatformCompletionResult`。
+2. 客户端协议模块**不能** import `platform/kiro`：它们只格式化 `PlatformCompletionResult`。
 3. 带 Kiro 的名字只能出现在：`platform/kiro` 内部、Kiro 账号的导入 / 刷新代码、部署兼容变量，或明确讨论迁移的文档里。
 4. 共享的模型能力、默认目标 ID 和模型列表 DTO 属于 `service-api/model`；服务代码要依赖 `ModelCatalogProvider`，而不是直接读各厂商的目录。
 5. 新增入站协议：新建一个 `platform/<provider>` 包，包含请求适配器、响应工厂、模型目录和与包对齐的测试。

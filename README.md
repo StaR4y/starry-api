@@ -134,7 +134,7 @@ flowchart TD
     next -->|没有| unavailable["返回错误，不收费"]
 ```
 
-用户只为实际服务自己的号池付费。OpenAI 格式的中转站也可以登记成别的厂商的一级。见 [号源分级](docs/OPERATIONS.md#号源分级) 和 [跨协议中转](docs/OPERATIONS.md#跨协议中转)。
+用户只为实际服务自己的号池付费。OpenAI 格式的中转站也可以登记成别的厂商的一级。见 [号源分级与跨协议中转](docs/SOURCE_TIERS.md)。
 
 ### 计费
 
@@ -176,6 +176,7 @@ stateDiagram-v2
 | 了解控制台每个页面 | [控制台使用手册](docs/CONSOLE_GUIDE.md) |
 | 查配置项和环境变量 | [配置参考](docs/CONFIGURATION.md) |
 | 导入账号、备份恢复、日志保留 | [运维手册](docs/OPERATIONS.md) |
+| 配置号池和跨协议中转 | [号源分级与跨协议中转](docs/SOURCE_TIERS.md) |
 | 调用接口、写集成 | [API 参考](docs/API.md) |
 | 排查报错 | [故障排查](docs/TROUBLESHOOTING.md) |
 | 了解内部设计 | [架构说明](docs/ARCHITECTURE.md) · [包结构与扩展](docs/PACKAGE_GUIDE.md) |
@@ -365,7 +366,7 @@ flowchart TD
     next -->|no| unavailable["Error, no charge"]
 ```
 
-Users pay only for the tier that served them. An OpenAI-format relay can also be registered as a tier of another vendor. See [source tiers](docs/OPERATIONS.md#号源分级) and [cross-protocol relays](docs/OPERATIONS.md#跨协议中转).
+Users pay only for the tier that served them. An OpenAI-format relay can also be registered as a tier of another vendor. See [source tiers and relays](docs/SOURCE_TIERS.md).
 
 ### Billing
 
@@ -409,6 +410,7 @@ The documentation is written in Chinese, and the console has both languages.
 | Learn each page of the console | [Console guide](docs/CONSOLE_GUIDE.md) |
 | Look up a setting or environment variable | [Configuration](docs/CONFIGURATION.md) |
 | Import accounts, back up and restore, keep logs | [Operations manual](docs/OPERATIONS.md) |
+| Configure source tiers and cross-protocol relays | [Source tiers](docs/SOURCE_TIERS.md) |
 | Call the API or write an integration | [API reference](docs/API.md) |
 | Track down an error | [Troubleshooting](docs/TROUBLESHOOTING.md) |
 | Understand the design | [Architecture](docs/ARCHITECTURE.md) · [Package guide](docs/PACKAGE_GUIDE.md) |

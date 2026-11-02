@@ -72,6 +72,10 @@ webui/
 │       ├── settings/      # 系统设置导航、注册/SMTP 设置和预留模板
 │       ├── system/        # 全站维护状态
 │       ├── data-transfer/ # PostgreSQL 数据导出、备份与恢复
+│       ├── documentation/ # 使用文档
+│       ├── model-ranking/ # 模型排行
+│       ├── news/          # 资讯
+│       ├── tickets/       # 工单
 │       ├── users/
 │       └── welcome/       # 普通用户首次进入页
 └── README.md
@@ -91,7 +95,7 @@ webui/
 
 ### 系统设置结构
 
-管理员主菜单只保留一个“系统设置”入口，页面内使用二级分类导航：
+管理员主菜单只保留一个「系统设置」入口，页面内使用二级分类导航：
 
 | 分类 | 路由 | 状态 |
 | --- | --- | --- |
@@ -101,6 +105,8 @@ webui/
 | 模型管理 | `/settings/models` | 已接入模型目录、显示顺序与「模型 ID」页样式；添加模型仍在 `/settings/models/new` |
 | 账号池设置 | `/settings/account-pool` | 已接入路由策略与自动复检配置 |
 | UI 自定义 | `/settings/appearance` | 站点品牌、配色与界面风格 |
+
+其余分类的路由：`/settings/proxy-channels`、`/settings/documentation`、`/settings/tickets`、`/settings/coding-plans`、`/settings/account-limits`、`/settings/source-tiers`、`/settings/model-ranking`，以及插件页 `/settings/plugin/:pluginId`。
 
 旧的 `/payment-settings` 和 `/models/new` hash 路由会重定向到新分类，供历史书签兼容；新代码应直接使用 `settings-*` 命名路由。
 
@@ -113,9 +119,9 @@ cp .env.example .env        # 修改 VITE_API_BASE 为你的后端地址
 npm run dev
 ```
 
-默认在 `http://127.0.0.1:5173`。当前 Vite 配置会代理 `/auth`、`/admin`、`/system`、`/v1`、`/health`、`/models`、`/chat`、`/responses`、`/messages`、`/actuator` 和 `/assets/model-icons` 到 `VITE_API_BASE`。`/payment` 尚未包含在开发代理规则中；调试充值页时应使用同源后端入口，或同步扩展 `vite.config.ts` 的代理表达式。
+默认在 `http://127.0.0.1:5173`。当前 Vite 配置会代理 `/auth`、`/admin`、`/system`、`/payment`、`/tickets`、`/assistant`、`/news`、`/documentation`、`/v1`、`/health`、`/models`、`/chat`、`/responses`、`/messages`、`/actuator`、`/assets/model-icons`、`/assets/branding` 和 `/plugin-assets` 到 `VITE_API_BASE`。
 
-> 首次启动且 application Root 尚未分配、`admin_users` 为空时，日志会打印一次性的 `admin` 随机密码。使用该密码登录并立即修改；后续启动不会再次打印。
+> 首次启动且应用 Root 尚未分配、`admin_users` 为空时，日志会打印一次性的 `admin` 随机密码。使用该密码登录并立即修改；后续启动不会再次打印。
 
 ## 数据备份协议
 

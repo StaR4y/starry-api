@@ -257,6 +257,7 @@ public class AssistantDocsIndex {
         "docs/ARCHITECTURE.md",
         "docs/CONFIGURATION.md",
         "docs/OPERATIONS.md",
+        "docs/SOURCE_TIERS.md",
         "docs/TROUBLESHOOTING.md",
         "docs/DEPLOYMENT.md",
         "docs/PLUGINS.md",

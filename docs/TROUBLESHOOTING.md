@@ -1,6 +1,6 @@
 # 故障排查
 
-遇到问题先别慌。按下面的**症状目录**找到最像的一条，每条都按「现象 → 原因 → 怎么解决」来写。
+按下面的**症状目录**找到最像的一条，每条都按「现象 → 原因 → 怎么解决」来写。
 
 **先用这几条命令摸清现状：**
 
@@ -64,7 +64,7 @@ brew services list | grep postgresql        # macOS + Homebrew
 export POSTGRES_HOST=localhost
 ```
 
-启动 Homebrew 的 PostgreSQL 17：`brew services start postgresql@17`。全新数据库还要先[创建数据库和最小权限角色](../README.md#本机源码运行)。
+启动 Homebrew 的 PostgreSQL 17：`brew services start postgresql@17`。全新数据库还要先[运维手册：准备数据库](OPERATIONS.md#准备数据库只需一次)。
 
 ### 报错 `relation "model_mappings" does not exist`
 
@@ -141,10 +141,10 @@ Username: admin
 Password: ...
 ```
 
-- **普通账号**（非 Root）忘了密码：由管理员重置——控制台「用户管理」里点「重置密码」，或调接口 `POST /admin/users/{userId}/reset-password`。
+- **普通账号**（非 Root）忘了密码：由管理员重置。在控制台「用户管理」里点「重置密码」，或调接口 `POST /admin/users/{userId}/reset-password`。
 - **Root** 不一样：其他管理员**不能**重置或替换它。如果还有一个有效的 Root 会话，Root 可以自己改密码或自助重置（之后所有 Root 会话被撤销）。
 - 如果 Root 的密码**和**所有会话都丢了：应用**故意**不会自动创建替代账号，但能操作服务器上 Docker 的人可以用 `starry-api` 命令重置：
-  - **Docker 部署**（一键安装，或用仓库里的 `docker-compose.yml`）：先 `sudo starry-api info`——Root 还没改过密码、日志里还有那一行时，它会直接显示初始密码；否则执行 `sudo starry-api reset-password`，输入 `RESET` 确认，会得到一个新的临时密码（只显示一次，下次登录必须改），服务会重启几秒到一两分钟，所有控制台会话被登出。详见 [运维手册](OPERATIONS.md#服务器上的-starry-api-命令)。
+  - **Docker 部署**（一键安装，或用仓库里的 `docker-compose.yml`）：先执行 `sudo starry-api info`。Root 还没改过密码、日志里还有那一行时，它会直接显示初始密码。否则执行 `sudo starry-api reset-password`，输入 `RESET` 确认，会得到一个新的临时密码（只显示一次，下次登录必须改）。服务会重启几秒到一两分钟，所有控制台会话被登出。详见 [运维手册](OPERATIONS.md#服务器上的-starry-api-命令)。
   - 仅限**一次性本地测试库**（没有 Docker）：删掉整个库再重建，触发首次启动流程。
   - **其他生产环境**：停止流量，由数据库所有者做有审计的恢复，或恢复一份可信备份。
 - **数据管理安全密钥**丢了不是这样：它无法在服务器上显示、找回或重置（只保存加盐校验值）。用你保存的原始密钥操作；被锁定见 [整站维护锁定](#整站维护锁定503-system_maintenance)。
@@ -218,9 +218,9 @@ curl http://127.0.0.1:8080/v1/models -H 'X-Api-Key: sk-...'
 | --- | --- |
 | 根本没添加该厂商的账号 | 去「账号管理」添加 |
 | 账号被停用 / 暂停 / 冷却中 | 在账号行点「…」重置，或等待冷却结束 |
-| **`gpt-*` 请求但只有"自定义 Base URL"的 OpenAI 账号** | 只有 Base URL 主机为 `api.openai.com` 的才算官方 OpenAI 账号。用中转站请选「第三方 OpenAI 兼容 API Key」，并配置[模型映射](CONSOLE_GUIDE.md#模型映射) |
-| 账号刚添加，还在预热阶段 | 新账号开始只开放 10% 的并发和 RPM，随成功请求逐级放开；高并发打新账号会被准入控制拒绝。放慢请求或等一会儿 |
-| 并发 / RPM 打满 | 每个上游账号有保护上限（如 OpenAI 系默认并发 4、60 RPM；Anthropic 默认 2 / 20）。在账号的「分配策略」里按需调高 |
+| **`gpt-*` 请求但只有「自定义 Base URL」的 OpenAI 账号** | 只有 Base URL 主机为 `api.openai.com` 的才算官方 OpenAI 账号。用中转站请选「第三方 OpenAI 兼容 API Key」，并配置[模型映射](CONSOLE_GUIDE.md#模型映射) |
+| 账号刚添加，还在预热阶段 | 新的 Codex、Kiro 账号开始只开放 10% 的并发和 RPM，随成功请求逐级放开（API 账号不预热）；高并发打新账号会被准入控制拒绝。放慢请求或等一会儿 |
+| 并发 / RPM 打满 | 每个上游账号有保护上限（新建时的默认值：官方 API 并发 14、不限 RPM；Codex 4、60 RPM；Claude OAuth 和 Kiro 2、30 RPM，见 [出站代理与路由限制](ACCOUNT_EGRESS.md)）。在账号的「分配策略」里按需调高 |
 | DeepSeek 池空了 | DeepSeek 请求只走 DeepSeek 账号，**不会**回退到别的厂商 |
 
 排查命令：
@@ -251,7 +251,7 @@ curl http://127.0.0.1:8080/admin/api-keys -H 'Authorization: Bearer adm-...'   #
 
 ### 返回 `409 BILLING_REVIEW_REQUIRED`
 
-之前有请求在**无法确定上游有没有计费**的情况下结束（请求已经发出，但读超时、连接被重置、响应不完整），系统保留了冻结金额，需要管理员核对处理，这期间该用户的**所有 Key** 的后续调用都会被拒绝。管理员在计费复核里按「结算」或「豁免」处理。详见 [API 参考：Coding Plan](API.md#coding-plan-订阅)。
+之前有请求在**无法确定上游有没有计费**的情况下结束（请求已经发出，但读超时、连接被重置、响应不完整）。系统保留了冻结金额，需要管理员核对处理，这期间该用户的**所有 Key** 的后续调用都会被拒绝。管理员在计费复核里按「结算」或「豁免」处理。详见 [API 参考：Coding Plan](API.md#coding-plan-订阅)。
 
 以下情况**不会**再触发复核，冻结金额会直接释放：上游明确返回了错误响应（400/401/403/404/422/429，以及 500/502/503/529），或者请求根本没发出去（无法连接、连接超时、TLS 握手失败、连接池耗尽）。如果仍然频繁出现，多半是上游响应超过了 `STARRY_REQUEST_TIMEOUT`（默认 300 秒）；请调大它，或让用户改用响应更快的模型。出现在 Codex（`/v1/responses`，客户端没写输出上限）上时，一轮最长可以写到 `STARRY_RESPONSES_DEFAULT_OUTPUT_TOKENS`（默认 16000 个令牌，按每秒约 60 个令牌约 270 秒）：调大时限，或把这个默认值调小；调大这个默认值时要同时调大时限。
 
@@ -277,7 +277,9 @@ curl http://127.0.0.1:8080/admin/api-keys -H 'Authorization: Bearer adm-...'   #
 curl -fsS http://127.0.0.1:18080/system/status
 ```
 
-返回里有 `"maintenance":true` 和 `"code":"SYSTEM_MAINTENANCE"` 就是它。在服务器上执行 `sudo starry-api info`，「数据管理安全密钥」一节会显示「已锁定」或状态文件异常。安全密钥无法在服务器上找回或重置，只能用你保存的原始密钥恢复；Root 重置密码也解决不了维护锁定。**此时不要删安全状态文件，也不要反复重启。**让公网流量保持隔离，确认只有**一个** `service` 容器在运行，然后用镜像里自带的恢复工具：
+返回里有 `"maintenance":true` 和 `"code":"SYSTEM_MAINTENANCE"` 就是它。在服务器上执行 `sudo starry-api info`，「数据管理安全密钥」一节会显示「已锁定」或状态文件异常。
+
+安全密钥无法在服务器上找回或重置，只能用你保存的原始密钥恢复；Root 重置密码也解决不了维护锁定。**此时不要删安全状态文件，也不要反复重启**。让公网流量保持隔离，确认只有**一个** `service` 容器在运行，然后用镜像里自带的恢复工具：
 
 ```bash
 cd /opt/starry-api
@@ -298,7 +300,7 @@ docker compose exec service \
 - 必须在**真实终端**里运行，**不要加 `exec -T`**：工具要隐藏输入并让你把原始 `dmsk-...` 密钥输入两遍。
 - 密钥**不能**写在命令行参数、管道、`.env` 里，也**不要**用 `curl ... | sh` 下载恢复脚本。
 - 输入匹配的密钥：解除维护、清零失败次数，并销毁恢复用的临时文件。
-- 输入了格式正确但不匹配的密钥：会被审计记录（`RECOVERY_FAILED`），临时文件同样被销毁，站点仍保持维护——用**正确的密钥**再来一遍。
+- 输入了格式正确但不匹配的密钥：会被审计记录（`RECOVERY_FAILED`），临时文件同样被销毁，站点仍保持维护。请用**正确的密钥**再来一遍。
 
 **如果解锁后仍处于维护，或者两个文件还在**：说明清理没能确认，恢复**没有完成**。不要再跑工具，也不要手动删文件。查看安全卷和日志（**不要**打印密钥内容）：
 

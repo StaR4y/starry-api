@@ -21,8 +21,8 @@
 }
 ```
 
-实际返回状态码：`502 Bad Gateway` ❌  
-期望返回状态码：`503 Service Unavailable` ✅
+实际返回状态码：`502 Bad Gateway`  
+期望返回状态码：`503 Service Unavailable`
 
 ## 修复方案
 
@@ -110,15 +110,15 @@ private HttpStatus mapUpstreamStatusCode(int upstreamStatusCode) {
 ./gradlew :service:build
 ```
 
-所有测试通过 ✅
+所有测试通过。
 
 ## 影响范围
 
-- ✅ 准确反映上游错误状态
-- ✅ 改善客户端错误处理体验
-- ✅ 保持现有重试逻辑不变
-- ✅ 兼容现有 API 行为
-- ✅ 无破坏性变更
+- 准确反映上游错误状态
+- 改善客户端错误处理体验
+- 保持现有重试逻辑不变
+- 兼容现有 API 行为
+- 无破坏性变更
 
 ## 相关文件
 
