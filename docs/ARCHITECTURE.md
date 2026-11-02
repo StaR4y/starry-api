@@ -22,36 +22,35 @@ Starry API 围绕**三个互相独立的关注点**组织：
 
 ## 请求流程
 
-```text
-客户端
-  │  OpenAI（含 DeepSeek 模型）/ Anthropic / Gemini 端点
-  ▼
-ProxyController
-  ▼
-ProxyFacade
-  │
-  ├─ platform/<client>.RequestAdapter       把入站协议转成统一的对话结构
-  │
-  ├─ ApiKeyService.authenticate()           API Key 鉴权
-  ├─ RateLimiterService.check()             限流
-  ├─ ModelMappingService.apply()            模型映射
-  ├─ ModelPoolKeyResolver.resolve()         解析 厂商:模型族 的熔断键
-  ├─ AccountPoolPolicyService.applyTierPolicy()   主/备分层策略
-  ├─ AccountPoolService.selectAccount()     选一个上游账号
-  │
-  ├─ 上游路由
-  │   ├─ platform/kiro.KiroPayloadFactory / KiroUpstreamClient / AwsEventStreamParser
-  │   ├─ platform/openai.OpenAiUpstreamClient   （OpenAI、Codex、DeepSeek）
-  │   └─ platform/anthropic.AnthropicUpstreamClient
-  │       都返回 platform/core.PlatformCompletionResult
-  │
-  ├─ platform/<client>.ResponseFactory      格式化成客户端协议的响应
-  │
-  ├─ ApiKeyService.recordUsage()            记录用量并计费
-  ├─ AccountPoolService.recordSuccess()/recordRequestFailure()   账号健康反馈
-  └─ StatsService.log(...)                  写请求日志（含熔断键、层级、上游结果）
-  ▼
-客户端兼容的响应
+```mermaid
+flowchart TD
+    client["客户端<br/>OpenAI（含 DeepSeek 模型）/ Anthropic / Gemini 端点"] --> controller["ProxyController"]
+    controller --> facade["ProxyFacade"]
+    facade --> adapter
+    subgraph prepare["派发之前"]
+        adapter["platform/&lt;client&gt;.RequestAdapter<br/>把入站协议转成统一的对话结构"]
+        adapter --> auth["ApiKeyService.authenticate()<br/>API Key 鉴权"]
+        auth --> limit["RateLimiterService.check()<br/>限流"]
+        limit --> mapping["ModelMappingService.apply()<br/>模型映射"]
+        mapping --> poolKey["ModelPoolKeyResolver.resolve()<br/>解析 厂商:模型族 的熔断键"]
+        poolKey --> policy["AccountPoolPolicyService.applyTierPolicy()<br/>主/备分层策略"]
+        policy --> select["AccountPoolService.selectAccount()<br/>选一个上游账号"]
+    end
+    select --> route{"上游路由"}
+    route --> kiro["platform/kiro<br/>KiroPayloadFactory<br/>KiroUpstreamClient<br/>AwsEventStreamParser"]
+    route --> openai["platform/openai.OpenAiUpstreamClient<br/>OpenAI、Codex、DeepSeek"]
+    route --> anthropic["platform/anthropic.AnthropicUpstreamClient"]
+    kiro --> result["platform/core.PlatformCompletionResult"]
+    openai --> result
+    anthropic --> result
+    result --> factory
+    subgraph finish["收尾"]
+        factory["platform/&lt;client&gt;.ResponseFactory<br/>格式化成客户端协议的响应"]
+        factory --> usage["ApiKeyService.recordUsage()<br/>记录用量并计费"]
+        usage --> health["AccountPoolService.recordSuccess() / recordRequestFailure()<br/>账号健康反馈"]
+        health --> log["StatsService.log(...)<br/>写请求日志（含熔断键、层级、上游结果）"]
+    end
+    log --> reply["客户端兼容的响应"]
 ```
 
 ---
@@ -214,6 +213,16 @@ Flyway 创建这些主要的表：
 
 每个模型池拥有一个独立的、并发安全的滑动窗口状态机：
 
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> CLOSED
+    CLOSED --> OPEN: 主层同时达到最小样本数和失败率阈值
+    OPEN --> HALF_OPEN: 严格的冷却期结束
+    HALF_OPEN --> CLOSED: 探测全部结束，达到 recoveryThresholdPercent
+    HALF_OPEN --> OPEN: 恢复率达不到，或探测租约过期
+```
+
 | 状态 | 路由行为 |
 | --- | --- |
 | `CLOSED` | 优先主账号；只有主层同时达到最小样本数和失败率阈值才打开。没有配置主账号时，仍可使用原有的「厂商列表」回退 |
@@ -270,6 +279,23 @@ Flyway 创建这些主要的表：
 每个策略的分配优先级默认都是 `100`，**数值越小越优先**。
 
 **生命周期与预热**：新 API 账号从 `HEALTHY`、第 4 阶段开始并使用完整配置容量。Codex / Kiro 从 `WARMING` 第 1 阶段开始，分别放行配置容量的 10%、25%、50%、100%，随成功调用推进。V26 保留已有账号手动策略；V28 起新账号的默认限额来自管理员可配置的系统设置（见出站代理文档）。详见 [出站代理与路由限制](ACCOUNT_EGRESS.md)。
+
+```mermaid
+stateDiagram-v2
+    [*] --> HEALTHY: 新 API 账号
+    [*] --> WARMING: 新 Codex、Kiro 账号
+    WARMING --> HEALTHY: 成功调用推进到第 4 阶段
+    DEGRADED --> HEALTHY: 成功调用推进到第 4 阶段
+    HEALTHY --> DEGRADED: 模型或端点范围的容量失败，传输错误
+    DEGRADED --> COOLDOWN: 错误 EWMA 达到 0.50
+    HEALTHY --> COOLDOWN: 账号或厂商池范围的容量失败
+    WARMING --> COOLDOWN: 账号或厂商池范围的容量失败
+    COOLDOWN --> WARMING: cooldownUntil 到期，回到第 1 阶段
+    HEALTHY --> QUARANTINED: 无证据的 401，代理、区域或有歧义的 403
+    QUARANTINED --> WARMING: 隔离到期，回到第 1 阶段
+    HEALTHY --> DISABLED: 凭据被吊销，或管理员禁用
+    DISABLED --> WARMING: 管理员重新启用
+```
 
 | 状态 | 含义 |
 | --- | --- |
