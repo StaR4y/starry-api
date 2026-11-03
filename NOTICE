@@ -24,8 +24,9 @@ component's own files.
 If you run a modified version of Starry API and let other people interact with
 it through a computer network, section 13 requires you to offer those users the
 corresponding source code of your modified version. The console does not do
-this for you: it shows the source address only to the Root administrator, once,
-in the consent dialog after deployment, and links to it nowhere else. If you run
+this for you: it shows the source address only to the Root administrator of a
+new deployment, once, in the "License Terms and Disclaimer" dialog, and links to
+it nowhere else. If you run
 a modified version for other users, offer them its source yourself. The address
 the dialog shows is the runtime setting STARRY_SOURCE_URL (default
 https://github.com/StaR4y/starry-api); point it at where your modified source can

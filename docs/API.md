@@ -337,7 +337,7 @@ Authorization: Bearer adm-...
 
 `GET /auth/permissions` 返回 `data: {"root": true|false, "legalConsentRequired": true|false}`，带 `Cache-Control: no-store`。Root 由不可变的 `application_root_user_id` 和账号当前的「已启用 / 管理员 / 密码已修改」状态解析而来，**从不**依据用户名或浏览器存储。普通管理员、用户和旧版静态管理员令牌得到 `root: false`。控制台用这个响应来隐藏和保护「数据管理」与「插件开发」；服务端会在每个请求上独立校验它们的权限。
 
-响应里还有 `legalConsentRequired`：只有 Root、而且这个部署还没确认过许可证和免责声明时为 `true`，控制台据此弹出一次性的确认对话框。Root 同意时调用：
+响应里还有 `legalConsentRequired`：只有新部署（首次启动时在空数据库里创建了 Root，服务端因此写入系统设置 `legal_consent_required`）的 Root、而且还没确认过时为 `true`，控制台据此显示「许可条款与免责声明」。之前已经初始化过的部署始终是 `false`。Root 同意时调用：
 
 ```http
 POST /auth/legal-consent

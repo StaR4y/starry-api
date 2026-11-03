@@ -250,6 +250,14 @@ class PostgreSqlBaselineIntegrationTest extends PostgreSqlIntegrationTestSupport
         assertThat(adminUserRepository.findApplicationRoot().block())
             .extracting(AdminUserEntity::getUserId)
             .isEqualTo(root.userId());
+        // The application started on an empty database, so its Root is asked, once, to agree to the licence and the
+        // disclaimer; a deployment whose Root existed before has no such setting.
+        assertThat(databaseClient.sql(
+                "SELECT setting_value FROM starry_api.system_settings WHERE setting_key = 'legal_consent_required'")
+            .map((row, metadata) -> row.get("setting_value", String.class))
+            .one()
+            .block())
+            .isEqualTo("true");
 
         assertThatThrownBy(() -> executeAsDatabaseOwner("""
             UPDATE starry_api.admin_users

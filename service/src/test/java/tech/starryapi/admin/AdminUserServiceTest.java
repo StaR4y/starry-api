@@ -85,6 +85,7 @@ class AdminUserServiceTest {
         when(repository.count()).thenReturn(Mono.just(0L));
         when(repository.save(any(AdminUserEntity.class))).thenAnswer(invocation -> Mono.just(invocation.getArgument(0)));
         when(repository.assignApplicationRoot(any())).thenReturn(Mono.just(1));
+        when(repository.requireLegalConsent()).thenReturn(Mono.just(1));
 
         AdminUserService.BootstrapAdmin bootstrap = service.ensureDefaultAdmin().block();
 
@@ -98,6 +99,8 @@ class AdminUserServiceTest {
         assertThat(captor.getValue().getRole()).isEqualTo("ADMIN");
         verify(repository).assignApplicationRoot(captor.getValue().getUserId());
         verify(repository).count();
+        // A new deployment: its Root is asked, once, to agree to the licence and the disclaimer.
+        verify(repository).requireLegalConsent();
     }
 
     @Test
@@ -135,6 +138,8 @@ class AdminUserServiceTest {
         verify(repository).assignApplicationRoot("root-1");
         verify(repository, never()).count();
         verify(repository, never()).save(any(AdminUserEntity.class));
+        // An existing deployment is not asked for the legal consent.
+        verify(repository, never()).requireLegalConsent();
     }
 
     @Test

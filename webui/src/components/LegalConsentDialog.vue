@@ -1,8 +1,8 @@
 <script setup lang="ts">
   /**
-   * 部署后 Root 第一次进入控制台时，确认许可证、源代码地址、第三方许可和免责声明。每个部署只问一次：同意记录在服务器上
-   * （POST /auth/legal-consent），之后谁都不会再看到；其他用户从来看不到。没同意之前对话框关不掉，只能同意或退出登录。
-   * 源代码地址来自运营者设置的 STARRY_SOURCE_URL（随公开外观一起下发）。
+   * 许可条款与免责声明。只在新部署上出现：首次启动在空数据库里创建 Root 时，服务端记下需要确认，Root 进入控制台后看到这个
+   * 对话框，同意后记录在服务器上（POST /auth/legal-consent），之后谁都不会再看到；在这之前已经初始化过的部署不会出现。
+   * 没同意之前对话框关不掉，只能同意或退出登录。源代码地址来自运营者设置的 STARRY_SOURCE_URL（随公开外观一起下发）。
    */
   import { ref } from 'vue';
   import { ElMessage } from 'element-plus';
@@ -21,6 +21,7 @@
   const appearance = useAppearanceStore();
   const router = useRouter();
   const accepting = ref(false);
+  const noticesFile = THIRD_PARTY_NOTICES_HREF.replace('./', '');
 
   async function accept() {
     accepting.value = true;
@@ -33,7 +34,7 @@
     }
   }
 
-  function signOut() {
+  function decline() {
     auth.logout();
     void router.push({ name: 'login' });
   }
@@ -42,73 +43,83 @@
 <template>
   <el-dialog
     :model-value="auth.legalConsentRequired"
-    :title="t('使用前请确认')"
-    width="min(560px, 92vw)"
+    :title="t('许可条款与免责声明')"
+    width="min(600px, 92vw)"
     :show-close="false"
     :close-on-click-modal="false"
     :close-on-press-escape="false"
     append-to-body
   >
-    <p class="legal-consent__intro" data-test="consent-intro">
-      {{ t('这是部署后的一次性确认，只有 Root 会看到。同意后不再出现。') }}
-    </p>
-    <dl class="legal-consent__terms">
-      <dt>{{ t('许可证') }}</dt>
-      <dd>
-        <a data-test="license-link" :href="LICENSE_URL" target="_blank" rel="noopener noreferrer">{{ LICENSE_NAME }}</a>
-      </dd>
-      <dt>{{ t('源代码') }}</dt>
-      <dd>
-        <a data-test="source-link" :href="appearance.sourceUrl" target="_blank" rel="noopener noreferrer">{{
-          appearance.sourceUrl
-        }}</a>
-      </dd>
-      <dt>{{ t('第三方许可') }}</dt>
-      <dd>
-        <a data-test="notices-link" :href="THIRD_PARTY_NOTICES_HREF" target="_blank" rel="noopener noreferrer">{{
-          THIRD_PARTY_NOTICES_HREF.replace('./', '')
-        }}</a>
-      </dd>
-    </dl>
-    <h3 class="legal-consent__heading">{{ t('免责声明') }}</h3>
-    <p class="legal-consent__disclaimer" data-test="disclaimer-text">{{ disclaimerText() }}</p>
+    <div class="legal-consent">
+      <p class="legal-consent__intro" data-test="consent-intro">
+        {{ t('使用本软件前，请仔细阅读以下许可条款与免责声明。点击「同意并继续」，即表示已阅读、理解并同意以下全部内容。') }}
+      </p>
+
+      <section class="legal-consent__clause">
+        <h3>{{ t('一、软件许可') }}</h3>
+        <p>
+          {{ t('本软件依据 GNU Affero 通用公共许可证第 3 版发布。许可证全文：') }}
+          <a data-test="license-link" :href="LICENSE_URL" target="_blank" rel="noopener noreferrer">{{ LICENSE_NAME }}</a>
+        </p>
+      </section>
+
+      <section class="legal-consent__clause">
+        <h3>{{ t('二、源代码') }}</h3>
+        <p>
+          {{ t('本软件的源代码可从以下地址获取：') }}
+          <a data-test="source-link" :href="appearance.sourceUrl" target="_blank" rel="noopener noreferrer">{{
+            appearance.sourceUrl
+          }}</a>
+        </p>
+      </section>
+
+      <section class="legal-consent__clause">
+        <h3>{{ t('三、第三方组件') }}</h3>
+        <p>
+          {{ t('本软件包含的第三方组件按各自的许可证提供，许可证与版权声明见：') }}
+          <a data-test="notices-link" :href="THIRD_PARTY_NOTICES_HREF" target="_blank" rel="noopener noreferrer">{{
+            noticesFile
+          }}</a>
+        </p>
+      </section>
+
+      <section class="legal-consent__clause">
+        <h3>{{ t('四、免责声明') }}</h3>
+        <p data-test="disclaimer-text">{{ disclaimerText() }}</p>
+      </section>
+    </div>
     <template #footer>
-      <el-button data-test="consent-sign-out" @click="signOut">{{ t('退出登录') }}</el-button>
+      <el-button data-test="consent-decline" @click="decline">{{ t('不同意并退出') }}</el-button>
       <el-button type="primary" data-test="consent-accept" :loading="accepting" @click="accept">
-        {{ t('我已阅读并同意') }}
+        {{ t('同意并继续') }}
       </el-button>
     </template>
   </el-dialog>
 </template>
 
 <style scoped lang="scss">
-  .legal-consent__intro {
-    margin: 0 0 12px;
+  .legal-consent {
+    max-height: min(60vh, 520px);
+    overflow-y: auto;
+    line-height: 1.7;
   }
-  .legal-consent__terms {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    gap: 6px 16px;
+  .legal-consent__intro {
     margin: 0 0 16px;
-    dt {
-      color: var(--kp-text-muted);
+  }
+  .legal-consent__clause {
+    margin: 0 0 14px;
+    h3 {
+      margin: 0 0 4px;
+      font-size: 14px;
+      font-weight: 600;
     }
-    dd {
+    p {
       margin: 0;
+      white-space: normal;
       overflow-wrap: anywhere;
     }
     a {
       color: var(--kp-primary);
     }
-  }
-  .legal-consent__heading {
-    margin: 0 0 6px;
-    font-size: 14px;
-  }
-  .legal-consent__disclaimer {
-    margin: 0;
-    line-height: 1.7;
-    white-space: normal;
-    overflow-wrap: anywhere;
   }
 </style>

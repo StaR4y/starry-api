@@ -107,27 +107,33 @@ async function mountDialog({ sourceUrl, permissions = { root: true, legalConsent
   return { host, auth };
 }
 
-test('Root is shown the licence, the operator\'s source and the third-party notices, in both languages', async () => {
+test('Root of a new deployment is shown the licence, the operator\'s source and the third-party notices, in both languages', async () => {
   const { host } = await mountDialog({ sourceUrl: 'https://git.example.com/me/starry-api-fork' });
   const link = (name) => host.querySelector(`[data-test="${name}"]`);
 
   app.setLocale('zh-CN');
   await app.nextTick();
-  assert.equal(host.querySelector('.dialog h2').textContent, '使用前请确认');
+  assert.equal(host.querySelector('.dialog h2').textContent, '许可条款与免责声明');
+  assert.deepEqual([...host.querySelectorAll('.dialog h3')].map((heading) => heading.textContent),
+    ['一、软件许可', '二、源代码', '三、第三方组件', '四、免责声明']);
+  assert.match(link('consent-intro').textContent, /^\s*使用本软件前，请仔细阅读以下许可条款与免责声明。/);
   assert.equal(link('license-link').textContent, 'AGPL-3.0-only');
   assert.equal(link('license-link').getAttribute('href'), 'https://www.gnu.org/licenses/agpl-3.0.html');
   assert.equal(link('source-link').textContent, 'https://git.example.com/me/starry-api-fork');
   assert.equal(link('source-link').getAttribute('href'), 'https://git.example.com/me/starry-api-fork');
   assert.equal(link('notices-link').getAttribute('href'), './THIRD-PARTY-NOTICES.txt');
   assert.equal(link('notices-link').textContent, THIRD_PARTY_NOTICES_FILE);
-  assert.equal(link('consent-accept').textContent.trim(), '我已阅读并同意');
+  assert.equal(link('consent-accept').textContent.trim(), '同意并继续');
+  assert.equal(link('consent-decline').textContent.trim(), '不同意并退出');
 
   app.setLocale('en-US');
   await app.nextTick();
-  assert.equal(host.querySelector('.dialog h2').textContent, 'Before you start');
-  assert.equal(link('consent-accept').textContent.trim(), 'I have read and agree');
-  assert.equal(link('consent-sign-out').textContent.trim(), 'Sign out');
-  assert.match(link('consent-intro').textContent, /only to Root/);
+  assert.equal(host.querySelector('.dialog h2').textContent, 'License Terms and Disclaimer');
+  assert.deepEqual([...host.querySelectorAll('.dialog h3')].map((heading) => heading.textContent),
+    ['1. Software license', '2. Source code', '3. Third-party components', '4. Disclaimer']);
+  assert.equal(link('consent-accept').textContent.trim(), 'Agree and continue');
+  assert.equal(link('consent-decline').textContent.trim(), 'Decline and sign out');
+  assert.match(link('consent-intro').textContent, /^\s*Before using this software/);
   for (const anchor of host.querySelectorAll('a')) {
     assert.equal(anchor.getAttribute('target'), '_blank');
     assert.match(anchor.getAttribute('rel'), /noopener/);
@@ -153,7 +159,7 @@ test('the dialog asks Root only, only until Root agrees, and cannot be dismissed
 
   // Not agreeing leaves one way out: signing out.
   const second = await mountDialog();
-  second.host.querySelector('[data-test="consent-sign-out"]').click();
+  second.host.querySelector('[data-test="consent-decline"]').click();
   await app.nextTick();
   assert.equal(second.auth.token, null);
   assert.deepEqual(app.pushed.at(-1), { name: 'login' });

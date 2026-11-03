@@ -33,8 +33,9 @@ class LegalConsentServiceTest {
     }
 
     @Test
-    void rootIsAskedUntilAConsentIsStoredAndNobodyElseIsAsked() {
+    void rootOfANewDeploymentIsAskedUntilAConsentIsStoredAndNobodyElseIsAsked() {
         when(users.permissions(any())).thenReturn(Mono.just(new AdminDtos.AdminPermissions(true)));
+        when(settings.findById(LegalConsentService.REQUIRED)).thenReturn(Mono.just(new SystemSettingEntity()));
         when(settings.findById(LegalConsentService.ACCEPTED_AT)).thenReturn(Mono.empty());
         assertThat(consent.permissions(principal).block()).isEqualTo(new AdminDtos.AdminPermissions(true, true));
 
@@ -44,6 +45,14 @@ class LegalConsentServiceTest {
         when(users.permissions(any())).thenReturn(Mono.just(new AdminDtos.AdminPermissions(false)));
         when(settings.findById(LegalConsentService.ACCEPTED_AT)).thenReturn(Mono.empty());
         assertThat(consent.permissions(principal).block()).isEqualTo(new AdminDtos.AdminPermissions(false, false));
+    }
+
+    @Test
+    void aDeploymentWhoseRootExistedBeforeIsNeverAsked() {
+        when(users.permissions(any())).thenReturn(Mono.just(new AdminDtos.AdminPermissions(true)));
+        when(settings.findById(LegalConsentService.REQUIRED)).thenReturn(Mono.empty());
+        when(settings.findById(LegalConsentService.ACCEPTED_AT)).thenReturn(Mono.empty());
+        assertThat(consent.permissions(principal).block()).isEqualTo(new AdminDtos.AdminPermissions(true, false));
     }
 
     @Test

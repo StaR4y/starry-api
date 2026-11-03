@@ -92,8 +92,10 @@ public class AdminUserService {
         entity.setFirstLogin(true);
         assignAffiliateCode(entity);
         applyPassword(entity, password);
+        // Only a deployment that starts on an empty database gets here, so only it asks Root for the legal consent.
         return repository.save(entity)
             .flatMap(saved -> assignExistingRoot(saved)
+                .then(repository.requireLegalConsent())
                 .thenReturn(BootstrapAdmin.created(saved.getUsername(), password)))
             .onErrorMap(DuplicateKeyException.class, error -> new IllegalStateException(
                 "The application Root account could not be created atomically",

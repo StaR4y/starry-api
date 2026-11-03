@@ -69,6 +69,15 @@ public interface AdminUserRepository extends ReactiveCrudRepository<AdminUserEnt
         """)
     Mono<Integer> assignApplicationRoot(@Param("userId") String userId);
 
+    /** A new deployment asks its Root, once, to agree to the licence and the disclaimer (see LegalConsentService). */
+    @Modifying
+    @Query("""
+        INSERT INTO system_settings (setting_key, setting_value)
+        VALUES ('legal_consent_required', 'true')
+        ON CONFLICT (setting_key) DO NOTHING
+        """)
+    Mono<Integer> requireLegalConsent();
+
     @Query("SELECT * FROM admin_users WHERE lower(affiliate_code) = lower(:affiliateCode) LIMIT 1")
     Mono<AdminUserEntity> findByAffiliateCode(@Param("affiliateCode") String affiliateCode);
 

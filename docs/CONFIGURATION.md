@@ -21,7 +21,7 @@ Starry API 的运行时配置主要来自**环境变量**，由 `service/src/mai
 | `STARRY_ADMIN_SESSION_TTL` | `12h` | 管理员会话有效期 |
 | `STARRY_RATE_LIMIT_PER_MINUTE` | `120` | 每个 API Key 每分钟请求上限，`0` 表示不限制 |
 | `STARRY_WEBUI_URL` | 空 | 控制台的**公开地址**，如 `https://你的域名/#/login`。启动日志会显示它。**注册验证邮件和 SMTP 验证邮件里的链接也用它生成**；不设置时这些链接会退回到请求里的 `Host` 头，而这个头可以被伪造。鲸鱼助手引用使用文档时，也用它的协议、主机和端口替换文档里的 `{{site_url}}` 和 `{{api_base_url}}`。**不设置时助手不会替换，也不读 `Host` 头**，只请用户换成自己浏览器里看到的地址 |
-| `STARRY_SOURCE_URL` | `https://github.com/StaR4y/starry-api` | 部署后 Root 第一次登录时确认对话框里显示的源码地址（AGPL-3.0 第 13 条）。**运行修改过的代码时必须改成你自己的源码地址**，见[源代码与许可证](#源代码与许可证) |
+| `STARRY_SOURCE_URL` | `https://github.com/StaR4y/starry-api` | 新部署的 Root 确认「许可条款与免责声明」时看到的源码地址（AGPL-3.0 第 13 条）。**运行修改过的代码时必须改成你自己的源码地址**，见[源代码与许可证](#源代码与许可证) |
 | `JAVA_OPTS` | `-Xms64m -Xmx768m -XX:MaxDirectMemorySize=256m -XX:+ExitOnOutOfMemoryError -XX:G1PeriodicGCInterval=300000 -XX:-G1PeriodicGCInvokesConcurrent -XX:MinHeapFreeRatio=10 -XX:MaxHeapFreeRatio=30`（Compose / 安装脚本） | JVM 参数，见下 |
 | `SERVICE_MEM_LIMIT` | `2g` | Compose 里服务容器的内存上限 |
 
@@ -158,7 +158,7 @@ R2DBC 和 Flyway 的 URL 都把 `starry_api` 设成当前 / 默认 schema。
 
 ## 源代码与许可证
 
-Starry API 以 **AGPL-3.0-only** 发布，全文和第三方说明见仓库根目录的 [LICENSE](../LICENSE) 与 [NOTICE](../NOTICE)。AGPL 第 13 条规定：如果你**修改了**代码，又让别人通过网络使用你运行的那个版本，就要向这些用户提供该版本的源代码。控制台不在页面上放源码链接，只在部署后 Root 第一次登录时，在一次性的确认对话框里列出许可证、源码地址、第三方许可和免责声明，Root 点「我已阅读并同意」后不再出现（同意的时间和账号记在系统设置 `legal_consent_accepted_at`、`legal_consent_accepted_by` 里）。**所以运行修改过的版本时，要自己向用户提供源码**，比如在你的站点公告或使用文档里写明源码地址。对话框里的地址由下面这个变量决定：
+Starry API 以 **AGPL-3.0-only** 发布，全文和第三方说明见仓库根目录的 [LICENSE](../LICENSE) 与 [NOTICE](../NOTICE)。AGPL 第 13 条规定：如果你**修改了**代码，又让别人通过网络使用你运行的那个版本，就要向这些用户提供该版本的源代码。控制台不在页面上放源码链接。只有**新部署**（首次启动时在空数据库里创建 Root）会在 Root 进入控制台时显示「许可条款与免责声明」，列出软件许可、源代码地址、第三方组件和免责声明；Root 点「同意并继续」后不再出现，点「不同意并退出」则退出登录。创建 Root 时服务端写入系统设置 `legal_consent_required`，同意的时间和账号记在 `legal_consent_accepted_at`、`legal_consent_accepted_by` 里。这个版本之前已经初始化过的部署不会出现这个对话框。**所以运行修改过的版本时，要自己向用户提供源码**，比如在你的站点公告或使用文档里写明源码地址。对话框里的地址由下面这个变量决定：
 
 | 变量 | 默认值 | 用途 |
 | --- | --- | --- |
