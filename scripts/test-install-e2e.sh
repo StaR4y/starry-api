@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs the real installer against a real Docker daemon: a fresh install, an upgrade that keeps the data, a failed upgrade
-# that rolls back, and the administration command. CI runs it after building the image; it needs root on a Linux machine.
+# that rolls back, and the administration command. Run it after building the image; it needs root on a Linux machine.
 #
 #   sudo scripts/test-install-e2e.sh IMAGE
 #

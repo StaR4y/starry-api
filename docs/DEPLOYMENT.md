@@ -267,7 +267,7 @@ sudo env STARRY_VERSION=v1.2.3 PULL_IMAGE=false REPO_RAW_BASE=https://你的镜�
 
 ## 发布新版本
 
-给维护者。推送 `v*` 标签就会触发 [`.github/workflows/release.yml`](../.github/workflows/release.yml)：
+给维护者。推送 `v*` 标签就会触发 [`.github/workflows/release.yml`](../.github/workflows/release.yml)。仓库没有 CI 工作流，发布流程也不跑测试，**打标签之前请先在本地跑完测试**（命令见 [CONTRIBUTING](../CONTRIBUTING.md)）：
 
 ```bash
 git tag v1.2.3
@@ -276,9 +276,8 @@ git push origin v1.2.3
 
 ```mermaid
 flowchart LR
-    tag(["推送标签 v1.2.3"]) --> test["全部测试"]
-    test --> amd["构建并检查 linux/amd64<br/>许可证文件齐全，没有 Mihomo"]
-    test --> arm["构建并检查 linux/arm64"]
+    tag(["推送标签 v1.2.3"]) --> amd["构建并检查 linux/amd64<br/>许可证文件齐全，没有 Mihomo"]
+    tag --> arm["构建并检查 linux/arm64"]
     amd --> manifest["合并成多架构镜像<br/>ghcr.io/&lt;仓库&gt;:v1.2.3、1.2.3、1.2、latest"]
     arm --> manifest
     manifest --> public["确认未登录也能拉取"]
@@ -291,6 +290,6 @@ flowchart LR
 - 带后缀的标签（`v1.2.3-rc.1`）是预发布：不更新 `latest` 镜像标签，安装脚本默认也不会选它。
 - 同步到 Docker Hub：在仓库设置里添加 secrets `DOCKERHUB_USERNAME` 和 `DOCKERHUB_TOKEN`，镜像会同时发布到 `docker.io/<用户名>/starry-api`。不配就只发布到 GitHub Container Registry，不需要额外的密钥。
 - 每个架构的镜像都在打标签之前检查过内容，有问题的镜像不会变成 `latest`。
-- 每次发布都带着许可证文件：镜像的 `/app` 里有 `LICENSE`、`NOTICE`、`licenses/` 和 `third-party-sources/`（5 个按 copyleft 许可证使用的 Java 库的源码，见 [NOTICE](../NOTICE) 第 3 节），jar 的 `META-INF/` 里也有。CI 用 `scripts/check-release-contents.sh` 确认这些都在，并且镜像和 jar 里没有 Mihomo 二进制（Mihomo 是 GPL-3.0，只在部署时由 Docker 拉取，不随本项目分发）。
+- 每次发布都带着许可证文件：镜像的 `/app` 里有 `LICENSE`、`NOTICE`、`licenses/` 和 `third-party-sources/`（5 个按 copyleft 许可证使用的 Java 库的源码，见 [NOTICE](../NOTICE) 第 3 节），jar 的 `META-INF/` 里也有。发布流程用 `scripts/check-release-contents.sh` 确认镜像里这些都在，并且镜像和 jar 里没有 Mihomo 二进制（Mihomo 是 GPL-3.0，只在部署时由 Docker 拉取，不随本项目分发）。
 
 镜像不再放进 git 仓库，仓库里也没有 `artifacts/` 目录了。

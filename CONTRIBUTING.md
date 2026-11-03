@@ -9,7 +9,7 @@ By taking part you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md). Se
 | Tool | Version | Why |
 | --- | --- | --- |
 | JDK | 25 | The Gradle build uses a Java 25 toolchain (`options.release = 25`). |
-| Node.js and npm | 22 | Builds and tests the Vue 3 console in `webui/` (CI uses Node 22). |
+| Node.js and npm | 22 | Builds and tests the Vue 3 console in `webui/`. |
 | Docker (Colima on macOS works) | any recent | The PostgreSQL tests start PostgreSQL 17 with Testcontainers. |
 
 **Docker matters more than it looks.** The PostgreSQL integration tests (`tech.starryapi.postgresql.*`, which cover the schema, billing, allocation and the admin command) are skipped **silently** when no Docker daemon is reachable, and the rest of the suite still passes. A green run without Docker did not run them. CI checks that they ran (the reports under `service/build/test-results/test/` must show `skipped="0"`), and you should too. With Colima on macOS:
@@ -20,7 +20,7 @@ export DOCKER_HOST=unix://$HOME/.colima/default/docker.sock
 export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
 ```
 
-`TEST_POSTGRES_IMAGE` (default `postgres:17-alpine`) selects the image; CI also runs the PostgreSQL tests on `postgres:18-alpine`.
+`TEST_POSTGRES_IMAGE` (default `postgres:17-alpine`) selects the image; set it to `postgres:18-alpine` to check PostgreSQL 18 as well.
 
 ## Building and testing
 
@@ -53,7 +53,7 @@ The test JVMs get a throwaway home directory, so running the tests never touches
 1. Fork the repository and create a branch from `main`.
 2. Make the change, with tests and documentation.
 3. Run the checks above that apply to it, with Docker running.
-4. Open the pull request and fill in the template. CI must pass.
+4. Open the pull request, fill in the template and say which checks you ran. The repository has no CI, so the checks you run are the ones that count.
 
 ## Licensing of contributions
 

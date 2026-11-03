@@ -1,7 +1,8 @@
 name: Release
 
-# Pushing a tag such as v1.2.3 runs the tests, publishes the image for linux/amd64 and linux/arm64 to the GitHub Container
-# Registry, and creates the GitHub release the installer looks up. A tag with a suffix (v1.2.3-rc.1) becomes a prerelease,
+# Pushing a tag such as v1.2.3 publishes the image for linux/amd64 and linux/arm64 to the GitHub Container Registry and
+# creates the GitHub release the installer looks up. It runs no test suite (the repository has no CI workflow): run the
+# tests locally before tagging. A tag with a suffix (v1.2.3-rc.1) becomes a prerelease,
 # which moves neither the "latest" image tag nor the release the installer picks by default.
 #
 # Docker Hub is optional: set the repository secrets DOCKERHUB_USERNAME and DOCKERHUB_TOKEN, and the same image also goes to
@@ -16,13 +17,8 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    name: Tests
-    uses: ./.github/workflows/ci.yml
-
   image:
     name: Image (${{ matrix.platform }})
-    needs: test
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     permissions:

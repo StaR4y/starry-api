@@ -4,7 +4,6 @@
 
 # Starry API
 
-[![CI](https://github.com/StaR4y/starry-api/actions/workflows/ci.yml/badge.svg)](https://github.com/StaR4y/starry-api/actions/workflows/ci.yml)
 [![License: AGPL-3.0-only](https://img.shields.io/badge/license-AGPL--3.0--only-blue)](LICENSE)
 
 **简体中文** · [English](#english)
