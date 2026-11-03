@@ -8,12 +8,12 @@ import { t } from '@/i18n';
 import { defineStore } from 'pinia';
 import { authApi } from '@/api';
 import { ApiError, getStoredToken, setStoredToken } from '@/utils/http';
-import type { AdminUser, LoginRequest, RegisterRequest } from '@/types/api';
+import type { AdminPermissions, AdminUser, LoginRequest, RegisterRequest } from '@/types/api';
 
 interface AuthState {
   token: string | null;
   user: AdminUser | null;
-  permissions: { root: boolean } | null;
+  permissions: AdminPermissions | null;
   permissionsToken: string | null;
 }
 
@@ -60,6 +60,13 @@ export const useAuthStore = defineStore('auth', {
       Boolean(state.token) &&
       state.permissionsToken === state.token &&
       state.permissions?.root === true,
+    /** Root has not yet agreed, for this deployment, to the licence, the third-party licences and the disclaimer. */
+    legalConsentRequired: (state) =>
+      state.user?.role === 'ADMIN' &&
+      Boolean(state.token) &&
+      state.permissionsToken === state.token &&
+      state.permissions?.root === true &&
+      state.permissions.legalConsentRequired === true,
     defaultRouteName: (state) => (state.user?.role === 'ADMIN' ? 'dashboard' : 'welcome'),
     displayName: (state) => state.user?.displayName || state.user?.username || t('账号'),
   },
@@ -87,6 +94,15 @@ export const useAuthStore = defineStore('auth', {
       setStoredToken(result.accessToken, remember);
       writeStoredUser(result.user, remember);
       return result;
+    },
+
+    async acceptLegalConsent() {
+      const token = this.token;
+      const permissions = await authApi.acceptLegalConsent();
+      if (this.token === token) {
+        this.permissions = permissions;
+        this.permissionsToken = token;
+      }
     },
 
     async loadPermissions(force = false) {

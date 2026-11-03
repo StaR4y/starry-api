@@ -23,10 +23,12 @@ component's own files.
 
 If you run a modified version of Starry API and let other people interact with
 it through a computer network, section 13 requires you to offer those users the
-corresponding source code of your modified version. The console shows a
-"Source code" link in its footer for this purpose. Its address is the runtime
-setting STARRY_SOURCE_URL (default https://github.com/StaR4y/starry-api). If
-you modify the code, point STARRY_SOURCE_URL at where your modified source can
+corresponding source code of your modified version. The console does not do
+this for you: it shows the source address only to the Root administrator, once,
+in the consent dialog after deployment, and links to it nowhere else. If you run
+a modified version for other users, offer them its source yourself. The address
+the dialog shows is the runtime setting STARRY_SOURCE_URL (default
+https://github.com/StaR4y/starry-api); point it at where your modified source can
 be downloaded. See docs/CONFIGURATION.md.
 
 
@@ -116,11 +118,12 @@ text and notice of every npm package that ends up in the console to
 THIRD-PARTY-NOTICES.txt, and stops when a bundled package has none. That file is
 served next to the console (it is the file
 BOOT-INF/classes/static/THIRD-PARTY-NOTICES.txt inside the executable jar and
-webui/dist/THIRD-PARTY-NOTICES.txt after "npm run build"). Because the console
-displays a copyright line while it runs, that file also ends with the notice for
-logback: its copyright line, the LGPL-2.1-only election and where the license text
-is (section 6 of the LGPL-2.1 asks for a copyright notice and a reference to the
-license among what a running work displays).
+webui/dist/THIRD-PARTY-NOTICES.txt after "npm run build"), and the consent
+dialog links to it. That file also ends with the notice for logback: its
+copyright line, the LGPL-2.1-only election and where the license text is. The
+console shows no copyright line while it runs; if you add one, section 6 of the
+LGPL-2.1 asks you to show logback's copyright notice and a reference to its
+license with it.
 
 The Gradle wrapper (gradlew, gradlew.bat, gradle/wrapper/) is Copyright 2015 the
 original author or authors, as its files say, and is licensed under the Apache

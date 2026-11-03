@@ -201,7 +201,7 @@ docker compose build --no-cache service
 docker compose up -d service
 ```
 
-⚠️ **如果你改了代码并让别人通过网络使用**，AGPL-3.0 第 13 条要求你提供修改后的源码：把 `.env` 里的 `STARRY_SOURCE_URL` 指向它，控制台页脚的「源代码」链接会用这个地址。见 [配置参考](CONFIGURATION.md#源代码与许可证)。
+⚠️ **如果你改了代码并让别人通过网络使用**，AGPL-3.0 第 13 条要求你向这些用户提供修改后的源码。控制台不在页面上放源码链接，需要你自己提供；`.env` 里的 `STARRY_SOURCE_URL` 只决定 Root 首次登录确认对话框里显示的地址。见 [配置参考](CONFIGURATION.md#源代码与许可证)。
 
 ## 配置变量
 

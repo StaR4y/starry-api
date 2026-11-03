@@ -20,6 +20,7 @@ public class AdminAuthController implements AdminAuthApi {
     private final SmtpVerificationService smtpVerificationService;
     private final LoginThrottle loginThrottle;
     private tech.starryapi.config.PublicSiteUrl publicSiteUrl;
+    private LegalConsentService legalConsentService;
 
     public AdminAuthController(
         AdminUserService adminUserService,
@@ -85,7 +86,20 @@ public class AdminAuthController implements AdminAuthApi {
     @Override
     public Mono<ApiResponse<AdminDtos.AdminPermissions>> permissions(ServerWebExchange exchange) {
         exchange.getResponse().getHeaders().setCacheControl(org.springframework.http.CacheControl.noStore());
-        return adminUserService.permissions(adminAuth.verify(exchange)).map(ApiResponse::ok);
+        AdminPrincipal principal = adminAuth.verify(exchange);
+        return (legalConsentService == null ? adminUserService.permissions(principal) : legalConsentService.permissions(principal))
+            .map(ApiResponse::ok);
+    }
+
+    @Override
+    public Mono<ApiResponse<AdminDtos.AdminPermissions>> acceptLegalConsent(ServerWebExchange exchange) {
+        exchange.getResponse().getHeaders().setCacheControl(org.springframework.http.CacheControl.noStore());
+        AdminPrincipal principal = adminAuth.verify(exchange);
+        if (legalConsentService == null) {
+            return Mono.error(new tech.starryapi.common.ApiException(org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE,
+                "LEGAL_CONSENT_UNAVAILABLE", "Consent cannot be recorded on this node"));
+        }
+        return legalConsentService.accept(principal).map(ApiResponse::ok);
     }
 
     @Override
@@ -136,6 +150,11 @@ public class AdminAuthController implements AdminAuthApi {
     ) {
         AdminPrincipal principal = adminAuth.verifyAllowFirstLogin(exchange);
         return adminUserService.changePassword(principal, request).thenReturn(ApiResponse.ok(null));
+    }
+
+    @Autowired(required = false)
+    void setLegalConsentService(LegalConsentService legalConsentService) {
+        this.legalConsentService = legalConsentService;
     }
 
     @Autowired(required = false)

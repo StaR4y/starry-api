@@ -1,6 +1,7 @@
 /** 认证模块 API。对应后端 /auth/*。 */
 import http, { unwrap } from '@/utils/http';
 import type {
+  AdminPermissions,
   AdminUser,
   ChangePasswordRequest,
   LoginRequest,
@@ -29,8 +30,14 @@ export const authApi = {
     return unwrap<AdminUser>(http.get<ApiResponse<AdminUser>>('/auth/me'));
   },
   permissions() {
-    return unwrap<{ root: boolean }>(
-      http.get<ApiResponse<{ root: boolean }>>('/auth/permissions', { timeout: 5_000 }),
+    return unwrap<AdminPermissions>(
+      http.get<ApiResponse<AdminPermissions>>('/auth/permissions', { timeout: 5_000 }),
+    );
+  },
+  /** Root agrees, once per deployment, to the licence, the third-party licences and the disclaimer. */
+  acceptLegalConsent() {
+    return unwrap<AdminPermissions>(
+      http.post<ApiResponse<AdminPermissions>>('/auth/legal-consent', null, { timeout: 10_000 }),
     );
   },
   register(payload: RegisterRequest) {

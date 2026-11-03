@@ -25,6 +25,9 @@ public interface AdminAuthApi {
     @GetMapping("/permissions")
     Mono<ApiResponse<AdminDtos.AdminPermissions>> permissions(ServerWebExchange exchange);
 
+    @PostMapping("/legal-consent")
+    Mono<ApiResponse<AdminDtos.AdminPermissions>> acceptLegalConsent(ServerWebExchange exchange);
+
     @PostMapping("/register")
     Mono<ApiResponse<AdminDtos.LoginResponse>> register(
         ServerWebExchange exchange,

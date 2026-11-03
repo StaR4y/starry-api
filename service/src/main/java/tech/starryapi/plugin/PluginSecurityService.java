@@ -83,7 +83,7 @@ public class PluginSecurityService {
 
     public Mono<Void> enable(AdminPrincipal actor, String sessionHash, PluginDtos.Enable request) {
         if (!request.acceptRisk()) return Mono.error(error(HttpStatus.BAD_REQUEST,
-            "PLUGIN_RISK_ACCEPTANCE_REQUIRED", "请先确认第三方插件的完整访问权限与运行风险"));
+            "PLUGIN_RISK_ACCEPTANCE_REQUIRED", "请先阅读并同意插件免责声明，接受来自第三方的插件"));
         return root(actor).flatMap(root -> store.locked(state -> {
             Instant now = Instant.now();
             ApiException blocked = blocked(state, now);
@@ -98,7 +98,7 @@ public class PluginSecurityService {
                 .flatMap(valid -> !valid.getT1() || !valid.getT2()
                     ? reject(state, actor, "VERIFICATION_REJECTED", now)
                     : store.mode(true).then(store.audit("", actor.userId(), "DEVELOPER_MODE", "ENABLED",
-                        "root password and email verified; full-trust code execution accepted"))
+                        "root password and email verified; plugin disclaimer accepted: third-party plugins, full-trust code execution"))
                         .thenReturn(new Decision(null)));
         })).flatMap(decision -> decision.error() == null ? Mono.empty() : Mono.error(decision.error()));
     }

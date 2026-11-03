@@ -26,7 +26,7 @@
   import LanguageSelect from '@/components/LanguageSelect.vue';
   import UsageMaidAssistant from '@/components/UsageMaidAssistant.vue';
   import PluginScriptHost from '@/components/PluginScriptHost.vue';
-  import SourceNotice from '@/components/SourceNotice.vue';
+  import LegalConsentDialog from '@/components/LegalConsentDialog.vue';
   import { ElMessageBox } from 'element-plus';
   import {
     DataAnalysis,
@@ -433,13 +433,9 @@ const appVersion = import.meta.env.VITE_APP_VERSION || 'dev';
           </transition>
         </router-view>
       </section>
-
-      <footer class="layout__main-footer text-muted">
-        <span>© {{ new Date().getFullYear() }} {{ appearance.siteName }}</span>
-        <SourceNotice />
-      </footer>
     </main>
     <UsageMaidAssistant />
+    <LegalConsentDialog />
     <PluginScriptHost />
   </div>
 </template>
@@ -673,19 +669,6 @@ const appVersion = import.meta.env.VITE_APP_VERSION || 'dev';
       margin: 0 auto;
     }
 
-    &__main-footer {
-      font-size: 12px;
-      color: var(--kp-text-muted);
-      text-align: center;
-      padding: 10px 0 4px;
-      border-top: 1px solid var(--kp-divider);
-      opacity: 0.8;
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: center;
-      align-items: center;
-      gap: 2px 18px;
-    }
 
     &.is-editorial {
       padding: 10px;
@@ -729,10 +712,6 @@ const appVersion = import.meta.env.VITE_APP_VERSION || 'dev';
         box-shadow: none;
         background: transparent;
         border: 1px solid var(--el-border-color);
-      }
-
-      .layout__main-footer {
-        padding: 4px 0 0;
       }
     }
   }

@@ -17,6 +17,12 @@ export interface ApiResponse<T> {
 
 export type AdminUserRole = 'ADMIN' | 'USER';
 
+/** GET /auth/permissions. legalConsentRequired: Root has not yet agreed to the licence and the disclaimer. */
+export interface AdminPermissions {
+  root: boolean;
+  legalConsentRequired?: boolean;
+}
+
 export interface AdminUser {
   userId: string;
   affiliateCode: string | null;

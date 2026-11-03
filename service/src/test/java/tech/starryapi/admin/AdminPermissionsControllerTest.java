@@ -49,6 +49,28 @@ class AdminPermissionsControllerTest {
     }
 
     @Test
+    void rootIsToldToAgreeUntilTheConsentIsRecorded() {
+        var controller = new AdminAuthController(users, new AdminAuth(new ProxyProperties(), sessions),
+            mock(RegistrationSettingsService.class), mock(EmailVerificationService.class));
+        LegalConsentService consent = mock(LegalConsentService.class);
+        controller.setLegalConsentService(consent);
+        WebTestClient withConsent = WebTestClient.bindToController(controller)
+            .controllerAdvice(new GlobalExceptionHandler()).build();
+        when(consent.permissions(any())).thenReturn(Mono.just(new AdminDtos.AdminPermissions(true, true)));
+        when(consent.accept(any())).thenReturn(Mono.just(new AdminDtos.AdminPermissions(true, false)));
+        String token = session(false);
+
+        withConsent.get().uri("/auth/permissions").headers(headers -> headers.setBearerAuth(token))
+            .exchange().expectStatus().isOk()
+            .expectBody().jsonPath("$.data.root").isEqualTo(true).jsonPath("$.data.legalConsentRequired").isEqualTo(true);
+        withConsent.post().uri("/auth/legal-consent").headers(headers -> headers.setBearerAuth(token))
+            .exchange().expectStatus().isOk().expectHeader().valueEquals("Cache-Control", "no-store")
+            .expectBody().jsonPath("$.data.legalConsentRequired").isEqualTo(false);
+        withConsent.post().uri("/auth/legal-consent").exchange().expectStatus().isUnauthorized();
+        verify(users, never()).permissions(any());
+    }
+
+    @Test
     void initialPasswordMustBeChangedBeforePermissionsAreGranted() {
         client.get().uri("/auth/permissions").headers(headers -> headers.setBearerAuth(session(true)))
             .exchange().expectStatus().isForbidden().expectBody()

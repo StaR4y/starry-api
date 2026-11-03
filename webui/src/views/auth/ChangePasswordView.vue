@@ -16,7 +16,6 @@
   import { useAuthStore } from '@/stores/auth';
   import { useAppearanceStore } from '@/stores/appearance';
   import SiteBrandLogo from '@/components/SiteBrandLogo.vue';
-  import SourceNotice from '@/components/SourceNotice.vue';
 
   const router = useRouter();
   const auth = useAuthStore();
@@ -158,7 +157,6 @@
         </div>
       </el-form>
     </div>
-    <SourceNotice class="change__source text-muted" />
   </div>
 </template>
 
@@ -168,16 +166,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 24px 24px 56px;
-    position: relative;
-
-    &__source {
-      position: absolute;
-      left: 16px;
-      right: 16px;
-      bottom: 12px;
-      font-size: 12px;
-    }
+    padding: 24px;
 
     &__panel {
       width: 100%;

@@ -28,7 +28,14 @@ public final class AdminDtos {
     ) {
     }
 
-    public record AdminPermissions(boolean root) {
+    /**
+     * What the console may show the signed-in administrator. {@code legalConsentRequired} is true only for Root, until
+     * Root has agreed to the licence, the third-party licences and the disclaimer once for this deployment.
+     */
+    public record AdminPermissions(boolean root, boolean legalConsentRequired) {
+        public AdminPermissions(boolean root) {
+            this(root, false);
+        }
     }
 
     public record ChangePasswordRequest(

@@ -345,7 +345,8 @@ class WireFormatTest {
                 """
                 {"content":{"title":"t","category":"c","summary":"s","body":"b","sortOrder":null},"version":null,"publish":null}""",
                 DocumentationDtos.Save.class, "Save[content=Content[title=t, category=c, summary=s, body=b, sortOrder=0, english=null], version=0, publish=false]");
-            read(json, "emptyObjectForPrimitivesOnly", "{}", AdminDtos.AdminPermissions.class, "AdminPermissions[root=false]");
+            read(json, "emptyObjectForPrimitivesOnly", "{}", AdminDtos.AdminPermissions.class,
+                "AdminPermissions[root=false, legalConsentRequired=false]");
             read(json, "unknownPropertiesAreIgnored",
                 """
                 {"name":"k","creditsLimit":10.50,"modelProvider":"OPENAI","surprise":{"a":[1,2]},"another":1}""",

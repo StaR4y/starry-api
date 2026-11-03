@@ -9,7 +9,7 @@
     "test:i18n": "node --test tests/i18n.test.mjs",
     "test:documentation": "node --test tests/documentMarkdown.test.mjs",
     "test:source-tiers": "node --test tests/sourceTiers.test.mjs",
-    "test:legal": "node --test tests/sourceNotice.test.mjs tests/thirdPartyNotices.test.mjs",
+    "test:legal": "node --test tests/legalConsent.test.mjs tests/thirdPartyNotices.test.mjs",
     "test:links": "node --test tests/webLink.test.mjs",
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",

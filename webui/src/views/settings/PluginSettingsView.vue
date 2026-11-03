@@ -22,6 +22,7 @@
     type PluginLog,
     type PluginAudit,
   } from '@/api/plugins';
+  import { pluginDisclaimer } from '@/utils/pluginDisclaimer';
 
   const status = ref<PluginStatus>();
   const compact = ref(window.innerWidth < 768);
@@ -704,23 +705,20 @@
       v-model="enableDialog"
       append-to-body
       :title="t('开启开发者模式')"
-      width="480px"
+      width="min(560px, 94vw)"
       class="plugin-dialog"
       :close-on-click-modal="false"
       :close-on-press-escape="!busy && !sending"
       :show-close="!busy && !sending"
       @closed="clearVerification"
     >
-      <el-alert
-        :title="
-          t(
-            '插件与主服务同进程运行，不提供安全沙箱。开启后，你将承担第三方代码带来的数据和服务风险。',
-          )
-        "
-        type="warning"
-        :closable="false"
-        show-icon
-      />
+      <section class="plugin-disclaimer" data-test="plugin-disclaimer" :aria-label="t('插件免责声明')">
+        <h4>{{ t('插件免责声明') }}</h4>
+        <template v-for="clause in pluginDisclaimer()" :key="clause.title">
+          <h5>{{ clause.title }}</h5>
+          <p>{{ clause.body }}</p>
+        </template>
+      </section>
       <el-form label-position="top" class="verify-form" @submit.prevent="enable">
         <el-form-item :label="t('初始管理员 root 的当前密码')">
           <el-input
@@ -755,8 +753,8 @@
         <p v-if="expiry && now >= expiry" class="error-text">
           {{ t('验证码已过期，请重新发送。') }}
         </p>
-        <el-checkbox v-model="form.acceptRisk" :disabled="busy">
-          {{ t('我理解并接受插件的完整访问权限与运行风险') }}
+        <el-checkbox v-model="form.acceptRisk" :disabled="busy" data-test="plugin-disclaimer-accept">
+          {{ t('我已阅读并同意以上插件免责声明，接受安装和运行来自第三方的插件，并自行承担由此产生的风险') }}
         </el-checkbox>
         <el-alert
           v-if="verificationError"
@@ -1022,6 +1020,28 @@
   }
   .more-audit {
     margin-top: 16px;
+  }
+  .plugin-disclaimer {
+    max-height: 260px;
+    overflow-y: auto;
+    padding: 12px 14px;
+    border: 1px solid var(--el-color-warning-light-5);
+    border-radius: 6px;
+    background: var(--el-color-warning-light-9);
+    line-height: 1.6;
+    h4 {
+      margin: 0 0 8px;
+      font-size: 14px;
+    }
+    h5 {
+      margin: 10px 0 2px;
+      font-size: 13px;
+    }
+    p {
+      margin: 0;
+      font-size: 13px;
+      overflow-wrap: anywhere;
+    }
   }
   .verify-form {
     margin-top: 20px;

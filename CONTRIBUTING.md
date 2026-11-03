@@ -33,7 +33,7 @@ npm --prefix webui run lint
 npm --prefix webui run test:i18n                 # every Chinese UI string needs an English entry
 npm --prefix webui run test:documentation
 npm --prefix webui run test:source-tiers
-npm --prefix webui run test:legal                # the license footer and THIRD-PARTY-NOTICES.txt
+npm --prefix webui run test:legal                # the licence consent dialog and THIRD-PARTY-NOTICES.txt
 ./scripts/test-install.sh                        # when you touch scripts/install.sh
 ```
 
