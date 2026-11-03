@@ -73,7 +73,7 @@ webui/src
 2. 新增 `service/.../platform/<provider>/<Provider>ResponseFactory.java`。
 3. 新增 `service/.../platform/<provider>/<Provider>ModelCatalog.java`。
 4. 把目录注册到 `platform/catalog/ProxyModelCatalog`。
-5. 只为公开端点的形状，在 facade / controller 里加路由。
+5. 在 facade / controller 里只为公开端点的形状加路由。
 6. 在 `service/src/test/java/.../platform/<provider>` 下加测试。
 7. 新增 `webui/src/platforms/<provider>/index.ts`，并在 `registry.ts` 里注册。
 8. 只有当客户端需要厂商专属的环境变量时，才添加配置片段（`setup.ts`）。

@@ -47,4 +47,4 @@ Set strong passwords in `.env`, keep `STARRY_ALLOW_ANONYMOUS_PROXY=false` on any
 
 ## 中文摘要
 
-发现安全漏洞时，请使用 GitHub 的**私密漏洞报告**（仓库 **Security** 页签 → **Report a vulnerability**），**不要**开公开的 issue。报告里请写清影响、版本和部署方式、复现步骤，**不要附带真实的密钥或密码**。这是志愿者维护的项目，我们的目标是 7 天内确认收到、30 天内给出处理结论或修复时间（目标，不是承诺）。只有最新发布版和 `main` 分支会收到安全修复。插件是「完全信任」的进程内代码：Root 管理员自己装的恶意插件不算本项目的漏洞，但绕过开发者模式（Root 密码 + 邮箱验证）或 `STARRY_PLUGINS_DISABLED` 去加载插件算。
+发现安全漏洞时，请使用 GitHub 的**私密漏洞报告**（仓库 **Security** 页签 → **Report a vulnerability**），**不要**开公开的 issue。报告里请写清影响、版本和部署方式、复现步骤，**不要附带真实的密钥或密码**。这是志愿者维护的项目，我们的目标是 7 天内确认收到、30 天内给出处理结论或修复时间，但这不是承诺。只有最新发布版和 `main` 分支会收到安全修复。插件是「完全信任」的进程内代码：Root 管理员自己装的恶意插件不算本项目的漏洞，但绕过开发者模式（Root 密码 + 邮箱验证）或 `STARRY_PLUGINS_DISABLED` 去加载插件算。

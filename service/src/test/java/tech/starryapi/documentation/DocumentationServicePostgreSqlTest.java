@@ -39,8 +39,8 @@ class DocumentationServicePostgreSqlTest {
     private DocumentationStorage storage;
     private final List<Object> events = new CopyOnWriteArrayList<>();
     private static final Duration TIMEOUT = Duration.ofSeconds(15);
-    private static final List<String> DEFAULT_TUTORIALS = List.of("getting-started", "console-tour", "billing", "coding-plan",
-        "api-keys", "models-and-pricing", "cc-switch", "claude-code", "codex-cli", "opencode", "manual-api", "errors", "faq", "tickets");
+    private static final List<String> DEFAULT_TUTORIALS = List.of("billing", "api-keys", "cc-switch", "claude-code", "codex-cli",
+        "opencode", "manual-api", "errors", "faq", "tickets");
     @TempDir Path files;
 
     @BeforeAll static void migrate() {
@@ -88,7 +88,7 @@ class DocumentationServicePostgreSqlTest {
 
     @Test void seedsBeginnerGuideAndKeepsDraftSeparateFromPublication() {
         assertThat(service.catalog("").block(TIMEOUT).entries()).extracting(Entry::id)
-            .contains("getting-started", "billing", "api-keys", "cc-switch", "manual-api", "faq");
+            .contains("billing", "api-keys", "cc-switch", "manual-api", "faq");
         assertThat(service.read("cc-switch").block(TIMEOUT).content().body()).contains("https://ccswitch.io");
         var page = service.create(content("First", "draft text"), "test").block(TIMEOUT);
         assertThatThrownBy(() -> service.read(page.id()).block(TIMEOUT)).isInstanceOf(ApiException.class);
@@ -216,7 +216,7 @@ class DocumentationServicePostgreSqlTest {
 
         var pages = service.publishedPages().block(TIMEOUT);
 
-        assertThat(pages).extracting(Document::id).contains(page.id(), "getting-started", "api-keys")
+        assertThat(pages).extracting(Document::id).contains(page.id(), "billing", "api-keys")
             .doesNotContain(draftOnly.id());
         assertThat(pages).filteredOn(d -> d.id().equals(page.id())).singleElement().satisfies(d -> {
             assertThat(d.content().title()).isEqualTo("Visible 页面");
@@ -284,7 +284,7 @@ class DocumentationServicePostgreSqlTest {
     @Test void publishedRowsAreTheSamePagesBeforeTheirJsonIsParsed() {
         var rows = service.publishedRows().block(TIMEOUT);
 
-        assertThat(rows).extracting(DocumentationService.PublishedRow::id).contains("getting-started", "api-keys");
+        assertThat(rows).extracting(DocumentationService.PublishedRow::id).contains("billing", "api-keys");
         assertThat(rows).allSatisfy(row -> assertThat(row.json()).startsWith("{"));
         assertThat(unproxied.documents(rows)).isEqualTo(service.publishedPages().block(TIMEOUT));
     }
@@ -384,7 +384,7 @@ class DocumentationServicePostgreSqlTest {
         var stream = service.publishedStream().block(TIMEOUT);
 
         assertThat(stream.fingerprint()).hasSize(32).isEqualTo(service.publishedFingerprint().block(TIMEOUT));
-        assertThat(stream.pages().collectList().block(TIMEOUT)).extracting(Document::id).contains("getting-started", "faq");
+        assertThat(stream.pages().collectList().block(TIMEOUT)).extracting(Document::id).contains("billing", "faq");
 
         var page = service.create(content("Streamed", "body"), "test").block(TIMEOUT);
         service.save(page.id(), new Save(page.draft(), page.version(), true), "test").block(TIMEOUT);
@@ -428,7 +428,7 @@ class DocumentationServicePostgreSqlTest {
 
         var pages = service.publishedPages().block(TIMEOUT);
 
-        assertThat(pages).extracting(Document::id).contains(good.id(), "getting-started", "faq", fraction, text, huge);
+        assertThat(pages).extracting(Document::id).contains(good.id(), "billing", "faq", fraction, text, huge);
         assertThat(pages.subList(pages.size() - 3, pages.size())).extracting(Document::id)
             .as("the damaged rows come after every page that has a sort order").containsExactly(fraction, text, huge);
         assertThat(pages).filteredOn(d -> d.id().equals(good.id())).singleElement().satisfies(d -> assertThat(d.content()).isNotNull());
@@ -443,8 +443,8 @@ class DocumentationServicePostgreSqlTest {
             String zh = original.stream().filter(e -> e.id().equals(id)).findFirst().orElseThrow().title();
             String en = english.stream().filter(e -> e.id().equals(id)).findFirst().orElseThrow().title();
             assertThat(en).as("English title of %s", id).isNotEqualTo(zh);
+            assertThat(service.read(id).block(TIMEOUT).content().body()).as(id).doesNotContain("管理员专属");
         }
-        assertThat(service.read("console-tour").block(TIMEOUT).content().body()).doesNotContain("管理员专属");
         assertThat(service.read("cc-switch", true).block(TIMEOUT).content().body()).doesNotContain("127.0.0.1");
     }
 
@@ -452,7 +452,7 @@ class DocumentationServicePostgreSqlTest {
         for (boolean english : new boolean[] {false, true}) {
             assertThat(service.read("errors", english).block(TIMEOUT).content().body())
                 .contains("SOURCE_TIER_NOT_SELECTABLE", "SOURCE_TIER_UNAVAILABLE", "RESPONSE_OWNER_TIER_MISMATCH");
-            for (String id : List.of("api-keys", "models-and-pricing", "claude-code", "codex-cli", "opencode")) {
+            for (String id : List.of("api-keys", "claude-code", "codex-cli", "opencode")) {
                 assertThat(service.read(id, english).block(TIMEOUT).content().body())
                     .as("%s (%s)", id, english ? "English" : "Chinese").contains("X-Starry-Tier");
             }
@@ -468,7 +468,7 @@ class DocumentationServicePostgreSqlTest {
     }
 
     @Test void englishPublicationSearchAndFallbackDoNotExposeTranslatedDrafts() {
-        assertThat(service.read("getting-started", true).block(TIMEOUT).content().title()).isEqualTo("Start here");
+        assertThat(service.read("billing", true).block(TIMEOUT).content().title()).isEqualTo("Top-ups and billing");
         assertThat(service.read("manual-api", true).block(TIMEOUT).content().body())
             .contains("{{api_base_url}}", "YOUR_API_KEY", "MODEL_ID");
         var page = service.create(content("Original", "Original body"), "test").block(TIMEOUT);

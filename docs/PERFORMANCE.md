@@ -176,7 +176,7 @@ ps -p "$PID" -o pid=,rss=,%mem=,%cpu=,etime=
 jcmd "$PID" GC.heap_info
 ```
 
-读取 Actuator 暴露的同样的运行时指标：
+从 Actuator 读取同样的运行时指标：
 
 ```bash
 curl -sS 'http://127.0.0.1:8080/actuator/metrics/jvm.memory.used?tag=area:heap'

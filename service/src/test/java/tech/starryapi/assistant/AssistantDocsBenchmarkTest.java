@@ -18,8 +18,8 @@ import tech.starryapi.documentation.DocumentationDtos.Document;
 
 /**
  * The standard the assistant's retrieval is measured against: typical questions of people using the console, each a
- * conversation of one or two user messages, asked of the tutorials that a fresh installation publishes (V23, V24 and V30,
- * read by {@link SeededTutorials}). A case names the page that has to be among the first three excerpts, and where it
+ * conversation of one or two user messages, asked of the tutorials that a fresh installation publishes (V23, V24, V30 and
+ * V33, read by {@link SeededTutorials}). A case names the page that has to be among the first three excerpts, and where it
  * matters the section; the page has to be cited in the sources, in the language the reader writes. A pasted error
  * identifier has to bring its page first. A question the tutorials do not cover has to retrieve nothing, so that the
  * assistant is handed the list of pages and says it is not sure instead of being given a page that only sounds alike,
@@ -95,10 +95,10 @@ class AssistantDocsBenchmarkTest {
     static List<Case> cases() {
         return List.of(
             // Chinese, in everyday wording
-            zh("怎么充值", "billing", "在线充值"),
-            zh("余额怎么扣", "billing", "余额是怎么扣的"),
-            zh("兑换码在哪里用", "billing", "使用兑换码"),
-            zh("付了款余额没变怎么回事", "billing", "付了款但余额没变"),
+            zh("怎么充值", "billing", "充值"),
+            zh("余额怎么扣", "billing", "怎么扣费"),
+            zh("兑换码在哪里用", "billing", "充值"),
+            zh("付了款余额没变怎么回事", "billing", "付了款余额没变"),
             zh("密钥怎么删", "api-keys", "列表里的操作"),
             zh("工单怎么关", "tickets", "状态的含义"),
             zh("怎么改密码", "faq", "怎么修改密码"),
@@ -108,13 +108,14 @@ class AssistantDocsBenchmarkTest {
             zh("402 怎么解决", "billing", "两种计费途径"),
             zh("429 啥意思", "faq", "429，请求太频繁"),
             zh("503 怎么回事", "errors", "503 的几种情况"),
-            zh("待定价是什么意思", "models-and-pricing", "待定价"),
-            zh("Coding Plan 额度用完了能不能扣余额", "coding-plan", "额度用完了"),
-            zh("额度用完了会不会自动扣余额", "coding-plan", "需要知道的规则"),
+            // The section on models and prices of the API key page explains it as well, but only the FAQ entry is retrieved.
+            zh("待定价是什么意思", "faq", "待定价"),
+            zh("Coding Plan 额度用完了能不能扣余额", "billing", "Coding Plan 订阅"),
+            zh("额度用完了会不会自动扣余额", "billing", "两种计费途径"),
             new Case(List.of("好的，那怎么删除密钥"), "api-keys", "列表里的操作", "zh", true, "tickets"),
             zh("一个密钥能不能同时用 Claude 和 GPT", "api-keys", "模型分类"),
-            zh("累计调用在哪里看", "console-tour", "数据统计怎么读"),
-            zh("怎么查看当前余额", "console-tour", null),
+            zh("累计调用在哪里看", "billing", "余额和用量在哪看"),
+            zh("怎么查看当前余额", "billing", "余额和用量在哪看"),
             zh("怎么配置 Claude Code", "claude-code", null),
             zh("Codex 提示 refresh token 怎么办", "codex-cli", "常见问题"),
             zh("Base URL 要不要带 /v1", "faq", "Base URL"),
@@ -125,43 +126,43 @@ class AssistantDocsBenchmarkTest {
             zh("协议选哪个", "manual-api", "各接口的地址"),
             // 请求头填什么 and 模型名填什么 were here until V30 added the tier sections; they are in knownGaps() now.
             zh("截图传不上去", "tickets", "提交一张工单"),
-            // The title of the page has 订阅, so any retrieval at all would put the page among the first three: the section
-            // that tells how to get a plan (and where its validity is shown) is what the case is about.
-            zh("订阅能用多久", "coding-plan", "开通订阅"),
+            // The page has 订阅 in its summary and in three of its sections, so any retrieval at all would put it among the first
+            // three: the section that tells how to get a plan (and where its validity is shown) is what the case is about.
+            zh("订阅能用多久", "billing", "Coding Plan 订阅"),
             exact("SYSTEM_MAINTENANCE", "errors", "503 的几种情况"),
             exact("config.toml", "codex-cli", null),
             // A pasted name the tutorials do not have, with a verb of one character: its parts are the topic, the verb only
             // orders the chunks that have one, and the sections about passwords or the wallet are not an answer.
             exact("API_KEY_INVALID 怎么改", "faq", "提示 401"),
-            new Case(List.of("config.yaml 怎么改"), "codex-cli", "config.toml", "zh", false, "getting-started"),
+            // "改" is in the heading of the FAQ entry on changing the password, which is not an answer.
+            new Case(List.of("config.yaml 怎么改"), "codex-cli", "config.toml", "zh", false, "faq"),
             zh("401", "faq", "提示 401"),
             // English
-            en("redeeming a code", "billing", "Redeem a code"),
+            en("redeeming a code", "billing", "Top up"),
             en("how am I billed", "billing", null),
             en("verifying Claude Code", "claude-code", "Verify"),
             en("Connection problems", "faq", "Connection failure"),
             en("How do I delete an API key?", "api-keys", "Actions in the list"),
             en("changing my password", "faq", "change my password"),
-            en("How do I sign out?", "console-tour", "Top bar"),
             en("What does 429 mean?", "faq", "429, too many requests"),
-            en("How do I subscribe to a Coding Plan?", "coding-plan", "Activate a plan"),
+            en("How do I subscribe to a Coding Plan?", "billing", "Coding Plan subscriptions"),
             new Case(List.of("What does the Resolved status mean?"), "tickets", "What the statuses mean", "en", true, null),
-            en("Where can I see model prices?", "models-and-pricing", "Where to see models"),
+            en("Where can I see model prices?", "api-keys", "Models and prices"),
             // A participle of a word of wording that the tutorials lack is wording, not the topic word "cause" or "view".
             en("What caused my 401?", "faq", "I get 401"),
             new Case(List.of("Where is my balance viewed?"), "billing", null, "en", false, "tickets"),
             en("How many attachments can I add to a ticket?", "tickets", "Submit a ticket"),
             // "put" is a word of no meaning in a question ("where do I put it"), so what is left is "api key" and "codex", and
             // the pages about API keys outweigh the one about Codex. It was a known gap until V30, which added to the Codex page
-            // a section on choosing a tier that mentions the API key and Codex over and over: that section is the second
-            // excerpt now, by chance and not by the question (the section that does answer, "1. config.toml", is the tenth), so
-            // no section is named.
+            // a section on choosing a tier that mentions the API key and Codex over and over: that section is the third excerpt
+            // now, by chance and not by the question (the section that does answer, "1. config.toml", is not among the excerpts),
+            // so no section is named.
             en("Where do I put the API key in Codex?", "codex-cli", null),
             // Follow-ups: the second message stays on the topic of the first, or changes it
             followUp("怎么创建 API Key", "那怎么改？", "api-keys", "列表里的操作"),
-            followUp("怎么充值", "具体步骤呢？", "billing", "在线充值"),
+            followUp("怎么充值", "具体步骤呢？", "billing", "充值"),
             followUp("Claude Code 报错 401", "还是不行", "claude-code", "常见问题"),
-            followUp("怎么充值", "可以", "billing", "在线充值"),
+            followUp("怎么充值", "可以", "billing", "充值"),
             switchTo("怎么配置 Claude Code", "那 Codex 呢？", "codex-cli", "claude-code"),
             new Case(List.of("How do I set up Claude Code?", "401"), "claude-code", "Common problems", "en", false, null),
             // Not covered by the tutorials: the verb before the topic, after it, and in English
@@ -169,7 +170,11 @@ class AssistantDocsBenchmarkTest {
             uncovered("发票怎么开"),
             uncovered("怎么申请退款"),
             uncovered("怎么导出请求日志"),
-            uncovered("How do I invite a teammate?")
+            uncovered("How do I invite a teammate?"),
+            // Without a word that asks how in front of it, "开发票" cannot be told from a topic and a verb ("协议选"): the last
+            // pair is the join of the two, so the page that had "开发" was found and this was a known gap. No tutorial has
+            // "开发" since V33.
+            uncovered("能开发票吗")
         );
     }
 
@@ -187,9 +192,9 @@ class AssistantDocsBenchmarkTest {
             uncovered("How do I view the request logs?"),
             uncovered("怎么修改昵称"),
             uncovered("Can I change my username?"),
-            // Without a word that asks how in front of it, "开发票" cannot be told from a topic and a verb ("协议选"): the
-            // last pair is the join of the two, so the page that has "开发" is found.
-            uncovered("能开发票吗"),
+            // V33 deleted the tour of the console, whose section on the top bar said how to sign out; "sign" still brings in
+            // the FAQ entries on keys and sign-in.
+            uncovered("How do I sign out?"),
             // Two questions of "the topic first and a verb of one character after it" that the tutorials answer, and that were
             // in cases() until V30. Their answers did not move: it is still the authentication section of the manual page for
             // the request header (认证方式) and the section on where the model name comes from for the model name (准备地址与
@@ -198,8 +203,8 @@ class AssistantDocsBenchmarkTest {
             // as long as a section is on average, which keyword retrieval counts as more matches. The manual page is the 7th
             // chunk for the first question and is not among the excerpts for the second. A tier section is not an answer to
             // either: it is about one optional header, or one optional suffix of the model name, not about what a request
-            // has to carry. (The case for the second question could have been moved to the models page, whose section on where
-            // to see models says what to copy into the model field, but that section is not retrieved either.) So both stay
+            // has to carry. (The case for the second question could have been moved to the section on models and prices of the
+            // API key page, which says what to copy into the model field, but that section is not retrieved either.) So both stay
             // here, as they were asked, and the first of them to be answered correctly is moved back to cases() with its target.
             // Weighing the length of a chunk puts them back first, but it changed the order of eight to thirteen other tests of
             // the retrieval, so it is not done.

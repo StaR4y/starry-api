@@ -101,7 +101,7 @@ Password: <一串随机字符>
 
 ![ChatGPT 浏览器授权](images/account-create-chatgpt.jpg)
 
-按页面指引，打开 `auth.openai.com` 显示的页面，输入一次性验证码即可，服务器会自动把授权结果保存成账号，**全程不需要你复制 Token**。
+按页面指引打开 `auth.openai.com` 的授权页面，输入一次性验证码即可，服务器会自动把授权结果保存成账号，**全程不需要你复制 Token**。
 
 使用前请注意：
 

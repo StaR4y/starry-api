@@ -18,7 +18,7 @@ import org.junit.jupiter.api.Timeout;
  * V30 (the default tutorials learn about source tiers): it replaces a tutorial only while it is exactly the version
  * V21-V24 left, which it recognises by the md5 of the stored draft. The test runs the real migrations on a database that
  * stands at V29, so a hash that does not match what V24 leaves (a changed seed, a hash copied wrongly) shows up as a
- * tutorial that was not replaced.
+ * tutorial that was not replaced. It migrates to V30 and no further, because V33 revises the same pages again.
  */
 @Timeout(240)
 class DocumentationTierTutorialsMigrationPostgreSqlIntegrationTest extends PostgreSqlIntegrationTestSupport {
@@ -40,7 +40,7 @@ class DocumentationTierTutorialsMigrationPostgreSqlIntegrationTest extends Postg
             assertThat(before.values()).allSatisfy(page -> assertThat(page.draft()).isEqualTo(page.published()));
         }
 
-        migrate(url, null);
+        migrate(url, "30");
 
         try (Connection db = owner(url)) {
             assertThat(scalar(db, "SELECT success FROM flyway_schema_history WHERE version = '30'")).isEqualTo(true);
@@ -91,7 +91,7 @@ class DocumentationTierTutorialsMigrationPostgreSqlIntegrationTest extends Postg
             edited = pages(db);
         }
 
-        migrate(url, null);
+        migrate(url, "30");
 
         try (Connection db = owner(url)) {
             Map<String, Page> after = pages(db);

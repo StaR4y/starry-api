@@ -157,7 +157,7 @@ GET /models
 ```
 
 - `models` 是 `data` 的兼容别名。管理员停用的条目在两个数组里都省略。顺序遵循管理员保存的全局显示顺序。
-- 每个条目既给出「每 100 余额能买多少 token」，也给出精确的**每 100 万 token 有效价格**。默认情况下，服务从 [`Wei-Shaw/model-price-repo`](https://github.com/Wei-Shaw/model-price-repo) 读取输入 / 输出 / 缓存写 / 缓存读的美元成本，再乘以管理员的「模型标价计费倍率」，默认 `1.0`，所以余额的数字扣费等于厂商标价（美元）。
+- 每个条目既给出「每 100 余额能买多少 token」，也给出精确的**每 100 万 token 有效价格**。默认情况下，服务从 [`Wei-Shaw/model-price-repo`](https://github.com/Wei-Shaw/model-price-repo) 读取输入 / 输出 / 缓存写 / 缓存读的美元成本，再乘以管理员的「模型标价计费倍率」，默认 `1.0`，此时扣除的余额数值等于厂商标价（美元）。
 - 逐项计费的模型会填充四个详细的 `*PricePerMillionTokens` 字段，同时把 `totalPricePerMillionTokens` 作为面向用户的「50% 输入 + 50% 输出」参考价。**实际计费仍按真实的 token 类别**。旧版固定总价的规则（包括通配规则）则给出真实的固定总价。
 - **价格解析是确定的**：启用的规则按优先级升序，同优先级时按精确模型 → 目录系列 → 目录厂商 → 通配符的顺序；通配符按字面长度降序。请求别名的精确匹配先于目标的精确匹配；其余并列按模式和规则 ID 决定。**只有胜出的规则生效**，它的倍率直接替换全局倍率，所以 `0.1` 永远表示标价的 10%。已知前缀（`starry/`、`openai-compatible/`、`openai/`、`anthropic/`、`google/`、`gemini/`、`deepseek/`）在精确规则和价格查找时都会规范化。优先使用模型自己的精确 / 规范化厂商标价，否则沿着配置的目录目标走；**不会**使用系列 / 厂商中位数。
 - 既没有经验证的价格、也没有显式旧版固定价的条目，会暴露 `billingMode: "unavailable"` 且不含数值价格；计费请求会在预留和派发之前返回 `503 MODEL_PRICE_UNAVAILABLE`。
@@ -229,7 +229,7 @@ POST /responses
 
 `platform/openai/OpenAiRequestAdapter` 会在路由前把 Responses 的输入、函数调用和函数输出转换成内部的对话结构。对 DeepSeek，Responses 目前**只支持 `deepseek-v4-flash`**；用这个端点请求 `deepseek-v4-pro` 会返回 `400`，所以 Pro 的调用方必须使用 Chat Completions。
 
-请求没写 `max_output_tokens`（也没写 `max_completion_tokens`、`max_tokens`）时，网关给它加上一个默认的输出上限：默认 16,000 个令牌，可用 `STARRY_RESPONSES_DEFAULT_OUTPUT_TOKENS` 调整，并且不超过这个模型自己的最大输出，也就是模型列表与厂商标价目录中较小的那个：
+请求没写 `max_output_tokens`（也没写 `max_completion_tokens`、`max_tokens`）时，网关给它加上默认的输出上限：16,000 个令牌，可用 `STARRY_RESPONSES_DEFAULT_OUTPUT_TOKENS` 调整，并且不超过这个模型自己的最大输出，也就是模型列表与厂商标价目录中较小的那个：
 
 - 大多数 Claude 和 GPT 别名得到默认的 16,000。
 - 价格目录列得比默认值小的模型得到那个数，例如 `gpt-4` 和 `gpt-4o-2024-05-13` 是 4,096，`gemini-2.0-flash` 是 8,192。`deepseek-v4-*` 在随包的价格目录里也是 8,192，但默认部署会刷新价格目录，刷新后的目录写 393,216，所以它们得到默认的 16,000。
@@ -281,7 +281,7 @@ POST /models/{model}:generateContent
 }
 ```
 
-响应形状：
+响应结构：
 
 ```json
 {
@@ -484,7 +484,7 @@ Content-Type: application/json
 - 登录会话只保存在有界的内存缓存里，**15 分钟**过期，绑定创建它的管理员，应用重启后丢失。每个管理员最多同时 3 个等待或完成中的登录。
 - Access、Refresh、ID Token **从不**由这些端点返回；成功的凭据直接写入已有的账号记录。
 - 重新授权选中的账号时，会先校验 ChatGPT 的用户 / 工作区身份再替换凭据。身份数据不足的旧导入账号，必须作为新的浏览器授权添加，而不是被覆盖。
-- 该流程只授权既有的 Codex 上游 `https://chatgpt.com/backend-api/codex`，**不会**代理 ChatGPT 网页应用。OpenAI 可能对特定账号或地区禁用设备授权。运维要对使用的授权账号及遵守 OpenAI 的条款和政策负责。手动导入 Codex Token 仍作为恢复手段保留。把浏览器授权的账号保留在可信的私有部署上；公开、多租户、CI 等不可信的程序化负载应改用 OpenAI Platform API Key 账号。
+- 该流程只授权既有的 Codex 上游 `https://chatgpt.com/backend-api/codex`，**不会**代理 ChatGPT 网页应用。OpenAI 可能对特定账号或地区禁用设备授权。运维要对所用的授权账号负责，也要负责遵守 OpenAI 的条款和政策。手动导入 Codex Token 仍作为恢复手段保留。把浏览器授权的账号保留在可信的私有部署上；公开、多租户、CI 等不可信的程序化负载应改用 OpenAI Platform API Key 账号。
 
 ### 导入
 
@@ -739,7 +739,7 @@ GET /admin/source-tiers/me?provider={provider}
 
 控制台生成的客户端配置（API Key 的「客户端配置」里选「号池」）因此用请求头：选的号池对这个客户端用不上（别的厂商的号池，或这个客户端的端点走的路由在号池里没有账号，例如给 OpenCode 选只放官方 Key 的号池，而它的 Claude 请求走 Kiro），请求照常服务，只是不按所选号池，不会整条配置失效。选了一个号池而它有账号、却都暂时不可用（忙、额度耗尽、被停用或挂起）时，请求不会换到别的号池，返回 `503 SOURCE_TIER_UNAVAILABLE`；选「及以下」才会改用更低的号池。
 
-CC Switch 的 Claude Code 链接放不下请求头，写在模型名后面，那是后缀，是对每个请求的要求：号池用不了（账号都被停用或挂起、管理员关闭了它或不再允许选择）就被拒绝（`400` 或 `403`），不像请求头那样照常服务，控制台在链接旁边写了这一点。Codex 的链接带的是同一份 `config.toml`，OpenCode 的链接不写号池（在 Key 里设号源偏好，或用 `opencode.json`）。
+CC Switch 的 Claude Code 链接放不下请求头，号池写在模型名后面，也就是后缀，是对每个请求的要求：号池用不了（账号都被停用或挂起、管理员关闭了它或不再允许选择）就被拒绝（`400` 或 `403`），不像请求头那样照常服务，控制台在链接旁边写了这一点。Codex 的链接带的是同一份 `config.toml`，OpenCode 的链接不写号池（在 Key 里设号源偏好，或用 `opencode.json`）。
 
 | 客户端 | 请求头（控制台生成的写法） | 模型后缀 |
 |---|---|---|
@@ -842,7 +842,7 @@ CC Switch 的 Claude Code 链接放不下请求头，写在模型名后面，那
   - `degradedFeatures`（丢掉的请求特性，逗号分隔；也有网关对请求体做的修补，如 Claude Code 每个请求都变的计费头 `billing_header_dropped`，它不是特性；anthropic 厂商的中转收到的采样参数被改过时，记 `temperature`（大于 1 改成 1）和 `top_p`（与 `temperature` 同写时去掉 `top_p`））。
   - 被网关扣下的应答（`stopReason` 为 `WITHHELD`）的行另有 `withheldInputTokens`、`withheldOutputTokens`：中转报告的用量，运营者承担的成本；这一行的 `inputTokens`、`outputTokens` 和 `credits` 仍是 0（用户没被收费，也没有用量），所以这两个字段不会进用户的统计。
   - 原生号源的行这些字段为空；用户自己的日志（`/admin/logs/me`）看不到它们。中转的原文错误不会出现在客户端的消息和这些日志里。
-- **所有节点都升级到支持跨协议的版本之后再保存非 `OFF` 的门控**：旧节点把不认识的对当作未提供，不会派给中转，同一个会话落在新旧节点上得到的服务不同。升级到带 V32 的版本后请立即重新备份（见 [运维手册：恢复流程](OPERATIONS.md#恢复流程)）。
+- **所有节点都升级到支持跨协议的版本之后再保存非 `OFF` 的门控**：旧节点把不认识的对当作未提供，不会派给中转，同一个会话落在新旧节点上得到的服务不同。升级到带 V33 的版本后请立即重新备份（见 [运维手册：恢复流程](OPERATIONS.md#恢复流程)）。
 
 **号源分级的错误码**
 
@@ -961,7 +961,7 @@ DELETE /admin/api-keys/{keyId}
 
 - 新建的 Key **必填 `modelProvider`**，并且要匹配至少一个已启用 `/v1/models` 条目的 `provider`（不区分大小写）。`*` **仅为迁移的旧 Key 保留**，创建或显式更新时会被拒绝。选择上游之前，请求的模型和任何映射目标，都必须同时在已启用的目录里并属于这个厂商。模型缺失返回 `400 MODEL_NOT_AVAILABLE` 或 `400 MAPPED_MODEL_NOT_AVAILABLE`；跨厂商访问返回 `403 API_KEY_MODEL_PROVIDER_FORBIDDEN`。
 - API Key 归属于登录的本地用户。管理员可以列出和管理所有的 Key，并看到每把 Key 的 `userId`；普通用户只能列出、更新、删除和复制自己的。
-- 新建的 Key 会把完整的 `sk-...` 值保存在所属用户的 Key 记录里，所以控制台可以直接复制 API Key 和生成的客户端配置。在这种行为之前创建的 Key 只有 `keyHash` 和 `keyPrefix`，完整密钥无法恢复，需要直接复制时请重建。
+- 新建的 Key 会把完整的 `sk-...` 值保存在所属用户的 Key 记录里，所以控制台可以直接复制 API Key 和生成的客户端配置。开始保存完整值之前创建的 Key 只有 `keyHash` 和 `keyPrefix`，完整密钥无法恢复，需要直接复制时请重建。
 - 在 Key 的 PATCH 里，`clearCreditsLimit:true` 显式移除之前配置的限额；省略的字段保持原值。
 - Key 创建时选择 `billingSource: "BALANCE" | "CODING_PLAN"`，没有未完成请求时可以修改。见下文 [Coding Plan 订阅](#coding-plan-订阅)。
 - `tierPreference` 是这把 Key 的号源偏好（`auto`、号池标识、`L2` 或 `2`，可加 `+`，不超过 40 个字符），创建和 PATCH 都可以带，PATCH 换了 `modelProvider` 又没有带它时清回 `auto`，创建、PATCH 和列表的响应里都只在设过偏好时才有这个字段；有未完成请求时也能修改。`modelProvider` 为 `*` 的旧 Key 须在同一次 PATCH 里一起选好 `modelProvider` 才能设偏好，否则返回 `400 API_KEY_TIER_PREFERENCE_INVALID`。规则见 [号源分级：指定号池](#号源分级)，可选的号池用 `GET /admin/source-tiers/me?provider=` 查询。
@@ -1027,7 +1027,7 @@ POST  /admin/model-pricing/refresh
 { "rules": [ { "modelPattern": "openai/gpt-5*", "priceMultiplier": 0.1, "priority": 10, "enabled": true } ] }
 ```
 
-`POST /admin/model-pricing/preview` 接受 `{ "model": "starry/gpt-5.5", "rules": [...] }`。提供稳定的 `ruleId` 值，用来标识草稿匹配。它按保存时的约束校验草稿，使用当前的全局倍率，**从不**持久化任何改动。响应包含：
+`POST /admin/model-pricing/preview` 接受 `{ "model": "starry/gpt-5.5", "rules": [...] }`。草稿规则要提供稳定的 `ruleId` 值，用来标识匹配到的草稿规则。它按保存时的约束校验草稿，使用当前的全局倍率，**从不**持久化任何改动。响应包含：
 
 - `model`：请求的 ID；`pricingModel`：解析出的目录定价 ID；
 - `source`：`official`、`normalized`、`legacy_total`、`legacy_itemized` 或 `unavailable`；`matchedPriceModel`：可用时的已验证来源键；

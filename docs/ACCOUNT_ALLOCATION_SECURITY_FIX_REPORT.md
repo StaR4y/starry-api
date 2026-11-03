@@ -136,7 +136,7 @@
 | 发布 JAR 内容检查 | 包含静态 WebUI 与 V10 迁移 |
 | `git diff --check` | 通过，无空白错误 |
 
-前端首次构建发现 `MaintenanceView.vue` 有一个未使用的 appearance store 声明；已做无行为变化的最小删除，随后构建通过。
+前端首次构建发现 `MaintenanceView.vue` 有一个未使用的 appearance store 声明；已删除该声明（最小改动，不改变行为），随后构建通过。
 
 ## 5. 部署注意事项
 

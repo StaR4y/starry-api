@@ -97,8 +97,8 @@ private HttpStatus mapUpstreamStatusCode(int upstreamStatusCode) {
 
 2. **ProxyFacade.java**
    - `isRetryableUpstreamError()` 检测到 503 >= 500
-   - 自动尝试使用其他可用的 OpenAI 账户重试
-   - 只有所有账户都失败后，才返回 503 给客户端
+   - 自动尝试使用其他可用的 OpenAI 账号重试
+   - 只有所有账号都失败后，才返回 503 给客户端
 
 ## 测试验证
 

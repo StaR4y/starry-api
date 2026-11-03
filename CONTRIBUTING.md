@@ -63,4 +63,4 @@ Do not copy code, prompts, documentation or data from other projects unless its 
 
 ## 中文说明
 
-欢迎提 issue 和 Pull Request。较大的改动请先开 issue 讨论。需要 JDK 25、Node.js 22，以及一个**正在运行的 Docker**（macOS 可用 Colima）：PostgreSQL 集成测试在没有 Docker 时会**静默跳过**，其余测试照样通过，所以请确认它们真的跑了（报告里 `skipped="0"`）。提交信息使用 Conventional Commits（`feat(...)`、`fix(...)`、`docs: ...`）。**已发布的 Flyway 迁移文件不能修改**，请新增更高版本号的迁移。控制台的中文源字符串是翻译键，英文写在 `webui/src/i18n/en.json`。你提交的贡献按 AGPL-3.0-only 授权，并附带 NOTICE 第 2 节的插件附加许可（AGPL 第 7 条下的附加许可）；`plugin-api/` 的改动按 Apache-2.0。没有额外的贡献者协议。
+欢迎提 issue 和 Pull Request。较大的改动请先开 issue 讨论。需要 JDK 25、Node.js 22，以及一个**正在运行的 Docker**（macOS 可用 Colima）：PostgreSQL 集成测试在没有 Docker 时会**静默跳过**，其余测试照样通过，所以请确认它们真的跑了（报告里 `skipped="0"`）。提交信息使用 Conventional Commits（`feat(...)`、`fix(...)`、`docs: ...`）。**已发布的 Flyway 迁移文件不能修改**，请新增更高版本号的迁移。控制台的中文源字符串是翻译键，英文写在 `webui/src/i18n/en.json`。你提交的贡献按 AGPL-3.0-only 授权，并附带 NOTICE 第 2 节的插件附加许可（依据 AGPL 第 7 条）；`plugin-api/` 的改动按 Apache-2.0。没有额外的贡献者协议。

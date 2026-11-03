@@ -211,7 +211,7 @@ class AssistantDocsPostgreSqlTest {
         assertThat(pageIds(ask("publishedwordqq"))).as("the published copy of an edited page").containsExactly(edited);
         assertThat(ask("editeddraftqq").chunks()).as("the unpublished draft of an edited page").isEmpty();
         assertThat(ask("Quasar").pageTitles()).as("titles of the published pages only")
-            .contains("Quasar 网关 / Quasar gateway", "创建与管理 API Key / Create and manage API keys")
+            .contains("Quasar 网关 / Quasar gateway", "API Key 与模型 / API keys and models")
             .doesNotContain("尚未发布", "已下线", "已删除");
     }
 
@@ -311,7 +311,7 @@ class AssistantDocsPostgreSqlTest {
 
         assertThat(ask("怎么创建 API Key").chunks()).isNotEmpty();
 
-        assertThat(parsedOn).as("the pages were parsed, 14 of them at least").isNotEmpty();
+        assertThat(parsedOn).as("the pages were parsed, 10 of them at least").isNotEmpty();
         assertThat(parsedOn).allSatisfy(thread -> assertThat(thread).as("not reactor-tcp-nio, which delivers the rows").startsWith("boundedElastic"));
     }
 
@@ -319,7 +319,7 @@ class AssistantDocsPostgreSqlTest {
     void theTutorialsTheBenchmarkReadsAreWhatTheMigrationsPublish() {
         List<Document> published = documentation.publishedPages().block(TIMEOUT);
 
-        assertThat(SeededTutorials.pages()).hasSize(14);
+        assertThat(SeededTutorials.pages()).hasSize(10);
         // Every page this class creates is in the category AssistantTest and is hidden again after each test, so what is
         // left is what a fresh installation publishes. It has to be exactly the pages the benchmark reads, in the order
         // the catalog lists them (the order breaks ties between chunks): a migration that adds, removes or reorders a
@@ -332,24 +332,24 @@ class AssistantDocsPostgreSqlTest {
         }
     }
 
-    // ---- the seeded tutorials (V23, V24 and V30) ---------------------------------------------------------------
+    // ---- the seeded tutorials (V23, V24, V30 and V33) --------------------------------------------------------------
 
     @Test
     void seededTutorialsAnswerWhatNewUsersAsk() {
         for (String[] expectation : new String[][] {
-            {"怎么创建 API Key", "api-keys", "使用文档《创建与管理 API Key》"},
-            {"如何创建密钥", "api-keys", "使用文档《创建与管理 API Key》"},
-            {"how do I create an API key", "api-keys", "Docs: Create and manage API keys"},
+            {"怎么创建 API Key", "api-keys", "使用文档《API Key 与模型》"},
+            {"如何创建密钥", "api-keys", "使用文档《API Key 与模型》"},
+            {"how do I create an API key", "api-keys", "Docs: API keys and models"},
             {"怎么配置 Claude Code", "claude-code", "使用文档《手动配置 Claude Code》"},
             {"How do I configure Claude Code?", "claude-code", "Docs: Set up Claude Code"},
             {"Codex CLI 怎么接入", "codex-cli", "使用文档《手动配置 Codex CLI》"},
             {"OpenCode 配置", "opencode", "使用文档《手动配置 OpenCode》"},
             {"CC Switch 一键导入", "cc-switch", "使用文档《CC Switch 一键接入》"},
             {"怎么充值", "billing", "使用文档《充值与计费》"},
-            {"Coding Plan 额度用完了会怎样", "coding-plan", "使用文档《使用 Coding Plan 订阅》"},
+            {"Coding Plan 额度用完了会怎样", "billing", "使用文档《充值与计费》"},
             {"怎么提交工单", "tickets", "使用文档《如何提交工单》"},
-            {"哪里看模型 ID 和价格", "models-and-pricing", "使用文档《选择模型与查看价格》"},
-            {"第一次使用要做什么", "getting-started", "使用文档《第一次使用，从这里开始》"},
+            {"哪里看模型 ID 和价格", "api-keys", "使用文档《API Key 与模型》"},
+            {"怎么手动调用 API", "manual-api", "使用文档《手动接入 API》"},
         }) {
             Retrieval result = ask(expectation[0]);
             assertThat(result.chunks()).as(expectation[0]).isNotEmpty();
@@ -374,7 +374,7 @@ class AssistantDocsPostgreSqlTest {
     @Test
     void whatIsRetrievedFromTheSeededTutorialsIsBoundedAndLabelled() {
         for (String question : List.of("怎么创建 API Key", "How do I configure Claude Code?", "怎么充值", "请求报错 401 怎么办",
-            "第一次使用要做什么", "如何手动调用 API", "what is the api base url")) {
+            "怎么看模型", "如何手动调用 API", "what is the api base url")) {
             List<Chunk> chunks = ask(question).chunks();
             assertThat(chunks).as(question).isNotEmpty().hasSizeLessThanOrEqualTo(6);
             assertThat(chunks.stream().mapToInt(Chunk::cost).sum()).as(question).isLessThanOrEqualTo(8000);
@@ -404,7 +404,7 @@ class AssistantDocsPostgreSqlTest {
             {"调用的时候报 400 Bad Request 是怎么回事", "errors"},
             {"我想问下充值的话怎么操作", "billing"},
             {"充值怎么操作", "billing"},
-            {"订阅怎么操作", "coding-plan"},
+            {"订阅怎么操作", "billing"},
             {"余额有什么规则", "billing"},
             {"在哪里看密钥", "api-keys"},
             {"I want to know how to get a key", "api-keys"},
@@ -425,19 +425,19 @@ class AssistantDocsPostgreSqlTest {
         for (String[] expectation : new String[][] {
             // question, pages of which at least one is cited
             {"帮我看看这个 401 报错", "errors,faq,codex-cli"},
-            {"余额在哪看", "billing,console-tour"},
-            {"去哪看余额", "billing,console-tour"},
-            {"哪里能看到余额", "billing,console-tour"},
-            {"查用量", "console-tour,billing,api-keys"},
-            {"在哪里看用量", "console-tour,billing,api-keys"},
-            {"用量在哪看", "console-tour,billing,api-keys"},
-            {"怎么看用量", "console-tour,billing,api-keys"},
-            {"怎么看新闻", "console-tour"},
-            {"在哪里看新闻", "console-tour"},
+            {"余额在哪看", "billing"},
+            {"去哪看余额", "billing"},
+            {"哪里能看到余额", "billing"},
+            {"查用量", "billing,api-keys"},
+            {"在哪里看用量", "billing,api-keys"},
+            {"用量在哪看", "billing,api-keys"},
+            {"怎么看用量", "billing,api-keys"},
+            {"怎么看回复", "tickets"},
+            {"在哪里看回复", "tickets"},
             {"为啥扣了这么多钱", "billing,faq"},
             {"我的余额为什么变少了", "billing,faq"},
             {"402 Payment Required", "errors,billing"},
-            {"Is there a way to see my usage?", "console-tour,billing,api-keys"},
+            {"Is there a way to see my usage?", "billing,api-keys"},
             {"API Error: 502 <html><head><title>502 Bad Gateway</title></head><body><center><h1>502 Bad Gateway</h1></center>"
                 + "<hr><center>nginx</center></body></html>", "errors"},
         }) {
@@ -453,7 +453,7 @@ class AssistantDocsPostgreSqlTest {
         assertThat(askAfter("具体怎么操作？", "怎么充值").chunks().getFirst().pageId()).isEqualTo("billing");
         assertThat(askAfter("能详细点吗", "Claude Code 怎么配置").chunks().getFirst().pageId()).isEqualTo("claude-code");
         assertThat(askAfter("步骤是什么", "Claude Code 怎么配置").chunks().getFirst().pageId()).isEqualTo("claude-code");
-        assertThat(askAfter("怎么操作", "怎么开通 Coding Plan").chunks().getFirst().pageId()).isEqualTo("coding-plan");
+        assertThat(askAfter("怎么操作", "怎么开通 Coding Plan").chunks().getFirst().pageId()).isEqualTo("billing");
         for (String example : List.of("举个例子", "有例子吗")) {
             Retrieval hits = askAfter(example, "用 Python 调用");
             assertThat(hits.chunks().getFirst().pageId()).as(example).isEqualTo("manual-api");
@@ -489,8 +489,8 @@ class AssistantDocsPostgreSqlTest {
         // The Chinese section that answers, although only the English heading says 'key'.
         Retrieval what = ask("API Key 是什么");
         assertThat(what.chunks().getFirst().pageId()).isEqualTo("api-keys");
-        assertThat(what.chunks()).extracting(Chunk::section).contains("密钥是什么");
-        assertThat(what.sources().getFirst()).isEqualTo("使用文档《创建与管理 API Key》");
+        assertThat(what.chunks()).extracting(Chunk::section).contains("创建密钥");
+        assertThat(what.sources().getFirst()).isEqualTo("使用文档《API Key 与模型》");
     }
 
     @Test
@@ -553,7 +553,7 @@ class AssistantDocsPostgreSqlTest {
             Retrieval result = ask(question);
             assertThat(result.chunks()).as(question).isEmpty();
             assertThat(result.sources()).as(question).isEmpty();
-            assertThat(result.pageTitles()).as(question).hasSizeGreaterThanOrEqualTo(14);
+            assertThat(result.pageTitles()).as(question).hasSizeGreaterThanOrEqualTo(10);
         }
     }
 
@@ -562,7 +562,7 @@ class AssistantDocsPostgreSqlTest {
         Retrieval cost = ask("那费用怎么算？", "Claude Code 怎么配置");
         Retrieval other = ask("那 Codex 呢？", "Claude Code 怎么配置");
 
-        assertThat(cost.chunks().getFirst().pageId()).isEqualTo("models-and-pricing");
+        assertThat(cost.chunks().getFirst().pageId()).isEqualTo("billing");
         assertThat(pageIds(cost)).doesNotContain("claude-code", "codex-cli", "opencode");
         assertThat(other.chunks().getFirst().pageId()).isEqualTo("codex-cli");
     }

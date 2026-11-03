@@ -4,7 +4,7 @@
 
 - [GitHub Actions #35645807212](https://github.com/StaR4y/starry-api/actions/runs/35645807212)
 - 提交：`541f6ea8515aa720d768c8e19405cba29de38aed`，分支：`main`。
-- `Java 25, WebUI, PostgreSQL 17` 在恢复工具测试退出，尚未执行 Java 测试及前端构建。
+- `Java 25, WebUI, PostgreSQL 17` 在恢复工具测试处退出，尚未执行 Java 测试及前端构建。
 - `PostgreSQL 18 compatibility` 报告 96 项测试，58 项失败、19 项跳过；主要错误为 `relation "system_settings" does not exist`。
 
 ## 根因与修复
@@ -17,7 +17,7 @@
 
 ### R2DBC 未等待 Flyway
 
-集成测试启用了 `spring.main.lazy-initialization=true`，Flyway 初始化 Bean 因而没有在首次业务查询前运行。启动管理员初始化、账号池和其他数据库消费者会访问尚未创建的表。这不是 PostgreSQL 18 的 SQL 兼容性问题。
+集成测试启用了 `spring.main.lazy-initialization=true`，Flyway 初始化 Bean 因而没有在首次业务查询前运行。启动时的管理员初始化、账号池和其他数据库消费者会访问尚未创建的表。这不是 PostgreSQL 18 的 SQL 兼容性问题。
 
 通过 Spring Boot 的 `DependsOnDatabaseInitializationDetector` 扩展点，将 `DatabaseClient` 注册为数据库初始化的消费者。正常和懒加载模式均先完成迁移再创建客户端；迁移失败时阻止客户端创建，不吞掉迁移错误。三个独立回归测试覆盖迁移顺序、迁移失败和未配置迁移器的场景。
 

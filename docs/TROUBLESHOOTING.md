@@ -64,7 +64,7 @@ brew services list | grep postgresql        # macOS + Homebrew
 export POSTGRES_HOST=localhost
 ```
 
-启动 Homebrew 的 PostgreSQL 17：`brew services start postgresql@17`。全新数据库还要先[运维手册：准备数据库](OPERATIONS.md#准备数据库只需一次)。
+启动 Homebrew 的 PostgreSQL 17：`brew services start postgresql@17`。全新数据库还要先按[运维手册：准备数据库](OPERATIONS.md#准备数据库只需一次)操作。
 
 ### 报错 `relation "model_mappings" does not exist`
 
@@ -251,9 +251,9 @@ curl http://127.0.0.1:8080/admin/api-keys -H 'Authorization: Bearer adm-...'   #
 
 ### 返回 `409 BILLING_REVIEW_REQUIRED`
 
-之前有请求在**无法确定上游有没有计费**的情况下结束（请求已经发出，但读超时、连接被重置、响应不完整）。系统保留了冻结金额，需要管理员核对处理，这期间该用户的**所有 Key** 的后续调用都会被拒绝。管理员在计费复核里按「结算」或「豁免」处理。详见 [API 参考：Coding Plan](API.md#coding-plan-订阅)。
+之前有请求在**无法确定上游有没有计费**的情况下结束（请求已经发出，但读超时、连接被重置、响应不完整）。系统保留了冻结金额，等管理员在计费复核里按「结算」或「豁免」处理；这期间该用户**所有 Key** 的后续调用都会被拒绝。详见 [API 参考：Coding Plan](API.md#coding-plan-订阅)。
 
-以下情况**不会**再触发复核，冻结金额会直接释放：上游明确返回了错误响应（400/401/403/404/422/429，以及 500/502/503/529），或者请求根本没发出去（无法连接、连接超时、TLS 握手失败、连接池耗尽）。如果仍然频繁出现，多半是上游响应超过了 `STARRY_REQUEST_TIMEOUT`（默认 300 秒）；请调大它，或让用户改用响应更快的模型。出现在 Codex（`/v1/responses`，客户端没写输出上限）上时，一轮最长可以写到 `STARRY_RESPONSES_DEFAULT_OUTPUT_TOKENS`（默认 16000 个令牌，按每秒约 60 个令牌约 270 秒）：调大时限，或把这个默认值调小；调大这个默认值时要同时调大时限。
+以下情况**不会**再触发复核，冻结金额会直接释放：上游明确返回了错误响应（400/401/403/404/422/429，以及 500/502/503/529），或者请求根本没发出去（无法连接、连接超时、TLS 握手失败、连接池耗尽）。如果仍然频繁出现，多半是上游响应超过了 `STARRY_REQUEST_TIMEOUT`（默认 300 秒）；请调大它，或让用户改用响应更快的模型。出现在 Codex（`/v1/responses`，客户端没写输出上限）上时，一轮最长可以写到 `STARRY_RESPONSES_DEFAULT_OUTPUT_TOKENS`（默认 16000 个令牌，按每秒约 60 个令牌计算约需 270 秒）：调大时限，或把这个默认值调小；调大这个默认值时要同时调大时限。
 
 ### 返回 `503 PROXY_OVERLOADED`
 
@@ -310,7 +310,7 @@ docker compose exec service \
 docker compose logs --tail=200 service
 ```
 
-修复安全卷的属主、权限、剩余空间或文件系统错误后重启 `service`。启动时会重试清理，直到清理、删除、目录同步全部成功前，服务保持故障关闭。如果修好存储后仍清不掉，请升级给有权限的运维做有审计的恢复。
+修复安全卷的属主、权限、剩余空间或文件系统错误后重启 `service`。启动时会重试清理；在清理、删除、目录同步全部成功之前，服务保持故障关闭。如果修好存储后仍清不掉，请升级给有权限的运维做有审计的恢复。
 
 直接在宿主机 / 用 jar 运行的恢复方法见 [运维手册](OPERATIONS.md#直接在宿主机用-jar-运行时的恢复)。
 

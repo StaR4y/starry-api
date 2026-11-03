@@ -569,7 +569,7 @@ class AssistantDocsIndexTest {
         assertThat(pageIds(ask(index, "怎么开发"))).containsExactly("tips");
         // After wording that asks how the verb comes first, so "发票" is a word the documents lack, not the join of "开发"
         // and "票": it cannot be answered by the page that has "开发". Without such wording the order cannot be told
-        // ("开发票" looks like "协议选"), which the benchmark lists among its known gaps.
+        // ("开发票" looks like "协议选"); the benchmark's "能开发票吗" is answered only because no tutorial has "开发" since V33.
         for (String question : List.of("怎么开发票", "怎样开发票", "如何开发票", "咋开发票", "请问怎么开发票", "那如何开发票")) {
             assertThat(ask(index, question).chunks()).as(question).isEmpty();
         }
@@ -608,7 +608,7 @@ class AssistantDocsIndexTest {
         }
         assertThat(ask(index, "密钥怎么删").chunks().getFirst().section()).isEqualTo("列表里的操作");
         assertThat(ask(index, "工单怎么关").chunks().stream().limit(3).map(Chunk::section).toList()).contains("状态的含义");
-        assertThat(ask(index, "余额怎么扣").chunks().getFirst().section()).isEqualTo("余额是怎么扣的");
+        assertThat(ask(index, "工单怎么补").chunks().getFirst().section()).isEqualTo("查看回复、补充问题");
         assertThat(ask(index, "充值怎么操作").chunks().getFirst().pageId()).isEqualTo("billing");
     }
 
@@ -935,7 +935,7 @@ class AssistantDocsIndexTest {
 
     // ---- the tutorials of a fresh installation: wordings that were answered with the wrong page ----------------
 
-    /** The tutorials a fresh installation publishes (V23, V24 and V30), as they are. */
+    /** The tutorials a fresh installation publishes (V23, V24, V30 and V33), as they are. */
     private static AssistantDocsIndex seeded() {
         return indexOf(SeededTutorials.pages());
     }
@@ -990,7 +990,7 @@ class AssistantDocsIndexTest {
         assertThat(ask(index, "密钥怎么删").chunks().getFirst().section()).isEqualTo("列表里的操作");
         assertThat(ask(index, "怎么删除密钥").chunks().getFirst().section()).isEqualTo("列表里的操作");
         assertThat(ask(index, "工单怎么关").chunks().stream().limit(3).map(Chunk::section).toList()).contains("状态的含义");
-        assertThat(ask(index, "余额怎么扣").chunks().getFirst().section()).isEqualTo("余额是怎么扣的");
+        assertThat(ask(index, "工单怎么补").chunks().getFirst().section()).isEqualTo("查看回复、补充问题");
     }
 
     @Test
@@ -1008,10 +1008,10 @@ class AssistantDocsIndexTest {
         for (String question : List.of("CLAUDE_CODE_MAX_OUTPUT_TOKENS 怎么改", "怎么改 CLAUDE_CODE_MAX_OUTPUT_TOKENS")) {
             assertThat(where(ask(index, question).chunks().getFirst())).as(question).isEqualTo("claude-code § 手动设置环境变量");
         }
-        // V30 gives claude-sonnet-4.5 whole, as the example of a model with a tier ("claude-sonnet-4.5@economy"): a name that a
-        // page has is found by that page, whatever the verb. A name that no page has whole, and that has all its parts, is
-        // the one the rule is about.
-        assertThat(where(ask(index, "claude-sonnet-4.5 怎么换").chunks().getFirst())).isEqualTo("models-and-pricing § 号池价格与 模型@标识");
+        // The section on tiers of the API key page gives claude-sonnet-4.5 whole, as the example of a model with a tier
+        // ("claude-sonnet-4.5@economy"; V30 wrote it, V33 moved it there): a name that a page has is found by that page,
+        // whatever the verb. A name that no page has whole, and that has all its parts, is the one the rule is about.
+        assertThat(where(ask(index, "claude-sonnet-4.5 怎么换").chunks().getFirst())).isEqualTo("api-keys § 号池");
         assertThat(where(ask(index, "claude-haiku-4.8 怎么换").chunks().getFirst())).isEqualTo("claude-code § 手动设置环境变量");
         assertThat(where(ask(index, "CODEX_HOME 怎么改").chunks().getFirst())).isEqualTo("codex-cli § 手动配置");
         assertThat(pageIds(ask(index, "config.yaml 怎么改"))).containsExactly("codex-cli");
@@ -1023,8 +1023,7 @@ class AssistantDocsIndexTest {
         }
         for (String question : List.of("gpt-5.5-mini 多少钱", "claude-opus-4.9 多少钱", "claude-opus-4.5 多少钱",
             "claude-opus-4.5-20251101 多少钱")) {
-            assertThat(pageIds(ask(index, question))).as(question + " is not about the wallet")
-                .doesNotContain("coding-plan", "billing", "console-tour");
+            assertThat(pageIds(ask(index, question))).as(question + " is not about the wallet").doesNotContain("billing");
         }
         // A verb still decides among the chunks of a topic that has a word of its own.
         assertThat(ask(index, "密钥怎么删").chunks().getFirst().section()).isEqualTo("列表里的操作");
@@ -1155,7 +1154,7 @@ class AssistantDocsIndexTest {
     void anEnglishWordIsFoundInTheFormTheDocumentsHaveItInWhateverEndingItIsAsked() {
         AssistantDocsIndex index = seeded();
 
-        assertThat(where(ask(index, "redeeming a code").chunks().getFirst())).isEqualTo("billing § Top up your balance › Redeem a code");
+        assertThat(where(ask(index, "redeeming a code").chunks().getFirst())).isEqualTo("billing § Top up");
         assertThat(ask(index, "verifying Claude Code").chunks().stream().limit(3).map(AssistantDocsIndexTest::where).toList())
             .contains("claude-code § Verify");
         assertThat(pageIds(ask(index, "how am I billed"))).contains("billing");
@@ -1182,26 +1181,28 @@ class AssistantDocsIndexTest {
 
         Retrieval hits = askAfter(index, "How do I buy one?", "What is a Coding Plan?");
 
-        assertThat(pageIds(hits)).as("'one' is in 'one provider per key' and 'Import with one click'").doesNotContain("api-keys", "cc-switch");
-        assertThat(pageIds(hits)).contains("coding-plan");
+        assertThat(pageIds(hits)).as("'one' is in 'One model category per key' and 'Import with one click'")
+            .doesNotContain("api-keys", "cc-switch");
+        assertThat(pageIds(hits)).contains("billing");
     }
 
     @Test
     void aWordThatTheTutorialsNeedIsNotDroppedAsAWordOfNoMeaning() {
         AssistantDocsIndex index = seeded();
 
-        // "out" is how the tutorials say how to leave the console and what happens when the credits are gone; "one" is what
-        // a heading about a single provider per key is about.
-        for (String question : List.of("How do I sign out?", "sign out", "Where do I sign out?")) {
+        // "out" is how the tutorials say what happens when the balance or the credits are gone; "one" is what a heading about
+        // a single model category per key is about. (They said how to sign out of the console until V33 deleted that page.)
+        for (String question : List.of("What if my balance runs out?", "balance runs out", "What happens when the balance runs out?")) {
+            assertThat(AssistantDocsIndex.terms(question)).as(question).contains("out");
             assertThat(ask(index, question).chunks().stream().limit(3).map(AssistantDocsIndexTest::where).toList())
-                .as(question).contains("console-tour § Top bar");
+                .as(question).contains("billing § Two billing sources");
         }
         for (String question : List.of("my plan ran out", "I ran out of credits", "credits ran out")) {
             assertThat(ask(index, question).chunks().stream().limit(2).map(Chunk::section).toList())
                 .as(question).anyMatch(section -> section.contains("What if the credits run out?"));
         }
         assertThat(ask(index, "Is one key enough?").chunks().stream().limit(3).map(Chunk::section).toList())
-            .contains("Model category: one provider per key");
+            .contains("One model category per key");
     }
 
     @Test
@@ -1438,7 +1439,7 @@ class AssistantDocsIndexTest {
         assertThat(sections(ask(index, "How do I verify?"))).isNotEmpty().containsOnly("Verify");
         assertThat(sections(ask(index, "常见问题"))).contains("常见问题");
         assertThat(sections(ask(index, "Common problems"))).contains("Common problems");
-        assertThat(where(ask(index, "规则").chunks().getFirst())).isEqualTo("coding-plan § 需要知道的规则");
+        assertThat(where(ask(index, "注意").chunks().getFirst())).isEqualTo("tickets § 注意");
     }
 
     @Test

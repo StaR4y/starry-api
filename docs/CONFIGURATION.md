@@ -2,7 +2,7 @@
 
 Starry API 的运行时配置主要来自**环境变量**，由 `service/src/main/resources/application.yml` 读取。控制台里「系统设置」下的内容（支付、注册、SMTP、模型目录……）则保存在数据库里，**不是**环境变量。
 
-> **旧的 `KIRO_` 变量名**：网关的通用设置以前沿用历史上的 `KIRO_` 前缀（如 `KIRO_WEBUI_URL`），现在统一为 `STARRY_` 前缀（如 `STARRY_WEBUI_URL`）；Kiro 专属的端点选择由 `KIRO_PREFERRED_ENDPOINT` 改名为 `STARRY_KIRO_PREFERRED_ENDPOINT`。旧名字**仍然有效**：新名字没有设置时，服务会读取对应的 `KIRO_` 变量，所以已有的 `.env` 不用改。两个都设置时以 `STARRY_` 为准。新部署请只用 `STARRY_` 名字。
+> **旧的 `KIRO_` 变量名**：网关的通用设置以前沿用 `KIRO_` 前缀（如 `KIRO_WEBUI_URL`），现在统一为 `STARRY_` 前缀（如 `STARRY_WEBUI_URL`）；Kiro 专属的端点选择由 `KIRO_PREFERRED_ENDPOINT` 改名为 `STARRY_KIRO_PREFERRED_ENDPOINT`。旧名字**仍然有效**：新名字没有设置时，服务会读取对应的 `KIRO_` 变量，所以已有的 `.env` 不用改。两个都设置时以 `STARRY_` 为准。新部署请只用 `STARRY_` 名字。
 
 **目录**：[最常用的配置](#最常用的配置) · [服务器与 JVM](#服务器与-jvm) · [出站代理组件](#出站代理组件可选) · [PostgreSQL 17](#postgresql-17) · [插件](#插件运行时) · [源代码与许可证](#源代码与许可证) · [备份与恢复](#数据库备份与恢复) · [模型目录与价格](#模型目录与价格) · [上游运行时](#上游运行时与适配器) · [注册与 SMTP](#注册与-smtp-设置) · [支付与计费](#支付与计费) · [工单通知](#工单通知) · [请求分析与保留](#请求分析与保留) · [本地环境示例](#本地环境示例) · [生产环境建议](#生产环境建议)
 
@@ -53,7 +53,7 @@ JAVA_OPTS="-Xms64m -Xmx768m -XX:MaxDirectMemorySize=256m -XX:+ExitOnOutOfMemoryE
 
 并发更高或有大量长时间流式响应时，把 `SERVICE_MEM_LIMIT` 调到 `3g` 并相应调大 `-Xmx`。**不要**把一个没有上限的宿主机 / 容器的 75% 都分给 Java 堆：Netty 的直接缓冲、元空间、代码缓存、线程栈和原生库都需要堆之外的内存。实测的数据基线、压测结果、监控阈值见 [性能与内存基线](PERFORMANCE.md)。
 
-**用户文档附件目录**：`STARRY_DOCUMENTATION_ATTACHMENT_DIR`（默认 `${user.home}/.starry-api/documentation`）。Compose 把 `./data/documentation` 挂载到 `/app/documentation`。请保持持久，并**与 PostgreSQL 分开备份**。详见 [用户文档系统](USER_DOCUMENTATION.md)。
+**用户文档附件目录**：`STARRY_DOCUMENTATION_ATTACHMENT_DIR`（默认 `${user.home}/.starry-api/documentation`）。Compose 把 `./data/documentation` 挂载到 `/app/documentation`。请持久保存这个目录，并**与 PostgreSQL 分开备份**。详见 [用户文档系统](USER_DOCUMENTATION.md)。
 
 ---
 
@@ -181,7 +181,7 @@ Starry API 以 **AGPL-3.0-only** 发布，全文和第三方说明见仓库根�
 
 数据传输接口使用 PostgreSQL 17 的 `pg_dump` / `pg_restore` 自定义格式归档。容器运行时已包含匹配版本的客户端工具；直接用 jar 运行的宿主机需要自己提供。
 
-「数据管理」和「插件开发」**只有初始应用 Root 可见、可用**。每一个数据传输接口（包括状态、备份列表、导出和授权签发）都要求该 Root 有效的、数据库支撑的会话；其他管理员和静态管理员令牌无法使用此模块。Root 由 `application_root_user_id` 识别，控制台用 `/auth/permissions` 决定可见性。原有的安全密钥和插件的「密码 + 邮箱」验证要求依然生效。
+「数据管理」和「插件开发」**只有初始应用 Root 可见、可用**。每一个数据传输接口（包括状态、备份列表、导出和授权签发）都要求该 Root 持有有效的、由数据库支撑的会话；其他管理员和静态管理员令牌无法使用此模块。Root 由 `application_root_user_id` 识别，控制台用 `/auth/permissions` 决定可见性。原有的安全密钥和插件的「密码 + 邮箱」验证要求依然生效。
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -197,8 +197,8 @@ Starry API 以 **AGPL-3.0-only** 发布，全文和第三方说明见仓库根�
 - ZIP 的导出和导入用 `database.dump` 作为归档条目。归档**只含应用 schema `starry_api`**；只追加的 `starry_security` 审计 / 发件箱 schema 被故意排除，这样恢复应用数据不会抹掉之后的安全证据。
 - 备份取 PostgreSQL 会话级**共享**咨询锁，恢复取对应的**排他**锁，所以跨实例的维护操作也受约束：冲突的跨实例维护会被拒绝，而不是让备份和恢复快照互相重叠。
 - 导入只接受 PostgreSQL 17 的自定义归档：TOC 标明数据库和 schema 为 `starry_api`，含 `flyway_schema_history` 和必需的核心表，且没有来自其他 schema 的对象。然后 `pg_restore --clean --single-transaction` 替换该 schema。这与固定的 PostgreSQL 17 客户端匹配，故意比「接受任何 PostgreSQL 自定义归档」更严格。
-- 恢复期间，迁移连接会撤销 `starry_api_runtime` 的 `CONNECT`，终止现有 `starry_api` 后端连接，从静默的数据库创建回滚备份，并在恢复完成前保持运行时连接禁用。重新开放访问前，同一个所有者会话会要求 **Flyway V1–V32** 的成功历史（版本、脚本名、迁移类型、校验和）与恢复前捕获的完全一致；校验所有必需的核心关系；验证不可变的 `application_root_user_id` 标记解析到恰好一个已启用的 `ADMIN` Root；检查 V5 熔断纪元列、设置和有效的支撑索引；校验外部安全 schema 的只追加触发器、最小权限 ACL 和无密钥列；然后运行 `ANALYZE`，避免新恢复的表带着空的规划器统计服务流量。旧历史、未知的未来迁移、改名的脚本和校验和不匹配都会被拒绝。
-- V29（号源分级）新增 `source_tier_vendors`、`source_tiers`、`source_tier_members`、`source_tier_member_models`、`source_tier_pair_gates` 五张表，它们属于必需的核心关系，缺任何一张的归档都会被拒绝。V30 只更新「使用文档」里还没被改过的默认教程，不加表。V31 给 `request_logs` 加 `withheld_input_tokens`、`withheld_output_tokens` 两列（网关扣下的中转应答令牌，算运营者的成本），不加表。V32 给 `source_tier_member_models` 加可空的 `max_output_tokens` 列（中转映射的最大输出），不加表。V31 及更早的备份升级后不能再从控制台恢复，所以**升级完成后请立即重新备份**。
+- 恢复期间，迁移连接会撤销 `starry_api_runtime` 的 `CONNECT`，终止现有 `starry_api` 后端连接，从静默的数据库创建回滚备份，并在恢复完成前保持运行时连接禁用。重新开放访问前，同一个所有者会话会要求 **Flyway V1–V33** 的成功历史（版本、脚本名、迁移类型、校验和）与恢复前捕获的完全一致；校验所有必需的核心关系；验证不可变的 `application_root_user_id` 标记解析到恰好一个已启用的 `ADMIN` Root；检查 V5 熔断纪元列、设置和有效的支撑索引；校验外部安全 schema 的只追加触发器、最小权限 ACL 和无密钥列；然后运行 `ANALYZE`，避免新恢复的表带着空的规划器统计服务流量。旧历史、未知的未来迁移、改名的脚本和校验和不匹配都会被拒绝。
+- V29（号源分级）新增 `source_tier_vendors`、`source_tiers`、`source_tier_members`、`source_tier_member_models`、`source_tier_pair_gates` 五张表，它们属于必需的核心关系，缺任何一张的归档都会被拒绝。V30 只更新「使用文档」里还没被改过的默认教程，不加表。V31 给 `request_logs` 加 `withheld_input_tokens`、`withheld_output_tokens` 两列（网关扣下的中转应答令牌，算运营者的成本），不加表。V32 给 `source_tier_member_models` 加可空的 `max_output_tokens` 列（中转映射的最大输出），不加表。V33 精简「使用文档」的默认教程：「开始使用」分类删掉四篇、另两篇改写成短文，其余教程润色中文措辞，都只处理还没被改过的教程，不加表。V32 及更早的备份升级后不能再从控制台恢复，所以**升级完成后请立即重新备份**。
 - 如果传入的 `pg_restore` 已提交但任何后置条件失败，服务会**自动还原恢复前的备份**，并再次校验和分析；回滚失败会作为被抑制的诊断信息保留。`CONNECT` 在 `finally` 里恢复，失败的恢复也一样。
 - 只要本实例进入过恢复隔离窗口，就会清空所有源自数据库的缓存和会话；其他实例在它们的 PostgreSQL 通知监听器重连时做同样的事。缓存代数防止更早的在途刷新在失效后重新填充状态。号源分级配置是例外：它立即重新读取、但不先清空，读取失败时继续使用原来的配置，30 秒内重试；清空会让所有请求在读取期间被拒绝，包括没有配置分级的厂商。更早开始的读取之后总会再读一次，不会留下恢复前的数据。**管理员和用户应预期在途请求会失败，且管理员会话在恢复后需要重新登录。**
 - 数据管理安全目前要求**恰好一个活动服务实例**：校验值 / 锁定状态和动作授权是实例本地的，不要在多副本或滚动重叠部署里启用。完整的恢复步骤见 [运维手册](OPERATIONS.md#恢复被锁定的数据管理)。
@@ -241,7 +241,7 @@ jar 里包含一份已验证的快照，所以**离线也能启动**。网络、
 
 ## 上游运行时与适配器
 
-OpenAI、Codex、Anthropic、DeepSeek 的凭据，作为上游账号记录**保存在 PostgreSQL 里**，而不是部署环境变量。`provider=DeepSeek` 的账号默认 `authMethod=api-key`、`baseUrl=https://api.deepseek.com/v1`，所以启用官方厂商**不需要**新增服务端密钥或 URL 变量。
+OpenAI、Codex、Anthropic、DeepSeek 的凭据作为上游账号记录**保存在 PostgreSQL 里**，不放在部署环境变量中。`provider=DeepSeek` 的账号默认 `authMethod=api-key`、`baseUrl=https://api.deepseek.com/v1`，所以启用官方厂商**不需要**新增服务端密钥或 URL 变量。
 
 ### 运行时变量
 
@@ -454,7 +454,7 @@ OpenAI、Codex、Anthropic、DeepSeek 的凭据，作为上游账号记录**保�
 | `STARRY_STATS_USAGE_EVENT_DELETE_BATCH_SIZE` | `10000` | 每个短保留事务删除的行数；范围 100–100000 |
 | `STARRY_STATS_USAGE_EVENT_DELETE_MAX_BATCHES` | `100` | 每次维护最多的保留事务数；范围 1–100 |
 
-**生产环境请保持聚合开启**。关闭它也会同时关闭自动分区创建和保留维护。聚合水位仍有积压时，原始 `request_logs` 分区**绝不会**被丢弃，所以长时间故障后的恢复优先保证汇总完整，而不是立即回收空间。
+**生产环境请保持聚合开启**。关闭它会同时关闭自动分区创建和保留维护。聚合水位仍有积压时，原始 `request_logs` 分区**绝不会**被丢弃，所以长时间故障后的恢复优先保证汇总完整，而不是立即回收空间。
 
 ### 账号分配的保留
 

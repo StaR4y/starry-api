@@ -26,7 +26,8 @@ import tech.starryapi.documentation.DocumentationDtos.Translation;
  * migrations those are is not listed here: every migration in {@code db/migration} (in any folder below it, as Flyway
  * scans) that mentions the table of the pages and is written as the tutorials migrations are ({@code WITH tutorials(...)
  * AS (VALUES ...)}, one jsonb_build_object per page with the body in a {@code $doc$} quote, which is all this reads) is
- * taken up from V23 on. The order is the one of Flyway's {@link MigrationVersion}, so a V31.1 (or V31_1) falls between V31
+ * taken up from V23 on. A migration may also delete pages, listed after {@code WITH removed(id, previous_hash) AS (VALUES}
+ * as {@code ('id', 'hash')}; they leave the catalog from that version on. The order is the one of Flyway's {@link MigrationVersion}, so a V31.1 (or V31_1) falls between V31
  * and V32 as it does in the database.
  *
  * <p>Whatever else touches the documentation pages is refused here, with its name, instead of being silently left out:
@@ -51,6 +52,8 @@ final class SeededTutorials {
     private static final Pattern ENTRY = Pattern.compile("(?m)^ {4}\\('([a-z0-9-]+)', ");
     private static final String ENGLISH = "'english', jsonb_build_object(";
     private static final Pattern BODY = Pattern.compile("(?s)'body', \\$doc\\$(.*?)\\$doc\\$");
+    private static final String REMOVED = "WITH removed(";
+    private static final Pattern REMOVED_ENTRY = Pattern.compile("(?m)^ {4}\\('([a-z0-9-]+)', '[0-9a-f]{32}'\\)");
 
     private SeededTutorials() {
     }
@@ -59,7 +62,17 @@ final class SeededTutorials {
     static List<Document> pages() {
         Map<String, Content> byId = new LinkedHashMap<>();
         for (String migration : migrations()) {
-            byId.putAll(read(migration));
+            int removed = migration.indexOf(REMOVED);
+            byId.putAll(read(removed < 0 ? migration : migration.substring(0, removed)));
+            if (removed >= 0) {
+                Matcher entry = REMOVED_ENTRY.matcher(migration.substring(removed));
+                while (entry.find()) {
+                    if (byId.remove(entry.group(1)) == null) {
+                        throw new IllegalStateException("A migration deletes the tutorial " + entry.group(1)
+                            + ", which no earlier migration published");
+                    }
+                }
+            }
         }
         List<Document> pages = new ArrayList<>();
         byId.forEach((id, content) -> pages.add(new Document(id, content, Instant.EPOCH, List.of())));

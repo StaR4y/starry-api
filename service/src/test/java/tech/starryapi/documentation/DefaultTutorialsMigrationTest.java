@@ -5,7 +5,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
@@ -14,6 +16,7 @@ class DefaultTutorialsMigrationTest {
     private static final String TUTORIALS = "/db/migration/V23__documentation_tutorials.sql";
     private static final String USER_FOCUS = "/db/migration/V24__documentation_user_focus.sql";
     private static final String SOURCE_TIERS = "/db/migration/V30__documentation_source_tiers.sql";
+    private static final String POLISH = "/db/migration/V33__documentation_trim_and_polish.sql";
     private static final Pattern TUTORIAL = Pattern.compile("(?m)^    \\('([a-z0-9-]+)', (?:'[0-9a-f]{32}', )?jsonb_build_object\\(");
     private static final Pattern BODY = Pattern.compile("\\$doc\\$(.*?)\\$doc\\$", Pattern.DOTALL);
     private static final Pattern LINK = Pattern.compile("#/documentation/([a-z0-9-]+)");
@@ -22,6 +25,13 @@ class DefaultTutorialsMigrationTest {
     /** What a reader of the tutorials is not told: how a tier is served is the administrator's business (design 6.4). */
     private static final Pattern HOW_TIERS_ARE_SERVED = Pattern.compile(
         "中转|跨协议|wire(?!_api)|OPENAI_CHAT|Chat Completions|relay|cross-protocol|Kiro|kiro|Codex 账号|Codex account");
+    /** What polishing the wording must not touch: inline code and headings (anchors depend on them). */
+    private static final Pattern PROTECTED = Pattern.compile("`[^`\\n]+`|(?m)^#{1,6} .*$");
+    private static final Pattern LINK_TARGET = Pattern.compile("\\]\\(([^)\\s]+)\\)");
+    /** The two 开始使用 pages V33 rewrites as short pages instead of deleting them. */
+    private static final List<String> REWRITTEN = List.of("billing", "api-keys");
+    /** A page V33 deletes: ('id', 'hash') after WITH removed(. */
+    private static final Pattern REMOVED_ENTRY = Pattern.compile("(?m)^    \\('([a-z0-9-]+)', '[0-9a-f]{32}'\\)");
     private static final Pattern PREVIOUS_HASH = Pattern.compile("(?m)^    \\('([a-z0-9-]+)', '([0-9a-f]{32})', jsonb_build_object\\(");
 
     private static String read(String resource) throws IOException {
@@ -47,7 +57,7 @@ class DefaultTutorialsMigrationTest {
 
     @Test
     void everyTutorialHasChineseAndEnglishBodiesWithinTheLimit() throws IOException {
-        for (String resource : List.of(TUTORIALS, USER_FOCUS, SOURCE_TIERS)) {
+        for (String resource : List.of(TUTORIALS, USER_FOCUS, SOURCE_TIERS, POLISH)) {
             String sql = read(resource);
             List<String> ids = ids(sql);
             assertThat(ids).as(resource).isNotEmpty().doesNotHaveDuplicates();
@@ -122,15 +132,133 @@ class DefaultTutorialsMigrationTest {
 
     @Test
     void sourceTierRevisionDoesNotTellAReaderHowTheTiersAreServed() throws IOException {
-        assertThat(bodies(read(SOURCE_TIERS))).isNotEmpty()
-            .allSatisfy(text -> assertThat(HOW_TIERS_ARE_SERVED.matcher(text).find()).as("how a tier is served").isFalse());
+        for (String resource : List.of(SOURCE_TIERS, POLISH)) {
+            assertThat(bodies(read(resource))).as(resource).isNotEmpty()
+                .allSatisfy(text -> assertThat(HOW_TIERS_ARE_SERVED.matcher(text).find()).as("how a tier is served").isFalse());
+        }
+    }
+
+    @Test
+    void v33TrimsTheGettingStartedTutorialsAndOnlyRewordsTheOthers() throws IOException {
+        String sql = read(POLISH);
+        int removedAt = sql.indexOf("WITH removed(");
+        assertThat(removedAt).as("V33 lists the tutorials it deletes").isPositive();
+        String replaced = sql.substring(0, removedAt);
+        String removedPart = sql.substring(removedAt);
+        List<String> ids = ids(replaced);
+        List<String> removed = new ArrayList<>();
+        Matcher entry = REMOVED_ENTRY.matcher(removedPart);
+        while (entry.find()) removed.add(entry.group(1));
+        // Four pages of the 开始使用 category go and its other two are rewritten; no page is both replaced and deleted.
+        assertThat(removed).containsExactlyInAnyOrder("getting-started", "console-tour", "coding-plan", "models-and-pricing");
+        assertThat(ids).containsAll(REWRITTEN);
+        assertThat(ids(read(TUTORIALS))).containsAll(ids).containsAll(removed);
+        assertThat(ids).doesNotContainAnyElementsOf(removed);
+        Matcher hashed = PREVIOUS_HASH.matcher(replaced);
+        List<String> withHash = new ArrayList<>();
+        while (hashed.find()) withHash.add(hashed.group(1));
+        assertThat(withHash).as("every replaced tutorial names the hash of the version it replaces").isEqualTo(ids);
+        // Like V24 and V30, only a tutorial that is still the seed is replaced or deleted; a deletion is the console's.
+        assertThat(replaced).contains("AND p.deleted = FALSE AND p.published IS NOT NULL", "AND p.draft = p.published",
+            "AND md5(p.draft::text) = tutorials.previous_hash");
+        assertThat(removedPart).contains("SET published = NULL,", "published_at = NULL,", "deleted = TRUE,",
+            "version = p.version + 1,", "AND p.deleted = FALSE AND p.published IS NOT NULL", "AND p.draft = p.published",
+            "AND md5(p.draft::text) = removed.previous_hash;");
+        assertThat(BODY.matcher(sql).replaceAll("")).doesNotContainPattern("(?im)^\\s*(INSERT|DELETE|ALTER|CREATE|DROP)\\b");
+
+        Map<String, List<String>> earlier = pagesAfter(List.of(TUTORIALS, USER_FOCUS, SOURCE_TIERS));
+        Pattern removedLink = Pattern.compile("#/documentation/(" + String.join("|", removed) + ")\\b");
+        List<String> bodies = bodies(replaced);
+        for (int i = 0; i < ids.size(); i++) {
+            String id = ids.get(i);
+            String zh = bodies.get(i * 2);
+            String en = bodies.get(i * 2 + 1);
+            assertThat(removedLink.matcher(zh + en).find()).as("%s links to a deleted page", id).isFalse();
+            if (REWRITTEN.contains(id)) {
+                continue;
+            }
+            String zhBefore = earlier.get(id).get(0);
+            String enBefore = earlier.get(id).get(1);
+            assertThat(protectedParts(zh)).as("%s: inline code and headings", id)
+                .containsExactlyInAnyOrderElementsOf(protectedParts(zhBefore));
+            for (String language : List.of("zh", "en")) {
+                List<String> before = links("zh".equals(language) ? zhBefore : enBefore);
+                List<String> after = links("zh".equals(language) ? zh : en);
+                before.removeIf(target -> removedLink.matcher(target).find());
+                assertThat(after).as("%s (%s): links to the deleted pages are gone, the others stay", id, language)
+                    .noneMatch(target -> removedLink.matcher(target).find()).containsAll(before);
+            }
+            // The English text is not polished: a line changes only where it had a link to another tutorial.
+            String[] enLines = en.split("\n", -1);
+            String[] enLinesBefore = enBefore.split("\n", -1);
+            assertThat(enLines).as("%s in English", id).hasSameSizeAs(enLinesBefore);
+            for (int line = 0; line < enLines.length; line++) {
+                if (!enLines[line].equals(enLinesBefore[line])) {
+                    assertThat(enLinesBefore[line]).as("%s in English, line %d changed without a link to a tutorial", id, line + 1)
+                        .contains("#/documentation/");
+                }
+            }
+        }
+        // What a reader is left with links to no deleted page.
+        Map<String, List<String>> after = pagesAfter(List.of(TUTORIALS, USER_FOCUS, SOURCE_TIERS, POLISH));
+        removed.forEach(after::remove);
+        assertThat(after).hasSize(10);
+        after.forEach((id, texts) -> assertThat(texts).as(id)
+            .allSatisfy(text -> assertThat(removedLink.matcher(text).find()).isFalse()));
+
+        // The two short pages still carry what the deleted ones taught: billing and plans, keys, models, prices and tiers.
+        String billingZh = after.get("billing").get(0);
+        String billingEn = after.get("billing").get(1);
+        assertThat(billingZh).contains("余额计费", "Coding Plan", "`402`", "**不会**改扣余额", "兑换码", "已入账", "预留", "额度明细");
+        assertThat(billingEn).contains("Balance billing", "Coding Plan", "`402`", "**not** charged", "Redeem a code", "Credited",
+            "reserved", "Quota history");
+        String keysZh = after.get("api-keys").get(0);
+        String keysEn = after.get("api-keys").get(1);
+        assertThat(keysZh).contains("`API_KEY_MODEL_PROVIDER_FORBIDDEN`", "[模型 ID](#/models)", "`MODEL_PRICE_UNAVAILABLE`",
+            "号源偏好", "及以下", "X-Starry-Tier-Status", "ignored", "`模型@auto`", "× 实际服务这个请求的号池的系数",
+            "`SOURCE_TIER_UNKNOWN`", "`SOURCE_TIER_NOT_OFFERED`", "`SOURCE_TIER_NOT_SELECTABLE`", "`SOURCE_TIER_UNAVAILABLE`",
+            "`API_KEY_TIER_PREFERENCE_INVALID`");
+        assertThat(keysEn).contains("`API_KEY_MODEL_PROVIDER_FORBIDDEN`", "[Model IDs](#/models)", "`MODEL_PRICE_UNAVAILABLE`",
+            "Tier preference", "and below", "X-Starry-Tier-Status", "`model@auto`", "the factor of the tier that served the request",
+            "`SOURCE_TIER_UNKNOWN`", "`SOURCE_TIER_NOT_OFFERED`", "`SOURCE_TIER_NOT_SELECTABLE`", "`SOURCE_TIER_UNAVAILABLE`",
+            "`API_KEY_TIER_PREFERENCE_INVALID`");
+    }
+
+    /** Each page as these migrations leave it, in order: [Chinese body, English body]. Deletions are not applied here. */
+    private static Map<String, List<String>> pagesAfter(List<String> resources) throws IOException {
+        Map<String, List<String>> pages = new HashMap<>();
+        for (String resource : resources) {
+            String sql = read(resource);
+            int removedAt = sql.indexOf("WITH removed(");
+            String replaced = removedAt < 0 ? sql : sql.substring(0, removedAt);
+            List<String> ids = ids(replaced);
+            List<String> bodies = bodies(replaced);
+            for (int i = 0; i < ids.size(); i++) {
+                pages.put(ids.get(i), bodies.subList(i * 2, i * 2 + 2));
+            }
+        }
+        return pages;
+    }
+
+    private static List<String> protectedParts(String body) {
+        List<String> parts = new ArrayList<>();
+        Matcher part = PROTECTED.matcher(body);
+        while (part.find()) parts.add(part.group());
+        return parts;
+    }
+
+    private static List<String> links(String body) {
+        List<String> targets = new ArrayList<>();
+        Matcher link = LINK_TARGET.matcher(body);
+        while (link.find()) targets.add(link.group(1));
+        return targets;
     }
 
     @Test
     void everyInternalDocumentationLinkPointsToAnExistingTutorial() throws IOException {
         List<String> known = ids(read(TUTORIALS));
         int links = 0;
-        for (String resource : List.of(TUTORIALS, USER_FOCUS, SOURCE_TIERS)) {
+        for (String resource : List.of(TUTORIALS, USER_FOCUS, SOURCE_TIERS, POLISH)) {
             Matcher link = LINK.matcher(read(resource));
             while (link.find()) {
                 links++;
@@ -144,6 +272,7 @@ class DefaultTutorialsMigrationTest {
     void revisedTutorialsContainNoOperationsOrHostingWording() throws IOException {
         List<String> revised = new ArrayList<>(bodies(read(USER_FOCUS)));
         revised.addAll(bodies(read(SOURCE_TIERS)));
+        revised.addAll(bodies(read(POLISH)));
         assertThat(revised).isNotEmpty()
             .allSatisfy(text -> assertThat(OPERATIONS_WORDING.matcher(text).find()).as("operations wording").isFalse());
     }
