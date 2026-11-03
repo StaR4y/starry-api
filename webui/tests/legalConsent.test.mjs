@@ -195,7 +195,7 @@ test('the source link is the upstream project until the server says otherwise, a
   assert.equal(store.sourceUrl, 'https://git.example.com/me/starry-api-fork');
 });
 
-test('the disclaimer in the dialog says the same as the README, the docs index and both languages', async () => {
+test('the disclaimer in the dialog says the same as both READMEs, the docs index and both languages', async () => {
   app.setLocale('zh-CN');
   const chinese = app.disclaimerText();
   app.setLocale('en-US');
@@ -203,11 +203,11 @@ test('the disclaimer in the dialog says the same as the README, the docs index a
   assert.match(chinese, /^Starry API 是独立的开源项目/);
   assert.match(englishText, /^Starry API is an independent open-source project\. It is not affiliated with, endorsed by or sponsored by/);
   assert.equal(english[chinese], englishText);
-  for (const file of ['README.md', 'docs/README.md']) {
-    const text = read(file);
-    assert.ok(text.includes(chinese), `${file} must carry the Chinese disclaimer verbatim`);
-    assert.ok(text.includes(englishText), `${file} must carry the English disclaimer verbatim`);
-  }
+  assert.ok(read('README.md').includes(englishText), 'README.md must carry the English disclaimer verbatim');
+  assert.ok(read('README.zh-CN.md').includes(chinese), 'README.zh-CN.md must carry the Chinese disclaimer verbatim');
+  const index = read('docs/README.md');
+  assert.ok(index.includes(chinese), 'docs/README.md must carry the Chinese disclaimer verbatim');
+  assert.ok(index.includes(englishText), 'docs/README.md must carry the English disclaimer verbatim');
 
   const { host } = await mountDialog();
   assert.equal(host.querySelector('[data-test="disclaimer-text"]').textContent, englishText);

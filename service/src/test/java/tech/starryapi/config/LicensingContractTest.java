@@ -109,7 +109,7 @@ class LicensingContractTest {
             .contains("META-INF/licenses/LGPL-2.1.txt");
     }
 
-    /** README quotes the additional permission for plugins; it has to be the one in NOTICE, word for word. */
+    /** Both READMEs quote the additional permission for plugins; it has to be the one in NOTICE, word for word. */
     @Test
     void theReadmeQuotesTheAdditionalPermissionOfTheNoticeWordForWord() throws IOException {
         String notice = read("NOTICE");
@@ -118,6 +118,7 @@ class LicensingContractTest {
         String permission = notice.substring(start, notice.indexOf("\n\n", start)).replaceAll("\\s+", " ");
 
         assertThat(read("README.md").replaceAll("\\s+", " ")).contains(permission);
+        assertThat(read("README.zh-CN.md").replaceAll("\\s+", " ")).contains(permission);
         assertThat(permission).contains("web widget plugin").contains("/plugin-assets");
     }
 
@@ -148,8 +149,11 @@ class LicensingContractTest {
                 + " (Apache-2.0 for changes to `plugin-api/`)");
 
         String readme = read("README.md");
-        String contributingSection = readme.substring(readme.indexOf("## 参与贡献"), readme.indexOf("## 许可证"));
-        assertThat(contributingSection)
+        assertThat(readme.substring(readme.indexOf("## Contributing"), readme.indexOf("## License")))
+            .contains("Contributions are licensed under AGPL-3.0-only together with the additional permission for plugins in section 2"
+                + " of [NOTICE](NOTICE) (Apache-2.0 for changes to `plugin-api/`)");
+        String chineseReadme = read("README.zh-CN.md");
+        assertThat(chineseReadme.substring(chineseReadme.indexOf("## 参与贡献"), chineseReadme.indexOf("## 许可证")))
             .contains("你提交的代码按 AGPL-3.0-only 授权，并附带 [NOTICE](NOTICE) 第 2 节的插件附加许可")
             .contains("`plugin-api/` 的改动按 Apache-2.0");
     }

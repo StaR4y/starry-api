@@ -253,6 +253,7 @@ public class AssistantDocsIndex {
 
     private static final List<String> FILES = List.of(
         "README.md",
+        "README.zh-CN.md",
         "docs/API.md",
         "docs/ARCHITECTURE.md",
         "docs/CONFIGURATION.md",
